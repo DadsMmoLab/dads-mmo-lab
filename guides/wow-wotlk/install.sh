@@ -239,85 +239,28 @@ print_success "Created $INSTALL_DIR/logs/"
 # ─────────────────────────────────────────
 print_step "STEP 4/8 — Setting Up Configuration"
 
-# Create docker-compose.yml
-cat > "$INSTALL_DIR/docker-compose.yml" << 'DOCKERCOMPOSE'
-version: '3.8'
+# Clone the official AzerothCore docker repo — contains correct images
+print_info "Downloading official AzerothCore Docker setup..."
 
-services:
-  ac-database:
-    image: mysql:8.0
-    container_name: ac_database
-    environment:
-      MYSQL_ROOT_PASSWORD: azeroth
-      MYSQL_DATABASE: acore_world
-    volumes:
-      - ac-database:/var/lib/mysql
-    ports:
-      - "3306:3306"
-    restart: unless-stopped
-    networks:
-      - ac-network
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-pazeroth"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
+if command -v git &>/dev/null; then
+    git clone --depth 1 https://github.com/azerothcore/acore-docker.git "$INSTALL_DIR" 2>/dev/null || true
+else
+    print_warning "Git not found — installing..."
+    if command -v pacman &>/dev/null; then
+        sudo pacman -Sy --noconfirm git 2>/dev/null || true
+    else
+        sudo apt-get install -y git 2>/dev/null || true
+    fi
+    git clone --depth 1 https://github.com/azerothcore/acore-docker.git "$INSTALL_DIR"
+fi
 
-  ac-authserver:
-    image: azerothcore/azerothcore:authserver
-    container_name: ac_authserver
-    environment:
-      AC_LOGIN_DATABASE_INFO: "ac-database;3306;root;azeroth;acore_auth"
-    depends_on:
-      ac-database:
-        condition: service_healthy
-    ports:
-      - "3724:3724"
-    restart: unless-stopped
-    networks:
-      - ac-network
+# Verify the clone worked
+if [ ! -f "$INSTALL_DIR/docker-compose.yml" ]; then
+    print_error "Failed to download AzerothCore setup. Check your internet connection."
+    exit 1
+fi
 
-  ac-worldserver:
-    image: azerothcore/azerothcore:worldserver
-    container_name: ac_worldserver
-    environment:
-      AC_DATA_DIR: "/azerothcore/env/dist/data"
-      AC_LOGS_DIR: "/azerothcore/env/dist/logs"
-      AC_CONFIG_DIR: "/azerothcore/env/dist/etc"
-      AC_WORLD_DATABASE_INFO: "ac-database;3306;root;azeroth;acore_world"
-      AC_CHARACTER_DATABASE_INFO: "ac-database;3306;root;azeroth;acore_characters"
-      AC_LOGIN_DATABASE_INFO: "ac-database;3306;root;azeroth;acore_auth"
-    depends_on:
-      ac-database:
-        condition: service_healthy
-    volumes:
-      - ./logs:/azerothcore/env/dist/logs
-    ports:
-      - "8085:8085"
-    restart: unless-stopped
-    networks:
-      - ac-network
-    stdin_open: true
-    tty: true
-    deploy:
-      resources:
-        limits:
-          memory: 3G
-        reservations:
-          memory: 1G
-
-volumes:
-  ac-database:
-    name: dads_mmo_wow_db
-
-networks:
-  ac-network:
-    name: dads_mmo_network
-    driver: bridge
-DOCKERCOMPOSE
-
-print_success "docker-compose.yml created"
+print_success "AzerothCore Docker setup downloaded!"
 
 # Create a simple start/stop script for convenience
 cat > "$INSTALL_DIR/start.sh" << 'STARTSCRIPT'
@@ -327,7 +270,7 @@ cd "$(dirname "$0")"
 docker compose up -d
 echo ""
 echo "✅ Server is starting! Give it 2-3 minutes on first run."
-echo "📋 Check progress: docker logs -f ac_worldserver"
+echo "📋 Check progress: docker logs -f acore-docker-ac-worldserver-1"
 echo "🎮 Then launch WoW through Steam!"
 STARTSCRIPT
 
@@ -343,7 +286,7 @@ cat > "$INSTALL_DIR/status.sh" << 'STATUSSCRIPT'
 #!/bin/bash
 echo "📊 WoW Server Status:"
 echo ""
-docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | grep -E "ac_|NAMES"
+docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | grep -E "acore|NAMES"
 echo ""
 STATUSSCRIPT
 
@@ -382,7 +325,7 @@ echo ""
 TIMEOUT=900  # 15 minutes — first run on slow SD card or slow connection can take a while
 ELAPSED=0
 while [ $ELAPSED -lt $TIMEOUT ]; do
-    if docker logs ac_worldserver 2>&1 | grep -q "World initialized"; then
+    if docker logs acore-docker-ac-worldserver-1 2>&1 | grep -q "World initialized"; then
         break
     fi
     printf "."
@@ -428,17 +371,19 @@ while true; do
     echo "Password cannot be empty."
 done
 
-# Create account via MySQL directly — most reliable method
-print_info "Creating account in database..."
+# Detect container name — acore-docker uses different naming
+DB_CONTAINER=$(docker ps --format '{{.Names}}' | grep -E "ac.database|ac_database" | head -1)
+if [ -z "$DB_CONTAINER" ]; then
+    DB_CONTAINER="acore-docker-ac-database-1"
+fi
 
-# Wait a moment to ensure DB is fully ready
-sleep 3
+print_info "Using database container: $DB_CONTAINER"
 
 # Hash the password the way AzerothCore expects (SHA1 of USER:PASS uppercase)
 WOW_PASS_HASH=$(echo -n "${WOW_USERNAME^^}:${WOW_PASSWORD^^}" | sha1sum | awk '{print toupper($1)}')
 
 # Insert account directly into auth database
-docker exec ac_database mysql -uroot -pazeroth acore_auth -e "
+docker exec "$DB_CONTAINER" mysql -uroot -ppassword acore_auth -e "
   INSERT INTO account (username, sha_pass_hash, reg_mail, email, joindate)
   VALUES (
     UPPER('${WOW_USERNAME}'),
@@ -450,12 +395,12 @@ docker exec ac_database mysql -uroot -pazeroth acore_auth -e "
 " 2>/dev/null
 
 # Get the account ID we just created
-ACCOUNT_ID=$(docker exec ac_database mysql -uroot -pazeroth acore_auth -sNe \
+ACCOUNT_ID=$(docker exec "$DB_CONTAINER" mysql -uroot -ppassword acore_auth -sNe \
   "SELECT id FROM account WHERE username=UPPER('${WOW_USERNAME}');" 2>/dev/null)
 
 # Set GM level 3 on all realms
 if [ -n "$ACCOUNT_ID" ]; then
-    docker exec ac_database mysql -uroot -pazeroth acore_auth -e "
+    docker exec "$DB_CONTAINER" mysql -uroot -ppassword acore_auth -e "
       INSERT INTO account_access (id, gmlevel, RealmID)
       VALUES ('${ACCOUNT_ID}', 3, -1)
       ON DUPLICATE KEY UPDATE gmlevel=3;
@@ -465,9 +410,8 @@ if [ -n "$ACCOUNT_ID" ]; then
 else
     print_warning "Account may not have been created automatically."
     print_info "You can create it manually after launch:"
-    print_info "  docker attach ac_worldserver"
-    print_info "  account create ${WOW_USERNAME} ${WOW_PASSWORD}"
-    print_info "  account set gmlevel ${WOW_USERNAME} 3 -1"
+    print_info "  docker attach acore-docker-ac-worldserver-1"
+    print_info "  account create ${WOW_USERNAME} ${WOW_PASSWORD} ${WOW_PASSWORD}"
 fi
 
 # Save credentials
@@ -533,6 +477,7 @@ echo -e "  📁 Server folder:  ${CYAN}$INSTALL_DIR${NC}"
 echo -e "  📋 Your account:   ${CYAN}$INSTALL_DIR/MY_ACCOUNT.txt${NC}"
 echo -e "  ▶️  Start server:   ${CYAN}$INSTALL_DIR/start.sh${NC}"
 echo -e "  ⏹️  Stop server:    ${CYAN}$INSTALL_DIR/stop.sh${NC}"
+echo -e "  🖥️  GM Console:     ${CYAN}docker attach acore-docker-ac-worldserver-1${NC}"
 echo ""
 echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${WHITE}  📺 Full video guide: ${CYAN}youtube.com/@DadsMmoLab${NC}"
