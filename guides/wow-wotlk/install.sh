@@ -321,7 +321,8 @@ cat > "$INSTALL_DIR/start.sh" << 'STARTSCRIPT'
 #!/bin/bash
 echo "⚔️  Starting WoW Server..."
 cd "$(dirname "$0")"
-docker compose up -d
+# Scale phpmyadmin to 0 — not needed for WoW and causes port conflicts
+docker compose up -d --scale phpmyadmin=0
 echo ""
 echo "✅ Server is starting! Give it 2-3 minutes on first run."
 echo "📋 Check progress: docker logs -f acore-docker-ac-worldserver-1"
@@ -378,7 +379,7 @@ print_step "STEP 6/8 — Starting the Server"
 print_info "First launch takes 5-10 minutes to build the database. Please wait..."
 echo ""
 
-if ! docker compose up -d; then
+if ! docker compose up -d --scale phpmyadmin=0; then
     print_error "Failed to start the server."
     print_info "Things to try:"
     print_info "  1. Check Docker is running: sudo systemctl status docker"
@@ -389,6 +390,8 @@ fi
 
 # Wait for worldserver to be ready
 print_info "Waiting for world server to initialize..."
+print_info "First launch builds the entire database — this can take 5-15 minutes."
+print_info "The dots below mean it's working. Go make a coffee! ☕"
 echo ""
 
 TIMEOUT=900  # 15 minutes — first run on slow SD card or slow connection can take a while
