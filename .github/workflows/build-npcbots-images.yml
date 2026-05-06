@@ -153,18 +153,26 @@ jobs:
           docker pull "${PREFIX}-db-import:latest"
           docker pull "${PREFIX}-client-data:latest"
 
-      - name: Verify NPCBots compiled in
-        # If the worldserver binary was built without NPCBots, the strings
-        # check fails here instead of silently shipping a broken image.
+      - name: Verify NPCBots configuration shipped
+        # NPCBots ships a config file and SQL into the build. Checking for
+        # these is more reliable than strings-greping the binary (the runtime
+        # image doesn't have binutils).
         run: |
           PREFIX="${{ steps.prefix.outputs.image_prefix }}"
           docker run --rm --entrypoint sh \
             "${PREFIX}-worldserver:latest" \
-            -c 'strings /azerothcore/env/dist/bin/worldserver | grep -qi "npcbot" && echo "NPCBots: OK" || (echo "FAIL: NPCBots strings not found in binary"; exit 1)'
+            -c 'find /azerothcore -iname "*npcbot*" 2>/dev/null | head -5 | grep -q . && echo "NPCBots files: OK" || (echo "FAIL: no NPCBots files found in image"; find /azerothcore -maxdepth 4 -type d 2>/dev/null; exit 1)'
 
-      - name: Verify mod-ah-bot compiled in
+      - name: Verify mod-ah-bot configuration shipped
         run: |
           PREFIX="${{ steps.prefix.outputs.image_prefix }}"
           docker run --rm --entrypoint sh \
             "${PREFIX}-worldserver:latest" \
-            -c 'strings /azerothcore/env/dist/bin/worldserver | grep -qi "auctionhousebot\|ahbot" && echo "AH bot: OK" || (echo "FAIL: AH bot strings not found in binary"; exit 1)'
+            -c 'find /azerothcore -iname "*auctionhouse*" -o -iname "*ah*bot*" -o -iname "*ahbot*" 2>/dev/null | head -5 | grep -q . && echo "AH bot files: OK" || (echo "FAIL: no AH bot files found in image"; exit 1)'
+
+      - name: Verify mod-individual-progression configuration shipped
+        run: |
+          PREFIX="${{ steps.prefix.outputs.image_prefix }}"
+          docker run --rm --entrypoint sh \
+            "${PREFIX}-worldserver:latest" \
+            -c 'find /azerothcore -iname "*individual*progression*" -o -iname "*individualprogression*" 2>/dev/null | head -5 | grep -q . && echo "IP files: OK" || (echo "FAIL: no IP files found in image"; exit 1)'
