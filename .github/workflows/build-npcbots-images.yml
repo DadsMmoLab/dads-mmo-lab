@@ -154,37 +154,34 @@ jobs:
           docker pull "${PREFIX}-client-data:latest"
 
       - name: Verify image contents
-        # NPCBots is integrated into trickerer's AzerothCore fork (not a
-        # separate module), so we can't find it as a directory — but if the
-        # worldserver binary built successfully from trickerer's source,
-        # NPCBots is in it. We verify the binary exists and is non-trivial,
-        # plus that the proper module directories are populated.
+        # Trickerer's Dockerfile has a multi-stage layout:
+        # - worldserver image: only contains the binary (modules compiled in)
+        # - db-import image: contains the modules/ directory with SQL files
+        # so we check each image for what it should contain.
         run: |
           PREFIX="${{ steps.prefix.outputs.image_prefix }}"
+
+          echo "=== Worldserver: binary contains NPCBots fork code ==="
           docker run --rm --entrypoint sh \
             "${PREFIX}-worldserver:latest" -c '
               set -e
-              echo "=== Checking worldserver binary ==="
-              test -x /azerothcore/env/dist/bin/worldserver || (echo "FAIL: worldserver binary missing or not executable"; exit 1)
+              test -x /azerothcore/env/dist/bin/worldserver || (echo "FAIL: worldserver binary missing"; exit 1)
               SIZE=$(stat -c%s /azerothcore/env/dist/bin/worldserver)
               echo "worldserver binary: ${SIZE} bytes"
-              test "$SIZE" -gt 50000000 || (echo "FAIL: worldserver binary suspiciously small (${SIZE} bytes — vanilla AzerothCore is much smaller than NPCBots fork)"; exit 1)
-              echo "worldserver binary: OK"
-
-              echo ""
-              echo "=== Checking module directories ==="
-              ls /azerothcore/modules/ || (echo "FAIL: /azerothcore/modules not populated"; exit 1)
-
-              echo ""
-              echo "=== Verifying mod-ah-bot ==="
-              test -d /azerothcore/modules/mod-ah-bot || (echo "FAIL: mod-ah-bot directory missing"; exit 1)
-              echo "mod-ah-bot: OK"
-
-              echo ""
-              echo "=== Verifying mod-individual-progression ==="
-              test -d /azerothcore/modules/mod-individual-progression || (echo "FAIL: mod-individual-progression directory missing"; exit 1)
-              echo "mod-individual-progression: OK"
-
-              echo ""
-              echo "All checks passed ✓"
+              test "$SIZE" -gt 50000000 || (echo "FAIL: worldserver binary too small (${SIZE} bytes — expected NPCBots fork to be 80MB+)"; exit 1)
+              echo "worldserver: OK"
             '
+
+          echo ""
+          echo "=== db-import: module SQL files present ==="
+          docker run --rm --entrypoint sh \
+            "${PREFIX}-db-import:latest" -c '
+              set -e
+              test -d /azerothcore/modules/mod-ah-bot || (echo "FAIL: mod-ah-bot directory missing in db-import"; ls -la /azerothcore/modules/ 2>/dev/null; exit 1)
+              echo "mod-ah-bot: OK"
+              test -d /azerothcore/modules/mod-individual-progression || (echo "FAIL: mod-individual-progression directory missing in db-import"; ls -la /azerothcore/modules/ 2>/dev/null; exit 1)
+              echo "mod-individual-progression: OK"
+            '
+
+          echo ""
+          echo "All checks passed ✓"
