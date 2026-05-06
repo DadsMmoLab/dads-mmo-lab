@@ -248,6 +248,8 @@ print_info "Starting compilation now..."
 echo ""
 
 # Build and start — log output to file too
+# [PR4] Pin local tag so failed builds cannot silently fall back to upstream :master
+echo "DOCKER_IMAGE_TAG=npcbots-local" > .env
 docker compose up -d --build 2>&1 | tee ~/npcbots-build.log
 
 BUILD_EXIT=${PIPESTATUS[0]}
