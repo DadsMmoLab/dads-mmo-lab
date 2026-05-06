@@ -194,6 +194,8 @@ if [ -d "$INSTALL_DIR" ]; then
 fi
 
 mkdir -p "$INSTALL_DIR"
+mkdir -p "$INSTALL_DIR/config" "$INSTALL_DIR/logs"
+sudo chown -R 1000:1000 "$INSTALL_DIR/config" "$INSTALL_DIR/logs"
 cd "$INSTALL_DIR" || exit 1
 
 print_info "Downloading docker-compose.npcbots.yml..."

@@ -36,6 +36,7 @@ services:
       AC_LOGIN_DATABASE_INFO: "ac-database;3306;root;password;acore_auth"
       AC_WORLD_DATABASE_INFO: "ac-database;3306;root;password;acore_world"
       AC_CHARACTER_DATABASE_INFO: "ac-database;3306;root;password;acore_characters"
+      AC_DATA_DIR: "/azerothcore/env/dist/data/"
     depends_on:
       ac-database:
         condition: service_healthy
