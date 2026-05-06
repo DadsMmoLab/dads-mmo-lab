@@ -266,10 +266,9 @@ docker attach acore-docker-ac-worldserver-1
 You'll see the server's output scrolling and a cursor waiting
 for input. You're now in the GM console!
 
-> 💡 **NPCBots server?** Use this instead:
-> ```bash
-> docker attach ac-worldserver
-> ```
+> 💡 **NPCBots server?** Use this command instead:
+>
+> `docker attach ac-worldserver`
 
 ---
 
