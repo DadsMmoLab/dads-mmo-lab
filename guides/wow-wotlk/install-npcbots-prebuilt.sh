@@ -1,28 +1,30 @@
 #!/bin/bash
 # ============================================================
-#  Dad's MMO Lab — WoW NPCBots Installer
+#  Dad's MMO Lab — WoW NPCBots Installer (Prebuilt Images)
 #  AzerothCore + NPCBots on Steam Deck (SteamOS / Arch Linux)
 #
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 #
 #  Usage:
-#    chmod +x install-npcbots.sh
-#    ./install-npcbots.sh
+#    chmod +x install-npcbots-prebuilt.sh
+#    ./install-npcbots-prebuilt.sh
 #
 #  What this does:
 #    1. Checks system requirements
 #    2. Installs Docker and Git if not present
-#    3. Clones AzerothCore with NPCBots (trickerer fork)
-#    4. Compiles the server FROM SOURCE (takes 2-4 hours!)
-#    5. Starts the server
-#    6. Creates your GM account
-#    7. Gives you bot management instructions
+#    3. PULLS prebuilt NPCBots images from GHCR (10 minutes!)
+#    4. Starts the server
+#    5. Creates your GM account
+#    6. Sets up Gaming Mode launcher
 #
-#  ⚠️  IMPORTANT: This script compiles from source.
-#  Leave your Steam Deck plugged in and don't let it sleep!
-#  Compilation takes 2-4 hours on a Steam Deck.
+#  ⚡ This is the FAST install path — no compilation needed.
+#  Images are built weekly in CI from trickerer's NPCBots fork
+#  and pushed to ghcr.io/dadsmmolab/wow-wotlk-npcbots-*
 #
-#  What you get:
+#  If you'd rather compile from source (no external dependencies,
+#  but takes 2-4 hours), use install-npcbots.sh instead.
+#
+#  What you get (same as the source-build path):
 #    ✅ Full AzerothCore WotLK 3.3.5a server
 #    ✅ NPCBots — hire AI companions for dungeons and raids
 #    ✅ Wandering bots that populate the world
@@ -49,7 +51,7 @@ print_header() {
     echo ""
     echo -e "${CYAN}╔══════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║${WHITE}${BOLD}         ⚙️  DAD'S MMO LAB                        ${NC}${CYAN}║${NC}"
-    echo -e "${CYAN}║${WHITE}         WoW + NPCBots Installer                  ${NC}${CYAN}║${NC}"
+    echo -e "${CYAN}║${WHITE}    WoW + NPCBots — Prebuilt Images Installer     ${NC}${CYAN}║${NC}"
     echo -e "${CYAN}║${BLUE}         github.com/DadsMmoLab/dads-mmo-lab       ${NC}${CYAN}║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════════════════╝${NC}"
     echo ""
@@ -80,6 +82,7 @@ ask_yes_no() {
 }
 
 INSTALL_DIR="$HOME/wow-server-npcbots"
+COMPOSE_URL="https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/guides/wow-wotlk/docker-compose.npcbots.yml"
 
 # ─────────────────────────────────────────
 # START
@@ -89,26 +92,20 @@ print_header
 echo -e "${WHITE}This installs WoW with NPCBots — AI companions you can${NC}"
 echo -e "${WHITE}hire for dungeons, raids and open world adventuring.${NC}"
 echo ""
-echo -e "${RED}${BOLD}⚠️  IMPORTANT — READ THIS FIRST:${NC}"
-echo -e "${YELLOW}This installer compiles AzerothCore from source code.${NC}"
-echo -e "${YELLOW}This takes 2-4 HOURS on a Steam Deck.${NC}"
-echo -e "${YELLOW}Please:${NC}"
-echo -e "  • Keep your Steam Deck PLUGGED IN"
-echo -e "  • Disable sleep mode before starting"
-echo -e "  • Don't close this terminal"
-echo ""
-echo -e "${WHITE}The best time to run this is overnight.${NC}"
+echo -e "${GREEN}${BOLD}⚡ FAST PATH:${NC} ~10 minutes total"
+echo -e "${WHITE}Images are prebuilt in GitHub Actions CI and pulled${NC}"
+echo -e "${WHITE}from GHCR — no compilation on your Steam Deck.${NC}"
 echo ""
 
-if ! ask_yes_no "Ready to begin? (Plug in your Steam Deck first!)"; then
-    echo "No problem! Run this script again when you're ready."
+if ! ask_yes_no "Ready to begin?"; then
+    echo "Cancelled."
     exit 0
 fi
 
 # ─────────────────────────────────────────
 # STEP 1 — SYSTEM CHECK
 # ─────────────────────────────────────────
-print_step "STEP 1/7 — Checking System"
+print_step "STEP 1/6 — Checking System"
 
 if [[ "$OSTYPE" != "linux-gnu"* ]]; then
     print_error "This script requires Linux (SteamOS). Are you in Desktop Mode?"
@@ -117,9 +114,8 @@ fi
 print_success "Linux detected"
 
 AVAILABLE_GB=$(df -BG "$HOME" 2>/dev/null | awk 'NR==2 {print $4}' | sed 's/G//' | tr -d ' ')
-if [ -n "$AVAILABLE_GB" ] && [ "$AVAILABLE_GB" -lt 30 ] 2>/dev/null; then
-    print_error "Not enough disk space. You have ${AVAILABLE_GB}GB free, need at least 30GB."
-    print_info "NPCBots requires more space than standard WoW due to compilation."
+if [ -n "$AVAILABLE_GB" ] && [ "$AVAILABLE_GB" -lt 15 ] 2>/dev/null; then
+    print_error "Not enough disk space. You have ${AVAILABLE_GB}GB free, need at least 15GB."
     exit 1
 fi
 print_success "Disk space OK (${AVAILABLE_GB:-unknown}GB available)"
@@ -133,7 +129,7 @@ print_success "Internet connection OK"
 # ─────────────────────────────────────────
 # STEP 2 — INSTALL DEPENDENCIES
 # ─────────────────────────────────────────
-print_step "STEP 2/7 — Installing Dependencies"
+print_step "STEP 2/6 — Installing Dependencies"
 
 # Docker
 if command -v docker &>/dev/null; then
@@ -145,7 +141,6 @@ else
         sudo steamos-readonly disable
     fi
 
-    # Fix pacman keyring
     print_info "Fixing pacman keyring..."
     sudo rm -rf /etc/pacman.d/gnupg 2>/dev/null || true
     sudo pacman-key --init 2>/dev/null || true
@@ -169,15 +164,6 @@ else
     print_success "Docker installed!"
 fi
 
-# Git
-if command -v git &>/dev/null; then
-    print_success "Git already installed"
-else
-    print_info "Installing Git..."
-    sudo pacman -Sy --noconfirm git 2>/dev/null || \
-    sudo apt-get install -y git 2>/dev/null || true
-fi
-
 # Verify Docker works
 if ! docker ps &>/dev/null 2>&1; then
     if sudo docker ps &>/dev/null 2>&1; then
@@ -192,97 +178,77 @@ fi
 print_success "Docker is running"
 
 # ─────────────────────────────────────────
-# STEP 3 — CLONE NPCBOTS REPO
+# STEP 3 — SET UP INSTALL DIR + COMPOSE FILE
 # ─────────────────────────────────────────
-print_step "STEP 3/7 — Downloading NPCBots Source"
-
-print_info "Cloning AzerothCore with NPCBots..."
-print_info "Source: github.com/trickerer/AzerothCore-wotlk-with-NPCBots"
-print_info "Credit: trickerer — thank you for maintaining this fork!"
-echo ""
+print_step "STEP 3/6 — Setting Up Server Folder"
 
 if [ -d "$INSTALL_DIR" ]; then
     print_warning "Existing install found at $INSTALL_DIR"
     if ask_yes_no "Remove it and start fresh?"; then
+        cd "$INSTALL_DIR" && docker compose down 2>/dev/null || true
+        cd "$HOME"
         sudo rm -rf "$INSTALL_DIR"
     else
-        print_info "Using existing folder — skipping clone"
+        print_info "Using existing folder"
     fi
 fi
 
-if [ ! -d "$INSTALL_DIR" ]; then
-    git clone --depth 1 \
-        https://github.com/trickerer/AzerothCore-wotlk-with-NPCBots.git \
-        "$INSTALL_DIR"
-
-    if [ ! -f "$INSTALL_DIR/docker-compose.yml" ]; then
-        print_error "Clone failed. Check your internet connection."
-        exit 1
-    fi
-    print_success "NPCBots source downloaded!"
-fi
-
+mkdir -p "$INSTALL_DIR"
+mkdir -p "$INSTALL_DIR/config" "$INSTALL_DIR/logs"
+sudo chown -R 1000:1000 "$INSTALL_DIR/config" "$INSTALL_DIR/logs"
 cd "$INSTALL_DIR" || exit 1
 
+print_info "Downloading docker-compose.npcbots.yml..."
+curl -fsSL -o docker-compose.yml "$COMPOSE_URL"
+if [ ! -f docker-compose.yml ]; then
+    print_error "Failed to download compose file. Check your internet connection."
+    exit 1
+fi
+print_success "Compose file ready"
+
 # ─────────────────────────────────────────
-# STEP 4 — COMPILE AND START
+# STEP 4 — PULL IMAGES AND START
 # ─────────────────────────────────────────
-print_step "STEP 4/7 — Compiling Server (2-4 Hours!)"
+print_step "STEP 4/6 — Pulling Prebuilt Images (~5-10 minutes)"
 
 echo ""
-echo -e "${RED}${BOLD}╔══════════════════════════════════════════════════╗${NC}"
-echo -e "${RED}${BOLD}║   ⏰ COMPILATION STARTING — THIS TAKES HOURS!    ║${NC}"
-echo -e "${RED}${BOLD}╚══════════════════════════════════════════════════╝${NC}"
-echo ""
-echo -e "${YELLOW}Your Steam Deck will now compile AzerothCore from${NC}"
-echo -e "${YELLOW}source code. This is completely normal and expected.${NC}"
-echo ""
-echo -e "${WHITE}During compilation you will see lots of C++ output.${NC}"
-echo -e "${WHITE}This is normal — just let it run!${NC}"
-echo ""
-echo -e "${CYAN}Progress is being saved to: ~/npcbots-build.log${NC}"
-echo -e "${CYAN}You can check it anytime in another terminal with:${NC}"
-echo -e "${CYAN}  tail -f ~/npcbots-build.log${NC}"
-echo ""
-print_info "Starting compilation now..."
+echo -e "${WHITE}Pulling prebuilt NPCBots images from GHCR...${NC}"
+echo -e "${WHITE}Total download: ~2 GB. Time depends on your connection.${NC}"
 echo ""
 
-# Build and start — log output to file too
-# [PR4] Pin local tag so failed builds cannot silently fall back to upstream :master
-echo "DOCKER_IMAGE_TAG=npcbots-local" > .env
-docker compose up -d --build 2>&1 | tee ~/npcbots-build.log
+docker compose pull 2>&1 | tee ~/npcbots-pull.log
+PULL_EXIT=${PIPESTATUS[0]}
 
-BUILD_EXIT=${PIPESTATUS[0]}
-
-if [ $BUILD_EXIT -ne 0 ]; then
-    print_error "Build failed! Check the log:"
-    print_info "  cat ~/npcbots-build.log | tail -50"
+if [ $PULL_EXIT -ne 0 ]; then
+    print_error "Image pull failed! Check the log:"
+    print_info "  cat ~/npcbots-pull.log | tail -30"
+    print_info ""
+    print_info "If GHCR is unreachable, fall back to source-build with:"
+    print_info "  ./install-npcbots.sh"
     exit 1
 fi
 
-print_success "Compilation complete and server starting!"
+print_success "Images pulled — starting server!"
+docker compose up -d
 
 # ─────────────────────────────────────────
-# STEP 5 — WAIT FOR SERVER
+# STEP 5 — WAIT FOR SERVER + VERIFY NPCBOTS
 # ─────────────────────────────────────────
-print_step "STEP 5/7 — Waiting for Server to Initialize"
+print_step "STEP 5/6 — Waiting for Server to Initialize"
 
-print_info "First launch initializes the database..."
-print_info "This takes an additional 5-10 minutes after compilation."
-echo ""
+print_info "First launch initializes the database (5-10 minutes)..."
 
+WORLD_CONTAINER=""
 TIMEOUT=900
 ELAPSED=0
 READY=0
-WORLD_CONTAINER=""
 
 while [ $ELAPSED -lt $TIMEOUT ]; do
     WORLD_CONTAINER=$(docker ps --format '{{.Names}}' \
         2>/dev/null | grep -i "worldserver" | head -1)
 
     if [ -n "$WORLD_CONTAINER" ]; then
-        if docker logs "$WORLD_CONTAINER" \
-            2>/dev/null | grep -q "ready\.\.\."; then
+        if docker logs "$WORLD_CONTAINER" 2>/dev/null | grep -q "ready\.\.\."; then
             READY=1
             break
         fi
@@ -292,22 +258,29 @@ while [ $ELAPSED -lt $TIMEOUT ]; do
     sleep 10
     ELAPSED=$((ELAPSED + 10))
 done
-
 echo ""
 
-if [ $READY -eq 0 ]; then
-    print_warning "Server is taking longer than expected."
-    print_info "Check progress: docker logs -f $WORLD_CONTAINER"
-    print_info "Wait for 'ready...' then run this script again to create your account."
-    exit 0
+if [ $READY -ne 1 ]; then
+    print_warning "Server didn't report ready within 15 min — proceeding anyway."
 fi
 
-print_success "Server is LIVE! ⚔️"
+# Verify NPCBots actually loaded
+print_info "Verifying NPCBots module loaded..."
+sleep 5
+if docker logs "$WORLD_CONTAINER" 2>&1 | grep -qi "npcbot"; then
+    print_success "NPCBots module is loaded — bots are ready!"
+else
+    print_error "WARNING: NPCBots not detected in worldserver logs!"
+    print_error "The image you pulled may not contain NPCBots."
+    print_error "Check: docker logs $WORLD_CONTAINER | grep -i npcbot"
+    print_error "If empty, please file an issue at:"
+    print_error "  https://github.com/DadsMmoLab/dads-mmo-lab/issues"
+fi
 
 # ─────────────────────────────────────────
-# STEP 6 — CREATE ACCOUNT
+# STEP 6 — CREATE ACCOUNT + LAUNCHER
 # ─────────────────────────────────────────
-print_step "STEP 6/7 — Creating Your Account"
+print_step "STEP 6/6 — Creating Your Account"
 
 echo ""
 echo -e "${WHITE}Let's create your in-game account.${NC}"
@@ -331,11 +304,9 @@ done
 print_info "Creating account via worldserver console..."
 sleep 3
 
-WORLD_CONTAINER=$(docker ps --format '{{.Names}}' \
-    2>/dev/null | grep -i "worldserver" | head -1)
+WORLD_CONTAINER="${WORLD_CONTAINER:-$(docker ps --format '{{.Names}}' | grep -i "worldserver" | head -1)}"
 WORLD_CONTAINER="${WORLD_CONTAINER:-ac-worldserver}"
 
-# Create account via console
 echo "account create ${WOW_USERNAME} ${WOW_PASSWORD} ${WOW_PASSWORD}" | \
     docker exec -i "$WORLD_CONTAINER" sh -c 'cat > /tmp/cmd.txt && \
     while IFS= read -r cmd; do echo "$cmd"; sleep 1; done < /tmp/cmd.txt' \
@@ -364,6 +335,7 @@ Username: $WOW_USERNAME
 Password: $WOW_PASSWORD
 
 Server: 127.0.0.1 (localhost)
+Install path: prebuilt images (GHCR)
 
 ====================================
   NPCBot Commands (in-game chat)
@@ -400,6 +372,7 @@ github.com/NetherstormX/NetherBot
 ====================================
 Start:   cd $INSTALL_DIR && docker compose up -d
 Stop:    cd $INSTALL_DIR && docker compose down
+Update:  cd $INSTALL_DIR && docker compose pull && docker compose up -d
 Logs:    docker logs -f $WORLD_CONTAINER
 Console: docker attach $WORLD_CONTAINER
          (exit: Ctrl+P then Ctrl+Q)
@@ -409,9 +382,9 @@ CREDS
 print_success "Login details saved to: $INSTALL_DIR/MY_ACCOUNT.txt"
 
 # ─────────────────────────────────────────
-# STEP 7 — GAMING MODE LAUNCHER
+# GAMING MODE LAUNCHER
 # ─────────────────────────────────────────
-print_step "STEP 7/7 — Setting Up Gaming Mode"
+print_info "Setting up Gaming Mode launcher..."
 
 cat > "$HOME/wow-npcbots-launcher.sh" << 'LAUNCHER'
 #!/bin/bash
@@ -427,7 +400,7 @@ exec 2>"$LOGFILE"
 INSTALL_DIR="$HOME/wow-server-npcbots"
 
 if [ ! -d "$INSTALL_DIR" ]; then
-    echo "ERR: NPCBots server not found! Run install-npcbots.sh first."
+    echo "ERR: NPCBots server not found! Run install-npcbots-prebuilt.sh first."
     sleep 5
     exit 1
 fi
@@ -448,7 +421,6 @@ docker compose up -d >> "$LOGFILE" 2>&1
 echo "  Containers started!"
 echo ""
 echo "  Waiting for world to initialize..."
-echo "  First launch: 5-15 minutes"
 echo "  After first launch: ~60 seconds"
 echo ""
 
@@ -538,26 +510,13 @@ echo -e "${GREEN}${BOLD}╔═════════════════�
 echo -e "${GREEN}${BOLD}║   🎉 NPCBOTS SERVER IS RUNNING!                  ║${NC}"
 echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "${WHITE}Set your WoW realmlist to: ${GREEN}set realmlist 127.0.0.1${NC}"
+echo -e "${WHITE}Next steps:${NC}"
+echo -e "  1. Set your WoW realmlist to: ${GREEN}set realmlist 127.0.0.1${NC}"
+echo -e "  2. Add Wow.exe to Steam (Proton Experimental)"
+echo -e "  3. Log in with: ${GREEN}${WOW_USERNAME}${NC}"
 echo ""
-echo -e "${WHITE}Login: ${CYAN}${WOW_USERNAME}${NC}"
+echo -e "${WHITE}Bot commands cheat-sheet: ${CYAN}cat $INSTALL_DIR/MY_ACCOUNT.txt${NC}"
 echo ""
-echo -e "${WHITE}${BOLD}First thing to do in game:${NC}"
-echo -e "  Type: ${CYAN}.npcbot spawn 2${NC} (spawns a Paladin bot)"
-echo -e "  Click the bot then: ${CYAN}.npcbot add${NC}"
-echo -e "  Install NetherBot addon for easy bot management!"
-echo -e "  ${CYAN}github.com/NetherstormX/NetherBot${NC}"
-echo ""
-echo -e "${WHITE}${BOLD}Add to Steam Gaming Mode:${NC}"
-echo -e "  Target:  ${CYAN}/usr/bin/konsole${NC}"
-echo -e "  Options: ${CYAN}--hold -e bash ~/wow-npcbots-launcher.sh${NC}"
-echo -e "  Proton:  ${CYAN}OFF${NC}"
-echo ""
-echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${WHITE}  📺 youtube.com/@DadsMmoLab${NC}"
-echo -e "${WHITE}  📦 github.com/DadsMmoLab/dads-mmo-lab${NC}"
-echo -e "${WHITE}  ⭐ Star the repo if NPCBots changed your life!${NC}"
-echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo ""
-echo -e "${GREEN}${BOLD}Welcome to Azeroth. Now you don't have to go alone. ⚔️${NC}"
+echo -e "${WHITE}Want updates? Run:${NC}"
+echo -e "  ${CYAN}cd $INSTALL_DIR && docker compose pull && docker compose up -d${NC}"
 echo ""

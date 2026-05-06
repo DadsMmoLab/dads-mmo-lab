@@ -1,0 +1,187 @@
+name: Build WoW WotLK NPCBots Images
+
+# Builds AzerothCore + NPCBots + mod-ah-bot + mod-individual-progression
+# as four prebuilt Docker images and pushes them to GHCR. This lets users
+# (especially Steam Deck users) skip the 2-4 hour local compile.
+#
+# Triggers:
+#   - Weekly cron: pulls in upstream fixes from trickerer / module authors.
+#   - Push to main: ships any installer/workflow changes immediately.
+#   - Manual dispatch: lets the maintainer rebuild on demand.
+
+on:
+  schedule:
+    # Sundays at 06:00 UTC. After this finishes, fresh images are
+    # available for every Steam Deck user to pull.
+    - cron: '0 6 * * 0'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-npcbots-images.yml'
+      - 'guides/wow-wotlk/install-npcbots.sh'
+      - 'guides/wow-wotlk/docker-compose.npcbots.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  # Trickerer maintains the canonical AzerothCore + NPCBots fork.
+  CORE_REPO: https://github.com/trickerer/AzerothCore-wotlk-with-NPCBots.git
+  CORE_BRANCH: npcbots_3.3.5
+  # Modules dropped into /modules before the build so CMake compiles them in.
+  AHBOT_REPO: https://github.com/azerothcore/mod-ah-bot.git
+  IP_REPO: https://github.com/ZhengPeiRu21/mod-individual-progression.git
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      # Don't fail the whole matrix if one image breaks — we want partial
+      # progress so a worldserver bug doesn't also kill authserver builds.
+      fail-fast: false
+      matrix:
+        include:
+          - target: worldserver
+            tag_suffix: worldserver
+          - target: authserver
+            tag_suffix: authserver
+          - target: db-import
+            tag_suffix: db-import
+          - target: client-data
+            tag_suffix: client-data
+
+    steps:
+      - name: Free up runner disk space
+        # The build needs ~30GB. ubuntu-latest ships with ~14GB free
+        # by default — the rest is taken by preinstalled tooling we
+        # don't need (Android SDK, .NET, etc.).
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo rm -rf /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          df -h
+
+      - name: Checkout AzerothCore + NPCBots fork
+        run: |
+          git clone --depth 1 --branch "$CORE_BRANCH" "$CORE_REPO" core
+          # The Dockerfile uses a bind mount of .git at build time. Depth 1
+          # is enough for that; we don't need full history.
+
+      - name: Add modules
+        run: |
+          cd core/modules
+          git clone --depth 1 "$AHBOT_REPO" mod-ah-bot
+          git clone --depth 1 "$IP_REPO" mod-individual-progression
+          # Drop the .git dirs from modules so they don't conflict with
+          # the core's .git bind mount during the Docker build.
+          rm -rf mod-ah-bot/.git mod-individual-progression/.git
+          ls -la
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compute lowercased image prefix
+        id: prefix
+        # GHCR rejects uppercase characters in image names. The default
+        # ${{ github.repository_owner }} is mixed-case (e.g. "DadsMmoLab"),
+        # so we lowercase it explicitly here.
+        run: |
+          OWNER_LC="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "image_prefix=ghcr.io/${OWNER_LC}/wow-wotlk-npcbots" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        run: |
+          # `latest` for normal users; date-stamped tag so the install script
+          # can pin a known-good version if the maintainer wants to.
+          DATE_TAG=$(date -u +'%Y%m%d')
+          PREFIX="${{ steps.prefix.outputs.image_prefix }}"
+          {
+            echo "primary=${PREFIX}-${{ matrix.tag_suffix }}:latest"
+            echo "dated=${PREFIX}-${{ matrix.tag_suffix }}:${DATE_TAG}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push ${{ matrix.target }}
+        uses: docker/build-push-action@v5
+        with:
+          context: ./core
+          file: ./core/apps/docker/Dockerfile
+          target: ${{ matrix.target }}
+          push: true
+          tags: |
+            ${{ steps.tags.outputs.primary }}
+            ${{ steps.tags.outputs.dated }}
+          # GitHub Actions cache lets reruns reuse compiled objects.
+          # First build is slow (~45 min for worldserver). Subsequent
+          # builds with no source changes are ~5 min.
+          cache-from: type=gha,scope=${{ matrix.target }}
+          cache-to: type=gha,scope=${{ matrix.target }},mode=max
+          # GPLv2 source attribution. Required because we're shipping
+          # a compiled binary derived from GPL code.
+          labels: |
+            org.opencontainers.image.source=${{ env.CORE_REPO }}
+            org.opencontainers.image.licenses=GPL-2.0-only
+            org.opencontainers.image.description=AzerothCore WotLK 3.3.5a + NPCBots + mod-ah-bot + mod-individual-progression. Source: ${{ env.CORE_REPO }}, https://github.com/azerothcore/mod-ah-bot, https://github.com/ZhengPeiRu21/mod-individual-progression
+
+  smoke-test:
+    name: Smoke test images
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute lowercased image prefix
+        id: prefix
+        run: |
+          OWNER_LC="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "image_prefix=ghcr.io/${OWNER_LC}/wow-wotlk-npcbots" >> "$GITHUB_OUTPUT"
+
+      - name: Pull built images
+        run: |
+          PREFIX="${{ steps.prefix.outputs.image_prefix }}"
+          docker pull "${PREFIX}-worldserver:latest"
+          docker pull "${PREFIX}-authserver:latest"
+          docker pull "${PREFIX}-db-import:latest"
+          docker pull "${PREFIX}-client-data:latest"
+
+      - name: Verify image contents
+        # Trickerer's Dockerfile has a multi-stage layout:
+        # - worldserver image: only contains the binary (modules compiled in)
+        # - db-import image: contains the modules/ directory with SQL files
+        # so we check each image for what it should contain.
+        run: |
+          PREFIX="${{ steps.prefix.outputs.image_prefix }}"
+
+          echo "=== Worldserver: binary contains NPCBots fork code ==="
+          docker run --rm --entrypoint sh \
+            "${PREFIX}-worldserver:latest" -c '
+              set -e
+              test -x /azerothcore/env/dist/bin/worldserver || (echo "FAIL: worldserver binary missing"; exit 1)
+              SIZE=$(stat -c%s /azerothcore/env/dist/bin/worldserver)
+              echo "worldserver binary: ${SIZE} bytes"
+              test "$SIZE" -gt 50000000 || (echo "FAIL: worldserver binary too small (${SIZE} bytes — expected NPCBots fork to be 80MB+)"; exit 1)
+              echo "worldserver: OK"
+            '
+
+          echo ""
+          echo "=== db-import: module SQL files present ==="
+          docker run --rm --entrypoint sh \
+            "${PREFIX}-db-import:latest" -c '
+              set -e
+              test -d /azerothcore/modules/mod-ah-bot || (echo "FAIL: mod-ah-bot directory missing in db-import"; ls -la /azerothcore/modules/ 2>/dev/null; exit 1)
+              echo "mod-ah-bot: OK"
+              test -d /azerothcore/modules/mod-individual-progression || (echo "FAIL: mod-individual-progression directory missing in db-import"; ls -la /azerothcore/modules/ 2>/dev/null; exit 1)
+              echo "mod-individual-progression: OK"
+            '
+
+          echo ""
+          echo "All checks passed ✓"

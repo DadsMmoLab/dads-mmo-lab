@@ -1,0 +1,98 @@
+# docker-compose.yml for Dad's MMO Lab — WoW WotLK + NPCBots
+#
+# This pulls prebuilt images from ghcr.io/dadsmmolab/wow-wotlk-npcbots-*
+# instead of compiling on-device. The images include:
+#   - AzerothCore 3.3.5a (trickerer's NPCBots fork)
+#   - mod-ah-bot (living auction house)
+#   - mod-individual-progression (vanilla -> TBC -> WotLK progression)
+#
+# Images are rebuilt weekly by GitHub Actions in the dads-mmo-lab repo.
+
+services:
+  ac-database:
+    container_name: ac-database
+    image: mysql:8.4
+    networks:
+      - ac-network
+    environment:
+      - MYSQL_ROOT_PASSWORD=password
+    volumes:
+      - ac-database:/var/lib/mysql
+    restart: unless-stopped
+    healthcheck:
+      test: "/usr/bin/mysql --user=root --password=$$MYSQL_ROOT_PASSWORD --execute \"SHOW DATABASES;\""
+      interval: 5s
+      timeout: 10s
+      retries: 40
+
+  ac-db-import:
+    container_name: ac-db-import
+    # IMPORTANT: this image has the NPCBots/AH/IP SQL baked in. Auto-imports
+    # all the custom schema on first run.
+    image: ghcr.io/dadsmmolab/wow-wotlk-npcbots-db-import:latest
+    networks:
+      - ac-network
+    environment:
+      AC_LOGIN_DATABASE_INFO: "ac-database;3306;root;password;acore_auth"
+      AC_WORLD_DATABASE_INFO: "ac-database;3306;root;password;acore_world"
+      AC_CHARACTER_DATABASE_INFO: "ac-database;3306;root;password;acore_characters"
+      AC_DATA_DIR: "/azerothcore/env/dist/data/"
+    depends_on:
+      ac-database:
+        condition: service_healthy
+
+  ac-client-data-init:
+    container_name: ac-client-data-init
+    image: ghcr.io/dadsmmolab/wow-wotlk-npcbots-client-data:latest
+    volumes:
+      - ac-client-data:/azerothcore/env/dist/data
+
+  ac-worldserver:
+    container_name: ac-worldserver
+    image: ghcr.io/dadsmmolab/wow-wotlk-npcbots-worldserver:latest
+    networks:
+      - ac-network
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+    ports:
+      - "8085:8085"
+    environment:
+      AC_LOGIN_DATABASE_INFO: "ac-database;3306;root;password;acore_auth"
+      AC_WORLD_DATABASE_INFO: "ac-database;3306;root;password;acore_world"
+      AC_CHARACTER_DATABASE_INFO: "ac-database;3306;root;password;acore_characters"
+    volumes:
+      - ./config:/azerothcore/env/dist/etc
+      - ./logs:/azerothcore/env/dist/logs
+      - ac-client-data:/azerothcore/env/dist/data:ro
+    depends_on:
+      ac-database:
+        condition: service_healthy
+      ac-db-import:
+        condition: service_completed_successfully
+      ac-client-data-init:
+        condition: service_completed_successfully
+
+  ac-authserver:
+    container_name: ac-authserver
+    image: ghcr.io/dadsmmolab/wow-wotlk-npcbots-authserver:latest
+    networks:
+      - ac-network
+    tty: true
+    restart: unless-stopped
+    ports:
+      - "3724:3724"
+    environment:
+      AC_LOGIN_DATABASE_INFO: "ac-database;3306;root;password;acore_auth"
+    depends_on:
+      ac-database:
+        condition: service_healthy
+      ac-db-import:
+        condition: service_completed_successfully
+
+volumes:
+  ac-database:
+  ac-client-data:
+
+networks:
+  ac-network:
