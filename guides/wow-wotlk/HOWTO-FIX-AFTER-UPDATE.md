@@ -40,12 +40,43 @@ That is all. The script handles everything automatically.
 ## What the Fix Does
 
 1. Disables the SteamOS read-only filesystem temporarily
-2. Wipes and rebuilds the pacman keyring from scratch
-3. Reinstalls Docker and Docker Compose via pacman
-4. Re-enables the Docker service
-5. Verifies Docker is working before finishing
+2. **Checks your pacman keyring health first**
+3. **Asks for your confirmation before resetting it** — see note below
+4. Reinstalls Docker and Docker Compose via pacman
+5. Re-enables the Docker service
+6. Verifies Docker is working before finishing
 
 The whole process takes about 2 minutes.
+
+---
+
+## ⚠️ About the Keyring Reset
+
+The script will show you a warning before touching your keyring:
+
+```
+⚠️  KEYRING RESET REQUIRED
+
+This script needs to reset your pacman keyring.
+
+It will:
+  • Delete /etc/pacman.d/gnupg
+  • Reinitialize the keyring
+  • Repopulate Arch + Holo (SteamOS) keys
+
+⚠️  Any custom keys you added manually will be
+removed. Re-add them after this runs if your
+system needs them.
+
+Type yes to continue, or anything else to cancel:
+```
+
+**For most Steam Deck users:** Just type `yes` and continue.
+This is safe for standard Steam Deck setups.
+
+**If you have added custom pacman keys manually:** Note down
+which keys you added before continuing, so you can re-add
+them after the fix runs.
 
 ---
 

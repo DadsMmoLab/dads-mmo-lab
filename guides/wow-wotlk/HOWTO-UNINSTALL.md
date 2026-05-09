@@ -49,11 +49,15 @@ The backup saves to:
 
 Keep this file somewhere safe. You can restore it after reinstalling.
 
+> ⚠️  The database must be running to create a backup.
+> If it is not running the script will warn you and ask
+> whether you want to continue without a backup.
+
 ---
 
 ## 🔒 Safety Confirmations
 
-The uninstaller has two safety steps before deleting anything:
+The uninstaller has multiple safety steps before deleting anything:
 
 ```
 Are you absolutely sure you want to uninstall? (y/n)
@@ -66,6 +70,21 @@ Last chance — type DELETE to confirm:
 ```
 
 You must type `DELETE` exactly to proceed. This prevents accidents.
+
+---
+
+## 💿 Keep Client Data Option
+
+The uninstaller also asks whether to keep your client data volumes:
+
+```
+Keep client data volumes to speed up future reinstalls? (y/n)
+```
+
+**Say yes** unless you need a completely clean slate. Client data
+is the map and DBC files downloaded during install — it never
+changes between reinstalls and takes 30+ minutes to re-download.
+Keeping it makes future reinstalls much faster.
 
 ---
 
@@ -84,6 +103,7 @@ For each selected server:
 - Docker itself
 - Any other server versions you did not select
 - Any other projects on your system
+- Client data volumes (if you chose to keep them)
 
 ---
 
@@ -120,7 +140,6 @@ Replace the date in the filename with your actual backup date.
 
 - Want to reinstall? See HOWTO-INSTALL.md
 - Want to manage your server? See HOWTO-DESKTOP-CONTROLS-1.md
-- Want to move characters between servers? See HOWTO-MIGRATE.md
 
 ---
 

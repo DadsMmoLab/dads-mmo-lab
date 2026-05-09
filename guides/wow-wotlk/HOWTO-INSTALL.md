@@ -107,20 +107,30 @@ Sit back. The wizard:
 
 ---
 
-### Step 5 — Create Accounts
+### Step 5 — Create Your Account
 
-The wizard automatically creates a default account:
+After the server starts the wizard shows you exactly how to create your account via the GM console. It takes about 60 seconds.
+
+Open a **new Konsole window** and run:
+
+```bash
+docker attach $(docker ps --format '{{.Names}}' | grep worldserver | head -1)
+```
+
+Then type these two commands — replace USERNAME and PASSWORD with whatever you want:
 
 ```
-Username: admin
-Password: admin
-GM Level: 3 (full admin)
+account create USERNAME PASSWORD PASSWORD
+account set gmlevel USERNAME 3 -1
 ```
 
-Then asks if you want more accounts. Just keep answering y until you have all the accounts you need. Perfect for families!
+Then exit safely with **Ctrl+P then Ctrl+Q** — never Ctrl+C!
 
-> You can always create more accounts later.
-> See HOWTO-DESKTOP-CONTROLS-1.md
+> You can create as many accounts as you need — one per family
+> member, one for testing, whatever you like. Just repeat the
+> two commands above for each one.
+>
+> See HOWTO-CREATE-ACCOUNTS.md for the full guide.
 
 ---
 
@@ -170,11 +180,11 @@ After the wizard finishes it shows you the exact launcher path. Here is the setu
 1. Launch your server from the Steam library
 2. Watch the dots and wait for AZEROTH IS READY
 3. Press Steam button and launch WoW
-4. Login with admin / admin
+4. Login with your username and password
 5. Play your session
 6. Close WoW and the server shuts down automatically
 
-Start to playing: Under 1 minute. Exit: Automatic.
+Start to playing: Under 1 minute after first launch. Exit: Automatic.
 
 ---
 
@@ -265,9 +275,9 @@ Each server folder contains MY_ACCOUNTS.txt with your login details and full Gam
 
 ## What is Next?
 
+- Want to create more accounts? See HOWTO-CREATE-ACCOUNTS.md
 - Want to uninstall? See HOWTO-UNINSTALL.md
 - Want to manage your server? See HOWTO-DESKTOP-CONTROLS-1.md
-- Want to move characters? See HOWTO-MIGRATE.md
 - Docker broken after an update? See HOWTO-FIX-AFTER-UPDATE.md
 
 ---

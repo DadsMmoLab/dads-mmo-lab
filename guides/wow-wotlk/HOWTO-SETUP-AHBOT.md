@@ -165,7 +165,7 @@ since the character data is wiped with the server.
 
 - Need to install a server? See HOWTO-INSTALL.md
 - Need to manage your server? See HOWTO-DESKTOP-CONTROLS-1.md
-- Want to move characters? See HOWTO-MIGRATE.md
+- Need to create player accounts? See HOWTO-CREATE-ACCOUNTS.md
 
 ---
 
