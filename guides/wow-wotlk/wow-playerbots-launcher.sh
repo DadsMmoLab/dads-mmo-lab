@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-#  Dad's MMO Lab — WoW Gaming Mode Launcher v7
+#  Dad's MMO Lab — Playerbots Gaming Mode Launcher v1.2.0
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 #
 #  FLOW:
@@ -27,7 +27,7 @@ exec 2>"$LOGFILE"
 # ─────────────────────────────────────────
 clear
 echo ""
-echo "  ⚔️  DAD'S MMO LAB — Playerbots Gaming Mode Launcher v1.2.0"
+echo "  ⚔️  DAD'S MMO LAB — Playerbots Gaming Mode Launcher v${LAUNCHER_VERSION}"
 echo "  ══════════════════════════════════════"
 echo "  WoW + Playerbots Server"
 echo "  ══════════════════════════════════════"
@@ -55,7 +55,9 @@ echo ""
 
 # Stop any other running WoW servers first
 # Prevents database conflicts between server versions
-WOW_CONTAINERS=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -iE "worldserver|authserver|ac-database|ac-eluna|ac-client|ac-db-import" || true)
+WOW_CONTAINERS=$(docker ps --format '{{.Names}}' 2>/dev/null | \
+    grep -iE "worldserver|authserver|ac-database|ac-eluna|ac-client|ac-db-import" || true)
+
 if [ -n "$WOW_CONTAINERS" ]; then
     echo "  Stopping any running servers first..."
     echo "$WOW_CONTAINERS" | xargs docker stop >> "$LOGFILE" 2>&1 || true
@@ -66,18 +68,17 @@ fi
 
 cd "$HOME/wow-server-playerbots" || exit 1
 
-docker compose up -d --scale phpmyadmin=0 \
-    >> "$LOGFILE" 2>&1 || \
-docker compose up -d >> "$LOGFILE" 2>&1
-
-if [ $? -ne 0 ]; then
+if docker compose up -d --scale phpmyadmin=0 >> "$LOGFILE" 2>&1; then
+    echo "  Containers started!"
+elif docker compose up -d >> "$LOGFILE" 2>&1; then
+    echo "  Containers started (phpmyadmin fallback used)"
+else
     echo "  ERR: Failed to start server."
     echo "  Check: $LOGFILE"
     sleep 10
     exit 1
 fi
 
-echo "  Containers started!"
 echo ""
 
 # ─────────────────────────────────────────
@@ -142,7 +143,6 @@ echo ""
 echo "  Waiting for WoW to launch..."
 echo ""
 
-# Wait up to 5 minutes for WoW to start
 WOW_STARTED=0
 for i in $(seq 1 60); do
     if pgrep -f "Wow\.exe" > /dev/null 2>&1; then
@@ -160,12 +160,10 @@ if [ $WOW_STARTED -eq 1 ]; then
     echo "  Server shuts down when WoW closes."
     echo ""
 
-    # Wait for ALL Wow.exe processes to end
     while pgrep -f "Wow\.exe" > /dev/null 2>&1; do
         sleep 3
     done
 
-    # Give Wine a moment to fully clean up
     sleep 5
     echo ""
     echo "  WoW closed — shutting down server..."
