@@ -1,193 +1,261 @@
-# ⚔️ RuneScape 2009 — Setup Guide
-**Dad's MMO Lab** · youtube.com/@DadsMmoLab · github.com/DadsMmoLab/dads-mmo-lab
+# Dad's MMO Lab — RuneScape 2009 Server: How-To Guide
+
+**Game:** RuneScape 2009 era (pre-Evolution of Combat)
+**Server:** 2009scape Singleplayer Edition for Linux
+**Platform:** Steam Deck (SteamOS), Desktop Mode + Gaming Mode
 
 ---
 
-## What This Guide Covers
+## What This Installs
 
-- Installing the server
-- Getting the client (it's included!)
-- Connecting the client to your local server
-- Creating your account
-- Starting and stopping the server
-- What to do after a SteamOS update
+A fully offline RuneScape 2009 singleplayer server running natively on your Steam Deck — no Docker, no Proton, no Wine. Pure Java on Linux. Includes:
+
+- **2009scape Singleplayer Edition** — the full 2009 game server, management server, and Java client bundled together
+- **Bundled MySQL database** — ships with the repo, no separate install needed
+- **Gaming Mode launcher** — one-button start from your Steam library
+
+This is the singleplayer edition. You play solo locally. No other players, no internet connection needed after install.
 
 ---
 
-## ⚠️ Client Version — Critical
+## Requirements
 
-**The 2009scape client is included with the server. You do not need to find a separate client.**
+| Requirement | Details |
+|---|---|
+| Disk space | **500 MB** minimum |
+| Java | **Java 11** (installer handles this automatically) |
+| Time | **~5 minutes** total |
+| Internet | Required for initial clone only |
 
-2009scape ships its own Java-based client that is pre-configured and maintained by the project. This is one of the easiest setups in Dad's MMO Lab.
-
-- ✅ 2009scape official client (bundled) — **correct, Linux native via Java**
-- ❌ Modern RuneScape client (Jagex) — **completely different game**
-- ❌ Old School RuneScape client — **different era, won't connect**
-- ❌ Any other RS client — **won't work with 2009scape server**
-
-> **Why Java?** RuneScape 2009 era was a Java applet game. The 2009scape client is Java-based and runs on any platform with a JRE — including your Steam Deck, natively, with no Proton.
+> **Why Java 11 specifically?** The 2009scape server uses Nashorn (Java's built-in JavaScript engine) to save character data. Nashorn was **removed in Java 15**. If you run the server on Java 17 or 21, saves silently fail and your character resets to the tutorial on every login. The installer installs Java 11 specifically and the launcher pins to it — your system's default Java is not affected.
 
 ---
 
 ## Step 1 — Run the Installer
 
-Open a terminal in Desktop Mode (Konsole) and run:
+Open Konsole (Desktop Mode) and run:
 
 ```bash
-chmod +x install-runescape.sh
-./install-runescape.sh
+chmod +x ~/Downloads/install-runescape.sh
+~/Downloads/install-runescape.sh
 ```
 
-The installer:
-- Installs Docker and Java (JRE)
-- Pulls the 2009scape Docker image
-- Sets up PostgreSQL database
-- Downloads the 2009scape Java client
-- Configures everything to connect to `127.0.0.1`
-
-Installation takes about 10-15 minutes.
+The installer takes about 5 minutes and handles everything automatically.
 
 ---
 
-## Step 2 — The Client is Already Configured
+## What Happens During Install
 
-Unlike most games in Dad's MMO Lab, **you don't need to manually edit any config files.**
+### Step 1: Dependencies (~1–2 min)
+Installs:
+- **Java 11** (`jre11-openjdk`) — pinned version for Nashorn support
+- **git + git-lfs** — needed to clone the repo and download JAR files
+- **wmctrl + xdotool** — for auto-resizing the client window to Steam Deck native (1280x800)
+- **libxcrypt-compat + libaio** — runtime libraries required by the bundled MySQL binary
 
-The 2009scape client the installer downloads is pre-configured to connect to `127.0.0.1`. Just launch it.
+### Step 2: Clone & Initialize Database (~3 min)
+- Clones [2009scape/Singleplayer-Edition-Linux](https://github.com/2009scape/Singleplayer-Edition-Linux) to `~/runescape-server/`
+- Downloads JAR files via Git LFS (server.jar, ms.jar, client.jar)
+- Starts the bundled MySQL, creates the `global` database, imports world data
+- Creates the `data/players/` save directory
+- Shuts MySQL back down cleanly
 
-### Where the client lives:
-
-```bash
-ls ~/runescape-server/client/
-```
-
-You should see a `.jar` file or a launch script.
-
-### Launching the client manually:
-
-```bash
-cd ~/runescape-server/client
-java -jar 2009scape-client.jar
-```
-
-Or use the launcher script created by the installer.
+### Step 3: Launcher Setup (~10 sec)
+Creates `~/runescape-launcher.sh` and saves a reference card to `~/runescape-server/MY_SERVER.txt`.
 
 ---
 
-## Step 3 — Create Your Account
+## Step 2 — Add to Steam (Gaming Mode)
 
-2009scape uses in-game account creation.
-
-1. Make sure the server is running (Step 5)
-2. Launch the 2009scape client
-3. At the login screen, click **Create Account** or simply type a new username and password
-4. The server creates the account automatically on first login
-
-> **No email required.** Just pick a username and password.
-
----
-
-## Step 4 — Add to Steam (Gaming Mode)
-
-The Java client runs natively — **no Proton needed.**
-
-### Add the client launcher:
-1. Open Steam → **Games** → **Add a Non-Steam Game**
-2. Browse to `/usr/bin/` → select `java`
-3. Rename it: `RuneScape 2009`
-4. Launch Options:
-```
--jar /home/deck/runescape-server/client/2009scape-client.jar
-```
-5. **Do NOT enable Proton**
-
-### Add the server launcher:
-1. Add `konsole` to Steam separately
-2. Rename: `RS2009 Server`
-3. Launch Options:
-```
---hold -e bash ~/runescape-launcher.sh
-```
+1. Steam → **Add a Non-Steam Game** → browse to `/usr/bin/konsole`
+2. Rename to: `RuneScape 2009`
+3. Right-click → **Properties** → Launch Options:
+   ```
+   --hold -e bash ~/runescape-launcher.sh
+   ```
+4. Compatibility: **Proton OFF** — Java runs natively, no Proton needed
 
 ---
 
-## Step 5 — Starting the Server
+## Daily Use — Gaming Mode
 
-### From Desktop Mode:
-```bash
-cd ~/runescape-server
-docker compose up -d
-```
+1. Launch **RuneScape 2009** from your library
+2. A terminal opens — wait for: **`GIELINOR IS OPEN!`**
+3. The Java client launches automatically
+4. At the login screen: **type any username + any password**
+   - First login with a new username creates the account automatically
+5. **Click the LEFT button (Standard Detail / SD)** — not HD
 
-### From Gaming Mode:
-Launch **RS2009 Server** from your Steam library. Wait for:
-```
-✅ GIELINOR IS READY!
-```
+> **IMPORTANT — Never click HD.** The legacy 2009scape client cannot load HD assets from a local server and will show "error connecting to server" if HD is selected. Always use Standard Detail (SD). If you accidentally saved HD, delete `~/.runite_rs/preferences.json` and relaunch.
+
+The launcher waits up to 30 seconds for the server to save your character data when you exit.
 
 ---
 
-## Step 6 — Stopping the Server
+## Saving Your Character
+
+- The server **auto-saves every ~5 minutes**
+- For a reliable save before quitting, use the **in-game LOGOUT button** — don't just close the client window
+- The launcher monitors for save activity on exit and reports:
+  - `✅ Character data saved successfully` — good
+  - `⚠️ no new save data was written` — possible issue (see troubleshooting)
+
+---
+
+## Getting Admin Rights (In-Game)
+
+To give your character admin privileges:
 
 ```bash
 cd ~/runescape-server
-docker compose down
+./run-linux.sh
+# Choose option 4
+# Enter your username
 ```
 
 ---
 
-## After a SteamOS Update
+## Files and Paths
 
-Java (installed via pacman) will be wiped. Re-run the installer:
-
-```bash
-./install-runescape.sh
-```
-
-Character data lives in Docker volumes (PostgreSQL) and is safe.
-
----
-
-## Useful Commands
-
-| What | Command |
-|------|---------|
-| Start server | `cd ~/runescape-server && docker compose up -d` |
-| Stop server | `cd ~/runescape-server && docker compose down` |
-| Server logs | `docker logs -f 2009scape` |
-| DB logs | `docker logs -f rs-postgres` |
-| Launch client | `cd ~/runescape-server/client && java -jar 2009scape-client.jar` |
+| Path | What it is |
+|---|---|
+| `~/runescape-server/` | Server root |
+| `~/runescape-server/server.jar` | Game server |
+| `~/runescape-server/ms.jar` | Management server |
+| `~/runescape-server/client.jar` | Java client |
+| `~/runescape-server/database/` | Bundled MySQL |
+| `~/runescape-server/data/players/` | Character save files (JSON) |
+| `~/runescape-server/data/global.sql` | World data (restored on re-init) |
+| `~/runescape-server/MY_SERVER.txt` | Quick reference card |
+| `~/runescape-launcher.sh` | Gaming Mode launcher |
+| `/tmp/rs-launch.log` | Runtime log |
 
 ---
 
-## Ports Used
+## Startup Sequence
 
-| Port | Purpose |
-|------|---------|
-| 43594 | Game server |
-| 5432 | PostgreSQL (internal) |
+The launcher starts processes in this order (and shuts them down in reverse):
+
+1. **MySQL** — the database must be up before anything else
+2. **ms.jar** — management server (handles account creation, admin tools)
+3. **server.jar** — game server
+4. **client.jar** — the Java client
+
+On shutdown, the server gets a 30-second grace period to write character saves before MySQL is touched.
 
 ---
 
 ## Troubleshooting
 
-**Client says "Error connecting to server"**
-- Make sure the server is running: `docker ps`
-- Check logs: `docker logs 2009scape | tail -20`
-- The server may take 1-2 minutes to fully start
+### "Bundled mysql failed to start" / database won't come up
 
-**"Java not found" when launching client**
-- Re-run the installer to reinstall Java
-- Or manually: `sudo pacman -Sy jre-openjdk`
+Check the log:
+```bash
+cat /tmp/rs-launch.log | grep -i "error\|fail\|missing"
+```
 
-**Blank login screen / client won't load**
-- Make sure you're using the 2009scape client, not any other RS client
-- Try: `java -version` to confirm Java is working
+Most common causes:
 
-**Server starts but world is empty**
-- 2009scape populates NPCs on zone load — walk around a bit
-- Check server logs for any initialization errors
+**1. Missing libcrypt.so.1 (most common on SteamOS)**
+```bash
+sudo steamos-readonly disable
+sudo pacman -Sy libxcrypt-compat
+sudo steamos-readonly enable
+```
+
+**2. Missing libaio**
+```bash
+sudo pacman -Sy libaio
+```
+
+**3. Port 3306 in use** by another database (Docker container, system MariaDB)
+```bash
+sudo ss -tlnp | grep 3306
+sudo systemctl stop mysqld mariadb 2>/dev/null
+# Or stop the relevant Docker container
+```
+
+**4. Corrupted database** (after a hard crash — destructive fix)
+```bash
+rm -rf ~/runescape-server/database/data
+bash ~/Downloads/install-runescape.sh  # re-initializes the database
+```
+
+The launcher auto-detects all of these and prints a `💡 FIX:` line when it spots the cause.
+
+### "Error connecting to server" at login
+
+You clicked HD. Restart the launcher and click SD (Standard Detail). If the client remembered your HD choice:
+```bash
+rm -f ~/.runite_rs/preferences.json
+```
+
+### "My character keeps resetting to the tutorial"
+
+**First check: Java version.** This is the most common cause.
+
+```bash
+/usr/lib/jvm/java-11-openjdk/bin/java -version
+```
+
+If that path doesn't exist, install Java 11:
+```bash
+sudo steamos-readonly disable
+sudo pacman -Sy jre11-openjdk
+sudo steamos-readonly enable
+```
+
+The launcher auto-detects Java 11 at `~/.usr/lib/jvm/java-11-openjdk`. Once installed, saves will work.
+
+**Other causes:**
+- Playing less than 5 minutes (below the autosave interval)
+- Closing the client window instead of using the in-game logout button
+- Server didn't have write permission to `~/runescape-server/data/players/`
+
+Check your save files:
+```bash
+ls -la ~/runescape-server/data/players/
+```
+You should see `.json` files named after your character.
+
+Check the log for the Nashorn NullPointerException:
+```bash
+grep -B3 "scriptEngine.*null" /tmp/rs-launch.log
+```
+If you get hits, it's the Java version issue — install Java 11.
+
+### Git LFS / JARs downloaded as tiny stub files
+
+If `server.jar`, `ms.jar`, or `client.jar` are under 10KB after cloning, Git LFS didn't download the real files. Manual fix:
+1. Go to [github.com/2009scape/Singleplayer-Edition-Linux](https://github.com/2009scape/Singleplayer-Edition-Linux)
+2. Click **Code → Download ZIP**
+3. Extract to `~/runescape-server/`
+4. Re-run the installer
+
+### "Launcher closes immediately, Java never opens"
+
+Same diagnosis as database failure above. Check `/tmp/rs-launch.log`.
+
+### Manual start (if launcher fails)
+
+```bash
+cd ~/runescape-server
+./run-linux.sh
+# Option 1 = run game
+```
 
 ---
 
-*Dad's MMO Lab · youtube.com/@DadsMmoLab · ko-fi.com/dadsmmolab*
+## Re-running the Installer
+
+The installer is safe to re-run. If `~/runescape-server/` exists with an initialized database, it skips the clone and database init entirely. To force a complete fresh install:
+
+```bash
+rm -rf ~/runescape-server
+~/Downloads/install-runescape.sh
+```
+
+---
+
+*Dad's MMO Lab — one-click offline MMO servers for Steam Deck.*
+*youtube.com/@DadsMmoLab*
