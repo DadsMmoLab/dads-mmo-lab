@@ -4483,7 +4483,7 @@ _module_conf_hints() {
             ;;
     esac
 }
-
+# Show unified module list with conf status and actions for managing conf files
 menu_module_management() {
     local page_start=0
     while true; do
@@ -4510,7 +4510,7 @@ menu_module_management() {
         printf "  ${GOLD}── Module Management ─────────────────────────────${RST}\n"
         printf "  ${DIM}Conf files are activated by copying: .conf.dist -> .conf${RST}\n"
         printf "  ${DIM}Path: $SERVER_DIR/env/dist/etc/modules/${RST}\n"
-        printf "  ${YELLOW}⚠  After installing modules, run top-level option 7 (Rebuild worldserver) first.${RST}\n"
+        printf "  ${YELLOW}⚠  After installing modules, Rebuild worldserver, if you did not do it during installation.${RST}\n"
         printf "  ${DIM}%-4s %-34s %s${RST}\n" "Num" "Module" "Conf Status"
         printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
 
@@ -4590,7 +4590,7 @@ menu_module_management() {
                 fi
                 if ! module_is_installed "$key"; then
                     print_warning "$name is not installed."
-                    print_info "Install it first from top-level option 1, then rebuild via option 7."
+                    print_info "Install it first from top-level option Install modules, then rebuild via Rebuild worldserver."
                     press_enter
                     continue
                 fi
@@ -4603,7 +4603,7 @@ menu_module_management() {
                 if [ "${action,,}" = "a" ]; then
                     if [ -z "$conf_dist" ] || [ ! -f "$conf_dist" ]; then
                         print_warning "Template .dist not found for $name."
-                        print_info "Run top-level option 7 (Rebuild worldserver), then try again."
+                        print_info "Run top-level option Rebuild worldserver, then try again."
                         press_enter
                         continue
                     fi
@@ -4614,7 +4614,7 @@ menu_module_management() {
                     fi
                     cp "$conf_dist" "$conf_active"
                     print_success "Activated conf: $conf_active"
-                    print_info "Restart worldserver (top-level option 11) to apply."
+                    print_info "Restart worldserver to apply."
                     press_enter
                     continue
                 fi
@@ -4632,7 +4632,7 @@ menu_module_management() {
                         fi
                     fi
                     ${EDITOR:-nano} "$conf_active"
-                    print_info "Restart worldserver (top-level option 11) to apply."
+                    print_info "Restart worldserver to apply."
                     press_enter
                     continue
                 fi
@@ -4640,7 +4640,7 @@ menu_module_management() {
                 if [ "${action,,}" = "r" ]; then
                     if [ -z "$conf_dist" ] || [ ! -f "$conf_dist" ]; then
                         print_warning "Template .dist not found for $name."
-                        print_info "Run top-level option 7 (Rebuild worldserver), then try again."
+                        print_info "Run top-level option Rebuild worldserver, then try again."
                         press_enter
                         continue
                     fi
@@ -4651,7 +4651,7 @@ menu_module_management() {
                     fi
                     cp "$conf_dist" "$conf_active"
                     print_success "Reset to defaults: $conf_active"
-                    print_info "Restart worldserver (top-level option 11) to apply."
+                    print_info "Restart worldserver to apply."
                     press_enter
                     continue
                 fi
@@ -5077,16 +5077,17 @@ main_menu() {
         printf "  ${WHITE}3)${RST} Manage SQL Mods\n"
         printf "  ${WHITE}4)${RST} Configure AH Bot\n"
         printf "  ${WHITE}5)${RST} Configure ALE\n"
-        printf "  ${WHITE}6)${RST} Rebuild worldserver\n"
+        printf "  ${WHITE}6)${RST} Configure Modules\n"
+        printf "  ${WHITE}7)${RST} Rebuild worldserver\n"
         printf "\n  ${GOLD}${BOLD}Server Controls${RST}\n"
         printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
-        printf "  ${WHITE}7)${RST} Server status\n"
-        printf "  ${WHITE}8)${RST} Start server\n"
-        printf "  ${WHITE}9)${RST} Stop server\n"
-        printf "  ${WHITE}10)${RST} Restart server\n"
-        printf "  ${WHITE}11)${RST} View logs\n"
-        printf "  ${WHITE}12)${RST} Attach to console\n"
-        printf "  ${WHITE}13)${RST} Server maintenance\n"
+        printf "  ${WHITE}8)${RST} Server status\n"
+        printf "  ${WHITE}9)${RST} Start server\n"
+        printf "  ${WHITE}10)${RST} Stop server\n"
+        printf "  ${WHITE}11)${RST} Restart server\n"
+        printf "  ${WHITE}12)${RST} View logs\n"
+        printf "  ${WHITE}13)${RST} Attach to console\n"
+        printf "  ${WHITE}14)${RST} Server maintenance\n"
         printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
         printf "  ${GOLD} Q)${RST} Quit\n"
 
@@ -5102,14 +5103,15 @@ main_menu() {
             3)  menu_sql_mods ;;
             4)  configure_ahbot; press_enter ;;
             5)  configure_ale; press_enter ;;
-            6)  rebuild_worldserver; press_enter ;;
-            7)  server_status; press_enter ;;
-            8)  server_start; press_enter ;;
-            9)  server_stop; press_enter ;;
-            10) server_restart; press_enter ;;
-            11) with_full_screen server_logs ;;
-            12) with_full_screen server_attach ;;
-            13) menu_server_maintenance ;;
+            6)  menu_module_management ;;
+            7)  rebuild_worldserver; press_enter ;;
+            8)  server_status; press_enter ;;
+            9)  server_start; press_enter ;;
+            10) server_stop; press_enter ;;
+            11) server_restart; press_enter ;;
+            12) with_full_screen server_logs ;;
+            13) with_full_screen server_attach ;;
+            14) menu_server_maintenance ;;
             q)  echo ""; print_info "Goodbye!"; exit 0 ;;
         esac
     done
