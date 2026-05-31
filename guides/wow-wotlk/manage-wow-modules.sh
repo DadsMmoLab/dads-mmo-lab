@@ -1508,46 +1508,228 @@ configure_ale_bmah() {
     lua_dir=$(ale_lua_scripts_dir)
     local deployed_file="$lua_dir/bmah_server.lua"
 
-    print_step "Black Market AH — NPC Configuration"
+    # Parallel arrays — index-aligned (Bash 3 compatible; no associative arrays).
+    local -a BNPC_IDS=(   45281   2496  11183   8921   3162  14740  11504  10834)
+    local -a BNPC_NAMES=( "Slytter"
+                          "Krazek"
+                          "Dirge Quikcleave"
+                          "Ravenholdt Guards"
+                          "Slyres Notrash"
+                          "Stonard Smuggler"
+                          "Baron Vardus"
+                          "Count Remo" )
+
+    # Return 0 if $1 is already in the remaining args; used for dedup without
+    # associative arrays so this stays Bash 3 / macOS compatible.
+    _bmah_in_list() {
+        local needle="$1"; shift
+        local item
+        for item in "$@"; do [ "$item" = "$needle" ] && return 0; done
+        return 1
+    }
+
+    print_step "Black Market AH — NPC Vendor Configuration"
     echo ""
-    echo -e "${WHITE}The BMAH needs a gossip-enabled NPC in-world to act as the vendor.${RST}"
-    echo -e "${WHITE}Its entry ID(s) must be added to the ${CYAN}BMAH_VENDOR_NPCs${WHITE} list in bmah_server.lua.${RST}"
-    echo -e "${DIM}The list format is: local BMAH_VENDOR_NPCs = { 2069430, 90001, ... }${RST}"
+    echo -e "${WHITE}The BMAH opens when a player interacts with any gossip-enabled NPC whose${RST}"
+    echo -e "${WHITE}entry ID is listed in ${CYAN}BMAH_VENDOR_NPCs${WHITE} inside bmah_server.lua.${RST}"
     echo ""
 
-    if [ -f "$deployed_file" ]; then
-        printf "${WHITE}Enter your gossip NPC entry ID to add [90001]: ${RST}"
-        read -r npc_id
-        npc_id=${npc_id:-90001}
-        if [[ "$npc_id" =~ ^[0-9]+$ ]]; then
-            # Append the new ID into the existing brace-enclosed list
-            if sed -i "s/local BMAH_VENDOR_NPCs = {/local BMAH_VENDOR_NPCs = { $npc_id,/" \
-                "$deployed_file" 2>/dev/null && \
-               grep -q "$npc_id" "$deployed_file"; then
-                print_success "Added NPC $npc_id to BMAH_VENDOR_NPCs list."
-            else
-                print_warning "Auto-patch failed or NPC already present. Edit manually:"
-                print_info "  File: $deployed_file"
-                print_info "  Add ${CYAN}$npc_id${RST} to: local BMAH_VENDOR_NPCs = { ... }"
-            fi
-        else
-            print_warning "Invalid entry ID — edit $deployed_file manually."
-        fi
-    else
-        print_warning "bmah_server.lua not found at expected path:"
+    # ── Missing file guard ────────────────────────────────────
+    if [ ! -f "$deployed_file" ]; then
+        print_warning "bmah_server.lua not found at:"
         print_info "  $deployed_file"
-        print_info "Deploy the script first, then edit BMAH_VENDOR_NPCs at the top of the file."
+        print_info "Deploy the script first (install from the ALE Scripts menu), then reconfigure."
+        echo ""
+        print_step "Black Market AH — Client Addon Required"
+        echo -e "${WHITE}BMAH includes a WoW addon that recreates the Mists of Pandaria BMAH UI.${RST}"
+        echo ""
+        echo -e "${WHITE}${BOLD}Copy this folder to your WoW client's AddOns directory:${RST}"
+        echo -e "  ${CYAN}Source:${RST}      $clone_dir/BlackMarketUI/"
+        echo -e "  ${CYAN}Destination:${RST} <WoW_Client>/Interface/AddOns/BlackMarketUI/"
+        echo ""
+        echo -e "${WHITE}After copying, run ${CYAN}/reload${WHITE} or restart the WoW client.${RST}"
+        return 1
     fi
 
+    # ── Show current IDs extracted from the file ──────────────
+    local current_ids
+    current_ids=$(awk '
+        /local BMAH_VENDOR_NPCs[[:space:]]*=/ { found=1 }
+        found {
+            tmp = $0
+            gsub(/--[^\n]*/, "", tmp)   # strip line comments
+            while (match(tmp, /[0-9]+/)) {
+                print substr(tmp, RSTART, RLENGTH)
+                tmp = substr(tmp, RSTART + RLENGTH)
+            }
+        }
+        found && /\}/ { exit }
+    ' "$deployed_file" | sort -u | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+
+    if [ -n "$current_ids" ]; then
+        echo -e "${WHITE}Currently configured NPC IDs:${RST} ${CYAN}${current_ids}${RST}"
+        echo ""
+    fi
+
+    # ── NPC selection menu ────────────────────────────────────
+    echo -e "  ${GOLD}──  Suggested Vendor NPCs  ──────────────────────────────────────────────${RST}"
     echo ""
-    echo -e "${WHITE}Additional config (in bmah_server.lua):${RST}"
-    printf "  ${CYAN}%-22s${RST} ${WHITE}%s${RST}\n" "common_price"    "Starting bid for common items"
-    printf "  ${CYAN}%-22s${RST} ${WHITE}%s${RST}\n" "rare_price"      "Starting bid for rare items"
-    printf "  ${CYAN}%-22s${RST} ${WHITE}%s${RST}\n" "ultra_rare_price" "Starting bid for ultra-rare items"
+    echo -e "  ${DIM}Shady / Neutral Factions${RST}"
+    printf "  ${WHITE}%2s)${RST} %-20s ${CYAN}(%5s)${RST}  %s\n" \
+        1 "Slytter"          45281 "Goblin rogue in Booty Bay; coastal smuggler theme" \
+        2 "Krazek"            2496 "Booty Bay goblin with shady business connections" \
+        3 "Dirge Quikcleave" 11183 "Gadgetzan butcher; deals in rare exotic goods"
+    echo ""
+    echo -e "  ${DIM}Criminal Underworld / Rogue Themes${RST}"
+    printf "  ${WHITE}%2s)${RST} %-20s ${CYAN}(%5s)${RST}  %s\n" \
+        4 "Ravenholdt Guards"  8921 "Ravenholdt Manor; gate BMAH behind rogue faction" \
+        5 "Slyres Notrash"     3162 "Dalaran Underbelly; illicit underground zone" \
+        6 "Stonard Smuggler"  14740 "Out-of-the-way NPC; hidden underground trade network"
+    echo ""
+    echo -e "  ${DIM}High Society / Wealthy Elites${RST}"
+    printf "  ${WHITE}%2s)${RST} %-20s ${CYAN}(%5s)${RST}  %s\n" \
+        7 "Baron Vardus"      11504 "Corrupt noble; wealthy elites buying illegal artifacts" \
+        8 "Count Remo"        10834 "High-standing noble; hidden high-end auction ring"
+    echo ""
+    echo -e "  ${GOLD}────────────────────────────────────────────────────────────────────────${RST}"
+    echo ""
+    printf "${WHITE}Select NPCs by number (e.g. 1 3 7), or \"all\". Leave blank to keep current IDs: ${RST}"
+    read -r _bsel
+
+    # ── Parse numbered selection ──────────────────────────────
+    local -a sel_ids=()
+    local -a sel_names=()
+
+    if [[ "${_bsel,,}" == "all" ]]; then
+        sel_ids=("${BNPC_IDS[@]}")
+        sel_names=("${BNPC_NAMES[@]}")
+    elif [ -n "$_bsel" ]; then
+        local tok
+        for tok in $_bsel; do
+            if [[ "$tok" =~ ^[0-9]+$ ]] && \
+               [ "$tok" -ge 1 ] && [ "$tok" -le "${#BNPC_IDS[@]}" ]; then
+                sel_ids+=("${BNPC_IDS[$((tok - 1))]}")
+                sel_names+=("${BNPC_NAMES[$((tok - 1))]}")
+            else
+                print_warning "  Skipping invalid selection: $tok (valid range: 1-${#BNPC_IDS[@]})"
+            fi
+        done
+    fi
+
+    # ── Optional extra custom NPC ID ─────────────────────────
+    echo ""
+    printf "${WHITE}Add a custom NPC entry ID? (leave blank to skip): ${RST}"
+    read -r _bcustom
+    if [[ "$_bcustom" =~ ^[0-9]+$ ]]; then
+        sel_ids+=("$_bcustom")
+        sel_names+=("Custom NPC")
+    elif [ -n "$_bcustom" ]; then
+        print_warning "  '$_bcustom' is not a valid numeric entry ID — skipping."
+    fi
+
+    # ── Decide add vs replace ─────────────────────────────────
+    local _bmode="add"
+    if [ "${#sel_ids[@]}" -gt 0 ] && [ -n "$current_ids" ]; then
+        echo ""
+        printf "${WHITE}Apply as: [a] Add to existing list  [r] Replace list entirely [a]: ${RST}"
+        read -r _bmode_raw
+        [ "${_bmode_raw,,}" = "r" ] && _bmode="replace"
+    fi
+
+    # ── Build final deduped ID list ───────────────────────────
+    local -a final_ids=()
+
+    if [ "$_bmode" = "add" ] && [ -n "$current_ids" ]; then
+        local id
+        for id in $current_ids; do
+            [[ "$id" =~ ^[0-9]+$ ]] && final_ids+=("$id")
+        done
+    fi
+
+    local i
+    for (( i=0; i<${#sel_ids[@]}; i++ )); do
+        local sid="${sel_ids[$i]}"
+        if ! _bmah_in_list "$sid" "${final_ids[@]}"; then
+            final_ids+=("$sid")
+        fi
+    done
+
+    # ── Patch the file (or skip if nothing to change) ─────────
+    if [ "${#final_ids[@]}" -eq 0 ] && [ -z "$_bsel" ] && [ -z "$_bcustom" ]; then
+        print_info "No changes to NPC list."
+    elif [ "${#final_ids[@]}" -eq 0 ]; then
+        print_warning "Resulting NPC list is empty — skipping file patch."
+        print_info "Add at least one NPC ID, or edit ${deployed_file} manually."
+    else
+        # Write one NPC entry per line to a temp file; awk reads it with
+        # getline so embedded newlines never hit the -v variable limit.
+        local ids_file tmpfile j label
+        ids_file=$(mktemp "${TMPDIR:-/tmp}/bmah_ids_XXXXXX")
+        tmpfile=$(mktemp "${TMPDIR:-/tmp}/bmah_server_XXXXXX.lua")
+        for id in "${final_ids[@]}"; do
+            label=""
+            for (( j=0; j<${#BNPC_IDS[@]}; j++ )); do
+                [ "${BNPC_IDS[$j]}" = "$id" ] && label=" --${BNPC_NAMES[$j]}" && break
+            done
+            printf "  %s,%s\n" "$id" "$label" >> "$ids_file"
+        done
+
+        # awk replaces the BMAH_VENDOR_NPCs block — handles both inline and
+        # multiline forms.  Exits 1 if the pattern was never matched so we
+        # detect a failed patch before overwriting the live file.
+        awk -v ids_file="$ids_file" '
+            /local BMAH_VENDOR_NPCs[[:space:]]*=/ {
+                print "local BMAH_VENDOR_NPCs = {"
+                while ((getline line < ids_file) > 0) { print line }
+                close(ids_file)
+                replaced++
+                if (/\}/) { print "}"; next }   # inline closing brace on same line
+                skip = 1
+                next
+            }
+            skip {
+                if (/^[[:space:]]*\}/) { print "}"; skip = 0 }
+                next
+            }
+            { print }
+            END { if (replaced == 0) exit 1 }
+        ' "$deployed_file" > "$tmpfile"
+        local awk_rc=$?
+        rm -f "$ids_file"
+
+        if [ $awk_rc -eq 0 ] && [ -s "$tmpfile" ]; then
+            mv "$tmpfile" "$deployed_file"
+            echo ""
+            print_success "BMAH_VENDOR_NPCs updated with ${#final_ids[@]} NPC(s):"
+            for id in "${final_ids[@]}"; do
+                label=""
+                for (( j=0; j<${#BNPC_IDS[@]}; j++ )); do
+                    [ "${BNPC_IDS[$j]}" = "$id" ] && label=" — ${BNPC_NAMES[$j]}" && break
+                done
+                print_info "  • ${id}${label}"
+            done
+        else
+            rm -f "$tmpfile"
+            print_error "Could not locate BMAH_VENDOR_NPCs block in bmah_server.lua."
+            print_info "Edit manually: $deployed_file"
+            print_info "Look for: local BMAH_VENDOR_NPCs = { ... } and add your IDs."
+        fi
+    fi
+
+    # ── Pricing & timing reference ────────────────────────────
+    echo ""
+    echo -e "${WHITE}Other configurable values (edit directly in bmah_server.lua):${RST}"
+    echo ""
+    printf "  ${CYAN}%-32s${RST} ${WHITE}%s${RST}\n" \
+        "common/rare/ultraRare_*_price"  "Starting bids per item category and tier" \
+        "FillRateCommon / Rare / Ultra"  "Rarity probabilities (default: 85%% / 10%% / 5%%)" \
+        "MinBidIncrementG"               "Minimum gold increment per bid (default: 10g)" \
+        "AutoFillChance"                 "Chance to restock when empty (default: 0.50)" \
+        "PotentialDurations"             "Auction lengths in minutes (default: 720, 1440)"
     echo ""
     echo -e "${WHITE}GM commands: ${CYAN}/bmah flush${WHITE} (expire all) | ${CYAN}/bmah fill${WHITE} (refill immediately)${RST}"
 
-    # Client addon
+    # ── Client addon ─────────────────────────────────────────
     echo ""
     print_step "Black Market AH — Client Addon Required"
     echo -e "${WHITE}BMAH includes a WoW addon that recreates the Mists of Pandaria BMAH UI.${RST}"
@@ -1708,7 +1890,7 @@ configure_ale_accountwide() {
     if [ -n "$f_rep_default" ] && [ -n "$f_rep_other" ]; then
         print_info "  Two reputation variants are deployed — only one can be active:"
         print_info "  1) Default AC-WotLK  (standard AzerothCore factions)"
-        print_info "  2) $(basename "$f_rep_other" .lua)  (custom server modifications)"
+        print_info "  2) $(basename "$f_rep_other" .lua)  (custom server modifications, Offline doesn't use this.)"
         printf "${WHITE}  Choose variant [1/2, default=1]: ${RST}"
         read -r _rep_choice
         if [ "$_rep_choice" = "2" ]; then
