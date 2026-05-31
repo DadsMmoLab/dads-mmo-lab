@@ -232,6 +232,68 @@ press_enter() {
 }
 
 # ─────────────────────────────────────────────────────────────
+# _offer_npc_in_capitals  npc_entry  npc_name  [timing_note]
+#   Shows GM commands (in-game and console forms) to spawn an NPC
+#   in Stormwind and Orgrimmar.  Uses per-entry deterministic offsets
+#   so repeated calls never stack NPCs on the same coordinates.
+#   Optionally appends commands to $SERVER_DIR/npc_spawn_commands.txt.
+#   timing_note: extra line shown before coordinates (e.g. "run after rebuild")
+# ─────────────────────────────────────────────────────────────
+_offer_npc_in_capitals() {
+    local npc_entry="$1"
+    local npc_name="$2"
+    local timing_note="${3:-}"
+
+    # Deterministic slot per known entry; unknown entries use session counter
+    local slot
+    case "$npc_entry" in
+        190010)  slot=0 ;;
+        999991)  slot=1 ;;
+        601026)  slot=2 ;;
+        1116001) slot=3 ;;
+        *)       slot="${_NPC_SPAWN_IDX:-0}" ;;
+    esac
+    _NPC_SPAWN_IDX=$((_NPC_SPAWN_IDX + 1))
+
+    # Offset x by +3 and y by +2 per slot to prevent NPC overlap
+    local sw_x sw_y og_x og_y
+    sw_x=$(LC_ALL=C awk -v s="$slot" 'BEGIN{printf "%.1f", -8831.3 + s*3}')
+    sw_y=$(LC_ALL=C awk -v s="$slot" 'BEGIN{printf "%.1f",   628.2 + s*2}')
+    og_x=$(LC_ALL=C awk -v s="$slot" 'BEGIN{printf "%.1f",  1597.2 + s*3}')
+    og_y=$(LC_ALL=C awk -v s="$slot" 'BEGIN{printf "%.1f", -4415.7 + s*2}')
+
+    echo ""
+    print_info "📍 $npc_name (entry $npc_entry) is in the database but not yet placed in the world."
+    [ -n "$timing_note" ] && print_info "   $timing_note"
+    echo ""
+    echo -e "  ${GOLD}Stormwind, Alliance (map 0):${RST}"
+    echo -e "  ${WHITE}In-game GM:${RST}  ${CYAN}.npc add $npc_entry 0 $sw_x $sw_y 94.1 3.7${RST}"
+    echo -e "  ${WHITE}WS console:${RST}  ${CYAN}npc add $npc_entry 0 $sw_x $sw_y 94.1 3.7${RST}"
+    echo ""
+    echo -e "  ${GOLD}Orgrimmar, Horde (map 1):${RST}"
+    echo -e "  ${WHITE}In-game GM:${RST}  ${CYAN}.npc add $npc_entry 1 $og_x $og_y 17.5 4.5${RST}"
+    echo -e "  ${WHITE}WS console:${RST}  ${CYAN}npc add $npc_entry 1 $og_x $og_y 17.5 4.5${RST}"
+    echo ""
+    print_info "Access the worldserver console via option 12 from the main menu."
+    print_info "If the NPC lands in a bad spot, use .npc delete (in-game) or"
+    print_info "npc delete (console) then re-place with your own coordinates."
+    echo ""
+
+    if ask_yes_no "Save these spawn commands to a reference file?"; then
+        local outfile="$SERVER_DIR/npc_spawn_commands.txt"
+        {
+            printf '# %s (entry %s) — %s\n' "$npc_name" "$npc_entry" "$(date '+%Y-%m-%d %H:%M')"
+            printf '# Stormwind (Alliance, map 0)\n'
+            printf 'npc add %s 0 %s %s 94.1 3.7\n' "$npc_entry" "$sw_x" "$sw_y"
+            printf '# Orgrimmar (Horde, map 1)\n'
+            printf 'npc add %s 1 %s %s 17.5 4.5\n' "$npc_entry" "$og_x" "$og_y"
+            printf '\n'
+        } >> "$outfile"
+        print_success "Commands saved to: $outfile"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────
 # CONFIG — populated by detect_install
 # ─────────────────────────────────────────────────────────────
 SERVER_DIR=""
@@ -241,6 +303,9 @@ WORLD_CONTAINER=""
 DB_CONTAINER=""
 AUTH_CONTAINER=""
 DB_ROOT_PASSWORD="password"   # acore-docker default
+
+# Session counter for NPC spawn coordinate staggering (deterministic per known entry)
+_NPC_SPAWN_IDX=0
 
 # Module registry: key|name|repo url|sql dirs (comma-sep)
 declare -a MODULE_REGISTRY=(
@@ -2461,6 +2526,7 @@ ale_script_install() {
         exchangenpc)
             echo ""
             print_info "Exchange NPC requires a world SQL file to be applied."
+            local _exchangenpc_sql_ok=false
             if ask_yes_no "Apply Exchange NPC world SQL now?"; then
                 if ensure_db_running; then
                     # Prefer the *_Up.sql (install) variant; avoid Down/Revert scripts
@@ -2472,7 +2538,9 @@ ale_script_install() {
                             | grep -v -i "down\|revert" | head -1)
                     fi
                     if [ -n "$sql_file" ]; then
-                        ale_run_sql_file "acore_world" "$sql_file"
+                        if ale_run_sql_file "acore_world" "$sql_file"; then
+                            _exchangenpc_sql_ok=true
+                        fi
                     else
                         print_warning "No install SQL file found in $clone_dir"
                         print_info "Manually apply the *_Up.sql file from the repo."
@@ -2480,7 +2548,15 @@ ale_script_install() {
                 fi
             fi
             echo ""
-            print_info "After restart, teleport to the NPC: ${CYAN}.go zonexy 51.1 27.7 976${RST}"
+            print_info "Exchange NPC (Roboto, entry 1116001) is in the database but has no spawn point."
+            if [ "$_exchangenpc_sql_ok" = true ]; then
+                _offer_npc_in_capitals 1116001 "Roboto (Exchange NPC)" \
+                    "The NPC template was just applied — restart the server, then run these commands."
+            else
+                print_info "Apply the world SQL first (re-install or run manually), then spawn the NPC:"
+                print_info "  In-game:  ${CYAN}.npc add 1116001 0 -8831.3 628.2 94.1 3.7${RST}  (Stormwind)"
+                print_info "  In-game:  ${CYAN}.npc add 1116001 1  1597.2 -4415.7 17.5 4.5${RST}  (Orgrimmar)"
+            fi
             ;;
         battlepass)
             echo ""
@@ -3435,15 +3511,18 @@ _get_about_text() {
             printf '%s\n' \
                 'Adds a Transmogrification NPC (entry 190010) letting players' \
                 'change the visual appearance of their gear. Based on the' \
-                'Rochet2 transmog script. Spawn the NPC anywhere with' \
-                '.npc add 190010.'
+                'Rochet2 transmog script. After installing and rebuilding,' \
+                'spawn the NPC in-game or via console: .npc add 190010.' \
+                'The install flow will offer to provide capital-city coordinates.'
             ;;
         mod-1v1-arena)
             printf '%s\n' \
                 'Introduces solo 1v1 arena brackets so players can queue for' \
                 'ranked matches without needing a partner. Adds its own arena' \
                 'season structure and rating/reward system alongside the' \
-                'standard 2v2, 3v3, and 5v5 brackets.'
+                'standard 2v2, 3v3, and 5v5 brackets. Requires NPC entry' \
+                '999991 (Arena Battlemaster 1v1) to be manually spawned in' \
+                'the world after rebuilding — install flow provides coordinates.'
             ;;
         mod-ale)
             printf '%s\n' \
@@ -3484,8 +3563,9 @@ _get_about_text() {
                 'special NPC. Provides pet adoption (normal, rare, exotic), Hunter' \
                 'skills for non-hunters, a pet food vendor, stables, and a tracked-pets' \
                 'system (summon, rename, delete). Players summon the NPC anywhere via' \
-                '.beastmaster. NPC entry: 601026 (White Fang). Add 601026 to' \
-                'Creatures.CustomIDs in worldserver.conf to silence a harmless warning.'
+                '.beastmaster. NPC entry: 601026 (White Fang). You can also place it' \
+                'permanently in capitals — install flow provides coordinates. Add 601026' \
+                'to Creatures.CustomIDs in worldserver.conf to silence a harmless warning.'
             ;;
         accountwide)
             printf '%s\n' \
@@ -3505,10 +3585,11 @@ _get_about_text() {
             ;;
         exchangenpc)
             printf '%s\n' \
-                'Spawns a configurable NPC that swaps items for other items --' \
-                'a custom material-exchange vendor. Define exchange pairs in' \
-                'the Lua config, run the world SQL to place the NPC, and' \
-                'players interact with it directly to trade materials.'
+                'Spawns a configurable NPC (Roboto, entry 1116001) that swaps' \
+                'items for other items -- a custom material-exchange vendor.' \
+                'Define exchange pairs in the Lua config, apply the world SQL' \
+                'during install, then manually spawn the NPC in the world.' \
+                'The install flow offers capital-city spawn coordinates.'
             ;;
         activechat)
             printf '%s\n' \
@@ -4058,6 +4139,23 @@ menu_modules() {
                         print_info "NPC Beastmaster has a conf file and SQL in db-world and db-characters."
                         print_info "Note: rebuild the worldserver first if the conf.dist is not yet present."
                         if ask_yes_no "Configure NPC Beastmaster now?"; then configure_module_npc_beastmaster; fi
+                        echo ""
+                        print_info "Players can summon the Beastmaster NPC anywhere via .beastmaster."
+                        print_info "You can also permanently place it in capital cities."
+                        _offer_npc_in_capitals 601026 "White Fang (Beastmaster NPC)" \
+                            "Run these commands after rebuilding and starting the worldserver."
+                    fi
+                    if [ "$key" = "mod-transmog" ]; then
+                        echo ""
+                        print_info "Transmogrification adds NPC entry 190010 — it must be manually placed in the world."
+                        _offer_npc_in_capitals 190010 "Transmogrifier NPC" \
+                            "Run these commands after rebuilding and starting the worldserver."
+                    fi
+                    if [ "$key" = "mod-1v1-arena" ]; then
+                        echo ""
+                        print_info "1v1 Arena adds a Battlemaster NPC (entry 999991) — it must be manually placed in the world."
+                        _offer_npc_in_capitals 999991 "Arena Battlemaster 1v1" \
+                            "Run these commands after rebuilding and starting the worldserver."
                     fi
                 done
                 press_enter
