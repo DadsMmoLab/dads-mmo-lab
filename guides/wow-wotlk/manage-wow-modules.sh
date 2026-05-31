@@ -1559,6 +1559,213 @@ configure_ale_bmah() {
     echo -e "${WHITE}After copying, run ${CYAN}/reload${WHITE} or restart the WoW client.${RST}"
 }
 
+# ─────────────────────────────────────────────────────────────
+# ACCOUNTWIDE CONFIGURATION
+# ─────────────────────────────────────────────────────────────
+# Patches ENABLE_* flags in the deployed Accountwide Lua scripts.
+# Each system is opt-in — all flags default to false upstream.
+# Handles the dual reputation variant by prompting which to keep
+# and removing the other so both aren't loaded simultaneously.
+#
+# Tolerant sed pattern:  s/\(local FLAG\)[[:space:]]*=[[:space:]]*false/\1 = true/
+# Verifies each patch landed; warns if the file was not changed.
+
+# Patch one ENABLE flag from false → true in a deployed Lua file.
+# Usage: _aw_enable <file> <FLAG_NAME>
+# Returns 1 and prints a warning if the patch cannot be verified.
+_aw_enable() {
+    local file="$1" flag="$2"
+    if [ ! -f "$file" ]; then
+        print_warning "  File not found: $(basename "$file") — skipping."
+        return 1
+    fi
+    sed -i "s/\(local ${flag}\)[[:space:]]*=[[:space:]]*false/\1 = true/" "$file"
+    if grep -q "local ${flag} = true" "$file"; then
+        return 0
+    fi
+    print_warning "  Could not patch ${flag} in $(basename "$file") — edit manually."
+    return 1
+}
+
+configure_ale_accountwide() {
+    local lua_dir
+    lua_dir=$(ale_lua_scripts_dir)
+    local aw_dir="$lua_dir/accountwide"
+
+    print_step "Configuring Accountwide Systems"
+
+    if [ ! -d "$aw_dir" ]; then
+        print_error "Accountwide scripts not found at: $aw_dir"
+        print_info "Install the script first from the ALE Scripts menu."
+        return 1
+    fi
+
+    echo ""
+    echo -e "${WHITE}Each system is enabled independently — answer Y to activate each one.${RST}"
+    echo -e "${WHITE}All systems are disabled by default; only enable what you want.${RST}"
+    echo -e "${DIM}The characters DB tables must be applied before starting the server.${RST}"
+    echo ""
+
+    # ── Achievements ──────────────────────────────────────────
+    local f_ach="$aw_dir/AccountAchievements.lua"
+    if [ -f "$f_ach" ]; then
+        echo -e "${GOLD}Achievements${RST}"
+        if ask_yes_no "Enable Accountwide Completed Achievements (sync earned achievements across alts)?"; then
+            _aw_enable "$f_ach" "ENABLE_ACCOUNTWIDE_COMPLETED_ACHIEVEMENTS" && \
+                print_success "  Completed Achievements enabled."
+        fi
+        if ask_yes_no "Enable Accountwide Achievement Criteria Progress (sync partial criteria)?"; then
+            _aw_enable "$f_ach" "ENABLE_ACCOUNTWIDE_CRITERIA_PROGRESS" && \
+                print_success "  Criteria Progress enabled."
+        fi
+        echo ""
+    fi
+
+    # ── Currency ─────────────────────────────────────────────
+    local f_cur="$aw_dir/AccountCurrency.lua"
+    if [ -f "$f_cur" ]; then
+        echo -e "${GOLD}Currency${RST}"
+        if ask_yes_no "Enable Accountwide Currency (shared badge/token counts across all characters)?"; then
+            _aw_enable "$f_cur" "ENABLE_ACCOUNTWIDE_CURRENCY" && \
+                print_success "  Currency enabled."
+        fi
+        echo ""
+    fi
+
+    # ── Money ────────────────────────────────────────────────
+    local f_mon="$aw_dir/AccountMoney.lua"
+    if [ -f "$f_mon" ]; then
+        echo -e "${GOLD}Money${RST}"
+        if ask_yes_no "Enable Accountwide Money (shared gold pool across all characters)?"; then
+            _aw_enable "$f_mon" "ENABLE_ACCOUNTWIDE_MONEY" && \
+                print_success "  Money enabled."
+            if ask_yes_no "  Enable real-time gold tick (syncs gold every ~5 s while online)?"; then
+                _aw_enable "$f_mon" "ENABLE_REALTIME_TICK" && \
+                    print_success "  Realtime tick enabled."
+                if ask_yes_no "  Also enable realtime tick for Altbots?"; then
+                    _aw_enable "$f_mon" "ENABLE_ALTBOT_REALTIME_TICK" && \
+                        print_success "  Altbot realtime tick enabled."
+                fi
+            fi
+        fi
+        echo ""
+    fi
+
+    # ── Mounts ───────────────────────────────────────────────
+    local f_mnt="$aw_dir/AccountMounts.lua"
+    if [ -f "$f_mnt" ]; then
+        echo -e "${GOLD}Mounts${RST}"
+        if ask_yes_no "Enable Accountwide Mounts (shared learned mounts across all characters)?"; then
+            _aw_enable "$f_mnt" "ENABLE_ACCOUNTWIDE_MOUNTS" && \
+                print_success "  Mounts enabled."
+        fi
+        echo ""
+    fi
+
+    # ── Pets ─────────────────────────────────────────────────
+    local f_pet="$aw_dir/AccountPets.lua"
+    if [ -f "$f_pet" ]; then
+        echo -e "${GOLD}Pets${RST}"
+        if ask_yes_no "Enable Accountwide Pets (shared companion pets across all characters)?"; then
+            _aw_enable "$f_pet" "ENABLE_ACCOUNTWIDE_PETS" && \
+                print_success "  Pets enabled."
+        fi
+        echo ""
+    fi
+
+    # ── Playtime ─────────────────────────────────────────────
+    local f_play="$aw_dir/AccountPlaytime.lua"
+    if [ -f "$f_play" ]; then
+        echo -e "${GOLD}Playtime${RST}"
+        if ask_yes_no "Enable Accountwide Playtime (.playtime command for total account play time)?"; then
+            _aw_enable "$f_play" "ENABLE_ACCOUNTWIDE_PLAYTIME" && \
+                print_success "  Playtime enabled."
+        fi
+        echo ""
+    fi
+
+    # ── PvP Rank ─────────────────────────────────────────────
+    local f_pvp="$aw_dir/AccountPvPRank.lua"
+    if [ -f "$f_pvp" ]; then
+        echo -e "${GOLD}PvP Rank${RST}"
+        print_info "  RUN_INIT_SEED_ON_STARTUP is true by default — this seeds existing PvP"
+        print_info "  data on first server start. Set it to false in AccountPvPRank.lua after."
+        if ask_yes_no "Enable Accountwide PvP Rank (sync honor kills, honor/arena points)?"; then
+            _aw_enable "$f_pvp" "ENABLE_ACCOUNTWIDE_PVP_RANK" && \
+                print_success "  PvP Rank enabled."
+        fi
+        echo ""
+    fi
+
+    # ── Reputation ───────────────────────────────────────────
+    # Two variants ship in the repo. Both get copied by the deploy step.
+    # Only one should be loaded — the other must be removed.
+    local f_rep_default f_rep_other f_rep_target
+    f_rep_default=$(find "$aw_dir" -name "AccountReputation*default*" 2>/dev/null | head -1)
+    f_rep_other=$(find "$aw_dir" -name "AccountReputation*.lua" ! -name "*default*" 2>/dev/null | head -1)
+
+    echo -e "${GOLD}Reputation${RST}"
+    if [ -n "$f_rep_default" ] && [ -n "$f_rep_other" ]; then
+        print_info "  Two reputation variants are deployed — only one can be active:"
+        print_info "  1) Default AC-WotLK  (standard AzerothCore factions)"
+        print_info "  2) $(basename "$f_rep_other" .lua)  (custom server modifications)"
+        printf "${WHITE}  Choose variant [1/2, default=1]: ${RST}"
+        read -r _rep_choice
+        if [ "$_rep_choice" = "2" ]; then
+            f_rep_target="$f_rep_other"
+            rm -f "$f_rep_default"
+            print_success "  Removed default variant, keeping: $(basename "$f_rep_other")"
+        else
+            f_rep_target="$f_rep_default"
+            rm -f "$f_rep_other"
+            print_success "  Removed custom variant, keeping: $(basename "$f_rep_default")"
+        fi
+    elif [ -n "$f_rep_default" ]; then
+        f_rep_target="$f_rep_default"
+    elif [ -n "$f_rep_other" ]; then
+        f_rep_target="$f_rep_other"
+    fi
+
+    if [ -n "$f_rep_target" ]; then
+        if ask_yes_no "Enable Accountwide Reputation (shared faction rep, faction-gated by Horde/Alliance)?"; then
+            _aw_enable "$f_rep_target" "ENABLE_ACCOUNTWIDE_REPUTATION" && \
+                print_success "  Reputation enabled ($(basename "$f_rep_target"))."
+        fi
+    else
+        print_warning "  No AccountReputation*.lua found in $aw_dir — skipping."
+    fi
+    echo ""
+
+    # ── Taxi Paths ───────────────────────────────────────────
+    local f_taxi="$aw_dir/AccountTaxiPaths.lua"
+    if [ -f "$f_taxi" ]; then
+        echo -e "${GOLD}Taxi Paths${RST}"
+        print_info "  Requires Aldori15's custom mod-ale fork with updated C++ bindings."
+        print_info "  Skip this unless you're running that specific fork."
+        if ask_yes_no "Enable Accountwide Taxi Paths (shared flight paths per faction)?"; then
+            _aw_enable "$f_taxi" "ENABLE_ACCOUNTWIDE_TAXI_PATHS" && \
+                print_success "  Taxi Paths enabled."
+        fi
+        echo ""
+    fi
+
+    # ── Titles ───────────────────────────────────────────────
+    local f_ttl="$aw_dir/AccountTitles.lua"
+    if [ -f "$f_ttl" ]; then
+        echo -e "${GOLD}Titles${RST}"
+        if ask_yes_no "Enable Accountwide Titles (share earned titles across all characters)?"; then
+            _aw_enable "$f_ttl" "ENABLE_ACCOUNTWIDE_TITLES" && \
+                print_success "  Titles enabled."
+        fi
+        echo ""
+    fi
+
+    echo ""
+    print_info "Accountwide configuration complete."
+    print_info "Ensure create_accountwide_tables.sql has been applied to acore_characters."
+    print_info "Restart the worldserver or run ${CYAN}.reload ale${RST} in-game to activate changes."
+}
+
 # ── Lua file deployment (per-script copy strategy) ───────────
 # Each script has its own repo layout; this handles the mapping.
 ale_deploy_lua_files() {
@@ -1723,6 +1930,12 @@ ale_script_install() {
                 fi
             else
                 print_info "Apply manually: mysql acore_characters < $clone_dir/sql/create_accountwide_tables.sql"
+            fi
+            echo ""
+            if ask_yes_no "Configure Accountwide systems (enable individual scripts) now?"; then
+                configure_ale_accountwide
+            else
+                print_info "Reconfigure anytime from the ALE Scripts menu → c on Accountwide."
             fi
             ;;
         exchangenpc)
@@ -1985,6 +2198,7 @@ menu_ale_scripts() {
                 fi
                 IFS='|' read -r key name url <<< "${available_entries[$((cnum - 1))]}"
                 case "$key" in
+                    accountwide) configure_ale_accountwide ;;
                     battlepass) configure_ale_battlepass ;;
                     paragon)    configure_ale_paragon ;;
                     bmah)       configure_ale_bmah ;;
@@ -2330,7 +2544,7 @@ main_menu() {
         printf "\n  ${GOLD}${BOLD}Server Modifications${RST}\n"
         printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
         printf "  ${WHITE}1)${RST} Manage Modules\n"
-        printf "  ${WHITE}2)${RST} Manage ALE Lua\n"
+        printf "  ${WHITE}2)${RST} Manage ALE Lua Mods\n"
         printf "  ${WHITE}3)${RST} Configure AH Bot\n"
         printf "  ${WHITE}4)${RST} Configure ALE\n"
         printf "  ${WHITE}5)${RST} Rebuild worldserver\n"
