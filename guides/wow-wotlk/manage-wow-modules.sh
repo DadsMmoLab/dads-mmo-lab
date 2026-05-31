@@ -38,110 +38,210 @@ GOLD='\033[38;5;220m'; DIM='\033[2m'
 # ─────────────────────────────────────────────────────────────
 # UI HELPERS
 # ─────────────────────────────────────────────────────────────
-print_header() {
-    clear
-    local F1='\033[38;5;220m'   # gold   — top
-    local F2='\033[38;5;214m'   # amber
-    local F3='\033[38;5;208m'   # orange
-    local F4='\033[38;5;202m'   # red-orange
-    local F5='\033[38;5;196m'   # red    — base (hottest)
-    echo ""
-    echo -e "${DIM}                           ▄▄  ▄█                                                                                        ${RST}"
-    echo -e "${F1}▀███▀▀▀██▄               ▀███  ██           ▀████▄     ▄███▀████▄     ▄███▀ ▄▄█▀▀██▄     ▀████▀         ██     ▀███▀▀▀██▄${RST}"
-    echo -e "${F1}  ██    ▀██▄               ██  ▀▀             ████    ████   ████    ████ ▄██▀    ▀██▄     ██          ▄██▄      ██    ██${RST}"
-    echo -e "${F2}  ██     ▀██▄█▀██▄    ▄█▀▀███     ▄██▀███     █ ██   ▄█ ██   █ ██   ▄█ ██ ██▀      ▀██     ██         ▄█▀██▄     ██    ██${RST}"
-    echo -e "${F2}  ██      ███   ██  ▄██    ██     ██   ▀▀     █  ██  █▀ ██   █  ██  █▀ ██ ██        ██     ██        ▄█  ▀██     ██▀▀▀█▄▄${RST}"
-    echo -e "${F3}  ██     ▄██▄█████  ███    ██     ▀█████▄     █  ██▄█▀  ██   █  ██▄█▀  ██ ██▄      ▄██     ██     ▄  ████████    ██    ▀█${RST}"
-    echo -e "${F4}  ██    ▄██▀█   ██  ▀██    ██     █▄   ██     █  ▀██▀   ██   █  ▀██▀   ██ ▀██▄    ▄██▀     ██    ▄█ █▀      ██   ██    ▄█${RST}"
-    echo -e "${F5}▄████████▀ ▀████▀██▄ ▀████▀███▄   ██████▀   ▄███▄ ▀▀  ▄████▄███▄ ▀▀  ▄████▄ ▀▀████▀▀     █████████████▄   ▄████▄████████${RST}"
-    echo ""
-    echo -e "${F1}   ══════════════════════════════════════════════════════════════════════════════════${RST}"
-    echo -e "   ${DIM}WoW Module Manager${RST}  ✦  ${DIM}v${MANAGER_VERSION}${RST}"
-    echo -e "${F1}   ══════════════════════════════════════════════════════════════════════════════════${RST}"
-    echo ""
-}
+# ─────────────────────────────────────────────────────────────
+# LOGO ANIMATION (persistent background heat blaze)
+# ─────────────────────────────────────────────────────────────
+# Layout (1-indexed rows):
+#   Row  1    : blank
+#   Rows 2-9  : 8 logo lines  ← animated by background process
+#   Row  10   : blank
+#   Row  11   : separator bar
+#   Row  12   : "WoW Module Manager  ✦  vX.Y.Z"
+#   Row  13   : separator bar
+#   Row  14   : blank
+#   Row  15+  : menu content  ← print_header() writes here
+MENU_START_ROW=15
+MENU_INPUT_ROW=24   # always row 15+9; scroll region keeps logo rows safe
+ANIM_PID=""
+_IN_ALT_SCREEN=false
 
-# One-shot animated intro — heat blaze effect. Stay hot James >:)
-# Plays once at startup; print_header() is used for all subsequent redraws.
-animate_intro() {
-    clear
+# When true, INT signal exits the script.  Set false during full-screen operations
+# (e.g. docker logs -f) so Ctrl+C kills the child but returns to the menu.
+_ALLOW_INT_EXIT=true
 
-    # The 8 logo lines (index 0 = tiny top accent, 7 = base / hottest)
-    local -a L=(
-        "                           ▄▄  ▄█                                                                                        "
-        "▀███▀▀▀██▄               ▀███  ██           ▀████▄     ▄███▀████▄     ▄███▀ ▄▄█▀▀██▄     ▀████▀         ██     ▀███▀▀▀██▄"
-        "  ██    ▀██▄               ██  ▀▀             ████    ████   ████    ████ ▄██▀    ▀██▄     ██          ▄██▄      ██    ██"
-        "  ██     ▀██▄█▀██▄    ▄█▀▀███     ▄██▀███     █ ██   ▄█ ██   █ ██   ▄█ ██ ██▀      ▀██     ██         ▄█▀██▄     ██    ██"
-        "  ██      ███   ██  ▄██    ██     ██   ▀▀     █  ██  █▀ ██   █  ██  █▀ ██ ██        ██     ██        ▄█  ▀██     ██▀▀▀█▄▄"
-        "  ██     ▄██▄█████  ███    ██     ▀█████▄     █  ██▄█▀  ██   █  ██▄█▀  ██ ██▄      ▄██     ██     ▄  ████████    ██    ▀█"
-        "  ██    ▄██▀█   ██  ▀██    ██     █▄   ██     █  ▀██▀   ██   █  ▀██▀   ██ ▀██▄    ▄██▀     ██    ▄█ █▀      ██   ██    ▄█"
-        "▄████████▀ ▀████▀██▄ ▀████▀███▄   ██████▀   ▄███▄ ▀▀  ▄████▄███▄ ▀▀  ▄████▄ ▀▀████▀▀     █████████████▄   ▄████▄████████"
-    )
-    local llen=${#L[@]}  # 8
+# The logo lines (shared between static draw and background loop).
+_LOGO_L0="                           ▄▄  ▄█                                                                                        "
+_LOGO_L1="▀███▀▀▀██▄               ▀███  ██           ▀████▄     ▄███▀████▄     ▄███▀ ▄▄█▀▀██▄     ▀████▀         ██     ▀███▀▀▀██▄"
+_LOGO_L2="  ██    ▀██▄               ██  ▀▀             ████    ████   ████    ████ ▄██▀    ▀██▄     ██          ▄██▄      ██    ██"
+_LOGO_L3="  ██     ▀██▄█▀██▄    ▄█▀▀███     ▄██▀███     █ ██   ▄█ ██   █ ██   ▄█ ██ ██▀      ▀██     ██         ▄█▀██▄     ██    ██"
+_LOGO_L4="  ██      ███   ██  ▄██    ██     ██   ▀▀     █  ██  █▀ ██   █  ██  █▀ ██ ██        ██     ██        ▄█  ▀██     ██▀▀▀█▄▄"
+_LOGO_L5="  ██     ▄██▄█████  ███    ██     ▀█████▄     █  ██▄█▀  ██   █  ██▄█▀  ██ ██▄      ▄██     ██     ▄  ████████    ██    ▀█"
+_LOGO_L6="  ██    ▄██▀█   ██  ▀██    ██     █▄   ██     █  ▀██▀   ██   █  ▀██▀   ██ ▀██▄    ▄██▀     ██    ▄█ █▀      ██   ██    ▄█"
+_LOGO_L7="▄████████▀ ▀████▀██▄ ▀████▀███▄   ██████▀   ▄███▄ ▀▀  ▄████▄███▄ ▀▀  ▄████▄ ▀▀████▀▀     █████████████▄   ▄████▄████████"
 
-    # Extended palette — cycling through this simulates rising heat bands.
-    # 196=red → 202 → 208=orange → 214=amber → 220=gold → 226=bright → back down
-    local -a P=(196 196 202 202 208 208 214 214 220 220 226 220 214 208 202)
-    local plen=${#P[@]}  # 15
+# Background animation loop. Runs as a forked subprocess.
+# Writes to /dev/tty directly so redirection at call site can't swallow output.
+# Uses ANSI \033[s / \033[u (save/restore cursor) — widely supported on Linux.
+# Fire direction: i=0 is TOP of logo (coolest), i=7 is BOTTOM (hottest/red).
+# Palette: red(196) → orange(202) → amber(208) → gold(214) → yellow(220) → bright(226)
+#          then back — 12 elements cycling creates a rising heat-wave band.
+_logo_anim_loop() {
+    local -a L=("$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8")
+    # Palette index 0 = hot red, ascending = cooler/brighter
+    local -a P=(196 196 202 208 214 220 226 220 214 208 202 196)
+    local -a S=(0 0 1 2 1 0)   # shimmer nudge per phase
+    local plen=12 slen=6 llen=8
+    local f=0 ci ph
 
-    # Shimmer offsets — three phases that alternate to create the "blaze" ripple.
-    # Each entry is the palette-index nudge applied to a line when it's in phase.
-    local -a SHIMMER=(0 1 2 1 0)
-    local shimmer_len=5
-
-    # Hide cursor during animation; restore it no matter how we exit
-    printf '\033[?25l'
-    trap 'printf "\033[?25h"' EXIT INT TERM
-
-    # Print the logo once (initial state) so we have lines to overwrite
-    echo ""
-    local i
-    for ((i=0; i<llen; i++)); do
-        printf '\033[38;5;220m%s\033[0m\n' "${L[$i]}"
-    done
-
-    # Animate: 36 frames × ~70 ms ≈ 2.5 s
-    local f ci phase color
-    for ((f=0; f<36; f++)); do
-        # Jump back to the first logo line
-        printf "\033[%dA" "$llen"
-
+    while true; do
+        # Save cursor + jump to logo row 2 + hide cursor — all ANSI/xterm standard
+        printf '\033[s\033[2;1H\033[?25l' > /dev/tty
+        local i
         for ((i=0; i<llen; i++)); do
-            # Base colour: bottom lines are hotter (higher i = lower in image = hotter)
-            # The band shifts upward each frame (f advances the hot zone toward the top)
-            ci=$(( (i * 2 + plen - f) % plen ))
-
-            # Shimmer: lines in a rolling "blaze phase" get a brief brightness spike
-            phase=$(( (i + f) % shimmer_len ))
-            ci=$(( (ci + SHIMMER[phase]) % plen ))
-
-            color="${P[$ci]}"
-            printf "\033[38;5;%dm%s\033[0m\n" "$color" "${L[$i]}"
+            # Invert i so bottom line (i=7) maps to palette index 0 (hottest red).
+            # Offset by frame counter f so the heat band rises over time.
+            ci=$(( ( (llen - 1 - i) * 2 + f) % plen ))
+            ph=$(( (i + f) % slen ))
+            ci=$(( (ci + S[ph]) % plen ))
+            printf "\033[38;5;%dm%s\033[K\033[0m\n" "${P[$ci]}" "${L[$i]}" > /dev/tty
         done
-
+        # Restore cursor + show cursor
+        printf '\033[u\033[?25h' > /dev/tty
+        f=$(( (f + 1) % plen ))
         sleep 0.07
     done
+}
 
-    # Settle to final static gradient (gold top → red base)
-    printf "\033[%dA" "$llen"
-    local -a FINAL=(2 220 220 214 214 208 202 196)   # index 0 = dim (top accent)
-    for ((i=0; i<llen; i++)); do
-        if [ "${FINAL[$i]}" = "2" ]; then
-            printf '\033[2m%s\033[0m\n' "${L[$i]}"
+stop_logo_animation() {
+    if [ -n "$ANIM_PID" ]; then
+        /bin/kill "$ANIM_PID" 2>/dev/null
+        wait "$ANIM_PID" 2>/dev/null
+        ANIM_PID=""
+    fi
+}
+
+# Pause/resume animation to prevent concurrent terminal writes during redraws.
+_pause_animation()  { [ -n "$ANIM_PID" ] && kill -STOP "$ANIM_PID" 2>/dev/null; true; }
+_resume_animation() { [ -n "$ANIM_PID" ] && kill -CONT "$ANIM_PID" 2>/dev/null; true; }
+
+# Read a line of menu input with animation-safe handling and backspace support.
+# Resumes animation so the logo is live while the user reads the menu.
+# As soon as the first keypress is detected, animation is paused and input is
+# read character-by-character with full backspace/delete support.
+# Result is stored in global _MENU_INPUT.
+_MENU_INPUT=""
+_read_menu_input() {
+    local _input_row=${1:-$MENU_INPUT_ROW}
+    _MENU_INPUT=""
+    local _buf="" _ch
+
+    # Animation live while waiting for first keypress (silent, no echo)
+    _resume_animation
+    IFS= read -r -s -n 1 _ch
+    # First key pressed — stop animation immediately to prevent cursor corruption
+    _pause_animation
+
+    # Handle bare Enter (empty input — e.g. "go back" in submenus)
+    if [[ "$_ch" == $'\r' ]] || [[ "$_ch" == $'\n' ]] || [[ -z "$_ch" ]]; then
+        printf '\n'
+        return 0
+    fi
+
+    # If first char is backspace/delete, treat as empty Enter
+    if [[ "$_ch" == $'\177' ]] || [[ "$_ch" == $'\b' ]]; then
+        printf '\n'
+        return 0
+    fi
+
+    _buf="$_ch"
+
+    # Reprint the input line cleanly with animation stopped, then read the rest
+    printf '\033[%d;3H\033[K' "$_input_row"
+    printf "${WHITE}Choice: ${RST}%s" "$_buf"
+
+    # Read remaining characters one at a time to support backspace/delete
+    while IFS= read -r -s -n 1 _ch; do
+        if [[ "$_ch" == $'\r' ]] || [[ "$_ch" == $'\n' ]] || [[ -z "$_ch" ]]; then
+            break
+        elif [[ "$_ch" == $'\177' ]] || [[ "$_ch" == $'\b' ]]; then
+            # Backspace: remove last char from buffer and erase on screen
+            if [[ -n "$_buf" ]]; then
+                _buf="${_buf%?}"
+                printf '\b \b'
+            fi
         else
-            printf "\033[38;5;%dm%s\033[0m\n" "${FINAL[$i]}" "${L[$i]}"
+            _buf="${_buf}${_ch}"
+            printf '%s' "$_ch"
         fi
     done
 
-    # Restore cursor
-    printf '\033[?25h'
-    trap - EXIT INT TERM
+    printf '\n'
+    _MENU_INPUT="$_buf"
+}
 
-    echo ""
-    printf '\033[38;5;220m   ══════════════════════════════════════════════════════════════════════════════════\033[0m\n'
-    printf '   \033[2mWoW Module Manager\033[0m  ✦  \033[2mv%s\033[0m\n' "$MANAGER_VERSION"
-    printf '\033[38;5;220m   ══════════════════════════════════════════════════════════════════════════════════\033[0m\n'
-    echo ""
+_anim_int_handler() {
+    if [ "$_ALLOW_INT_EXIT" = true ]; then
+        stop_logo_animation
+        printf '\033[r\033[?1049l\033[?25h'
+        exit 0
+    fi
+    # Inside with_full_screen: SIGINT already killed the foreground child — just continue
+}
+
+# Draw the logo + subtitle bar statically (no animation).
+# Called by start_logo_animation before the bg process takes over.
+_draw_logo_static() {
+    printf '\033[1;1H\033[J'   # jump to top-left, clear screen
+    printf '\n'
+    printf '\033[2m%s\033[K\033[0m\n'       "$_LOGO_L0"
+    printf '\033[38;5;220m%s\033[K\033[0m\n' "$_LOGO_L1"
+    printf '\033[38;5;220m%s\033[K\033[0m\n' "$_LOGO_L2"
+    printf '\033[38;5;214m%s\033[K\033[0m\n' "$_LOGO_L3"
+    printf '\033[38;5;214m%s\033[K\033[0m\n' "$_LOGO_L4"
+    printf '\033[38;5;208m%s\033[K\033[0m\n' "$_LOGO_L5"
+    printf '\033[38;5;202m%s\033[K\033[0m\n' "$_LOGO_L6"
+    printf '\033[38;5;196m%s\033[K\033[0m\n' "$_LOGO_L7"
+    printf '\n'
+    printf '\033[38;5;220m   ══════════════════════════════════════════════════════════════════════════════════\033[K\033[0m\n'
+    printf '   \033[2mWoW Module Manager\033[0m  ✦  \033[2mv%s\033[0m\033[K\n' "$MANAGER_VERSION"
+    printf '\033[38;5;220m   ══════════════════════════════════════════════════════════════════════════════════\033[K\033[0m\n'
+    printf '\n'
+}
+
+# Clear screen, draw logo statically, then launch the background animation subprocess.
+start_logo_animation() {
+    stop_logo_animation
+    # Enter alternate screen buffer once — user's terminal is restored on exit
+    if ! $_IN_ALT_SCREEN; then
+        printf '\033[?1049h'
+        _IN_ALT_SCREEN=true
+    fi
+    # Scroll region: protect logo rows 1-14 from ever being scrolled off-screen.
+    local tlines
+    tlines=$(tput lines 2>/dev/null || echo 25)
+    printf '\033[%d;%dr' "$MENU_START_ROW" "$tlines"
+
+    printf '\033[?25l'
+    _draw_logo_static
+    printf '\033[?25h'
+
+    _logo_anim_loop \
+        "$_LOGO_L0" "$_LOGO_L1" "$_LOGO_L2" "$_LOGO_L3" \
+        "$_LOGO_L4" "$_LOGO_L5" "$_LOGO_L6" "$_LOGO_L7" &
+    ANIM_PID=$!
+
+    trap 'stop_logo_animation; printf "\033[r\033[?1049l\033[?25h"' EXIT
+    trap '_anim_int_handler' INT TERM
+}
+
+# Reset scroll region, clear screen, run a function, restart animation.
+# Stays in the alternate screen buffer throughout.
+# _ALLOW_INT_EXIT=false lets Ctrl+C kill the child without exiting the script.
+# Usage: with_full_screen <function_name> [args...]
+with_full_screen() {
+    stop_logo_animation
+    printf '\033[r'     # reset scroll region so full-screen output can use all rows
+    clear
+    _ALLOW_INT_EXIT=false
+    "$@"
+    _ALLOW_INT_EXIT=true
+    start_logo_animation
+}
+
+print_header() {
+    # Move to the menu content row and clear everything below.
+    # Rows 1-14 (logo area) are owned by the background animation process.
+    printf '\033[%d;1H\033[J' "$MENU_START_ROW"
 }
 
 print_step()    { echo ""; echo -e "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RST}"
@@ -168,6 +268,8 @@ press_enter() {
     echo ""
     printf "${WHITE}Press ENTER to continue...${RST}"
     read -r
+    # Erase the prompt line so it doesn't linger when the menu redraws
+    printf '\033[1A\033[2K'
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -1782,54 +1884,59 @@ ale_script_remove() {
 # ── ALE Scripts submenu ───────────────────────────────────────
 menu_ale_scripts() {
     while true; do
-        print_header
-        print_step "ALE Lua Scripts"
+        _pause_animation
+
+        # Clear menu area
+        printf '\033[%d;1H\033[J' "$MENU_START_ROW"
 
         if ! module_is_installed "mod-ale"; then
-            echo ""
-            print_error "mod-ale (ALE Lua Engine) is not installed!"
-            print_info "Install it via main menu option 1 (Add modules),"
-            print_info "then configure via option 5 before installing Lua scripts."
-            echo ""
-            press_enter; return
+            printf "  ${RED}✗ mod-ale (ALE Lua Engine) is not installed.${RST}\n"
+            printf "  ${WHITE}Install via main menu option 1, then configure via option 5.${RST}\n"
+            printf "\n  ${DIM}Press ENTER to return...${RST}\n"
+            _resume_animation
+            read -r _
+            _pause_animation
+            return
         fi
 
-        echo ""
-        echo -e "${WHITE}Available ALE Lua scripts:${RST}"
-        echo ""
-
-        local i=1
+        # Build script list with status markers
         local -a available_entries=()
-        local entry key name url marker cloned deployed
+        local i=1 entry key name url marker cloned deployed
+
+        printf "  ${GOLD}── ALE Lua Scripts ──────────────────────────────${RST}\n"
+        printf "  ${DIM}%-4s %-38s %s${RST}\n" "Num" "Script" "Status"
+        printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
+
         for entry in "${ALE_SCRIPT_REGISTRY[@]}"; do
             IFS='|' read -r key name url <<< "$entry"
             cloned=false; deployed=false
             ale_script_is_installed "$key" && cloned=true
-            ale_lua_is_deployed "$key"     && deployed=true
+            ale_lua_is_deployed     "$key" && deployed=true
 
             if $deployed && $cloned; then
-                marker="${GREEN}[installed + deployed]${RST}"
+                marker="${GREEN}✓ Installed${RST}"
             elif $deployed; then
-                marker="${CYAN}[deployed, no clone]${RST}"
+                marker="${CYAN}◑ Deployed only${RST}"
             elif $cloned; then
-                marker="${YELLOW}[cloned, not deployed]${RST}"
+                marker="${YELLOW}◐ Cloned only${RST}"
             else
-                marker="${DIM}[not installed]${RST}"
+                marker="${DIM}○ Not installed${RST}"
             fi
-            printf "  %2d) %-50s %b\n" "$i" "$name" "$marker"
             available_entries+=("$entry")
-            i=$((i + 1))
+            printf "  ${WHITE}%2d)${RST} %-38s %b\n" "$i" "$name" "$marker"
+            i=$(( i + 1 ))
         done
 
-        echo ""
-        echo -e "  ${GOLD}── Actions ──${RST}"
-        echo -e "${WHITE}    I <nums>  Install scripts  (e.g. I 1 3 5)${RST}"
-        echo -e "${WHITE}    R <num>   Remove a script  (e.g. R 2)${RST}"
-        echo -e "${WHITE}    C <num>   Reconfigure      (e.g. C 5 for battlepass)${RST}"
-        echo -e "${WHITE}    ENTER     Back to main menu${RST}"
-        echo ""
+        printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
+        printf "  ${WHITE}I <nums>${RST} Install   ${WHITE}R <num>${RST} Remove   ${WHITE}C <num>${RST} Config   ${WHITE}ENTER${RST} Back\n"
+
+        # Input at second-to-last terminal row
+        local _tlines; _tlines=$(tput lines 2>/dev/null || echo 24)
+        local _irow=$(( _tlines - 1 ))
+        printf '\033[%d;3H\033[K' "$_irow"
         printf "${WHITE}Choice: ${RST}"
-        read -r raw_choice
+        _read_menu_input "$_irow"
+        local raw_choice="$_MENU_INPUT"
 
         [ -z "$raw_choice" ] && return
 
@@ -2102,11 +2209,14 @@ menu_list() {
 # and that the manager doesn't run anything destructive without asking.
 show_first_run_welcome() {
     local marker="$SERVER_DIR/.dml-manager-seen"
-    # Returning user: just pause briefly so detection feedback is readable
+    # Returning user: just pause so detect_install output is readable, animation stays up
     if [ -f "$marker" ]; then
         press_enter
         return 0
     fi
+
+    # New user — stop animation, show the full welcome screen, then restart
+    stop_logo_animation
 
     # Detect "this looks fresh" — user-installed modules count.
     # mod-playerbots is bundled with the install so doesn't count.
@@ -2174,53 +2284,60 @@ show_first_run_welcome() {
 
     # Drop the marker — silent failure is OK, the welcome just shows again next time
     touch "$marker" 2>/dev/null || true
+    # Restart animation now that the welcome screen is done
+    start_logo_animation
 }
 
 main_menu() {
     while true; do
-        print_header
-        echo -e "${WHITE}Server: ${CYAN}$SERVER_DIR${RST}"
-        echo -e "${WHITE}Type:   ${CYAN}$SERVER_NAME${RST}"
+        _pause_animation
 
-        # Quick running indicator
         refresh_container_names
+        local state_str build_str
         if container_running "$WORLD_CONTAINER"; then
-            echo -e "${WHITE}State:  ${GREEN}● Running${RST}"
+            state_str="${GREEN}● Running${RST}"
         else
-            echo -e "${WHITE}State:  ${DIM}○ Stopped${RST}"
+            state_str="${DIM}○ Stopped${RST}"
+        fi
+        if [ "$SERVER_TYPE" = "playerbots" ]; then
+            build_str="${GREEN}source${RST}"
+        else
+            build_str="${YELLOW}prebuilt${RST}"
         fi
 
-        if [ "$SERVER_TYPE" = "playerbots" ]; then
-            echo -e "${WHITE}Build:  ${GREEN}source (modules fully supported)${RST}"
-        else
-            echo -e "${WHITE}Build:  ${YELLOW}prebuilt (modules experimental)${RST}"
-        fi
-        echo ""
-        echo -e "  ${GOLD}── Modules ──${RST}"
-        echo -e "${WHITE}    1) Add modules${RST}"
-        echo -e "${WHITE}    2) Remove modules${RST}"
-        echo -e "${WHITE}    3) List installed modules${RST}"
-        echo -e "${WHITE}    4) Configure / reconfigure AH Bot${RST}"
-        echo -e "${WHITE}    5) Configure / reconfigure ALE (Lua Engine)${RST}"
-        echo -e "${WHITE}    6) ALE Lua Scripts${RST}"
-        echo -e "${WHITE}    7) Rebuild worldserver${RST}"
-        echo ""
-        echo -e "  ${GOLD}── Server Controls ──${RST}"
-        echo -e "${WHITE}    8) Server status${RST}"
-        echo -e "${WHITE}    9) Start server${RST}"
-        echo -e "${WHITE}   10) Stop server${RST}"
-        echo -e "${WHITE}   11) Restart server${RST}"
-        echo -e "${WHITE}   12) View worldserver logs${RST}"
-        echo -e "${WHITE}   13) Attach to worldserver console${RST}"
-        echo ""
-        echo -e "  ${GOLD}── Troubleshooting ──${RST}"
-        echo -e "${WHITE}   14) Repair install state (clear stuck SQL update tracking)${RST}"
-        echo ""
-        echo -e "${WHITE}    Q) Quit${RST}"
-        echo ""
+        # Clear from menu area downward, then print single-column layout
+        printf '\033[%d;1H\033[J' "$MENU_START_ROW"
+
+        printf "  ${WHITE}Server:${RST} ${CYAN}%s${RST}  ${GOLD}✦${RST}  ${WHITE}State:${RST} %b  ${GOLD}✦${RST}  ${WHITE}Build:${RST} %b\n" \
+            "$(basename "$SERVER_DIR")" "$state_str" "$build_str"
+        printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
+        printf "  ${WHITE} 1)${RST} Add modules\n"
+        printf "  ${WHITE} 2)${RST} Remove modules\n"
+        printf "  ${WHITE} 3)${RST} List installed modules\n"
+        printf "  ${WHITE} 4)${RST} Configure AH Bot\n"
+        printf "  ${WHITE} 5)${RST} Configure ALE\n"
+        printf "  ${WHITE} 6)${RST} ALE Lua Scripts\n"
+        printf "  ${WHITE} 7)${RST} Rebuild worldserver\n"
+        printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
+        printf "  ${WHITE} 8)${RST} Server status\n"
+        printf "  ${WHITE} 9)${RST} Start server\n"
+        printf "  ${WHITE}10)${RST} Stop server\n"
+        printf "  ${WHITE}11)${RST} Restart server\n"
+        printf "  ${WHITE}12)${RST} View logs\n"
+        printf "  ${WHITE}13)${RST} Attach to console\n"
+        printf "  ${WHITE}14)${RST} Repair install state\n"
+        printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
+        printf "  ${GOLD} Q)${RST} Quit\n"
+
+        # Input at second-to-last terminal row so it's always visible
+        local _tlines; _tlines=$(tput lines 2>/dev/null || echo 24)
+        local _irow=$(( _tlines - 1 ))
+        printf '\033[%d;3H\033[K' "$_irow"
         printf "${WHITE}Choice: ${RST}"
-        read -r choice
-        case "${choice,,}" in
+        _read_menu_input "$_irow"
+        local choice="${_MENU_INPUT,,}"
+
+        case "$choice" in
             1)  menu_add ;;
             2)  menu_remove ;;
             3)  menu_list ;;
@@ -2232,8 +2349,8 @@ main_menu() {
             9)  server_start; press_enter ;;
             10) server_stop; press_enter ;;
             11) server_restart; press_enter ;;
-            12) server_logs ;;
-            13) server_attach; press_enter ;;
+            12) with_full_screen server_logs ;;
+            13) with_full_screen server_attach; press_enter ;;
             14) repair_install_state; press_enter ;;
             q)  echo ""; print_info "Goodbye!"; exit 0 ;;
         esac
@@ -2243,7 +2360,7 @@ main_menu() {
 # ─────────────────────────────────────────────────────────────
 # ENTRYPOINT
 # ─────────────────────────────────────────────────────────────
-animate_intro
+start_logo_animation
 detect_install
 show_first_run_welcome
 main_menu
