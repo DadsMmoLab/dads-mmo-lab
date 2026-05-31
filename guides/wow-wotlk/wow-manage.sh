@@ -702,6 +702,30 @@ declare -a ALE_SCRIPT_REGISTRY=(
     "unlimitedammo|Unlimited Ammo (auto-refills Hunter arrows/bullets)|https://github.com/Day36512/Acore_Lua_Unlimited_Ammo.git"
 )
 
+# SQL Mod registry — key|name|github_url|install_type
+# install_type values:
+#   clone_sql         — clone repo, run up.sql / down.sql via docker exec
+#   clone_sql_norevert— clone_sql but no down.sql exists
+#   clone_sql_pick    — clone repo, user picks which SQL variant to apply
+#   clone_dist        — clone repo, .dist files → .sql, apply with optional config
+#   conf_module       — C++ module: clone to modules/, copy .conf.dist; needs rebuild
+#   tweak_world       — inline SQL tweaks on acore_world (no clone needed)
+#   conf_xp           — edits worldserver.conf XP rate settings (no DB change)
+declare -a SQL_MOD_REGISTRY=(
+    "portals-capitals|Portals in All Capitals|https://github.com/azerothcore/portals-in-all-capitals.git|clone_sql"
+    "rare-drops|Rare Drops (450 Classic rares loot)|https://github.com/StraysFromPath/mod-rare-drops.git|clone_sql_norevert"
+    "lvl1-mounts|Level One Mounts (ride at level 1)|https://github.com/tomcoffingiii/mod-level-one-mounts.git|clone_sql"
+    "all-stackables|All Stackables to 200|https://github.com/AsgavinYT/azerothcore-all-stackables-200.git|clone_sql"
+    "custom-login|Custom Login (starter gear + rep on first login)|https://github.com/azerothcore/mod-custom-login.git|conf_module"
+    "npc-teleporter|NPC Teleporter (capital + starting zones)|https://github.com/Zoidwaffle/sql-npc-teleporter.git|clone_dist"
+    "hearthstone-cd|Hearthstone Cooldown Tweaks|https://github.com/AsgavinYT/hearthstone-cooldowns.git|clone_sql_pick"
+    "buff-mobs|Buff Mobs (HP×2 / DMG×1.5 / ARM×1.5)||tweak_world"
+    "xbuff-mobs|Extreme Buff Mobs (HP×4 / DMG×2 / ARM×2)||tweak_world"
+    "nerf-mobs|Nerf Mobs (HP×0.5 / DMG×0.75 / ARM×0.75)||tweak_world"
+    "baby-mobs|Baby Mobs (HP×0.25 / DMG×0.25 / ARM×0.25)||tweak_world"
+    "xp-rates|XP Rate Customization (Kill/Quest/Explore)||conf_xp"
+)
+
 # Discover the actual SQL filenames in a module's sql dir.
 # This is what AC's auto-update will use as the `updates.name` value.
 # Returns space-separated filenames, or empty if dir doesn't exist.
@@ -2457,6 +2481,760 @@ ale_script_remove() {
 }
 
 # ─────────────────────────────────────────────────────────────
+# SQL MODS — helpers
+# ─────────────────────────────────────────────────────────────
+
+SQLMOD_BASE_DIR=""
+SQLMOD_MARKER_DIR=""
+SQLMOD_CLONE_DIR=""
+SQLMOD_CONFIG_DIR=""
+SQLMOD_BACKUP_DIR=""
+
+sqlmod_init() {
+    [ -n "$SQLMOD_BASE_DIR" ] && return 0   # already initialised
+    SQLMOD_BASE_DIR="$SERVER_DIR/.sqlmods"
+    SQLMOD_MARKER_DIR="$SQLMOD_BASE_DIR/installed"
+    SQLMOD_CLONE_DIR="$SQLMOD_BASE_DIR/clones"
+    SQLMOD_CONFIG_DIR="$SQLMOD_BASE_DIR/config"
+    SQLMOD_BACKUP_DIR="$SQLMOD_BASE_DIR/backups"
+    mkdir -p "$SQLMOD_MARKER_DIR" "$SQLMOD_CLONE_DIR" "$SQLMOD_CONFIG_DIR" "$SQLMOD_BACKUP_DIR"
+}
+
+sqlmod_is_installed() {
+    local key="$1"
+    sqlmod_init
+    local entry t
+    for entry in "${SQL_MOD_REGISTRY[@]}"; do
+        IFS='|' read -r k _ _ t <<< "$entry"
+        if [ "$k" = "$key" ] && [ "$t" = "conf_module" ]; then
+            [ -d "$SERVER_DIR/modules/$key" ] && return 0 || return 1
+        fi
+    done
+    [ -f "$SQLMOD_MARKER_DIR/$key.installed" ]
+}
+
+sqlmod_backup_world() {
+    sqlmod_init
+    if ! container_running "$DB_CONTAINER"; then
+        print_error "Database container is not running. Cannot back up."
+        return 1
+    fi
+    local ts; ts=$(date +%Y%m%d_%H%M%S)
+    local bfile="$SQLMOD_BACKUP_DIR/${ts}_acore_world.sql.gz"
+    print_info "Backing up acore_world → $(basename "$bfile") ..."
+    if docker exec "$DB_CONTAINER" mysqldump -uroot -p"$DB_ROOT_PASSWORD" acore_world \
+       2>/dev/null | gzip > "$bfile"; then
+        print_success "Backup saved: $bfile"
+        return 0
+    else
+        rm -f "$bfile"
+        print_error "Backup failed! Aborting."
+        return 1
+    fi
+}
+
+sqlmod_run_sql() {
+    local db="$1" sql="$2"
+    docker exec "$DB_CONTAINER" mysql -uroot -p"$DB_ROOT_PASSWORD" "$db" -e "$sql" 2>&1
+}
+
+sqlmod_run_sql_file() {
+    local db="$1" filepath="$2"
+    docker exec -i "$DB_CONTAINER" mysql -uroot -p"$DB_ROOT_PASSWORD" "$db" \
+        < "$filepath" 2>&1
+}
+
+# ── Clone helper ──────────────────────────────────────────────
+_sqlmod_clone_or_update() {
+    local key="$1" url="$2"
+    local target="$SQLMOD_CLONE_DIR/$key"
+    if [ -d "$target/.git" ]; then
+        print_info "Updating $key..."
+        git -C "$target" pull --ff-only -q 2>&1 || true
+    else
+        print_info "Cloning $key..."
+        git clone --depth=1 -q "$url" "$target" 2>&1 || {
+            print_error "Clone failed for $url"
+            return 1
+        }
+    fi
+}
+
+# ── Install dispatcher ────────────────────────────────────────
+sqlmod_install() {
+    local key="$1" name="$2" url="$3" type="$4"
+    sqlmod_init
+
+    # These types don't touch the DB — handle separately
+    case "$type" in
+        conf_xp)     configure_sqlmod_xprates; return 0 ;;
+        conf_module) _sqlmod_install_conf_module "$key" "$name" "$url"; return ;;
+    esac
+
+    if sqlmod_is_installed "$key"; then
+        print_warning "$name is already installed."
+        return 0
+    fi
+
+    if ! container_running "$DB_CONTAINER"; then
+        print_error "Database container ($DB_CONTAINER) is not running."
+        print_info "Start the server first, then retry."
+        return 1
+    fi
+
+    printf '\033[%d;1H\033[J' "$MENU_START_ROW"
+    printf "  ${YELLOW}⚠  WARNING: SQL Mods modify the world database.${RST}\n"
+    printf "  ${DIM}These changes are unlikely to corrupt the server, but a backup${RST}\n"
+    printf "  ${DIM}will be taken automatically before proceeding.${RST}\n\n"
+
+    if ! ask_yes_no "Install $name?"; then return 0; fi
+
+    sqlmod_backup_world || return 1
+    echo ""
+
+    case "$type" in
+        clone_sql|clone_sql_norevert) _sqlmod_install_clone_sql "$key" "$name" "$url" ;;
+        clone_sql_pick)               _sqlmod_install_hearthstone "$key" "$name" "$url" ;;
+        clone_dist)                   _sqlmod_install_clone_dist "$key" "$name" "$url" ;;
+        tweak_world)                  _sqlmod_install_tweak "$key" "$name" ;;
+    esac
+}
+
+_sqlmod_install_clone_sql() {
+    local key="$1" name="$2" url="$3"
+    _sqlmod_clone_or_update "$key" "$url" || return 1
+    local clone_dir="$SQLMOD_CLONE_DIR/$key"
+    local up_sql="" tmp_sql
+
+    case "$key" in
+        portals-capitals)
+            up_sql="$clone_dir/portals-in-all-capitals.up.sql"
+            local cfg_file="$SQLMOD_CONFIG_DIR/portals-capitals.conf"
+            if [ -f "$cfg_file" ]; then
+                # shellcheck source=/dev/null
+                source "$cfg_file"
+                local go_tpl="${PORTALS_GO_TEMPLATE:-500000}"
+                local go_spn="${PORTALS_GO_SPAWN:-2000000}"
+                tmp_sql="$SQLMOD_CLONE_DIR/${key}_configured.sql"
+                sed \
+                    -e "s/SET @GO_TEMPLATE = [0-9]*/SET @GO_TEMPLATE = $go_tpl/" \
+                    -e "s/SET @GO_SPAWN = [0-9]*/SET @GO_SPAWN = $go_spn/" \
+                    "$up_sql" > "$tmp_sql"
+                up_sql="$tmp_sql"
+            fi
+            ;;
+        rare-drops)
+            up_sql="$clone_dir/data/sql/db-world/updates/mod rare drops final.sql"
+            ;;
+        lvl1-mounts)
+            up_sql="$clone_dir/level-one-mounts.sql"
+            ;;
+        all-stackables)
+            up_sql="$clone_dir/All_Stackables_200_Up.sql"
+            local cfg_file="$SQLMOD_CONFIG_DIR/all-stackables.conf"
+            if [ -f "$cfg_file" ]; then
+                # shellcheck source=/dev/null
+                source "$cfg_file"
+                local stack="${STACKABLES_SIZE:-200}"
+                tmp_sql="$SQLMOD_CLONE_DIR/${key}_configured.sql"
+                sed \
+                    -e "s/stackable=[0-9]*/stackable=$stack/g" \
+                    -e "s/maxcount=[0-9]*/maxcount=$stack/g" \
+                    "$up_sql" > "$tmp_sql"
+                up_sql="$tmp_sql"
+            fi
+            ;;
+    esac
+
+    if [ -z "$up_sql" ] || [ ! -f "$up_sql" ]; then
+        print_error "Could not find install SQL for $name"
+        return 1
+    fi
+
+    print_info "Applying SQL to acore_world..."
+    if sqlmod_run_sql_file "acore_world" "$up_sql"; then
+        touch "$SQLMOD_MARKER_DIR/$key.installed"
+        print_success "$name installed successfully!"
+    else
+        print_error "SQL apply failed for $name"
+        return 1
+    fi
+}
+
+_sqlmod_install_hearthstone() {
+    local key="$1" name="$2" url="$3"
+    _sqlmod_clone_or_update "$key" "$url" || return 1
+    local clone_dir="$SQLMOD_CLONE_DIR/$key"
+
+    local cfg_file="$SQLMOD_CONFIG_DIR/hearthstone-cd.conf"
+    local cooldown_choice="30min"
+    if [ -f "$cfg_file" ]; then
+        # shellcheck source=/dev/null
+        source "$cfg_file"
+        cooldown_choice="${HEARTHSTONE_COOLDOWN:-30min}"
+    fi
+
+    local sql_file
+    case "$cooldown_choice" in
+        1sec|1s)   sql_file="$clone_dir/Hearthstone_1_Sec.sql" ;;
+        1min)      sql_file="$clone_dir/Hearthstone_1_Min.sql" ;;
+        5min)      sql_file="$clone_dir/Hearthstone_5_Min.sql" ;;
+        15min)     sql_file="$clone_dir/Hearthstone_15_Min.sql" ;;
+        30min|*)   sql_file="$clone_dir/Hearthstone_30_Min.sql" ;;
+    esac
+
+    print_info "Applying Hearthstone cooldown ($cooldown_choice) to acore_world..."
+    if sqlmod_run_sql_file "acore_world" "$sql_file"; then
+        echo "HEARTHSTONE_COOLDOWN=$cooldown_choice" > "$SQLMOD_MARKER_DIR/$key.installed"
+        print_success "$name installed ($cooldown_choice)!"
+    else
+        print_error "SQL apply failed"
+        return 1
+    fi
+}
+
+_sqlmod_install_clone_dist() {
+    local key="$1" name="$2" url="$3"
+    _sqlmod_clone_or_update "$key" "$url" || return 1
+    local clone_dir="$SQLMOD_CLONE_DIR/$key"
+
+    local cfg_file="$SQLMOD_CONFIG_DIR/npc-teleporter.conf"
+    local ony_level=60 install_capital=true install_startzone=true
+    if [ -f "$cfg_file" ]; then
+        # shellcheck source=/dev/null
+        source "$cfg_file"
+        ony_level="${NPC_TELEPORTER_ONY_LEVEL:-60}"
+        install_capital="${NPC_TELEPORTER_CAPITAL:-true}"
+        install_startzone="${NPC_TELEPORTER_STARTZONE:-true}"
+    fi
+
+    local dist_dir="$clone_dir/data/sql/db-world"
+    local applied=false
+    if [ "$install_capital" = "true" ] && [ -f "$dist_dir/teleporter_capital.dist" ]; then
+        local cap_sql="$SQLMOD_CLONE_DIR/${key}_capital.sql"
+        sed "s/@ONY_LEVEL := [0-9]*/@ONY_LEVEL := $ony_level/" \
+            "$dist_dir/teleporter_capital.dist" > "$cap_sql"
+        print_info "Applying capital teleporter SQL (ONY_LEVEL=$ony_level)..."
+        sqlmod_run_sql_file "acore_world" "$cap_sql" || {
+            print_error "Capital teleporter SQL failed"; return 1
+        }
+        applied=true
+    fi
+
+    if [ "$install_startzone" = "true" ] && [ -f "$dist_dir/teleporter_starting_zone.dist" ]; then
+        local sz_sql="$SQLMOD_CLONE_DIR/${key}_startzone.sql"
+        sed "s/@ONY_LEVEL := [0-9]*/@ONY_LEVEL := $ony_level/" \
+            "$dist_dir/teleporter_starting_zone.dist" > "$sz_sql"
+        print_info "Applying starting zone teleporter SQL..."
+        sqlmod_run_sql_file "acore_world" "$sz_sql" || {
+            print_error "Starting zone teleporter SQL failed"; return 1
+        }
+        applied=true
+    fi
+
+    if ! $applied; then
+        print_warning "No SQL was applied — both capital and starting zone NPCs are disabled in config."
+        return 1
+    fi
+
+    touch "$SQLMOD_MARKER_DIR/$key.installed"
+    print_success "$name installed successfully!"
+}
+
+_sqlmod_install_conf_module() {
+    local key="$1" name="$2" url="$3"
+    local module_dir="$SERVER_DIR/modules/$key"
+    if [ -d "$module_dir/.git" ]; then
+        print_info "Updating $key module..."
+        git -C "$module_dir" pull --ff-only -q 2>&1 || true
+    else
+        print_info "Cloning $key into modules/..."
+        git clone --depth=1 -q "$url" "$module_dir" 2>&1 || {
+            print_error "Clone failed"; return 1
+        }
+    fi
+
+    local conf_dist="$module_dir/conf/mod_customlogin.conf.dist"
+    local conf_dest="$SERVER_DIR/env/docker/etc/modules/mod_customlogin.conf"
+    if [ -f "$conf_dist" ] && [ ! -f "$conf_dest" ]; then
+        mkdir -p "$(dirname "$conf_dest")"
+        cp "$conf_dist" "$conf_dest"
+        print_success "Created default config: $conf_dest"
+    fi
+
+    print_success "$name cloned to modules/!"
+    print_warning "A worldserver rebuild is required to activate this module."
+    print_info "Use 'Rebuild worldserver' from the main menu to compile."
+}
+
+_sqlmod_install_tweak() {
+    local key="$1" name="$2"
+    local cfg_file="$SQLMOD_CONFIG_DIR/${key}.conf"
+    local h_mult d_mult a_mult spd_mult
+
+    case "$key" in
+        buff-mobs)  h_mult=2;    d_mult=1.5;  a_mult=1.5;  spd_mult=0.8 ;;
+        xbuff-mobs) h_mult=4;    d_mult=2;    a_mult=2;    spd_mult=0.5 ;;
+        nerf-mobs)  h_mult=0.5;  d_mult=0.75; a_mult=0.75; spd_mult=1.2 ;;
+        baby-mobs)  h_mult=0.25; d_mult=0.25; a_mult=0.25; spd_mult=1.5 ;;
+    esac
+
+    if [ -f "$cfg_file" ]; then
+        # shellcheck source=/dev/null
+        source "$cfg_file"
+        h_mult="${TWEAK_HP_MULT:-$h_mult}"
+        d_mult="${TWEAK_DMG_MULT:-$d_mult}"
+        a_mult="${TWEAK_ARM_MULT:-$a_mult}"
+        spd_mult="${TWEAK_SPD_MULT:-$spd_mult}"
+    fi
+
+    print_info "Applying $name (HP×${h_mult} / DMG×${d_mult} / ARM×${a_mult} / SPD×${spd_mult})..."
+    local sql
+    sql="UPDATE creature_template SET HealthModifier = HealthModifier * ${h_mult};"
+    sql+=" UPDATE creature_template SET DamageModifier = DamageModifier * ${d_mult};"
+    sql+=" UPDATE creature_template SET BaseAttackTime = BaseAttackTime * ${spd_mult}, RangeAttackTime = RangeAttackTime * ${spd_mult};"
+    sql+=" UPDATE creature_template SET ArmorModifier = ArmorModifier * ${a_mult};"
+
+    if sqlmod_run_sql "acore_world" "$sql"; then
+        printf 'APPLIED_HP_MULT=%s\nAPPLIED_DMG_MULT=%s\nAPPLIED_ARM_MULT=%s\nAPPLIED_SPD_MULT=%s\n' \
+            "$h_mult" "$d_mult" "$a_mult" "$spd_mult" > "$SQLMOD_MARKER_DIR/$key.installed"
+        print_success "$name applied!"
+        print_warning "Applying again stacks multipliers. Use Remove to reverse."
+    else
+        print_error "SQL failed for $name"
+        return 1
+    fi
+}
+
+# ── Remove dispatcher ─────────────────────────────────────────
+sqlmod_remove() {
+    local key="$1" name="$2" url="$3" type="$4"
+    sqlmod_init
+
+    case "$type" in
+        conf_module)
+            if ! sqlmod_is_installed "$key"; then
+                print_warning "$name is not installed."; return 0
+            fi
+            if ! ask_yes_no "Remove $name module directory? A rebuild will be required."; then return 0; fi
+            rm -rf "$SERVER_DIR/modules/$key"
+            print_success "$name removed. Rebuild worldserver to deactivate."
+            return 0
+            ;;
+        conf_xp)
+            if ! sqlmod_is_installed "$key"; then
+                print_warning "No XP rate customization is applied."; return 0
+            fi
+            if ! ask_yes_no "Reset XP rates to 1.0 (server default)?"; then return 0; fi
+            _sqlmod_remove_xprates
+            return 0
+            ;;
+    esac
+
+    if ! sqlmod_is_installed "$key"; then
+        print_warning "$name is not installed."; return 0
+    fi
+    if ! container_running "$DB_CONTAINER"; then
+        print_error "Database container ($DB_CONTAINER) is not running."
+        return 1
+    fi
+
+    case "$type" in
+        clone_sql)
+            if ! ask_yes_no "Remove $name? (runs down.sql)"; then return 0; fi
+            sqlmod_backup_world || return 1
+            _sqlmod_remove_clone_sql "$key" "$name"
+            ;;
+        clone_sql_norevert)
+            print_warning "$name has no automated reversal SQL."
+            print_info "To undo: restore a backup from: $SQLMOD_BACKUP_DIR"
+            press_enter; return 0
+            ;;
+        clone_sql_pick)
+            if ! ask_yes_no "Remove $name? (Hearthstone resets to 30-min WotLK default)"; then return 0; fi
+            sqlmod_backup_world || return 1
+            _sqlmod_remove_hearthstone "$key" "$name"
+            ;;
+        clone_dist)
+            if ! ask_yes_no "Remove $name? (NPC deleted from world)"; then return 0; fi
+            sqlmod_backup_world || return 1
+            _sqlmod_remove_npc_teleporter "$key" "$name"
+            ;;
+        tweak_world)
+            if ! ask_yes_no "Reverse $name? (applies inverse multipliers to creature_template)"; then return 0; fi
+            sqlmod_backup_world || return 1
+            _sqlmod_remove_tweak "$key" "$name"
+            ;;
+    esac
+}
+
+_sqlmod_remove_clone_sql() {
+    local key="$1" name="$2"
+    local clone_dir="$SQLMOD_CLONE_DIR/$key"
+    local down_sql="" tmp_sql
+
+    case "$key" in
+        portals-capitals)
+            down_sql="$clone_dir/portals-in-all-capitals.down.sql"
+            # Apply same config substitution used at install time
+            local cfg_file="$SQLMOD_CONFIG_DIR/portals-capitals.conf"
+            if [ -f "$cfg_file" ] && [ -f "$down_sql" ]; then
+                # shellcheck source=/dev/null
+                source "$cfg_file"
+                local go_tpl="${PORTALS_GO_TEMPLATE:-500000}"
+                local go_spn="${PORTALS_GO_SPAWN:-2000000}"
+                tmp_sql="$SQLMOD_CLONE_DIR/${key}_down_configured.sql"
+                sed \
+                    -e "s/SET @GO_TEMPLATE = [0-9]*/SET @GO_TEMPLATE = $go_tpl/" \
+                    -e "s/SET @GO_SPAWN = [0-9]*/SET @GO_SPAWN = $go_spn/" \
+                    "$down_sql" > "$tmp_sql"
+                down_sql="$tmp_sql"
+            fi
+            ;;
+        lvl1-mounts)  down_sql="$clone_dir/level-twenty-mounts.sql" ;;
+        all-stackables) down_sql="$clone_dir/All_Stackables_200_Down.sql" ;;
+    esac
+
+    if [ -z "$down_sql" ] || [ ! -f "$down_sql" ]; then
+        print_error "Remove SQL not found for $name (missing clone?)"
+        return 1
+    fi
+
+    print_info "Applying down.sql for $name..."
+    if sqlmod_run_sql_file "acore_world" "$down_sql"; then
+        rm -f "$SQLMOD_MARKER_DIR/$key.installed"
+        print_success "$name removed!"
+    else
+        print_error "SQL remove failed"
+        return 1
+    fi
+}
+
+_sqlmod_remove_hearthstone() {
+    local key="$1" name="$2"
+    # Reset to WotLK default: 30 minutes (1800000 ms)
+    local sql="UPDATE spell_dbc SET RecoveryTime = 1800000, CategoryRecoveryTime = 1800000 WHERE Id = 8690;"
+    print_info "Resetting Hearthstone to 30-minute cooldown..."
+    if sqlmod_run_sql "acore_world" "$sql"; then
+        rm -f "$SQLMOD_MARKER_DIR/$key.installed"
+        print_success "$name removed (30-min cooldown restored)!"
+    else
+        print_error "SQL reset failed"; return 1
+    fi
+}
+
+_sqlmod_remove_npc_teleporter() {
+    local key="$1" name="$2"
+    local sql
+    sql="DELETE FROM creature WHERE id1 IN (190000, 190001);"
+    sql+=" DELETE FROM creature_template WHERE entry IN (190000, 190001);"
+    print_info "Removing NPC Teleporter from world..."
+    if sqlmod_run_sql "acore_world" "$sql"; then
+        rm -f "$SQLMOD_MARKER_DIR/$key.installed"
+        print_success "$name removed!"
+    else
+        print_error "SQL removal failed"; return 1
+    fi
+}
+
+_sqlmod_remove_tweak() {
+    local key="$1" name="$2"
+    local marker_file="$SQLMOD_MARKER_DIR/$key.installed"
+    local h_mult=1 d_mult=1 a_mult=1 spd_mult=1
+    if [ -f "$marker_file" ]; then
+        # shellcheck source=/dev/null
+        source "$marker_file"
+        h_mult="${APPLIED_HP_MULT:-1}"
+        d_mult="${APPLIED_DMG_MULT:-1}"
+        a_mult="${APPLIED_ARM_MULT:-1}"
+        spd_mult="${APPLIED_SPD_MULT:-1}"
+    fi
+
+    local inv_h inv_d inv_a inv_spd
+    inv_h=$(awk   "BEGIN{printf \"%.6f\", 1/$h_mult}")
+    inv_d=$(awk   "BEGIN{printf \"%.6f\", 1/$d_mult}")
+    inv_a=$(awk   "BEGIN{printf \"%.6f\", 1/$a_mult}")
+    inv_spd=$(awk "BEGIN{printf \"%.6f\", 1/$spd_mult}")
+
+    print_info "Reversing $name (HP×${inv_h} / DMG×${inv_d} / ARM×${inv_a})..."
+    local sql
+    sql="UPDATE creature_template SET HealthModifier = HealthModifier * ${inv_h};"
+    sql+=" UPDATE creature_template SET DamageModifier = DamageModifier * ${inv_d};"
+    sql+=" UPDATE creature_template SET BaseAttackTime = BaseAttackTime * ${inv_spd}, RangeAttackTime = RangeAttackTime * ${inv_spd};"
+    sql+=" UPDATE creature_template SET ArmorModifier = ArmorModifier * ${inv_a};"
+
+    if sqlmod_run_sql "acore_world" "$sql"; then
+        rm -f "$SQLMOD_MARKER_DIR/$key.installed"
+        print_success "$name reversed!"
+    else
+        print_error "SQL failed"; return 1
+    fi
+}
+
+_sqlmod_remove_xprates() {
+    local conf_path="$SERVER_DIR/env/docker/etc/worldserver.conf"
+    if [ ! -f "$conf_path" ]; then
+        print_error "worldserver.conf not found at $conf_path"; return 1
+    fi
+    local tmpf; tmpf=$(mktemp)
+    sed \
+        -e 's/^Rate\.XP\.Kill *= *[0-9.]*/Rate.XP.Kill = 1/' \
+        -e 's/^Rate\.XP\.Quest *= *[0-9.]*/Rate.XP.Quest = 1/' \
+        -e 's/^Rate\.XP\.Explore *= *[0-9.]*/Rate.XP.Explore = 1/' \
+        "$conf_path" > "$tmpf" && mv "$tmpf" "$conf_path"
+    rm -f "$SQLMOD_MARKER_DIR/xp-rates.installed" 2>/dev/null
+    print_success "XP rates reset to 1.0 in worldserver.conf"
+    print_info "Run '.reload config' in-game or restart the world server to apply."
+}
+
+# ── Configure dispatcher ──────────────────────────────────────
+sqlmod_configure() {
+    local key="$1" name="$2"
+    sqlmod_init
+    case "$key" in
+        portals-capitals) configure_sqlmod_portals ;;
+        all-stackables)   configure_sqlmod_stackables ;;
+        npc-teleporter)   configure_sqlmod_npc_teleporter ;;
+        hearthstone-cd)   configure_sqlmod_hearthstone ;;
+        custom-login)     configure_sqlmod_custom_login ;;
+        buff-mobs|xbuff-mobs|nerf-mobs|baby-mobs)
+                          configure_sqlmod_tweak "$key" "$name" ;;
+        xp-rates)         configure_sqlmod_xprates ;;
+        *)  print_info "No dedicated configuration for $name." ;;
+    esac
+}
+
+configure_sqlmod_portals() {
+    printf '\033[%d;1H\033[J' "$MENU_START_ROW"
+    printf "  ${GOLD}── Configure: Portals in All Capitals ──${RST}\n\n"
+    printf "  ${DIM}Adjust GO_TEMPLATE/GO_SPAWN base IDs if they conflict with other mods.${RST}\n"
+    printf "  ${DIM}Changes apply on next (re)install.${RST}\n\n"
+
+    local cfg_file="$SQLMOD_CONFIG_DIR/portals-capitals.conf"
+    local cur_tpl=500000 cur_spn=2000000
+    if [ -f "$cfg_file" ]; then
+        # shellcheck source=/dev/null
+        source "$cfg_file"
+        cur_tpl="${PORTALS_GO_TEMPLATE:-500000}"
+        cur_spn="${PORTALS_GO_SPAWN:-2000000}"
+    fi
+
+    printf "  GO_TEMPLATE base ID (current: %s): " "$cur_tpl"; local new_tpl; read -r new_tpl
+    printf "  GO_SPAWN base ID    (current: %s): " "$cur_spn"; local new_spn; read -r new_spn
+    [ -z "$new_tpl" ] && new_tpl="$cur_tpl"
+    [ -z "$new_spn" ] && new_spn="$cur_spn"
+
+    if ! [[ "$new_tpl" =~ ^[0-9]+$ ]] || ! [[ "$new_spn" =~ ^[0-9]+$ ]]; then
+        print_error "ID values must be positive integers."; press_enter; return
+    fi
+
+    printf 'PORTALS_GO_TEMPLATE=%s\nPORTALS_GO_SPAWN=%s\n' "$new_tpl" "$new_spn" > "$cfg_file"
+    print_success "Config saved. Remove + reinstall Portals to apply new IDs."
+    press_enter
+}
+
+configure_sqlmod_stackables() {
+    printf '\033[%d;1H\033[J' "$MENU_START_ROW"
+    printf "  ${GOLD}── Configure: All Stackables ──${RST}\n\n"
+    printf "  ${DIM}Set the maximum stack size. Default is 200.${RST}\n"
+    printf "  ${DIM}Changes apply on next (re)install.${RST}\n\n"
+
+    local cfg_file="$SQLMOD_CONFIG_DIR/all-stackables.conf"
+    local cur_size=200
+    if [ -f "$cfg_file" ]; then
+        # shellcheck source=/dev/null
+        source "$cfg_file"; cur_size="${STACKABLES_SIZE:-200}"
+    fi
+
+    printf "  Max stack size (current: %s): " "$cur_size"; local new_size; read -r new_size
+    [ -z "$new_size" ] && new_size="$cur_size"
+    if ! [[ "$new_size" =~ ^[0-9]+$ ]]; then print_error "Invalid value."; press_enter; return; fi
+
+    printf 'STACKABLES_SIZE=%s\n' "$new_size" > "$cfg_file"
+    print_success "Config saved (stack size = $new_size). Remove + reinstall to apply."
+    press_enter
+}
+
+configure_sqlmod_npc_teleporter() {
+    printf '\033[%d;1H\033[J' "$MENU_START_ROW"
+    printf "  ${GOLD}── Configure: NPC Teleporter ──${RST}\n\n"
+
+    local cfg_file="$SQLMOD_CONFIG_DIR/npc-teleporter.conf"
+    local cur_ony=60 cur_capital=true cur_startzone=true
+    if [ -f "$cfg_file" ]; then
+        # shellcheck source=/dev/null
+        source "$cfg_file"
+        cur_ony="${NPC_TELEPORTER_ONY_LEVEL:-60}"
+        cur_capital="${NPC_TELEPORTER_CAPITAL:-true}"
+        cur_startzone="${NPC_TELEPORTER_STARTZONE:-true}"
+    fi
+
+    printf "  Onyxia Level (60 = Vanilla, 80 = WotLK) [current: %s]: " "$cur_ony"
+    local new_ony; read -r new_ony
+    [ -z "$new_ony" ] && new_ony="$cur_ony"
+    ( [ "$new_ony" = "60" ] || [ "$new_ony" = "80" ] ) || {
+        print_error "Must be 60 or 80."; press_enter; return
+    }
+    printf "  Install Capital Teleporter NPC?      (true/false) [current: %s]: " "$cur_capital"
+    local new_capital; read -r new_capital
+    [ -z "$new_capital" ] && new_capital="$cur_capital"
+    printf "  Install Starting Zone Teleporter NPC? (true/false) [current: %s]: " "$cur_startzone"
+    local new_startzone; read -r new_startzone
+    [ -z "$new_startzone" ] && new_startzone="$cur_startzone"
+
+    printf 'NPC_TELEPORTER_ONY_LEVEL=%s\nNPC_TELEPORTER_CAPITAL=%s\nNPC_TELEPORTER_STARTZONE=%s\n' \
+        "$new_ony" "$new_capital" "$new_startzone" > "$cfg_file"
+    print_success "Config saved. Remove + reinstall to apply."
+    press_enter
+}
+
+configure_sqlmod_hearthstone() {
+    printf '\033[%d;1H\033[J' "$MENU_START_ROW"
+    printf "  ${GOLD}── Configure: Hearthstone Cooldowns ──${RST}\n\n"
+    printf "  ${DIM}Select the Hearthstone cooldown. Remove + reinstall to apply.${RST}\n\n"
+    printf "  1) 30 minutes (WotLK default)\n"
+    printf "  2) 15 minutes\n"
+    printf "  3) 5 minutes\n"
+    printf "  4) 1 minute\n"
+    printf "  5) 1 second (instant)\n\n"
+
+    local cfg_file="$SQLMOD_CONFIG_DIR/hearthstone-cd.conf"
+    local cur="30min"
+    if [ -f "$cfg_file" ]; then
+        # shellcheck source=/dev/null
+        source "$cfg_file"; cur="${HEARTHSTONE_COOLDOWN:-30min}"
+    fi
+
+    printf "  Your choice [current: %s]: " "$cur"; local ans; read -r ans
+    local sel
+    case "$ans" in
+        1) sel="30min" ;; 2) sel="15min" ;; 3) sel="5min" ;;
+        4) sel="1min"  ;; 5) sel="1sec"  ;; *) sel="$cur" ;;
+    esac
+    printf 'HEARTHSTONE_COOLDOWN=%s\n' "$sel" > "$cfg_file"
+    print_success "Config saved ($sel). Remove + reinstall to apply."
+    press_enter
+}
+
+configure_sqlmod_custom_login() {
+    sqlmod_init
+    local conf_dest="$SERVER_DIR/env/docker/etc/modules/mod_customlogin.conf"
+    if [ ! -f "$conf_dest" ]; then
+        local module_dir="$SERVER_DIR/modules/custom-login"
+        local conf_dist="$module_dir/conf/mod_customlogin.conf.dist"
+        if [ -f "$conf_dist" ]; then
+            mkdir -p "$(dirname "$conf_dest")"
+            cp "$conf_dist" "$conf_dest"
+            print_success "Created $conf_dest"
+        else
+            print_error "Config not found. Install mod first."; press_enter; return
+        fi
+    fi
+    print_info "Opening mod_customlogin.conf in ${EDITOR:-vi}..."
+    "${EDITOR:-vi}" "$conf_dest"
+}
+
+configure_sqlmod_tweak() {
+    local key="$1" name="$2"
+    printf '\033[%d;1H\033[J' "$MENU_START_ROW"
+    printf "  ${GOLD}── Configure: %s ──${RST}\n\n" "$name"
+    printf "  ${DIM}Adjust creature_template multipliers. Leave blank to keep current.${RST}\n"
+    printf "  ${DIM}Values must be positive numbers > 0 (used for reversal on remove).${RST}\n\n"
+
+    local def_h def_d def_a def_spd
+    case "$key" in
+        buff-mobs)  def_h=2;    def_d=1.5;  def_a=1.5;  def_spd=0.8 ;;
+        xbuff-mobs) def_h=4;    def_d=2;    def_a=2;    def_spd=0.5 ;;
+        nerf-mobs)  def_h=0.5;  def_d=0.75; def_a=0.75; def_spd=1.2 ;;
+        baby-mobs)  def_h=0.25; def_d=0.25; def_a=0.25; def_spd=1.5 ;;
+    esac
+
+    local cfg_file="$SQLMOD_CONFIG_DIR/${key}.conf"
+    local cur_h="$def_h" cur_d="$def_d" cur_a="$def_a" cur_spd="$def_spd"
+    if [ -f "$cfg_file" ]; then
+        # shellcheck source=/dev/null
+        source "$cfg_file"
+        cur_h="${TWEAK_HP_MULT:-$def_h}"; cur_d="${TWEAK_DMG_MULT:-$def_d}"
+        cur_a="${TWEAK_ARM_MULT:-$def_a}"; cur_spd="${TWEAK_SPD_MULT:-$def_spd}"
+    fi
+
+    local new_h new_d new_a new_spd
+    printf "  HP multiplier     [current: %s]: " "$cur_h";   read -r new_h
+    printf "  Damage multiplier [current: %s]: " "$cur_d";   read -r new_d
+    printf "  Armor multiplier  [current: %s]: " "$cur_a";   read -r new_a
+    printf "  Attack speed mult [current: %s]: " "$cur_spd"; read -r new_spd
+    [ -z "$new_h" ]   && new_h="$cur_h"
+    [ -z "$new_d" ]   && new_d="$cur_d"
+    [ -z "$new_a" ]   && new_a="$cur_a"
+    [ -z "$new_spd" ] && new_spd="$cur_spd"
+
+    # Validate: must be positive numbers (required for safe reversal)
+    local invalid=false
+    for v in "$new_h" "$new_d" "$new_a" "$new_spd"; do
+        if ! awk "BEGIN{exit !($v > 0)}" 2>/dev/null; then invalid=true; fi
+    done
+    if $invalid; then
+        print_error "All multipliers must be positive numbers greater than 0."
+        press_enter; return
+    fi
+
+    printf 'TWEAK_HP_MULT=%s\nTWEAK_DMG_MULT=%s\nTWEAK_ARM_MULT=%s\nTWEAK_SPD_MULT=%s\n' \
+        "$new_h" "$new_d" "$new_a" "$new_spd" > "$cfg_file"
+    print_success "Config saved. Install (or remove + reinstall) to apply."
+    press_enter
+}
+
+configure_sqlmod_xprates() {
+    sqlmod_init
+    printf '\033[%d;1H\033[J' "$MENU_START_ROW"
+    printf "  ${GOLD}── Configure: XP Rates ──${RST}\n\n"
+
+    local conf_path="$SERVER_DIR/env/docker/etc/worldserver.conf"
+    if [ ! -f "$conf_path" ]; then
+        print_error "worldserver.conf not found at $conf_path"
+        print_info "Make sure your AzerothCore install is complete."
+        press_enter; return
+    fi
+
+    local cur_kill cur_quest cur_explore
+    cur_kill=$(grep -m1 '^Rate\.XP\.Kill' "$conf_path" | awk -F'=' '{print $2}' | tr -d ' ' 2>/dev/null)
+    cur_quest=$(grep -m1 '^Rate\.XP\.Quest' "$conf_path" | awk -F'=' '{print $2}' | tr -d ' ' 2>/dev/null)
+    cur_explore=$(grep -m1 '^Rate\.XP\.Explore' "$conf_path" | awk -F'=' '{print $2}' | tr -d ' ' 2>/dev/null)
+    [ -z "$cur_kill" ]    && cur_kill="1"
+    [ -z "$cur_quest" ]   && cur_quest="1"
+    [ -z "$cur_explore" ] && cur_explore="1"
+
+    printf "  ${DIM}File: %s${RST}\n\n" "$conf_path"
+    printf "  Kill XP multiplier    [current: %s]: " "$cur_kill";    local new_kill;    read -r new_kill
+    printf "  Quest XP multiplier   [current: %s]: " "$cur_quest";   local new_quest;   read -r new_quest
+    printf "  Explore XP multiplier [current: %s]: " "$cur_explore"; local new_explore; read -r new_explore
+    [ -z "$new_kill" ]    && new_kill="$cur_kill"
+    [ -z "$new_quest" ]   && new_quest="$cur_quest"
+    [ -z "$new_explore" ] && new_explore="$cur_explore"
+
+    # Validate: must be positive numbers
+    local invalid=false
+    for v in "$new_kill" "$new_quest" "$new_explore"; do
+        if ! awk "BEGIN{exit !($v > 0)}" 2>/dev/null; then invalid=true; fi
+    done
+    if $invalid; then
+        print_error "XP multipliers must be positive numbers greater than 0."
+        press_enter; return
+    fi
+
+    local tmpf; tmpf=$(mktemp)
+    sed \
+        -e "s/^Rate\.XP\.Kill *= *[0-9.]*/Rate.XP.Kill = $new_kill/" \
+        -e "s/^Rate\.XP\.Quest *= *[0-9.]*/Rate.XP.Quest = $new_quest/" \
+        -e "s/^Rate\.XP\.Explore *= *[0-9.]*/Rate.XP.Explore = $new_explore/" \
+        "$conf_path" > "$tmpf" && mv "$tmpf" "$conf_path"
+    touch "$SQLMOD_MARKER_DIR/xp-rates.installed" 2>/dev/null
+    print_success "XP rates saved: Kill=$new_kill  Quest=$new_quest  Explore=$new_explore"
+    print_info "Run '.reload config' in-game or restart the world server to apply."
+    press_enter
+}
+
+# ─────────────────────────────────────────────────────────────
 # ABOUT PANELS
 # ─────────────────────────────────────────────────────────────
 
@@ -2515,8 +3293,7 @@ _get_about_text() {
                 'Adds a Transmogrification NPC (entry 190010) letting players' \
                 'change the visual appearance of their gear. Based on the' \
                 'Rochet2 transmog script. Spawn the NPC anywhere with' \
-                '.npc add 190010. An optional TransmogPlus variant is' \
-                'available via mod-acore-subscriptions.'
+                '.npc add 190010.'
             ;;
         mod-1v1-arena)
             printf '%s\n' \
@@ -2621,6 +3398,98 @@ _get_about_text() {
                 'mid-fight. Enable via the ENABLED flag in config, or use' \
                 'the .ua GM command for runtime-only toggling.'
             ;;
+        # ── SQL Mods ──────────────────────────────────────────
+        portals-capitals)
+            printf '%s\n' \
+                'Capitalizes portal and interactable object labels in every' \
+                'major city (Stormwind, Orgrimmar, etc.). Pure cosmetic SQL' \
+                'change to gameobject_template display names -- no client mod' \
+                'needed. GO_TEMPLATE and GO_SPAWN base IDs are configurable to' \
+                'avoid conflicts with other SQL mods that add game objects.'
+            ;;
+        rare-drops)
+            printf '%s\n' \
+                'Adds hand-picked, level-appropriate loot to 450+ Classic rare' \
+                'and rare-elite mobs that previously had no special drops. Each' \
+                'item was thematically chosen for its specific mob across 100+' \
+                'hours of curation. Note: no down.sql exists -- removing requires' \
+                'restoring from the automatic backup taken at install time.'
+            ;;
+        lvl1-mounts)
+            printf '%s\n' \
+                'Modifies mount skill requirements so characters can ride at' \
+                'level 1 instead of the default 20. A minimal SQL change to' \
+                'skill line abilities. Revert SQL (level-twenty-mounts.sql)' \
+                'is included to restore the original level-20 requirement.'
+            ;;
+        all-stackables)
+            printf '%s\n' \
+                'Updates all stackable items in item_template to a configurable' \
+                'max stack size (default 200). Dramatically reduces bag clutter' \
+                'for consumables, reagents, and materials. Stack size can be set' \
+                'in Config before installing. Down.sql reverts to original sizes.'
+            ;;
+        custom-login)
+            printf '%s\n' \
+                'Grants configurable starter items, bags, heirlooms, skills,' \
+                'and faction reputation to characters on their very first login.' \
+                'Toggle each category in mod_customlogin.conf. Ideal for fresh' \
+                'realms or starter-pack servers. NOTE: C++ module -- requires' \
+                'a worldserver rebuild after install to activate.'
+            ;;
+        npc-teleporter)
+            printf '%s\n' \
+                'Spawns a Portal Master NPC with a gossip menu teleporting' \
+                'players to all major zones, dungeons, raids, and battlegrounds.' \
+                'Two NPC variants: capital city hub and starting zone hub.' \
+                'Onyxia Level (60 or 80) is configurable. Pure SQL -- no' \
+                'client modification required. Originally by Rochet2.'
+            ;;
+        hearthstone-cd)
+            printf '%s\n' \
+                'Changes the Hearthstone cooldown from 30 minutes to your' \
+                'preferred duration: 30 min, 15 min, 5 min, 1 min, or 1 sec.' \
+                'Updates spell_dbc via a simple UPDATE statement. Select the' \
+                'variant in Config before installing. Remove resets to the' \
+                'WotLK default of 30 minutes automatically.'
+            ;;
+        buff-mobs)
+            printf '%s\n' \
+                'Multiplies all creature HP (×2), damage (×1.5), armor (×1.5),' \
+                'and attack speed (×0.8 interval = faster). Makes open-world' \
+                'mobs noticeably harder without touching dungeon scripting.' \
+                'Multipliers are configurable. Remove applies the exact inverse' \
+                'to restore original values (floating-point accuracy may vary).'
+            ;;
+        xbuff-mobs)
+            printf '%s\n' \
+                'Extreme buff: creature HP×4, damage×2, armor×2, attack speed' \
+                '×0.5 (double attack rate). Designed for hardcore or challenge' \
+                'servers where trash mobs are genuinely dangerous. Multipliers' \
+                'are configurable. Remove applies the inverse multipliers.'
+            ;;
+        nerf-mobs)
+            printf '%s\n' \
+                'Reduces creature HP (×0.5), damage (×0.75), armor (×0.75),' \
+                'and slows attacks (×1.2 interval). Makes open-world content' \
+                'more accessible for casual players or fast leveling servers.' \
+                'Multipliers are configurable. Remove applies the inverse.'
+            ;;
+        baby-mobs)
+            printf '%s\n' \
+                'Sets creatures to baby difficulty: HP×0.25, damage×0.25,' \
+                'armor×0.25, very slow attacks (×1.5 interval). Ideal for' \
+                'families, new players, or near-trivial open-world combat.' \
+                'Multipliers are configurable. Remove applies the exact inverse.'
+            ;;
+        xp-rates)
+            printf '%s\n' \
+                'Edits Rate.XP.Kill, Rate.XP.Quest, and Rate.XP.Explore in' \
+                'worldserver.conf to custom multiplier values (e.g. 2 = double' \
+                'XP). Changes take effect after .reload config in-game or a' \
+                'world server restart. Remove resets all three rates to 1.0' \
+                '(the AzerothCore default). Install and Config do the same thing.'
+            ;;
         *)
             printf '%s\n' 'No description available. See the GitHub link below.'
             ;;
@@ -2632,7 +3501,7 @@ show_about() {
     printf '\033[%d;1H\033[J' "$MENU_START_ROW"
     printf "  ${GOLD}── About: %s ──${RST}\n\n" "$name"
     _get_about_text "$key" | sed 's/^/  /'
-    printf "\n  ${DIM}Source: %s${RST}\n" "$url"
+    [ -n "$url" ] && printf "\n  ${DIM}Source: %s${RST}\n" "$url"
     printf "\n  ${DIM}Press ENTER to return...${RST}\n"
     read -r _
 }
@@ -3124,6 +3993,133 @@ show_first_run_welcome() {
     printf '\033[%d;1H\033[J' "$MENU_START_ROW"
 }
 
+# ── SQL Mods submenu ──────────────────────────────────────────
+menu_sql_mods() {
+    sqlmod_init
+    local page_start=0
+    while true; do
+        local tlines; tlines=$(tput lines 2>/dev/null || echo 24)
+        printf '\033[%d;1H\033[J' "$MENU_START_ROW"
+
+        local -a available_entries=()
+        local -a markers=()
+        local entry key name url type
+
+        for entry in "${SQL_MOD_REGISTRY[@]}"; do
+            IFS='|' read -r key name url type <<< "$entry"
+            if sqlmod_is_installed "$key"; then
+                markers+=("${GREEN}✓ Installed${RST}")
+            else
+                markers+=("${DIM}○ Not installed${RST}")
+            fi
+            available_entries+=("$entry")
+        done
+
+        local total=${#available_entries[@]}
+        local avail=$(( tlines - MENU_START_ROW - 1 ))
+        local page_size=$(( avail - 7 ))
+        [ "$page_size" -lt 3 ] && page_size=3
+
+        local max_start=$(( total - page_size ))
+        [ "$max_start" -lt 0 ] && max_start=0
+        [ "$page_start" -gt "$max_start" ] && page_start=$max_start
+        [ "$page_start" -lt 0 ] && page_start=0
+
+        local page_end=$(( page_start + page_size ))
+        [ "$page_end" -gt "$total" ] && page_end=$total
+        local total_pages=$(( (total + page_size - 1) / page_size ))
+        local current_page=$(( page_start / page_size + 1 ))
+
+        printf "  ${GOLD}── SQL Mods ──────────────────────────────────────${RST}\n"
+        printf "  ${YELLOW}⚠  Edits the world DB — auto-backup runs before each install${RST}\n"
+        printf "  ${DIM}%-4s %-40s %s${RST}\n" "Num" "Mod" "Status"
+        printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
+
+        local idx
+        for (( idx=page_start; idx<page_end; idx++ )); do
+            IFS='|' read -r key name url type <<< "${available_entries[$idx]}"
+            printf "  ${WHITE}%2d)${RST} %-40s %b\n" "$(( idx + 1 ))" "$name" "${markers[$idx]}"
+        done
+
+        printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
+        if [ "$total_pages" -gt 1 ]; then
+            local nav="  ${DIM}Page $current_page/$total_pages${RST}"
+            [ "$current_page" -gt 1 ]              && nav+="   ${WHITE}< prev${RST}"
+            [ "$current_page" -lt "$total_pages" ]  && nav+="   ${WHITE}> next${RST}"
+            printf "%b\n" "$nav"
+        fi
+        printf "  ${WHITE}i<num>${RST} Install   ${WHITE}r<num>${RST} Remove   ${WHITE}c<num>${RST} Config   ${WHITE}?<num>${RST} About   ${WHITE}ENTER${RST} Back\n"
+
+        _read_menu_input "$(( tlines - 1 ))"
+        local raw_choice="$_MENU_INPUT"
+        [ -z "$raw_choice" ] && return
+
+        local action nums
+        action="${raw_choice:0:1}"
+        nums="${raw_choice:1}"
+
+        case "${action,,}" in
+            '<')
+                page_start=$(( page_start - page_size ))
+                [ "$page_start" -lt 0 ] && page_start=0
+                ;;
+            '>')
+                page_start=$(( page_start + page_size ))
+                [ "$page_start" -gt "$max_start" ] && page_start=$max_start
+                ;;
+            i)
+                local inum; inum="${nums//[[:space:]]/}"
+                if ! [[ "$inum" =~ ^[0-9]+$ ]] || \
+                   [ "$inum" -lt 1 ] || [ "$inum" -gt "$total" ]; then
+                    print_warning "Invalid mod number — e.g. i3"
+                    press_enter; continue
+                fi
+                IFS='|' read -r key name url type <<< "${available_entries[$((inum - 1))]}"
+                printf '\033[%d;1H\033[J' "$MENU_START_ROW"
+                sqlmod_install "$key" "$name" "$url" "$type" || true
+                press_enter
+                ;;
+            r)
+                local rnum; rnum="${nums//[[:space:]]/}"
+                if ! [[ "$rnum" =~ ^[0-9]+$ ]] || \
+                   [ "$rnum" -lt 1 ] || [ "$rnum" -gt "$total" ]; then
+                    print_warning "Invalid mod number — e.g. r3"
+                    press_enter; continue
+                fi
+                IFS='|' read -r key name url type <<< "${available_entries[$((rnum - 1))]}"
+                printf '\033[%d;1H\033[J' "$MENU_START_ROW"
+                sqlmod_remove "$key" "$name" "$url" "$type" || true
+                press_enter
+                ;;
+            c)
+                local cnum; cnum="${nums//[[:space:]]/}"
+                if ! [[ "$cnum" =~ ^[0-9]+$ ]] || \
+                   [ "$cnum" -lt 1 ] || [ "$cnum" -gt "$total" ]; then
+                    print_warning "Invalid mod number — e.g. c5"
+                    press_enter; continue
+                fi
+                IFS='|' read -r key name url type <<< "${available_entries[$((cnum - 1))]}"
+                printf '\033[%d;1H\033[J' "$MENU_START_ROW"
+                sqlmod_configure "$key" "$name"
+                ;;
+            [?])
+                local anum; anum="${nums//[[:space:]]/}"
+                if ! [[ "$anum" =~ ^[0-9]+$ ]] || \
+                   [ "$anum" -lt 1 ] || [ "$anum" -gt "$total" ]; then
+                    print_warning "Invalid mod number -- e.g. ?3"
+                    press_enter; continue
+                fi
+                IFS='|' read -r key name url type <<< "${available_entries[$((anum - 1))]}"
+                show_about "$key" "$name" "$url"
+                ;;
+            *)
+                print_warning "Unknown command. Use i<num>, r<num>, c<num>, ?<num>, or ENTER."
+                press_enter
+                ;;
+        esac
+    done
+}
+
 main_menu() {
     while true; do
         refresh_container_names
@@ -3148,18 +4144,19 @@ main_menu() {
         printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
         printf "  ${WHITE}1)${RST} Manage AzerothCore Modules\n"
         printf "  ${WHITE}2)${RST} Manage ALE Lua Mods\n"
-        printf "  ${WHITE}3)${RST} Configure AH Bot\n"
-        printf "  ${WHITE}4)${RST} Configure ALE\n"
-        printf "  ${WHITE}5)${RST} Rebuild worldserver\n"
+        printf "  ${WHITE}3)${RST} Manage SQL Mods\n"
+        printf "  ${WHITE}4)${RST} Configure AH Bot\n"
+        printf "  ${WHITE}5)${RST} Configure ALE\n"
+        printf "  ${WHITE}6)${RST} Rebuild worldserver\n"
         printf "\n  ${GOLD}${BOLD}Server Controls${RST}\n"
         printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
-        printf "  ${WHITE}6)${RST} Server status\n"
-        printf "  ${WHITE}7)${RST} Start server\n"
-        printf "  ${WHITE}8)${RST} Stop server\n"
-        printf "  ${WHITE}9)${RST} Restart server\n"
-        printf "  ${WHITE}10)${RST} View logs\n"
-        printf "  ${WHITE}11)${RST} Attach to console\n"
-        printf "  ${WHITE}12)${RST} Repair install state\n"
+        printf "  ${WHITE}7)${RST} Server status\n"
+        printf "  ${WHITE}8)${RST} Start server\n"
+        printf "  ${WHITE}9)${RST} Stop server\n"
+        printf "  ${WHITE}10)${RST} Restart server\n"
+        printf "  ${WHITE}11)${RST} View logs\n"
+        printf "  ${WHITE}12)${RST} Attach to console\n"
+        printf "  ${WHITE}13)${RST} Repair install state\n"
         printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
         printf "  ${GOLD} Q)${RST} Quit\n"
 
@@ -3172,16 +4169,17 @@ main_menu() {
         case "$choice" in
             1)  menu_modules ;;
             2)  menu_ale_scripts ;;
-            3)  configure_ahbot; press_enter ;;
-            4)  configure_ale; press_enter ;;
-            5)  rebuild_worldserver; press_enter ;;
-            6)  server_status; press_enter ;;
-            7)  server_start; press_enter ;;
-            8)  server_stop; press_enter ;;
-            9)  server_restart; press_enter ;;
-            10) with_full_screen server_logs ;;
-            11) with_full_screen server_attach ;;
-            12) repair_install_state; press_enter ;;
+            3)  menu_sql_mods ;;
+            4)  configure_ahbot; press_enter ;;
+            5)  configure_ale; press_enter ;;
+            6)  rebuild_worldserver; press_enter ;;
+            7)  server_status; press_enter ;;
+            8)  server_start; press_enter ;;
+            9)  server_stop; press_enter ;;
+            10) server_restart; press_enter ;;
+            11) with_full_screen server_logs ;;
+            12) with_full_screen server_attach ;;
+            13) repair_install_state; press_enter ;;
             q)  echo ""; print_info "Goodbye!"; exit 0 ;;
         esac
     done
