@@ -243,7 +243,24 @@ uninstall_ro() {
 
 uninstall_mhf() {
     confirm_delete "Monster Hunter Frontier Z — Erupe" || return
+
+    # Stop native processes (MHF uses Erupe binary + pg_ctl, not Docker)
+    pkill -TERM -f "erupe" 2>/dev/null || true
+    sleep 1
+    pkill -KILL -f "erupe" 2>/dev/null || true
+    if [ -d "$HOME/mhf-pgdata" ]; then
+        pg_ctl -D "$HOME/mhf-pgdata" stop -m fast 2>/dev/null || true
+        sleep 2
+    fi
+
     do_uninstall "$HOME/mhf-server" "$HOME/mhf-launcher.sh"
+
+    # PostgreSQL data directory lives outside the server folder
+    if [ -d "$HOME/mhf-pgdata" ]; then
+        rm -rf "$HOME/mhf-pgdata"
+        print_success "Removed: ~/mhf-pgdata (PostgreSQL data)"
+    fi
+
     # Remove /etc/hosts patch
     if grep -q "mhf.capcom.com.jp" /etc/hosts 2>/dev/null; then
         sudo sed -i '/mhf\.capcom\.com\.jp/d' /etc/hosts 2>/dev/null || true
@@ -312,11 +329,50 @@ uninstall_uo() {
 
 uninstall_runescape() {
     confirm_delete "RuneScape 2009 — 2009scape" || return
+
+    # Stop native processes before deleting (RuneScape uses bundled mysqld, not Docker)
+    pkill -TERM -f "$HOME/runescape-server/server.jar" 2>/dev/null || true
+    pkill -TERM -f "$HOME/runescape-server/ms.jar"     2>/dev/null || true
+    flatpak kill org._2009scape.Launcher                2>/dev/null || true
+    sleep 1
+    pkill -KILL -f "$HOME/runescape-server/database/bin/mysqld" 2>/dev/null || true
+    pkill -KILL -u "$(id -u)" mysqld                    2>/dev/null || true
+    sleep 1
+
     do_uninstall "$HOME/runescape-server" "$HOME/runescape-launcher.sh"
+
+    # HD launcher
+    if [ -f "$HOME/runescape-hd-launcher.sh" ]; then
+        rm -f "$HOME/runescape-hd-launcher.sh"
+        print_success "Removed launcher: runescape-hd-launcher.sh"
+    fi
+
+    # Legacy client dir (pre-HD installs)
     if [ -d "$HOME/runescape-client" ]; then
         rm -rf "$HOME/runescape-client"
         print_success "Removed: ~/runescape-client"
     fi
+
+    # SD client cache
+    if [ -d "$HOME/.runite_rs" ]; then
+        rm -rf "$HOME/.runite_rs"
+        print_success "Removed: ~/.runite_rs (SD client cache)"
+    fi
+
+    # Saradomin HD Launcher Flatpak
+    if flatpak list --user --app 2>/dev/null | grep -q "org._2009scape.Launcher"; then
+        print_info "Removing Saradomin HD Launcher (Flatpak)..."
+        flatpak uninstall --user -y org._2009scape.Launcher 2>/dev/null || \
+            print_warning "Couldn't auto-remove Saradomin — remove manually: flatpak uninstall --user org._2009scape.Launcher"
+        print_success "Saradomin Launcher removed"
+    fi
+
+    # Saradomin data and config
+    if [ -d "$HOME/.var/app/org._2009scape.Launcher" ]; then
+        rm -rf "$HOME/.var/app/org._2009scape.Launcher"
+        print_success "Removed: ~/.var/app/org._2009scape.Launcher (Saradomin data)"
+    fi
+
     print_success "RuneScape 2009 uninstalled!"
 }
 
@@ -497,6 +553,17 @@ uninstall_all() {
     print_info "Stopping all servers..."
     local running; running=$(docker ps -q 2>/dev/null)
     [ -n "$running" ] && docker stop $running 2>/dev/null || true
+
+    # Kill native/non-Docker processes before deleting their files
+    pkill -KILL -f erupe                                2>/dev/null || true
+    pkill -f newserv                                    2>/dev/null || true
+    pkill -TERM -f "runescape-server/server.jar"       2>/dev/null || true
+    pkill -TERM -f "runescape-server/ms.jar"           2>/dev/null || true
+    pkill -KILL -u "$(id -u)" mysqld                   2>/dev/null || true
+    flatpak kill org._2009scape.Launcher                2>/dev/null || true
+    if [ -d "$HOME/mhf-pgdata" ]; then
+        pg_ctl -D "$HOME/mhf-pgdata" stop -m fast      2>/dev/null || true
+    fi
     sleep 2
 
     # Compose down every stack (check both compose.yml and docker-compose.yml)
@@ -514,16 +581,24 @@ uninstall_all() {
         [ -d "$dr" ] && rm -rf "$dr" && print_success "Removed: $dr"
     done
 
-    # Remove source dirs and client dirs
+    # Remove source dirs, client dirs, and game data outside server folders
     [ -d "$HOME/daoc-spbots" ] && rm -rf "$HOME/daoc-spbots" && \
         print_success "Removed: ~/daoc-spbots"
     [ -d "$HOME/ClassicUO" ] && rm -rf "$HOME/ClassicUO" && \
         print_success "Removed: ~/ClassicUO"
     [ -d "$HOME/runescape-client" ] && rm -rf "$HOME/runescape-client" && \
         print_success "Removed: ~/runescape-client"
-
-    # Kill native processes (PSO runs without Docker)
-    pkill -f newserv 2>/dev/null || true
+    [ -d "$HOME/mhf-pgdata" ] && rm -rf "$HOME/mhf-pgdata" && \
+        print_success "Removed: ~/mhf-pgdata (PostgreSQL data)"
+    [ -d "$HOME/.runite_rs" ] && rm -rf "$HOME/.runite_rs" && \
+        print_success "Removed: ~/.runite_rs (RuneScape SD client cache)"
+    [ -d "$HOME/.var/app/org._2009scape.Launcher" ] && \
+        rm -rf "$HOME/.var/app/org._2009scape.Launcher" && \
+        print_success "Removed: ~/.var/app/org._2009scape.Launcher (Saradomin data)"
+    if flatpak list --user --app 2>/dev/null | grep -q "org._2009scape.Launcher"; then
+        flatpak uninstall --user -y org._2009scape.Launcher 2>/dev/null || true
+        print_success "Removed Saradomin HD Launcher (Flatpak)"
+    fi
 
     # Remove all launchers
     print_info "Removing launchers..."
@@ -532,7 +607,7 @@ uninstall_all() {
         wow-vanilla-launcher.sh wow-tbc-launcher.sh daoc-launcher.sh
         ro-launcher.sh mhf-launcher.sh maplestory-launcher.sh eq1-launcher.sh
         tibia-launcher.sh lineage2-launcher.sh ffxi-launcher.sh swg-launcher.sh
-        uo-launcher.sh runescape-launcher.sh pso-launcher.sh
+        uo-launcher.sh runescape-launcher.sh runescape-hd-launcher.sh pso-launcher.sh
         muonline-launcher.sh lego-launcher.sh
     )
     for l in "${launchers[@]}"; do
