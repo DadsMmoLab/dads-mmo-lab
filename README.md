@@ -50,9 +50,11 @@ Turns out — for a lot of classic MMOs — you can. The emulator community has 
 
 | Game | Emulator | Bot Support | Status | Guide |
 |------|----------|-------------|--------|-------|
-| ⚔️ WoW WotLK 3.3.5a (Standard) | AzerothCore | Playerbots | ✅ Complete | [View Guide](./guides/wow-wotlk/README.md) |
-| ⚔️ WoW WotLK 3.3.5a (Playerbots) | AzerothCore + trickerer fork | Playerbots | ✅ Complete | [View Guide](./guides/wow-wotlk-npcbots/README.md) |
-| 🏃 RuneScape 2009 | 2009scape | — | ✅ Complete | [View Guide](./guides/runescape/README.md) |
+| ⚔️ WoW Vanilla 1.12.1 | CMaNGOS Classic + Playerbots | Playerbots | ✅ Complete | [View Guide](./guides/wow-vanilla/HOWTO-WOW-VANILLA.md) |
+| ⚔️ WoW The Burning Crusade 2.4.3 | CMaNGOS TBC + Playerbots | Playerbots | ✅ Complete | [View Guide](./guides/wow-tbc/WoW-TBC-HOWTO.md) |
+| ⚔️ WoW Wrath of the Lich King 3.3.5a | AzerothCore + Playerbots | Playerbots | ✅ Complete | [View Guide](./guides/wow-wotlk/WoW-WotLK-HOWTO.md) |
+| 🏃 RuneScape 2009 (SD) | 2009scape Singleplayer | — | ✅ Complete | [View Guide](./guides/runescape/HOWTO-RUNESCAPE.md) |
+| 🏃 RuneScape 2009 (HD) | 2009scape + Saradomin Launcher | — | ✅ Complete | [View Guide](./guides/runescape/RuneScape-HD-HOWTO.md) |
 
 ---
 
@@ -61,8 +63,6 @@ Turns out — for a lot of classic MMOs — you can. The emulator community has 
 | Game | Emulator | Status |
 |------|----------|--------|
 | 🐉 Monster Hunter Frontier Z | Erupe CE | 🔨 In Progress |
-| ⚔️ WoW Vanilla 1.12 | VMaNGOS | 🔨 In Progress |
-| ⚔️ WoW The Burning Crusade | TrinityCore | 🔨 In Progress |
 | 🌿 Ragnarok Online | rAthena | 🔨 In Progress |
 | 💎 Mu Online | OpenMU | 🔨 In Progress |
 | 🏰 Dark Age of Camelot | OpenDAoC | 🔨 In Progress |
@@ -88,63 +88,97 @@ Turns out — for a lot of classic MMOs — you can. The emulator community has 
 | 🌐 Ultima Online | ModernUO + ClassicUO | Linux native client — no Proton needed |
 | 🦸 City of Heroes | Homecoming | |
 | 🏹 Asheron's Call | ACEmulator | |
-| 🗝️ RuneScape Classic | OpenRSC | Coming Soon — the original 2001 era |
+| 🗝️ RuneScape Classic | OpenRSC | The original 2001 era |
 
 ---
 
 ## 📦 What's In This Repo
 
-### WoW Guides (`guides/wow-wotlk/`)
+### WoW Vanilla 1.12 (`guides/wow-vanilla/`)
 
 | File | What it does |
 |------|-------------|
-| `install.sh` | Full automated installer — one command does everything |
-| `install-playerbots.sh` | Playerbots version — compiles from source (2-4 hours) |
-| `uninstall.sh` | Safe removal with character backup |
-| `docker-compose.yml` | Server configuration |
-| `wow-gaming-mode.sh` | Gaming Mode launcher — auto-shuts down with WoW |
-| `fix-after-update.sh` | Fix Docker after a SteamOS update breaks it |
-| `HOWTO-INSTALL.md` | Beginner install guide — zero Linux knowledge needed |
-| `HOWTO-UNINSTALL.md` | Beginner uninstall guide |
-| `HOWTO-DESKTOP-CONTROLS.md` | Full Desktop Mode control guide with GM console |
+| `install-wow-vanilla.sh` | Full automated installer — one command does everything |
+| `HOWTO-WOW-VANILLA.md` | Beginner install guide — zero Linux knowledge needed |
 
-### RuneScape Guide (`guides/runescape/`)
+### WoW The Burning Crusade (`guides/wow-tbc/`)
+
+| File | What it does |
+|------|-------------|
+| `install-wow-tbc.sh` | Full automated installer — one command does everything |
+| `WoW-TBC-HOWTO.md` | Beginner install guide — zero Linux knowledge needed |
+
+### WoW Wrath of the Lich King (`guides/wow-wotlk/`)
+
+| File | What it does |
+|------|-------------|
+| `install-wow-wotlk.sh` | Full automated installer — one command does everything |
+| `WoW-WotLK-HOWTO.md` | Beginner install guide — zero Linux knowledge needed |
+| `manage-wow-modules.sh` | Enable / disable optional server modules in-place |
+
+### RuneScape 2009 (`guides/runescape/`)
 
 | File | What it does |
 |------|-------------|
 | `install-runescape.sh` | Full automated installer — one command does everything |
-| `README.md` | Install guide — zero Linux knowledge needed |
+| `upgrade-runescape-hd.sh` | Adds the Saradomin HD client on top of an existing install |
+| `HOWTO-RUNESCAPE.md` | Beginner install guide — zero Linux knowledge needed |
+| `RuneScape-HD-HOWTO.md` | HD upgrade guide — Saradomin Launcher setup and first run |
 
 ---
 
 ## 🚀 Quick Start
 
+Pick your game and run the installer. Each one handles everything automatically.
+
+**WoW Vanilla 1.12:**
 ```bash
-chmod +x install.sh && ./install.sh
+chmod +x install-wow-vanilla.sh && ./install-wow-vanilla.sh
 ```
 
-The installer handles everything automatically:
+**WoW The Burning Crusade:**
+```bash
+chmod +x install-wow-tbc.sh && ./install-wow-tbc.sh
+```
+
+**WoW Wrath of the Lich King:**
+```bash
+chmod +x install-wow-wotlk.sh && ./install-wow-wotlk.sh
+```
+
+**RuneScape 2009:**
+```bash
+chmod +x install-runescape.sh && ./install-runescape.sh
+```
+
+**RuneScape 2009 HD upgrade** *(run after the base installer):*
+```bash
+chmod +x upgrade-runescape-hd.sh && ./upgrade-runescape-hd.sh
+```
+
+Every WoW installer:
 - ✅ Detects SteamOS and fixes the pacman keyring
 - ✅ Installs Docker if needed
-- ✅ Downloads AzerothCore
+- ✅ Downloads and compiles the server
 - ✅ Creates a default **admin / admin** account with GM Level 3
+- ✅ Populates the world with bots
 - ✅ Builds a Gaming Mode launcher
 
-**First time on Linux?** Read [HOWTO-INSTALL.md](./guides/wow-wotlk/HOWTO-INSTALL.md) first — every step explained in plain English, zero assumed knowledge.
+**New to Linux?** Read the HOWTO guide for your game first — every step explained in plain English, zero assumed knowledge.
 
 ---
 
-## 🤖 Bot Options
+## 🤖 Bot Options (WoW)
 
-Two different bot systems — pick the experience you want:
+All three WoW installers ship with **Playerbots** pre-configured — bots that roam the world, fill dungeons and raids, and keep the economy alive so the game feels like a real server, not an empty shell.
 
-| | Standard | Playerbots |
-|---|---|---|
-| **Script** | `install.sh` | `install-playerbots.sh` |
-| **Bots** | Playerbots (roam the world) | Playerbots (hired companions) |
-| **Feel** | Living populated world | Personal party members |
-| **Install time** | ~30 minutes | 2-4 hours (compiles from source) |
-| **Folder** | `~/wow-server` | `~/wow-server-playerbots` |
+| | Vanilla | TBC | WotLK |
+|---|---|---|---|
+| **Bot engine** | CMaNGOS Playerbots | CMaNGOS Playerbots | AzerothCore Playerbots |
+| **Bot count** | 600–800 active | 600–800 active | 600–800 active |
+| **Level range** | Endgame 50–60 | Outlands 57–70 | Full 1–80 (syncs to player) |
+| **Auction House** | Stocked | Stocked | Stocked |
+| **Install time** | ~30 min | ~30 min | ~30 min |
 
 ---
 
@@ -152,14 +186,17 @@ Two different bot systems — pick the experience you want:
 
 Play entirely from Steam Gaming Mode — no Desktop Mode needed after setup:
 
-1. Add `wow-gaming-mode.sh` as a Non-Steam game via Konsole
-2. Launch **"WoW Server"** from your Steam library
-3. Watch the dots... **"AZEROTH IS READY!"**
-4. Press Steam button → launch WoW from your library
-5. Play your session
-6. Close WoW → **server auto-shuts down**
+1. Each installer creates a **Gaming Mode launcher** in your home folder
+2. Add it to Steam as a Non-Steam game via Konsole:
+   - **Target:** `/usr/bin/konsole`
+   - **Launch Options:** `--hold -e bash ~/[game]-launcher.sh`
+   - **Proton:** OFF (WoW uses Proton for the game client, not the server)
+3. Launch from your Steam library
+4. Wait for **"[GAME] IS READY!"**
+5. Launch the game client from your library
+6. Close the client → **server auto-shuts down**
 
-Full setup instructions in [HOWTO-INSTALL.md](./guides/wow-wotlk/HOWTO-INSTALL.md)
+Full setup instructions in each game's HOWTO guide.
 
 ---
 
@@ -168,7 +205,8 @@ Full setup instructions in [HOWTO-INSTALL.md](./guides/wow-wotlk/HOWTO-INSTALL.m
 If Docker stops working after a Steam Deck update:
 
 ```bash
-chmod +x fix-after-update.sh && ./fix-after-update.sh
+chmod +x guides/Steam-Update-Fix/fix-after-update.sh
+./guides/Steam-Update-Fix/fix-after-update.sh
 ```
 
 Rebuilds the pacman keyring and reinstalls Docker automatically.
@@ -185,7 +223,7 @@ Steam Deck Gaming Mode
    (Server Emulator)
         │
         ▼
-  MySQL Database
+  MySQL / MariaDB
    (Game Database)
         │
         ▼
@@ -193,6 +231,8 @@ Game Client via Proton
    → connects to localhost
    → completely offline
 ```
+
+*(RuneScape runs without Docker — pure Java on Linux. No Proton needed.)*
 
 ---
 
@@ -207,9 +247,10 @@ This project:
 - ❌ Does **not** support monetization of private servers
 
 Huge credit to the communities that make this possible:
-- **[AzerothCore](https://github.com/azerothcore/azerothcore-wotlk)** — the incredible open source WoW emulator
-- **[trickerer](https://github.com/trickerer/AzerothCore-wotlk-with-NPCBots)** — the NPCBots fork
+- **[AzerothCore](https://github.com/azerothcore/azerothcore-wotlk)** — the incredible open source WoW WotLK emulator
+- **[CMaNGOS](https://github.com/cmangos)** — the Vanilla and TBC foundation
 - **[2009scape](https://github.com/2009scape/2009scape)** — the RuneScape 2009 emulator
+- **[Saradomin Launcher](https://flathub.org/apps/org._2009scape.Launcher)** — the HD experimental client
 - Every emulator project linked in our guides
 
 Go give them a star. They deserve it.
@@ -262,7 +303,5 @@ Game emulators linked here are subject to their own licenses. Game assets belong
 *Built with love by a dad who just wanted to play WoW on the couch without a subscription.*
 
 *And then things got out of hand.* 😄
-
-*5,400 views. 565 likes. Two videos. A community. In 48 hours.*
 
 *We're just getting started.* ⚔️
