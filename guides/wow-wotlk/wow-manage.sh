@@ -55,6 +55,7 @@ MENU_INPUT_ROW=24
 _TERM_LINES=24
 _TERM_COLS=80
 _RESIZE_NEEDED=false
+_IN_MENU=false   # true once we enter main_menu; switches to the slim banner
 ANIM_PID=""
 _IN_ALT_SCREEN=false
 
@@ -121,7 +122,9 @@ _get_term_size() {
 _handle_resize() {
     _RESIZE_NEEDED=true
     _get_term_size
-    if [ "${_TERM_COLS:-80}" -ge 80 ]; then
+    if [ "$_IN_MENU" = true ]; then
+        MENU_START_ROW=5
+    elif [ "${_TERM_COLS:-80}" -ge 80 ]; then
         MENU_START_ROW=15
     else
         MENU_START_ROW=6
@@ -153,7 +156,14 @@ _screen_int_handler() {
 _draw_logo_static() {
     printf '\033[1;1H\033[J'
     tput rmam 2>/dev/null || true  # disable line wrap — logo/bars truncate cleanly on narrow terminals
-    if [ "${_TERM_COLS:-80}" -ge 80 ]; then
+    if [ "$_IN_MENU" = true ]; then
+        # Slim in-menu banner: 4 rows → MENU_START_ROW=5.
+        # Keeps vertical space for menu content on short terminals (e.g. Steam Deck 30 rows).
+        printf '\n'
+        printf '\033[38;5;220m ════════════════════════════════════════════════════════════════════════════════\033[K\033[0m\n'
+        printf '   \033[38;5;220m⚔︎\033[0m  \033[1mDad'"'"'s MMO Lab\033[0m  \033[2m✦  WotLK Server Manager  ✦  v%s\033[0m\033[K\n' "$MANAGER_VERSION"
+        printf '\033[38;5;220m ════════════════════════════════════════════════════════════════════════════════\033[K\033[0m\n'
+    elif [ "${_TERM_COLS:-80}" -ge 80 ]; then
         printf '\n'
         printf '\033[2m%s\033[K\033[0m\n'       "$_LOGO_L0"
         printf '\033[38;5;220m%s\033[K\033[0m\n' "$_LOGO_L1"
@@ -187,7 +197,9 @@ _setup_screen() {
         _IN_ALT_SCREEN=true
     fi
     _get_term_size
-    if [ "${_TERM_COLS:-80}" -ge 80 ]; then
+    if [ "$_IN_MENU" = true ]; then
+        MENU_START_ROW=5
+    elif [ "${_TERM_COLS:-80}" -ge 80 ]; then
         MENU_START_ROW=15
     else
         MENU_START_ROW=6
@@ -675,6 +687,84 @@ _cmd_block_for() {
     esac
 }
 
+# Rebuild the "=== NPC Spawn Quick Reference ===" block at the top of
+# INGAME_COMMANDS_FILE by scanning all mod sections for "npc add" lines.
+# Uses [mod-key] labels (not === markers) to avoid confusing the section parser.
+_rebuild_npc_spawn_header() {
+    local outfile="$INGAME_COMMANDS_FILE"
+    [ -z "$outfile" ] || [ ! -f "$outfile" ] && return 0
+
+    local header_marker="=== NPC Spawn Quick Reference ==="
+    local -a spawn_entries=()
+    local current_section="" in_skip=false
+
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^"=== "(.+)" ===" ]]; then
+            local sec="${BASH_REMATCH[1]}"
+            if [ "$sec" = "NPC Spawn Quick Reference" ]; then
+                in_skip=true
+                current_section=""
+            else
+                in_skip=false
+                current_section="$sec"
+            fi
+        elif [ "$in_skip" = false ] && [[ "$line" == "npc add "* ]]; then
+            spawn_entries+=("${current_section}|${line}")
+        fi
+    done < "$outfile"
+
+    if [ ${#spawn_entries[@]} -eq 0 ]; then
+        # No spawn commands — remove the header block if present
+        if grep -Fxq "$header_marker" "$outfile" 2>/dev/null; then
+            local tmpout; tmpout=$(mktemp)
+            awk -v marker="$header_marker" '
+            $0 == marker { skip=1; next }
+            skip && /^=== .+ ===$/ { skip=0 }
+            !skip { print }
+            ' "$outfile" > "$tmpout" && mv "$tmpout" "$outfile"
+        fi
+        return 0
+    fi
+
+    # Build the new header block
+    local tmpblock; tmpblock=$(mktemp)
+    {
+        printf '%s\n' "$header_marker"
+        printf '%s\n' "Consolidated NPC spawn commands for all installed mods that require NPCs."
+        printf '%s\n' "  Worldserver console: npc add <entry> ...   |   In-game GM: .npc add <entry> ..."
+        printf '\n'
+        local prev_section=""
+        for entry in "${spawn_entries[@]}"; do
+            local sec="${entry%%|*}"
+            local cmd="${entry#*|}"
+            if [ "$sec" != "$prev_section" ]; then
+                [ -n "$prev_section" ] && printf '\n'
+                printf '  [%s]\n' "$sec"
+                prev_section="$sec"
+            fi
+            printf '%s\n' "  $cmd"
+        done
+        printf '\n'
+    } > "$tmpblock"
+
+    # Place at the very top of the file (replace if header exists, otherwise prepend)
+    local tmpout; tmpout=$(mktemp)
+    if grep -Fxq "$header_marker" "$outfile" 2>/dev/null; then
+        awk -v marker="$header_marker" -v newfile="$tmpblock" '
+        $0 == marker {
+            while ((getline line < newfile) > 0) print line
+            close(newfile)
+            skip=1; next
+        }
+        skip && /^=== .+ ===$/ { skip=0 }
+        !skip { print }
+        ' "$outfile" > "$tmpout" && mv "$tmpout" "$outfile"
+    else
+        cat "$tmpblock" "$outfile" > "$tmpout" && mv "$tmpout" "$outfile"
+    fi
+    rm -f "$tmpblock"
+}
+
 # Write or replace the === key === section in INGAME_COMMANDS_FILE.
 # Uses unique temp files + atomic mv to avoid partial writes.
 # Pass --quiet as second argument to suppress the print_info notification.
@@ -687,11 +777,13 @@ upsert_mod_commands() {
     [ -z "$outfile" ] && return 0
     local marker="=== ${key} ==="
 
+    # Each section ends with a trailing blank line for readability
     local tmpblock; tmpblock=$(mktemp)
-    printf '%s\n%s\n' "$marker" "$content" > "$tmpblock"
+    printf '%s\n%s\n\n' "$marker" "$content" > "$tmpblock"
 
     if [ ! -f "$outfile" ]; then
         mv "$tmpblock" "$outfile"
+        _rebuild_npc_spawn_header
         [ "$quiet" != "--quiet" ] && print_info "📋 In-game commands reference created: $outfile"
         return 0
     fi
@@ -708,10 +800,10 @@ upsert_mod_commands() {
         !skip { print }
         ' "$outfile" > "$tmpout" && mv "$tmpout" "$outfile"
     else
-        printf '\n' >> "$outfile"
         cat "$tmpblock" >> "$outfile"
     fi
     rm -f "$tmpblock"
+    _rebuild_npc_spawn_header
     [ "$quiet" != "--quiet" ] && print_info "📋 In-game commands reference updated: $outfile"
 }
 
@@ -729,6 +821,7 @@ remove_mod_commands() {
     skip && /^=== .+ ===$/ { skip=0 }
     !skip { print }
     ' "$outfile" > "$tmpout" && mv "$tmpout" "$outfile"
+    _rebuild_npc_spawn_header
     print_info "📋 Removed $key from in-game commands reference."
 }
 
@@ -745,34 +838,7 @@ show_ingame_commands() {
         return
     fi
 
-    echo ""
-    echo -e "  ${GOLD}${BOLD}In-Game Commands Reference${RST}"
-    echo -e "  ${GOLD}══════════════════════════════════════════════${RST}"
-    echo -e "  ${DIM}Source: $outfile${RST}"
-    echo ""
-
-    while IFS= read -r line; do
-        if [[ "$line" == "=== "* ]]; then
-            echo -e "\n  ${GOLD}${BOLD}${line}${RST}"
-        elif [[ "$line" == "Commands:"* ]] || [[ "$line" == "NPC Spawn Commands"* ]]; then
-            echo -e "  ${WHITE}${BOLD}${line}${RST}"
-        elif [[ "$line" == "."* ]] || [[ "$line" == "[GM]"* ]] || \
-             [[ "$line" == "[ADMIN]"* ]] || [[ "$line" == "npc add"* ]]; then
-            echo -e "  ${CYAN}${line}${RST}"
-        elif [[ "$line" == "(none"* ]] || [[ "$line" == "WARNING:"* ]] || \
-             [[ "$line" == "NOTICE:"* ]]; then
-            echo -e "  ${YELLOW}${line}${RST}"
-        elif [[ -z "$line" ]]; then
-            echo ""
-        else
-            echo -e "  ${line}"
-        fi
-    done < "$outfile"
-
-    echo ""
-    echo -e "  ${DIM}Full file: $outfile${RST}"
-    echo ""
-    press_enter
+    with_full_screen nano "$outfile"
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -1243,15 +1309,15 @@ declare -a MODULE_UPDATE_FILES=(
 # inside ale_script_install() and the configure_ale_* functions.
 declare -a ALE_SCRIPT_REGISTRY=(
     "accountwide|Accountwide Systems (achievements, currency, mounts, pets)|https://github.com/Aldori15/azerothcore-eluna-accountwide.git"
-    "levelupreward|Level Up Reward (mail gold/items on level-up)|https://github.com/55Honey/Acore_LevelUpReward.git"
-    "exchangenpc|Exchange NPC (configurable item-exchange vendor NPC)|https://github.com/55Honey/Acore_ExchangeNpc.git"
     "activechat|Active Chat (simulated world/guild chat for immersion)|https://github.com/Day36512/ActiveChat.git"
     "battlepass|Battle Pass System (XP progression + rewards + client addon)|https://github.com/Shonik/lua-battlepass.git"
-    "paragon|Paragon Anniversary (endless post-80 stat progression + client addon)|https://github.com/Grim-Batol/Paragon-Anniversary.git"
     "bmah|Black Market Auction House (MoP-style BMAH + client addon)|https://github.com/Youpeoples/Black-Market-Auction-House.git"
+    "exchangenpc|Exchange NPC (configurable item-exchange vendor NPC)|https://github.com/55Honey/Acore_ExchangeNpc.git"
+    "levelupreward|Level Up Reward (mail gold/items on level-up)|https://github.com/55Honey/Acore_LevelUpReward.git"
     "lootpet|Loot Pet (vanity pet auto-loots nearby corpses)|https://github.com/Brytenwally/Lootpet.git"
-    "sod|Season of Discovery Buffs (phased leveling XP rate bonus)|https://github.com/notepadguyOfficial/acore_sod.git"
+    "paragon|Paragon Anniversary (endless post-80 stat progression + client addon)|https://github.com/Grim-Batol/Paragon-Anniversary.git"
     "sitmeanrest|Sit Means Rest (regen buff on /sit; strips on movement)|https://github.com/Brytenwally/SitMeansRest.git"
+    "sod|Season of Discovery Buffs (phased leveling XP rate bonus)|https://github.com/notepadguyOfficial/acore_sod.git"
     "unlimitedammo|Unlimited Ammo (auto-refills Hunter arrows/bullets)|https://github.com/Day36512/Acore_Lua_Unlimited_Ammo.git"
 )
 
@@ -1265,17 +1331,17 @@ declare -a ALE_SCRIPT_REGISTRY=(
 #   tweak_world       — inline SQL tweaks on acore_world (no clone needed)
 #   conf_xp           — edits worldserver.conf XP rate settings (no DB change)
 declare -a SQL_MOD_REGISTRY=(
+    "all-stackables|All Stackables to 200|https://github.com/AsgavinYT/azerothcore-all-stackables-200.git|clone_sql"
+    "baby-mobs|Baby Mobs (HP×0.25 / DMG×0.25 / ARM×0.25)||tweak_world"
+    "buff-mobs|Buff Mobs (HP×2 / DMG×1.5 / ARM×1.5)||tweak_world"
+    "custom-login|Custom Login (starter gear + rep on first login)|https://github.com/azerothcore/mod-custom-login.git|conf_module"
+    "xbuff-mobs|Extreme Buff Mobs (HP×4 / DMG×2 / ARM×2)||tweak_world"
+    "hearthstone-cd|Hearthstone Cooldown Tweaks|https://github.com/AsgavinYT/hearthstone-cooldowns.git|clone_sql_pick"
+    "lvl1-mounts|Level One Mounts (ride at level 1)|https://github.com/tomcoffingiii/mod-level-one-mounts.git|clone_sql"
+    "nerf-mobs|Nerf Mobs (HP×0.5 / DMG×0.75 / ARM×0.75)||tweak_world"
+    "npc-teleporter|NPC Teleporter (capital + starting zones)|https://github.com/Zoidwaffle/sql-npc-teleporter.git|clone_dist"
     "portals-capitals|Portals in All Capitals|https://github.com/azerothcore/portals-in-all-capitals.git|clone_sql"
     "rare-drops|Rare Drops (450 Classic rares loot)|https://github.com/StraysFromPath/mod-rare-drops.git|clone_sql_norevert"
-    "lvl1-mounts|Level One Mounts (ride at level 1)|https://github.com/tomcoffingiii/mod-level-one-mounts.git|clone_sql"
-    "all-stackables|All Stackables to 200|https://github.com/AsgavinYT/azerothcore-all-stackables-200.git|clone_sql"
-    "custom-login|Custom Login (starter gear + rep on first login)|https://github.com/azerothcore/mod-custom-login.git|conf_module"
-    "npc-teleporter|NPC Teleporter (capital + starting zones)|https://github.com/Zoidwaffle/sql-npc-teleporter.git|clone_dist"
-    "hearthstone-cd|Hearthstone Cooldown Tweaks|https://github.com/AsgavinYT/hearthstone-cooldowns.git|clone_sql_pick"
-    "buff-mobs|Buff Mobs (HP×2 / DMG×1.5 / ARM×1.5)||tweak_world"
-    "xbuff-mobs|Extreme Buff Mobs (HP×4 / DMG×2 / ARM×2)||tweak_world"
-    "nerf-mobs|Nerf Mobs (HP×0.5 / DMG×0.75 / ARM×0.75)||tweak_world"
-    "baby-mobs|Baby Mobs (HP×0.25 / DMG×0.25 / ARM×0.25)||tweak_world"
     "xp-rates|XP Rate Customization (Kill/Quest/Explore)||conf_xp"
 )
 
@@ -1919,7 +1985,7 @@ configure_module_challenge_modes() {
 
     print_info "⚠  Challenge Modes requires  EnablePlayerSettings = 1  in worldserver.conf."
     echo ""
-    ${EDITOR:-nano} "$conf_dest"
+    nano "$conf_dest"
     echo ""
     print_info "Restart the worldserver for conf changes to take effect."
 }
@@ -1956,7 +2022,7 @@ configure_module_bot_level_brackets() {
 
     print_info "⚠  Bot Level Brackets requires the Playerbots module to function."
     echo ""
-    ${EDITOR:-nano} "$conf_dest"
+    nano "$conf_dest"
     echo ""
     print_info "Restart the worldserver for conf changes to take effect."
 }
@@ -1994,7 +2060,7 @@ configure_module_npc_beastmaster() {
     print_info "Tip: Add 601026 to Creatures.CustomIDs in worldserver.conf to suppress"
     print_info "     a harmless gossip-menu warning in server logs."
     echo ""
-    ${EDITOR:-nano} "$conf_dest"
+    nano "$conf_dest"
     echo ""
     print_info "Restart the worldserver for conf changes to take effect."
 }
@@ -3910,8 +3976,8 @@ configure_sqlmod_custom_login() {
             print_error "Config not found. Install mod first."; press_enter; return
         fi
     fi
-    print_info "Opening mod_customlogin.conf in ${EDITOR:-vi}..."
-    "${EDITOR:-vi}" "$conf_dest"
+    print_info "Opening mod_customlogin.conf in nano..."
+    nano "$conf_dest"
 }
 
 configure_sqlmod_tweak() {
@@ -4334,6 +4400,7 @@ show_about() {
 # ── ALE Scripts submenu ───────────────────────────────────────
 menu_ale_scripts() {
     local page_start=0
+    _setup_screen
     while true; do
         if [ "$_RESIZE_NEEDED" = true ]; then
             _RESIZE_NEEDED=false
@@ -4517,6 +4584,7 @@ menu_ale_scripts() {
 # ENTER     Return to main menu
 menu_modules() {
     local page_start=0
+    _setup_screen
     while true; do
         if [ "$_RESIZE_NEEDED" = true ]; then
             _RESIZE_NEEDED=false
@@ -5002,6 +5070,7 @@ _module_conf_hints() {
 # Show unified module list with conf status and actions for managing conf files
 menu_module_management() {
     local page_start=0
+    _setup_screen
     while true; do
         if [ "$_RESIZE_NEEDED" = true ]; then
             _RESIZE_NEEDED=false
@@ -5153,7 +5222,7 @@ menu_module_management() {
                             continue
                         fi
                     fi
-                    ${EDITOR:-nano} "$conf_active"
+                    nano "$conf_active"
                     print_info "Restart worldserver to apply."
                     press_enter
                     continue
@@ -5297,6 +5366,7 @@ show_first_run_welcome() {
 menu_sql_mods() {
     sqlmod_init
     local page_start=0
+    _setup_screen
     while true; do
         if [ "$_RESIZE_NEEDED" = true ]; then
             _RESIZE_NEEDED=false
@@ -5428,6 +5498,7 @@ menu_sql_mods() {
 
 # ── Server Maintenance submenu ───────────────────────────────
 menu_server_maintenance() {
+    _setup_screen
     while true; do
         if [ "$_RESIZE_NEEDED" = true ]; then
             _RESIZE_NEEDED=false
@@ -5583,11 +5654,12 @@ _maintenance_import() {
 }
 
 main_menu() {
+    _IN_MENU=true
+    _setup_screen
+    printf '\033[%d;1H\033[J' "$MENU_START_ROW"
     while true; do
-        if [ "$_RESIZE_NEEDED" = true ]; then
-            _RESIZE_NEEDED=false
-            _setup_screen
-        fi
+        _RESIZE_NEEDED=false
+        _setup_screen
         refresh_container_names
         local state_str build_str
         if container_running "$WORLD_CONTAINER"; then
