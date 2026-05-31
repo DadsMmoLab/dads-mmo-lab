@@ -519,7 +519,7 @@ server_start() {
             print_info "Most common causes and fixes:"
             print_info ""
             print_info "  • ${CYAN}'Table X already exists' errors${RST}: a previous module install"
-            print_info "    corrupted update tracking. Use menu option 12 (Repair install state)."
+            print_info "    corrupted update tracking. Use option 13 → Server Maintenance → Repair install state."
             print_info ""
             print_info "  • ${CYAN}'Permission denied' errors${RST}: UID/GID mismatch on env/dist."
             print_info "    Run: sudo chown -R 1000:1000 env/dist/etc env/dist/logs"
@@ -2952,14 +2952,25 @@ _sqlmod_remove_npc_teleporter() {
 _sqlmod_remove_tweak() {
     local key="$1" name="$2"
     local marker_file="$SQLMOD_MARKER_DIR/$key.installed"
-    local h_mult=1 d_mult=1 a_mult=1 spd_mult=1
+
+    # Known defaults per tweak (fallback if marker lacks APPLIED_* values)
+    local def_h def_d def_a def_spd
+    case "$key" in
+        buff-mobs)  def_h=2;    def_d=1.5;  def_a=1.5;  def_spd=0.8 ;;
+        xbuff-mobs) def_h=4;    def_d=2;    def_a=2;    def_spd=0.5 ;;
+        nerf-mobs)  def_h=0.5;  def_d=0.75; def_a=0.75; def_spd=1.2 ;;
+        baby-mobs)  def_h=0.25; def_d=0.25; def_a=0.25; def_spd=1.5 ;;
+        *) def_h=1; def_d=1; def_a=1; def_spd=1 ;;
+    esac
+
+    local h_mult="$def_h" d_mult="$def_d" a_mult="$def_a" spd_mult="$def_spd"
     if [ -f "$marker_file" ]; then
         # shellcheck source=/dev/null
         source "$marker_file"
-        h_mult="${APPLIED_HP_MULT:-1}"
-        d_mult="${APPLIED_DMG_MULT:-1}"
-        a_mult="${APPLIED_ARM_MULT:-1}"
-        spd_mult="${APPLIED_SPD_MULT:-1}"
+        h_mult="${APPLIED_HP_MULT:-$def_h}"
+        d_mult="${APPLIED_DMG_MULT:-$def_d}"
+        a_mult="${APPLIED_ARM_MULT:-$def_a}"
+        spd_mult="${APPLIED_SPD_MULT:-$def_spd}"
     fi
 
     local inv_h inv_d inv_a inv_spd
@@ -3180,10 +3191,11 @@ configure_sqlmod_tweak() {
     [ -z "$new_a" ]   && new_a="$cur_a"
     [ -z "$new_spd" ] && new_spd="$cur_spd"
 
-    # Validate: must be positive numbers (required for safe reversal)
+    # Validate: must be positive numeric literals (regex + value check)
     local invalid=false
     for v in "$new_h" "$new_d" "$new_a" "$new_spd"; do
-        if ! awk "BEGIN{exit !($v > 0)}" 2>/dev/null; then invalid=true; fi
+        if ! [[ "$v" =~ ^[0-9]+([.][0-9]+)?$ ]] || \
+           ! awk "BEGIN{exit !($v > 0)}" 2>/dev/null; then invalid=true; fi
     done
     if $invalid; then
         print_error "All multipliers must be positive numbers greater than 0."
@@ -3224,10 +3236,11 @@ configure_sqlmod_xprates() {
     [ -z "$new_quest" ]   && new_quest="$cur_quest"
     [ -z "$new_explore" ] && new_explore="$cur_explore"
 
-    # Validate: must be positive numbers
+    # Validate: must be positive numeric literals (regex + value check)
     local invalid=false
     for v in "$new_kill" "$new_quest" "$new_explore"; do
-        if ! awk "BEGIN{exit !($v > 0)}" 2>/dev/null; then invalid=true; fi
+        if ! [[ "$v" =~ ^[0-9]+([.][0-9]+)?$ ]] || \
+           ! awk "BEGIN{exit !($v > 0)}" 2>/dev/null; then invalid=true; fi
     done
     if $invalid; then
         print_error "XP multipliers must be positive numbers greater than 0."
@@ -3979,7 +3992,7 @@ show_first_run_welcome() {
     echo -e "${WHITE}    On Steam Deck this takes 30-90 minutes. Plug in and${RST}"
     echo -e "${WHITE}    keep the device on a flat surface for airflow.${RST}"
     echo ""
-    echo -e "${GREEN}  ✓${RST} ${WHITE}The repair function (option 12) only clears SQL update${RST}"
+    echo -e "${GREEN}  ✓${RST} ${WHITE}The repair function (option 13 → Server Maintenance) only clears SQL update${RST}"
     echo -e "${WHITE}    tracking rows. It never drops database tables.${RST}"
     echo ""
     if [ "$user_module_count" -eq 0 ]; then
@@ -4132,6 +4145,158 @@ menu_sql_mods() {
     done
 }
 
+# ── Server Maintenance submenu ───────────────────────────────
+menu_server_maintenance() {
+    while true; do
+        printf '\033[%d;1H\033[J' "$MENU_START_ROW"
+        printf "  ${GOLD}${BOLD}Server Maintenance${RST}\n"
+        printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
+        printf "  ${WHITE}1)${RST} Repair install state\n"
+        printf "  ${WHITE}2)${RST} Backup databases\n"
+        printf "  ${WHITE}3)${RST} Restore / import a backup\n"
+        printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
+        printf "  ${DIM}  [ENTER] Back${RST}\n"
+
+        local _tlines; _tlines=$(tput lines 2>/dev/null || echo 24)
+        _read_menu_input "$(( _tlines - 1 ))"
+        local choice="${_MENU_INPUT,,}"
+
+        case "$choice" in
+            1) repair_install_state; press_enter ;;
+            2) _maintenance_backup_all; press_enter ;;
+            3) _maintenance_import ;;
+            "") return ;;
+            *) print_warning "Enter 1–3 or ENTER to go back."; press_enter ;;
+        esac
+    done
+}
+
+_maintenance_backup_all() {
+    sqlmod_init
+    if ! container_running "$DB_CONTAINER"; then
+        print_error "Database container is not running."
+        return 1
+    fi
+    printf '\033[%d;1H\033[J' "$MENU_START_ROW"
+    printf "  ${GOLD}── Database Backup ──${RST}\n\n"
+    local ts; ts=$(date +%Y%m%d_%H%M%S)
+    local failed=0
+    for db in acore_world acore_characters acore_auth; do
+        local bfile="$SQLMOD_BACKUP_DIR/${ts}_${db}.sql.gz"
+        print_info "Backing up ${db} → $(basename "$bfile") ..."
+        if docker exec "$DB_CONTAINER" mysqldump -uroot -p"$DB_ROOT_PASSWORD" "$db" \
+           2>/dev/null | gzip > "$bfile"; then
+            print_success "  ✓ $db"
+        else
+            rm -f "$bfile"
+            print_error "  ✗ $db backup failed"
+            failed=1
+        fi
+    done
+    printf "\n"
+    if [ "$failed" -eq 0 ]; then
+        print_success "All databases backed up to: $SQLMOD_BACKUP_DIR"
+    else
+        print_warning "Some backups failed. Check that the DB container is healthy."
+    fi
+    printf "\n  ${DIM}Backups are .sql.gz files — restore via option 3 in this menu.${RST}\n"
+}
+
+_maintenance_import() {
+    sqlmod_init
+    if ! container_running "$DB_CONTAINER"; then
+        print_error "Database container is not running."
+        press_enter; return
+    fi
+
+    printf '\033[%d;1H\033[J' "$MENU_START_ROW"
+    printf "  ${GOLD}── Restore / Import Backup ──${RST}\n\n"
+
+    # List available backups sorted newest-first
+    local -a files=()
+    while IFS= read -r f; do files+=("$f"); done < <(
+        ls -t "$SQLMOD_BACKUP_DIR"/*.sql.gz 2>/dev/null
+    )
+
+    if [ "${#files[@]}" -eq 0 ]; then
+        print_warning "No backups found in $SQLMOD_BACKUP_DIR"
+        print_info "Run option 2 first to create a backup."
+        press_enter; return
+    fi
+
+    printf "  ${DIM}Available backups (newest first):${RST}\n\n"
+    local i=1
+    for f in "${files[@]}"; do
+        local sz; sz=$(du -h "$f" 2>/dev/null | awk '{print $1}')
+        printf "  ${WHITE}%2d)${RST} %s  ${DIM}(%s)${RST}\n" "$i" "$(basename "$f")" "$sz"
+        (( i++ ))
+    done
+    printf "\n  ${DIM}Or enter a full path to a .sql or .sql.gz file.${RST}\n"
+    printf "\n  ${WHITE}Select [1-%d] or path (B to cancel): ${RST}" "${#files[@]}"
+    local sel; read -r sel
+    [ "${sel,,}" = "b" ] || [ -z "$sel" ] && return
+
+    local chosen_file
+    if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le "${#files[@]}" ]; then
+        chosen_file="${files[$((sel - 1))]}"
+    elif [ -f "$sel" ]; then
+        chosen_file="$sel"
+    else
+        print_error "Invalid selection."; press_enter; return
+    fi
+
+    # Determine target database from filename
+    local target_db=""
+    local fname; fname="$(basename "$chosen_file")"
+    if [[ "$fname" == *acore_world* ]];      then target_db="acore_world"
+    elif [[ "$fname" == *acore_characters* ]]; then target_db="acore_characters"
+    elif [[ "$fname" == *acore_auth* ]];       then target_db="acore_auth"
+    fi
+
+    if [ -z "$target_db" ]; then
+        printf "\n  ${WHITE}Target database (acore_world / acore_characters / acore_auth): ${RST}"
+        read -r target_db
+        if [[ ! "$target_db" =~ ^acore_(world|characters|auth)$ ]]; then
+            print_error "Invalid database name."; press_enter; return
+        fi
+    fi
+
+    printf "\n"
+    print_warning "This will OVERWRITE ${target_db} with data from: $(basename "$chosen_file")"
+    print_warning "Make sure you have a fresh backup before restoring!"
+    if ! ask_yes_no "Restore ${target_db} from this backup?"; then return; fi
+
+    # Take a safety backup before overwriting
+    print_info "Taking safety backup of current ${target_db} before restore..."
+    local ts; ts=$(date +%Y%m%d_%H%M%S)
+    local safefile="$SQLMOD_BACKUP_DIR/${ts}_pre_restore_${target_db}.sql.gz"
+    if docker exec "$DB_CONTAINER" mysqldump -uroot -p"$DB_ROOT_PASSWORD" "$target_db" \
+       2>/dev/null | gzip > "$safefile"; then
+        print_success "Safety backup: $(basename "$safefile")"
+    else
+        rm -f "$safefile"
+        print_warning "Safety backup failed — proceeding anyway (you accepted the risk)."
+    fi
+
+    print_info "Restoring ${target_db} from $(basename "$chosen_file")..."
+    if [[ "$chosen_file" == *.gz ]]; then
+        if gzip -dc "$chosen_file" | docker exec -i "$DB_CONTAINER" \
+           mysql -uroot -p"$DB_ROOT_PASSWORD" "$target_db" 2>&1; then
+            print_success "Restore complete!"
+        else
+            print_error "Restore failed. Check the file and try again."
+        fi
+    else
+        if docker exec -i "$DB_CONTAINER" \
+           mysql -uroot -p"$DB_ROOT_PASSWORD" "$target_db" < "$chosen_file" 2>&1; then
+            print_success "Restore complete!"
+        else
+            print_error "Restore failed. Check the file and try again."
+        fi
+    fi
+    press_enter
+}
+
 main_menu() {
     while true; do
         refresh_container_names
@@ -4168,7 +4333,7 @@ main_menu() {
         printf "  ${WHITE}10)${RST} Restart server\n"
         printf "  ${WHITE}11)${RST} View logs\n"
         printf "  ${WHITE}12)${RST} Attach to console\n"
-        printf "  ${WHITE}13)${RST} Repair install state\n"
+        printf "  ${WHITE}13)${RST} Server maintenance\n"
         printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
         printf "  ${GOLD} Q)${RST} Quit\n"
 
@@ -4191,7 +4356,7 @@ main_menu() {
             10) server_restart; press_enter ;;
             11) with_full_screen server_logs ;;
             12) with_full_screen server_attach ;;
-            13) repair_install_state; press_enter ;;
+            13) menu_server_maintenance ;;
             q)  echo ""; print_info "Goodbye!"; exit 0 ;;
         esac
     done
