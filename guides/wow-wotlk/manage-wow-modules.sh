@@ -698,6 +698,8 @@ declare -a ALE_SCRIPT_REGISTRY=(
     "bmah|Black Market Auction House (MoP-style BMAH + client addon)|https://github.com/Youpeoples/Black-Market-Auction-House.git"
     "lootpet|Loot Pet (vanity pet auto-loots nearby corpses)|https://github.com/Brytenwally/Lootpet.git"
     "sod|Season of Discovery Buffs (phased leveling XP rate bonus)|https://github.com/notepadguyOfficial/acore_sod.git"
+    "sitmeanrest|Sit Means Rest (regen buff on /sit; strips on movement)|https://github.com/Brytenwally/SitMeansRest.git"
+    "unlimitedammo|Unlimited Ammo (auto-refills Hunter arrows/bullets)|https://github.com/Day36512/Acore_Lua_Unlimited_Ammo.git"
 )
 
 # Discover the actual SQL filenames in a module's sql dir.
@@ -1341,6 +1343,8 @@ ale_lua_is_deployed() {
         sod)           ls "$lua_dir"/sod*.lua &>/dev/null 2>&1 || \
                        ls "$lua_dir"/SoD*.lua &>/dev/null 2>&1 || \
                        ls "$lua_dir"/season*.lua &>/dev/null 2>&1 ;;
+        sitmeanrest)   [ -f "$lua_dir/SitMeansRest.lua" ] ;;
+        unlimitedammo) [ -f "$lua_dir/UnlimitedAmmo.lua" ] ;;
         *)             false ;;
     esac
 }
@@ -1499,6 +1503,145 @@ configure_ale_paragon() {
     echo -e "  ${CYAN}Destination:${RST} <WoW_Client>/Interface/AddOns/ParagonAnniversary/"
     echo ""
     echo -e "${DIM}The addon communicates with the server via the ParagonAnniversary protocol.${RST}"
+}
+
+# ─────────────────────────────────────────────────────────────
+# SIT MEANS REST CONFIGURATION
+# ─────────────────────────────────────────────────────────────
+
+# Generic single-expression sed patcher using a temp-file rewrite.
+# Portable across macOS (BSD sed) and Linux (GNU sed).
+# Usage: _sed_patch_config <file> <sed_expression> <description>
+_sed_patch_config() {
+    local file="$1" expr="$2" desc="${3:-config value}"
+    local _spc_tmp
+    _spc_tmp=$(mktemp "${TMPDIR:-/tmp}/ale_cfg_XXXXXX") || {
+        print_warning "  mktemp failed; cannot patch ${desc}."
+        return 1
+    }
+    if sed "$expr" "$file" > "$_spc_tmp" && [ -s "$_spc_tmp" ]; then
+        mv "$_spc_tmp" "$file"
+        return 0
+    fi
+    rm -f "$_spc_tmp"
+    print_warning "  Could not patch ${desc} in $(basename "$file") — edit manually."
+    return 1
+}
+
+configure_ale_sitmeanrest() {
+    local lua_dir
+    lua_dir=$(ale_lua_scripts_dir)
+    local deployed="$lua_dir/SitMeansRest.lua"
+
+    print_step "Sit Means Rest — Configuration"
+
+    if [ ! -f "$deployed" ]; then
+        print_error "SitMeansRest.lua not found at: $deployed"
+        print_info "Install first from the ALE Scripts menu."
+        return 1
+    fi
+
+    echo ""
+    echo -e "${WHITE}Players type ${CYAN}/sit${WHITE} out of combat to receive a regen buff.${RST}"
+    echo -e "${WHITE}Moving or standing up removes the buff immediately.${RST}"
+    echo ""
+
+    echo -e "${DIM}Current CONFIG values in SitMeansRest.lua:${RST}"
+    grep -E "DURATION|REGEN_AURA" "$deployed" | grep -v "^[[:space:]]*--" | sed 's/^/  /'
+    echo ""
+
+    # DURATION
+    printf "${WHITE}Rest duration in seconds [default 20, ENTER to keep]: ${RST}"
+    read -r _smr_dur
+    if [[ "$_smr_dur" =~ ^[0-9]+$ ]] && [ "$_smr_dur" -gt 0 ]; then
+        _sed_patch_config "$deployed" \
+            "s/\(DURATION[[:space:]]*=[[:space:]]*\)[0-9]*/\1${_smr_dur}/" \
+            "DURATION" && print_success "  DURATION → ${_smr_dur}s"
+    elif [ -n "$_smr_dur" ]; then
+        print_warning "  '${_smr_dur}' is not a valid positive integer — keeping current."
+    fi
+
+    # REGEN_AURA
+    echo ""
+    echo -e "${WHITE}Regen aura spell ID applied while resting.${RST}"
+    echo -e "${DIM}Default 25990 = Graccu's Fruitcake (restores health + mana for all levels).${RST}"
+    printf "${WHITE}Spell ID [ENTER to keep current]: ${RST}"
+    read -r _smr_aura
+    if [[ "$_smr_aura" =~ ^[0-9]+$ ]] && [ "$_smr_aura" -gt 0 ]; then
+        _sed_patch_config "$deployed" \
+            "s/\(REGEN_AURA[[:space:]]*=[[:space:]]*\)[0-9]*/\1${_smr_aura}/" \
+            "REGEN_AURA" && print_success "  REGEN_AURA → ${_smr_aura}"
+    elif [ -n "$_smr_aura" ]; then
+        print_warning "  '${_smr_aura}' is not a valid spell ID — keeping current."
+    fi
+
+    echo ""
+    print_info "No SQL required — drop-in script."
+    print_info "Reload with ${CYAN}.reload ale${RST} in-game or restart the worldserver."
+}
+
+# ─────────────────────────────────────────────────────────────
+# UNLIMITED AMMO CONFIGURATION
+# ─────────────────────────────────────────────────────────────
+
+configure_ale_unlimitedammo() {
+    local lua_dir
+    lua_dir=$(ale_lua_scripts_dir)
+    local deployed="$lua_dir/UnlimitedAmmo.lua"
+
+    print_step "Unlimited Ammo — Configuration"
+
+    if [ ! -f "$deployed" ]; then
+        print_error "UnlimitedAmmo.lua not found at: $deployed"
+        print_info "Install first from the ALE Scripts menu."
+        return 1
+    fi
+
+    echo ""
+    echo -e "${WHITE}Auto-refills arrows/bullets for Hunters when ammo drops below the threshold.${RST}"
+    echo -e "${WHITE}Supports all ammo types for bows, guns, and crossbows.${RST}"
+    echo -e "${GOLD}The script ships with ENABLED = false — it must be enabled to function.${RST}"
+    echo ""
+
+    echo -e "${DIM}Current configuration in UnlimitedAmmo.lua:${RST}"
+    grep -E "^UnlimitedAmmoNamespace\.(ENABLED|MAX_AMMO|MIN_AMMO)" "$deployed" | sed 's/^/  /'
+    echo ""
+
+    # ENABLED
+    if ask_yes_no "Enable Unlimited Ammo by default (set ENABLED = true in the file)?"; then
+        _sed_patch_config "$deployed" \
+            "s/\(UnlimitedAmmoNamespace\.ENABLED[[:space:]]*=[[:space:]]*\)false/\1true/" \
+            "ENABLED" && print_success "  ENABLED → true"
+    fi
+
+    # MAX_AMMO
+    echo ""
+    printf "${WHITE}Maximum ammo to maintain [default 1000, ENTER to keep]: ${RST}"
+    read -r _ua_max
+    if [[ "$_ua_max" =~ ^[0-9]+$ ]] && [ "$_ua_max" -gt 0 ]; then
+        _sed_patch_config "$deployed" \
+            "s/\(UnlimitedAmmoNamespace\.MAX_AMMO[[:space:]]*=[[:space:]]*\)[0-9]*/\1${_ua_max}/" \
+            "MAX_AMMO" && print_success "  MAX_AMMO → ${_ua_max}"
+    elif [ -n "$_ua_max" ]; then
+        print_warning "  '${_ua_max}' is not a valid positive integer — keeping current."
+    fi
+
+    # MIN_AMMO_THRESHOLD
+    echo ""
+    printf "${WHITE}Refill threshold — top up when ammo drops below this [default 52, ENTER to keep]: ${RST}"
+    read -r _ua_min
+    if [[ "$_ua_min" =~ ^[0-9]+$ ]] && [ "$_ua_min" -gt 0 ]; then
+        _sed_patch_config "$deployed" \
+            "s/\(UnlimitedAmmoNamespace\.MIN_AMMO_THRESHOLD[[:space:]]*=[[:space:]]*\)[0-9]*/\1${_ua_min}/" \
+            "MIN_AMMO_THRESHOLD" && print_success "  MIN_AMMO_THRESHOLD → ${_ua_min}"
+    elif [ -n "$_ua_min" ]; then
+        print_warning "  '${_ua_min}' is not a valid positive integer — keeping current."
+    fi
+
+    echo ""
+    print_info "GM command ${CYAN}.ua${RST} enables the script at runtime (resets to file default on restart)."
+    print_info "No SQL required — drop-in script."
+    print_info "Reload with ${CYAN}.reload ale${RST} in-game or restart the worldserver."
 }
 
 # Return 0 if $1 is already in the remaining args; used for dedup in
@@ -2087,6 +2230,24 @@ ale_deploy_lua_files() {
                 print_warning "No .lua files found in clone root — check $clone_dir"
             fi
             ;;
+        sitmeanrest)
+            if [ -f "$clone_dir/SitMeansRest.lua" ]; then
+                cp "$clone_dir/SitMeansRest.lua" "$lua_dir/" && \
+                    print_success "Deployed SitMeansRest.lua → lua_scripts/" || \
+                    print_warning "Copy failed"
+            else
+                print_warning "SitMeansRest.lua not found in $clone_dir"
+            fi
+            ;;
+        unlimitedammo)
+            if [ -f "$clone_dir/UnlimitedAmmo.lua" ]; then
+                cp "$clone_dir/UnlimitedAmmo.lua" "$lua_dir/" && \
+                    print_success "Deployed UnlimitedAmmo.lua → lua_scripts/" || \
+                    print_warning "Copy failed"
+            else
+                print_warning "UnlimitedAmmo.lua not found in $clone_dir"
+            fi
+            ;;
         *)
             if cp "$clone_dir"/*.lua "$lua_dir/" 2>/dev/null; then
                 print_success "Deployed → lua_scripts/ (generic copy)"
@@ -2201,6 +2362,24 @@ ale_script_install() {
                 configure_ale_bmah
             fi
             ;;
+        sitmeanrest)
+            echo ""
+            if ask_yes_no "Configure Sit Means Rest (duration, regen spell) now?"; then
+                configure_ale_sitmeanrest
+            else
+                print_info "Reconfigure anytime from the ALE Scripts menu → c on Sit Means Rest."
+            fi
+            ;;
+        unlimitedammo)
+            echo ""
+            print_warning "The script ships with ENABLED = false — configure to activate it."
+            if ask_yes_no "Configure Unlimited Ammo (enable + ammo thresholds) now?"; then
+                configure_ale_unlimitedammo
+            else
+                print_info "Reconfigure anytime from the ALE Scripts menu → c on Unlimited Ammo."
+                print_info "Or use the in-game GM command ${CYAN}.ua${RST} to enable at runtime."
+            fi
+            ;;
     esac
 
     echo ""
@@ -2247,6 +2426,8 @@ ale_script_remove() {
         paragon)     deployed_hint="$lua_dir/paragon/" ;;
         bmah)        deployed_hint="$lua_dir/bmah_server.lua" ;;
         lootpet)     deployed_hint="$lua_dir/LootPet.lua" ;;
+        sitmeanrest)  deployed_hint="$lua_dir/SitMeansRest.lua" ;;
+        unlimitedammo) deployed_hint="$lua_dir/UnlimitedAmmo.lua" ;;
         *)           deployed_hint="$lua_dir/ (search for files from this script)" ;;
     esac
 
@@ -2260,6 +2441,8 @@ ale_script_remove() {
             paragon)     rm -rf "$lua_dir/paragon" ;;
             bmah)        rm -f  "$lua_dir/bmah_server.lua" ;;
             lootpet)     rm -f  "$lua_dir/LootPet.lua" ;;
+            sitmeanrest)   rm -f "$lua_dir/SitMeansRest.lua" ;;
+            unlimitedammo) rm -f "$lua_dir/UnlimitedAmmo.lua" ;;
             levelupreward|exchangenpc|sod)
                 local f
                 for f in "${generic_deployed_files[@]}"; do
@@ -2419,6 +2602,8 @@ menu_ale_scripts() {
                     battlepass) configure_ale_battlepass ;;
                     paragon)    configure_ale_paragon ;;
                     bmah)       configure_ale_bmah ;;
+                    sitmeanrest)   configure_ale_sitmeanrest ;;
+                    unlimitedammo) configure_ale_unlimitedammo ;;
                     *) print_info "No dedicated reconfigure for $name." ;;
                 esac
                 press_enter
