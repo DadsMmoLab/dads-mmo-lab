@@ -1501,6 +1501,15 @@ configure_ale_paragon() {
     echo -e "${DIM}The addon communicates with the server via the ParagonAnniversary protocol.${RST}"
 }
 
+# Return 0 if $1 is already in the remaining args; used for dedup in
+# configure_ale_bmah without associative arrays (Bash 3 / macOS compatible).
+_bmah_in_list() {
+    local needle="$1"; shift
+    local item
+    for item in "$@"; do [ "$item" = "$needle" ] && return 0; done
+    return 1
+}
+
 configure_ale_bmah() {
     local clone_dir
     clone_dir=$(ale_script_clone_dir "bmah")
@@ -1519,14 +1528,6 @@ configure_ale_bmah() {
                           "Baron Vardus"
                           "Count Remo" )
 
-    # Return 0 if $1 is already in the remaining args; used for dedup without
-    # associative arrays so this stays Bash 3 / macOS compatible.
-    _bmah_in_list() {
-        local needle="$1"; shift
-        local item
-        for item in "$@"; do [ "$item" = "$needle" ] && return 0; done
-        return 1
-    }
 
     print_step "Black Market AH — NPC Vendor Configuration"
     echo ""
@@ -1554,7 +1555,7 @@ configure_ale_bmah() {
     # ── Show current IDs extracted from the file ──────────────
     local current_ids
     current_ids=$(awk '
-        /local BMAH_VENDOR_NPCs[[:space:]]*=/ { found=1 }
+        /^[[:space:]]*local BMAH_VENDOR_NPCs[[:space:]]*=/ { found=1 }
         found {
             tmp = $0
             gsub(/--[^\n]*/, "", tmp)   # strip line comments
@@ -1600,7 +1601,9 @@ configure_ale_bmah() {
     local -a sel_ids=()
     local -a sel_names=()
 
-    if [[ "${_bsel,,}" == "all" ]]; then
+    local _bsel_lower
+    _bsel_lower=$(printf '%s' "$_bsel" | tr '[:upper:]' '[:lower:]')
+    if [ "$_bsel_lower" = "all" ]; then
         sel_ids=("${BNPC_IDS[@]}")
         sel_names=("${BNPC_NAMES[@]}")
     elif [ -n "$_bsel" ]; then
@@ -1633,7 +1636,7 @@ configure_ale_bmah() {
         echo ""
         printf "${WHITE}Apply as: [a] Add to existing list  [r] Replace list entirely [a]: ${RST}"
         read -r _bmode_raw
-        [ "${_bmode_raw,,}" = "r" ] && _bmode="replace"
+        case "$_bmode_raw" in [Rr]) _bmode="replace" ;; esac
     fi
 
     # ── Build final deduped ID list ───────────────────────────
@@ -1664,8 +1667,15 @@ configure_ale_bmah() {
         # Write one NPC entry per line to a temp file; awk reads it with
         # getline so embedded newlines never hit the -v variable limit.
         local ids_file tmpfile j label
-        ids_file=$(mktemp "${TMPDIR:-/tmp}/bmah_ids_XXXXXX")
-        tmpfile=$(mktemp "${TMPDIR:-/tmp}/bmah_server_XXXXXX.lua")
+        ids_file=$(mktemp "${TMPDIR:-/tmp}/bmah_ids_XXXXXX") || {
+            print_error "Could not create temp file — aborting NPC patch."
+            return 1
+        }
+        tmpfile=$(mktemp "${TMPDIR:-/tmp}/bmah_server_XXXXXX.lua") || {
+            rm -f "$ids_file"
+            print_error "Could not create temp file — aborting NPC patch."
+            return 1
+        }
         for id in "${final_ids[@]}"; do
             label=""
             for (( j=0; j<${#BNPC_IDS[@]}; j++ )); do
@@ -1675,10 +1685,11 @@ configure_ale_bmah() {
         done
 
         # awk replaces the BMAH_VENDOR_NPCs block — handles both inline and
-        # multiline forms.  Exits 1 if the pattern was never matched so we
-        # detect a failed patch before overwriting the live file.
+        # multiline forms.  Anchored to line-start so a commented-out example
+        # line cannot trigger the replacement.  Exits 1 if the pattern was
+        # never matched so we detect a failed patch before overwriting the file.
         awk -v ids_file="$ids_file" '
-            /local BMAH_VENDOR_NPCs[[:space:]]*=/ {
+            /^[[:space:]]*local BMAH_VENDOR_NPCs[[:space:]]*=/ {
                 print "local BMAH_VENDOR_NPCs = {"
                 while ((getline line < ids_file) > 0) { print line }
                 close(ids_file)
@@ -1698,16 +1709,20 @@ configure_ale_bmah() {
         rm -f "$ids_file"
 
         if [ $awk_rc -eq 0 ] && [ -s "$tmpfile" ]; then
-            mv "$tmpfile" "$deployed_file"
-            echo ""
-            print_success "BMAH_VENDOR_NPCs updated with ${#final_ids[@]} NPC(s):"
-            for id in "${final_ids[@]}"; do
-                label=""
-                for (( j=0; j<${#BNPC_IDS[@]}; j++ )); do
-                    [ "${BNPC_IDS[$j]}" = "$id" ] && label=" — ${BNPC_NAMES[$j]}" && break
+            if mv "$tmpfile" "$deployed_file"; then
+                echo ""
+                print_success "BMAH_VENDOR_NPCs updated with ${#final_ids[@]} NPC(s):"
+                for id in "${final_ids[@]}"; do
+                    label=""
+                    for (( j=0; j<${#BNPC_IDS[@]}; j++ )); do
+                        [ "${BNPC_IDS[$j]}" = "$id" ] && label=" — ${BNPC_NAMES[$j]}" && break
+                    done
+                    print_info "  • ${id}${label}"
                 done
-                print_info "  • ${id}${label}"
-            done
+            else
+                rm -f "$tmpfile"
+                print_error "Could not write updated file — check permissions on: $deployed_file"
+            fi
         else
             rm -f "$tmpfile"
             print_error "Could not locate BMAH_VENDOR_NPCs block in bmah_server.lua."
@@ -1755,16 +1770,26 @@ configure_ale_bmah() {
 # Patch one ENABLE flag from false → true in a deployed Lua file.
 # Usage: _aw_enable <file> <FLAG_NAME>
 # Returns 1 and prints a warning if the patch cannot be verified.
+# Uses a temp-file rewrite instead of sed -i so it works on both
+# macOS (BSD sed) and Linux (GNU sed) without a backup-suffix dance.
 _aw_enable() {
     local file="$1" flag="$2"
     if [ ! -f "$file" ]; then
         print_warning "  File not found: $(basename "$file") — skipping."
         return 1
     fi
-    sed -i "s/\(local ${flag}\)[[:space:]]*=[[:space:]]*false/\1 = true/" "$file"
-    if grep -q "local ${flag} = true" "$file"; then
+    local _aw_tmp
+    _aw_tmp=$(mktemp "${TMPDIR:-/tmp}/aw_enable_XXXXXX") || {
+        print_warning "  mktemp failed; cannot patch ${flag}."
+        return 1
+    }
+    # Anchor to line-start so commented-out lines (-- local FLAG = false) are skipped.
+    sed "s/^\([[:space:]]*local ${flag}\)[[:space:]]*=[[:space:]]*false/\1 = true/" "$file" > "$_aw_tmp"
+    if grep -q "^[[:space:]]*local ${flag} = true" "$_aw_tmp"; then
+        mv "$_aw_tmp" "$file"
         return 0
     fi
+    rm -f "$_aw_tmp"
     print_warning "  Could not patch ${flag} in $(basename "$file") — edit manually."
     return 1
 }
@@ -1819,14 +1844,16 @@ configure_ale_accountwide() {
     if [ -f "$f_mon" ]; then
         echo -e "${GOLD}Money${RST}"
         if ask_yes_no "Enable Accountwide Money (shared gold pool across all characters)?"; then
-            _aw_enable "$f_mon" "ENABLE_ACCOUNTWIDE_MONEY" && \
+            if _aw_enable "$f_mon" "ENABLE_ACCOUNTWIDE_MONEY"; then
                 print_success "  Money enabled."
-            if ask_yes_no "  Enable real-time gold tick (syncs gold every ~5 s while online)?"; then
-                _aw_enable "$f_mon" "ENABLE_REALTIME_TICK" && \
-                    print_success "  Realtime tick enabled."
-                if ask_yes_no "  Also enable realtime tick for Altbots?"; then
-                    _aw_enable "$f_mon" "ENABLE_ALTBOT_REALTIME_TICK" && \
-                        print_success "  Altbot realtime tick enabled."
+                if ask_yes_no "  Enable real-time gold tick (syncs gold every ~5 s while online)?"; then
+                    if _aw_enable "$f_mon" "ENABLE_REALTIME_TICK"; then
+                        print_success "  Realtime tick enabled."
+                        if ask_yes_no "  Also enable realtime tick for Altbots?"; then
+                            _aw_enable "$f_mon" "ENABLE_ALTBOT_REALTIME_TICK" && \
+                                print_success "  Altbot realtime tick enabled."
+                        fi
+                    fi
                 fi
             fi
         fi
@@ -1895,12 +1922,20 @@ configure_ale_accountwide() {
         read -r _rep_choice
         if [ "$_rep_choice" = "2" ]; then
             f_rep_target="$f_rep_other"
-            rm -f "$f_rep_default"
-            print_success "  Removed default variant, keeping: $(basename "$f_rep_other")"
+            if rm -f "$f_rep_default" && [ ! -f "$f_rep_default" ]; then
+                print_success "  Removed default variant, keeping: $(basename "$f_rep_other")"
+            else
+                print_warning "  Could not remove default variant — both files may load. Remove manually:"
+                print_info "    $f_rep_default"
+            fi
         else
             f_rep_target="$f_rep_default"
-            rm -f "$f_rep_other"
-            print_success "  Removed custom variant, keeping: $(basename "$f_rep_default")"
+            if rm -f "$f_rep_other" && [ ! -f "$f_rep_other" ]; then
+                print_success "  Removed custom variant, keeping: $(basename "$f_rep_default")"
+            else
+                print_warning "  Could not remove custom variant — both files may load. Remove manually:"
+                print_info "    $f_rep_other"
+            fi
         fi
     elif [ -n "$f_rep_default" ]; then
         f_rep_target="$f_rep_default"
