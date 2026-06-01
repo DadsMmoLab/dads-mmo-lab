@@ -2517,15 +2517,8 @@ configure_ale_bmah() {
     local deployed_file="$lua_dir/bmah_server.lua"
 
     # Parallel arrays — index-aligned (Bash 3 compatible; no associative arrays).
-    local -a BNPC_IDS=(   45281   2496  11183   8921   3162  14740  11504  10834)
-    local -a BNPC_NAMES=( "Slytter"
-                        "Krazek"
-                        "Dirge Quikcleave"
-                        "Ravenholdt Guards"
-                        "Slyres Notrash"
-                        "Stonard Smuggler"
-                        "Baron Vardus"
-                        "Count Remo" )
+    local -a BNPC_IDS=(   2494              7164    )
+    local -a BNPC_NAMES=( "Privateer Bloads" "Krazek" )
 
 
     print_step "Black Market AH — NPC Vendor Configuration"
@@ -2572,28 +2565,15 @@ configure_ale_bmah() {
     fi
 
     # ── NPC selection menu ────────────────────────────────────
-    echo -e "  ${GOLD}──  Suggested Vendor NPCs  ──────────────────────────────────────────────${RST}"
+    echo -e "  ${GOLD}──  Suggested Vendor NPCs (Booty Bay)  ─────────────────────────────────${RST}"
     echo ""
-    echo -e "  ${DIM}Shady / Neutral Factions${RST}"
-    printf "  ${WHITE}%2s)${RST} %-20s ${CYAN}(%5s)${RST}  %s\n" \
-        1 "Slytter"          45281 "Goblin rogue in Booty Bay; coastal smuggler theme" \
-        2 "Krazek"            2496 "Booty Bay goblin with shady business connections" \
-        3 "Dirge Quikcleave" 11183 "Gadgetzan butcher; deals in rare exotic goods"
-    echo ""
-    echo -e "  ${DIM}Criminal Underworld / Rogue Themes${RST}"
-    printf "  ${WHITE}%2s)${RST} %-20s ${CYAN}(%5s)${RST}  %s\n" \
-        4 "Ravenholdt Guards"  8921 "Ravenholdt Manor; gate BMAH behind rogue faction" \
-        5 "Slyres Notrash"     3162 "Dalaran Underbelly; illicit underground zone" \
-        6 "Stonard Smuggler"  14740 "Out-of-the-way NPC; hidden underground trade network"
-    echo ""
-    echo -e "  ${DIM}High Society / Wealthy Elites${RST}"
-    printf "  ${WHITE}%2s)${RST} %-20s ${CYAN}(%5s)${RST}  %s\n" \
-        7 "Baron Vardus"      11504 "Corrupt noble; wealthy elites buying illegal artifacts" \
-        8 "Count Remo"        10834 "High-standing noble; hidden high-end auction ring"
+    printf "  ${WHITE}%2s)${RST} %-22s ${CYAN}(%5s)${RST}  %s\n" \
+        1 "Privateer Bloads" 2494 "Booty Bay; shady privateer with underworld connections" \
+        2 "Krazek"           7164 "Booty Bay goblin; deals in rare and illicit goods"
     echo ""
     echo -e "  ${GOLD}────────────────────────────────────────────────────────────────────────${RST}"
     echo ""
-    printf "${WHITE}Select NPCs by number (e.g. 1 3 7), or \"all\". Leave blank to keep current IDs: ${RST}"
+    printf "${WHITE}Select NPCs by number (e.g. 1 2), or \"all\". Leave blank to keep current IDs: ${RST}"
     read -r _bsel
 
     # ── Parse numbered selection ──────────────────────────────
