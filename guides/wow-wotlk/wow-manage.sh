@@ -26,7 +26,7 @@
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 # ============================================================
 
-MANAGER_VERSION="2.1.5 - ALE Drinker Edition"
+MANAGER_VERSION="2.1.6 - ALE Drinker Edition"
 
 set -o pipefail
 
@@ -739,7 +739,7 @@ _cmd_block_for() {
                 '' \
                 'Commands: (none — edits worldserver.conf; use .reload config in-game to apply without a full restart)'
             ;;
-        custom-login)
+        mod-custom-login)
             printf '%s\n' \
                 'Custom Login (SQL Mod / Module)' \
                 'Gives new characters starter items, spells, or buffs on first login. Configurable via mod_customlogin.conf.' \
@@ -1044,6 +1044,34 @@ detect_install() {
     # Find running containers (will be empty if server is stopped — that's OK)
     refresh_container_names
     INGAME_COMMANDS_FILE="$SERVER_DIR/ingame-commands.txt"
+
+    # Self-heal a known mis-named module dir before any rebuild can hit it.
+    heal_legacy_module_dirs
+}
+
+# Rename/clean legacy mis-named C++ module directories so the worldserver
+# can compile. AzerothCore derives each module's script-loader call from the
+# module's DIRECTORY name (dashes -> underscores): a dir named custom-login
+# makes it emit Addcustom_loginScripts(), but mod-custom-login only defines
+# Addmod_custom_loginScripts() — an "undefined reference" link error that
+# fails every worldserver rebuild. Older runs of this script cloned the
+# module into modules/custom-login (the registry key used to drop the mod-
+# prefix); rename it to the correct mod- prefixed dir. Silent no-op when
+# there's nothing to fix.
+heal_legacy_module_dirs() {
+    [ -n "$SERVER_DIR" ] || return 0
+    local legacy="$SERVER_DIR/modules/custom-login"
+    local correct="$SERVER_DIR/modules/mod-custom-login"
+    [ -d "$legacy" ] || return 0
+    if [ -d "$correct" ]; then
+        print_warning "Removing stale mis-named module dir modules/custom-login"
+        print_info    "(superseded by modules/mod-custom-login — fixes the worldserver build)"
+        rm -rf "$legacy"
+    else
+        print_warning "Fixing mis-named Custom Login module so the worldserver can compile"
+        print_info    "Renaming modules/custom-login -> modules/mod-custom-login"
+        mv "$legacy" "$correct"
+    fi
 }
 
 # Classify an install by looking at directory name AND, if needed,
@@ -1419,7 +1447,7 @@ declare -a SQL_MOD_REGISTRY=(
     "all-stackables|All Stackables to 200|https://github.com/AsgavinYT/azerothcore-all-stackables-200.git|clone_sql"
     "baby-mobs|Baby Mobs (HP×0.25 / DMG×0.25 / ARM×0.25)||tweak_world"
     "buff-mobs|Buff Mobs (HP×2 / DMG×1.5 / ARM×1.5)||tweak_world"
-    "custom-login|Custom Login (starter gear + rep on first login)|https://github.com/azerothcore/mod-custom-login.git|conf_module"
+    "mod-custom-login|Custom Login (starter gear + rep on first login)|https://github.com/azerothcore/mod-custom-login.git|conf_module"
     "xbuff-mobs|Extreme Buff Mobs (HP×4 / DMG×2 / ARM×2)||tweak_world"
     "hearthstone-cd|Hearthstone Cooldown Tweaks|https://github.com/AsgavinYT/hearthstone-cooldowns.git|clone_sql_pick"
     "lvl1-mounts|Level One Mounts (ride at level 1)|https://github.com/tomcoffingiii/mod-level-one-mounts.git|clone_sql"
@@ -3918,7 +3946,7 @@ sqlmod_configure() {
         all-stackables)   configure_sqlmod_stackables ;;
         npc-teleporter)   configure_sqlmod_npc_teleporter ;;
         hearthstone-cd)   configure_sqlmod_hearthstone ;;
-        custom-login)     configure_sqlmod_custom_login ;;
+        mod-custom-login) configure_sqlmod_custom_login ;;
         buff-mobs|xbuff-mobs|nerf-mobs|baby-mobs)
                           configure_sqlmod_tweak "$key" "$name" ;;
         xp-rates)         configure_sqlmod_xprates ;;
@@ -4060,7 +4088,7 @@ configure_sqlmod_custom_login() {
     sqlmod_init
     local conf_dest="$SERVER_DIR/env/dist/etc/modules/mod_customlogin.conf"
     if [ ! -f "$conf_dest" ]; then
-        local module_dir="$SERVER_DIR/modules/custom-login"
+        local module_dir="$SERVER_DIR/modules/mod-custom-login"
         local conf_dist="$module_dir/conf/mod_customlogin.conf.dist"
         if [ -f "$conf_dist" ]; then
             mkdir -p "$(dirname "$conf_dest")"
@@ -4414,7 +4442,7 @@ _get_about_text() {
                 'for consumables, reagents, and materials. Stack size can be set' \
                 'in Config before installing. Down.sql reverts to original sizes.'
             ;;
-        custom-login)
+        mod-custom-login)
             printf '%s\n' \
                 'Grants configurable starter items, bags, heirlooms, skills,' \
                 'and faction reputation to characters on their very first login.' \
