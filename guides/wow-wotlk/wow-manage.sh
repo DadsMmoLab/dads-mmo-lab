@@ -6289,50 +6289,52 @@ fix_battlepass_npc() {
         print_error "Database container is not running — start the server first."
         return 1
     fi
-    local _bp_sql_err
-    _bp_sql_err=$(docker exec "$DB_CONTAINER" mysql -uroot -p"$DB_ROOT_PASSWORD" acore_world 2>&1 <<'_BPNPC_SQL'
-SET foreign_key_checks=0;
-SET sql_mode='';
-DELETE FROM `creature_template` WHERE `entry` = 90100;
-INSERT INTO `creature_template`
-  (`entry`,`name`,`subname`,`gossip_menu_id`,`minlevel`,`maxlevel`,`exp`,`faction`,`npcflag`,
-   `speed_walk`,`speed_run`,`rank`,`dmgschool`,`DamageModifier`,
-   `BaseAttackTime`,`RangeAttackTime`,`BaseVariance`,`RangeVariance`,
-   `unit_class`,`unit_flags`,`unit_flags2`,`dynamicflags`,
-   `type`,`AIName`,`MovementType`,`HoverHeight`,
-   `HealthModifier`,`ManaModifier`,`ArmorModifier`,`RegenHealth`,`flags_extra`,`VerifiedBuild`)
-VALUES
-  (90100,'Battle Pass Vendor','Seasonal Rewards',0,80,80,0,35,1,
-   1.0,1.14286,0,0,1.0,2000,2000,1.0,1.0,1,33536,2048,0,7,'',0,1.0,1.0,1.0,1.0,1,2,0);
-SET @hasScale=(SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='creature_template' AND COLUMN_NAME='scale');
-SET @sql=IF(@hasScale>0,'UPDATE creature_template SET scale=1.0 WHERE entry=90100','SELECT 1');
-PREPARE _s FROM @sql; EXECUTE _s; DEALLOCATE PREPARE _s;
-SET @hasModelTable=(SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='creature_template_model');
-SET @sql=IF(@hasModelTable>0,'DELETE FROM creature_template_model WHERE CreatureID=90100','SELECT 1');
-PREPARE _s FROM @sql; EXECUTE _s; DEALLOCATE PREPARE _s;
-SET @sql=IF(@hasModelTable>0,'INSERT INTO creature_template_model (CreatureID,Idx,CreatureDisplayID,DisplayScale,Probability,VerifiedBuild) VALUES (90100,0,25478,1.0,1.0,0)','SELECT 1');
-PREPARE _s FROM @sql; EXECUTE _s; DEALLOCATE PREPARE _s;
-SET @hasModelid1=(SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='creature_template' AND COLUMN_NAME='modelid1');
-SET @sql=IF(@hasModelid1>0,'UPDATE creature_template SET modelid1=25478 WHERE entry=90100','SELECT 1');
-PREPARE _s FROM @sql; EXECUTE _s; DEALLOCATE PREPARE _s;
-SET foreign_key_checks=1;
-_BPNPC_SQL
-)
-    local _bp_rc=$?
-    local _bp_errs; _bp_errs=$(echo "$_bp_sql_err" | grep -v "^mysql: \[Warning\]" | grep -v "^$")
-    if [ $_bp_rc -ne 0 ] || echo "$_bp_errs" | grep -qi "^ERROR"; then
-        print_error "SQL apply failed:"
-        echo "$_bp_sql_err"
+    local _mdb="docker exec $DB_CONTAINER mysql -uroot -p$DB_ROOT_PASSWORD"
+    # Step 1: show current state
+    local _pre
+    _pre=$(docker exec "$DB_CONTAINER" mysql -uroot -p"$DB_ROOT_PASSWORD" -N -e \
+        "SELECT IFNULL(CONCAT('EXISTS: entry=',entry,' name=',name),'NOT FOUND') FROM acore_world.creature_template WHERE entry=90100 UNION ALL SELECT 'NOT FOUND' LIMIT 1;" 2>/dev/null | head -1)
+    print_info "Current DB state: ${_pre:-unknown}"
+    # Step 2: DELETE (separate call — FK checks off)
+    local _del_out
+    _del_out=$(docker exec "$DB_CONTAINER" mysql -uroot -p"$DB_ROOT_PASSWORD" \
+        -e "SET foreign_key_checks=0; DELETE FROM acore_world.creature_template WHERE entry=90100; SET foreign_key_checks=1;" 2>&1)
+    local _del_rc=$?
+    local _del_errs; _del_errs=$(echo "$_del_out" | grep -v "^\(mysql:\|$\)")
+    if [ $_del_rc -ne 0 ] || echo "$_del_errs" | grep -qi "^ERROR"; then
+        print_error "DELETE failed (rc=$_del_rc): $_del_errs"
         return 1
     fi
-    [ -n "$_bp_errs" ] && echo "$_bp_errs"
+    # Step 3: INSERT (separate call — explicit schema, FK off, sql_mode cleared)
+    local _ins_out
+    _ins_out=$(docker exec "$DB_CONTAINER" mysql -uroot -p"$DB_ROOT_PASSWORD" \
+        -e "SET foreign_key_checks=0; SET sql_mode=''; INSERT INTO acore_world.creature_template (\`entry\`,\`name\`,\`subname\`,\`gossip_menu_id\`,\`minlevel\`,\`maxlevel\`,\`exp\`,\`faction\`,\`npcflag\`,\`speed_walk\`,\`speed_run\`,\`rank\`,\`dmgschool\`,\`DamageModifier\`,\`BaseAttackTime\`,\`RangeAttackTime\`,\`BaseVariance\`,\`RangeVariance\`,\`unit_class\`,\`unit_flags\`,\`unit_flags2\`,\`dynamicflags\`,\`type\`,\`AIName\`,\`MovementType\`,\`HoverHeight\`,\`HealthModifier\`,\`ManaModifier\`,\`ArmorModifier\`,\`RegenHealth\`,\`flags_extra\`,\`VerifiedBuild\`) VALUES (90100,'Battle Pass Vendor','Seasonal Rewards',0,80,80,0,35,1,1.0,1.14286,0,0,1.0,2000,2000,1.0,1.0,1,33536,2048,0,7,'',0,1.0,1.0,1.0,1.0,1,2,0); SET foreign_key_checks=1;" 2>&1)
+    local _ins_rc=$?
+    local _ins_errs; _ins_errs=$(echo "$_ins_out" | grep -v "^\(mysql:\|$\)")
+    if [ $_ins_rc -ne 0 ] || echo "$_ins_errs" | grep -qi "^ERROR"; then
+        print_error "INSERT failed (rc=$_ins_rc): $_ins_errs"
+        print_info "This usually means a column mismatch. Try running the Server Maintenance → 5 again after a worldserver restart."
+        return 1
+    fi
+    # Step 4: schema-adaptive model/scale (non-fatal)
+    docker exec "$DB_CONTAINER" mysql -uroot -p"$DB_ROOT_PASSWORD" -e \
+        "SET @h=(SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='acore_world' AND TABLE_NAME='creature_template' AND COLUMN_NAME='scale'); SET @s=IF(@h>0,'UPDATE acore_world.creature_template SET scale=1.0 WHERE entry=90100','SELECT 1'); PREPARE _p FROM @s; EXECUTE _p; DEALLOCATE PREPARE _p;" 2>/dev/null
+    docker exec "$DB_CONTAINER" mysql -uroot -p"$DB_ROOT_PASSWORD" -e \
+        "SET @h=(SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='acore_world' AND TABLE_NAME='creature_template_model'); SET @s=IF(@h>0,'DELETE FROM acore_world.creature_template_model WHERE CreatureID=90100','SELECT 1'); PREPARE _p FROM @s; EXECUTE _p; DEALLOCATE PREPARE _p;" 2>/dev/null
+    docker exec "$DB_CONTAINER" mysql -uroot -p"$DB_ROOT_PASSWORD" -e \
+        "SET @h=(SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='acore_world' AND TABLE_NAME='creature_template_model'); SET @s=IF(@h>0,'INSERT INTO acore_world.creature_template_model (CreatureID,Idx,CreatureDisplayID,DisplayScale,Probability,VerifiedBuild) VALUES (90100,0,25478,1.0,1.0,0)','SELECT 1'); PREPARE _p FROM @s; EXECUTE _p; DEALLOCATE PREPARE _p;" 2>/dev/null
+    docker exec "$DB_CONTAINER" mysql -uroot -p"$DB_ROOT_PASSWORD" -e \
+        "SET @h=(SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='acore_world' AND TABLE_NAME='creature_template' AND COLUMN_NAME='modelid1'); SET @s=IF(@h>0,'UPDATE acore_world.creature_template SET modelid1=25478 WHERE entry=90100','SELECT 1'); PREPARE _p FROM @s; EXECUTE _p; DEALLOCATE PREPARE _p;" 2>/dev/null
+    # Step 5: verify
     local _bp_verify
     _bp_verify=$(docker exec "$DB_CONTAINER" mysql -uroot -p"$DB_ROOT_PASSWORD" -N -e \
-        "SELECT CONCAT('entry=',entry,' name=',name,' npcflag=',npcflag) FROM acore_world.creature_template WHERE entry=90100;" 2>&1)
+        "SELECT CONCAT('entry=',entry,' name=',name,' npcflag=',npcflag) FROM acore_world.creature_template WHERE entry=90100;" 2>/dev/null)
     if echo "$_bp_verify" | grep -q "entry=90100"; then
         print_success "Verified: entry 90100 exists in DB → $_bp_verify"
     else
-        print_error "Verification failed — entry 90100 not found after SQL. Output: $_bp_verify"
+        print_error "Verification failed — entry 90100 not found after SQL."
+        print_info "Run this diagnostic manually on the Steam Deck:"
+        print_info "  docker exec \$DB_CONTAINER mysql -uroot -ppassword -e \"SHOW COLUMNS FROM acore_world.creature_template LIKE 'entry';\" 2>&1"
         return 1
     fi
     echo ""
