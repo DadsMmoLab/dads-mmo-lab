@@ -3432,12 +3432,26 @@ ale_deploy_lua_files() {
             ;;
         activechat)
             # Upstream layout: AzerothChatter/ subdirectory
+            # ALE detects duplicate basenames across subdirs — data/chatter.lua vs logic/chatter.lua
+            # and data/context.lua vs logic/context.lua both collide. Fix: rename data/ files and
+            # patch require("data.chatter") → require("data.chatter_data") etc. after copy.
             local src="$clone_dir/AzerothChatter"
             if [ -d "$src" ]; then
                 mkdir -p "$lua_dir/AzerothChatter"
-                cp -r "$src"/. "$lua_dir/AzerothChatter/" && \
-                    print_success "Deployed → lua_scripts/AzerothChatter/" || \
-                    print_warning "Copy failed — check $src"
+                cp -r "$src"/. "$lua_dir/AzerothChatter/"
+                local _ac_dest="$lua_dir/AzerothChatter"
+                # Rename conflicting data/ files
+                [ -f "$_ac_dest/data/chatter.lua"  ] && mv "$_ac_dest/data/chatter.lua"  "$_ac_dest/data/chatter_data.lua"
+                [ -f "$_ac_dest/data/context.lua"  ] && mv "$_ac_dest/data/context.lua"  "$_ac_dest/data/context_data.lua"
+                # Patch all require("data.chatter") / require("data.context") references
+                find "$_ac_dest" -name "*.lua" -exec \
+                    sed -i '' \
+                        -e 's/require("data\.chatter")/require("data.chatter_data")/g' \
+                        -e "s/require('data\.chatter')/require('data.chatter_data')/g" \
+                        -e 's/require("data\.context")/require("data.context_data")/g' \
+                        -e "s/require('data\.context')/require('data.context_data')/g" \
+                    {} \;
+                print_success "Deployed → lua_scripts/AzerothChatter/ (duplicate filenames resolved)"
             else
                 print_warning "Expected directory not found: $src"
                 print_info "Manually copy AzerothChatter/ contents to: $lua_dir/AzerothChatter/"
