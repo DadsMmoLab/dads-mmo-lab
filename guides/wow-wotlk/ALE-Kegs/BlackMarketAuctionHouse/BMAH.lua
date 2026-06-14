@@ -323,15 +323,14 @@ end
 
 -- ── Gossip: open BMAH UI ──────────────────────────────────────────────────────
 -- ALE: RegisterCreatureGossipEvent with GOSSIP_EVENT_ON_HELLO=1, ON_SELECT=2.
--- GossipSendMenu takes 2 args for creature senders (npcTextId, creature).
--- SendAddonMessage channel 255 = CHAT_MSG_ADDON (uint8 0xFF).
--- The npc_text ID (2069430) is created by sql/BMAH_Up.sql.
+-- GossipSendMenu(textId, creature) — use textId=1 (default greeting, always exists).
+-- SendAddonMessage channel 255 = CHAT_MSG_ADDON (0xFF) — correct for WotLK 3.3.5.
 local GOSSIP_EVENT_ON_HELLO  = 1
 local GOSSIP_EVENT_ON_SELECT = 2
 local function OnBMAHGossipHello(event, player, creature)
     player:GossipClearMenu()
-    player:GossipMenuAddItem(4, "Browse the Black Market", 0, 1)
-    player:GossipSendMenu(2069430, creature)
+    player:GossipMenuAddItem(0, "Browse the Black Market", 0, 1)
+    player:GossipSendMenu(1, creature)
 end
 local function OnBMAHGossipSelect(event, player, creature, sender, intid, code, menu_id)
     if intid == 1 then

@@ -3182,6 +3182,10 @@ PYEOF
                 print_warning "  NPC $sid not found in creature_template — skipping (not in this server's DB)."
                 print_info "    If you want NPC $sid, add it to creature_template first and restart worldserver."
             else
+                # Ensure the gossip npcflag bit is set so right-click opens gossip
+                docker exec "$DB_CONTAINER" mysql -uroot -p"$DB_ROOT_PASSWORD" acore_world \
+                    -e "UPDATE creature_template SET npcflag = npcflag | 1 WHERE entry = $sid;" \
+                    2>/dev/null
                 final_ids+=("$sid")
             fi
         fi
