@@ -54,14 +54,11 @@ set -o pipefail
 # ─────────────────────────────────────────
 # COLORS
 # ─────────────────────────────────────────
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-WHITE='\033[1;37m'
+RST='\033[0m'; BOLD='\033[1m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+BLUE='\033[0;34m'; WHITE='\033[1;37m'; CYAN='\033[0;36m'
 NC='\033[0m'
-BOLD='\033[1m'
+GOLD='\033[38;5;220m'; DIM='\033[2m'
 
 # Classic vanilla — warm gold
 CL='\033[0;33m'
@@ -1615,17 +1612,26 @@ unset LD_PRELOAD
 unset LD_LIBRARY_PATH
 # ─────────────────────────────────────────────────────────────────
 
+GOLD='\033[38;5;220m'; DIM='\033[2m'
+GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'
+WHITE='\033[1;37m'; BOLD='\033[1m'; NC='\033[0m'
+
 LOGFILE=/tmp/wow-vanilla-launcher.log
 echo "=== Vanilla WoW Launcher started \$(date) ===" > "\$LOGFILE"
 
+clear
 echo ""
-echo "  ⚔️  Vanilla WoW Server starting up..."
+printf "${GOLD} ══════════════════════════════════════════════════════════════════════════════════${NC}\n"
+printf "   ${DIM}Dad's MMO Lab${NC}  ✦  ${DIM}Vanilla WoW${NC}\n"
+printf "${GOLD} ══════════════════════════════════════════════════════════════════════════════════${NC}\n"
+echo ""
+echo -e "  ${WHITE}${BOLD}Starting server...${NC}"
 echo ""
 
 # Stop any conflicting Classic WoW containers from other expansions
 OTHER=\$(docker ps --format '{{.Names}}' 2>/dev/null | grep -iE "tbc|wotlk|azeroth" || true)
 if [ -n "\$OTHER" ]; then
-    echo "  Stopping other expansion containers..."
+    echo -e "  ${YELLOW}⚠️  Stopping other expansion containers...${NC}"
     echo "\$OTHER" | xargs docker stop >> "\$LOGFILE" 2>&1 || true
     sleep 2
 fi
@@ -1633,18 +1639,20 @@ fi
 cd "${server_dir}" || exit 1
 
 if docker compose up -d >> "\$LOGFILE" 2>&1; then
-    echo "  Containers started!"
+    echo -e "  ${GREEN}✅ Containers started!${NC}"
 else
-    echo "  ERR: Failed to start. Check: \$LOGFILE"
+    echo -e "  ${RED}❌ Failed to start. Check: \$LOGFILE${NC}"
     sleep 10
     exit 1
 fi
 
 echo ""
-echo "  Waiting for Azeroth to open..."
+printf "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+echo -e "${WHITE}${BOLD} Waiting for Azeroth to open...${NC}"
+printf "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
 echo ""
 
-# Wait for ready (faster after first install)
+MANUAL_SHUTDOWN=0
 TIMEOUT=480
 ELAPSED=0
 READY=0
@@ -1654,51 +1662,76 @@ while [ \$ELAPSED -lt \$TIMEOUT ]; do
         READY=1
         break
     fi
-    sleep 5
+    if read -r -t 5 2>/dev/null; then
+        MANUAL_SHUTDOWN=1
+        break
+    fi
+    printf "  ${GOLD}.${NC}"
     ELAPSED=\$((ELAPSED + 5))
 done
 
-if [ \$READY -eq 1 ]; then
-    echo "  🎉 AZEROTH IS READY!"
-    echo ""
-    echo "  Login: player / player"
-    echo "  Realmlist: 127.0.0.1"
-    echo ""
-else
-    echo "  ⏳ Server still warming up. Check logs if needed."
-fi
-
-# Wait for WoW client process
-# pgrep -f with extended regex: use | not \|  (session pattern #1)
-echo "  Press STEAM button and launch WoW"
-echo "  Server auto-shuts down when WoW closes"
+echo ""
 echo ""
 
-WOW_STARTED=0
-for i in \$(seq 1 60); do
-    if pgrep -fi "Wow\\.exe|wine.*[Ww]o[Ww]" > /dev/null 2>&1; then
-        WOW_STARTED=1
-        break
+if [ \$MANUAL_SHUTDOWN -eq 0 ]; then
+    if [ \$READY -eq 1 ]; then
+        printf "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+        echo -e "${GREEN}${BOLD}  ✅ AZEROTH IS READY!${NC}"
+        printf "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+        echo ""
+        echo -e "  ${DIM}Login: player / player  •  Realmlist: 127.0.0.1${NC}"
+        echo ""
+    else
+        echo -e "  ${YELLOW}⏳ Server still warming up. Check logs if needed.${NC}"
     fi
-    sleep 5
-done
 
-if [ \$WOW_STARTED -eq 1 ]; then
-    echo "  WoW detected! Enjoy Azeroth! ⚔️"
-    while pgrep -fi "Wow\\.exe|wine.*[Ww]o[Ww]" > /dev/null 2>&1; do
-        sleep 3
+    echo -e "  ${WHITE}${BOLD}Press STEAM button and launch WoW${NC}"
+    echo -e "  ${DIM}Server AUTO-SHUTS DOWN when WoW closes${NC}"
+    echo -e "  ${DIM}── or press ENTER to shut down manually ──${NC}"
+    echo ""
+
+    WOW_STARTED=0
+    for i in \$(seq 1 60); do
+        if pgrep -fi "Wow\\.exe|wine.*[Ww]o[Ww]" > /dev/null 2>&1; then
+            WOW_STARTED=1
+            break
+        fi
+        if read -r -t 5 2>/dev/null; then
+            MANUAL_SHUTDOWN=1
+            break
+        fi
     done
-    sleep 5
-    echo "  WoW closed — shutting down server..."
-else
-    echo "  WoW not detected — keeping server alive for 3 hours."
-    sleep 10800
+
+    if [ \$MANUAL_SHUTDOWN -eq 0 ]; then
+        if [ \$WOW_STARTED -eq 1 ]; then
+            echo -e "  ${GREEN}⚔️  WoW detected! Enjoy Azeroth!${NC}"
+            while pgrep -fi "Wow\\.exe|wine.*[Ww]o[Ww]" > /dev/null 2>&1; do
+                if read -r -t 3 2>/dev/null; then
+                    MANUAL_SHUTDOWN=1
+                    break
+                fi
+            done
+            if [ \$MANUAL_SHUTDOWN -eq 0 ]; then
+                sleep 5
+                echo -e "  ${YELLOW}WoW closed — shutting down...${NC}"
+            fi
+        else
+            echo -e "  ${DIM}WoW not detected — press ENTER to shut down.${NC}"
+            read -r
+        fi
+    fi
+fi
+
+if [ \$MANUAL_SHUTDOWN -eq 1 ]; then
+    echo -e "  ${YELLOW}Manual shutdown — shutting down...${NC}"
 fi
 
 cd "${server_dir}" && docker compose down >> "\$LOGFILE" 2>&1
 echo ""
-echo "  ✅ Server stopped! Safe to close."
-echo "  Thanks for playing! youtube.com/@DadsMmoLab"
+printf "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+echo -e "${GREEN}${BOLD}  ✅ Server stopped! Safe to close.${NC}"
+echo -e "  ${DIM}Thanks for playing! youtube.com/@DadsMmoLab${NC}"
+printf "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
 echo ""
 sleep 5
 LAUNCHER
@@ -1782,14 +1815,14 @@ show_completion() {
     fi
 
     echo ""
-    echo -e "${GREEN}${BOLD}╔══════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}${BOLD}║         🎉 VANILLA WOW INSTALLED! 🎉              ║${NC}"
-    echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════╝${NC}"
+    echo -e "${GOLD}${BOLD}╔══════════════════════════════════════════════════╗${NC}"
+    echo -e "${GOLD}${BOLD}║         🎉 VANILLA WOW INSTALLED! 🎉              ║${NC}"
+    echo -e "${GOLD}${BOLD}╚══════════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "${WHITE}${BOLD}You compiled CMaNGOS Classic from source on your Steam Deck.${NC}"
     echo -e "${WHITE}${BOLD}That's real engineering work. Welcome to a club of one.${NC}"
     echo ""
-    echo -e "${CL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "  ${WHITE}${BOLD}Expansion:${NC}  ${CL}Vanilla (1.12.1)${NC}"
     echo -e "  ${WHITE}${BOLD}Server dir:${NC} ${CL}$SERVER_DIR${NC}"
     echo -e "  ${WHITE}${BOLD}Launcher:${NC}   ${CL}~/wow-vanilla-launcher.sh${NC}"
@@ -1800,7 +1833,7 @@ show_completion() {
     else
         echo -e "  ${WHITE}${BOLD}Realmlist:${NC}  ${YELLOW}NOT auto-written — see step A below${NC}"
     fi
-    echo -e "${CL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     echo -e "${CLB}${BOLD}NEXT STEPS — finish setup (~10 min):${NC}"
     echo ""

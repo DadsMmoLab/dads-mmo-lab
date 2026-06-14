@@ -42,15 +42,11 @@ set -o pipefail
 # ─────────────────────────────────────────
 # COLORS
 # ─────────────────────────────────────────
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-WHITE='\033[1;37m'
-MAGENTA='\033[0;35m'
-NC='\033[0m'
-BOLD='\033[1m'
+RST='\033[0m'; BOLD='\033[1m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+BLUE='\033[0;34m'; WHITE='\033[1;37m'; CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'; NC='\033[0m'
+GOLD='\033[38;5;220m'; DIM='\033[2m'
 
 print_header() {
     clear
@@ -528,10 +524,11 @@ exec 2>"\$LOGFILE"
 
 clear
 echo ""
-echo "  ⚔️  DAD'S MMO LAB — WoW Playerbots"
-echo "  ══════════════════════════════════════"
+printf "${GOLD} ══════════════════════════════════════════════════════════════════════════════════${NC}\n"
+printf "   ${DIM}Dad's MMO Lab${NC}  ✦  ${DIM}WoW Playerbots${NC}\n"
+printf "${GOLD} ══════════════════════════════════════════════════════════════════════════════════${NC}\n"
 echo ""
-echo "  Starting server..."
+echo -e "  ${WHITE}${BOLD}Starting server...${NC}"
 echo ""
 
 # Stop any other running WoW servers first
@@ -540,30 +537,33 @@ WOW_CONTAINERS=\$(docker ps --format '{{.Names}}' 2>/dev/null | \
     grep -iE "worldserver|authserver|ac-database|ac-eluna|ac-client|ac-db-import" || true)
 
 if [ -n "\$WOW_CONTAINERS" ]; then
-    echo "  Stopping any running WoW servers first..."
+    echo -e "  ${YELLOW}⚠️  Stopping any running WoW servers first...${NC}"
     echo "\$WOW_CONTAINERS" | xargs docker stop >> "\$LOGFILE" 2>&1 || true
     sleep 5
-    echo "  All clear!"
+    echo -e "  ${GREEN}✅ All clear!${NC}"
     echo ""
 fi
 
 cd "${server_dir}" || exit 1
 
 if docker compose up -d --scale phpmyadmin=0 >> "\$LOGFILE" 2>&1; then
-    echo "  Containers started!"
+    echo -e "  ${GREEN}✅ Containers started!${NC}"
 elif docker compose up -d >> "\$LOGFILE" 2>&1; then
-    echo "  Containers started (phpmyadmin fallback used)"
+    echo -e "  ${GREEN}✅ Containers started (phpmyadmin fallback used)${NC}"
 else
-    echo "  ERR: Failed to start server."
-    echo "  Check: \$LOGFILE"
+    echo -e "  ${RED}❌ Failed to start server.${NC}"
+    echo -e "  ${DIM}Check: \$LOGFILE${NC}"
     sleep 10
     exit 1
 fi
 
 echo ""
-echo "  Waiting for world to initialize..."
-echo "  First launch: 5-15 minutes"
-echo "  After first launch: ~30 seconds"
+printf "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+echo -e "${WHITE}${BOLD} Waiting for Azeroth to wake up...${NC}"
+printf "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+echo ""
+echo -e "  ${DIM}First launch: 5-15 minutes${NC}"
+echo -e "  ${DIM}After first launch: ~30 seconds${NC}"
 echo ""
 
 TIMEOUT=900
@@ -579,7 +579,7 @@ while [ \$ELAPSED -lt \$TIMEOUT ]; do
             break
         fi
     fi
-    printf "  ."
+    printf "  ${GOLD}.${NC}"
     sleep 5
     ELAPSED=\$((ELAPSED + 5))
 done
@@ -588,44 +588,62 @@ echo ""
 echo ""
 
 if [ \$READY -eq 1 ]; then
-    echo "  ══════════════════════════════════════"
-    echo "  ✅ AZEROTH IS READY!"
-    echo "  ══════════════════════════════════════"
+    printf "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    echo -e "${GREEN}${BOLD}  ✅ AZEROTH IS READY!${NC}"
+    printf "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
 else
-    echo "  ⏳ Still initializing — launch WoW soon"
+    echo -e "  ${YELLOW}⏳ Still initializing — launch WoW soon${NC}"
 fi
 
 echo ""
-echo "  Press STEAM button and launch WoW"
-echo "  Server AUTO-SHUTS DOWN when WoW closes"
+echo -e "  ${WHITE}${BOLD}Press STEAM button and launch WoW${NC}"
+echo -e "  ${DIM}Server AUTO-SHUTS DOWN when WoW closes${NC}"
+echo -e "  ${DIM}── or press ENTER to shut down manually ──${NC}"
 echo ""
 
+MANUAL_SHUTDOWN=0
 WOW_STARTED=0
 for i in \$(seq 1 60); do
     if pgrep -fi "Wow\\.exe|wine.*[Ww]o[Ww]" > /dev/null 2>&1; then
         WOW_STARTED=1
         break
     fi
-    sleep 5
+    if read -r -t 5 2>/dev/null; then
+        MANUAL_SHUTDOWN=1
+        break
+    fi
 done
 
-if [ \$WOW_STARTED -eq 1 ]; then
-    echo "  WoW detected! Enjoy Azeroth! ⚔️"
-    while pgrep -fi "Wow\\.exe|wine.*[Ww]o[Ww]" > /dev/null 2>&1; do
-        sleep 3
-    done
-    sleep 5
-    echo "  WoW closed — shutting down..."
-else
-    echo "  WoW not detected — keeping server alive."
-    sleep 10800
+if [ \$MANUAL_SHUTDOWN -eq 0 ]; then
+    if [ \$WOW_STARTED -eq 1 ]; then
+        echo -e "  ${GREEN}⚔️  WoW detected! Enjoy Azeroth!${NC}"
+        while pgrep -fi "Wow\\.exe|wine.*[Ww]o[Ww]" > /dev/null 2>&1; do
+            if read -r -t 3 2>/dev/null; then
+                MANUAL_SHUTDOWN=1
+                break
+            fi
+        done
+        if [ \$MANUAL_SHUTDOWN -eq 0 ]; then
+            sleep 5
+            echo -e "  ${YELLOW}WoW closed — shutting down...${NC}"
+        fi
+    else
+        echo -e "  ${DIM}WoW not detected — press ENTER to shut down.${NC}"
+        read -r
+    fi
+fi
+
+if [ \$MANUAL_SHUTDOWN -eq 1 ]; then
+    echo -e "  ${YELLOW}Manual shutdown — shutting down...${NC}"
 fi
 
 cd "${server_dir}" && docker compose down >> "\$LOGFILE" 2>&1
 
 echo ""
-echo "  ✅ Server stopped! Safe to close."
-echo "  Thanks for playing! youtube.com/@DadsMmoLab"
+printf "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+echo -e "${GREEN}${BOLD}  ✅ Server stopped! Safe to close.${NC}"
+echo -e "  ${DIM}Thanks for playing! youtube.com/@DadsMmoLab${NC}"
+printf "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
 echo ""
 sleep 5
 LAUNCHER
@@ -678,18 +696,18 @@ INFO
 # ─────────────────────────────────────────
 show_completion() {
     echo ""
-    echo -e "${GREEN}${BOLD}╔══════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}${BOLD}║   🎉 YOUR PLAYERBOTS SERVER IS READY!            ║${NC}"
-    echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════╝${NC}"
+    echo -e "${GOLD}${BOLD}╔══════════════════════════════════════════════════╗${NC}"
+    echo -e "${GOLD}${BOLD}║   🎉 YOUR PLAYERBOTS SERVER IS READY!            ║${NC}"
+    echo -e "${GOLD}${BOLD}╚══════════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "  ${WHITE}${BOLD}Server:${NC}   ${CYAN}WoW Playerbots (AzerothCore WotLK)${NC}"
     echo -e "  ${WHITE}${BOLD}Folder:${NC}   ${CYAN}$SERVER_DIR${NC}"
     echo -e "  ${WHITE}${BOLD}Launcher:${NC} ${CYAN}~/wow-playerbots-launcher.sh${NC}"
     echo ""
 
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${WHITE}${BOLD} STEP A — Set Your WoW Realmlist${NC}"
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     echo -e "  1. Open your WoW client folder in the file manager"
     echo -e "  2. Find and open: ${CYAN}realmlist.wtf${NC}"
@@ -697,9 +715,9 @@ show_completion() {
     echo -e "  4. Save the file"
     echo ""
 
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${WHITE}${BOLD} STEP B — Add to Steam Gaming Mode${NC}"
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     echo -e "  Your Gaming Mode launcher was created here:"
     echo ""
@@ -720,9 +738,9 @@ show_completion() {
     echo -e "  9. Under Compatibility — ${RED}do NOT enable Proton${NC}"
     echo ""
 
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${WHITE}${BOLD} STEP C — Play!${NC}"
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     echo -e "  1. Switch to Gaming Mode"
     echo -e "  2. Launch ${CYAN}WoW Playerbots Server${NC} from your library"
@@ -734,11 +752,11 @@ show_completion() {
     echo ""
     echo -e "  ${YELLOW}Server info saved at: $SERVER_DIR/MY_SERVER.txt${NC}"
     echo ""
-    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${WHITE}  📺 youtube.com/@DadsMmoLab${NC}"
     echo -e "${WHITE}  📦 github.com/DadsMmoLab/dads-mmo-lab${NC}"
     echo -e "${WHITE}  ☕ ko-fi.com/dadsmmolab${NC}"
-    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     echo -e "${GREEN}${BOLD}Welcome to Azeroth. It's yours now. Forever. ⚔️${NC}"
     echo ""
@@ -746,9 +764,7 @@ show_completion() {
     echo -e "${YELLOW}  To stop it: ${CYAN}cd $SERVER_DIR && docker compose down${NC}"
     echo -e "${YELLOW}  Or just use the Gaming Mode launcher next time.${NC}"
     echo ""
-    echo -e "${WHITE}Would you like to stop the server now? (y/n): ${NC}"
-    read -r STOP_NOW
-    if [[ "$STOP_NOW" =~ ^[Yy]$ ]]; then
+    if ask_yes_no "Would you like to stop the server now?"; then
         print_info "Stopping server..."
         cd "$SERVER_DIR" && docker compose down
         print_success "Server stopped! Use the Gaming Mode launcher to start it next time."
