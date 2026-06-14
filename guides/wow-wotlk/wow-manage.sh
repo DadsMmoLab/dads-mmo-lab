@@ -28,7 +28,7 @@
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 # ============================================================
 
-MANAGER_VERSION="2.1.6 - ALE Drinker Edition"
+MANAGER_VERSION="2.2.1 - ALE House Edition"
 
 set -o pipefail
 
