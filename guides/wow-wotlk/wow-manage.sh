@@ -6363,6 +6363,7 @@ menu_server_maintenance() {
         printf "  ${WHITE}1)${RST} Repair install state\n"
         printf "  ${WHITE}2)${RST} Backup databases\n"
         printf "  ${WHITE}3)${RST} Restore / import a backup\n"
+        printf "  ${WHITE}4)${RST} Fix: ac-db-import 'Table already exists' errors\n"
         printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
         printf "  ${DIM}  [ENTER] Back${RST}\n"
 
@@ -6378,8 +6379,9 @@ menu_server_maintenance() {
             1) repair_install_state; press_enter ;;
             2) _maintenance_backup_all; press_enter ;;
             3) _maintenance_import ;;
+            4) fix_dbimport_table_exists; press_enter ;;
             "") return ;;
-            *) print_warning "Enter 1–3 or ENTER to go back."; press_enter ;;
+            *) print_warning "Enter 1–4 or ENTER to go back."; press_enter ;;
         esac
     done
 }
