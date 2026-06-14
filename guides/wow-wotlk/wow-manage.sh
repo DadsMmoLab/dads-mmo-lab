@@ -618,9 +618,9 @@ _cmd_block_for() {
         exchangenpc)
             printf '%s\n' \
                 'Exchange NPC (ALE)' \
-                'Adds Roboto (entry 1116001), an NPC that lets players exchange currencies, items, and resources. Requires a world SQL file. NPC must be placed in the world after install.' \
+                'Spawns up to three configurable exchange NPCs: Roboto (item-for-item with mail delivery), Shadow Priest Hacki (honor-to-gold), and Construct (PvP token vendor). Sourced from the Dad'"'"'s MMO Lab ALE-Pub collection — bugs fixed and hardened for ALE.' \
                 '' \
-                'Commands: (none — all interaction is through Roboto NPC gossip menu)' \
+                'Commands: (none — all interaction is through NPC gossip menus)' \
                 '' \
                 'NPC Spawn Commands (worldserver console; prefix with . for in-game GM):' \
                 'npc add 1116001 0 -8822.3 634.2 94.1 3.7   — Roboto (Exchange NPC), Stormwind (Alliance)' \
@@ -1397,7 +1397,7 @@ declare -a ALE_SCRIPT_REGISTRY=(
     "activechat|Azeroth Chatter (lore-grounded ambient world RP chat)|https://github.com/svey-xyz/ActiveChat.git"
     "battlepass|Battle Pass System (XP progression + rewards + client addon)|https://github.com/Shonik/lua-battlepass.git"
     "bmah|Black Market Auction House (MoP-style BMAH + client addon)|https://github.com/Youpeoples/Black-Market-Auction-House.git"
-    "exchangenpc|Exchange NPC (configurable item-exchange vendor NPC)|https://github.com/55Honey/Acore_ExchangeNpc.git"
+    "exchangenpc|Exchange NPC (configurable item-exchange vendor NPC)|https://github.com/DadsMmoLab/dads-mmo-lab.git"
     "levelupreward|Level Up Reward (random class-appropriate gear on every level-up)|https://github.com/phreeez/Levelreward.git"
     "lootpet|Loot Pet (vanity pet auto-loots nearby corpses)|https://github.com/Brytenwally/Lootpet.git"
     "paragon|Paragon Anniversary (endless post-80 stat progression + client addon)|https://github.com/Grim-Batol/Paragon-Anniversary.git"
@@ -2165,8 +2165,7 @@ ale_lua_is_deployed() {
         accountwide)   [ -d "$lua_dir/accountwide" ] && \
                         ls "$lua_dir/accountwide"/*.lua &>/dev/null ;;
         levelupreward) ls "$lua_dir"/levelreward.lua &>/dev/null 2>&1 ;;
-        exchangenpc)   ls "$lua_dir"/Exchange*.lua &>/dev/null 2>&1 || \
-                        ls "$lua_dir"/exchange*.lua &>/dev/null 2>&1 ;;
+        exchangenpc)   [ -f "$lua_dir/ExchangeNpc.lua" ] ;;
         activechat)    [ -d "$lua_dir/AzerothChatter" ] ;;
         battlepass)    [ -d "$lua_dir/battlepass" ] ;;
         paragon)       [ -d "$lua_dir/paragon" ] ;;
@@ -2986,12 +2985,13 @@ ale_deploy_lua_files() {
             fi
             ;;
         exchangenpc)
-            local count=0
-            if cp "$clone_dir"/*.lua "$lua_dir/" 2>/dev/null; then
-                count=$(ls "$clone_dir"/*.lua 2>/dev/null | wc -l | tr -d ' ')
-                print_success "Deployed $count file(s) → lua_scripts/"
+            local exc_src="$clone_dir/guides/wow-wotlk/ALE-Pub/ExchangeNPC/ExchangeNpc.lua"
+            if [ -f "$exc_src" ]; then
+                cp "$exc_src" "$lua_dir/" && \
+                    print_success "Deployed ExchangeNpc.lua → lua_scripts/" || \
+                    print_warning "Copy failed — check $exc_src"
             else
-                print_warning "No .lua files found in clone root — check $clone_dir"
+                print_warning "ExchangeNpc.lua not found at expected path: $exc_src"
             fi
             ;;
         activechat)
@@ -3124,6 +3124,22 @@ ale_script_install() {
                     return 1
                 }
                 ;;
+            exchangenpc)
+                # exchangenpc lives in ALE-Pub/ExchangeNPC in the main dads-mmo-lab repo.
+                if ! git clone --depth 1 --filter=blob:none --sparse \
+                        "$url" "$clone_dir"; then
+                    rm -rf "$clone_dir"
+                    print_error "Clone failed for $name!"
+                    return 1
+                fi
+                (cd "$clone_dir" && \
+                    git sparse-checkout set \
+                        "guides/wow-wotlk/ALE-Pub/ExchangeNPC") || {
+                    rm -rf "$clone_dir"
+                    print_error "Sparse checkout failed for $name!"
+                    return 1
+                }
+                ;;
             *)
                 if ! git clone --depth 1 "$url" "$clone_dir"; then
                     rm -rf "$clone_dir"
@@ -3174,27 +3190,26 @@ ale_script_install() {
             ;;
         exchangenpc)
             echo ""
-            print_info "Exchange NPC requires a world SQL file to be applied."
+            print_warning "Exchange NPC requires world SQL to be applied before the NPCs will work."
             local _exchangenpc_sql_ok=false
-            if ask_yes_no "Apply Exchange NPC world SQL now?"; then
+            local _exc_sql_dir="$clone_dir/guides/wow-wotlk/ALE-Pub/ExchangeNPC/database/world"
+            local _exc_sql_up="$_exc_sql_dir/ExchangeNpc_Up.sql"
+            if [ ! -f "$_exc_sql_up" ]; then
+                print_warning "SQL file not found at: $_exc_sql_up"
+                print_info "The sparse checkout may be incomplete. Try re-installing."
+            elif ask_yes_no "Apply ExchangeNpc_Up.sql to acore_world now? (required for NPCs to spawn)"; then
                 if ensure_db_running; then
-                    # Prefer the *_Up.sql (install) variant; avoid Down/Revert scripts
-                    local sql_file
-                    sql_file=$(find "$clone_dir" -name "*_Up.sql" 2>/dev/null | head -1)
-                    if [ -z "$sql_file" ]; then
-                        # Fallback: any SQL that isn't a rollback
-                        sql_file=$(find "$clone_dir" -name "*.sql" 2>/dev/null \
-                            | grep -v -i "down\|revert" | head -1)
-                    fi
-                    if [ -n "$sql_file" ]; then
-                        if ale_run_sql_file "acore_world" "$sql_file"; then
-                            _exchangenpc_sql_ok=true
-                        fi
+                    if ale_run_sql_file "acore_world" "$_exc_sql_up"; then
+                        _exchangenpc_sql_ok=true
+                        print_success "Exchange NPC SQL applied."
                     else
-                        print_warning "No install SQL file found in $clone_dir"
-                        print_info "Manually apply the *_Up.sql file from the repo."
+                        print_warning "SQL apply failed — check DB logs and retry or apply manually."
+                        print_info "Manual: $_exc_sql_up"
                     fi
                 fi
+            else
+                print_info "Skipped. Apply manually when ready:"
+                print_info "  $_exc_sql_up"
             fi
             echo ""
             print_info "Exchange NPC (Roboto, entry 1116001) is in the database but has no spawn point."
@@ -3202,9 +3217,9 @@ ale_script_install() {
                 _offer_npc_in_capitals 1116001 "Roboto (Exchange NPC)" \
                     "The NPC template was just applied — restart the server, then run these commands."
             else
-                print_info "Apply the world SQL first (re-install or run manually), then spawn the NPC:"
-                print_info "  In-game:  ${CYAN}.npc add 1116001 0 -8831.3 628.2 94.1 3.7${RST}  (Stormwind)"
-                print_info "  In-game:  ${CYAN}.npc add 1116001 1  1597.2 -4415.7 17.5 4.5${RST}  (Orgrimmar)"
+                print_info "After SQL is applied, spawn the NPC in-game:"
+                print_info "  ${CYAN}.npc add 1116001 0 -8831.3 628.2 94.1 3.7${RST}  (Stormwind)"
+                print_info "  ${CYAN}.npc add 1116001 1  1597.2 -4415.7 17.5 4.5${RST}  (Orgrimmar)"
             fi
             ;;
         battlepass)
@@ -3281,7 +3296,7 @@ ale_script_remove() {
     # For scripts whose deployed filenames come from the clone, collect them BEFORE removal
     local -a generic_deployed_files=()
     case "$key" in
-        levelupreward|exchangenpc)
+        levelupreward)
             while IFS= read -r f; do
                 generic_deployed_files+=("$(basename "$f")")
             done < <(find "$clone_dir" -maxdepth 1 -name "*.lua" 2>/dev/null)
@@ -3303,6 +3318,7 @@ ale_script_remove() {
         bmah)        deployed_hint="$lua_dir/bmah_server.lua" ;;
         lootpet)     deployed_hint="$lua_dir/LootPet.lua" ;;
         sitmeanrest)  deployed_hint="$lua_dir/SitMeansRest.lua" ;;
+        exchangenpc) deployed_hint="$lua_dir/ExchangeNpc.lua" ;;
         sod)         deployed_hint="$lua_dir/SOD.lua" ;;
         unlimitedammo) deployed_hint="$lua_dir/UnlimitedAmmo.lua" ;;
         *)           deployed_hint="$lua_dir/ (search for files from this script)" ;;
@@ -3320,8 +3336,9 @@ ale_script_remove() {
             lootpet)     rm -f  "$lua_dir/LootPet.lua" ;;
             sitmeanrest)   rm -f "$lua_dir/SitMeansRest.lua" ;;
             sod)           rm -f "$lua_dir/SOD.lua" ;;
+            exchangenpc)   rm -f "$lua_dir/ExchangeNpc.lua" ;;
             unlimitedammo) rm -f "$lua_dir/UnlimitedAmmo.lua" ;;
-            levelupreward|exchangenpc)
+            levelupreward)
                 local f
                 for f in "${generic_deployed_files[@]}"; do
                     rm -f "$lua_dir/$f" 2>/dev/null || true
@@ -4335,11 +4352,11 @@ _get_about_text() {
             ;;
         exchangenpc)
             printf '%s\n' \
-                'Spawns a configurable NPC (Roboto, entry 1116001) that swaps' \
-                'items for other items -- a custom material-exchange vendor.' \
-                'Define exchange pairs in the Lua config, apply the world SQL' \
-                'during install, then manually spawn the NPC in the world.' \
-                'The install flow offers capital-city spawn coordinates.'
+                'Three configurable exchange NPCs sourced from the Dad'"'"'s MMO' \
+                'Lab ALE-Pub collection. Roboto swaps items via mail; Shadow' \
+                'Priest Hacki converts honor to gold; Construct sells PvP gear' \
+                'tokens. Bugs fixed (undefined variable crash, wrong mail qty,' \
+                'nil spawn handling). Token NPC off by default. Requires SQL.'
             ;;
         activechat)
             printf '%s\n' \

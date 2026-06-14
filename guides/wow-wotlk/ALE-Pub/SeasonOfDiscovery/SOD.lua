@@ -1,14 +1,7 @@
 -- Season of Discovery Buff
 -- ALE (AzerothCore Lua Engine) version
---
--- Applies a tiered Discoverer's Delight XP bonus on login and adjusts it
--- automatically whenever the player levels up, mimicking WoW Classic SoD
--- phased catch-up bonuses. The bonus decreases as the player approaches
--- max level (80); level 80 players receive no buff.
---
 -- Forked from: https://github.com/notepadguyOfficial/acore_sod
 -- Updated for ALE by: Dad's MMO Lab
--- ALE API reference: https://www.azerothcore.org/eluna/
 
 -- ── Double-load guard ────────────────────────────────────────────────────────
 -- Prevents duplicate event registration on .reload ale
