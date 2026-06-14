@@ -1492,12 +1492,13 @@ declare -a ALE_SCRIPT_REGISTRY=(
     "activechat|Azeroth Chatter (lore-grounded ambient world RP chat)|https://github.com/svey-xyz/ActiveChat.git"
     "battlepass|Battle Pass System (XP progression + rewards + client addon)|https://github.com/Shonik/lua-battlepass.git"
     "bmah|Black Market Auction House (MoP-style BMAH + client addon)|https://github.com/Youpeoples/Black-Market-Auction-House.git"
-    "exchangenpc|Exchange NPC (configurable item-exchange vendor NPC)|https://github.com/DadsMmoLab/dads-mmo-lab.git"
+    # ! DEBUG: Set to baerthe repo for now since original author repo is private. Original repo: dads-mmo-lab
+    "exchangenpc|Exchange NPC (configurable item-exchange vendor NPC)|https://github.com/Baerthe/dads-mmo-lab.git|Update-Delta"
     "levelupreward|Level Up Reward (random class-appropriate gear on every level-up)|https://github.com/phreeez/Levelreward.git"
     "lootpet|Loot Pet (vanity pet auto-loots nearby corpses)|https://github.com/Brytenwally/Lootpet.git"
     "paragon|Paragon Anniversary (endless post-80 stat progression + client addon)|https://github.com/Grim-Batol/Paragon-Anniversary.git"
     "sitmeanrest|Sit Means Rest (regen buff on /sit; strips on movement)|https://github.com/Brytenwally/SitMeansRest.git"
-    "sod|Season of Discovery Buffs (phased leveling XP rate bonus)|https://github.com/DadsMmoLab/dads-mmo-lab.git"
+    "sod|Season of Discovery Buffs (phased leveling XP rate bonus)|https://github.com/Baerthe/dads-mmo-lab.git|Update-Delta"
     "unlimitedammo|Unlimited Ammo (auto-refills Hunter arrows/bullets)|https://github.com/Day36512/Acore_Lua_Unlimited_Ammo.git"
 )
 
@@ -2393,42 +2394,56 @@ copy_client_data() {
     fi
 }
 
-# Copy custom DBC files into the AzerothCore server container.
+# Copy custom DBC files into the AzerothCore server data volume.
+# The ac-client-data volume is mounted :ro on the worldserver, so docker cp
+# into the worldserver container won't work. Instead we spin up a temporary
+# alpine container with the volume mounted read-write, copy the files, then
+# remove the helper container.
 # Usage: copy_server_dbc <src_dbc_dir> [description]
-# Uses docker cp when worldserver is running; falls back to host path.
 copy_server_dbc() {
     local src_dir="$1" desc="${2:-DBC files}"
     if [ ! -d "$src_dir" ]; then
         print_warning "DBC source not found: $src_dir"
         return 1
     fi
-    if container_running "$WORLD_CONTAINER"; then
-        local f
-        local _ok=true
-        for f in "$src_dir"/*.dbc; do
-            [ -f "$f" ] || continue
-            if ! docker cp "$f" "$WORLD_CONTAINER:/azerothcore/env/dist/data/dbc/"; then
-                print_warning "docker cp failed for $(basename "$f")"
-                _ok=false
-            fi
-        done
-        if [ "$_ok" = true ]; then
-            print_success "$desc copied into container → /azerothcore/env/dist/data/dbc/"
-            print_info "Restart the worldserver for DBC changes to take effect."
-            return 0
-        fi
+    local -a _dbc_files=("$src_dir"/*.dbc)
+    if [ ! -f "${_dbc_files[0]}" ]; then
+        print_warning "No .dbc files found in: $src_dir"
+        return 1
     fi
-    # Fallback: copy to host data dir (picked up on next container start)
-    local host_dbc="$SERVER_DIR/env/dist/data/dbc"
-    mkdir -p "$host_dbc"
-    if cp "$src_dir"/*.dbc "$host_dbc/" 2>/dev/null; then
-        print_success "$desc copied → $host_dbc"
+    print_info "Detecting data volume name..."
+    # Inspect worldserver mounts to find the ac-client-data volume name
+    local _vol_name=""
+    if [ -n "$WORLD_CONTAINER" ]; then
+        _vol_name=$(docker inspect "$WORLD_CONTAINER" \
+            --format '{{range .Mounts}}{{if eq .Destination "/azerothcore/env/dist/data"}}{{.Name}}{{end}}{{end}}' \
+            2>/dev/null)
+    fi
+    # Fall back to the default volume name if inspect fails
+    [ -z "$_vol_name" ] && _vol_name="ac-client-data"
+    print_info "Using data volume: $_vol_name"
+    # Spin up a temporary alpine container with the volume mounted rw
+    local _ok=true
+    local f
+    for f in "${_dbc_files[@]}"; do
+        [ -f "$f" ] || continue
+        if ! docker run --rm \
+                -v "$_vol_name:/data" \
+                -v "$f:/src/$(basename "$f"):ro" \
+                alpine \
+                cp "/src/$(basename "$f")" "/data/dbc/$(basename "$f")"; then
+            print_warning "Failed to copy $(basename "$f") into volume"
+            _ok=false
+        fi
+    done
+    if [ "$_ok" = true ]; then
+        print_success "$desc installed → $_vol_name:/azerothcore/env/dist/data/dbc/"
         print_info "Restart the worldserver for DBC changes to take effect."
         return 0
     else
-        print_warning "DBC copy failed — install manually:"
-        print_info "  cp \"$src_dir\"/*.dbc \"$host_dbc/\""
-        print_info "  OR: docker cp <file>.dbc $WORLD_CONTAINER:/azerothcore/env/dist/data/dbc/"
+        print_warning "Some DBC files failed. Manual steps:"
+        print_info "  docker run --rm -v $_vol_name:/data -v \$(pwd):/src alpine \\"
+        print_info "    sh -c 'cp /src/*.dbc /data/dbc/'"
         return 1
     fi
 }
@@ -3401,7 +3416,7 @@ ale_deploy_lua_files() {
 
 # Clone/update, deploy Lua files, run per-script extras.
 ale_script_install() {
-    local key="$1" name="$2" url="$3"
+    local key="$1" name="$2" url="$3" branch="${4:-HEAD}"
     local clone_dir
     clone_dir=$(ale_script_clone_dir "$key")
 
@@ -3422,7 +3437,7 @@ ale_script_install() {
         if [ -f "$_dml_src" ]; then
             print_info "Staged files found — updating from remote if possible..."
             if [ -d "$clone_dir/.git" ]; then
-                git -C "$clone_dir" pull --depth=1 origin HEAD --quiet 2>/dev/null || \
+                git -C "$clone_dir" pull --depth=1 origin "$branch" --quiet 2>/dev/null || \
                     print_warning "git pull failed — using existing staged files"
             fi
         else
@@ -3443,7 +3458,7 @@ ale_script_install() {
             git -C "$clone_dir" config core.sparseCheckout true
             mkdir -p "$clone_dir/.git/info"
             printf '%s/\n' "$_sparse_path" > "$clone_dir/.git/info/sparse-checkout"
-            if ! git -C "$clone_dir" pull --depth=1 origin HEAD --quiet; then
+            if ! git -C "$clone_dir" pull --depth=1 origin "$branch" --quiet; then
                 rm -rf "$clone_dir"
                 print_error "Sparse fetch failed for $name!"
                 print_info "Ensure the files have been pushed to: $url"
@@ -3453,7 +3468,7 @@ ale_script_install() {
         fi
     elif ale_script_is_installed "$key"; then
         print_info "Already cloned — pulling latest..."
-        (cd "$clone_dir" && git pull --depth=1 origin HEAD --quiet 2>/dev/null) || \
+        (cd "$clone_dir" && git pull --depth=1 origin "$branch" --quiet 2>/dev/null) || \
             print_warning "git pull failed — using existing copy"
     else
         if [ -d "$clone_dir" ] && [ ! -d "$clone_dir/.git" ]; then
@@ -4919,7 +4934,7 @@ menu_ale_scripts() {
         local entry key name url cloned deployed marker
 
         for entry in "${ALE_SCRIPT_REGISTRY[@]}"; do
-            IFS='|' read -r key name url <<< "$entry"
+            IFS='|' read -r key name url branch <<< "$entry"
             cloned=false; deployed=false
             ale_script_is_installed "$key" && cloned=true
             ale_lua_is_deployed     "$key" && deployed=true
@@ -4959,7 +4974,7 @@ menu_ale_scripts() {
 
         local idx
         for (( idx=page_start; idx<page_end; idx++ )); do
-            IFS='|' read -r key name url <<< "${available_entries[$idx]}"
+            IFS='|' read -r key name url branch <<< "${available_entries[$idx]}"
             printf "  ${WHITE}%2d)${RST} %-38s %b\n" "$(( idx + 1 ))" "$name" "${markers[$idx]}"
         done
 
@@ -5002,8 +5017,8 @@ menu_ale_scripts() {
                     press_enter; continue
                 fi
                 local inum="$_PARSED_INDEX"
-                IFS='|' read -r key name url <<< "${available_entries[$((inum - 1))]}"
-                ale_script_install "$key" "$name" "$url" || true
+                IFS='|' read -r key name url branch <<< "${available_entries[$((inum - 1))]}"
+                ale_script_install "$key" "$name" "$url" "$branch" || true
                 press_enter
                 ;;
             r)
@@ -5012,7 +5027,7 @@ menu_ale_scripts() {
                     press_enter; continue
                 fi
                 local rnum="$_PARSED_INDEX"
-                IFS='|' read -r key name url <<< "${available_entries[$((rnum - 1))]}"
+                IFS='|' read -r key name url branch <<< "${available_entries[$((rnum - 1))]}"
                 ale_script_remove "$key" "$name"
                 press_enter
                 ;;
@@ -5022,7 +5037,7 @@ menu_ale_scripts() {
                     press_enter; continue
                 fi
                 local cnum="$_PARSED_INDEX"
-                IFS='|' read -r key name url <<< "${available_entries[$((cnum - 1))]}"
+                IFS='|' read -r key name url branch <<< "${available_entries[$((cnum - 1))]}"
                 case "$key" in
                     accountwide) configure_ale_accountwide ;;
                     battlepass) configure_ale_battlepass ;;
@@ -5041,7 +5056,7 @@ menu_ale_scripts() {
                     print_warning "Invalid script number -- e.g. ?5"
                     press_enter; continue
                 fi
-                IFS='|' read -r key name url <<< "${available_entries[$((anum - 1))]}"
+                IFS='|' read -r key name url branch <<< "${available_entries[$((anum - 1))]}"
                 show_about "$key" "$name" "$url"
                 ;;
             *)
