@@ -529,6 +529,16 @@ _cmd_block_for() {
                 'npc add 601026 0 -8825.3 632.2 94.1 3.7   — White Fang (Beastmaster), Stormwind (Alliance)' \
                 'npc add 601026 1 1603.2 -4411.7 17.5 4.5  — White Fang (Beastmaster), Orgrimmar (Horde)'
             ;;
+        mod-quest-loot-party)
+            printf '%s\n' \
+                'Quest Loot Party' \
+                'Distributes quest item loot to ALL eligible party members when any one member' \
+                'loots the item — eliminating repeated boss kills when questing in a group.' \
+                '' \
+                'Configuration: QuestParty.Enable (on/off), QuestParty.Message (notify players)' \
+                '' \
+                'Commands: (none — fully automatic)'
+            ;;
         mod-aoe-loot)
             printf '%s\n' \
                 'AoE Loot' \
@@ -951,12 +961,13 @@ declare -a MODULE_REGISTRY=(
     "mod-ah-bot|Auction House Bot|https://github.com/azerothcore/mod-ah-bot.git|world"
     "mod-autobalance|Auto Balance (dynamic difficulty)|https://github.com/azerothcore/mod-autobalance.git|world"
     "mod-ale|AzerothCore Lua Engine (ALE)|https://github.com/azerothcore/mod-ale.git|"
-    "mod-player-bot-level-brackets|Bot Level Brackets (Playerbot distribution)|https://github.com/DustinHendrickson/mod-player-bot-level-brackets.git|world,characters"
+    "mod-player-bot-level-brackets|Bot Level Brackets (Playerbot distribution)|https://github.com/DustinHendrickson/mod-player-bot-level-brackets.git|characters"
     "mod-challenge-modes|Challenge Modes (Hardcore, Iron Man, etc.)|https://github.com/ZhengPeiRu21/mod-challenge-modes.git|world,characters"
     "mod-individual-progression|Individual Progression (Vanilla → TBC → WotLK)|https://github.com/ZhengPeiRu21/mod-individual-progression.git|world,characters"
     "mod-junk-to-gold|Junk to Gold (auto-sell gray items)|https://github.com/noisiver/mod-junk-to-gold.git|world"
     "mod-learn-spells|Learn Spells on Levelup|https://github.com/azerothcore/mod-learn-spells.git|world"
     "mod-npc-beastmaster|NPC Beastmaster (pets for all classes)|https://github.com/azerothcore/mod-npc-beastmaster.git|world,characters"
+    "mod-quest-loot-party|Quest Loot Party (quest items drop for all eligible party members)|https://github.com/pangolp/mod-quest-loot-party.git|world"
     "mod-solocraft|Solocraft (solo dungeon/raid scaling)|https://github.com/azerothcore/mod-solocraft.git|world"
     "mod-transmog|Transmogrification|https://github.com/azerothcore/mod-transmog.git|world,characters"
 )
@@ -2195,6 +2206,42 @@ configure_module_bot_level_brackets() {
     fi
 
     print_info "⚠  Bot Level Brackets requires the Playerbots module to function."
+    echo ""
+    _open_text_file "$conf_dest"
+    echo ""
+    print_info "Restart the worldserver for conf changes to take effect."
+}
+
+# ─────────────────────────────────────────────────────────────
+# configure_module_quest_loot_party
+#   Copies mod-quest-loot-party.conf.dist and opens it.
+#   Two settings: QuestParty.Enable and QuestParty.Message
+# ─────────────────────────────────────────────────────────────
+configure_module_quest_loot_party() {
+    print_step "Configuring Quest Loot Party"
+    local module_dir="$SERVER_DIR/modules/mod-quest-loot-party"
+    if [ ! -d "$module_dir" ]; then
+        print_error "Quest Loot Party module not installed (expected at $module_dir)."
+        return 1
+    fi
+    local conf_dist="$module_dir/conf/mod-quest-loot-party.conf.dist"
+    local conf_dest="$SERVER_DIR/env/dist/etc/modules/mod-quest-loot-party.conf"
+    mkdir -p "$SERVER_DIR/env/dist/etc/modules"
+    if [ ! -f "$conf_dest" ]; then
+        if [ -f "$conf_dist" ]; then
+            cp "$conf_dist" "$conf_dest"
+            print_success "Created $conf_dest"
+        else
+            print_warning "conf.dist not found at $conf_dist"
+            print_info "The worldserver must be rebuilt once before conf files are generated."
+            print_info "After rebuilding, re-run this configure option."
+            return 0
+        fi
+    fi
+    echo ""
+    echo -e "${WHITE}Settings:${RST}"
+    printf "  ${CYAN}%-30s${RST} ${WHITE}%s${RST}\n" "QuestParty.Enable" "true = on / false = off (default: true)"
+    printf "  ${CYAN}%-30s${RST} ${WHITE}%s${RST}\n" "QuestParty.Message" "true = notify players / false = silent (default: true)"
     echo ""
     _open_text_file "$conf_dest"
     echo ""
@@ -4750,6 +4797,13 @@ _get_about_text() {
                 'permanently in capitals — install flow provides coordinates. Add 601026' \
                 'to Creatures.CustomIDs in worldserver.conf to silence a harmless warning.'
             ;;
+        mod-quest-loot-party)
+            printf '%s\n' \
+                'When any party member loots a normal-quality quest item, all party' \
+                'members with the same quest active automatically receive the item.' \
+                'Eliminates repeated boss kills when questing as a group. Fully' \
+                'automatic — no player commands needed.'
+            ;;
         accountwide)
             printf '%s\n' \
                 'Syncs achievements, currencies, gold, mounts, and pets across' \
@@ -5149,6 +5203,12 @@ _module_post_install_hook() {
             _offer_npc_in_capitals 601026 "White Fang (Beastmaster NPC)" \
                 "Run these commands after rebuilding and starting the worldserver."
             ;;
+        mod-quest-loot-party)
+            echo ""
+            print_info "Module SQL (module_string entries) will be auto-applied on next server start."
+            print_info "Note: rebuild the worldserver first if the conf.dist is not yet present."
+            if ask_yes_no "Configure Quest Loot Party now?"; then configure_module_quest_loot_party; fi
+            ;;
         mod-transmog)
             echo ""
             print_info "Transmogrification adds NPC entry 190010 — it must be manually placed in the world."
@@ -5376,6 +5436,7 @@ menu_modules() {
                     mod-challenge-modes)         configure_module_challenge_modes ;;
                     mod-player-bot-level-brackets) configure_module_bot_level_brackets ;;
                     mod-npc-beastmaster)         configure_module_npc_beastmaster ;;
+                    mod-quest-loot-party)        configure_module_quest_loot_party ;;
                     *)
                         print_info "$name has no dedicated configure option."
                         print_info "Edit its .conf file in $SERVER_DIR/env/dist/etc/modules/ directly."
@@ -5415,6 +5476,7 @@ _module_conf_name() {
         mod-junk-to-gold)               echo "" ;;
         mod-learn-spells)               echo "mod_learnspells.conf" ;;
         mod-npc-beastmaster)            echo "mod_npc_beastmaster.conf" ;;
+        mod-quest-loot-party)           echo "mod-quest-loot-party.conf" ;;
         mod-solocraft)                  echo "Solocraft.conf" ;;
         mod-transmog)                   echo "transmog.conf" ;;
         *)                              echo "" ;;
@@ -5575,6 +5637,12 @@ _module_conf_hints() {
                 '  - BeastMaster.AllowedClasses' \
                 '  - BeastMaster.MinLevel' \
                 'Tip: add 601026 to Creatures.CustomIDs in worldserver.conf.'
+            ;;
+        mod-quest-loot-party)
+            printf '%s\n' \
+                'Settings:' \
+                '  - QuestParty.Enable  (true/false — master on/off)' \
+                '  - QuestParty.Message (true/false — show login announcement)'
             ;;
         mod-solocraft)
             printf '%s\n' \
