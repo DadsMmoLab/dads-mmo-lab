@@ -2,6 +2,8 @@
 # ============================================================
 #  Dad's MMO Lab — WoW Module Manager
 #  wow-manage.sh
+# ------------------------------------------------------------
+#  Mostly written by Baerthe (https://github.com/Baerthe)
 #
 #  Post-install management for AzerothCore WoW servers:
 #    - Add/remove modules (AH Bot, Solocraft, Transmog, etc.)
@@ -1566,13 +1568,12 @@ declare -a ALE_SCRIPT_REGISTRY=(
     "accountwide|Accountwide Systems (achievements, currency, mounts, pets)|https://github.com/Aldori15/azerothcore-eluna-accountwide.git"
     "activechat|Azeroth Chatter (lore-grounded ambient world RP chat)|https://github.com/svey-xyz/ActiveChat.git"
     "battlepass|Battle Pass System (XP progression + rewards + client addon)|https://github.com/Shonik/lua-battlepass.git"
-    # ! DEBUG: Using Baerthe test repo; move to DadsMmoLab/dads-mmo-lab when merged to main
-    "bmah|Black Market Auction House (MoP-style BMAH + client addon)|https://github.com/Baerthe/dads-mmo-lab.git|Update-Delta"
+    "bmah|Black Market Auction House (MoP-style BMAH + client addon)|https://github.com/DadsMmoLab/dads-mmo-lab.git|Update-Delta"
     "levelupreward|Level Up Reward (random class-appropriate gear on every level-up)|https://github.com/phreeez/Levelreward.git"
     "lootpet|Loot Pet (vanity pet auto-loots nearby corpses)|https://github.com/Brytenwally/Lootpet.git"
     "paragon|Paragon Anniversary (endless post-80 stat progression + client addon)|https://github.com/Grim-Batol/Paragon-Anniversary.git"
     "sitmeanrest|Sit Means Rest (regen buff on /sit; strips on movement)|https://github.com/Brytenwally/SitMeansRest.git"
-    "sod|Season of Discovery Buffs (phased leveling XP rate bonus)|https://github.com/Baerthe/dads-mmo-lab.git|Update-Delta"
+    "sod|Season of Discovery Buffs (phased leveling XP rate bonus)|https://github.com/DadsMmoLab/dads-mmo-lab.git|Update-Delta"
     "unlimitedammo|Unlimited Ammo (auto-refills Hunter arrows/bullets)|https://github.com/Day36512/Acore_Lua_Unlimited_Ammo.git"
 )
 
