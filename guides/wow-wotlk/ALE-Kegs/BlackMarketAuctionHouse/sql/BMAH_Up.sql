@@ -48,21 +48,30 @@ SET @sql = IF(@hasScale > 0,
 PREPARE _bmah_stmt FROM @sql; EXECUTE _bmah_stmt; DEALLOCATE PREPARE _bmah_stmt;
 
 -- ── 2. Display model — schema-adaptive ───────────────────────────────────────────
--- Newer AC (no modelid columns): insert into creature_template_model.
--- Older AC (has modelid1): update modelid1 directly.
--- Uses MySQL dynamic SQL (PREPARE/EXECUTE) so neither branch errors out.
+-- Picks a display ID already in the DB (prefers Krazek → Privateer Bloads → any
+-- valid row), so the INSERT is guaranteed to reference a real CreatureDisplayInfo
+-- entry regardless of which AC fork or DBC revision the server is running.
 
 SET @hasModelTable = (
   SELECT COUNT(*) FROM information_schema.TABLES
   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'creature_template_model'
 );
+-- Resolve a safe display ID dynamically from existing creatures
+SET @bmah_display_id = 6557; -- absolute fallback if table is empty / doesn't exist
+SET @sql = IF(@hasModelTable > 0,
+  'SELECT COALESCE(MIN(CASE WHEN CreatureID=7164 THEN CreatureDisplayID ELSE NULL END), MIN(CASE WHEN CreatureID=2494 THEN CreatureDisplayID ELSE NULL END), MIN(CreatureDisplayID)) INTO @bmah_display_id FROM creature_template_model WHERE CreatureDisplayID > 0',
+  'SELECT 6557');
+PREPARE _bmah_stmt FROM @sql; EXECUTE _bmah_stmt; DEALLOCATE PREPARE _bmah_stmt;
+SET @bmah_display_id = COALESCE(@bmah_display_id, 6557);
+SELECT CONCAT('Using CreatureDisplayID = ', @bmah_display_id) AS model_note;
+
 SET @sql = IF(@hasModelTable > 0,
   'DELETE FROM creature_template_model WHERE CreatureID = 2069430',
   'SELECT 1'
 );
 PREPARE _bmah_stmt FROM @sql; EXECUTE _bmah_stmt; DEALLOCATE PREPARE _bmah_stmt;
 SET @sql = IF(@hasModelTable > 0,
-  'INSERT INTO creature_template_model (CreatureID, Idx, CreatureDisplayID, DisplayScale, Probability, VerifiedBuild) VALUES (2069430, 0, 6557, 1.0, 1.0, 0)',
+  CONCAT('INSERT INTO creature_template_model (CreatureID, Idx, CreatureDisplayID, DisplayScale, Probability, VerifiedBuild) VALUES (2069430, 0, ', @bmah_display_id, ', 1.0, 1.0, 0)'),
   'SELECT ''Skipping creature_template_model — not present in this AC build'' AS note'
 );
 PREPARE _bmah_stmt FROM @sql; EXECUTE _bmah_stmt; DEALLOCATE PREPARE _bmah_stmt;
@@ -72,7 +81,7 @@ SET @hasModelid1 = (
   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'creature_template' AND COLUMN_NAME = 'modelid1'
 );
 SET @sql = IF(@hasModelid1 > 0,
-  'UPDATE creature_template SET modelid1 = 6557 WHERE entry = 2069430',
+  CONCAT('UPDATE creature_template SET modelid1 = ', @bmah_display_id, ' WHERE entry = 2069430'),
   'SELECT ''Skipping modelid1 — column not present in this AC build'' AS note'
 );
 PREPARE _bmah_stmt FROM @sql; EXECUTE _bmah_stmt; DEALLOCATE PREPARE _bmah_stmt;

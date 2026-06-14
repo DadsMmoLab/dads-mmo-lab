@@ -2980,6 +2980,45 @@ configure_ale_bmah() {
         fi
         return 1
     fi
+    # ── Patch pcall wrapping if not already present ───────────
+    # Prevents script abort when an NPC entry isn't in ObjectMgr yet
+    if ! grep -q "pcall(RegisterCreatureGossipEvent" "$deployed_file"; then
+        python3 - "$deployed_file" <<'PYEOF'
+import sys, re
+path = sys.argv[1]
+with open(path) as f: src = f.read()
+old = re.compile(
+    r'(for _, entry in ipairs\(BMAH_VENDOR_NPCs\) do\n)'
+    r'( +)(RegisterCreatureGossipEvent\(entry, GOSSIP_EVENT_ON_HELLO, +(\S+)\))\n'
+    r'( +)(RegisterCreatureGossipEvent\(entry, GOSSIP_EVENT_ON_SELECT, +(\S+)\))\n'
+    r'(end)'
+)
+def replace(m):
+    ind = m.group(2)
+    h = m.group(4); s = m.group(7)
+    return (
+        f'{m.group(1)}'
+        f'{ind}print("[BMAH] Registering gossip for creature entry: " .. tostring(entry))\n'
+        f'{ind}local ok1, err1 = pcall(RegisterCreatureGossipEvent, entry, GOSSIP_EVENT_ON_HELLO,  {h})\n'
+        f'{ind}local ok2, err2 = pcall(RegisterCreatureGossipEvent, entry, GOSSIP_EVENT_ON_SELECT, {s})\n'
+        f'{ind}if not ok1 or not ok2 then\n'
+        f'{ind}    print("[BMAH] WARNING: Gossip reg failed for entry " .. tostring(entry) .. " — restart worldserver to fix")\n'
+        f'{ind}    print("[BMAH]   " .. tostring(err1 or err2))\n'
+        f'{ind}else\n'
+        f'{ind}    print("[BMAH] Gossip registered OK for entry " .. tostring(entry))\n'
+        f'{ind}end\n'
+        f'{m.group(8)}'
+    )
+patched, n = old.subn(replace, src)
+if n:
+    with open(path, 'w') as f: f.write(patched)
+    print(f"pcall patch applied ({n} block(s))")
+else:
+    print("Pattern not matched — file may already be patched or has custom layout")
+PYEOF
+    else
+        print_info "pcall wrapping already present — skipping patch."
+    fi
 
     # ── Show current IDs extracted from the file ──────────────
     local current_ids
