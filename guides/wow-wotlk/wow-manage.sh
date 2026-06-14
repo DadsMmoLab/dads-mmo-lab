@@ -3588,6 +3588,21 @@ ale_script_install() {
             ;;
         bmah)
             echo ""
+            # Apply world SQL (creates creature_template with gossip npcflag)
+            local _bmah_sql="$clone_dir/guides/wow-wotlk/ALE-Kegs/BlackMarketAuctionHouse/sql/BMAH_Up.sql"
+            if [ -f "$_bmah_sql" ]; then
+                print_step "BMAH — Applying NPC setup SQL (acore_world)..."
+                if ale_run_sql_file "acore_world" "$_bmah_sql"; then
+                    print_success "BMAH NPC (entry 2069430) created in acore_world."
+                else
+                    print_warning "SQL failed — run manually:"
+                    print_info "  $_bmah_sql"
+                fi
+            else
+                print_warning "BMAH_Up.sql not found — NPC may not be gossip-enabled."
+                print_info "Manual: UPDATE creature_template SET npcflag = npcflag | 1 WHERE entry = 2069430;"
+            fi
+            echo ""
             if ask_yes_no "Configure Black Market AH (NPC ID + client addon info) now?"; then
                 configure_ale_bmah
             fi

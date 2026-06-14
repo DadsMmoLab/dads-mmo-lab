@@ -4,11 +4,17 @@
 -- Updated for ALE by: Dad's MMO Lab
 --
 -- ADMIN GUIDE:
---   1. Copy this file to your lua_scripts/ directory
---   2. Reload: .reload ale  (or restart worldserver)
---   3. The DB table is created automatically on first load (acore_characters)
---   4. Spawn a vendor NPC and add its entry ID to BMAH_VENDOR_NPCs below
---   5. Client addon: copy Client Files/AddOns/BlackMarketUI → <WoW>/Interface/AddOns/
+--   1. Run sql/BMAH_Up.sql against acore_world to create the vendor NPC
+--   2. Copy this file to your lua_scripts/ directory
+--   3. Reload: .reload ale  (or restart worldserver)
+--   4. The DB table is created automatically on first load (acore_characters)
+--   5. Spawn the NPC: .npc add 2069430  (or add your own entry to BMAH_VENDOR_NPCs)
+--   6. Client addon: copy Client Files/AddOns/BlackMarketUI → <WoW>/Interface/AddOns/
+--
+-- USING A CUSTOM NPC:
+--   Add its entry ID to BMAH_VENDOR_NPCs below.
+--   The creature_template row must have npcflag with bit 0 set (gossip = 1):
+--     UPDATE creature_template SET npcflag = npcflag | 1 WHERE entry = <your_entry>;
 --
 -- GM COMMANDS (whisper the NPC or self):
 --   bmah_fill   — manually fill the auction table (only when empty)
@@ -286,12 +292,23 @@ local function rollItem()
 end
 
 -- ── Gossip: open BMAH UI ──────────────────────────────────────────────────────
-local function OnBMAHVendorGossip(event, player, creature)
-    player:SendAddonMessage("BMAHUI", "OPEN", 0, player)
-    player:GossipComplete()
+-- ALE requires GossipMenuAddItem + GossipSendMenu to open the gossip window.
+-- HELLO shows one option; SELECT sends the addon message and closes the window.
+local GOSSIP_EVENT_ON_HELLO  = 1
+local GOSSIP_EVENT_ON_SELECT = 2
+local function OnBMAHGossipHello(event, player, creature)
+    player:GossipMenuAddItem(4, "Browse the Black Market", 0, 1)
+    player:GossipSendMenu(68, creature, 0)
+end
+local function OnBMAHGossipSelect(event, player, creature, sender, intid, code, menu_id)
+    if intid == 1 then
+        player:SendAddonMessage("BMAHUI", "OPEN", 0, player)
+        player:GossipComplete()
+    end
 end
 for _, entry in ipairs(BMAH_VENDOR_NPCs) do
-    RegisterCreatureGossipEvent(entry, 1, OnBMAHVendorGossip)
+    RegisterCreatureGossipEvent(entry, GOSSIP_EVENT_ON_HELLO,  OnBMAHGossipHello)
+    RegisterCreatureGossipEvent(entry, GOSSIP_EVENT_ON_SELECT, OnBMAHGossipSelect)
 end
 
 -- ── Listing request (client whispers BMAH_REQ) ────────────────────────────────
