@@ -469,9 +469,11 @@ _cmd_block_for() {
                 'Challenge Modes' \
                 'Adds optional self-imposed difficulty rules — Hardcore (death = permadeath), Semi-Hardcore, Ironman, and more. Players opt-in via an NPC (Shrine of Challenge) or the game settings menu. Requires EnablePlayerSettings = 1 in worldserver.conf.' \
                 '' \
+                'Source: nl-saw fork — OnPlayerResurrect signature patched automatically on install.' \
+                '' \
                 'Commands: (none — all functionality is accessed through the Shrine of Challenge NPC or in-game Settings menu)' \
                 '' \
-                'Configuration: edit mod_challenge_modes.conf after a worldserver rebuild.'
+                'Configuration: edit challenge_modes.conf after a worldserver rebuild.'
             ;;
         mod-solocraft)
             printf '%s\n' \
@@ -962,7 +964,7 @@ declare -a MODULE_REGISTRY=(
     "mod-autobalance|Auto Balance (dynamic difficulty)|https://github.com/azerothcore/mod-autobalance.git|world"
     "mod-ale|AzerothCore Lua Engine (ALE)|https://github.com/azerothcore/mod-ale.git|"
     "mod-player-bot-level-brackets|Bot Level Brackets (Playerbot distribution)|https://github.com/DustinHendrickson/mod-player-bot-level-brackets.git|characters"
-    "mod-challenge-modes|Challenge Modes (Hardcore, Iron Man, etc.)|https://github.com/ZhengPeiRu21/mod-challenge-modes.git|world,characters"
+    "mod-challenge-modes|Challenge Modes (Hardcore, Iron Man, etc.)|https://github.com/nl-saw/mod-challenge-modes.git|world,characters"
     "mod-individual-progression|Individual Progression (Vanilla → TBC → WotLK)|https://github.com/ZhengPeiRu21/mod-individual-progression.git|world,characters"
     "mod-junk-to-gold|Junk to Gold (auto-sell gray items)|https://github.com/noisiver/mod-junk-to-gold.git|world"
     "mod-learn-spells|Learn Spells on Levelup|https://github.com/azerothcore/mod-learn-spells.git|world"
@@ -4781,7 +4783,9 @@ _get_about_text() {
                 '(permanent ghost on death), Semi-Hardcore (lose gear/gold on death),' \
                 'Self-Crafted, Item-Quality Level, Slow/Very Slow XP, Quest-XP Only,' \
                 'and Iron Man. Configurable rewards (items, titles, XP rate bonus).' \
-                'Requires EnablePlayerSettings = 1 in worldserver.conf.'
+                'Requires EnablePlayerSettings = 1 in worldserver.conf.' \
+                'Source: nl-saw fork. OnPlayerResurrect signature auto-patched on install' \
+                'to match the current AzerothCore API (bool& + commented param names).'
             ;;
         mod-junk-to-gold)
             printf '%s\n' \
@@ -5183,6 +5187,25 @@ _module_post_install_hook() {
             if ask_yes_no "Configure ALE now?"; then configure_ale; fi
             ;;
         mod-challenge-modes)
+            echo ""
+            # Patch: newer AzerothCore changed the OnPlayerResurrect hook signature.
+            # The nl-saw fork has the old signature (bool instead of bool&, named params).
+            # Both occurrences must be commented-out to match the current AC API.
+            local _cm_dir="$SERVER_DIR/modules/mod-challenge-modes"
+            local _cm_src="$_cm_dir/src/ChallengeModes.cpp"
+            if [ -f "$_cm_src" ] && grep -q "float restore_percent, bool applySickness" "$_cm_src"; then
+                print_step "Patching OnPlayerResurrect signature in ChallengeModes.cpp..."
+                sed -i 's/float restore_percent, bool applySickness/float \/*restore_percent*\/, bool\& \/*applySickness*\//g' "$_cm_src"
+                local _patch_count
+                _patch_count=$(grep -c "bool& /\*applySickness\*/" "$_cm_src" 2>/dev/null || echo "0")
+                if [ "$_patch_count" -ge 1 ]; then
+                    print_success "Patched $_patch_count occurrence(s) — module now matches current AC API."
+                else
+                    print_warning "Patch may not have applied cleanly — verify ChallengeModes.cpp manually."
+                    print_info "Lines 448 and 641: change 'float restore_percent, bool applySickness'"
+                    print_info "  to: 'float /*restore_percent*/, bool& /*applySickness*/'"
+                fi
+            fi
             echo ""
             print_info "Challenge Modes has a conf file and requires EnablePlayerSettings = 1."
             print_info "Note: rebuild the worldserver first if the conf.dist is not yet present."
