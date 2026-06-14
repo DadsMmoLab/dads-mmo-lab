@@ -18,7 +18,9 @@
 --   The creature_template row must have npcflag with bit 0 set (gossip = 1):
 --     UPDATE creature_template SET npcflag = npcflag | 1 WHERE entry = <your_entry>;
 --
--- GM COMMANDS (whisper the NPC or self):
+-- GM COMMANDS (whisper yourself or the NPC):
+--   IMPORTANT: run  .gm on  in chat before using these — IsGM() requires
+--              GM mode to be active, not just a high security level.
 --   bmah_fill   — manually fill the auction table (only when empty)
 --   bmah_flush  — award won items via mail and wipe the table
 --   bmah_diag   — print system state to GM chat (use when NPC/gossip won't work)
@@ -399,7 +401,7 @@ end)
 RegisterPlayerEvent(19, function(_, player, msg, _, _, _)
     if msg:lower() ~= "bmah_flush" then return end
     if not player:IsGM() then
-        player:SendBroadcastMessage("|cffff0000[BMAH]|r You do not have permission to flush the BMAH table.")
+        player:SendBroadcastMessage("|cffff0000[BMAH]|r You do not have permission. Type |cff00ff00.gm on|r first to enable GM mode.")
         return false
     end
     local q = CharDBQuery("SELECT id, item_id, buyer_id, last_bid FROM blackmarketauctionhouse WHERE buyer_id <> 0")
@@ -424,7 +426,7 @@ end)
 RegisterPlayerEvent(19, function(_, player, msg, _, _, _)
     if msg:lower() ~= "bmah_fill" then return end
     if not player:IsGM() then
-        player:SendBroadcastMessage("|cffff0000[BMAH]|r You do not have permission to fill the BMAH table.")
+        player:SendBroadcastMessage("|cffff0000[BMAH]|r You do not have permission. Type |cff00ff00.gm on|r first to enable GM mode.")
         return false
     end
     local countQ = CharDBQuery("SELECT COUNT(*) FROM blackmarketauctionhouse")

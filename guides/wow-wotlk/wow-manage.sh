@@ -3074,6 +3074,16 @@ PYEOF
         print_info "pcall wrapping already present — skipping patch."
     fi
 
+    # ── Re-apply BMAH_Up.sql to ensure NPC model is correct ──
+    local _bmah_sql="$clone_dir/guides/wow-wotlk/ALE-Kegs/BlackMarketAuctionHouse/sql/BMAH_Up.sql"
+    if [ -f "$_bmah_sql" ] && container_running "$DB_CONTAINER"; then
+        print_info "Re-applying BMAH_Up.sql (fixes NPC model)..."
+        docker exec "$DB_CONTAINER" mysql -uroot -p"$DB_ROOT_PASSWORD" acore_world \
+            < "$_bmah_sql" 2>/dev/null && \
+            print_success "BMAH SQL applied — NPC model set." || \
+            print_warning "BMAH SQL apply failed — check DB container logs."
+    fi
+
     # ── Show current IDs extracted from the file ──────────────
     local current_ids
     current_ids=$(awk '
@@ -3162,7 +3172,18 @@ PYEOF
     for (( i=0; i<${#sel_ids[@]}; i++ )); do
         local sid="${sel_ids[$i]}"
         if ! _bmah_in_list "$sid" "${final_ids[@]}"; then
-            final_ids+=("$sid")
+            # Verify the NPC exists in creature_template before adding
+            local npc_check
+            npc_check=$(docker exec "$DB_CONTAINER" mysql -uroot -p"$DB_ROOT_PASSWORD" -N \
+                acore_world \
+                -e "SELECT COUNT(*) FROM creature_template WHERE entry=$sid;" 2>/dev/null \
+                | tr -d '[:space:]')
+            if [ "$npc_check" = "0" ] || [ -z "$npc_check" ]; then
+                print_warning "  NPC $sid not found in creature_template — skipping (not in this server's DB)."
+                print_info "    If you want NPC $sid, add it to creature_template first and restart worldserver."
+            else
+                final_ids+=("$sid")
+            fi
         fi
     done
 
