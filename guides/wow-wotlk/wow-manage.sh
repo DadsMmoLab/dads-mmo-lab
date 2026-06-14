@@ -3581,8 +3581,19 @@ ale_deploy_lua_files() {
         battlepass)
             if [ -d "$clone_dir/lua_scripts" ]; then
                 cp -r "$clone_dir/lua_scripts/." "$lua_dir/" && \
-                    print_success "Deployed → lua_scripts/ (lib/CSMH + battlepass/)" || \
-                    print_warning "Copy failed — check $clone_dir/lua_scripts"
+                    print_success "Deployed → lua_scripts/ (battlepass/ + lib/CSMH)" || \
+                    { print_warning "Copy failed — check $clone_dir/lua_scripts"; break; }
+                # ALE auto-loads all .ext files BEFORE any .lua scripts run.
+                # So by the time 05_BP_Communication.lua executes, RegisterClientRequests
+                # and Player:SendServerResponse are already defined by CSMH_SMH.ext.
+                # The require("lib.CSMH.CSMH_SMH") call in the upstream file causes
+                # double-loading which corrupts CSMH's internal state and crashes the server.
+                # Fix: remove the redundant require so CSMH loads exactly once.
+                local _comm="$lua_dir/battlepass/05_BP_Communication.lua"
+                if [ -f "$_comm" ]; then
+                    sed -i 's|^require("lib\.CSMH\.CSMH_SMH")|-- require removed: CSMH_SMH.ext is auto-loaded by ALE before .lua scripts run|' "$_comm"
+                    print_success "Patched 05_BP_Communication.lua — removed duplicate require (double-load fix)"
+                fi
             else
                 print_warning "lua_scripts/ dir not found in clone — check $clone_dir manually."
             fi
@@ -4967,6 +4978,30 @@ _get_about_text() {
                 'Eliminates repeated boss kills when questing as a group. Fully' \
                 'automatic — no player commands needed.'
             ;;
+        mod-arac)
+            printf '%s\n' \
+                'All Races All Classes (ARAC) — unlocks every race/class combination' \
+                'not normally available (Night Elf Warrior, Undead Paladin, etc.).' \
+                'DATA-ONLY mod: no worldserver rebuild required. Configure applies three' \
+                'steps automatically: arac.sql → acore_world, server DBC patch, and' \
+                'client Patch-A.MPQ. Back up your database before applying SQL.'
+            ;;
+        mod-dungeon-master)
+            printf '%s\n' \
+                'Procedural roguelike dungeon challenge system. Talk to the Dungeon' \
+                'Master NPC (entry 500000) to pick a difficulty tier, creature theme,' \
+                'and dungeon — then enter a repopulated scaled instance. 37 dungeons,' \
+                '9 themes, 6 difficulty tiers, party and solo support. The NPC' \
+                'auto-spawns in all major cities; SQL is auto-applied on server start.'
+            ;;
+        mod-talentbutton)
+            printf '%s\n' \
+                'Enables Dual Talent Specialization at level 10 and adds an anywhere' \
+                'talent reset — no class trainer visit required. Uses server-side' \
+                'script injection for the in-game button. IMPORTANT: requires an' \
+                'unpatched WoW 3.3.5a client; tools like RCEPatcher break the injection.' \
+                'Activate by setting TalentButton.Enable = 1 in mod_talentbutton.conf.'
+            ;;
         accountwide)
             printf '%s\n' \
                 'Syncs achievements, currencies, gold, mounts, and pets across' \
@@ -4998,7 +5033,7 @@ _get_about_text() {
                 'kills, quests, PvP, and dungeons. Rewards include items, gold,' \
                 'titles, and spells. Comes with an in-game client addon for' \
                 'progress tracking and an NPC vendor fallback. Players use .bp' \
-                'commands; GMs use .bpadmin. Requires the CSMH library.'
+                'commands; GMs use .bpadmin. Full CSMH client-server sync included.'
             ;;
         paragon)
             printf '%s\n' \
@@ -6468,6 +6503,44 @@ fix_battlepass_npc() {
     fi
 }
 
+fix_battlepass_csmh_crash() {
+    print_step "Fix: BattlePass CSMH double-load crash"
+    echo ""
+    echo -e "${WHITE}Root cause: CSMH_SMH.ext is a plain Lua file that ALE auto-loads${RST}"
+    echo -e "${WHITE}BEFORE any .lua scripts. When 05_BP_Communication.lua then calls${RST}"
+    echo -e "${WHITE}require(\"lib.CSMH.CSMH_SMH\"), CSMH is loaded a SECOND time — which${RST}"
+    echo -e "${WHITE}registers duplicate event handlers and corrupts internal state.${RST}"
+    echo -e "${WHITE}Fix: remove the redundant require line. Full CSMH client sync kept.${RST}"
+    echo ""
+    local lua_dir
+    lua_dir=$(ale_lua_scripts_dir)
+    local comm_file="$lua_dir/battlepass/05_BP_Communication.lua"
+    if [ ! -d "$lua_dir/battlepass" ]; then
+        print_error "BattlePass not deployed at: $lua_dir/battlepass"
+        print_info "Deploy it first via: ALE Scripts → Install → battlepass"
+        return 1
+    fi
+    if [ ! -f "$comm_file" ]; then
+        print_error "File not found: $comm_file"
+        return 1
+    fi
+    # Check if already patched
+    if grep -q "require removed" "$comm_file" 2>/dev/null; then
+        print_info "Already patched — require line already removed."
+    elif grep -q 'require("lib\.CSMH\.CSMH_SMH")' "$comm_file" 2>/dev/null; then
+        sed -i 's|^require("lib\.CSMH\.CSMH_SMH")|-- require removed: CSMH_SMH.ext is auto-loaded by ALE before .lua scripts run|' "$comm_file"
+        print_success "Patched: removed duplicate require in $comm_file"
+    else
+        print_info "require line not found — file may already be clean or have a different format."
+        grep -n "CSMH\|require" "$comm_file" | head -5
+    fi
+    echo ""
+    print_info "Next steps:"
+    print_info "  1. In-game GM command:  ${CYAN}.reload ale${RST}"
+    print_info "  2. OR restart the worldserver from the main menu."
+    print_info "  Full CSMH client sync is preserved — all BattlePass features work."
+}
+
 menu_server_maintenance() {
     _setup_screen
     while true; do
@@ -6483,6 +6556,7 @@ menu_server_maintenance() {
         printf "  ${WHITE}3)${RST} Restore / import a backup\n"
         printf "  ${WHITE}4)${RST} Fix: ac-db-import 'Table already exists' errors\n"
         printf "  ${WHITE}5)${RST} Fix: BattlePass NPC missing (entry 90100)\n"
+        printf "  ${WHITE}6)${RST} Fix: BattlePass crash (remove duplicate CSMH require)\n"
         printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
         printf "  ${DIM}  [ENTER] Back${RST}\n"
 
@@ -6500,8 +6574,9 @@ menu_server_maintenance() {
             3) _maintenance_import ;;
             4) fix_dbimport_table_exists; press_enter ;;
             5) fix_battlepass_npc; press_enter ;;
+            6) fix_battlepass_csmh_crash; press_enter ;;
             "") return ;;
-            *) print_warning "Enter 1–5 or ENTER to go back."; press_enter ;;
+            *) print_warning "Enter 1–6 or ENTER to go back."; press_enter ;;
         esac
     done
 }
