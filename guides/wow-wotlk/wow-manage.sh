@@ -2957,6 +2957,13 @@ configure_ale_bmah() {
     echo -e "${WHITE}entry ID is listed in ${CYAN}BMAH_VENDOR_NPCs${WHITE} inside BMAH.lua.${RST}"
     echo ""
 
+    # ── Re-deploy base file to pick up latest fixes ──────────
+    local _base_src="$clone_dir/guides/wow-wotlk/ALE-Kegs/BlackMarketAuctionHouse/BMAH.lua"
+    if [ -f "$_base_src" ]; then
+        cp "$_base_src" "$deployed_file" && \
+            print_success "Re-deployed base BMAH.lua (latest fixes applied)." || \
+            print_warning "Could not re-deploy base file — working with existing deployed copy."
+    fi
     # ── Missing file guard ────────────────────────────────────
     if [ ! -f "$deployed_file" ]; then
         print_warning "BMAH.lua not found at:"
@@ -3389,6 +3396,40 @@ configure_ale_accountwide() {
     print_info "Restart the worldserver or run ${CYAN}.reload ale${RST} in-game to activate changes."
 }
 
+configure_ale_activechat() {
+    local lua_dir clone_dir _ac_dest
+    lua_dir=$(ale_lua_scripts_dir)
+    clone_dir=$(ale_script_clone_dir "activechat")
+    _ac_dest="$lua_dir/AzerothChatter"
+    print_step "Configuring Azeroth Chatter"
+    if [ ! -d "$_ac_dest" ]; then
+        print_error "AzerothChatter not yet deployed — install it first (i<num> in ALE Scripts menu)."
+        return 1
+    fi
+    # Re-copy from clone if available
+    if [ -d "$clone_dir/AzerothChatter" ]; then
+        cp -r "$clone_dir/AzerothChatter"/. "$_ac_dest/"
+        print_success "Re-synced from clone."
+    fi
+    # Fix duplicate-basename collision: ALE detects dupes by basename across all subdirs.
+    # data/chatter.lua clashes with logic/chatter.lua; same for context.lua.
+    local _fixed=false
+    [ -f "$_ac_dest/data/chatter.lua" ] && mv "$_ac_dest/data/chatter.lua" "$_ac_dest/data/chatter_data.lua" && _fixed=true
+    [ -f "$_ac_dest/data/context.lua" ] && mv "$_ac_dest/data/context.lua" "$_ac_dest/data/context_data.lua" && _fixed=true
+    if $_fixed; then
+        find "$_ac_dest" -name "*.lua" -exec \
+            sed -i '' \
+                -e 's/require("data\.chatter")/require("data.chatter_data")/g' \
+                -e "s/require('data\.chatter')/require('data.chatter_data')/g" \
+                -e 's/require("data\.context")/require("data.context_data")/g' \
+                -e "s/require('data\.context')/require('data.context_data')/g" \
+            {} \;
+        print_success "Duplicate filename collision fixed (data/chatter→chatter_data, data/context→context_data)."
+    else
+        print_info "No duplicate files found — already fixed or not present."
+    fi
+    print_info "Run ${CYAN}.reload ale${RST} in-game to apply."
+}
 # ── Lua file deployment (per-script copy strategy) ───────────
 # Each script has its own repo layout; this handles the mapping.
 ale_deploy_lua_files() {
@@ -5225,6 +5266,7 @@ menu_ale_scripts() {
                 IFS='|' read -r key name url branch <<< "${available_entries[$((cnum - 1))]}"
                 case "$key" in
                     accountwide) configure_ale_accountwide ;;
+                    activechat)  configure_ale_activechat ;;
                     battlepass) configure_ale_battlepass ;;
                     paragon)    configure_ale_paragon ;;
                     bmah)       configure_ale_bmah ;;

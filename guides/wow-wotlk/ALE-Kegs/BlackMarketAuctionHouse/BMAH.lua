@@ -338,8 +338,17 @@ local function OnBMAHGossipSelect(event, player, creature, sender, intid, code, 
     end
 end
 for _, entry in ipairs(BMAH_VENDOR_NPCs) do
-    RegisterCreatureGossipEvent(entry, GOSSIP_EVENT_ON_HELLO,  OnBMAHGossipHello)
-    RegisterCreatureGossipEvent(entry, GOSSIP_EVENT_ON_SELECT, OnBMAHGossipSelect)
+    print("[BMAH] Registering gossip for creature entry: " .. tostring(entry))
+    local ok1, err1 = pcall(RegisterCreatureGossipEvent, entry, GOSSIP_EVENT_ON_HELLO,  OnBMAHGossipHello)
+    local ok2, err2 = pcall(RegisterCreatureGossipEvent, entry, GOSSIP_EVENT_ON_SELECT, OnBMAHGossipSelect)
+    if not ok1 or not ok2 then
+        print("[BMAH] WARNING: Gossip registration failed for entry " .. tostring(entry))
+        print("[BMAH]   HELLO:  " .. tostring(err1))
+        print("[BMAH]   SELECT: " .. tostring(err2))
+        print("[BMAH]   FIX: Run BMAH_Up.sql then 'docker compose restart worldserver'")
+    else
+        print("[BMAH] Gossip registered OK for entry " .. tostring(entry))
+    end
 end
 
 -- ── Listing request (client whispers BMAH_REQ) ────────────────────────────────
