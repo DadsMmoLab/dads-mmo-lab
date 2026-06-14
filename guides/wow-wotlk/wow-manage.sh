@@ -3649,7 +3649,7 @@ ale_script_install() {
                     echo ""
                     print_warning "⚠  The worldserver MUST be restarted for the new creature template to load."
                     print_info "AC does not hot-load new creature_template rows — a reload is not sufficient."
-                    print_info "Restart command:  docker compose restart worldserver"
+                    print_info "Restart command:  docker restart \$WORLD_CONTAINER  (or use Main menu → Restart Server)"
                     print_info "After restart:    .npc add 2069430    (in-game, as GM)"
                     print_info "Verify state:     whisper 'bmah_diag' to yourself in-game"
                 else
@@ -6267,12 +6267,16 @@ _EXCNPC_SQL
     fi
     echo ""
     if ask_yes_no "Restart the worldserver now to load the new creature_template entries?"; then
-        cd "$SERVER_DIR" && docker compose restart worldserver && \
-            print_success "Worldserver restarted — spawn NPCs with .npc add (see ALE Scripts → c on Exchange NPC)." || \
-            print_error "Restart failed. Run: cd $SERVER_DIR && docker compose restart worldserver"
+        if [ -z "$WORLD_CONTAINER" ] || ! container_running "$WORLD_CONTAINER"; then
+            print_error "Worldserver container not running — start the server first, then restart manually."
+        elif docker restart "$WORLD_CONTAINER"; then
+            print_success "Worldserver restarted — spawn NPCs with .npc add (see ALE Scripts → c on Exchange NPC)."
+        else
+            print_error "Restart failed. Container: $WORLD_CONTAINER"
+        fi
     else
-        print_info "Remember to restart the worldserver before spawning:"
-        print_info "  ${CYAN}cd $SERVER_DIR && docker compose restart worldserver${RST}"
+        print_info "Remember to restart the worldserver before spawning."
+        print_info "  Main menu → Restart Server  or:  ${CYAN}docker restart $WORLD_CONTAINER${RST}"
     fi
 }
 
@@ -6331,12 +6335,16 @@ _BPNPC_SQL
     fi
     echo ""
     if ask_yes_no "Restart the worldserver now to load the new creature_template?"; then
-        cd "$SERVER_DIR" && docker compose restart worldserver && \
-            print_success "Worldserver restarted — use .npc add 90100 in-game to spawn the NPC." || \
-            print_error "Restart failed. Run: cd $SERVER_DIR && docker compose restart worldserver"
+        if [ -z "$WORLD_CONTAINER" ] || ! container_running "$WORLD_CONTAINER"; then
+            print_error "Worldserver container not running — start the server first, then restart manually."
+        elif docker restart "$WORLD_CONTAINER"; then
+            print_success "Worldserver restarted — use .npc add 90100 in-game to spawn the NPC."
+        else
+            print_error "Restart failed. Container: $WORLD_CONTAINER"
+        fi
     else
-        print_info "Remember to restart the worldserver before spawning:"
-        print_info "  ${CYAN}cd $SERVER_DIR && docker compose restart worldserver${RST}"
+        print_info "Remember to restart the worldserver before spawning."
+        print_info "  Main menu → Restart Server  or:  ${CYAN}docker restart $WORLD_CONTAINER${RST}"
         print_info "  then in-game: ${CYAN}.npc add 90100${RST}"
     fi
 }
