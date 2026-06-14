@@ -3459,6 +3459,11 @@ ale_deploy_lua_files() {
                 cp "$sod_src" "$lua_dir/" && \
                     print_success "Deployed SOD.lua → lua_scripts/" || \
                     print_warning "Copy failed — check $sod_src"
+                # Remove stale sub-directory copy that causes duplicate-load error
+                if [ -f "$lua_dir/sod/SOD.lua" ]; then
+                    rm -f "$lua_dir/sod/SOD.lua" && \
+                        print_info "Removed stale lua_scripts/sod/SOD.lua (duplicate)"
+                fi
             else
                 print_warning "SOD.lua not found at expected path: $sod_src"
             fi

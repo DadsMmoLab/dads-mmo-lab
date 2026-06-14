@@ -42,7 +42,7 @@ do
         local faction = q:GetUInt32(0)
         local npcflag = q:GetUInt32(1)
         print(string.format("[BMAH] NPC 2069430 loaded — faction=%d npcflag=0x%X", faction, npcflag))
-        if (npcflag & 1) == 0 then
+        if bit.band(npcflag, 1) == 0 then
             print("[BMAH] WARNING: gossip npcflag bit missing — NPC won't respond to right-click!")
         end
         if faction ~= 35 then
@@ -572,7 +572,7 @@ RegisterPlayerEvent(19, function(_, player, msg, _, _, _)
         local faction = npcQ:GetUInt32(0)
         local npcflag = npcQ:GetUInt32(1)
         report("69ccf0", string.format("NPC 2069430: faction=%d npcflag=0x%X", faction, npcflag))
-        if (npcflag & 1) == 0 then
+        if bit.band(npcflag, 1) == 0 then
             report("ff8000", "WARN: gossip bit not set — run BMAH_Up.sql, then RESTART worldserver")
         end
         if faction ~= 35 then
