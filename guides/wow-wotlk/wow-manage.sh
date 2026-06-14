@@ -6541,6 +6541,96 @@ fix_battlepass_csmh_crash() {
     print_info "  Full CSMH client sync is preserved — all BattlePass features work."
 }
 
+# ─────────────────────────────────────────────────────────────
+# cleanup_docker
+#   Prunes Docker build cache and optionally build volumes.
+#   Safe by design: always keeps the database volume running.
+#   Use after removing modules or when a rebuild isn't picking
+#   up changes due to stale cache layers.
+# ─────────────────────────────────────────────────────────────
+cleanup_docker() {
+    print_step "Docker Cleanup"
+    echo ""
+    echo -e "${WHITE}Frees disk space and forces a clean rebuild on next start.${RST}"
+    echo -e "${WHITE}Useful after removing modules or when cached layers are stale.${RST}"
+    echo ""
+    echo -e "${WHITE}${BOLD}Choose cleanup level:${RST}"
+    echo ""
+    printf "  ${WHITE}1)${RST} Build cache only  ${DIM}(safe — frees space, next rebuild is full recompile)${RST}\n"
+    printf "  ${WHITE}2)${RST} Build cache + build volume  ${DIM}(deeper clean — also wipes CMake artifacts)${RST}\n"
+    printf "  ${WHITE}3)${RST} Full clean  ${DIM}(cache + build volume + old images — maximum disk recovery)${RST}\n"
+    printf "  ${DIM}  [ENTER] Cancel${RST}\n"
+    echo ""
+    printf "${WHITE}Choice: ${RST}"
+    read -r choice
+    [ -z "$choice" ] && return 0
+
+    case "$choice" in
+        1|2|3) ;;
+        *) print_warning "Invalid choice."; return 1 ;;
+    esac
+
+    # Ensure DB is running before we touch anything, so its volume stays attached
+    refresh_container_names
+    local db_was_running=false
+    if container_running "$DB_CONTAINER"; then
+        db_was_running=true
+    else
+        print_info "Starting database container to protect its volume..."
+        (cd "$SERVER_DIR" && docker compose up -d ac-database 2>/dev/null) || true
+        sleep 3
+        refresh_container_names
+    fi
+
+    # Stop worldserver (not DB) before cleanup
+    print_info "Stopping worldserver..."
+    (cd "$SERVER_DIR" && docker compose stop ac-worldserver 2>/dev/null) || true
+
+    echo ""
+    print_info "Pruning Docker build cache..."
+    if docker builder prune -af 2>&1 | grep -E "Total reclaimed|freed|error" ; then
+        print_success "Build cache cleared."
+    else
+        print_warning "builder prune had non-zero exit — may already be empty."
+    fi
+
+    if [ "$choice" -ge 2 ]; then
+        echo ""
+        print_info "Identifying build volume..."
+        local project; project=$(basename "$SERVER_DIR" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')
+        # AzerothCore source-build volume is typically <project>_ac-build or <project>_build
+        local build_vol
+        build_vol=$(docker volume ls --format '{{.Name}}' 2>/dev/null \
+            | grep -E "^${project}.*(ac.build|build)" | head -1)
+        if [ -n "$build_vol" ]; then
+            print_info "Removing build volume: $build_vol"
+            if docker volume rm "$build_vol" 2>/dev/null; then
+                print_success "Build volume removed — CMake cache cleared."
+            else
+                print_warning "Could not remove $build_vol (may still be in use)."
+                print_info "Run: docker volume rm $build_vol  after fully stopping the server."
+            fi
+        else
+            print_info "No build volume found matching '${project}*build' — nothing to remove."
+            print_info "  (Run 'docker volume ls' to inspect manually if needed.)"
+        fi
+    fi
+
+    if [ "$choice" -ge 3 ]; then
+        echo ""
+        print_info "Removing unused Docker images..."
+        docker image prune -af 2>&1 | grep -E "Total reclaimed|deleted|error" || true
+        print_success "Old images removed."
+    fi
+
+    echo ""
+    print_success "Cleanup complete."
+    echo ""
+    echo -e "${WHITE}Next step: rebuild the worldserver${RST}"
+    echo -e "  ${CYAN}Configuration → Rebuild Worldserver${RST}"
+    echo -e "${DIM}  The first rebuild after this will take 30–90 min (full recompile).${RST}"
+}
+
 menu_server_maintenance() {
     _setup_screen
     while true; do
@@ -6557,6 +6647,7 @@ menu_server_maintenance() {
         printf "  ${WHITE}4)${RST} Fix: ac-db-import 'Table already exists' errors\n"
         printf "  ${WHITE}5)${RST} Fix: BattlePass NPC missing (entry 90100)\n"
         printf "  ${WHITE}6)${RST} Fix: BattlePass crash (remove duplicate CSMH require)\n"
+        printf "  ${WHITE}7)${RST} Clean Docker cache / build artifacts\n"
         printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
         printf "  ${DIM}  [ENTER] Back${RST}\n"
 
@@ -6575,8 +6666,9 @@ menu_server_maintenance() {
             4) fix_dbimport_table_exists; press_enter ;;
             5) fix_battlepass_npc; press_enter ;;
             6) fix_battlepass_csmh_crash; press_enter ;;
+            7) cleanup_docker; press_enter ;;
             "") return ;;
-            *) print_warning "Enter 1–6 or ENTER to go back."; press_enter ;;
+            *) print_warning "Enter 1–7 or ENTER to go back."; press_enter ;;
         esac
     done
 }
