@@ -20,6 +20,7 @@
 -- GM COMMANDS (whisper the NPC or self):
 --   bmah_fill   — manually fill the auction table (only when empty)
 --   bmah_flush  — award won items via mail and wipe the table
+--   bmah_diag   — print system state to GM chat (use when NPC/gossip won't work)
 -- ---------------------------------------------------------------------------
 
 -- ── Double-load guard ────────────────────────────────────────────────────────
@@ -30,6 +31,28 @@ local ALE_EVENT_ON_LUA_STATE_CLOSE = 16
 RegisterServerEvent(ALE_EVENT_ON_LUA_STATE_CLOSE, function()
     _G.BMAHLoaded = nil
 end)
+
+-- ── Load-time NPC template check ─────────────────────────────────────────────
+-- Prints to worldserver console on every ALE (re)load.
+-- If the NPC template is missing or misconfigured, the error is shown here.
+do
+    local q = WorldDBQuery("SELECT faction, npcflag FROM creature_template WHERE entry = 2069430")
+    if q then
+        local faction = q:GetUInt32(0)
+        local npcflag = q:GetUInt32(1)
+        print(string.format("[BMAH] NPC 2069430 loaded — faction=%d npcflag=0x%X", faction, npcflag))
+        if (npcflag & 1) == 0 then
+            print("[BMAH] WARNING: gossip npcflag bit missing — NPC won't respond to right-click!")
+        end
+        if faction ~= 35 then
+            print("[BMAH] WARNING: faction=" .. faction .. " (expected 35/Friendly) — NPC may not be interactable!")
+        end
+    else
+        print("[BMAH] ERROR: entry 2069430 NOT FOUND in creature_template!")
+        print("[BMAH] Run sql/BMAH_Up.sql against acore_world, then RESTART the worldserver.")
+        print("[BMAH] After restart: .npc add 2069430  to spawn the broker.")
+    end
+end
 
 -- ── Config ───────────────────────────────────────────────────────────────────
 -- NPC entry IDs that open the BMAH UI when interacted with
@@ -293,19 +316,20 @@ local function rollItem()
 end
 
 -- ── Gossip: open BMAH UI ──────────────────────────────────────────────────────
--- ALE requires GossipClearMenu + GossipMenuAddItem + GossipSendMenu to open
--- the gossip window.  GossipClearMenu flushes any stale items from prior calls.
+-- ALE: RegisterCreatureGossipEvent with GOSSIP_EVENT_ON_HELLO=1, ON_SELECT=2.
+-- GossipSendMenu takes 2 args for creature senders (npcTextId, creature).
+-- SendAddonMessage channel 255 = CHAT_MSG_ADDON (uint8 0xFF).
 -- The npc_text ID (2069430) is created by sql/BMAH_Up.sql.
 local GOSSIP_EVENT_ON_HELLO  = 1
 local GOSSIP_EVENT_ON_SELECT = 2
 local function OnBMAHGossipHello(event, player, creature)
     player:GossipClearMenu()
     player:GossipMenuAddItem(4, "Browse the Black Market", 0, 1)
-    player:GossipSendMenu(2069430, creature, 0)
+    player:GossipSendMenu(2069430, creature)
 end
 local function OnBMAHGossipSelect(event, player, creature, sender, intid, code, menu_id)
     if intid == 1 then
-        player:SendAddonMessage("BMAHUI", "OPEN", 0, player)
+        player:SendAddonMessage("BMAHUI", "OPEN", 255, player)
         player:GossipComplete()
     end
 end
@@ -323,7 +347,7 @@ RegisterPlayerEvent(19, function(_, player, msg, _, _, receiver)
     local hotId  = maxQ and maxQ:GetUInt32(0) or 0
     local rowsQ  = CharDBQuery("SELECT id, item_id, time, item_owner, last_bid FROM blackmarketauctionhouse ORDER BY id ASC")
     if not rowsQ then
-        player:SendAddonMessage(DONE, "0", 0, target)
+        player:SendAddonMessage(DONE, "0", 255, target)
         return
     end
     local sent = 0
@@ -352,10 +376,10 @@ RegisterPlayerEvent(19, function(_, player, msg, _, _, receiver)
             itemName:gsub(";", ""), reqLevel, itemType,
             ClassifyTime(minsLeft), owner:gsub(";", ""),
             lastBid, iconName, hotId, rowId)
-        player:SendAddonMessage(DATA, payload, 0, target)
+        player:SendAddonMessage(DATA, payload, 255, target)
         sent = sent + 1
     until not rowsQ:NextRow()
-    player:SendAddonMessage(DONE, tostring(sent), 0, target)
+    player:SendAddonMessage(DONE, tostring(sent), 255, target)
 end)
 
 -- ── Flush command (GM whispers bmah_flush) ────────────────────────────────────
@@ -522,3 +546,45 @@ CreateLuaEvent(function()
         end
     end
 end, 300000, 0)
+
+-- ── GM diagnostic command: whisper 'bmah_diag' ───────────────────────────────
+-- Reports full system state to the GM in chat. Use when gossip/spawn isn't working.
+RegisterPlayerEvent(19, function(_, player, msg, _, _, _)
+    if msg:lower() ~= "bmah_diag" then return end
+    if not player:IsGM() then return false end
+    local function report(color, text)
+        player:SendBroadcastMessage("|cff" .. color .. "[BMAH Diag]|r " .. text)
+    end
+    -- DB table
+    local tblQ = CharDBQuery("SELECT COUNT(*) FROM blackmarketauctionhouse")
+    if tblQ then
+        report("69ccf0", "Characters DB table: OK (" .. tblQ:GetUInt32(0) .. " auction rows)")
+    else
+        report("ff0000", "Characters DB table: MISSING — re-run BMAH.lua (table auto-creates on load)")
+    end
+    -- NPC template
+    local npcQ = WorldDBQuery("SELECT faction, npcflag FROM creature_template WHERE entry = 2069430")
+    if npcQ then
+        local faction = npcQ:GetUInt32(0)
+        local npcflag = npcQ:GetUInt32(1)
+        report("69ccf0", string.format("NPC 2069430: faction=%d npcflag=0x%X", faction, npcflag))
+        if (npcflag & 1) == 0 then
+            report("ff8000", "WARN: gossip bit not set — run BMAH_Up.sql, then RESTART worldserver")
+        end
+        if faction ~= 35 then
+            report("ff8000", "WARN: faction=" .. faction .. " (need 35/Friendly) — run BMAH_Up.sql, then RESTART")
+        end
+        if npcflag == 1 and faction == 35 then
+            report("69ccf0", "NPC template OK — if .npc add fails, the worldserver needs a RESTART to load templates")
+        end
+    else
+        report("ff0000", "NPC 2069430 NOT IN DB — run sql/BMAH_Up.sql against acore_world")
+        report("ff0000", "Then RESTART the worldserver — .reload creature_template alone is not reliable")
+        report("ffffff", "After restart: .npc add 2069430")
+    end
+    -- Registered NPC entries
+    local entries = {}
+    for _, e in ipairs(BMAH_VENDOR_NPCs) do entries[#entries+1] = tostring(e) end
+    report("69ccf0", "Lua-registered entries: " .. table.concat(entries, ", "))
+    return false
+end)

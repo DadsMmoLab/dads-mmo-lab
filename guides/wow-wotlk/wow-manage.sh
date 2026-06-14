@@ -3659,11 +3659,15 @@ ale_script_install() {
                 print_step "BMAH — Applying NPC setup SQL (acore_world)..."
                 if ale_run_sql_file "acore_world" "$_bmah_sql"; then
                     print_success "BMAH NPC (entry 2069430) created/updated in acore_world."
-                    print_info "After restarting or reloading, spawn with: .npc add 2069430"
-                    print_info "In-game GM reload: .reload creature_template"
+                    echo ""
+                    print_warning "⚠  The worldserver MUST be restarted for the new creature template to load."
+                    print_info "AC does not hot-load new creature_template rows — a reload is not sufficient."
+                    print_info "Restart command:  docker compose restart worldserver"
+                    print_info "After restart:    .npc add 2069430    (in-game, as GM)"
+                    print_info "Verify state:     whisper 'bmah_diag' to yourself in-game"
                 else
                     print_warning "SQL failed — run manually:"
-                    print_info "  $_bmah_sql"
+                    print_info "  docker exec -i \"\$DB_CONTAINER\" mysql -uroot -p\"\$DB_ROOT_PASSWORD\" acore_world < \"$_bmah_sql\""
                 fi
             else
                 print_warning "BMAH_Up.sql not found — NPC may not be gossip-enabled."
@@ -3684,7 +3688,7 @@ ale_script_install() {
             echo ""
             print_info "Black Market AH Auctioneer (entry 2069430) needs to be placed in the world."
             _offer_npc_in_capitals 2069430 "Black Market AH Auctioneer" \
-                "First run: .reload creature_template — then use .npc add 2069430"
+                "Only works AFTER worldserver restart post-SQL. Use 'bmah_diag' whisper to verify state."
             ;;
         sod)
             echo ""
@@ -6338,6 +6342,7 @@ main_menu() {
         printf "  ${WHITE}WoW Client:${RST} %b  ${GOLD}✦${RST}  ${WHITE}Version:${RST} ${DIM}WotLK 3.3.5a${RST}\n" "$_client_str"
         printf "\n  ${GOLD}${BOLD}Server Modifications${RST}\n"
         printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
+        printf "  ${WHITE}C)${RST} Set WoW Client Folder\n"
         printf "  ${WHITE}1)${RST} Manage AzerothCore Modules\n"
         printf "  ${WHITE}2)${RST} Manage ALE Lua Mods\n"
         printf "  ${WHITE}3)${RST} Manage SQL Mods\n"
@@ -6355,7 +6360,6 @@ main_menu() {
         printf "  ${WHITE}13)${RST} Attach to console\n"
         printf "  ${WHITE}14)${RST} Server maintenance\n"
         printf "  ${WHITE}15)${RST} View In-Game Commands\n"
-        printf "  ${WHITE}16)${RST} Set WoW Client Folder\n"
         printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
         printf "  ${GOLD} Q)${RST} Quit\n"
 
@@ -6370,6 +6374,7 @@ main_menu() {
         local choice="${_MENU_INPUT,,}"
 
         case "$choice" in
+            c) configure_wow_client; press_enter ;;
             1)  menu_modules ;;
             2)  menu_ale_scripts ;;
             3)  menu_sql_mods ;;
@@ -6385,7 +6390,6 @@ main_menu() {
             13) with_full_screen server_attach ;;
             14) menu_server_maintenance ;;
             15) show_ingame_commands ;;
-            16) configure_wow_client; press_enter ;;
             q)  echo ""; print_info "Goodbye!"; exit 0 ;;
         esac
     done
