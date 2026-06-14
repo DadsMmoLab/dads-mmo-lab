@@ -2565,6 +2565,39 @@ configure_ale_battlepass() {
     if ensure_db_running; then
         ale_run_sql_file "acore_world"      "$clone_dir/sql/battlepass_world.sql"      && _bp_world_ok=true
         ale_run_sql_file "acore_characters" "$clone_dir/sql/battlepass_characters.sql" && _bp_chars_ok=true
+        # Create the Battle Pass vendor NPC (entry 90100) — not included in upstream SQL
+        if [ "$_bp_world_ok" = true ]; then
+            docker exec "$DB_CONTAINER" mysql -uroot -p"$DB_ROOT_PASSWORD" acore_world 2>/dev/null <<'_BPNPC_SQL'
+DELETE FROM `creature_template` WHERE `entry` = 90100;
+INSERT INTO `creature_template`
+  (`entry`,`name`,`subname`,`gossip_menu_id`,`minlevel`,`maxlevel`,`exp`,`faction`,`npcflag`,
+   `speed_walk`,`speed_run`,`rank`,`dmgschool`,`DamageModifier`,
+   `BaseAttackTime`,`RangeAttackTime`,`BaseVariance`,`RangeVariance`,
+   `unit_class`,`unit_flags`,`unit_flags2`,`dynamicflags`,
+   `type`,`AIName`,`MovementType`,`HoverHeight`,
+   `HealthModifier`,`ManaModifier`,`ArmorModifier`,`RegenHealth`,`flags_extra`,`VerifiedBuild`)
+VALUES
+  (90100,'Battle Pass Vendor','Seasonal Rewards',0,80,80,0,35,1,
+   1.0,1.14286,0,0,1.0,
+   2000,2000,1.0,1.0,
+   1,33536,2048,0,
+   7,'',0,1.0,
+   1.0,1.0,1.0,1,2,0);
+SET @hasScale=(SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='creature_template' AND COLUMN_NAME='scale');
+SET @sql=IF(@hasScale>0,'UPDATE creature_template SET scale=1.0 WHERE entry=90100','SELECT 1');
+PREPARE _s FROM @sql; EXECUTE _s; DEALLOCATE PREPARE _s;
+SET @hasModelTable=(SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='creature_template_model');
+SET @sql=IF(@hasModelTable>0,'DELETE FROM creature_template_model WHERE CreatureID=90100','SELECT 1');
+PREPARE _s FROM @sql; EXECUTE _s; DEALLOCATE PREPARE _s;
+SET @sql=IF(@hasModelTable>0,'INSERT INTO creature_template_model (CreatureID,Idx,CreatureDisplayID,DisplayScale,Probability,VerifiedBuild) VALUES (90100,0,25478,1.0,1.0,0)','SELECT 1');
+PREPARE _s FROM @sql; EXECUTE _s; DEALLOCATE PREPARE _s;
+SET @hasModelid1=(SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='creature_template' AND COLUMN_NAME='modelid1');
+SET @sql=IF(@hasModelid1>0,'UPDATE creature_template SET modelid1=25478 WHERE entry=90100','SELECT 1');
+PREPARE _s FROM @sql; EXECUTE _s; DEALLOCATE PREPARE _s;
+_BPNPC_SQL
+            print_success "Battle Pass vendor NPC (entry 90100) created in acore_world."
+            print_info "After worldserver restart: .npc add 90100  to spawn the vendor"
+        fi
         if [ "$_bp_world_ok" = false ] || [ "$_bp_chars_ok" = false ]; then
             print_warning "Battle Pass install incomplete — one or more SQL files failed:"
             [ "$_bp_world_ok"  = false ] && print_info "  FAILED: $clone_dir/sql/battlepass_world.sql → acore_world"

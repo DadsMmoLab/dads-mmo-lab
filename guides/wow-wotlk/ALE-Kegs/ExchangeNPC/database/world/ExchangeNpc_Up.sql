@@ -6,30 +6,66 @@
 -- Apply to acore_world:
 --   docker exec -i <db-container> mysql -u acore -pacore acore_world < ExchangeNpc_Up.sql
 --
--- Note: The original upstream SQL also includes optional glyph vendor data (npc_vendor /
--- conditions rows for NPC 1116001 selling WotLK/TBC glyphs).  That data is NOT included
--- here to keep installs lean.  To enable glyph selling, run the full
--- ExchangeNpc_Up.sql from 55Honey/Acore_ExchangeNpc and then:
---   UPDATE `creature_template` SET `npcflag` = 129 WHERE `entry` = 1116001;
+-- Schema-adaptive: handles both old AC (modelid1 columns) and new AC (creature_template_model).
+-- Scale column is also handled conditionally — removed from some AC Playerbots builds.
 
+-- ── 1. NPC templates ─────────────────────────────────────────────────────────────
 DELETE FROM `creature_template` WHERE `entry` IN (1116001, 1116002, 1116003);
 INSERT INTO `creature_template`
-  (`entry`,`difficulty_entry_1`,`difficulty_entry_2`,`difficulty_entry_3`,
-   `KillCredit1`,`KillCredit2`,`modelid1`,`modelid2`,`modelid3`,`modelid4`,
-   `name`,`subname`,`gossip_menu_id`,`minlevel`,`maxlevel`,`exp`,`faction`,
-   `npcflag`,`speed_walk`,`speed_run`,`scale`,`rank`,`dmgschool`,`DamageModifier`,
-   `BaseAttackTime`,`RangeAttackTime`,`BaseVariance`,`RangeVariance`,`unit_class`,
-   `unit_flags`,`unit_flags2`,`dynamicflags`,`family`,`trainer_type`,`trainer_spell`,
-   `trainer_class`,`trainer_race`,`type`,`type_flags`,`lootid`,`pickpocketloot`,
-   `skinloot`,`PetSpellDataId`,`VehicleId`,`mingold`,`maxgold`,`AIName`,`MovementType`,
-   `HoverHeight`,`HealthModifier`,`ManaModifier`,`ArmorModifier`,`RacialLeader`,
-   `movementId`,`RegenHealth`,`mechanic_immune_mask`,`spell_school_immune_mask`,
-   `flags_extra`,`ScriptName`,`VerifiedBuild`)
+  (`entry`, `name`, `subname`, `gossip_menu_id`,
+   `minlevel`, `maxlevel`, `exp`, `faction`, `npcflag`,
+   `speed_walk`, `speed_run`, `rank`,
+   `dmgschool`, `DamageModifier`,
+   `BaseAttackTime`, `RangeAttackTime`,
+   `BaseVariance`, `RangeVariance`,
+   `unit_class`, `unit_flags`, `unit_flags2`, `dynamicflags`,
+   `type`, `AIName`, `MovementType`, `HoverHeight`,
+   `HealthModifier`, `ManaModifier`, `ArmorModifier`,
+   `RegenHealth`, `flags_extra`, `VerifiedBuild`)
 VALUES
-(1116001,0,0,0,0,0,1097,0,0,0,'Roboto','Trusted Dealer',62001,63,63,0,35,1,1,1.14286,1,0,0,1,2000,2000,1,1,1,33536,2048,0,0,0,0,0,0,2,0,0,0,0,0,0,0,0,'',0,1,1.35,1,1,0,0,1,0,0,2,'',0),
-(1116002,0,0,0,0,0,24207,0,0,0,'Shadow Priest Hacki','The Honor Melter',62001,63,63,0,35,1,1,1.14286,1,0,0,1,2000,2000,1,1,1,33536,2048,0,0,0,0,0,0,2,0,0,0,0,0,0,0,0,'',0,1,1.35,1,1,0,0,1,0,0,2,'',0),
-(1116003,0,0,0,0,0,27645,0,0,0,'Construct','...has the good stuff',62001,63,63,0,35,1,1,1.14286,0.7,0,0,1,2000,2000,1,1,1,33536,2048,0,0,0,0,0,0,2,0,0,0,0,0,0,0,0,'',0,1,1.35,1,1,0,0,1,0,0,2,'',0);
+  (1116001, 'Roboto',             'Trusted Dealer',        62001, 63, 63, 0, 35, 1, 1, 1.14286, 0, 0, 1, 2000, 2000, 1, 1, 1, 33536, 2048, 0, 2, '', 0, 1, 1.35, 1, 1, 1, 2, 0),
+  (1116002, 'Shadow Priest Hacki','The Honor Melter',      62001, 63, 63, 0, 35, 1, 1, 1.14286, 0, 0, 1, 2000, 2000, 1, 1, 1, 33536, 2048, 0, 2, '', 0, 1, 1.35, 1, 1, 1, 2, 0),
+  (1116003, 'Construct',          '...has the good stuff', 62001, 63, 63, 0, 35, 1, 1, 1.14286, 0, 0, 1, 2000, 2000, 1, 1, 1, 33536, 2048, 0, 2, '', 0, 1, 1.35, 1, 1, 1, 2, 0);
 
+-- ── 1b. Scale — conditional (removed in some AC builds) ──────────────────────────
+SET @hasScale = (
+  SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'creature_template' AND COLUMN_NAME = 'scale'
+);
+SET @sql = IF(@hasScale > 0,
+  'UPDATE creature_template SET scale = 1.0 WHERE entry IN (1116001, 1116002) AND scale = 0; UPDATE creature_template SET scale = 0.7 WHERE entry = 1116003',
+  'SELECT ''Skipping scale — column not present'' AS note'
+);
+PREPARE _s FROM @sql; EXECUTE _s; DEALLOCATE PREPARE _s;
+
+-- ── 1c. Display models — schema-adaptive ─────────────────────────────────────────
+-- Newer AC: creature_template_model table. Older AC: modelid1 column.
+SET @hasModelTable = (
+  SELECT COUNT(*) FROM information_schema.TABLES
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'creature_template_model'
+);
+SET @sql = IF(@hasModelTable > 0,
+  'DELETE FROM creature_template_model WHERE CreatureID IN (1116001,1116002,1116003)',
+  'SELECT 1'
+);
+PREPARE _s FROM @sql; EXECUTE _s; DEALLOCATE PREPARE _s;
+SET @sql = IF(@hasModelTable > 0,
+  'INSERT INTO creature_template_model (CreatureID,Idx,CreatureDisplayID,DisplayScale,Probability,VerifiedBuild) VALUES (1116001,0,1097,1.0,1.0,0),(1116002,0,24207,1.0,1.0,0),(1116003,0,27645,0.7,1.0,0)',
+  'SELECT ''Skipping creature_template_model — not present'' AS note'
+);
+PREPARE _s FROM @sql; EXECUTE _s; DEALLOCATE PREPARE _s;
+
+SET @hasModelid1 = (
+  SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'creature_template' AND COLUMN_NAME = 'modelid1'
+);
+SET @sql = IF(@hasModelid1 > 0,
+  'UPDATE creature_template SET modelid1=1097 WHERE entry=1116001; UPDATE creature_template SET modelid1=24207 WHERE entry=1116002; UPDATE creature_template SET modelid1=27645 WHERE entry=1116003',
+  'SELECT ''Skipping modelid1 — column not present'' AS note'
+);
+PREPARE _s FROM @sql; EXECUTE _s; DEALLOCATE PREPARE _s;
+
+-- ── 2. Gossip text ────────────────────────────────────────────────────────────────
 DELETE FROM `npc_text` WHERE `ID` IN (92101,92102,92103,92104,92105);
 INSERT INTO `npc_text`
   (`ID`,`text0_0`,`BroadcastTextID0`,`lang0`,`Probability0`,
@@ -49,6 +85,7 @@ VALUES
 (92104,'Are you sure you wish to spend your acquired honor for money? There is no turning back!',0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1),
 (92105,'I am offering Tokens for the most powerful gear, designed for combat against other heroes. You can currently obtain these tokens listed below.',0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1);
 
+-- ── 3. Equipment ──────────────────────────────────────────────────────────────────
 DELETE FROM `creature_equip_template` WHERE `CreatureID` IN (1116001,1116002);
 INSERT INTO `creature_equip_template` (`CreatureID`,`ID`,`ItemID1`,`ItemID2`,`ItemID3`,`VerifiedBuild`) VALUES
 (1116002,1,18609,0,0,18019);
