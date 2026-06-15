@@ -1596,12 +1596,11 @@ declare -a ALE_SCRIPT_REGISTRY=(
     "accountwide|Accountwide Systems (achievements, currency, mounts, pets)|https://github.com/Aldori15/azerothcore-eluna-accountwide.git"
     "activechat|Azeroth Chatter (lore-grounded ambient world RP chat)|https://github.com/svey-xyz/ActiveChat.git"
     "battlepass|Battle Pass System (XP progression + rewards + client addon)|https://github.com/Shonik/lua-battlepass.git"
-    "bmah|Black Market Auction House (MoP-style BMAH + client addon)|https://github.com/DadsMmoLab/dads-mmo-lab.git|Update-Delta"
-    "levelupreward|Level Up Reward (random class-appropriate gear on every level-up)|https://github.com/phreeez/Levelreward.git"
+    "bmah|Black Market Auction House (MoP-style BMAH + client addon)|https://github.com/DadsMmoLab/dads-mmo-lab.git"
     "lootpet|Loot Pet (vanity pet auto-loots nearby corpses)|https://github.com/Brytenwally/Lootpet.git"
     "paragon|Paragon Anniversary (endless post-80 stat progression + client addon)|https://github.com/Grim-Batol/Paragon-Anniversary.git"
     "sitmeanrest|Sit Means Rest (regen buff on /sit; strips on movement)|https://github.com/Brytenwally/SitMeansRest.git"
-    "sod|Season of Discovery Buffs (phased leveling XP rate bonus)|https://github.com/DadsMmoLab/dads-mmo-lab.git|Update-Delta"
+    "sod|Season of Discovery Buffs (phased leveling XP rate bonus)|https://github.com/DadsMmoLab/dads-mmo-lab.git"
     "unlimitedammo|Unlimited Ammo (auto-refills Hunter arrows/bullets)|https://github.com/Day36512/Acore_Lua_Unlimited_Ammo.git"
 )
 
@@ -2514,6 +2513,40 @@ configure_module_talentbutton() {
 }
 
 # ─────────────────────────────────────────────────────────────
+# configure_module_learn_spells
+#   Copies mod_learnspells.conf.dist → mod_learnspells.conf.
+#   Falls back to writing minimal defaults inline when the
+#   conf.dist is not yet present (pre-rebuild).
+# ─────────────────────────────────────────────────────────────
+configure_module_learn_spells() {
+    print_step "Configuring Learn Spells on Levelup"
+    local module_dir="$SERVER_DIR/modules/mod-learn-spells"
+    if [ ! -d "$module_dir" ]; then
+        print_error "mod-learn-spells is not installed (expected at $module_dir)."
+        return 1
+    fi
+    local conf_dest="$SERVER_DIR/env/dist/etc/modules/mod_learnspells.conf"
+    mkdir -p "$SERVER_DIR/env/dist/etc/modules"
+    if [ -f "$conf_dest" ]; then
+        print_success "mod_learnspells.conf already active: $conf_dest"
+        print_info "Edit directly to change settings."
+        return 0
+    fi
+    local conf_dist="$module_dir/conf/mod_learnspells.conf.dist"
+    if [ -f "$conf_dist" ]; then
+        cp "$conf_dist" "$conf_dest"
+        print_success "Created $conf_dest from conf.dist"
+    else
+        # conf.dist not present yet (pre-rebuild) — write minimal defaults
+        printf '[worldserver]\nLearnSpells.Enable = 1\nLearnSpells.Announce = 1\nLearnSpells.OnFirstLogin = 0\nLearnSpells.MaxLevel = 80\n' > "$conf_dest"
+        print_success "Created $conf_dest with default settings"
+        print_info "(conf.dist not found — defaults written inline; rebuild will not override this file)"
+    fi
+    echo ""
+    print_info "Restart the worldserver for the new conf to take effect."
+}
+
+# ─────────────────────────────────────────────────────────────
 # configure_mod_arac
 #   Applies ARAC SQL, copies server DBC files, and offers to
 #   install Patch-A.MPQ to the WoW client Data/ directory.
@@ -2636,7 +2669,6 @@ ale_lua_is_deployed() {
     case "$key" in
         accountwide)   [ -d "$lua_dir/accountwide" ] && \
                         ls "$lua_dir/accountwide"/*.lua &>/dev/null ;;
-        levelupreward) ls "$lua_dir"/levelreward.lua &>/dev/null 2>&1 ;;
         activechat)    [ -d "$lua_dir/AzerothChatter" ] ;;
         battlepass)    [ -d "$lua_dir/battlepass" ] ;;
         paragon)       [ -d "$lua_dir/paragon" ] ;;
@@ -3571,15 +3603,6 @@ ale_deploy_lua_files() {
                 print_info "Manually copy .lua files to: $lua_dir/accountwide/"
             fi
             ;;
-        levelupreward)
-            local count=0
-            if cp "$clone_dir"/*.lua "$lua_dir/" 2>/dev/null; then
-                count=$(ls "$clone_dir"/*.lua 2>/dev/null | wc -l | tr -d ' ')
-                print_success "Deployed $count file(s) → lua_scripts/"
-            else
-                print_warning "No .lua files found in clone root — check $clone_dir"
-            fi
-            ;;
         activechat)
             # Upstream layout: AzerothChatter/ subdirectory
             # ALE detects duplicate basenames across subdirs — data/chatter.lua vs logic/chatter.lua
@@ -3935,6 +3958,25 @@ ale_script_install() {
             else
                 print_info "Reconfigure anytime from the ALE Scripts menu → c on Unlimited Ammo."
                 print_info "Or use the in-game GM command ${CYAN}.ua${RST} to enable at runtime."
+            fi
+            ;;
+        levelupreward)
+            echo ""
+            print_warning "Level Up Reward writes prestige tokens to acore_characters.account_prestige."
+            print_warning "This table MUST exist before the server starts — missing it causes a hard crash."
+            local _lur_sql="CREATE TABLE IF NOT EXISTS \`account_prestige\` (\`account_id\` INT UNSIGNED NOT NULL, \`prestige_tokens\` INT UNSIGNED NOT NULL DEFAULT 0, PRIMARY KEY (\`account_id\`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"
+            if ensure_db_running; then
+                if sqlmod_run_sql "acore_characters" "$_lur_sql" >/dev/null 2>&1; then
+                    print_success "account_prestige table created in acore_characters."
+                else
+                    print_error "Failed to create account_prestige — apply manually:"
+                    print_info "  USE acore_characters;"
+                    print_info "  $_lur_sql"
+                fi
+            else
+                print_warning "Database not running. Apply this SQL manually before starting the server:"
+                print_info "  USE acore_characters;"
+                print_info "  $_lur_sql"
             fi
             ;;
     esac
@@ -5482,6 +5524,11 @@ _module_post_install_hook() {
             print_info "Note: rebuild the worldserver first if the conf.dist is not yet present."
             if ask_yes_no "Configure Talent Button now?"; then configure_module_talentbutton; fi
             ;;
+        mod-learn-spells)
+            echo ""
+            print_info "Learn Spells requires a conf file — create/activate it now to avoid config spam on every bot login."
+            if ask_yes_no "Configure Learn Spells (create conf with defaults) now?"; then configure_module_learn_spells; fi
+            ;;
     esac
 }
 
@@ -5708,6 +5755,7 @@ menu_modules() {
                     mod-npc-beastmaster)         configure_module_npc_beastmaster ;;
                     mod-quest-loot-party)        configure_module_quest_loot_party ;;
                     mod-talentbutton)            configure_module_talentbutton ;;
+                    mod-learn-spells)            configure_module_learn_spells ;;
                     *)
                         print_info "$name has no dedicated configure option."
                         print_info "Edit its .conf file in $SERVER_DIR/env/dist/etc/modules/ directly."
