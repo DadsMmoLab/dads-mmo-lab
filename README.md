@@ -237,7 +237,6 @@ Game Client via Proton
 ---
 
 ## ⚠️ Legal & Ethical Notes
-## ⚠️ Important Notice
 
 Dad's MMO Lab and WoW Unbound are not affiliated with, endorsed by, 
 or associated with Blizzard Entertainment or any of its products.
