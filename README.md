@@ -53,6 +53,7 @@ Turns out — for a lot of classic MMOs — you can. The emulator community has 
 | ⚔️ WoW Vanilla 1.12.1 | CMaNGOS Classic + Playerbots | Playerbots | ✅ Complete | [View Guide](./guides/wow-vanilla/HOWTO-WOW-VANILLA.md) |
 | ⚔️ WoW The Burning Crusade 2.4.3 | CMaNGOS TBC + Playerbots | Playerbots | ✅ Complete | [View Guide](./guides/wow-tbc/WoW-TBC-HOWTO.md) |
 | ⚔️ WoW Wrath of the Lich King 3.3.5a | AzerothCore + Playerbots | Playerbots | ✅ Complete | [View Guide](./guides/wow-wotlk/WoW-WotLK-HOWTO.md) |
+| ⚔️ WoW Wrath of the Lich King — Unbound Edition | AzerothCore + WoW Unbound | Playerbots | ✅ Complete | [View Guide](./guides/unbound-wrath/) |
 | 🏃 RuneScape 2009 (SD) | 2009scape Singleplayer | Bots | ✅ Complete | [View Guide](./guides/runescape/HOWTO-RUNESCAPE.md) |
 | 🏃 RuneScape 2009 (HD) | 2009scape + Saradomin Launcher | Bots | ✅ Complete | [View Guide](./guides/runescape/RuneScape-HD-HOWTO.md) |
 
