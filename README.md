@@ -309,9 +309,15 @@ Or just:
 
 ## 📜 License
 
-Scripts and guides in this repo are released under [MIT License](./LICENSE).
+Installer scripts and guides in this repo are released under the 
+[MIT License](./LICENSE).
 
-Game emulators linked here are subject to their own licenses. Game assets belong to their respective owners and are NOT included here.
+WoW Unbound server modifications are released under the 
+[GNU Affero General Public License v3.0](./LICENSE-AGPL), 
+consistent with AzerothCore's licensing.
+
+Game emulators linked here are subject to their own licenses. 
+Game assets belong to their respective owners and are NOT included here.
 
 ---
 
