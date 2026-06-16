@@ -1,0 +1,22 @@
+# ──────────────────────────────────────────────────────────────────────
+#  Line endings — keep Linux scripts LF on EVERY platform, including Windows.
+#
+#  Why this file exists (do not remove):
+#  These shell scripts run directly on Linux / WSL / SteamOS, and are often
+#  shared as raw files (e.g. posted to Discord) and run straight from the
+#  download. Git's core.autocrlf=true converts text to CRLF on a Windows
+#  checkout, which turns the shebang into `#!/bin/bash<CR>`. Linux then fails
+#  to run the script with:
+#        cannot execute: required file not found
+#  because it looks for an interpreter literally named "/bin/bash\r".
+#
+#  `eol=lf` forces LF in the working tree regardless of OS or autocrlf, so
+#  editing the source on Windows can never reintroduce CRLF into a script.
+#  (Future extensionless scripts — e.g. a launcher with no .sh — must be
+#  added here explicitly by path, since these globs match by extension.)
+# ──────────────────────────────────────────────────────────────────────
+*.sh    text eol=lf
+*.bash  text eol=lf
+*.zsh   text eol=lf
+*.ksh   text eol=lf
+*.fish  text eol=lf
