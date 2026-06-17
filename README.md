@@ -23,7 +23,7 @@ Every guide here is built around:
 
 ## 🌍 The Story
 
-I'm a dad who grew up on MMOs. Like a lot of you, I watched the servers for games I loved get shut down one by one. Nostalrius. Felmyst. Turtle WoW. Games that meant something — gone.
+I'm a dad who grew up on MMOs. Like a lot of you, I watched the servers for games I loved get shut down one by one. Nostalrius. Felmyst. Games that meant something — gone.
 
 Then I got a Steam Deck.
 
@@ -74,7 +74,7 @@ Turns out — for a lot of classic MMOs — you can. The emulator community has 
 
 | Game | Emulator | Notes |
 |------|----------|-------|
-| 🍄 MapleStory (v83 Pre-Big Bang) | Cosmic | Wife's pick 👩 |
+| 🍄 **MapleStory (v83 Pre-Big Bang)** | **Cosmic** | **⚡ VERY SOON — Wife's pick 👩** |
 | ⚡ PSO Blue Burst | newserv / Archon | Steam Deck proven |
 | 🌌 Phantasy Star Universe | Clementine | Community server |
 | 🧱 LEGO Universe | Darkflame Universe | For the kids |
@@ -87,7 +87,6 @@ Turns out — for a lot of classic MMOs — you can. The emulator community has 
 | 🚀 Star Wars Galaxies | SWGEmu | |
 | ⚔️ Lineage 2 | L2J / Mobius | |
 | 🌐 Ultima Online | ModernUO + ClassicUO | Linux native client — no Proton needed |
-| 🦸 City of Heroes | Homecoming | |
 | 🏹 Asheron's Call | ACEmulator | |
 | 🗝️ RuneScape Classic | OpenRSC | The original 2001 era |
 
@@ -116,6 +115,13 @@ Turns out — for a lot of classic MMOs — you can. The emulator community has 
 | `install-wow-wotlk.sh` | Full automated installer — one command does everything |
 | `WoW-WotLK-HOWTO.md` | Beginner install guide — zero Linux knowledge needed |
 | `manage-wow-modules.sh` | Enable / disable optional server modules in-place |
+
+### WoW Wrath of the Lich King — Unbound Edition (`guides/unbound-wrath/`)
+
+| File | What it does |
+|------|-------------|
+| `install-wow-unbound.sh` | Full automated installer — one command does everything |
+| `WoW-Unbound-HOWTO.md` | Beginner install guide — dual/triple class system explained |
 
 ### RuneScape 2009 (`guides/runescape/`)
 
@@ -147,6 +153,11 @@ chmod +x install-wow-tbc.sh && ./install-wow-tbc.sh
 chmod +x install-wow-wotlk.sh && ./install-wow-wotlk.sh
 ```
 
+**WoW Wrath of the Lich King — Unbound Edition:**
+```bash
+chmod +x install-wow-unbound.sh && ./install-wow-unbound.sh
+```
+
 **RuneScape 2009:**
 ```bash
 chmod +x install-runescape.sh && ./install-runescape.sh
@@ -171,15 +182,34 @@ Every WoW installer:
 
 ## 🤖 Bot Options (WoW)
 
-All three WoW installers ship with **Playerbots** pre-configured — bots that roam the world, fill dungeons and raids, and keep the economy alive so the game feels like a real server, not an empty shell.
+All WoW installers ship with **Playerbots** pre-configured — bots that roam the world, fill dungeons and raids, and keep the economy alive so the game feels like a real server, not an empty shell.
 
-| | Vanilla | TBC | WotLK |
-|---|---|---|---|
-| **Bot engine** | CMaNGOS Playerbots | CMaNGOS Playerbots | AzerothCore Playerbots |
-| **Bot count** | 600–800 active | 600–800 active | 600–800 active |
-| **Level range** | Endgame 50–60 | Outlands 57–70 | Full 1–80 (syncs to player) |
-| **Auction House** | Stocked | Stocked | Stocked |
-| **Install time** | ~30 min | ~30 min | ~30 min |
+| | Vanilla | TBC | WotLK | WotLK Unbound |
+|---|---|---|---|---|
+| **Bot engine** | CMaNGOS Playerbots | CMaNGOS Playerbots | AzerothCore Playerbots | AzerothCore Playerbots |
+| **Bot count** | 600–800 active | 600–800 active | 600–800 active | 600–800 active |
+| **Level range** | Endgame 50–60 | Outlands 57–70 | Full 1–80 (syncs to player) | Full 1–80 (syncs to player) |
+| **Auction House** | Stocked | Stocked | Stocked | Stocked |
+| **Install time** | ~30 min | ~30 min | ~30 min | ~30 min |
+
+---
+
+## ⚔️ WoW Unbound — Multi-Class System
+
+WoW Unbound is a custom dual/triple class mod built on AzerothCore. Play WotLK as a classless hybrid — combine any classes into a character that's uniquely yours.
+
+| Milestone | Unlock | Cost |
+|-----------|--------|------|
+| Level 5 | Dual Class | Free |
+| Level 25 | Triple Class | 3g |
+| Higher levels | Further unlocks | See guide |
+
+- Full weapon, armor, and dual-wield access across all class combinations
+- Hundreds of Playerbots fill the world
+- Runs completely offline — your server, your rules, forever
+- Open source under AGPL-3.0, consistent with AzerothCore
+
+[📖 Full Guide](./guides/unbound-wrath/)
 
 ---
 
@@ -239,19 +269,19 @@ Game Client via Proton
 
 ## ⚠️ Legal & Ethical Notes
 
-Dad's MMO Lab and WoW Unbound are not affiliated with, endorsed by, 
+Dad's MMO Lab and WoW Unbound are not affiliated with, endorsed by,
 or associated with Blizzard Entertainment or any of its products.
 
-We do not operate, host, or endorse any public or third-party servers 
-— including any servers at unboundwow.com or similar domains. 
-WoW Unbound is an open source educational project built on AzerothCore 
-(GPL licensed), intended for personal use cases wholly dependant on end user choices
+We do not operate, host, or endorse any public or third-party servers
+— including any servers at unboundwow.com or similar domains.
+WoW Unbound is an open source educational project built on AzerothCore
+(GPL licensed), intended for personal use cases wholly dependent on end user choices.
 
-We do not claim ownership of any Blizzard intellectual property. 
-No Blizzard game files are distributed by this project. Users must 
+We do not claim ownership of any Blizzard intellectual property.
+No Blizzard game files are distributed by this project. Users must
 supply their own legally obtained game client.
 
-Any public server operating under the "WoW Unbound" or "Unbound" 
+Any public server operating under the "WoW Unbound" or "Unbound"
 name is doing so without our knowledge, authorization, or support.
 
 This project:
@@ -261,6 +291,7 @@ This project:
 - ✅ Is intended for **personal, offline, single-player use**
 - ❌ Does **not** help run public servers
 - ❌ Does **not** support monetization of private servers
+- ❌ Does **not** provide or link to game client downloads
 
 Huge credit to the communities that make this possible:
 - **[AzerothCore](https://github.com/azerothcore/azerothcore-wotlk)** — the incredible open source WoW WotLK emulator
@@ -310,14 +341,14 @@ Or just:
 
 ## 📜 License
 
-Installer scripts and guides in this repo are released under the 
+Installer scripts and guides in this repo are released under the
 [MIT License](./LICENSE).
 
-WoW Unbound server modifications are released under the 
-[GNU Affero General Public License v3.0](./LICENSE-AGPL), 
+WoW Unbound server modifications are released under the
+[GNU Affero General Public License v3.0](./LICENSE-AGPL),
 consistent with AzerothCore's licensing.
 
-Game emulators linked here are subject to their own licenses. 
+Game emulators linked here are subject to their own licenses.
 Game assets belong to their respective owners and are NOT included here.
 
 ---
