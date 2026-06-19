@@ -56,6 +56,8 @@ Turns out — for a lot of classic MMOs — you can. The emulator community has 
 | ⚔️ WoW Wrath of the Lich King — Unbound Edition | AzerothCore + WoW Unbound | Playerbots | ✅ Complete | [View Guide](./guides/unbound-wrath/) |
 | 🏃 RuneScape 2009 (SD) | 2009scape Singleplayer | Bots | ✅ Complete | [View Guide](./guides/runescape/HOWTO-RUNESCAPE.md) |
 | 🏃 RuneScape 2009 (HD) | 2009scape + Saradomin Launcher | Bots | ✅ Complete | [View Guide](./guides/runescape/RuneScape-HD-HOWTO.md) |
+| 🍄 MapleStory v83 Pre-Big Bang | Cosmic | None | ✅ Complete | [View Guide](./guides/Maplestory/MapleStory-v83-HOWTO.md) |
+| 💎 Mu Online | OpenMU | None | ✅ Complete | [View Guide](./guides/Mu-online/MU-Online-HOWTO.md) |
 
 ---
 
@@ -65,7 +67,6 @@ Turns out — for a lot of classic MMOs — you can. The emulator community has 
 |------|----------|--------|
 | 🐉 Monster Hunter Frontier Z | Erupe CE | 🔨 In Progress |
 | 🌿 Ragnarok Online | rAthena | 🔨 In Progress |
-| 💎 Mu Online | OpenMU | 🔨 In Progress |
 | 🏰 Dark Age of Camelot | OpenDAoC | 🔨 In Progress |
 
 ---
@@ -74,7 +75,6 @@ Turns out — for a lot of classic MMOs — you can. The emulator community has 
 
 | Game | Emulator | Notes |
 |------|----------|-------|
-| 🍄 **MapleStory (v83 Pre-Big Bang)** | **Cosmic** | **⚡ VERY SOON — Wife's pick 👩** |
 | ⚡ PSO Blue Burst | newserv / Archon | Steam Deck proven |
 | 🌌 Phantasy Star Universe | Clementine | Community server |
 | 🧱 LEGO Universe | Darkflame Universe | For the kids |
@@ -132,6 +132,20 @@ Turns out — for a lot of classic MMOs — you can. The emulator community has 
 | `HOWTO-RUNESCAPE.md` | Beginner install guide — zero Linux knowledge needed |
 | `RuneScape-HD-HOWTO.md` | HD upgrade guide — Saradomin Launcher setup and first run |
 
+### MapleStory v83 Pre-Big Bang (`guides/Maplestory/`)
+
+| File | What it does |
+|------|-------------|
+| `install-maplestory.sh` | Full automated installer — one command does everything |
+| `MapleStory-v83-HOWTO.md` | Beginner install guide — zero Linux knowledge needed |
+
+### Mu Online (`guides/Mu-online/`)
+
+| File | What it does |
+|------|-------------|
+| `install-muonline.sh` | Full automated installer — one command does everything |
+| `MU-Online-HOWTO.md` | Beginner install guide — zero Linux knowledge needed |
+
 ---
 
 ## 🚀 Quick Start
@@ -166,6 +180,16 @@ chmod +x install-runescape.sh && ./install-runescape.sh
 **RuneScape 2009 HD upgrade** *(run after the base installer):*
 ```bash
 chmod +x upgrade-runescape-hd.sh && ./upgrade-runescape-hd.sh
+```
+
+**MapleStory v83 Pre-Big Bang:**
+```bash
+chmod +x install-maplestory.sh && ./install-maplestory.sh
+```
+
+**Mu Online:**
+```bash
+chmod +x install-muonline.sh && ./install-muonline.sh
 ```
 
 Every WoW installer:
