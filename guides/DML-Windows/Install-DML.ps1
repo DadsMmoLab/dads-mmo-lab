@@ -1,4 +1,4 @@
-﻿#Requires -RunAsAdministrator
+#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
     Dad's MMO Lab -- Windows Substrate Installer
@@ -721,7 +721,7 @@ echo "[docker] Socket ready"
 set -euo pipefail
 
 VERSION="2.0.0"
-GAMES_DIR="/home/dml/games"
+GAMES_DIR="$HOME"
 
 _require_docker() {
     if ! docker info &>/dev/null; then
@@ -840,6 +840,12 @@ case "$cmd" in
     if ! _has_compose "$dir"; then echo "[dml] ERROR: No docker-compose.yml in $dir" >&2; exit 1; fi
     _require_docker
     cd "$dir"
+    if ss -tlnp 2>/dev/null | grep -q ':3306[[:space:]]'; then
+        if ! grep -q 'DOCKER_DB_EXTERNAL_PORT' .env 2>/dev/null; then
+            printf 'DOCKER_DB_EXTERNAL_PORT=13306\n' >> .env
+            echo "[dml] Port 3306 in use — remapped DB host port to 13306"
+        fi
+    fi
     echo "[dml] Starting $title..."
     docker compose up -d
     echo "[dml] $title started"
