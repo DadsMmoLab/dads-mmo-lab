@@ -1,4 +1,4 @@
-﻿#Requires -RunAsAdministrator
+#Requires -RunAsAdministrator
 param(
     [switch]$RemoveWSL,
     [switch]$Force
