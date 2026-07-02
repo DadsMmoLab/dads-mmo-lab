@@ -997,6 +997,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Forms;
 
@@ -1014,6 +1015,14 @@ class DmlLauncherEntry
 class TrayApp : ApplicationContext
 {
     const string DISTRO = "dml-arch";
+
+    // Prevents Windows from sleeping while a server is running.
+    // ES_CONTINUOUS makes the state persist until explicitly released.
+    // ES_SYSTEM_REQUIRED blocks sleep without requiring the display to stay on.
+    [DllImport("kernel32.dll")] static extern uint SetThreadExecutionState(uint esFlags);
+    const uint ES_CONTINUOUS      = 0x80000000;
+    const uint ES_SYSTEM_REQUIRED = 0x00000001;
+
     NotifyIcon _tray;
 
     public TrayApp()
@@ -1029,6 +1038,53 @@ class TrayApp : ApplicationContext
         var menu = new ContextMenuStrip();
         menu.Opening += OnMenuOpening;
         _tray.ContextMenuStrip = menu;
+
+        // Check server state at startup so sleep is blocked immediately
+        // if a server is already running when the tray loads.
+        var startupTimer = new System.Windows.Forms.Timer { Interval = 3000 };
+        startupTimer.Tick += delegate {
+            startupTimer.Stop(); startupTimer.Dispose();
+            string[] r = { null };
+            var pollTimer = new System.Windows.Forms.Timer { Interval = 150 };
+            pollTimer.Tick += delegate {
+                if (r[0] == null) return;
+                pollTimer.Stop(); pollTimer.Dispose();
+                UpdateSleepLock(CountRunning(r[0]));
+            };
+            pollTimer.Start();
+            System.Threading.ThreadPool.QueueUserWorkItem(_ => {
+                try { r[0] = WslRun("dml status"); } catch { r[0] = ""; }
+            });
+        };
+        startupTimer.Start();
+    }
+
+    // Blocks or releases Windows sleep based on how many servers are running.
+    void UpdateSleepLock(int runningCount)
+    {
+        if (runningCount > 0)
+        {
+            SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED);
+            _tray.Text = "DML Launcher — Server Active (sleep blocked)";
+        }
+        else
+        {
+            SetThreadExecutionState(ES_CONTINUOUS);  // release
+            _tray.Text = "DML Launcher";
+        }
+    }
+
+    static int CountRunning(string statusOut)
+    {
+        int count = 0;
+        foreach (var line in statusOut.Split(new char[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            int colon = line.Trim().IndexOf(':');
+            if (colon > 0 && line.Trim().Substring(colon + 1).Trim()
+                    .Equals("running", StringComparison.OrdinalIgnoreCase))
+                count++;
+        }
+        return count;
     }
 
     void OnMenuOpening(object sender, System.ComponentModel.CancelEventArgs e)
@@ -1090,8 +1146,9 @@ class TrayApp : ApplicationContext
 
     System.Collections.Generic.List<ToolStripItem> BuildTitleItems(string statusOut)
     {
-        var items   = new System.Collections.Generic.List<ToolStripItem>();
+        var items     = new System.Collections.Generic.List<ToolStripItem>();
         var statusMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        int runningCount = 0;
 
         foreach (var line in statusOut.Split(new char[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
         {
@@ -1106,6 +1163,7 @@ class TrayApp : ApplicationContext
             var empty = new ToolStripMenuItem("No titles installed");
             empty.Enabled = false;
             items.Add(empty);
+            UpdateSleepLock(0);
             return items;
         }
 
@@ -1113,6 +1171,7 @@ class TrayApp : ApplicationContext
         {
             string title   = kv.Key;
             bool   running = string.Equals(kv.Value, "running", StringComparison.OrdinalIgnoreCase);
+            if (running) runningCount++;
 
             var gameMenu  = new ToolStripMenuItem(title);
             var statusLbl = new ToolStripMenuItem(running ? "● Running" : "○ Stopped");
@@ -1133,6 +1192,8 @@ class TrayApp : ApplicationContext
             gameMenu.DropDownItems.Add(stopItem);
             items.Add(gameMenu);
         }
+
+        UpdateSleepLock(runningCount);
         return items;
     }
 
@@ -1158,7 +1219,12 @@ class TrayApp : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
 
         var exitItem = new ToolStripMenuItem("Exit");
-        exitItem.Click += delegate { _tray.Visible = false; _tray.Dispose(); Application.Exit(); };
+        exitItem.Click += delegate {
+            SetThreadExecutionState(ES_CONTINUOUS);  // always release before exit
+            _tray.Visible = false;
+            _tray.Dispose();
+            Application.Exit();
+        };
         menu.Items.Add(exitItem);
     }
 
@@ -1169,6 +1235,20 @@ class TrayApp : ApplicationContext
         MessageBoxIcon icon = (result.Contains("[error]") || result.ToLower().Contains("error"))
             ? MessageBoxIcon.Warning : MessageBoxIcon.Information;
         MessageBox.Show(result, caption, MessageBoxButtons.OK, icon);
+
+        // Re-check server state after start/stop so the sleep lock updates
+        // without requiring the user to reopen the menu.
+        string[] r = { null };
+        var pollTimer = new System.Windows.Forms.Timer { Interval = 150 };
+        pollTimer.Tick += delegate {
+            if (r[0] == null) return;
+            pollTimer.Stop(); pollTimer.Dispose();
+            UpdateSleepLock(CountRunning(r[0]));
+        };
+        pollTimer.Start();
+        System.Threading.ThreadPool.QueueUserWorkItem(_ => {
+            try { r[0] = WslRun("dml status"); } catch { r[0] = ""; }
+        });
     }
 
     string WslRun(string wslCmd)
@@ -1288,6 +1368,7 @@ class TrayApp : ApplicationContext
         return input;
     }
 }
+
 '@, [System.Text.Encoding]::UTF8)
 
             Write-Diag "Compiling DML-Launcher.cs -> DML-Launcher.exe..."
