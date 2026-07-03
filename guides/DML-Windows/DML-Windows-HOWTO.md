@@ -52,12 +52,6 @@ Set-ExecutionPolicy Bypass -Scope Process -Force
 & "$env:USERPROFILE\Downloads\Install-DML.ps1"
 ```
 
-If you have Windows 10 use this:
-
-```powershell
-Set-ExecutionPolicy Bypass -Scope Process -Force
-& "$env:USERPROFILE\Downloads\DML-Windows-10.ps1"
-```
 > **If you saved it somewhere else** (like your Desktop), change `Downloads` to match. For example: `& "$env:USERPROFILE\Desktop\Install-DML.ps1"`
 
 ---
