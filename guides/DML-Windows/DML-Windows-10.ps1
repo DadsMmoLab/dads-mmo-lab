@@ -11,6 +11,9 @@
     Phase 2 (PowerShell, elevated): installs Arch Linux as 'dml-arch', Docker Engine.
     Phase 3 (bash, inside dml-arch): core deps + the 'dml' CLI.
 
+    Supports Windows 10 (2004 / build 19041+) and Windows 11 (22H2+).
+    Install location is chosen at first run; defaults to C:\DML.
+
     Run as Administrator. One click, one reboot, then run any DML script.
 #>
 [CmdletBinding()]
@@ -34,7 +37,6 @@ if (-not $ScriptPath) { $ScriptPath = $PSCommandPath }
 # =============================================================================
 # Constants
 # =============================================================================
-$MinWindowsBuild = 19041    # Windows 10 2004 (minimum for WSL2)
 $DiskNeededBytes = 30GB
 $DmlDistroName   = 'dml-arch'
 $DmlLinuxUser    = 'dml'
@@ -80,10 +82,11 @@ function Write-Fail([string]$msg) {
 # =============================================================================
 # State
 # =============================================================================
-function Save-State {
+function Save-State([string]$InstallRoot) {
     try {
         @{
             Phase1Complete = $true
+            InstallRoot    = $InstallRoot
             Timestamp      = (Get-Date -Format 'o')
         } | ConvertTo-Json | Set-Content -Path $StateFile -Encoding UTF8
     } catch {
@@ -116,12 +119,17 @@ function Clear-DistroStepMarkers {
 # =============================================================================
 function Assert-WindowsBuild {
     Write-Step "Checking Windows version..."
-    $build = [System.Environment]::OSVersion.Version.Build
-    Write-Diag "Build: $build  (minimum: $MinWindowsBuild -- Windows 10 2004)"
-    if ($build -lt $MinWindowsBuild) {
-        Write-Fail "Windows 10 version 2004 (build $MinWindowsBuild) or later is required.`nPlease run Windows Update, then try again."
+    $build      = [System.Environment]::OSVersion.Version.Build
+    $Win11Build = 22621  # Win11 22H2
+    $Win10Build = 19041  # Win10 2004
+    Write-Diag "Build: $build  (Win10 min: $Win10Build  Win11 min: $Win11Build)"
+    if ($build -ge $Win11Build) {
+        Write-Ok "Windows 11 (build $build) -- OK"
+    } elseif ($build -ge $Win10Build) {
+        Write-Ok "Windows 10 (build $build) -- OK"
+    } else {
+        Write-Fail "Windows 10 version 2004 (build 19041) or Windows 11 22H2 (build 22621) or later is required.`nPlease run Windows Update, then try again."
     }
-    Write-Ok "Windows build $build -- OK"
 }
 
 function Assert-VirtualizationFirmware {
@@ -164,23 +172,23 @@ function Assert-VirtualizationFirmware {
     Write-Warn "If WSL2 fails to start later, enable Intel VT-x or AMD-V (SVM) in your BIOS/UEFI."
 }
 
-function Assert-DiskSpace {
-    Write-Step "Checking disk space..."
-    $driveLetter = ($env:SystemDrive).TrimEnd(':')
+function Assert-DiskSpace([string]$InstallRoot) {
+    $driveLetter = $InstallRoot.Substring(0, 1).ToUpper()
+    Write-Step "Checking disk space on ${driveLetter}:..."
     try {
         $drive = Get-PSDrive -Name $driveLetter -ErrorAction Stop
         if ($null -ne $drive.Free) {
             $freeGB = [math]::Round($drive.Free / 1GB, 1)
-            Write-Diag "$($env:SystemDrive) free: $freeGB GB  (need: 30 GB)"
+            Write-Diag "${driveLetter}: free: $freeGB GB  (need: 30 GB)"
             if ($drive.Free -lt $DiskNeededBytes) {
-                Write-Fail "Not enough disk space. Need 30 GB free on $($env:SystemDrive), found $freeGB GB.`nFree up space and try again."
+                Write-Fail "Not enough disk space on ${driveLetter}:. Need 30 GB free, found $freeGB GB.`nFree up space or choose a different drive."
             }
-            Write-Ok "$freeGB GB free -- OK"
+            Write-Ok "${driveLetter}: $freeGB GB free -- OK"
         } else {
-            Write-Warn "Could not read free space on $($env:SystemDrive) -- continuing"
+            Write-Warn "Could not read free space on ${driveLetter}: -- continuing"
         }
     } catch {
-        Write-Warn "Could not check disk space ($($_.Exception.Message)) -- continuing"
+        Write-Warn "Could not check disk space on ${driveLetter}: ($($_.Exception.Message)) -- continuing"
     }
 }
 
@@ -313,13 +321,29 @@ function Invoke-Phase1 {
     Write-Host "  Phase 1 runs some checks and may need one reboot." -ForegroundColor White
     Write-Host ""
 
+    # Choose install location
+    Write-Host "  Where do you want to install DML?" -ForegroundColor White
+    Write-Host "  This is where the Linux environment (WSL VHD) and launcher will be stored." -ForegroundColor White
+    Write-Host "  The folder will be created if it doesn't exist." -ForegroundColor White
+    Write-Host "  Examples: D:\DML   E:\Games\DML" -ForegroundColor DarkGray
+    Write-Host ""
+    $defaultRoot = 'C:\DML'
+    $rawInput    = Read-Host "  Install location (press Enter for $defaultRoot)"
+    $InstallRoot = if ([string]::IsNullOrWhiteSpace($rawInput)) { $defaultRoot } else { $rawInput.Trim().TrimEnd('\') }
+    if ($InstallRoot -notmatch '^[A-Za-z]:') {
+        Write-Fail "Install path must start with a drive letter (e.g., D:\DML).`nNetwork paths and relative paths are not supported by WSL."
+    }
+    Write-Diag "Install root: $InstallRoot"
+    Write-Ok "Installing to: $InstallRoot"
+    Write-Host ""
+
     Assert-WindowsBuild
     Assert-VirtualizationFirmware
-    Assert-DiskSpace
+    Assert-DiskSpace -InstallRoot $InstallRoot
     Assert-Internet
 
     Write-Step "Saving installer state..."
-    Save-State
+    Save-State -InstallRoot $InstallRoot
 
     $rebootNeeded = Enable-Wsl2Features
 
@@ -399,6 +423,14 @@ function Invoke-Phase2 {
         Write-Fail "Install state not found at $StateFile.`nPlease re-run Phase 1 (run Install-DML.ps1 without -ResumePhase2)."
     }
 
+    # Load install root saved by Phase 1; fall back to C:\DML for legacy state files
+    $stateJson   = $null
+    try { $stateJson = (Get-Content $StateFile -Raw | ConvertFrom-Json) } catch {}
+    $InstallRoot = if ($stateJson -and $stateJson.InstallRoot) { $stateJson.InstallRoot } else { 'C:\DML' }
+    $WslDir      = "$InstallRoot\wsl"
+    Write-Diag "Install root: $InstallRoot"
+    Write-Diag "WSL dir:      $WslDir"
+
     # -------------------------------------------------------------------------
     # Step 5: Update WSL + set default version to 2
     # -------------------------------------------------------------------------
@@ -422,7 +454,7 @@ function Invoke-Phase2 {
     Write-Ok "WSL2 set as default version"
 
     # Guard against null: Select-String returns $null when wsl --version output
-    # encoding doesn't match (e.g. Store WSL on some Windows versions outputs UTF-16).
+    # encoding doesn't match (e.g. Store WSL on Windows 11 outputs UTF-16).
     $wslVerMatch = wsl --version | Select-String 'WSL version' | Select-Object -First 1
     $wslVerStr   = if ($wslVerMatch) { $wslVerMatch.Line -replace '.*WSL version:\s*', '' } else { '' }
     Write-Diag "WSL version: '$wslVerStr'"
@@ -474,7 +506,7 @@ localhostForwarding=true
     # -------------------------------------------------------------------------
     Write-Step "Installing Arch Linux as '$DmlDistroName' (isolated distro)..."
 
-    # wsl -l --quiet may output UTF-16 LE; strip null bytes before matching
+    # wsl -l --quiet outputs UTF-16 LE on Windows 11; strip null bytes before matching
     $distroRaw      = (wsl -l --quiet) -replace "`0", ""
     Write-Diag "Registered distros: $($distroRaw -join ' | ')"
     $dmlArchPresent = [bool]($distroRaw | Where-Object { $_ -match '^dml-arch$' })
@@ -505,6 +537,14 @@ localhostForwarding=true
         if ($initExit -ne 0) {
             Write-Warn "Arch Linux init run returned $initExit -- proceeding with export (export will fail if the image is corrupt)."
         }
+
+        # bsdtar (used by wsl --export) cannot archive Unix socket files and hard-fails.
+        # Socket files are created by gpg-agent and other daemons during init and persist in
+        # the VHD after forced termination. Remove them while the distro is still live.
+        Write-Diag "Removing socket files before export (bsdtar cannot archive sockets)..."
+        wsl -d archlinux -u root -- find / -xdev -type s -delete
+        Write-Diag "Socket cleanup exit code: $LASTEXITCODE"
+
         wsl --terminate archlinux
         Write-Diag "wsl --terminate archlinux exit code: $LASTEXITCODE"
 
@@ -720,7 +760,7 @@ echo "[docker] Socket ready"
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2.0.0"
+VERSION="2.1.0"
 GAMES_DIR="$HOME"
 
 _require_docker() {
@@ -731,8 +771,63 @@ _require_docker() {
 }
 
 _has_compose() {
-    local dir="$1"
-    [[ -f "$dir/docker-compose.yml" || -f "$dir/docker-compose.yaml" ]]
+    local dir="$1" name
+    for name in docker-compose.yml docker-compose.yaml compose.yml compose.yaml; do
+        [[ -f "$dir/$name" ]] && return 0
+    done
+    return 1
+}
+
+_compose_running() {
+    local dir="$1" name compose_file=""
+    for name in docker-compose.yml docker-compose.yaml compose.yml compose.yaml; do
+        if [[ -f "$dir/$name" ]]; then compose_file="$dir/$name"; break; fi
+    done
+    [[ -z "$compose_file" ]] && echo 0 && return
+    { docker compose -f "$compose_file" ps --status running -q 2>/dev/null || true; } | wc -l | tr -d '[:space:]'
+}
+
+_check_port_conflicts() {
+    local in_use
+    in_use=$(ss -tlnp 2>/dev/null)
+
+    # DB port: remap silently -- safe to move because clients never connect to it directly
+    if echo "$in_use" | grep -q ':3306[[:space:]]'; then
+        if ! grep -q 'DOCKER_DB_EXTERNAL_PORT' .env 2>/dev/null; then
+            printf 'DOCKER_DB_EXTERNAL_PORT=13306\n' >> .env
+            echo "[dml] Port 3306 in use — remapped DB host port to 13306"
+        fi
+    fi
+
+    # Game server ports: warn only -- clients connect to fixed ports, cannot silently remap
+    local _ports=(
+        "3724:WoW auth/login server (TrinityCore, AzerothCore, MaNGOS)"
+        "8085:WoW world server (TrinityCore, AzerothCore)"
+        "8086:WoW SOAP API (TrinityCore, AzerothCore)"
+        "4000:EverQuest zone server (EQEmu)"
+        "5998:EverQuest login server (EQEmu)"
+        "5999:EverQuest login server (EQEmu)"
+        "9000:EverQuest world/zone server (EQEmu)"
+        "2593:Ultima Online game server (ServUO / RunUO)"
+        "7171:Tibia game server (OpenTibia / OTServBR)"
+        "6112:Blizzard legacy port (Warcraft III / Diablo II)"
+        "43594:RuneScape private server (RSPS)"
+        "2106:Lineage II login server (L2J)"
+        "7777:Lineage II game server (L2J)"
+        "54230:Final Fantasy XI auth server (Darkstar)"
+        "54231:Final Fantasy XI game server (Darkstar)"
+        "44453:Star Wars Galaxies login server"
+        "44462:Star Wars Galaxies connection server"
+    )
+    local entry port desc
+    for entry in "${_ports[@]}"; do
+        port="${entry%%:*}"
+        desc="${entry#*:}"
+        if echo "$in_use" | grep -q ":${port}[[:space:]]"; then
+            echo "[WARN] Port $port is already in use -- $desc."
+            echo "[WARN]   Stop whatever is using port $port before starting this server."
+        fi
+    done
 }
 
 cmd="${1:-help}"
@@ -791,12 +886,25 @@ case "$cmd" in
         exit 0
     fi
     found=0
+    declare -A _list_seen
     for dir in "$GAMES_DIR"/*/; do
         [[ -d "$dir" ]] || continue
         title=$(basename "$dir")
         if _has_compose "$dir" || [[ -f "$dir/install.sh" ]]; then
             echo "$title"
             found=$((found + 1))
+            _list_seen["$title"]=1
+        else
+            for subdir in "$dir"*/; do
+                [[ -d "$subdir" ]] || continue
+                [[ -n "${_list_seen[$title]:-}" ]] && continue
+                if _has_compose "$subdir" || [[ -f "$subdir/install.sh" ]]; then
+                    echo "$title"
+                    found=$((found + 1))
+                    _list_seen["$title"]=1
+                    break
+                fi
+            done
         fi
     done
     if [[ $found -eq 0 ]]; then
@@ -809,27 +917,49 @@ case "$cmd" in
     if [[ -n "$target" ]]; then
         dir="$GAMES_DIR/$target"
         if [[ ! -d "$dir" ]]; then echo "not-found"; exit 1; fi
-        if _has_compose "$dir"; then
-            cd "$dir"
-            count=$(docker compose ps --status running -q 2>/dev/null | wc -l | tr -d '[:space:]')
+        compose_dir="$dir"
+        if ! _has_compose "$dir"; then
+            for subdir in "$dir"*/; do
+                if [[ -d "$subdir" ]] && _has_compose "$subdir"; then
+                    compose_dir="$subdir"; break
+                fi
+            done
+        fi
+        if _has_compose "$compose_dir"; then
+            count=$(_compose_running "$compose_dir")
             if [[ "$count" -gt 0 ]]; then echo "running"; else echo "stopped"; fi
         else
             echo "stopped"
         fi
     else
         [[ ! -d "$GAMES_DIR" ]] && exit 0
+        declare -A _seen
         for dir in "$GAMES_DIR"/*/; do
             [[ -d "$dir" ]] || continue
-            _has_compose "$dir" || continue
             title=$(basename "$dir")
-            cd "$dir"
-            count=$(docker compose ps --status running -q 2>/dev/null | wc -l | tr -d '[:space:]')
-            if [[ "$count" -gt 0 ]]; then
-                echo "$title:running"
+            if _has_compose "$dir"; then
+                count=$(_compose_running "$dir")
+                if [[ "$count" -gt 0 ]]; then echo "$title:running"; else echo "$title:stopped"; fi
+                _seen["$title"]=1
             else
-                echo "$title:stopped"
+                # One level deeper -- catches repos with compose file in a subdirectory
+                for subdir in "$dir"*/; do
+                    [[ -d "$subdir" ]] || continue
+                    _has_compose "$subdir" || continue
+                    [[ -n "${_seen[$title]:-}" ]] && continue
+                    count=$(_compose_running "$subdir")
+                    if [[ "$count" -gt 0 ]]; then echo "$title:running"; else echo "$title:stopped"; fi
+                    _seen["$title"]=1
+                    break
+                done
             fi
         done
+        # Fallback: catch running Compose projects not found by directory scan
+        while IFS= read -r project; do
+            [[ -z "$project" ]] && continue
+            [[ -n "${_seen[$project]:-}" ]] && continue
+            echo "$project:running"
+        done < <(docker ps --format '{{index .Labels "com.docker.compose.project"}}' 2>/dev/null | sort -u | grep -v '^$')
     fi
     ;;
 
@@ -837,15 +967,20 @@ case "$cmd" in
     title="${1:?Usage: dml start <title>}"
     dir="$GAMES_DIR/$title"
     if [[ ! -d "$dir" ]]; then echo "[dml] ERROR: Title not found: $title" >&2; exit 1; fi
-    if ! _has_compose "$dir"; then echo "[dml] ERROR: No docker-compose.yml in $dir" >&2; exit 1; fi
-    _require_docker
-    cd "$dir"
-    if ss -tlnp 2>/dev/null | grep -q ':3306[[:space:]]'; then
-        if ! grep -q 'DOCKER_DB_EXTERNAL_PORT' .env 2>/dev/null; then
-            printf 'DOCKER_DB_EXTERNAL_PORT=13306\n' >> .env
-            echo "[dml] Port 3306 in use — remapped DB host port to 13306"
-        fi
+    compose_dir="$dir"
+    if ! _has_compose "$dir"; then
+        for subdir in "$dir"*/; do
+            if [[ -d "$subdir" ]] && _has_compose "$subdir"; then
+                compose_dir="$subdir"; break
+            fi
+        done
     fi
+    if ! _has_compose "$compose_dir"; then
+        echo "[dml] ERROR: No compose file found in $title or its subdirectories." >&2; exit 1
+    fi
+    _require_docker
+    cd "$compose_dir"
+    _check_port_conflicts
     echo "[dml] Starting $title..."
     docker compose up -d
     echo "[dml] $title started"
@@ -855,12 +990,203 @@ case "$cmd" in
     title="${1:?Usage: dml stop <title>}"
     dir="$GAMES_DIR/$title"
     if [[ ! -d "$dir" ]]; then echo "[dml] ERROR: Title not found: $title" >&2; exit 1; fi
-    if ! _has_compose "$dir"; then echo "[dml] ERROR: No docker-compose.yml in $dir" >&2; exit 1; fi
+    compose_dir="$dir"
+    if ! _has_compose "$dir"; then
+        for subdir in "$dir"*/; do
+            if [[ -d "$subdir" ]] && _has_compose "$subdir"; then
+                compose_dir="$subdir"; break
+            fi
+        done
+    fi
+    if ! _has_compose "$compose_dir"; then
+        echo "[dml] ERROR: No compose file found in $title or its subdirectories." >&2; exit 1
+    fi
     _require_docker
-    cd "$dir"
+    cd "$compose_dir"
     echo "[dml] Stopping $title..."
     docker compose down
     echo "[dml] $title stopped"
+    ;;
+
+  scan)
+    _require_docker
+    echo "[dml] Scanning for all running containers in dml-arch..."
+    echo ""
+
+    total=$(docker ps -q 2>/dev/null | wc -l | tr -d '[:space:]')
+    if [[ "$total" -eq 0 ]]; then
+        echo "[dml] No running containers found."
+        exit 0
+    fi
+
+    declare -A _known_ports
+    _known_ports["3306"]="MySQL/MariaDB"
+    _known_ports["3724"]="WoW auth/login"
+    _known_ports["8085"]="WoW world server"
+    _known_ports["8086"]="WoW SOAP API"
+    _known_ports["4000"]="EQ zone (EQEmu)"
+    _known_ports["5998"]="EQ login (EQEmu)"
+    _known_ports["5999"]="EQ login (EQEmu)"
+    _known_ports["9000"]="EQ world (EQEmu)"
+    _known_ports["2593"]="Ultima Online"
+    _known_ports["7171"]="Tibia"
+    _known_ports["6112"]="Blizzard legacy"
+    _known_ports["43594"]="RuneScape (RSPS)"
+    _known_ports["2106"]="Lineage II login"
+    _known_ports["7777"]="Lineage II game"
+    _known_ports["54230"]="FFXI auth"
+    _known_ports["54231"]="FFXI game"
+    _known_ports["44453"]="SWG login"
+    _known_ports["44462"]="SWG connection"
+
+    prev_project="__unset__"
+    while IFS='|' read -r cid cname project; do
+        if [[ "$project" != "$prev_project" ]]; then
+            [[ "$prev_project" != "__unset__" ]] && echo ""
+            if [[ -z "$project" ]]; then
+                echo "[ standalone containers -- no compose project ]"
+            else
+                echo "[ project: $project ]"
+            fi
+            prev_project="$project"
+        fi
+        printf "  %-40s  %s\n" "$cname" "$cid"
+        while IFS= read -r pline; do
+            [[ -z "$pline" ]] && continue
+            hostport=$(echo "$pline" | grep -oE ':[0-9]+$' | tr -d ':')
+            note="${_known_ports[$hostport]:-}"
+            if [[ -n "$note" ]]; then
+                printf "    %-36s  [%s]\n" "$pline" "$note"
+            else
+                printf "    %s\n" "$pline"
+            fi
+        done < <(docker port "$cid" 2>/dev/null)
+    done < <(docker ps --format '{{.ID}}|{{.Names}}|{{index .Labels "com.docker.compose.project"}}' \
+             2>/dev/null | sort -t'|' -k3)
+
+    echo ""
+    echo "[dml] To stop a project: dml kill <project-name>  or  dml kill --all"
+    ;;
+
+  kill)
+    _require_docker
+    target="${1:-}"
+    if [[ -z "$target" ]]; then
+        echo "[dml] Usage: dml kill <project-name> | --all" >&2
+        exit 1
+    fi
+
+    if [[ "$target" == "--all" ]]; then
+        running=$(docker ps -q 2>/dev/null)
+        if [[ -z "$running" ]]; then
+            echo "[dml] No running containers to stop."
+            exit 0
+        fi
+        count=$(echo "$running" | wc -l | tr -d '[:space:]')
+        echo "[dml] Stopping $count running container(s)..."
+        echo "$running" | xargs docker stop 2>/dev/null || true
+        echo "$running" | xargs docker rm -f 2>/dev/null || true
+        docker network prune -f 2>/dev/null || true
+        echo "[ok]  All containers stopped, removed, and orphaned networks pruned."
+    else
+        # Find containers by project label -- works with any compose version, no directory needed
+        containers=$(docker ps -q --filter "label=com.docker.compose.project=$target" 2>/dev/null)
+        if [[ -z "$containers" ]]; then
+            echo "[dml] ERROR: No running containers found for project '$target'." >&2
+            echo "[dml]   Run 'dml scan' to see what is currently running." >&2
+            exit 1
+        fi
+        count=$(echo "$containers" | wc -l | tr -d '[:space:]')
+        echo "[dml] Stopping $count container(s) for project '$target'..."
+        echo "$containers" | xargs docker stop 2>/dev/null || true
+        # Compose down cleans up networks and volumes; fall back to direct rm if unavailable
+        if ! docker compose -p "$target" down 2>/dev/null; then
+            echo "$containers" | xargs docker rm -f 2>/dev/null || true
+        fi
+        echo "[ok]  '$target' stopped."
+    fi
+    ;;
+
+  clean)
+    _require_docker
+    yes_flag="${1:-}"
+    _confirm() {
+        local prompt="$1" ans
+        if [[ "$yes_flag" == "--yes" ]]; then return 0; fi
+        read -rp "    $prompt [y/N] " ans
+        [[ "$ans" =~ ^[Yy] ]]
+    }
+
+    echo "[dml] Running DML cleanup..."
+    echo ""
+
+    # 1. Stop DML-managed containers (compose-project containers only; standalone containers not touched)
+    running=$(docker ps -q --filter "label=com.docker.compose.project" 2>/dev/null)
+    if [[ -n "$running" ]]; then
+        count=$(echo "$running" | wc -l | tr -d '[:space:]')
+        echo "[dml] $count Docker Compose container(s) found:"
+        docker ps --filter "label=com.docker.compose.project" \
+            --format '  {{.Names}}  (project: {{index .Labels "com.docker.compose.project"}})' 2>/dev/null
+        echo ""
+        echo "  Note: standalone containers not part of a compose project are not affected."
+        echo ""
+        if _confirm "Stop these containers?"; then
+            echo "$running" | xargs docker stop 2>/dev/null || true
+            echo "$running" | xargs docker rm -f 2>/dev/null || true
+            echo "[ok]  Containers stopped."
+        fi
+    else
+        echo "[ok]  No running Docker Compose containers found."
+    fi
+    echo ""
+
+    # 2. Identify and optionally remove incomplete install directories
+    if [[ -d "$GAMES_DIR" ]]; then
+        echo "[dml] Checking $GAMES_DIR for incomplete installs..."
+        declare -a incomplete
+        for dir in "$GAMES_DIR"/*/; do
+            [[ -d "$dir" ]] || continue
+            if ! _has_compose "$dir" && [[ ! -f "$dir/install.sh" ]]; then
+                found_nested=0
+                for subdir in "$dir"*/; do
+                    if [[ -d "$subdir" ]] && ( _has_compose "$subdir" || [[ -f "$subdir/install.sh" ]] ); then
+                        found_nested=1; break
+                    fi
+                done
+                [[ $found_nested -eq 0 ]] && incomplete+=("$dir")
+            fi
+        done
+
+        if [[ ${#incomplete[@]} -gt 0 ]]; then
+            echo "[dml] Incomplete directories (no compose file or install.sh found):"
+            for d in "${incomplete[@]}"; do echo "    $(basename "$d")  ($d)"; done
+            echo ""
+            if _confirm "Remove these directories?"; then
+                for d in "${incomplete[@]}"; do
+                    [[ -z "$d" ]] && continue
+                    rm -rf "$d" && echo "[ok]  Removed: $(basename "$d")"
+                done
+            fi
+        else
+            echo "[ok]  No incomplete install directories found."
+        fi
+    fi
+    echo ""
+
+    # 3. Docker prune
+    dangling=$(docker images -f dangling=true -q 2>/dev/null | wc -l | tr -d '[:space:]')
+    stopped_ct=$(docker ps -a -q --filter status=exited 2>/dev/null | wc -l | tr -d '[:space:]')
+    echo "[dml] Docker: $dangling dangling image(s), $stopped_ct exited container(s)."
+    if [[ "$dangling" -gt 0 || "$stopped_ct" -gt 0 ]]; then
+        if _confirm "Run docker system prune? Warning: removes ALL unused Docker resources system-wide, not just DML ones."; then
+            docker system prune -f
+            echo "[ok]  Docker pruned."
+        fi
+    else
+        echo "[ok]  Docker is already clean."
+    fi
+    echo ""
+    echo "[ok]  Cleanup complete."
     ;;
 
   shell)
@@ -926,11 +1252,14 @@ case "$cmd" in
     echo "  status [<title>]      show running/stopped status (all titles if no arg)"
     echo "  start <title>         start a title's Docker server"
     echo "  stop <title>          stop a title's Docker server"
+    echo "  scan                  show all running containers and which game ports they hold"
+    echo "  kill <name|--all>     force-stop by project name (no directory needed)"
+    echo "  clean [--yes]         stop stuck containers, remove incomplete installs, prune Docker"
     echo "  shell                 open an interactive shell"
     echo "  run <url|path>        install a title from GitHub URL or local folder"
     echo "  version               print version"
     echo ""
-    echo "Game data lives in /home/dml/games/ (ext4), never /mnt/c."
+    echo "Game data lives in /home/dml/ (ext4), never /mnt/c."
     ;;
 
   *)
@@ -969,10 +1298,10 @@ echo "[phase3] Done"
     # -------------------------------------------------------------------------
     # Step 11: Compile DML Launcher (Windows system tray app)
     # Uses csc.exe from .NET Framework 4.8 -- pre-installed on Windows 10/11.
-    # Output: C:\DML\DML-Launcher.exe + Desktop shortcut + startup shortcut.
+    # Output: $InstallRoot\DML-Launcher.exe + Desktop shortcut + startup shortcut.
     # -------------------------------------------------------------------------
     # Always write the icon so re-runs and upgrades pick it up
-    $LauncherDir = 'C:\DML'
+    $LauncherDir = $InstallRoot
     New-Item -ItemType Directory -Force -Path $LauncherDir | Out-Null
     # Write bundled icon (base64-encoded dml.ico)
             $IcoPath = "$LauncherDir\dml.ico"
@@ -1416,7 +1745,8 @@ class TrayApp : ApplicationContext
     Write-Host "============================================================" -ForegroundColor Green
     Write-Host ""
     Write-Host "  Installed inside WSL2 (dml-arch):" -ForegroundColor White
-    Write-Host "    Arch Linux  +  systemd  +  Docker Engine  +  dml CLI v2" -ForegroundColor Green
+    Write-Host "    Arch Linux  +  systemd  +  Docker Engine  +  dml CLI v2.1" -ForegroundColor Green
+    Write-Host "  Install location: $InstallRoot" -ForegroundColor DarkGray
     Write-Host ""
     if (Test-Path "$env:USERPROFILE\Desktop\DML Launcher.lnk") {
         Write-Host "  DML Launcher is on your Desktop and starts with Windows." -ForegroundColor White
