@@ -174,10 +174,6 @@ Target the bot then type:
 .npcbot list
 ```
 
-> Install the NetherBot addon for a full UI so you never
-> have to type these commands!
-> `github.com/NetherstormX/NetherBot`
-
 ---
 
 ## 🔧 Troubleshooting Common Problems

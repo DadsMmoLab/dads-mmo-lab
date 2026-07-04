@@ -5,8 +5,8 @@
 **Platform:** Steam Deck (SteamOS), Desktop Mode + Gaming Mode
 
 > 📍 **Not on a Steam Deck?**
-> - **Windows 10/11 (WSL2) or Ubuntu/Debian/Fedora:** The server still runs in Docker the same way — use the [Server Controls guides](./WoW-WotLK-CONTROLS-1.md) for commands, and the [Networking guide](./WoW-Wotlk-NETWORKING.md) for platform-specific setup and multiplayer.
-> - The installer script in this guide is Steam Deck specific. On other platforms, follow the [AzerothCore Docker install guide](https://www.azerothcore.org/wiki/install-with-docker).
+> - **Ubuntu / Debian / Fedora:** The server runs in Docker the same way — the server management, account creation, and networking sections in this guide apply to you. The automated installer script is Steam Deck specific, but the [AzerothCore Docker install guide](https://www.azerothcore.org/wiki/install-with-docker) gets you set up on Linux quickly.
+> - **Windows 10/11:** Use the [DML Windows Installer guide](../DML-Windows/DML-Windows-HOWTO.md) for a full Windows walkthrough, then return here for the server management and networking sections.
 
 ---
 
