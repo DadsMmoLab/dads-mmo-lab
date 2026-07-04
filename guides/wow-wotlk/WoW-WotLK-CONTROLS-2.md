@@ -1,7 +1,9 @@
-# 🖥️ Desktop Mode Controls — Part 2
-## GM Console, Commands, Troubleshooting & Linux Basics
+# 🖥️ Server Controls — Part 2
+## GM Console, Commands, Troubleshooting & Terminal Basics
 
-> **⬅️ [Back to Part 1 — Server Management & Account Creation](./HOWTO-DESKTOP-CONTROLS-1.md)**
+> **⬅️ [Back to Part 1 — Server Management & Account Creation](./WoW-WotLK-CONTROLS-1.md)**
+>
+> 📍 **Landing here directly?** Part 1 has your platform's terminal setup (Steam Deck, Ubuntu, Fedora, Windows/WSL2). [Check it out first.](./WoW-WotLK-CONTROLS-1.md#-what-platform-are-you-on)
 
 ---
 
@@ -16,14 +18,15 @@ all without being logged into the game.
 
 ### Opening the GM Console
 
-Make sure your server is running first, then run:
+Make sure your server is running first, then run this in your terminal:
 
 ```bash
 docker attach $(docker ps --format '{{.Names}}' | grep worldserver | head -1)
 ```
 
-You will see the server output scrolling and a cursor waiting
-for input. You are now in the GM console!
+If it worked, your prompt changes to `AC>`. That means you're talking directly to the server console.
+
+> 💡 **To paste in your terminal:** right-click → Paste, or press **Ctrl+Shift+V**
 
 ---
 
@@ -35,7 +38,7 @@ Ctrl+C kills the worldserver completely — everyone gets
 disconnected and you will have to restart.
 
 **The correct way to exit:**
-1. Press and hold **Ctrl+P**
+1. Press **Ctrl+P**
 2. Then immediately press **Ctrl+Q**
 
 This detaches you from the console safely while leaving the
@@ -49,9 +52,9 @@ server running perfectly.
 ### Common GM Console Commands
 
 ```
-account create USERNAME PASSWORD PASSWORD
+account create USERNAME PASSWORD
 account set gmlevel USERNAME 3 -1
-account list
+account onlinelist
 account delete USERNAME
 reload config
 server info
@@ -109,10 +112,10 @@ Look up item IDs on wowhead.com
 
 ### Change Time of Day
 ```
-.modify time 12
+.modify time 12:00
 ```
 
-0 through 23 for hour of day.
+0:00 through 23:59 for time of day.
 
 ### See All Commands
 ```
@@ -123,7 +126,9 @@ Look up item IDs on wowhead.com
 
 ## 🤖 NPCBot Commands
 
-These work if you are running the NPCBots server version.
+These work if you are running the **NPCBots** server version.
+
+> **Not sure if you're on NPCBots?** Your server folder will be `wow-server-npcbots`, or your installer/launcher mentioned NPCBots.
 
 ### Spawn a Bot Near You
 ```
@@ -189,12 +194,14 @@ If you do not see the containers start the server:
 cd ~/wow-server && docker compose up -d
 ```
 
-Check your realmlist.wtf contains:
-```
-set realmlist 127.0.0.1
-```
+Check your `realmlist.wtf` — the value depends on your setup:
+- **WoW is on the same machine as the server:** use `set realmlist 127.0.0.1`
+- **WoW is on a different PC on the same network (LAN):** use your server's local IP address
+- **Playing over the internet:** use your server's public IP address
 
-Give it time — first launch takes 5-15 minutes.
+See the [Networking Guide](./WoW-Wotlk-NETWORKING.md) for LAN and internet setup.
+
+Give it time — first launch takes 5–15 minutes.
 
 ---
 
@@ -206,10 +213,10 @@ Create the account manually via the GM console:
 docker attach $(docker ps --format '{{.Names}}' | grep worldserver | head -1)
 ```
 
-Then type:
+Wait for the `AC>` prompt, then type (replace `USERNAME` and `PASSWORD` with your own):
 ```
-account create admin admin admin
-account set gmlevel admin 3 -1
+account create USERNAME PASSWORD
+account set gmlevel USERNAME 3 -1
 ```
 
 Exit with Ctrl+P then Ctrl+Q.
@@ -218,45 +225,65 @@ Exit with Ctrl+P then Ctrl+Q.
 
 ### The Server Will Not Start
 
+First, make sure you're in your server folder:
+```bash
+cd ~/wow-server          # or wow-server-npcbots / wow-server-playerbots
+```
+
 Check what is wrong:
 ```bash
-docker compose logs | tail -50
+docker compose logs --tail 50
 ```
 
 Most common fix — remove old containers and restart:
 ```bash
-docker compose down
-docker compose up -d
+docker compose down && docker compose up -d
 ```
 
 ---
 
-### Docker Stopped Working After a SteamOS Update
+### Docker Stopped Working After a System Update
 
-Run the fix script:
+**Steam Deck (SteamOS):** Run the fix script included in this repo:
 ```bash
+cd ~/path/to/dads-mmo-lab/guides/Steam-Update-Fix
 chmod +x fix-after-update.sh && ./fix-after-update.sh
 ```
+See `guides/Steam-Update-Fix/fix-after-update.sh` in the repo for full details.
 
-See HOWTO-FIX-AFTER-UPDATE.md for full details.
+**Ubuntu / Debian:** Docker Engine is managed by apt — updates usually don't break it. If Docker won't start:
+```bash
+sudo systemctl enable --now docker
+```
+
+**Fedora:** Same as above but with dnf:
+```bash
+sudo systemctl enable --now docker
+```
+
+**Windows / WSL2:** If Docker Desktop updated itself and containers won't start, restart Docker Desktop from the system tray (right-click the whale icon → Restart). If WSL2 itself updated, run `wsl --shutdown` in PowerShell then reopen your WSL2 terminal.
 
 ---
 
 ### I Pressed Ctrl+C in the GM Console
 
-Restart the worldserver:
+The worldserver container may have stopped. Restart it using docker compose from your server folder:
+
 ```bash
-docker restart $(docker ps --format '{{.Names}}' | grep worldserver | head -1)
+cd ~/wow-server       # or wow-server-npcbots / wow-server-playerbots
+docker compose up -d
 ```
 
-Remember — always exit with Ctrl+P then Ctrl+Q.
+Remember — always exit the GM console with Ctrl+P then Ctrl+Q.
 
 ---
 
-## 📚 A Little Bit of Linux
+## 📚 A Little Bit of Terminal
 
-Here are a few Linux basics that will make everything easier.
+Here are a few terminal basics that will make everything easier.
 Each one takes 30 seconds to learn.
+
+> 🪟 **Windows users:** These commands run inside your **WSL2 terminal** (where you see `user@archlinux ~ $`). They are Linux commands — they don't work in PowerShell.
 
 ### Navigating Folders
 ```bash
@@ -266,6 +293,8 @@ cd ..                # go up one folder
 ls                   # list what is in the current folder
 pwd                  # show where you currently are
 ```
+
+> In Linux (and WSL2), `~` means your home folder. On a Steam Deck that is `/home/deck`. On WSL2 Arch it is `/home/yourusername`.
 
 ### Reading Files
 ```bash
@@ -310,9 +339,9 @@ If you have read both parts of this guide you now know:
 - How to use in-game GM commands
 - How to manage NPCBots
 - How to diagnose and fix common problems
-- Basic Linux navigation
+- Basic terminal navigation
 
-That is genuinely more Linux knowledge than most people have.
+That is genuinely more than most people know.
 And you learned it by setting up a WoW server. Not bad! 😄
 
 ---
@@ -320,15 +349,13 @@ And you learned it by setting up a WoW server. Not bad! 😄
 ## 📺 Video Guides
 
 Full video tutorials at:
-**youtube.com/@DadsMmoLab**
+**[youtube.com/@DadsMmoLab](https://youtube.com/@DadsMmoLab)**
 
 ## 📦 More Guides
 
-- HOWTO-INSTALL.md — install the server
-- HOWTO-UNINSTALL.md — remove the server
-- HOWTO-MIGRATE.md — move characters between servers
-- HOWTO-SETUP-AHBOT.md — set up the Auction House Bot
-- HOWTO-FIX-AFTER-UPDATE.md — fix Docker after SteamOS updates
+- [WoW-WotLK-HOWTO.md](./WoW-WotLK-HOWTO.md) — Full install guide (Steam Deck)
+- [WoW-WotLK-CREATE-ACCOUNTS.md](./WoW-WotLK-CREATE-ACCOUNTS.md) — Quick account creation reference
+- [WoW-Wotlk-NETWORKING.md](./WoW-Wotlk-NETWORKING.md) — Let friends connect (LAN & internet), Windows/WSL2 setup
 
 ---
 
@@ -337,4 +364,3 @@ on Steam Deck, free forever.*
 
 **youtube.com/@DadsMmoLab**
 **github.com/DadsMmoLab/dads-mmo-lab**
-**ko-fi.com/dadsmmolab**

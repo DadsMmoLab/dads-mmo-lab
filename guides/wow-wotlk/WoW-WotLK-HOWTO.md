@@ -4,6 +4,10 @@
 **Server:** AzerothCore WotLK + mod-playerbots, compiled from source
 **Platform:** Steam Deck (SteamOS), Desktop Mode + Gaming Mode
 
+> 📍 **Not on a Steam Deck?**
+> - **Windows 10/11 (WSL2) or Ubuntu/Debian/Fedora:** The server still runs in Docker the same way — use the [Server Controls guides](./WoW-WotLK-CONTROLS-1.md) for commands, and the [Networking guide](./WoW-Wotlk-NETWORKING.md) for platform-specific setup and multiplayer.
+> - The installer script in this guide is Steam Deck specific. On other platforms, follow the [AzerothCore Docker install guide](https://www.azerothcore.org/wiki/install-with-docker).
+
 ---
 
 ## What This Installs
@@ -27,63 +31,98 @@ This installer uses AzerothCore's own Docker compose build system, which handles
 | Time | 2–4 hours compile (hands-off) + ~15 min first-boot DB import |
 | Power | Deck plugged in; flat hard surface for airflow |
 
+**Before you start — make sure you have all of these:**
+
+- [ ] `install-wow-wotlk.sh` downloaded into your **Downloads** folder (get it from this repo)
+- [ ] A **WoW 3.3.5a (Wrath of the Lich King)** game client already on your Steam Deck. The server software does not include game files — you supply your own client.
+- [ ] **Docker** installed and running. If you haven't installed Docker yet, do that first — many installs already have it, but a fresh Steam Deck does not. To check: open Konsole and run `docker ps`. If you see a table header (even empty), Docker is running. If you get an error, Docker needs to be started or installed.
+- [ ] **GE-Proton** installed in Steam (for the WoW client shortcut in Step 4). Install it via **ProtonUp-Qt** from the Discover app store.
+
+> **New to Steam Deck Desktop Mode?**  
+> Press **Steam button → Power → Switch to Desktop** to reach the desktop. To get back to Gaming Mode, double-click **Return to Gaming Mode** on the desktop.
+
 ---
 
 ## Step 1 — Run the Installer
 
-Open Konsole (Desktop Mode) and run:
+> **In Linux (and on your Steam Deck), `~` is a shortcut that means your home folder** — the personal folder where your files live. So `~/Downloads` is your Downloads folder.
+
+**Open Konsole** — the black terminal app. You'll find it pinned to the taskbar in Desktop Mode, or search for it in the application launcher. This is where you type commands.
+
+Run these two commands:
 
 ```bash
 chmod +x ~/Downloads/install-wow-wotlk.sh
 ~/Downloads/install-wow-wotlk.sh
 ```
 
-The script walks you through everything interactively. Answer the prompts at the start, then walk away.
+> The first command (`chmod +x`) gives the file permission to run as a program. The second command starts it.  
+> **To paste in Konsole:** right-click → Paste, or press **Ctrl+Shift+V**.
+
+The script will ask you a few setup questions in the terminal — read each one, type your answer, and press **Enter**. After that, it runs unattended for 2–4 hours while it compiles everything.
 
 ---
 
 ## What Happens During Install
 
-### Step 1: Summary & Confirm (~1 min)
+The installer handles everything automatically. This section is just for reference — **you don't do these steps yourself**.
+
+### Phase 1: Summary & Confirm (~1 min)
 Confirms what will be built and asks you to start.
 
-### Step 2: Compile AzerothCore + Playerbots (2–4 hours)
-- Clones [mod-playerbots/azerothcore-wotlk](https://github.com/mod-playerbots/azerothcore-wotlk) with the Playerbot branch
-- Clones [mod-playerbots/mod-playerbots](https://github.com/mod-playerbots/mod-playerbots)
-- Builds Docker images: worldserver, authserver, db-import, client-data
-- On first boot, AzerothCore downloads and imports its map data automatically
+### Phase 2: Compile AzerothCore + Playerbots (2–4 hours)
+The installer automatically:
+- Downloads the server source code from [mod-playerbots/azerothcore-wotlk](https://github.com/mod-playerbots/azerothcore-wotlk) and [mod-playerbots/mod-playerbots](https://github.com/mod-playerbots/mod-playerbots)
+- Builds the server using Docker (a tool that packages software in a self-contained way — you don't need to understand it)
+- Compiles four components: worldserver, authserver, db-import, client-data
 
 The fan will be loud during compile — that's normal.
 
-> **If it fails:** Re-run the installer. It detects existing compiled images and skips the compile automatically.
+> **If it fails:** Re-run the installer. It detects an existing project directory and skips the compile automatically.
 
-### Step 3: Wait for Server Ready (~5–15 min first boot)
-The installer waits for the world server to print `ready...` before continuing. First launch after compilation includes a full database import pass, which takes 10–15 minutes. Subsequent starts take ~30 seconds.
+### Phase 3: Wait for Server Ready (~5–15 min first boot)
+The installer waits for the world server to print `ready...` before continuing. The first launch after compilation includes a full game database import — this is normal and takes 10–15 minutes once. Every start after that takes ~30 seconds.
 
-### Step 4: Create Your Account
-The installer pauses here and shows you the exact commands. See Step 2 below.
+### Phase 4: Create Your Account
+The installer pauses here and shows you the exact commands. See **Step 2** below.
 
-### Step 5: Gaming Mode Setup
+### Phase 5: Gaming Mode Setup
 Creates `~/wow-playerbots-launcher.sh` and saves a reference card to `~/wow-server-playerbots/MY_SERVER.txt`.
 
 ---
 
 ## Step 2 — Create Your Account (Required)
 
-When the installer pauses at account creation, open a **new Konsole window** and run:
+When the installer pauses at account creation, leave the first terminal window open and open a **second Konsole window** (right-click the taskbar Konsole icon → New Window, or open it again from the app launcher). Then run:
 
 ```bash
 docker attach $(docker ps --format '{{.Names}}' | grep worldserver | head -1)
 ```
 
-At the `AC>` prompt, type:
+If it worked, your terminal prompt changes to `AC>`. That means you're talking directly to the server console.
+
+At the `AC>` prompt, type the following — **replace `YOURNAME` and `YOURPASSWORD` with your own login details:**
 
 ```
-account create player player
-account set gmlevel player 3 -1
+account create YOURNAME YOURPASSWORD
+account set gmlevel YOURNAME 3 -1
 ```
 
-Exit safely: **Ctrl+P then Ctrl+Q** (sequential — do NOT press Ctrl+C, that kills the server).
+For example, if you want the username `john` and password `mypassword`:
+```
+account create john mypassword
+account set gmlevel john 3 -1
+```
+
+> `account set gmlevel ... 3 -1` gives your account administrator ("GM") powers in-game, which lets you use commands like teleport, summon items, and more. This only affects your local server.
+
+---
+
+> ⚠️ **IMPORTANT — exiting the console:**  
+> Press **Ctrl+P, then Ctrl+Q** (one after the other) to safely detach from the server console.  
+> **Do NOT press Ctrl+C** — that stops the server entirely.
+
+---
 
 Return to the installer window and press **Enter** to continue.
 
@@ -91,59 +130,130 @@ Return to the installer window and press **Enter** to continue.
 
 ## Step 3 — Set Your Realmlist
 
-In your WoW WotLK client folder, find `realmlist.wtf` and make sure it contains:
+The **realmlist** tells your WoW client which server to connect to. Setting it to `127.0.0.1` points the game at the server running on your own Steam Deck.
+
+In your WoW WotLK client folder, find `realmlist.wtf` — it's usually inside the `Data` subfolder, in a folder named after your client's language:
+
+- **Primary location:** `[client]/Data/enUS/realmlist.wtf` *(use your locale — enGB, deDE, etc.)*
+- Fallback: `[client]/realmlist.wtf`
+
+On Steam Deck, your WoW client is usually somewhere like:
+- `/home/deck/Games/WoW/` (if you copied it there manually)
+- Or inside a Proton prefix under `~/.steam/steam/steamapps/compatdata/`
+
+Open the file in a text editor (right-click → Open With → Kate or Text Editor) and make sure it contains exactly:
 
 ```
 set realmlist 127.0.0.1
 ```
 
-Common locations:
-- `[client]/realmlist.wtf`
-- `[client]/Data/enUS/realmlist.wtf`
-
-Lock it after editing so the client doesn't overwrite it:
+Then lock the file so the WoW launcher can't overwrite it:
 ```bash
 chmod 444 "[path]/realmlist.wtf"
 ```
+
+> `chmod 444` makes the file read-only. If the command returns to a blank prompt with no error, it worked. If you ever need to edit it again, unlock it first:
+> ```bash
+> chmod 644 "[path]/realmlist.wtf"
+> ```
 
 ---
 
 ## Step 4 — Add to Steam (Gaming Mode)
 
-You need two Steam shortcuts.
+You need two Steam shortcuts. A **Non-Steam Game** is just a shortcut in your Steam library to a program Steam didn't install — it lets you launch anything from Gaming Mode.
 
 ### Shortcut 1: Server Launcher
 
-1. Steam → **Add a Non-Steam Game** → browse to `/usr/bin/konsole`
+1. Steam → **Add a Non-Steam Game** → browse to `/usr/bin/konsole`  
+   *(In the file picker, navigate to the root of the filesystem `/`, then `usr` → `bin` → select `konsole`)*
 2. Rename to: `WoW Playerbots Server`
 3. Right-click → **Properties** → Launch Options:
    ```
    --hold -e bash ~/wow-playerbots-launcher.sh
    ```
-4. Compatibility: **Proton OFF** (this is a Linux bash script)
+   *(This tells Konsole to open and run your server launcher script, keeping the window open so you can see status messages)*
+4. Compatibility tab: **disable Proton** (this is a Linux script, not a Windows program)
 
 ### Shortcut 2: WoW Client
 
 1. Steam → **Add a Non-Steam Game** → browse to `WoW.exe` in your client folder
 2. Rename to: `Wrath of the Lich King`
-3. Compatibility: **Force GE-Proton** (latest)
+3. Compatibility tab: **Force a specific Steam Play compatibility tool** → select **GE-Proton** (latest)  
+   *(If you don't see GE-Proton, install it first via ProtonUp-Qt from the Discover app store)*
 
 ---
 
 ## Daily Use — Gaming Mode
 
-1. Launch **WoW Playerbots Server** from your library
-2. Wait for: **`AZEROTH IS READY!`**
-3. Press the Steam button → switch to your library
-4. Launch **Wrath of the Lich King**
-5. Log in: your chosen username / password — realmlist: **127.0.0.1**
-6. **Bots take 5–10 minutes after server start to populate** — be patient on first login
+1. Launch **WoW Playerbots Server** from your library — a terminal window will open
+2. Wait until you see **`AZEROTH IS READY!`** near the bottom of that window — this means the server is fully loaded
+3. **Leave the server window open** (don't close it — the server is running inside it)
+4. Press the Steam button → switch to your library
+5. Launch **Wrath of the Lich King**
+6. Log in using the **username and password you created in Step 2** — this only works if your `realmlist.wtf` is set to `127.0.0.1`
+7. **Bots take 5–10 minutes after server start to populate** — be patient on first login
 
 When you close WoW, the launcher shuts the server down automatically. If WoW isn't detected within 5 minutes, the server stays alive for 3 hours as a fallback.
 
 ---
 
+## Managing Your Server
+
+After install, you have two tools to manage your server — pick whichever suits you.
+
+---
+
+### Option A — wow-manage.sh (Interactive Menu)
+
+`wow-manage.sh` is an interactive, menu-driven terminal script included in this repository. It wraps all common server tasks behind numbered menus — no typing raw Docker commands required.
+
+**Where to find it:** [`guides/wow-wotlk/wow-manage.sh`](https://github.com/DadsMmoLab/dads-mmo-lab/blob/main/guides/wow-wotlk/wow-manage.sh) in this repo.
+
+**Download and run it** (paste these into Konsole):
+```bash
+curl -o ~/Downloads/wow-manage.sh https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/guides/wow-wotlk/wow-manage.sh
+chmod +x ~/Downloads/wow-manage.sh
+~/Downloads/wow-manage.sh
+```
+
+It opens a full-screen interactive menu with three sub-menus:
+
+| Menu | What it does |
+|---|---|
+| **Server Controls** | Start, stop, restart, check status, view live logs, attach to the server console |
+| **Server Modifications** | Add/remove AzerothCore modules, ALE Lua mods, and SQL mods |
+| **Configurations** | Set your WoW client folder, configure AH Bot and ALE, rebuild the worldserver |
+
+Navigate with the numbers shown on screen. Press **Enter** with no input to go back.
+
+---
+
+### Option B — The Lab (GUI App — No Terminal Required)
+
+**The Lab** is a full graphical app for managing your server with clicks, not commands. It's built for Steam Deck Gaming Mode and works great from the couch.
+
+**Download:** [github.com/0xVe1L/the-lab](https://github.com/0xVe1L/the-lab) — grab `TheLab.AppImage` from the latest release.
+
+Features include:
+- **Start / stop / restart** the server with a live, readable console
+- **My Party** — build a 5-man bot group: pick role, class, spec, and level — The Lab spawns and gears them for you
+- **Item database & in-game mail** — search any item and send it to your character instantly
+- **Teleport** to any named location or map coordinates
+- **Module management** — toggle AzerothCore modules on/off; tune their settings in-app
+- **Steam integration** — adds the server and WoW client to Steam with artwork
+- Auto-shutdown when you close WoW
+
+> **Already have a server from this guide?** The Lab detects existing Dad's MMO Lab installs and migrates them in — your characters and data are untouched.
+
+---
+
 ## Useful Commands (Desktop Mode)
+
+These are for manual control or troubleshooting. You don't need them for normal daily use.
+
+> **To paste in Konsole:** right-click → Paste, or press **Ctrl+Shift+V**  
+> **To browse folders:** you can paste any `~/...` path into the Dolphin file manager's address bar.
 
 ```bash
 # Start server manually
@@ -160,7 +270,7 @@ docker ps | grep -iE "worldserver|authserver"
 
 # Attach to server console
 docker attach $(docker ps --format '{{.Names}}' | grep worldserver | head -1)
-# Exit: Ctrl+P then Ctrl+Q
+# Exit: Ctrl+P then Ctrl+Q  — DO NOT press Ctrl+C (that stops the server)
 
 # Create additional accounts
 docker attach $(docker ps --format '{{.Names}}' | grep worldserver | head -1)
@@ -201,7 +311,7 @@ Bots are tuned for a solo player. Settings in `docker-compose.override.yml`:
 | `AC_AI_PLAYERBOT_MAX_RANDOM_BOTS` | 2000 |
 | `AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN` | 1 (enabled) |
 
-To change these, edit `~/wow-server-playerbots/docker-compose.override.yml` and restart:
+To change these, open `~/wow-server-playerbots/docker-compose.override.yml` in a text editor (right-click → Open With → Kate). Only change the numbers after the `:` — do not change spacing or punctuation, or the file will break. Then restart:
 ```bash
 cd ~/wow-server-playerbots && docker compose down && docker compose up -d
 ```
@@ -213,7 +323,7 @@ cd ~/wow-server-playerbots && docker compose down && docker compose up -d
 ### Server won't start / worldserver keeps restarting
 
 ```bash
-docker compose -f ~/wow-server-playerbots/docker-compose.yml logs ac-worldserver --tail 50
+docker compose -f ~/wow-server-playerbots/docker-compose.yml logs --tail 50 ac-worldserver
 ```
 
 ### "ready..." never appears
@@ -236,17 +346,28 @@ docker ps | grep authserver
 Check `~/playerbots-build.log` for the last error. Common causes:
 - Network drop during clone — re-run the installer
 - Disk full during Docker build — `df -h ~` to check
-- Docker not running — `sudo systemctl start docker`
+- Docker not running — `sudo systemctl start docker`  
+  *(This is an administrator command — it may ask for your Steam Deck password)*
 
 ### Re-running the installer
 
-Safe to re-run. If compiled images already exist in `~/wow-server-playerbots/`, the installer skips the 2–4 hour compile and restarts the server instead. To force a full rebuild:
+Safe to re-run. If an existing project directory is detected at `~/wow-server-playerbots/`, the installer skips the 2–4 hour compile and restarts the server instead.
+
+To force a completely clean rebuild:
+
+> ⚠️ **WARNING — this permanently deletes the server folder and all local data inside it.** Only run this if you want to wipe the install and start from scratch.
+
 ```bash
+cd ~/wow-server-playerbots && docker compose down -v --rmi local
 sudo rm -rf ~/wow-server-playerbots
 ~/Downloads/install-wow-wotlk.sh
 ```
 
+The first line removes Docker containers, volumes, and locally-built images. The second removes the project folder. The third re-runs the installer from scratch.
+
 ---
 
-*Dad's MMO Lab — one-click offline MMO servers for Steam Deck.*
-*youtube.com/@DadsMmoLab*
+*Part of the Dad's MMO Lab project — free forever.*
+
+**youtube.com/@DadsMmoLab**
+**github.com/DadsMmoLab/dads-mmo-lab**
