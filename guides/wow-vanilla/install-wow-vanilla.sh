@@ -825,10 +825,10 @@ extract_client_data() {
                     ulimit -s unlimited 2>/dev/null || true
                     cd /client
                     echo "=== Vmap retry starting at $(date) ==="
-                    /opt/mangos/bin/tools/vmap4_extractor || true
+                    /opt/mangos/bin/tools/vmap_extractor || true
                     if [ -d "/client/Buildings" ]; then
                         mkdir -p /client/vmaps
-                        /opt/mangos/bin/tools/vmap4_assembler Buildings vmaps 2>&1 || true
+                        /opt/mangos/bin/tools/vmap_assembler Buildings vmaps 2>&1 || true
                         rm -rf /client/Buildings
                     fi
                     if [ -d "/client/vmaps" ] && [ "$(ls /client/vmaps 2>/dev/null | wc -l)" -gt 0 ]; then
