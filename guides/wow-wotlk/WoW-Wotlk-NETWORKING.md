@@ -10,8 +10,9 @@ This guide helps you let other players connect to your AzerothCore WoW private s
 
 > Not sure which? Same home or same Wi-Fi → **LAN**. Friends at their own home → **Internet play**.
 
-> 📦 **New to Docker or setting up the server for the first time?**
-> Follow the [AzerothCore Docker install guide](https://www.azerothcore.org/wiki/install-with-docker) first, then come back here.
+> 📦 **New to this? Setting up the server for the first time?**
+> - **Steam Deck or Linux:** Start with the [WoW WotLK HOWTO guide](./WoW-WotLK-HOWTO.md), then come back here.
+> - **Windows:** Start with the [DML Windows HOWTO](../DML-Windows/DML-Windows-HOWTO.md), then come back here.
 
 ---
 
@@ -56,12 +57,15 @@ Open: Right-click **Start** → **Windows PowerShell (Admin)** → click **Yes**
 - *(Internet play only)* You can log in to your router admin page
 - You can edit `realmlist.wtf` on any WoW client that needs to connect
 
-> 🪟 **sudo on Arch WSL2:** The `sudo` command may not be pre-configured in all Arch WSL2 setups. If `sudo` gives "command not found", install it first:
-> ```
-> pacman -S sudo
-> ```
-> Then add your user to sudoers: `echo "yourusername ALL=(ALL) ALL" >> /etc/sudoers`
-> Or alternatively, prefix admin commands with `su -c "command"` and enter the root password when prompted.
+> 🪟 **sudo on Arch WSL2:** The `sudo` command may not be pre-configured in all Arch WSL2 setups. If `sudo` gives "command not found", you need to install it as root first:
+> 1. Switch to root: `su -` (enter the root password when prompted)
+> 2. Install sudo: `pacman -S sudo`
+> 3. Configure your user: run `visudo` and add this line at the bottom:  
+>    `yourusername ALL=(ALL) ALL`  
+>    *(replace `yourusername` with your actual username — use arrow keys to navigate, type the line, then press **Ctrl+X → Y → Enter** to save)*
+> 4. Type `exit` to leave root, then test: `sudo whoami` — it should print `root`
+> 
+> Alternatively, prefix admin commands with `su -c "command"` and enter the root password when prompted.
 
 ## Part 1 — Open a Terminal
 
@@ -215,14 +219,17 @@ Because WSL2 runs in a virtual machine, if your server ports are bound to `127.0
 
 Replace `YOUR_LOCAL_IP` with your Windows IPv4 from `ipconfig` (e.g. `192.168.1.25`). Run in **PowerShell as Administrator**:
 
+**Required — game ports (3724 and 8085):**
 ```
-netsh advfirewall firewall add rule name="AzerothCore DB" protocol=TCP dir=in localport=3306 action=allow
-netsh interface portproxy add v4tov4 listenaddress=YOUR_LOCAL_IP listenport=3306 connectaddress=127.0.0.1 connectport=3306
 netsh interface portproxy add v4tov4 listenaddress=YOUR_LOCAL_IP listenport=3724 connectaddress=127.0.0.1 connectport=3724
 netsh interface portproxy add v4tov4 listenaddress=YOUR_LOCAL_IP listenport=8085 connectaddress=127.0.0.1 connectport=8085
 ```
 
-> Port 3306 is the database port — useful if you want to use a database tool like HeidiSQL to browse characters. Ports 3724 and 8085 are required for the game to work.
+**Optional — database port (3306, only needed if you use HeidiSQL or another database tool):**
+```
+netsh advfirewall firewall add rule name="AzerothCore DB" protocol=TCP dir=in localport=3306 action=allow
+netsh interface portproxy add v4tov4 listenaddress=YOUR_LOCAL_IP listenport=3306 connectaddress=127.0.0.1 connectport=3306
+```
 
 > ⚠️ If your Windows IP changes, re-run these commands with the new IP. To verify rules are active: `netsh interface portproxy show all`. To remove old rules before re-adding: `netsh interface portproxy delete v4tov4 listenaddress=OLD_IP listenport=3724`
 
@@ -263,6 +270,7 @@ docker compose up -d
 Where to find it:
 - **Windows client:** WoW folder → `Data` → locale folder (e.g. `enUS`) → `realmlist.wtf`
 - **Steam Deck (Proton):** Usually at `~/.steam/steam/steamapps/compatdata/[AppID]/pfx/drive_c/Program Files/World of Warcraft/Data/enUS/realmlist.wtf` — or wherever you placed your WoW folder
+  > 💡 **Not sure what `[AppID]` is?** Open **Dolphin** file manager, press **F5** to show hidden files, then use the search bar and search for `realmlist.wtf` — it'll find the right file wherever it lives.
 - **Linux client (Wine/Proton):** Inside the Wine prefix for your WoW install. A Wine prefix is a folder that acts like a Windows C: drive. It typically lives at `~/.wine/drive_c/...` or wherever your WoW folder is stored.
 
 Open it in a text editor and change the `set realmlist` line to:
@@ -399,7 +407,7 @@ docker compose up -d
   - Windows PowerShell: use `curl.exe` (already built in)
 
 **"Access denied" on database command**
-Default password is `password`. If you changed it, check `DOCKER_DB_ROOT_PASSWORD` in the `.env` file in your server folder.
+Default password is `password`. If you changed it, check the `.env` file in your server folder — open `~/wow-server-playerbots/.env` (or `~/wow-server/.env` etc.) in Kate or any text editor and look for the `DOCKER_DB_ROOT_PASSWORD` line.
 
 **"steamdeck is not a valid host"**
 Hostname resolution is unreliable on most home networks. Use the **local IP address directly**.

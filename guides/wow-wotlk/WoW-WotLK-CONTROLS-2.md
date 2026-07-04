@@ -112,10 +112,10 @@ Look up item IDs on wowhead.com
 
 ### Change Time of Day
 ```
-.modify time 12:00
+.time set 12 0
 ```
 
-0:00 through 23:59 for time of day.
+Format is `HH MM` — for example `.time set 6 30` for 6:30 AM or `.time set 20 0` for 8 PM.
 
 ### See All Commands
 ```
@@ -188,6 +188,7 @@ docker ps
 If you do not see the containers start the server:
 ```bash
 cd ~/wow-server && docker compose up -d
+# Replace wow-server with wow-server-npcbots or wow-server-playerbots if that's your install
 ```
 
 Check your `realmlist.wtf` — the value depends on your setup:
@@ -240,12 +241,12 @@ docker compose down && docker compose up -d
 
 ### Docker Stopped Working After a System Update
 
-**Steam Deck (SteamOS):** Run the fix script included in this repo:
+**Steam Deck (SteamOS):** Run the fix script included in this repo. First, find where you cloned the repo (run `ls ~` to look for a `dads-mmo-lab` folder), then:
 ```bash
-cd ~/path/to/dads-mmo-lab/guides/Steam-Update-Fix
+cd ~/dads-mmo-lab/guides/Steam-Update-Fix
 chmod +x fix-after-update.sh && ./fix-after-update.sh
 ```
-See `guides/Steam-Update-Fix/fix-after-update.sh` in the repo for full details.
+> If you don't have the repo cloned, download it: `git clone https://github.com/DadsMmoLab/dads-mmo-lab ~/dads-mmo-lab`
 
 **Ubuntu / Debian:** Docker Engine is managed by apt — updates usually don't break it. If Docker won't start:
 ```bash

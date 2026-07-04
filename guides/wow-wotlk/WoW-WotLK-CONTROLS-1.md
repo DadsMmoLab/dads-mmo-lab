@@ -82,7 +82,7 @@ When you run `docker compose down` you are closing it safely.
 > - **Ubuntu / Debian:** `sudo apt install docker.io docker-compose-plugin && sudo systemctl enable --now docker`
 > - **Fedora:** `sudo dnf install docker docker-compose-plugin && sudo systemctl enable --now docker`
 > - **Windows (WSL2):** Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) and enable WSL2 integration in its settings
-> - **Steam Deck:** Follow the [AzerothCore Docker install guide](https://www.azerothcore.org/wiki/install-with-docker)
+> - **Steam Deck:** Follow the [WoW WotLK HOWTO guide](./WoW-WotLK-HOWTO.md) — it installs Docker and the server for you
 > - **Ubuntu / Debian / Fedora users:** After installing Docker, run `sudo usermod -aG docker $USER` then log out and back in so you can run `docker` without `sudo`.
 
 ### What are Containers?
@@ -217,13 +217,13 @@ docker restart $(docker ps --format '{{.Names}}' | grep worldserver | head -1)
 ### Checking Server Logs
 
 ```bash
-docker compose logs $(docker ps --format '{{.Names}}' | grep worldserver | head -1)
+docker logs $(docker ps --format '{{.Names}}' | grep worldserver | head -1)
 ```
 
 To watch live as it happens add `-f`:
 
 ```bash
-docker compose logs -f $(docker ps --format '{{.Names}}' | grep worldserver | head -1)
+docker logs -f $(docker ps --format '{{.Names}}' | grep worldserver | head -1)
 ```
 
 Press Ctrl+C to stop following. The server keeps running.
@@ -281,8 +281,10 @@ account set gmlevel kiddo 3 -1
 ### Changing a Password
 
 ```
-account set password USERNAME OLDPASSWORD NEWPASSWORD
+account set password USERNAME NEWPASSWORD NEWPASSWORD
 ```
+
+> Type the new password **twice** — that's how AzerothCore confirms it. You do not need the old password when you have GM console access.
 
 ---
 
@@ -330,6 +332,12 @@ docker exec $DB mysqldump -uroot -ppassword --databases acore_characters acore_a
 ```
 
 Your backup is saved to your home folder (`~`) as a file like `wow-backup-20260704.sql`.
+
+**Verify the backup was created:**
+```bash
+ls -lh ~/wow-backup-*.sql
+```
+You should see the file listed with a size greater than 0. If the file is missing or 0 bytes, something went wrong — check that the server is running and try again.
 
 **To restore a backup:**
 

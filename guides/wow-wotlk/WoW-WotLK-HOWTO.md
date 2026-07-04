@@ -5,7 +5,7 @@
 **Platform:** Steam Deck (SteamOS), Desktop Mode + Gaming Mode
 
 > 📍 **Not on a Steam Deck?**
-> - **Ubuntu / Debian / Fedora:** The server runs in Docker the same way — the server management, account creation, and networking sections in this guide apply to you. The automated installer script is Steam Deck specific, but the [AzerothCore Docker install guide](https://www.azerothcore.org/wiki/install-with-docker) gets you set up on Linux quickly.
+> - **Ubuntu / Debian / Fedora:** The server runs in Docker the same way — the server management, account creation, and networking sections in this guide all apply to you. The automated installer script is Steam Deck specific; skip to [Step 2](./WoW-WotLK-HOWTO.md#step-2--create-your-account) once your server is running.
 > - **Windows 10/11:** Use the [DML Windows Installer guide](../DML-Windows/DML-Windows-HOWTO.md) for a full Windows walkthrough, then return here for the server management and networking sections.
 
 ---
@@ -33,9 +33,9 @@ This installer uses AzerothCore's own Docker compose build system, which handles
 
 **Before you start — make sure you have all of these:**
 
-- [ ] `install-wow-wotlk.sh` downloaded into your **Downloads** folder (get it from this repo)
+- [ ] `install-wow-wotlk.sh` downloaded into your **Downloads** folder. To download it: go to [github.com/DadsMmoLab/dads-mmo-lab](https://github.com/DadsMmoLab/dads-mmo-lab) → open the `guides/wow-wotlk/` folder → click `install-wow-wotlk.sh` → click the **download** icon (arrow pointing down) → save to your Downloads folder.
 - [ ] A **WoW 3.3.5a (Wrath of the Lich King)** game client already on your Steam Deck. The server software does not include game files — you supply your own client.
-- [ ] **Docker** installed and running. If you haven't installed Docker yet, do that first — many installs already have it, but a fresh Steam Deck does not. To check: open Konsole and run `docker ps`. If you see a table header (even empty), Docker is running. If you get an error, Docker needs to be started or installed.
+- [ ] **Docker** — the installer will install and start Docker automatically if it isn't already running. You don't need to install it manually. To verify Docker is already running (optional): open Konsole and run `docker ps`. If you see a table header (even empty), Docker is running. If you get an error, don't worry — the installer handles it.
 - [ ] **GE-Proton** installed in Steam (for the WoW client shortcut in Step 4). Install it via **ProtonUp-Qt** from the Discover app store.
 
 > **New to Steam Deck Desktop Mode?**  
@@ -126,6 +126,8 @@ account set gmlevel john 3 -1
 
 Return to the installer window and press **Enter** to continue.
 
+> 📍 **Linux users (Ubuntu / Debian / Fedora):** You won't have an installer window — you're here after starting your server manually with `docker compose up -d`. Skip the "press Enter" instruction above. Your server is already running; just make sure the account was created successfully, then move on to Step 3.
+
 ---
 
 ## Step 3 — Set Your Realmlist
@@ -139,7 +141,9 @@ In your WoW WotLK client folder, find `realmlist.wtf` — it's usually inside th
 
 On Steam Deck, your WoW client is usually somewhere like:
 - `/home/deck/Games/WoW/` (if you copied it there manually)
-- Or inside a Proton prefix under `~/.steam/steam/steamapps/compatdata/`
+- Or inside a Proton prefix under `~/.steam/steam/steamapps/compatdata/[AppID]/` — where `[AppID]` is a number Steam assigns to the game shortcut
+
+> 💡 **Not sure where your realmlist.wtf is?** Open **Dolphin** file manager, press **F5** to show hidden files, then use the search bar (magnifying glass icon) and search for `realmlist.wtf`. It'll find it wherever it is.
 
 Open the file in a text editor (right-click → Open With → Kate or Text Editor) and make sure it contains exactly:
 
@@ -323,7 +327,7 @@ cd ~/wow-server-playerbots && docker compose down && docker compose up -d
 ### Server won't start / worldserver keeps restarting
 
 ```bash
-docker compose -f ~/wow-server-playerbots/docker-compose.yml logs --tail 50 ac-worldserver
+cd ~/wow-server-playerbots && docker compose logs --tail 50 ac-worldserver
 ```
 
 ### "ready..." never appears

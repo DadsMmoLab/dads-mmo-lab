@@ -4,7 +4,7 @@ Run a fully offline **World of Warcraft: Wrath of the Lich King (3.3.5a)** priva
 
 **Supported platforms:** Steam Deck (SteamOS) · Ubuntu / Debian / Linux Mint · Fedora · Windows 10/11 (WSL2)
 
-All servers run in **Docker** via [AzerothCore's official Docker compose setup](https://www.azerothcore.org/wiki/install-with-docker).
+All servers run in **Docker** via [AzerothCore's official Docker compose setup](https://www.azerothcore.org/wiki/install-with-docker). We do not manage nor are we affiliated with AzerothCore — we simply provide a fully automated installer and management scripts for the AzerothCore WotLK + Playerbots server branch.
 
 ---
 

@@ -82,6 +82,7 @@ Log into WoW with your new username and password.
 
 Make sure your `realmlist.wtf` is set to `127.0.0.1` if you haven't already:
 - **Steam Deck users:** see [WoW-WotLK-HOWTO.md — Step 3](./WoW-WotLK-HOWTO.md#step-3--set-your-realmlist)
+- **Linux users (local play):** open your WoW client folder → `Data/<locale>/realmlist.wtf` → set it to `set realmlist 127.0.0.1`
 - **Windows / LAN / internet play:** see [WoW-Wotlk-NETWORKING.md](./WoW-Wotlk-NETWORKING.md)
 
 ---
@@ -126,10 +127,10 @@ Make sure your username and password match exactly what you typed when creating 
 
 To reset a password, attach to the GM console and run:
 ```
-account set password USERNAME CURRENTPASSWORD NEWPASSWORD
+account set password USERNAME NEWPASSWORD NEWPASSWORD
 ```
 
-If you've forgotten the current password, you can create a fresh account with a new name instead.
+> Type the new password **twice**. You do not need the old password when you have GM console access.
 
 **Server not found?**
 Start your server first:

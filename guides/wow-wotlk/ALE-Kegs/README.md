@@ -1,3 +1,7 @@
+# ALE-Kegs
+
+> **Just want to install and play?** You can ignore this folder entirely — these are optional server mods. Nothing here is required to run the server.
+
 # What is this?
 ALE-Kegs are a local collection of ELUNA mods that were updated to use ALE by Baerthe specifically for this WotLK installation. They are not intended to be used outside of this installation, and may not work properly if used in other contexts.
 
