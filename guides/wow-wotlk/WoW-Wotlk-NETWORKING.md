@@ -4,11 +4,14 @@
 ## What This Guide Does
 
 This guide helps you let other players connect to your AzerothCore WoW private server running in Docker on your Steam Deck, Linux PC, or Windows 10/11 machine with WSL2.
+Please join the discord to discuss issues related to this or if you are having issues doing it. Do *NOT* submit a github issue.
 
 **LAN only** — Same Wi-Fi as you: No router changes needed
 **Internet play** — Anyone anywhere: Requires router access
 
-> Not sure which? Same home or same Wi-Fi → **LAN**. Friends at their own home → **Internet play**.
+> Not sure which? 
+  Same home or same Wi-Fi → **LAN**.
+  Friends at their own home → **Internet play**.
 
 > 📦 **New to this? Setting up the server for the first time?**
 > - **Steam Deck or Linux:** Start with the [WoW WotLK HOWTO guide](./WoW-WotLK-HOWTO.md), then come back here.
