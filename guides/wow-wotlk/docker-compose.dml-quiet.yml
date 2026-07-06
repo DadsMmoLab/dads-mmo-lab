@@ -1,0 +1,16 @@
+# DML overlay — quiet startup (no cp -n warnings). Merged by dml-start.sh / dml CLI.
+services:
+  ac-worldserver:
+    entrypoint: ["/bin/bash", "/azerothcore/dml-docker-entrypoint.sh"]
+    command: ["worldserver"]
+    volumes:
+      - ./dml-docker-entrypoint.sh:/azerothcore/dml-docker-entrypoint.sh:ro
+    environment:
+      AC_PROCESS_PRIORITY: "0"
+  ac-authserver:
+    entrypoint: ["/bin/bash", "/azerothcore/dml-docker-entrypoint.sh"]
+    command: ["authserver"]
+    volumes:
+      - ./dml-docker-entrypoint.sh:/azerothcore/dml-docker-entrypoint.sh:ro
+    environment:
+      AC_PROCESS_PRIORITY: "0"

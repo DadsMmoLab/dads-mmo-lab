@@ -40,7 +40,7 @@ if (-not $ScriptPath) { $ScriptPath = $PSCommandPath }
 $DiskNeededBytes = 30GB
 $DmlDistroName   = 'dml-arch'
 $DmlLinuxUser    = 'dml'
-$DmlCliVersion   = '2.1.0'   # bundled dml CLI + launcher tooltip (keep in sync)
+$DmlCliVersion   = '2.1.1'   # bundled dml CLI + launcher tooltip (keep in sync)
 $TaskName        = 'DadsMmoLab-Phase2'
 
 $Script:FailReported = $false
@@ -819,6 +819,194 @@ _compose_running() {
     { docker compose -f "$compose_file" ps --status running -q 2>/dev/null || true; } | wc -l | tr -d '[:space:]'
 }
 
+_title_lifecycle_busy() {
+    local compose_dir="${1%/}"
+    [[ -f "${compose_dir}/.dml-lifecycle-busy" ]] && return 0
+    pgrep -f "${compose_dir}/dml-start\\.sh" >/dev/null 2>&1 \
+        || pgrep -f "${compose_dir}/dml-stop\\.sh" >/dev/null 2>&1
+}
+
+_title_reported_status() {
+    local compose_dir="$1" count
+    if _title_lifecycle_busy "$compose_dir"; then
+        echo "loading"
+        return
+    fi
+    count=$(_compose_running "$compose_dir")
+    if [[ "$count" -gt 0 ]]; then echo "running"; else echo "stopped"; fi
+}
+
+_stop_title_graceful() {
+    local title="$1" dir="$GAMES_DIR/$title" compose_dir="$GAMES_DIR/$title"
+    if [[ ! -d "$dir" ]]; then
+        echo "[dml] ERROR: Title not found: $title" >&2
+        return 1
+    fi
+    if [[ -x "$dir/dml-stop.sh" ]]; then
+        bash "$dir/dml-stop.sh"
+        return
+    fi
+    if ! _has_compose "$dir"; then
+        for subdir in "$dir"*/; do
+            if [[ -d "$subdir" ]] && _has_compose "$subdir"; then
+                compose_dir="$subdir"; break
+            fi
+        done
+    fi
+    if ! _has_compose "$compose_dir"; then
+        echo "[dml] ERROR: No compose file found in $title or its subdirectories." >&2
+        return 1
+    fi
+    _require_docker
+    cd "$compose_dir" || return 1
+    echo "[dml] Stopping $title (containers only — data volumes are preserved)..."
+    docker compose down >"$compose_dir/.dml-stop.log" 2>&1 \
+        || { echo "[dml] ERROR: Stop failed — see $compose_dir/.dml-stop.log" >&2; return 1; }
+    echo "[dml] $title stopped — progress saved on disk"
+}
+
+_stop_all_running_titles() {
+    command -v docker &>/dev/null || { echo "[dml] Docker not available — skipping server stop"; return 0; }
+    if ! systemctl is-active --quiet docker 2>/dev/null; then
+        echo "[dml] Docker not running — no servers to stop"
+        return 0
+    fi
+
+    local -A _seen=()
+    local -a titles=()
+    local dir title compose_dir count subdir project
+
+    if [[ -d "$GAMES_DIR" ]]; then
+        for dir in "$GAMES_DIR"/*/; do
+            [[ -d "$dir" ]] || continue
+            title=$(basename "$dir")
+            compose_dir="$dir"
+            if ! _has_compose "$dir"; then
+                for subdir in "$dir"*/; do
+                    if [[ -d "$subdir" ]] && _has_compose "$subdir"; then
+                        compose_dir="$subdir"; break
+                    fi
+                done
+            fi
+            if _has_compose "$compose_dir"; then
+                count=$(_compose_running "$compose_dir")
+                if [[ "$count" -gt 0 ]]; then
+                    titles+=("$title")
+                    _seen["$title"]=1
+                fi
+            fi
+        done
+    fi
+
+    while IFS= read -r project; do
+        [[ -z "$project" ]] || [[ -n "${_seen[$project]:-}" ]] && continue
+        if docker ps -q --filter "label=com.docker.compose.project=$project" 2>/dev/null | grep -q .; then
+            titles+=("$project")
+            _seen["$project"]=1
+        fi
+    done < <(docker ps --format '{{index .Labels "com.docker.compose.project"}}' 2>/dev/null | sort -u | grep -v '^$')
+
+    if [[ ${#titles[@]} -eq 0 ]]; then
+        echo "[dml] No running game servers to stop"
+        return 0
+    fi
+
+    for title in "${titles[@]}"; do
+        compose_dir=""
+        if [[ -d "$GAMES_DIR/$title" ]]; then
+            compose_dir="$GAMES_DIR/$title"
+            if ! _has_compose "$compose_dir"; then
+                for subdir in "$GAMES_DIR/$title"*/; do
+                    if [[ -d "$subdir" ]] && _has_compose "$subdir"; then
+                        compose_dir="$subdir"; break
+                    fi
+                done
+            fi
+        fi
+        if [[ -n "$compose_dir" ]] && _has_compose "$compose_dir"; then
+            echo "[dml] Stopping $title..."
+            ( cd "$compose_dir" && docker compose down ) \
+                || echo "[WARN] Failed to stop $title" >&2
+            echo "[dml] $title stopped"
+        else
+            echo "[dml] Stopping compose project $title..."
+            docker compose -p "$title" down 2>/dev/null \
+                || echo "[WARN] Failed to stop project $title" >&2
+        fi
+    done
+    _update_titles_cache
+}
+
+_restart_all_running_titles() {
+    command -v docker &>/dev/null || { echo "[dml] Docker not available"; return 1; }
+    if ! systemctl is-active --quiet docker 2>/dev/null; then
+        echo "[dml] Docker not running — no servers to restart"
+        return 1
+    fi
+
+    local -A _seen=()
+    local -a titles=()
+    local dir title compose_dir count subdir project
+
+    if [[ -d "$GAMES_DIR" ]]; then
+        for dir in "$GAMES_DIR"/*/; do
+            [[ -d "$dir" ]] || continue
+            title=$(basename "$dir")
+            compose_dir="$dir"
+            if ! _has_compose "$dir"; then
+                for subdir in "$dir"*/; do
+                    if [[ -d "$subdir" ]] && _has_compose "$subdir"; then
+                        compose_dir="$subdir"; break
+                    fi
+                done
+            fi
+            if _has_compose "$compose_dir"; then
+                count=$(_compose_running "$compose_dir")
+                if [[ "$count" -gt 0 ]]; then
+                    titles+=("$title")
+                    _seen["$title"]=1
+                fi
+            fi
+        done
+    fi
+
+    while IFS= read -r project; do
+        [[ -z "$project" ]] || [[ -n "${_seen[$project]:-}" ]] && continue
+        if docker ps -q --filter "label=com.docker.compose.project=$project" 2>/dev/null | grep -q .; then
+            titles+=("$project")
+            _seen["$project"]=1
+        fi
+    done < <(docker ps --format '{{index .Labels "com.docker.compose.project"}}' 2>/dev/null | sort -u | grep -v '^$')
+
+    if [[ ${#titles[@]} -eq 0 ]]; then
+        echo "[dml] No active servers to restart"
+        return 1
+    fi
+
+    for title in "${titles[@]}"; do
+        compose_dir=""
+        if [[ -d "$GAMES_DIR/$title" ]]; then
+            compose_dir="$GAMES_DIR/$title"
+            if ! _has_compose "$compose_dir"; then
+                for subdir in "$GAMES_DIR/$title"*/; do
+                    if [[ -d "$subdir" ]] && _has_compose "$subdir"; then
+                        compose_dir="$subdir"; break
+                    fi
+                done
+            fi
+        fi
+        if [[ -n "$compose_dir" ]] && _has_compose "$compose_dir"; then
+            _start_title "$title" restart || echo "[WARN] Failed to restart $title" >&2
+        else
+            echo "[dml] Restarting compose project $title..."
+            docker compose -p "$title" down 2>/dev/null || true
+            docker compose -p "$title" up -d 2>/dev/null \
+                || echo "[WARN] Failed to restart project $title" >&2
+        fi
+    done
+    _update_titles_cache
+}
+
 # Windows-side helpers (paths written at install time)
 DML_WIN_ROOT='__DML_INSTALL_ROOT__'
 
@@ -1049,6 +1237,8 @@ case "$cmd" in
 
     if command -v powershell.exe &>/dev/null; then
         _doctor_section "Windows host + WSL"
+        win_root_mnt=$(_win_to_mnt "$DML_WIN_ROOT")
+        stopped_marker="$win_root_mnt/.dml-servers-stopped"
         # wsl.exe stdout is UTF-16 when piped; strip NULs before text tools
         wsl_ver=$(wsl.exe --version 2>&1 | tr -d '\0' | grep -i 'WSL version' | head -1 | sed 's/.*:[[:space:]]*//' | tr -d '\r' || true)
         if [[ -n "$wsl_ver" ]]; then
@@ -1082,8 +1272,12 @@ case "$cmd" in
                 warns=$((warns + 1))
             elif docker ps -q 2>/dev/null | grep -q .; then
                 echo "[ok]  Vmmem RAM: ${vmmem_mb} MB (servers running)"
+            elif [[ -f "$stopped_marker" ]] && (( vmmem_mb > 500 )); then
+                echo "[WARN] Vmmem ${vmmem_mb} MB after intentional stop -- WSL woke (doctor/tray) -- re-releasing RAM..."
+                warns=$((warns + 1))
+                _release_wsl
             elif (( vmmem_mb > 500 )); then
-                echo "[WARN] Vmmem ${vmmem_mb} MB with no containers -- Stop from tray to release RAM"
+                echo "[WARN] Vmmem ${vmmem_mb} MB with no containers -- tray: Stop WSL (release RAM), or: dml release-wsl"
                 warns=$((warns + 1))
             else
                 echo "[ok]  Vmmem RAM: ${vmmem_mb} MB"
@@ -1091,7 +1285,6 @@ case "$cmd" in
         fi
 
         _doctor_section "Windows DML install ($DML_WIN_ROOT)"
-        win_root_mnt=$(_win_to_mnt "$DML_WIN_ROOT")
         for script in WSL-Keepalive.ps1 DML-Ensure-Keepalive.ps1 DML-Release-WSL.ps1 DML-Launcher.exe dml-titles.cache; do
             if [[ -f "$win_root_mnt/$script" ]]; then
                 echo "[ok]  $script present"
@@ -1136,7 +1329,6 @@ case "$cmd" in
         else
             echo "[ok]  Windows keepalive off (no game servers running)"
         fi
-        stopped_marker="$win_root_mnt/.dml-servers-stopped"
         if [[ -f "$stopped_marker" ]] && docker ps -q 2>/dev/null | grep -q .; then
             echo "[WARN] .dml-servers-stopped marker exists but containers are running -- tray may show Stopped"
             warns=$((warns + 1))
@@ -1282,8 +1474,7 @@ case "$cmd" in
             done
         fi
         if _has_compose "$compose_dir"; then
-            count=$(_compose_running "$compose_dir")
-            if [[ "$count" -gt 0 ]]; then echo "running"; else echo "stopped"; fi
+            _title_reported_status "$compose_dir"
         else
             echo "stopped"
         fi
@@ -1294,8 +1485,7 @@ case "$cmd" in
             [[ -d "$dir" ]] || continue
             title=$(basename "$dir")
             if _has_compose "$dir"; then
-                count=$(_compose_running "$dir")
-                if [[ "$count" -gt 0 ]]; then echo "$title:running"; else echo "$title:stopped"; fi
+                echo "$title:$(_title_reported_status "$dir")"
                 _seen["$title"]=1
             else
                 # One level deeper -- catches repos with compose file in a subdirectory
@@ -1303,8 +1493,7 @@ case "$cmd" in
                     [[ -d "$subdir" ]] || continue
                     _has_compose "$subdir" || continue
                     [[ -n "${_seen[$title]:-}" ]] && continue
-                    count=$(_compose_running "$subdir")
-                    if [[ "$count" -gt 0 ]]; then echo "$title:running"; else echo "$title:stopped"; fi
+                    echo "$title:$(_title_reported_status "$subdir")"
                     _seen["$title"]=1
                     break
                 done
@@ -1330,31 +1519,37 @@ case "$cmd" in
     _start_title "$title" restart
     ;;
 
+  restart-active)
+    echo "[dml] Restarting active server(s)..."
+    _restart_all_running_titles || exit 1
+    ;;
+
   stop)
     title="${1:?Usage: dml stop <title>}"
-    dir="$GAMES_DIR/$title"
-    if [[ ! -d "$dir" ]]; then echo "[dml] ERROR: Title not found: $title" >&2; exit 1; fi
-    compose_dir="$dir"
-    if ! _has_compose "$dir"; then
-        for subdir in "$dir"*/; do
-            if [[ -d "$subdir" ]] && _has_compose "$subdir"; then
-                compose_dir="$subdir"; break
-            fi
-        done
+    if [[ -x "$GAMES_DIR/$title/dml-stop.sh" ]]; then
+      bash "$GAMES_DIR/$title/dml-stop.sh"
+    else
+      _stop_title_graceful "$title" || exit 1
+      running=$(docker ps -q 2>/dev/null | wc -l | tr -d '[:space:]')
+      if [[ "$running" -eq 0 ]]; then
+        echo "[dml] No servers running — releasing WSL memory to Windows..."
+        _release_wsl
+      fi
     fi
-    if ! _has_compose "$compose_dir"; then
-        echo "[dml] ERROR: No compose file found in $title or its subdirectories." >&2; exit 1
+    ;;
+
+  release-wsl)
+    echo "[dml] Stopping any running game servers cleanly..."
+    _stop_all_running_titles
+    remaining=$(docker ps -q 2>/dev/null | wc -l | tr -d '[:space:]')
+    if [[ "$remaining" -gt 0 ]]; then
+        echo "[WARN] $remaining container(s) still running — stopping..."
+        docker ps -q 2>/dev/null | xargs docker stop 2>/dev/null || true
     fi
-    _require_docker
-    cd "$compose_dir"
-    echo "[dml] Stopping $title..."
-    docker compose down
-    echo "[dml] $title stopped"
-    running=$(docker ps -q 2>/dev/null | wc -l | tr -d '[:space:]')
-    if [[ "$running" -eq 0 ]]; then
-      echo "[dml] No servers running — releasing WSL memory to Windows..."
-      _release_wsl
-    fi
+    echo "[dml] Shutting down WSL and returning RAM to Windows..."
+    _release_wsl
+    echo "[dml] Scheduled — Vmmem should drop in a few seconds."
+    echo "[dml] Use 'dml start <title>' when you want to play again."
     ;;
 
   scan)
@@ -1601,7 +1796,9 @@ case "$cmd" in
     echo "  status [<title>]      show running/stopped status (all titles if no arg)"
     echo "  start <title>         start a title's Docker server"
     echo "  restart <title>       restart a title (uses dml-start.sh if present)"
+    echo "  restart-active        restart all currently running titles"
     echo "  stop <title>          stop a title; releases WSL RAM if no servers left"
+    echo "  release-wsl           compose-down all titles, then shut down WSL (frees Vmmem RAM)"
     echo "  scan                  show all running containers and which game ports they hold"
     echo "  kill <name|--all>     force-stop by project name (no directory needed)"
     echo "  clean [--yes]         stop stuck containers, remove incomplete installs, prune Docker"
@@ -1696,8 +1893,7 @@ echo "[phase3] Done"
             $LauncherCs  = "$LauncherDir\DML-Launcher.cs"
             $LauncherExe = "$LauncherDir\DML-Launcher.exe"
 
-            $LauncherSource = @'
-// DML-Launcher.cs -- Dad's MMO Lab system tray launcher
+            $LauncherSource = @'// DML-Launcher.cs -- Dad's MMO Lab system tray launcher
 // Compiled at install time: csc.exe /target:winexe /r:System.Windows.Forms.dll /r:System.Drawing.dll
 
 using System;
@@ -1706,6 +1902,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Windows.Forms;
 
 class DmlLauncherEntry
@@ -1715,6 +1912,9 @@ class DmlLauncherEntry
     {
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += delegate(object s, ThreadExceptionEventArgs e) { };
+        SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
         Application.Run(new TrayApp());
     }
 }
@@ -1722,7 +1922,9 @@ class DmlLauncherEntry
 class TrayApp : ApplicationContext
 {
     const string DISTRO   = "dml-arch";
-    const string VERSION  = "__DML_CLI_VERSION__";
+    const string VERSION  = "2.1.1";
+
+    enum ServerDisplayState { Stopped, Running, Loading }
 
     string TrayTooltip(bool serverActive)
     {
@@ -1737,6 +1939,34 @@ class TrayApp : ApplicationContext
                 System.IO.Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location),
                 "dml-titles.cache");
         }
+    }
+
+    string StoppedMarkerPath {
+        get {
+            return System.IO.Path.Combine(
+                System.IO.Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location),
+                ".dml-servers-stopped");
+        }
+    }
+
+    bool ServersIntentionallyStopped()
+    {
+        try { return System.IO.File.Exists(StoppedMarkerPath); }
+        catch { return false; }
+    }
+
+    // After stop, tray/doctor must not boot WSL for status — that leaves VmmemWSL ~2 GB idle.
+    string GetStatusOutput()
+    {
+        if (ServersIntentionallyStopped() || !IsDistroRunning())
+            return BuildStoppedStatusOutput();
+        return WslRun("dml status");
+    }
+
+    void MaybeReReleaseWsl()
+    {
+        if (ServersIntentionallyStopped() && IsDistroRunning())
+            TriggerReleaseWsl(0);
     }
 
     // True only when dml-arch is Running — wsl -l -v does NOT boot the distro.
@@ -1810,9 +2040,32 @@ class TrayApp : ApplicationContext
     const uint ES_SYSTEM_REQUIRED = 0x00000001;
 
     NotifyIcon _tray;
+    ContextMenuStrip _menu;
+    System.Windows.Forms.Timer _menuTimer;
+    System.Windows.Forms.Timer _loadingAnimTimer;
+    Form _syncForm;
+    string _lastStatusOut = "";
+    int _loadingDotFrame;
+    readonly Dictionary<string, string> _pendingTitleStatus =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    const int WslQuickTimeoutMs = 15000;
+    const int WslLongTimeoutMs  = 600000;
+
+    static readonly Color ColorRunning = Color.FromArgb(30, 160, 60);
+    static readonly Color ColorStopped = Color.FromArgb(110, 110, 110);
+    static readonly Color ColorLoading = Color.FromArgb(200, 150, 0);
 
     public TrayApp()
     {
+        // Hidden form gives a stable UI thread marshal target (ApplicationContext alone can leave _uiSync null).
+        _syncForm = new Form();
+        _syncForm.FormBorderStyle = FormBorderStyle.None;
+        _syncForm.ShowInTaskbar   = false;
+        _syncForm.StartPosition   = FormStartPosition.Manual;
+        _syncForm.Size            = new Size(0, 0);
+        _syncForm.Opacity         = 0;
+        _syncForm.Show();
+
         _tray = new NotifyIcon();
         string icoPath = System.IO.Path.Combine(
             System.IO.Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location),
@@ -1821,9 +2074,13 @@ class TrayApp : ApplicationContext
         _tray.Text    = TrayTooltip(false);
         _tray.Visible = true;
 
-        var menu = new ContextMenuStrip();
-        menu.Opening += OnMenuOpening;
-        _tray.ContextMenuStrip = menu;
+        _menu = new ContextMenuStrip();
+        _menu.Closed += OnMenuClosed;
+        // Win11: show menu only on right-click (not ContextMenuStrip — avoids left-click open)
+        _tray.MouseUp += OnTrayMouseUp;
+
+        // Re-release if something woke WSL after an intentional stop (doctor, old tray poll).
+        MaybeReReleaseWsl();
 
         // Check server state at startup so sleep is blocked immediately
         // if a server is already running when the tray loads.
@@ -1835,16 +2092,49 @@ class TrayApp : ApplicationContext
             pollTimer.Tick += delegate {
                 if (r[0] == null) return;
                 pollTimer.Stop(); pollTimer.Dispose();
-                UpdateSleepLock(CountRunning(r[0]));
+                ApplyStatusResult(r[0]);
             };
             pollTimer.Start();
             System.Threading.ThreadPool.QueueUserWorkItem(_ => {
-                try {
-                    r[0] = IsDistroRunning() ? WslRun("dml status") : BuildStoppedStatusOutput();
-                } catch { r[0] = BuildStoppedStatusOutput(); }
+                try { r[0] = GetStatusOutput(); }
+                catch { r[0] = BuildStoppedStatusOutput(); }
             });
         };
         startupTimer.Start();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            try { if (_syncForm != null) { _syncForm.Close(); _syncForm.Dispose(); } } catch { }
+        }
+        base.Dispose(disposing);
+    }
+
+    void PostToUi(Action action)
+    {
+        if (action == null) return;
+        try
+        {
+            if (_syncForm != null && !_syncForm.IsDisposed)
+            {
+                if (_syncForm.InvokeRequired)
+                    _syncForm.BeginInvoke(action);
+                else
+                    action();
+                return;
+            }
+        }
+        catch { }
+        try { action(); } catch { }
+    }
+
+    void DeferCloseMenu()
+    {
+        PostToUi(delegate {
+            try { if (_menu != null && _menu.Visible) _menu.Close(); } catch { }
+        });
     }
 
     // Blocks or releases Windows sleep based on how many servers are running.
@@ -1868,25 +2158,225 @@ class TrayApp : ApplicationContext
         foreach (var line in statusOut.Split(new char[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
         {
             int colon = line.Trim().IndexOf(':');
-            if (colon > 0 && line.Trim().Substring(colon + 1).Trim()
-                    .Equals("running", StringComparison.OrdinalIgnoreCase))
+            if (colon <= 0) continue;
+            string state = line.Trim().Substring(colon + 1).Trim();
+            if (state.Equals("running", StringComparison.OrdinalIgnoreCase)
+                || state.Equals("loading", StringComparison.OrdinalIgnoreCase))
                 count++;
         }
         return count;
     }
 
-    void OnMenuOpening(object sender, System.ComponentModel.CancelEventArgs e)
+    void OnTrayMouseUp(object sender, MouseEventArgs e)
     {
-        var menu = (ContextMenuStrip)sender;
+        if (e.Button != MouseButtons.Right) return;
+        try
+        {
+            if (_menu == null || _menu.IsDisposed) return;
+            if (_menu.Visible)
+            {
+                _menu.Close();
+                return;
+            }
+            try
+            {
+                PopulateMenu(_menu);
+            }
+            catch
+            {
+                _menu.Items.Clear();
+                var err = new ToolStripMenuItem("DML Launcher");
+                err.Enabled = false;
+                _menu.Items.Add(err);
+                _menu.Items.Add(new ToolStripSeparator());
+                AddStaticItems(_menu);
+            }
+            _menu.Show(Cursor.Position);
+        }
+        catch { }
+    }
+
+    void OnMenuClosed(object sender, ToolStripDropDownClosedEventArgs e)
+    {
+        if (_menuTimer != null)
+        {
+            _menuTimer.Stop();
+            _menuTimer.Dispose();
+            _menuTimer = null;
+        }
+        if (_loadingAnimTimer != null && _pendingTitleStatus.Count == 0)
+        {
+            _loadingAnimTimer.Stop();
+            _loadingAnimTimer.Dispose();
+            _loadingAnimTimer = null;
+        }
+    }
+
+    string LoadingDots()
+    {
+        int n = (_loadingDotFrame % 3) + 1;
+        return new string('.', n);
+    }
+
+    string FormatTitleText(string title, ServerDisplayState state)
+    {
+        switch (state)
+        {
+            case ServerDisplayState.Running:
+                return title + "  \u25cf Running";
+            case ServerDisplayState.Loading:
+                return title + "  \u25cc Loading" + LoadingDots();
+            default:
+                return title + "  \u25cb Stopped";
+        }
+    }
+
+    Color ColorForState(ServerDisplayState state)
+    {
+        switch (state)
+        {
+            case ServerDisplayState.Running: return ColorRunning;
+            case ServerDisplayState.Loading: return ColorLoading;
+            default: return ColorStopped;
+        }
+    }
+
+    ServerDisplayState GetDisplayState(string title, string reportedStatus)
+    {
+        if (string.Equals(reportedStatus, "loading", StringComparison.OrdinalIgnoreCase))
+            return ServerDisplayState.Loading;
+
+        string expected;
+        if (_pendingTitleStatus.TryGetValue(title, out expected))
+        {
+            if (!string.Equals(reportedStatus, expected, StringComparison.OrdinalIgnoreCase))
+                return ServerDisplayState.Loading;
+        }
+        return string.Equals(reportedStatus, "running", StringComparison.OrdinalIgnoreCase)
+            ? ServerDisplayState.Running : ServerDisplayState.Stopped;
+    }
+
+    void SyncPendingWithStatus(string statusOut)
+    {
+        var map = ParseStatusMap(statusOut);
+        var done = new System.Collections.Generic.List<string>();
+        foreach (var kv in _pendingTitleStatus)
+        {
+            string reported;
+            if (map.TryGetValue(kv.Key, out reported)
+                && string.Equals(reported, kv.Value, StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(reported, "loading", StringComparison.OrdinalIgnoreCase))
+                done.Add(kv.Key);
+        }
+        foreach (var t in done) _pendingTitleStatus.Remove(t);
+        if (_pendingTitleStatus.Count == 0 && _loadingAnimTimer != null)
+        {
+            _loadingAnimTimer.Stop();
+            _loadingAnimTimer.Dispose();
+            _loadingAnimTimer = null;
+        }
+    }
+
+    void MarkTitlePending(string title, string expectedStatus)
+    {
+        _pendingTitleStatus[title] = expectedStatus;
+        EnsureLoadingAnimTimer();
+    }
+
+    void MarkAllTitlesPending(string expectedStatus)
+    {
+        foreach (var line in _lastStatusOut.Split(new char[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            string trimmed = line.Trim();
+            int colon = trimmed.IndexOf(':');
+            if (colon > 0)
+                _pendingTitleStatus[trimmed.Substring(0, colon)] = expectedStatus;
+        }
+        if (_pendingTitleStatus.Count == 0)
+        {
+            foreach (var t in LoadTitleCache())
+            {
+                string title = (t ?? "").Trim();
+                if (title.Length > 0) _pendingTitleStatus[title] = expectedStatus;
+            }
+        }
+        EnsureLoadingAnimTimer();
+    }
+
+    void EnsureLoadingAnimTimer()
+    {
+        if (_loadingAnimTimer != null) return;
+        _loadingAnimTimer = new System.Windows.Forms.Timer { Interval = 450 };
+        _loadingAnimTimer.Tick += delegate {
+            _loadingDotFrame++;
+            if (_menu != null && _menu.Visible && _pendingTitleStatus.Count > 0)
+                UpdateTitleRowsInOpenMenu(_lastStatusOut);
+        };
+        _loadingAnimTimer.Start();
+    }
+
+    void UpdateTitleRowsInOpenMenu(string statusOut)
+    {
+        if (_menu == null || _menu.IsDisposed || !_menu.Visible) return;
+        var statusMap = ParseStatusMap(statusOut);
+        PostToUi(delegate {
+            try
+            {
+                if (_menu == null || _menu.IsDisposed || !_menu.Visible) return;
+                foreach (ToolStripItem item in _menu.Items)
+                {
+                    string title = item.Tag as string;
+                    if (string.IsNullOrEmpty(title)) continue;
+                    string reported;
+                    if (!statusMap.TryGetValue(title, out reported)) reported = "stopped";
+                    var state = GetDisplayState(title, reported);
+                    item.Text = FormatTitleText(title, state);
+                    item.ForeColor = ColorForState(state);
+                }
+            }
+            catch { }
+        });
+    }
+
+    Dictionary<string, string> ParseStatusMap(string statusOut)
+    {
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var line in statusOut.Split(new char[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            string trimmed = line.Trim();
+            int colon = trimmed.IndexOf(':');
+            if (colon > 0)
+                map[trimmed.Substring(0, colon)] = trimmed.Substring(colon + 1).Trim();
+        }
+        return map;
+    }
+
+    void ApplyStatusResult(string statusOut)
+    {
+        _lastStatusOut = statusOut ?? "";
+        SyncPendingWithStatus(_lastStatusOut);
+        UpdateSleepLock(CountRunning(_lastStatusOut));
+        UpdateTitleRowsInOpenMenu(_lastStatusOut);
+    }
+
+    void PopulateMenu(ContextMenuStrip menu)
+    {
+        if (_menuTimer != null)
+        {
+            _menuTimer.Stop();
+            _menuTimer.Dispose();
+            _menuTimer = null;
+        }
+
         menu.Items.Clear();
 
         var header = new ToolStripMenuItem("DML Launcher v" + VERSION);
         header.Enabled = false;
-        header.Font = new Font(SystemFonts.MenuFont, FontStyle.Bold);
+        try { header.Font = new Font(SystemFonts.MenuFont, FontStyle.Bold); }
+        catch { }
         menu.Items.Add(header);
         menu.Items.Add(new ToolStripSeparator());
 
-        // Placeholder shown immediately — menu pops up with no delay
         var placeholder = new ToolStripMenuItem("Checking servers...");
         placeholder.Enabled = false;
         placeholder.Tag = "placeholder";
@@ -1895,17 +2385,16 @@ class TrayApp : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
         AddStaticItems(menu);
 
-        // Shared slot for background result
         string[] result = new string[1];
 
-        // Timer fires on the UI thread — no Invoke/handle needed
-        var timer = new System.Windows.Forms.Timer();
-        timer.Interval = 150;
-        timer.Tick += delegate
+        _menuTimer = new System.Windows.Forms.Timer();
+        _menuTimer.Interval = 150;
+        _menuTimer.Tick += delegate
         {
-            if (result[0] == null) return;   // not ready yet
-            timer.Stop();
-            timer.Dispose();
+            if (result[0] == null) return;
+            _menuTimer.Stop();
+            _menuTimer.Dispose();
+            _menuTimer = null;
             if (menu.IsDisposed) return;
 
             int idx = -1;
@@ -1914,24 +2403,17 @@ class TrayApp : ApplicationContext
             if (idx < 0) return;
 
             menu.Items.RemoveAt(idx);
+            ApplyStatusResult(result[0]);
             var items = BuildTitleItems(result[0]);
             for (int i = items.Count - 1; i >= 0; i--)
                 menu.Items.Insert(idx, items[i]);
         };
+        _menuTimer.Start();
 
-        // Clean up timer if the menu closes before the result arrives
-        menu.Closed += delegate { timer.Stop(); timer.Dispose(); };
-
-        timer.Start();
-
-        // Background thread — do NOT boot WSL just to check status (that auto-starts Docker).
         System.Threading.ThreadPool.QueueUserWorkItem(delegate
         {
-            try {
-                result[0] = IsDistroRunning() ? WslRun("dml status") : BuildStoppedStatusOutput();
-            } catch {
-                result[0] = BuildStoppedStatusOutput();
-            }
+            try { result[0] = GetStatusOutput(); }
+            catch { result[0] = BuildStoppedStatusOutput(); }
         });
     }
 
@@ -1961,21 +2443,22 @@ class TrayApp : ApplicationContext
         foreach (var kv in statusMap)
         {
             string title   = kv.Key;
-            bool   running = string.Equals(kv.Value, "running", StringComparison.OrdinalIgnoreCase);
+            string reported = kv.Value;
+            var displayState = GetDisplayState(title, reported);
+            bool running = displayState == ServerDisplayState.Running;
+            bool loading = displayState == ServerDisplayState.Loading;
             if (running) runningCount++;
 
-            var gameMenu  = new ToolStripMenuItem(title);
-            var statusLbl = new ToolStripMenuItem(running ? "● Running" : "○ Stopped");
-            statusLbl.Enabled = false;
-            gameMenu.DropDownItems.Add(statusLbl);
-            gameMenu.DropDownItems.Add(new ToolStripSeparator());
+            var gameMenu = new ToolStripMenuItem(FormatTitleText(title, displayState));
+            gameMenu.Tag = title;
+            gameMenu.ForeColor = ColorForState(displayState);
 
             var startItem   = new ToolStripMenuItem("Start");
             var restartItem = new ToolStripMenuItem("Restart");
             var stopItem    = new ToolStripMenuItem("Stop");
-            startItem.Enabled   = !running;
-            restartItem.Enabled =  running;
-            stopItem.Enabled    =  running;
+            startItem.Enabled   = !running && !loading;
+            restartItem.Enabled =  running && !loading;
+            stopItem.Enabled    =  running && !loading;
 
             string captured = title;
             startItem.Click   += delegate { RunAndReport("start",   captured); };
@@ -2003,16 +2486,45 @@ class TrayApp : ApplicationContext
         shellItem.Click += delegate { OpenTerminal("-d " + DISTRO); };
         menu.Items.Add(shellItem);
 
-        var doctorItem = new ToolStripMenuItem("Run dml doctor");
+        var doctorItem = new ToolStripMenuItem("Run DML Doctor");
         doctorItem.Click += delegate
         {
-            string result = WslRun("dml doctor");
-            MessageBoxIcon icon = result.Contains("[WARN]") ? MessageBoxIcon.Warning : MessageBoxIcon.Information;
-            MessageBox.Show(result, "DML Doctor", MessageBoxButtons.OK, icon);
+            DeferCloseMenu();
+            SetTrayProgress("Running doctor...");
+            System.Threading.ThreadPool.QueueUserWorkItem(_ => {
+                try {
+                    string result = WslRun("dml doctor", WslLongTimeoutMs);
+                    MaybeReReleaseWsl();
+                    bool warn = result.Contains("[WARN]");
+                    PostToUi(delegate {
+                        RefreshTrayFromStatus();
+                        MessageBoxIcon icon = warn ? MessageBoxIcon.Warning : MessageBoxIcon.Information;
+                        MessageBox.Show(result, "DML Doctor", MessageBoxButtons.OK, icon);
+                    });
+                } catch (Exception ex) {
+                    PostToUi(delegate {
+                        MessageBox.Show("[error] " + ex.Message, "DML Doctor", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    });
+                }
+            });
         };
         menu.Items.Add(doctorItem);
 
         menu.Items.Add(new ToolStripSeparator());
+
+        var minimizeItem = new ToolStripMenuItem("Minimize");
+        minimizeItem.Click += delegate { if (_menu != null && _menu.Visible) _menu.Close(); };
+        menu.Items.Add(minimizeItem);
+
+        var extrasMenu = new ToolStripMenuItem("Extras");
+        var restartActiveItem = new ToolStripMenuItem("Restart active server/s");
+        restartActiveItem.Click += delegate { RestartActiveServers(); };
+        extrasMenu.DropDownItems.Add(restartActiveItem);
+
+        var releaseItem = new ToolStripMenuItem("Stop WSL (release RAM)");
+        releaseItem.Click += delegate { ConfirmAndReleaseWsl(); };
+        extrasMenu.DropDownItems.Add(releaseItem);
+        menu.Items.Add(extrasMenu);
 
         var exitItem = new ToolStripMenuItem("Exit");
         exitItem.Click += delegate {
@@ -2024,7 +2536,103 @@ class TrayApp : ApplicationContext
         menu.Items.Add(exitItem);
     }
 
-    void TriggerReleaseWsl()
+    void RestartActiveServers()
+    {
+        if (!IsDistroRunning())
+        {
+            MessageBox.Show(
+                "WSL is not running.\n\nUse Start on a title to boot the server first.",
+                "Restart active server/s", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        int running = 0;
+        try { running = CountRunning(WslRun("dml status")); } catch { }
+
+        if (running == 0)
+        {
+            MessageBox.Show(
+                "No active servers to restart.",
+                "Restart active server/s", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        string msg = running == 1
+            ? "Restart the 1 active server now?"
+            : "Restart all " + running + " active servers now?";
+
+        if (MessageBox.Show(msg, "Restart active server/s",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+            return;
+
+        DeferCloseMenu();
+        MarkAllTitlesPending("running");
+        SetTrayProgress("Restarting active server(s) — see console");
+        OpenLiveConsole("dml restart-active", "Restart active server/s");
+        StartStatusPolling(900);
+    }
+
+    void ConfirmAndReleaseWsl()
+    {
+        int running = 0;
+        try {
+            if (IsDistroRunning())
+                running = CountRunning(WslRun("dml status"));
+        } catch { }
+
+        string msg =
+            "This will stop any running game servers cleanly (docker compose down), "
+            + "then shut down WSL and return RAM to Windows.\n\n"
+            + "• Running titles are stopped with docker compose down\n"
+            + "• Docker and DML services are then stopped\n"
+            + "• Vmmem RAM should drop within a few seconds\n\n"
+            + "Use Start on a title when you want to play again.";
+
+        if (running > 0)
+            msg += "\n\n" + running + " server(s) will be stopped gracefully first.";
+
+        if (MessageBox.Show(msg, "Stop WSL", MessageBoxButtons.YesNo, MessageBoxIcon.Warning)
+                != DialogResult.Yes)
+            return;
+
+        try { System.IO.File.WriteAllText(StoppedMarkerPath, DateTime.Now.ToString("o")); }
+        catch { }
+
+        MarkAllTitlesPending("stopped");
+        UpdateSleepLock(0);
+        DeferCloseMenu();
+
+        if (IsDistroRunning())
+        {
+            SetTrayProgress("Stopping servers + releasing WSL...");
+            System.Threading.ThreadPool.QueueUserWorkItem(_ => {
+                try {
+                    string result = WslRun("dml release-wsl", WslLongTimeoutMs);
+                    bool warn = result.Contains("[WARN]") || result.ToLower().Contains("error");
+                    PostToUi(delegate {
+                        UpdateSleepLock(0);
+                        _tray.Text = TrayTooltip(false);
+                        MessageBoxIcon icon = warn ? MessageBoxIcon.Warning : MessageBoxIcon.Information;
+                        MessageBox.Show(result, "Stop WSL", MessageBoxButtons.OK, icon);
+                    });
+                } catch (Exception ex) {
+                    PostToUi(delegate {
+                        MessageBox.Show("[error] " + ex.Message, "Stop WSL", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    });
+                }
+            });
+        }
+        else
+        {
+            TriggerReleaseWsl(0);
+            MessageBox.Show(
+                "WSL is shutting down — RAM should free in a few seconds.\n"
+                + "Use Start when you want to bring the server back.",
+                "Stop WSL", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+    }
+
+    void TriggerReleaseWsl(int delaySeconds)
     {
         try
         {
@@ -2034,7 +2642,7 @@ class TrayApp : ApplicationContext
             if (!System.IO.File.Exists(ps1)) return;
             var psi = new ProcessStartInfo();
             psi.FileName = "powershell.exe";
-            psi.Arguments = "-NoProfile -WindowStyle Hidden -File \"" + ps1 + "\"";
+            psi.Arguments = "-NoProfile -WindowStyle Hidden -File \"" + ps1 + "\" -DelaySeconds " + delaySeconds;
             psi.UseShellExecute = false;
             psi.CreateNoWindow = true;
             psi.WindowStyle = ProcessWindowStyle.Hidden;
@@ -2043,35 +2651,129 @@ class TrayApp : ApplicationContext
         catch { }
     }
 
-    void RunAndReport(string cmd, string title)
+    void CloseMenuIfOpen()
     {
-        string result  = WslRun("dml " + cmd + " " + title);
-        string caption = (cmd == "start" ? "Start " : cmd == "restart" ? "Restart " : "Stop ") + title;
-        MessageBoxIcon icon = (result.Contains("[error]") || result.ToLower().Contains("error"))
-            ? MessageBoxIcon.Warning : MessageBoxIcon.Information;
-        MessageBox.Show(result, caption, MessageBoxButtons.OK, icon);
+        try { if (_menu != null && _menu.Visible) _menu.Close(); } catch { }
+    }
 
-        if (cmd == "stop" && result.IndexOf("releasing WSL", StringComparison.OrdinalIgnoreCase) >= 0)
-            TriggerReleaseWsl();
+    void SetTrayProgress(string detail)
+    {
+        try { _tray.Text = "DML Launcher v" + VERSION + " — " + detail; } catch { }
+    }
 
-        // Re-check server state after start/stop so the sleep lock updates
-        // without requiring the user to reopen the menu.
+    void ShowTrayBalloon(string title, string text, ToolTipIcon icon)
+    {
+        try
+        {
+            _tray.BalloonTipTitle = title;
+            _tray.BalloonTipText  = TruncateForBalloon(text);
+            _tray.BalloonTipIcon  = icon;
+            _tray.ShowBalloonTip(5000);
+        }
+        catch { }
+    }
+
+    string TruncateForBalloon(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return "";
+        text = text.Trim();
+        return text.Length <= 240 ? text : text.Substring(0, 237) + "...";
+    }
+
+    void RefreshTrayFromStatus()
+    {
         string[] r = { null };
         var pollTimer = new System.Windows.Forms.Timer { Interval = 150 };
         pollTimer.Tick += delegate {
             if (r[0] == null) return;
             pollTimer.Stop(); pollTimer.Dispose();
-            UpdateSleepLock(CountRunning(r[0]));
+            ApplyStatusResult(r[0]);
         };
         pollTimer.Start();
         System.Threading.ThreadPool.QueueUserWorkItem(_ => {
-            try {
-                r[0] = IsDistroRunning() ? WslRun("dml status") : BuildStoppedStatusOutput();
-            } catch { r[0] = BuildStoppedStatusOutput(); }
+            try { r[0] = GetStatusOutput(); }
+            catch { r[0] = BuildStoppedStatusOutput(); }
         });
     }
 
+    void StartStatusPolling(int durationSeconds)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(durationSeconds);
+        var timer = new System.Windows.Forms.Timer { Interval = 3000 };
+        timer.Tick += delegate {
+            RefreshTrayFromStatus();
+            if (DateTime.UtcNow >= deadline) {
+                timer.Stop();
+                timer.Dispose();
+            }
+        };
+        timer.Start();
+        RefreshTrayFromStatus();
+    }
+
+    // Same terminal + dml-arch path as "Open DML Shell" (wt → cmd → PowerShell).
+    bool OpenShell(string wslArguments, string errorTitle)
+    {
+        try {
+            // wt.exe treats ';' as a command separator — use 'new-tab --' so the
+            // remainder is passed intact to wsl (live-console scripts use '&&' not ';').
+            var psi = new ProcessStartInfo("wt.exe", "new-tab -- wsl " + wslArguments);
+            psi.UseShellExecute = true;
+            Process.Start(psi);
+            return true;
+        }
+        catch { }
+        try {
+            var psi = new ProcessStartInfo("cmd.exe", "/k wsl " + wslArguments);
+            psi.UseShellExecute = true;
+            Process.Start(psi);
+            return true;
+        }
+        catch { }
+        try {
+            var psi = new ProcessStartInfo("powershell.exe",
+                "-NoExit -Command \"wsl " + wslArguments + "\"");
+            psi.UseShellExecute = true;
+            Process.Start(psi);
+            return true;
+        }
+        catch (Exception ex) {
+            MessageBox.Show("[error] Could not open console: " + ex.Message, errorTitle,
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return false;
+        }
+    }
+
+    void OpenLiveConsole(string wslInnerCmd, string windowTitle)
+    {
+        // wow-server-playerbots: dml-start/stop.sh handle shell + close prompt.
+        // Other commands: land in login bash when done.
+        string bashScript = wslInnerCmd;
+        if (wslInnerCmd.IndexOf("wow-server-playerbots", StringComparison.OrdinalIgnoreCase) < 0)
+            bashScript = wslInnerCmd + " && exec bash -l";
+        string wslArgs = "-d " + DISTRO + " -e bash -lic \"" + bashScript.Replace("\"", "\\\"") + "\"";
+        OpenShell(wslArgs, windowTitle);
+    }
+
+    void RunAndReport(string cmd, string title)
+    {
+        DeferCloseMenu();
+        string expected = (cmd == "stop") ? "stopped" : "running";
+        MarkTitlePending(title, expected);
+        try { System.IO.File.Delete(StoppedMarkerPath); } catch { }
+        string caption = (cmd == "start" ? "Start " : cmd == "restart" ? "Restart " : "Stop ") + title;
+        string verb = cmd == "start" ? "Starting" : cmd == "restart" ? "Restarting" : "Stopping";
+        SetTrayProgress(verb + " " + title + " — see console");
+        OpenLiveConsole("dml " + cmd + " " + title, caption);
+        StartStatusPolling(900);
+    }
+
     string WslRun(string wslCmd)
+    {
+        return WslRun(wslCmd, WslQuickTimeoutMs);
+    }
+
+    string WslRun(string wslCmd, int timeoutMs)
     {
         try
         {
@@ -2083,11 +2785,30 @@ class TrayApp : ApplicationContext
             psi.RedirectStandardError  = true;
             psi.CreateNoWindow         = true;
             psi.StandardOutputEncoding = Encoding.UTF8;
+            psi.StandardErrorEncoding  = Encoding.UTF8;
             using (var p = Process.Start(psi))
             {
-                string output = p.StandardOutput.ReadToEnd();
-                p.WaitForExit(15000);
-                return output.Trim();
+                var stdout = new System.Text.StringBuilder();
+                var stderr = new System.Text.StringBuilder();
+                p.OutputDataReceived += delegate(object s, DataReceivedEventArgs e) {
+                    if (e.Data != null) stdout.AppendLine(e.Data);
+                };
+                p.ErrorDataReceived += delegate(object s, DataReceivedEventArgs e) {
+                    if (e.Data != null) stderr.AppendLine(e.Data);
+                };
+                p.BeginOutputReadLine();
+                p.BeginErrorReadLine();
+                if (!p.WaitForExit(timeoutMs))
+                {
+                    string partial = stdout.ToString().Trim();
+                    if (string.IsNullOrEmpty(partial)) partial = stderr.ToString().Trim();
+                    if (!string.IsNullOrEmpty(partial)) partial += "\n";
+                    return partial + "[WARN] Still running — use Open DML Shell to monitor progress.";
+                }
+                p.WaitForExit();
+                string output = stdout.ToString().Trim();
+                if (string.IsNullOrEmpty(output)) output = stderr.ToString().Trim();
+                return output;
             }
         }
         catch (Exception ex)
@@ -2098,23 +2819,7 @@ class TrayApp : ApplicationContext
 
     void OpenTerminal(string wslArgs)
     {
-        try
-        {
-            var psi = new ProcessStartInfo("wt.exe", "wsl " + wslArgs);
-            psi.UseShellExecute = true;
-            Process.Start(psi);
-        }
-        catch
-        {
-            try
-            {
-                var psi = new ProcessStartInfo("powershell.exe",
-                    "-NoExit -Command \"wsl " + wslArgs + "\"");
-                psi.UseShellExecute = true;
-                Process.Start(psi);
-            }
-            catch { }
-        }
+        OpenShell(wslArgs, "Open DML Shell");
     }
 
     void ShowInstallDialog()
