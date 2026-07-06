@@ -332,7 +332,7 @@ function Invoke-Phase1 {
     $rawInput    = Read-Host "  Install location (press Enter for $defaultRoot)"
     $InstallRoot = if ([string]::IsNullOrWhiteSpace($rawInput)) { $defaultRoot } else { $rawInput.Trim().TrimEnd('\') }
     if ($InstallRoot -notmatch '^[A-Za-z]:') {
-        Write-Fail "Install path must start with a drive letter (e.g., D:\DML).`nNetwork paths and relative paths are not supported by WSL."
+        Write-Fail "Install path must start with a drive letter (e.g., D:\DML)`nNetwork paths and relative paths are not supported by WSL."
     }
     Write-Diag "Install root: $InstallRoot"
     Write-Ok "Installing to: $InstallRoot"
@@ -535,7 +535,7 @@ autoMemoryReclaim=gradual
             $archInstallExit = $LASTEXITCODE
             Write-Diag "wsl --install archlinux exit code: $archInstallExit"
             if ($archInstallExit -ne 0) {
-                Write-Fail "Failed to download Arch Linux from the Microsoft Store (exit $archInstallExit).`nCheck your internet connection and try again."
+                Write-Fail "Failed to download Arch Linux from the Microsoft Store (exit $archInstallExit)`nCheck your internet connection and try again."
             }
         } else {
             Write-Diag "Using pre-existing 'archlinux' as import source"
@@ -591,7 +591,7 @@ autoMemoryReclaim=gradual
             $unregExit = $LASTEXITCODE
             Write-Diag "wsl --unregister exit code: $unregExit"
             if ($unregExit -ne 0) {
-                Write-Warn "Could not remove temporary 'archlinux' distro (exit $unregExit).`nRemove it manually when convenient: wsl --unregister archlinux"
+                Write-Warn "Could not remove temporary 'archlinux' distro (exit $unregExit)`nRemove it manually when convenient: wsl --unregister archlinux"
             }
         }
 
@@ -604,7 +604,7 @@ autoMemoryReclaim=gradual
     $setDefaultExit = $LASTEXITCODE
     Write-Diag "wsl --set-default exit code: $setDefaultExit"
     if ($setDefaultExit -ne 0) {
-        Write-Warn "Could not set '$DmlDistroName' as default WSL distro (exit $setDefaultExit).`nFix manually: wsl --set-default dml-arch"
+        Write-Warn "Could not set '$DmlDistroName' as default WSL distro (exit $setDefaultExit)`nFix manually: wsl --set-default dml-arch"
     }
 
     # -------------------------------------------------------------------------
@@ -627,7 +627,7 @@ pacman -Syu --noconfirm
 echo "[arch] System up to date"
 '@
         if ($exit8a -ne 0) {
-            Write-Fail "Arch Linux keyring / system update failed (exit $exit8a).`nCheck your internet connection and the log: $LogFile"
+            Write-Fail "Arch Linux keyring / system update failed (exit $exit8a)`nCheck your internet connection and the log: $LogFile"
         }
         Write-Ok "Arch Linux packages up to date"
         Mark-StepDone 'arch-keyring'
@@ -713,7 +713,7 @@ timeout 30 bash -c 'until [ -S /var/run/docker.sock ]; do sleep 1; done'
 echo "[docker] Done"
 '@
         if ($exit9 -ne 0) {
-            Write-Fail "Docker Engine installation failed (exit $exit9).`nCheck the log: $LogFile"
+            Write-Fail "Docker Engine installation failed (exit $exit9)`nCheck the log: $LogFile"
         }
         Write-Ok "Docker Engine installed and enabled"
         Mark-StepDone 'docker-install'
@@ -1647,7 +1647,7 @@ systemctl enable --now dml-keepalive.service
 echo "[phase3] Done"
 "@
         if ($exit10 -ne 0) {
-            Write-Fail "Phase 3 bootstrap failed (exit $exit10).`nCheck the log: $LogFile"
+            Write-Fail "Phase 3 bootstrap failed (exit $exit10)`nCheck the log: $LogFile"
         }
         Write-Ok "Core dependencies and dml CLI installed"
         Mark-StepDone 'phase3-bootstrap'
