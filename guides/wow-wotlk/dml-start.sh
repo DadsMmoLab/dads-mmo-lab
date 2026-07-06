@@ -108,6 +108,10 @@ _filter_world_logs() {
     "Can't set process priority class|MoveSplineInitArgs::Validate|WaypointMovementGenerator::DoInitialize"
 }
 
+_clean_docker_logs() {
+  sed -u 's/\x1b\[[0-9;]*[a-zA-Z]//g' | tr -d '\r'
+}
+
 _ensure_playerbots_conf() {
   local conf="env/dist/etc/modules/playerbots.conf"
   local dist="env/dist/etc/modules/playerbots.conf.dist"
@@ -142,8 +146,8 @@ _is_ready() {
   docker ps --format '{{.Names}}' | grep -qx "$AUTH_CONTAINER" \
     && docker ps --format '{{.Names}}' | grep -qx "$WORLD_CONTAINER" || return 1
   set +o pipefail
-  docker logs "$AUTH_CONTAINER" 2>&1 | grep -m1 -q "${REALM_ADDRESS}:8085" \
-    && docker logs "$WORLD_CONTAINER" 2>&1 | grep -m1 -q 'ready\.\.\.' && ok=0
+  docker logs "$AUTH_CONTAINER" 2>&1 | _clean_docker_logs | grep -m1 -q "${REALM_ADDRESS}:8085" \
+    && docker logs "$WORLD_CONTAINER" 2>&1 | _clean_docker_logs | grep -m1 -q 'ready\.\.\.' && ok=0
   set -o pipefail
   [[ "$ok" -eq 0 ]]
 }
@@ -162,16 +166,16 @@ _start_world_log_tail() {
 }
 
 _bots_are_done() {
-  local line cur total
+  local line cur total logs
   set +o pipefail
-  if docker logs --tail 50 "$WORLD_CONTAINER" 2>&1 | grep -q 'Random Bots Stats:'; then
+  logs=$(docker logs --tail 500 "$WORLD_CONTAINER" 2>&1 | _clean_docker_logs)
+  if echo "$logs" | grep -q 'Random Bots Stats:'; then
     set -o pipefail
     return 0
   fi
-  line=$(docker logs --tail 20 "$WORLD_CONTAINER" 2>&1 \
-    | grep -E '[0-9]+/[0-9]+ Bot .+ logged in' | tail -1 || true)
+  line=$(echo "$logs" | grep -E '[0-9]+/[0-9]+ Bot .+ logged in' | tail -1 || true)
   set -o pipefail
-  if [[ "$line" =~ ^([0-9]+)/([0-9]+)\ Bot ]]; then
+  if [[ "$line" =~ ([0-9]+)/([0-9]+)[[:space:]]Bot ]]; then
     cur="${BASH_REMATCH[1]}"
     total="${BASH_REMATCH[2]}"
     [[ "$cur" == "$total" && "$total" -gt 0 ]]
