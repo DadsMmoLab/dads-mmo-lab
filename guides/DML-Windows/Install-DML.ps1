@@ -391,11 +391,31 @@ function Invoke-WslBash {
     )
     Write-Diag "[$Label] running in $Distro as $User"
     # PowerShell @'...'@ heredocs use CRLF; bash rejects lines ending with \r.
-    # Trailing "# end": absorbs any garbage bytes PowerShell's pipe appends.
-    ($Script.Replace("`r`n", "`n") + "# end") | wsl -d $Distro -u $User -- bash | Out-Host
+    # bash -s reads stdin; piping to bare "bash" can hang waiting for a TTY.
+    $Script.Replace("`r`n", "`n") | wsl -d $Distro -u $User -- bash -s | Out-Host
     $exit = $LASTEXITCODE
     Write-Diag "[$Label] exit code: $exit"
     return $exit
+}
+
+function Wait-DockerSocket {
+    param(
+        [string]$Distro,
+        [int]$TimeoutSec = 30
+    )
+    Write-Diag "[$Distro] Waiting for Docker socket (max ${TimeoutSec}s)..."
+    wsl -d $Distro -u root -- systemctl start docker 2>$null | Out-Null
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        wsl -d $Distro -u root -- test -S /var/run/docker.sock 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Diag "[$Distro] Docker socket ready"
+            return 0
+        }
+        Start-Sleep -Seconds 1
+    }
+    Write-Diag "[$Distro] Docker socket not ready within ${TimeoutSec}s"
+    return 1
 }
 
 # =============================================================================
@@ -426,8 +446,13 @@ function Invoke-Phase2 {
 
     # Load install root saved by Phase 1; fall back to C:\DML for legacy state files
     $stateJson   = $null
-    try { $stateJson = (Get-Content $StateFile -Raw | ConvertFrom-Json) } catch {}
-    $InstallRoot = if ($stateJson -and $stateJson.InstallRoot) { $stateJson.InstallRoot } else { 'C:\DML' }
+    $InstallRoot = 'C:\DML'
+    try {
+        $stateJson = (Get-Content $StateFile -Raw | ConvertFrom-Json)
+        if ($stateJson -and ($stateJson.PSObject.Properties.Name -contains 'InstallRoot')) {
+            $InstallRoot = [string]$stateJson.InstallRoot
+        }
+    } catch {}
     $WslDir      = "$InstallRoot\wsl"
     Write-Diag "Install root: $InstallRoot"
     Write-Diag "WSL dir:      $WslDir"
@@ -720,14 +745,9 @@ echo "[docker] Done"
     }
 
     Write-Step "Verifying Docker..."
-    # Wait for the Docker socket before running hello-world. This handles the case
-    # where the distro was just started fresh (systemd takes a few seconds to bring
-    # docker.service up) or a re-run where Docker was never stopped but is slow.
-    $socketWait = Invoke-WslBash -Distro $DmlDistroName -User root -Label 'docker-socket' -Script @'
-set -euo pipefail
-timeout 30 bash -c 'until [ -S /var/run/docker.sock ]; do sleep 1; done'
-echo "[docker] Socket ready"
-'@
+    # Wait for the Docker socket before running hello-world. Uses direct wsl test
+    # calls instead of a piped bash script (which can hang after wsl --shutdown).
+    $socketWait = Wait-DockerSocket -Distro $DmlDistroName -TimeoutSec 30
     if ($socketWait -ne 0) {
         Write-Warn "Docker socket not available within 30s (exit $socketWait) -- hello-world test may fail."
     }
