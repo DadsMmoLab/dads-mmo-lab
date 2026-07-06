@@ -263,8 +263,10 @@ class TrayApp : ApplicationContext
         foreach (var line in statusOut.Split(new char[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
         {
             int colon = line.Trim().IndexOf(':');
-            if (colon > 0 && line.Trim().Substring(colon + 1).Trim()
-                    .Equals("running", StringComparison.OrdinalIgnoreCase))
+            if (colon <= 0) continue;
+            string state = line.Trim().Substring(colon + 1).Trim();
+            if (state.Equals("running", StringComparison.OrdinalIgnoreCase)
+                || state.Equals("loading", StringComparison.OrdinalIgnoreCase))
                 count++;
         }
         return count;
@@ -346,6 +348,12 @@ class TrayApp : ApplicationContext
 
     ServerDisplayState GetDisplayState(string title, string reportedStatus)
     {
+        if (string.Equals(reportedStatus, "stopped", StringComparison.OrdinalIgnoreCase))
+            return ServerDisplayState.Stopped;
+
+        if (string.Equals(reportedStatus, "loading", StringComparison.OrdinalIgnoreCase))
+            return ServerDisplayState.Loading;
+
         string expected;
         if (_pendingTitleStatus.TryGetValue(title, out expected))
         {
@@ -356,6 +364,16 @@ class TrayApp : ApplicationContext
             ? ServerDisplayState.Running : ServerDisplayState.Stopped;
     }
 
+    void ApplyTitleActionEnabled(ToolStripMenuItem start, ToolStripMenuItem restart,
+        ToolStripMenuItem stop, ServerDisplayState state)
+    {
+        bool running = state == ServerDisplayState.Running;
+        bool loading = state == ServerDisplayState.Loading;
+        start.Enabled   = !running && !loading;
+        restart.Enabled =  running && !loading;
+        stop.Enabled    =  running || loading;
+    }
+
     void SyncPendingWithStatus(string statusOut)
     {
         var map = ParseStatusMap(statusOut);
@@ -363,8 +381,10 @@ class TrayApp : ApplicationContext
         foreach (var kv in _pendingTitleStatus)
         {
             string reported;
-            if (map.TryGetValue(kv.Key, out reported)
-                && string.Equals(reported, kv.Value, StringComparison.OrdinalIgnoreCase))
+            if (!map.TryGetValue(kv.Key, out reported)) continue;
+            if (string.Equals(reported, "stopped", StringComparison.OrdinalIgnoreCase)
+                || (string.Equals(reported, kv.Value, StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(reported, "loading", StringComparison.OrdinalIgnoreCase)))
                 done.Add(kv.Key);
         }
         foreach (var t in done) _pendingTitleStatus.Remove(t);
@@ -426,11 +446,19 @@ class TrayApp : ApplicationContext
                 {
                     string title = item.Tag as string;
                     if (string.IsNullOrEmpty(title)) continue;
+                    var gameMenu = item as ToolStripMenuItem;
+                    if (gameMenu == null) continue;
                     string reported;
                     if (!statusMap.TryGetValue(title, out reported)) reported = "stopped";
                     var state = GetDisplayState(title, reported);
-                    item.Text = FormatTitleText(title, state);
-                    item.ForeColor = ColorForState(state);
+                    gameMenu.Text = FormatTitleText(title, state);
+                    gameMenu.ForeColor = ColorForState(state);
+                    if (gameMenu.DropDownItems.Count >= 3)
+                        ApplyTitleActionEnabled(
+                            gameMenu.DropDownItems[0] as ToolStripMenuItem,
+                            gameMenu.DropDownItems[1] as ToolStripMenuItem,
+                            gameMenu.DropDownItems[2] as ToolStripMenuItem,
+                            state);
                 }
             }
             catch { }
@@ -544,9 +572,7 @@ class TrayApp : ApplicationContext
             string title   = kv.Key;
             string reported = kv.Value;
             var displayState = GetDisplayState(title, reported);
-            bool running = displayState == ServerDisplayState.Running;
-            bool loading = displayState == ServerDisplayState.Loading;
-            if (running) runningCount++;
+            if (displayState == ServerDisplayState.Running) runningCount++;
 
             var gameMenu = new ToolStripMenuItem(FormatTitleText(title, displayState));
             gameMenu.Tag = title;
@@ -555,9 +581,7 @@ class TrayApp : ApplicationContext
             var startItem   = new ToolStripMenuItem("Start");
             var restartItem = new ToolStripMenuItem("Restart");
             var stopItem    = new ToolStripMenuItem("Stop");
-            startItem.Enabled   = !running && !loading;
-            restartItem.Enabled =  running && !loading;
-            stopItem.Enabled    =  running && !loading;
+            ApplyTitleActionEnabled(startItem, restartItem, stopItem, displayState);
 
             string captured = title;
             startItem.Click   += delegate { RunAndReport("start",   captured); };
