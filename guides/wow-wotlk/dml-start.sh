@@ -166,29 +166,18 @@ _start_world_log_tail() {
 }
 
 _bots_are_done() {
-  local line cur total logs
-  set +o pipefail
-  logs=$(docker logs --tail 500 "$WORLD_CONTAINER" 2>&1 | _clean_docker_logs)
-  if echo "$logs" | grep -q 'Random Bots Stats:'; then
-    set -o pipefail
-    return 0
-  fi
-  line=$(echo "$logs" | grep -E '[0-9]+/[0-9]+ Bot .+ logged in' | tail -1 || true)
-  set -o pipefail
-  if [[ "$line" =~ ([0-9]+)/([0-9]+)[[:space:]]Bot ]]; then
-    cur="${BASH_REMATCH[1]}"
-    total="${BASH_REMATCH[2]}"
-    [[ "$cur" == "$total" && "$total" -gt 0 ]]
-    return
-  fi
-  return 1
+  local check="$SERVER_DIR/dml-bots-done-check.sh"
+  [[ -x "$check" ]] && "$check" "$WORLD_CONTAINER"
 }
 
 _wait_bots_populated() {
-  local i
+  local i check="$SERVER_DIR/dml-bots-done-check.sh"
+  if [[ ! -x "$check" ]]; then
+    chmod +x "$check" 2>/dev/null || true
+  fi
   _log "AzerothCore is ready — streaming playerbot logins until complete..."
   for i in $(seq 1 300); do
-    if _bots_are_done; then
+    if [[ -x "$check" ]] && "$check" "$WORLD_CONTAINER"; then
       return 0
     fi
     sleep 2

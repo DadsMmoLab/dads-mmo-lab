@@ -331,7 +331,7 @@ install_dml_start_hook() {
     hook_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     local ok=1
 
-    for file in dml-start.sh dml-stop.sh dml-docker-entrypoint.sh docker-compose.dml-quiet.yml; do
+    for file in dml-start.sh dml-stop.sh dml-bots-done-check.sh dml-docker-entrypoint.sh docker-compose.dml-quiet.yml; do
         src="$hook_dir/$file"
         dest="$SERVER_DIR/$file"
         if [ -f "$src" ]; then

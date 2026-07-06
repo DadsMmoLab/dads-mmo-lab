@@ -826,9 +826,25 @@ _title_lifecycle_busy() {
         || pgrep -f "${compose_dir}/dml-stop\\.sh" >/dev/null 2>&1
 }
 
+_title_bots_done() {
+    local compose_dir="${1%/}" check="$compose_dir/dml-bots-done-check.sh"
+    [[ -x "$check" ]] && "$check"
+}
+
+_title_world_ready() {
+    local world="${DML_WORLD_CONTAINER:-ac-worldserver}"
+    docker logs "$world" 2>&1 \
+        | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | tr -d '\r' \
+        | grep -q 'ready\.\.\.'
+}
+
 _title_reported_status() {
     local compose_dir="${1%/}" count
     count=$(_compose_running "$compose_dir")
+    if [[ "$count" -gt 0 ]] && { _title_bots_done "$compose_dir" || _title_world_ready; }; then
+        echo "running"
+        return
+    fi
     if _title_lifecycle_busy "$compose_dir"; then
         if [[ "$count" -eq 0 ]] && pgrep -f "${compose_dir}/dml-stop\\.sh" >/dev/null 2>&1; then
             echo "stopped"
