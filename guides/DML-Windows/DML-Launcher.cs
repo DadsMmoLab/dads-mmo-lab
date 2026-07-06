@@ -27,7 +27,7 @@ class DmlLauncherEntry
 class TrayApp : ApplicationContext
 {
     const string DISTRO   = "dml-arch";
-    const string VERSION  = "2.1.1";
+    const string VERSION  = "2.1.2";
 
     enum ServerDisplayState { Stopped, Running, Loading }
 
@@ -153,6 +153,8 @@ class TrayApp : ApplicationContext
     int _loadingDotFrame;
     readonly Dictionary<string, string> _pendingTitleStatus =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    HashSet<string> _manageScriptTitles =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     const int WslQuickTimeoutMs = 15000;
     const int WslLongTimeoutMs  = 600000;
 
@@ -374,6 +376,33 @@ class TrayApp : ApplicationContext
         stop.Enabled    =  running || loading;
     }
 
+    void RefreshManageScriptCache()
+    {
+        var titles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (!IsDistroRunning())
+        {
+            _manageScriptTitles = titles;
+            return;
+        }
+        try
+        {
+            string output = WslRun(
+                "for d in \"$HOME\"/*/; do [ -f \"${d}wow-manage.sh\" ] && basename \"$d\"; done");
+            foreach (var line in output.Split(new char[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                string title = line.Trim();
+                if (title.Length > 0) titles.Add(title);
+            }
+        }
+        catch { }
+        _manageScriptTitles = titles;
+    }
+
+    bool TitleHasManageScript(string title)
+    {
+        return _manageScriptTitles != null && _manageScriptTitles.Contains(title);
+    }
+
     void SyncPendingWithStatus(string statusOut)
     {
         var map = ParseStatusMap(statusOut);
@@ -542,6 +571,7 @@ class TrayApp : ApplicationContext
             try { result[0] = GetStatusOutput(); }
             catch { result[0] = BuildStoppedStatusOutput(); }
         });
+        System.Threading.ThreadPool.QueueUserWorkItem(delegate { RefreshManageScriptCache(); });
     }
 
     System.Collections.Generic.List<ToolStripItem> BuildTitleItems(string statusOut)
@@ -591,6 +621,15 @@ class TrayApp : ApplicationContext
             gameMenu.DropDownItems.Add(startItem);
             gameMenu.DropDownItems.Add(restartItem);
             gameMenu.DropDownItems.Add(stopItem);
+
+            if (TitleHasManageScript(title))
+            {
+                var manageItem = new ToolStripMenuItem("Manage");
+                string capturedManage = title;
+                manageItem.Click += delegate { OpenManageConsole(capturedManage); };
+                gameMenu.DropDownItems.Add(manageItem);
+            }
+
             items.Add(gameMenu);
         }
 
@@ -869,13 +908,25 @@ class TrayApp : ApplicationContext
 
     void OpenLiveConsole(string wslInnerCmd, string windowTitle)
     {
-        // wow-server-playerbots: dml-start/stop.sh handle shell + close prompt.
+        // Staged start/stop and wow-manage.sh keep the console open themselves.
         // Other commands: land in login bash when done.
         string bashScript = wslInnerCmd;
-        if (wslInnerCmd.IndexOf("wow-server-playerbots", StringComparison.OrdinalIgnoreCase) < 0)
+        if (!KeepsConsoleOpen(wslInnerCmd))
             bashScript = wslInnerCmd + " && exec bash -l";
         string wslArgs = "-d " + DISTRO + " -e bash -lic \"" + bashScript.Replace("\"", "\\\"") + "\"";
         OpenShell(wslArgs, windowTitle);
+    }
+
+    static bool KeepsConsoleOpen(string wslInnerCmd)
+    {
+        return wslInnerCmd.IndexOf("wow-server-playerbots", StringComparison.OrdinalIgnoreCase) >= 0
+            || wslInnerCmd.IndexOf("wow-manage.sh", StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    void OpenManageConsole(string title)
+    {
+        DeferCloseMenu();
+        OpenLiveConsole("cd ~/" + title + " && ./wow-manage.sh", "Manage " + title);
     }
 
     void RunAndReport(string cmd, string title)

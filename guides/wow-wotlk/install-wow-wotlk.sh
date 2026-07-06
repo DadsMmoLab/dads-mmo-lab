@@ -20,6 +20,8 @@
 #    6. Sets up the Gaming Mode launcher
 #
 #  Changelog:
+#    1.2.2 — wow-manage.sh bundled with DML hook
+#      - Ships wow-manage.sh alongside dml-start/stop (module manager + tray Manage)
 #    1.2.1 — DML staged restart hook (Windows/WSL)
 #      - Ships dml-start.sh: restarts auth/world without re-running db-import
 #      - Pins realm to 127.0.0.1; waits for DB healthy before starting servers
@@ -38,7 +40,7 @@
 #      - Heredoc launcher synced with standalone launcher scripts
 # ============================================================
 
-WIZARD_VERSION="1.2.1"
+WIZARD_VERSION="1.2.2"
 
 set -o pipefail
 
@@ -330,21 +332,34 @@ install_dml_start_hook() {
     local hook_dir dest file src
     hook_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     local ok=1
+    local hook_base="https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/guides/wow-wotlk"
 
-    for file in dml-start.sh dml-stop.sh dml-bots-done-check.sh dml-docker-entrypoint.sh docker-compose.dml-quiet.yml; do
-        src="$hook_dir/$file"
-        dest="$SERVER_DIR/$file"
+    _copy_hook_file() {
+        local name="$1" required="${2:-1}"
+        src="$hook_dir/$name"
+        dest="$SERVER_DIR/$name"
         if [ -f "$src" ]; then
             cp "$src" "$dest"
-            [[ "$file" == *.sh ]] && chmod +x "$dest"
-        elif [ "$file" = "dml-start.sh" ] && curl -fsSL \
-            "https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/guides/wow-wotlk/$file" \
-            -o "$dest"; then
-            chmod +x "$dest"
-        else
-            ok=0
+            [[ "$name" == *.sh ]] && chmod +x "$dest"
+            return 0
         fi
+        if curl -fsSL "${hook_base}/${name}" -o "$dest"; then
+            [[ "$name" == *.sh ]] && chmod +x "$dest"
+            return 0
+        fi
+        rm -f "$dest"
+        if [ "$required" -eq 1 ]; then
+            ok=0
+        else
+            print_warning "Optional hook file not installed: $name"
+        fi
+        return 1
+    }
+
+    for file in dml-start.sh dml-stop.sh dml-bots-done-check.sh dml-docker-entrypoint.sh docker-compose.dml-quiet.yml; do
+        _copy_hook_file "$file" 1 || true
     done
+    _copy_hook_file "wow-manage.sh" 0 || true
 
     if [ "$ok" -eq 0 ]; then
         print_warning "Could not install full DML start hook bundle"
@@ -353,6 +368,9 @@ install_dml_start_hook() {
     fi
 
     print_success "DML restart hook installed: $SERVER_DIR/dml-start.sh"
+    if [ -x "$SERVER_DIR/wow-manage.sh" ]; then
+        print_success "WoW module manager installed: $SERVER_DIR/wow-manage.sh"
+    fi
     print_info "On DML Windows: dml restart wow-server-playerbots"
 }
 
