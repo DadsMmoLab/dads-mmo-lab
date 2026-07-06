@@ -327,23 +327,32 @@ show_summary() {
 install_dml_start_hook() {
     print_info "Installing DML staged start/restart hook..."
 
-    local src dest="$SERVER_DIR/dml-start.sh"
-    src="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/dml-start.sh"
+    local hook_dir dest file src
+    hook_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local ok=1
 
-    if [ -f "$src" ]; then
-        cp "$src" "$dest"
-    elif curl -fsSL \
-        "https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/guides/wow-wotlk/dml-start.sh" \
-        -o "$dest"; then
-        :
-    else
-        print_warning "Could not install dml-start.sh"
-        print_info "Restarts via 'dml restart' may re-import the DB until this file is present."
+    for file in dml-start.sh dml-stop.sh dml-docker-entrypoint.sh docker-compose.dml-quiet.yml; do
+        src="$hook_dir/$file"
+        dest="$SERVER_DIR/$file"
+        if [ -f "$src" ]; then
+            cp "$src" "$dest"
+            [[ "$file" == *.sh ]] && chmod +x "$dest"
+        elif [ "$file" = "dml-start.sh" ] && curl -fsSL \
+            "https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/guides/wow-wotlk/$file" \
+            -o "$dest"; then
+            chmod +x "$dest"
+        else
+            ok=0
+        fi
+    done
+
+    if [ "$ok" -eq 0 ]; then
+        print_warning "Could not install full DML start hook bundle"
+        print_info "Restarts via 'dml restart' may re-import the DB until dml-start.sh is present."
         return 1
     fi
 
-    chmod +x "$dest"
-    print_success "DML restart hook installed: $dest"
+    print_success "DML restart hook installed: $SERVER_DIR/dml-start.sh"
     print_info "On DML Windows: dml restart wow-server-playerbots"
 }
 
@@ -429,7 +438,10 @@ services:
       AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN: "1"
       AC_AI_PLAYERBOT_MIN_RANDOM_BOTS: "1600"
       AC_AI_PLAYERBOT_MAX_RANDOM_BOTS: "2000"
+      AC_PROCESS_PRIORITY: "0"
   ac-authserver:
+    environment:
+      AC_PROCESS_PRIORITY: "0"
     build:
       context: .
       target: authserver
