@@ -90,4 +90,5 @@ _log_ok "wow-server-playerbots stopped"
 _log_ok "All progress preserved — database and client data remain in Docker volumes"
 _log_ok "Next Start will bring everything back (no re-import needed)"
 
+rm -f "$DML_BUSY_MARKER"
 _close_prompt

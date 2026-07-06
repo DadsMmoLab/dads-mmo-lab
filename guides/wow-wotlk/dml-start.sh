@@ -301,6 +301,7 @@ fi
 _start_auth_world
 
 if _wait_ready; then
+  rm -f "$DML_BUSY_MARKER"
   echo ""
   _log_ok "wow-server-playerbots is ready"
   _log_ok "Realm: AzerothCore at ${REALM_ADDRESS}:8085"

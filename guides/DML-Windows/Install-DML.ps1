@@ -827,12 +827,16 @@ _title_lifecycle_busy() {
 }
 
 _title_reported_status() {
-    local compose_dir="$1" count
+    local compose_dir="${1%/}" count
+    count=$(_compose_running "$compose_dir")
     if _title_lifecycle_busy "$compose_dir"; then
+        if [[ "$count" -eq 0 ]] && pgrep -f "${compose_dir}/dml-stop\\.sh" >/dev/null 2>&1; then
+            echo "stopped"
+            return
+        fi
         echo "loading"
         return
     fi
-    count=$(_compose_running "$compose_dir")
     if [[ "$count" -gt 0 ]]; then echo "running"; else echo "stopped"; fi
 }
 
