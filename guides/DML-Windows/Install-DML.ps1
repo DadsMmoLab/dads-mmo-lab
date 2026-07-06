@@ -40,6 +40,7 @@ if (-not $ScriptPath) { $ScriptPath = $PSCommandPath }
 $DiskNeededBytes = 30GB
 $DmlDistroName   = 'dml-arch'
 $DmlLinuxUser    = 'dml'
+$DmlCliVersion   = '2.1.0'   # bundled dml CLI + launcher tooltip (keep in sync)
 $TaskName        = 'DadsMmoLab-Phase2'
 
 $Script:FailReported = $false
@@ -487,13 +488,24 @@ function Invoke-Phase2 {
 
     $wslConfigPath = "$env:USERPROFILE\.wslconfig"
     @"
+[general]
+instanceIdleTimeout=-1
+
 [wsl2]
 memory=${wslRamGB}GB
 processors=$wslCores
 swap=${wslSwapGB}GB
 localhostForwarding=true
+vmIdleTimeout=-1
+
+[experimental]
+autoMemoryReclaim=gradual
 "@ | Set-Content -Path $wslConfigPath -Encoding UTF8
-    Write-Ok ".wslconfig written: ${wslRamGB} GB RAM, $wslCores cores, ${wslSwapGB} GB swap"
+    Write-Ok ".wslconfig written: instanceIdleTimeout=-1, vmIdleTimeout=-1, autoMemoryReclaim=gradual"
+    Write-Diag "Applying .wslconfig (requires brief WSL shutdown)..."
+    wsl --shutdown 2>$null | Out-Null
+    Start-Sleep -Seconds 3
+    Write-Ok "WSL restarted — vmIdleTimeout=-1 is now active"
 
     # -------------------------------------------------------------------------
     # Step 7: Install Arch Linux as isolated 'dml-arch' distro
@@ -733,7 +745,7 @@ echo "[docker] Socket ready"
     # If the installed version doesn't match the bundled version, clear the
     # phase3-bootstrap marker so Step 10 re-installs the CLI automatically.
     # -------------------------------------------------------------------------
-    $ExpectedCliVersion = 'dml v2.0.0'
+    $ExpectedCliVersion = "dml v$DmlCliVersion"
     $installedCliRaw = ''
     try {
         $installedCliRaw = (wsl -d $DmlDistroName -- dml version 2>$null)
@@ -760,7 +772,7 @@ echo "[docker] Socket ready"
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2.1.0"
+VERSION="__DML_CLI_VERSION__"
 GAMES_DIR="$HOME"
 
 _require_docker() {
@@ -787,15 +799,76 @@ _compose_running() {
     { docker compose -f "$compose_file" ps --status running -q 2>/dev/null || true; } | wc -l | tr -d '[:space:]'
 }
 
+# Windows-side helpers (paths written at install time)
+DML_WIN_ROOT='__DML_INSTALL_ROOT__'
+
+_win_path() { echo "${DML_WIN_ROOT//\\//}/$1"; }
+
+_ensure_keepalive() {
+    command -v powershell.exe &>/dev/null || return 0
+    local ps1
+    ps1=$(_win_path "DML-Ensure-Keepalive.ps1")
+    powershell.exe -NoProfile -WindowStyle Hidden -File "$ps1" 2>/dev/null || true
+}
+
+_release_wsl() {
+    # Must run detached on Windows AFTER this WSL session exits — cannot self-terminate.
+    command -v powershell.exe &>/dev/null || return 0
+    local ps1 win_ps1
+    ps1=$(_win_path "DML-Release-WSL.ps1")
+    win_ps1="${ps1//\//\\}"
+    powershell.exe -NoProfile -WindowStyle Hidden -Command \
+        "Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-WindowStyle','Hidden','-File','${win_ps1}') -WindowStyle Hidden" \
+        2>/dev/null || true
+}
+
+_update_titles_cache() {
+    # Keep C:\DML\dml-titles.cache fresh for the tray when WSL is off (no hardcoding).
+    command -v powershell.exe &>/dev/null || return 0
+    local cache titles=() dir title
+    cache=$(_win_path "dml-titles.cache")
+    [[ ! -d "$GAMES_DIR" ]] && return 0
+    for dir in "$GAMES_DIR"/*/; do
+        [[ -d "$dir" ]] || continue
+        title=$(basename "$dir")
+        if _has_compose "$dir"; then
+            titles+=("$title")
+        else
+            for subdir in "$dir"*/; do
+                [[ -d "$subdir" ]] && _has_compose "$subdir" && titles+=("$title") && break
+            done
+        fi
+    done
+    [[ ${#titles[@]} -eq 0 ]] && return 0
+    printf '%s\n' "${titles[@]}" | powershell.exe -NoProfile -Command \
+        "\$p='$cache'; \$i=\$input | Out-String; Set-Content -Path \$p -Value \$i.TrimEnd() -Encoding UTF8" \
+        2>/dev/null || true
+}
+
+_win_to_mnt() {
+    local p="${1//\\//}"
+    echo "/mnt/c${p#C:}"
+}
+
+_wslconfig_path() {
+    local p
+    p=$(powershell.exe -NoProfile -Command '$env:USERPROFILE + "\.wslconfig"' 2>/dev/null | tr -d '\r\n')
+    [[ -n "$p" ]] && _win_to_mnt "$p"
+}
+
+_doctor_section() { echo ""; echo "== $1 =="; }
+
 _check_port_conflicts() {
     local in_use
     in_use=$(ss -tlnp 2>/dev/null)
 
     # DB port: remap silently -- safe to move because clients never connect to it directly
     if echo "$in_use" | grep -q ':3306[[:space:]]'; then
-        if ! grep -q 'DOCKER_DB_EXTERNAL_PORT' .env 2>/dev/null; then
-            printf 'DOCKER_DB_EXTERNAL_PORT=13306\n' >> .env
-            echo "[dml] Port 3306 in use — remapped DB host port to 13306"
+        if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'ac-database'; then
+            if ! grep -q 'DOCKER_DB_EXTERNAL_PORT' .env 2>/dev/null; then
+                printf 'DOCKER_DB_EXTERNAL_PORT=13306\n' >> .env
+                echo "[dml] Port 3306 in use — remapped DB host port to 13306"
+            fi
         fi
     fi
 
@@ -830,18 +903,55 @@ _check_port_conflicts() {
     done
 }
 
+_start_title() {
+    local title="$1"
+    local mode="${2:-start}"
+    local dir="$GAMES_DIR/$title"
+    if [[ ! -d "$dir" ]]; then echo "[dml] ERROR: Title not found: $title" >&2; exit 1; fi
+    local compose_dir="$dir"
+    if ! _has_compose "$dir"; then
+        for subdir in "$dir"*/; do
+            if [[ -d "$subdir" ]] && _has_compose "$subdir"; then
+                compose_dir="$subdir"; break
+            fi
+        done
+    fi
+    if ! _has_compose "$compose_dir"; then
+        echo "[dml] ERROR: No compose file found in $title or its subdirectories." >&2; exit 1
+    fi
+    _require_docker
+    _ensure_keepalive
+    cd "$compose_dir"
+
+    if [[ -x "$dir/dml-start.sh" ]]; then
+        echo "[dml] ${mode^}ing $title (staged)..."
+        bash "$dir/dml-start.sh" "$mode"
+        return
+    fi
+
+    _check_port_conflicts
+    echo "[dml] ${mode^}ing $title..."
+    if [[ "$mode" == "restart" ]]; then
+        docker compose down
+    fi
+    docker compose up -d
+    echo "[dml] $title started"
+}
+
 cmd="${1:-help}"
 shift || true
 
 case "$cmd" in
   doctor)
-    echo "[dml] Checking DML environment..."
+    echo "[dml] DML Doctor v$VERSION"
     errors=0
+    warns=0
 
+    _doctor_section "Linux environment"
     if systemctl is-system-running 2>/dev/null | grep -qE "running|degraded"; then
         echo "[ok]  systemd is running"
     else
-        echo "[WARN] systemd is not running -- from Windows run: wsl --shutdown, then reopen"
+        echo "[WARN] systemd is not running -- from Windows: wsl --shutdown, then reopen"
         errors=$((errors + 1))
     fi
 
@@ -852,13 +962,20 @@ case "$cmd" in
         errors=$((errors + 1))
     fi
 
+    if systemctl is-active dml-keepalive.service &>/dev/null; then
+        echo "[ok]  dml-keepalive.service is active (WSL idle backup)"
+    else
+        echo "[WARN] dml-keepalive.service is not active -- WSL may idle-shutdown while playing"
+        warns=$((warns + 1))
+    fi
+
     free_kb=$(df /home --output=avail 2>/dev/null | tail -1 | tr -d ' ')
     if [[ "$free_kb" =~ ^[0-9]+$ ]]; then
         free_gb=$(( free_kb / 1024 / 1024 ))
         if (( free_gb >= 20 )); then
             echo "[ok]  Disk space: ${free_gb} GB free on ext4"
         else
-            echo "[WARN] Low disk space: ${free_gb} GB free under /home (need 20+ GB for most titles)"
+            echo "[WARN] Low disk space: ${free_gb} GB free under /home (need 20+ GB)"
             errors=$((errors + 1))
         fi
     else
@@ -870,13 +987,230 @@ case "$cmd" in
         echo "[ok]  Internet connection"
     else
         echo "[WARN] No internet connection detected"
-        errors=$((errors + 1))
+        warns=$((warns + 1))
     fi
 
-    if (( errors == 0 )); then
-        echo "[ok]  Environment healthy. Run 'dml run <url>' to install a title."
+    _doctor_section "WSL stability (disconnects while playing)"
+    wslconf=$(_wslconfig_path || true)
+    if [[ -n "$wslconf" && -f "$wslconf" ]]; then
+        echo "[ok]  .wslconfig found: $wslconf"
+        if grep -qE 'instanceIdleTimeout=-1' "$wslconf" 2>/dev/null; then
+            echo "[ok]  instanceIdleTimeout=-1 (distro idle disabled)"
+        else
+            echo "[WARN] instanceIdleTimeout not -1 -- WSL may shut down the distro after ~10 min idle"
+            warns=$((warns + 1))
+        fi
+        if grep -qE 'vmIdleTimeout=-1' "$wslconf" 2>/dev/null; then
+            echo "[ok]  vmIdleTimeout=-1 (VM idle disabled)"
+        else
+            echo "[WARN] vmIdleTimeout not -1 -- WSL VM may shut down after ~60s idle"
+            warns=$((warns + 1))
+        fi
+        if grep -qE 'autoMemoryReclaim=gradual' "$wslconf" 2>/dev/null; then
+            echo "[ok]  autoMemoryReclaim=gradual"
+        else
+            echo "[WARN] autoMemoryReclaim=gradual not set -- WSL may hold RAM when idle"
+            warns=$((warns + 1))
+        fi
     else
-        echo "[dml] Found $errors warning(s) above."
+        echo "[WARN] .wslconfig not found -- re-run Install-DML.ps1 as Administrator"
+        warns=$((warns + 1))
+    fi
+
+    if command -v journalctl &>/dev/null; then
+        po_count=$(journalctl -b --no-pager 2>/dev/null | grep -c 'poweroff requested' || true)
+        if (( po_count > 0 )); then
+            echo "[WARN] $po_count unexpected WSL poweroff event(s) this boot -- check .wslconfig + keepalive"
+            warns=$((warns + 1))
+        else
+            echo "[ok]  No unexpected WSL poweroff events this boot"
+        fi
+    fi
+
+    if command -v powershell.exe &>/dev/null; then
+        _doctor_section "Windows host + WSL"
+        # wsl.exe stdout is UTF-16 when piped; strip NULs before text tools
+        wsl_ver=$(wsl.exe --version 2>&1 | tr -d '\0' | grep -i 'WSL version' | head -1 | sed 's/.*:[[:space:]]*//' | tr -d '\r' || true)
+        if [[ -n "$wsl_ver" ]]; then
+            echo "[ok]  WSL version: $wsl_ver"
+        else
+            echo "[WARN] Could not read WSL version -- run: wsl --update"
+            warns=$((warns + 1))
+        fi
+        # wsl -l -v emits UTF-16 when piped; strip NULs before grep
+        wsl_line=$(wsl.exe -l -v 2>/dev/null | tr -d '\0' | grep -i 'dml-arch' | head -1 || true)
+        if [[ "$wsl_line" == *Running* ]]; then
+            echo "[ok]  WSL distro dml-arch: Running (Windows view)"
+        elif [[ "$wsl_line" == *Stopped* ]]; then
+            echo "[ok]  WSL distro dml-arch: Stopped (RAM released)"
+            if docker ps -q 2>/dev/null | grep -q .; then
+                echo "[WARN] dml-arch Stopped on Windows but Docker has containers -- stale state?"
+                warns=$((warns + 1))
+            fi
+        else
+            echo "[WARN] dml-arch not found in 'wsl -l -v' -- re-run Install-DML.ps1"
+            warns=$((warns + 1))
+        fi
+        vmmem_mb=$(powershell.exe -NoProfile -Command \
+            "\$p=Get-Process vmmem,VmmemWSL -EA SilentlyContinue | Select-Object -First 1; if(\$p){[math]::Round(\$p.WorkingSet64/1MB)}else{'0'}" \
+            2>/dev/null | tr -d '\r\n')
+        if [[ "$vmmem_mb" =~ ^[0-9]+$ ]]; then
+            if (( vmmem_mb == 0 )); then
+                echo "[ok]  Vmmem not active (WSL VM fully released)"
+            elif [[ "$wsl_line" == *Stopped* ]] && (( vmmem_mb > 150 )); then
+                echo "[WARN] Vmmem ${vmmem_mb} MB but dml-arch Stopped -- WSL VM still loaded; run: wsl --shutdown"
+                warns=$((warns + 1))
+            elif docker ps -q 2>/dev/null | grep -q .; then
+                echo "[ok]  Vmmem RAM: ${vmmem_mb} MB (servers running)"
+            elif (( vmmem_mb > 500 )); then
+                echo "[WARN] Vmmem ${vmmem_mb} MB with no containers -- Stop from tray to release RAM"
+                warns=$((warns + 1))
+            else
+                echo "[ok]  Vmmem RAM: ${vmmem_mb} MB"
+            fi
+        fi
+
+        _doctor_section "Windows DML install ($DML_WIN_ROOT)"
+        win_root_mnt=$(_win_to_mnt "$DML_WIN_ROOT")
+        for script in WSL-Keepalive.ps1 DML-Ensure-Keepalive.ps1 DML-Release-WSL.ps1 DML-Launcher.exe dml-titles.cache; do
+            if [[ -f "$win_root_mnt/$script" ]]; then
+                echo "[ok]  $script present"
+            else
+                echo "[WARN] Missing $DML_WIN_ROOT\\$script -- re-run Install-DML.ps1"
+                warns=$((warns + 1))
+            fi
+        done
+        launcher_ver=$(grep -oE 'VERSION\s*=\s*"[0-9.]+"' "$win_root_mnt/DML-Launcher.cs" 2>/dev/null | head -1 | grep -oE '[0-9.]+' || true)
+        if [[ -n "$launcher_ver" ]]; then
+            echo "[ok]  DML Launcher source version: v$launcher_ver"
+        fi
+        if powershell.exe -NoProfile -Command 'Get-Process DML-Launcher -EA SilentlyContinue' &>/dev/null; then
+            echo "[ok]  DML Launcher tray app is running"
+        else
+            echo "[WARN] DML Launcher is not running -- start $DML_WIN_ROOT\\DML-Launcher.exe"
+            warns=$((warns + 1))
+        fi
+        legacy_vbs=$(powershell.exe -NoProfile -Command \
+            "Test-Path (Join-Path \$env:APPDATA 'Microsoft\\Windows\\Start Menu\\Programs\\Startup\\DML-WSL-Keepalive.vbs')" \
+            2>/dev/null | tr -d '\r\n')
+        if [[ "$legacy_vbs" == "True" ]]; then
+            echo "[WARN] Legacy always-on keepalive VBS in Startup -- remove or re-run Install-DML.ps1"
+            warns=$((warns + 1))
+        else
+            echo "[ok]  No legacy always-on keepalive in Startup"
+        fi
+        if schtasks /Query /TN 'DML-WSL-Keepalive' &>/dev/null; then
+            echo "[WARN] Legacy scheduled task DML-WSL-Keepalive exists -- re-run Install-DML.ps1 to remove"
+            warns=$((warns + 1))
+        fi
+
+        _doctor_section "Windows keepalive + tray state"
+        ka_count=$(powershell.exe -NoProfile -Command \
+            "(Get-CimInstance Win32_Process -EA SilentlyContinue | Where-Object { \$_.CommandLine -match 'WSL-Keepalive|sleep.+infinity' }).Count" \
+            2>/dev/null | tr -d '\r\n')
+        if [[ "$ka_count" =~ ^[0-9]+$ ]] && (( ka_count > 0 )); then
+            echo "[ok]  Windows WSL keepalive running ($ka_count process(es))"
+        elif docker ps -q 2>/dev/null | grep -q .; then
+            echo "[WARN] Game containers running but Windows keepalive is off -- WSL may idle-shutdown"
+            warns=$((warns + 1))
+        else
+            echo "[ok]  Windows keepalive off (no game servers running)"
+        fi
+        stopped_marker="$win_root_mnt/.dml-servers-stopped"
+        if [[ -f "$stopped_marker" ]] && docker ps -q 2>/dev/null | grep -q .; then
+            echo "[WARN] .dml-servers-stopped marker exists but containers are running -- tray may show Stopped"
+            warns=$((warns + 1))
+        elif [[ -f "$stopped_marker" ]]; then
+            echo "[ok]  .dml-servers-stopped marker set (intentional stop / RAM released)"
+        fi
+        if [[ -f "$win_root_mnt/dml-titles.cache" ]]; then
+            cache_lines=$(wc -l < "$win_root_mnt/dml-titles.cache" | tr -d ' ')
+            echo "[ok]  dml-titles.cache: $cache_lines title(s) (tray uses when WSL is Stopped)"
+        else
+            echo "[WARN] dml-titles.cache missing -- tray may be empty after reboot; run 'dml list'"
+            warns=$((warns + 1))
+        fi
+        win_ports=$(powershell.exe -NoProfile -Command \
+            "(Get-NetTCPConnection -State Listen -EA SilentlyContinue | Where-Object { \$_.LocalPort -in 3724,8085 } | ForEach-Object { \$_.LocalPort }) -join ','" \
+            2>/dev/null | tr -d '\r\n')
+        if docker ps -q 2>/dev/null | grep -q .; then
+            if [[ "$win_ports" == *3724* ]]; then
+                echo "[ok]  Windows forwarding: port 3724 listening"
+            else
+                echo "[WARN] Port 3724 not listening on Windows -- WoW client may not connect"
+                warns=$((warns + 1))
+            fi
+            if [[ "$win_ports" == *8085* ]]; then
+                echo "[ok]  Windows forwarding: port 8085 listening"
+            else
+                echo "[WARN] Port 8085 not listening on Windows"
+                warns=$((warns + 1))
+            fi
+        fi
+    else
+        _doctor_section "Windows host"
+        echo "[INFO] powershell.exe unavailable -- skipping Windows checks (not WSL-on-Windows?)"
+    fi
+
+    _doctor_section "Installed titles"
+    title_count=0
+    running_count=0
+    if [[ -d "$GAMES_DIR" ]]; then
+        for dir in "$GAMES_DIR"/*/; do
+            [[ -d "$dir" ]] || continue
+            title=$(basename "$dir")
+            compose_dir="$dir"
+            if ! _has_compose "$dir"; then
+                for subdir in "$dir"*/; do
+                    [[ -d "$subdir" ]] && _has_compose "$subdir" && compose_dir="$subdir" && break
+                done
+            fi
+            [[ -d "$compose_dir" ]] && _has_compose "$compose_dir" || continue
+            title_count=$((title_count + 1))
+            rc=$(_compose_running "$compose_dir")
+            if (( rc > 0 )); then
+                running_count=$((running_count + 1))
+                echo "[ok]  $title: running ($rc container(s))"
+            else
+                echo "[ok]  $title: stopped"
+            fi
+            if [[ -x "$dir/dml-start.sh" ]]; then
+                echo "[ok]    dml-start.sh present (safe restart)"
+            elif [[ -f "$dir/dml-start.sh" ]]; then
+                echo "[WARN]  $title: dml-start.sh not executable"
+                warns=$((warns + 1))
+            else
+                echo "[WARN]  $title: no dml-start.sh -- 'dml restart' may re-import DB (WoW/AzerothCore)"
+                warns=$((warns + 1))
+            fi
+        done
+    fi
+    if (( title_count == 0 )); then
+        echo "[INFO] No installed titles with compose files"
+    fi
+
+    if (( running_count > 0 )); then
+        if ss -tln 2>/dev/null | grep -q ':3724 '; then
+            echo "[ok]  WoW auth port 3724 listening"
+        else
+            echo "[WARN] Containers running but port 3724 not listening yet"
+            warns=$((warns + 1))
+        fi
+        if ss -tln 2>/dev/null | grep -q ':8085 '; then
+            echo "[ok]  WoW world port 8085 listening"
+        else
+            echo "[WARN] Containers running but port 8085 not listening yet"
+            warns=$((warns + 1))
+        fi
+    fi
+
+    echo ""
+    if (( errors == 0 && warns == 0 )); then
+        echo "[ok]  All checks passed."
+    elif (( errors == 0 )); then
+        echo "[dml] $warns warning(s), 0 critical issue(s). Share this output if you need help."
+    else
+        echo "[dml] $errors critical issue(s), $warns warning(s)."
     fi
     ;;
 
@@ -909,6 +1243,8 @@ case "$cmd" in
     done
     if [[ $found -eq 0 ]]; then
         echo "[dml] No titles found in $GAMES_DIR"
+    else
+        _update_titles_cache
     fi
     ;;
 
@@ -960,30 +1296,18 @@ case "$cmd" in
             [[ -n "${_seen[$project]:-}" ]] && continue
             echo "$project:running"
         done < <(docker ps --format '{{index .Labels "com.docker.compose.project"}}' 2>/dev/null | sort -u | grep -v '^$')
+        _update_titles_cache
     fi
     ;;
 
   start)
     title="${1:?Usage: dml start <title>}"
-    dir="$GAMES_DIR/$title"
-    if [[ ! -d "$dir" ]]; then echo "[dml] ERROR: Title not found: $title" >&2; exit 1; fi
-    compose_dir="$dir"
-    if ! _has_compose "$dir"; then
-        for subdir in "$dir"*/; do
-            if [[ -d "$subdir" ]] && _has_compose "$subdir"; then
-                compose_dir="$subdir"; break
-            fi
-        done
-    fi
-    if ! _has_compose "$compose_dir"; then
-        echo "[dml] ERROR: No compose file found in $title or its subdirectories." >&2; exit 1
-    fi
-    _require_docker
-    cd "$compose_dir"
-    _check_port_conflicts
-    echo "[dml] Starting $title..."
-    docker compose up -d
-    echo "[dml] $title started"
+    _start_title "$title" start
+    ;;
+
+  restart)
+    title="${1:?Usage: dml restart <title>}"
+    _start_title "$title" restart
     ;;
 
   stop)
@@ -1006,6 +1330,11 @@ case "$cmd" in
     echo "[dml] Stopping $title..."
     docker compose down
     echo "[dml] $title stopped"
+    running=$(docker ps -q 2>/dev/null | wc -l | tr -d '[:space:]')
+    if [[ "$running" -eq 0 ]]; then
+      echo "[dml] No servers running — releasing WSL memory to Windows..."
+      _release_wsl
+    fi
     ;;
 
   scan)
@@ -1247,11 +1576,12 @@ case "$cmd" in
     echo "dml -- Dad's MMO Lab CLI v$VERSION"
     echo ""
     echo "Commands:"
-    echo "  doctor                check environment health"
+    echo "  doctor                diagnose Linux + Windows/WSL issues (idle shutdown, tray, RAM)"
     echo "  list                  list installed titles"
     echo "  status [<title>]      show running/stopped status (all titles if no arg)"
     echo "  start <title>         start a title's Docker server"
-    echo "  stop <title>          stop a title's Docker server"
+    echo "  restart <title>       restart a title (uses dml-start.sh if present)"
+    echo "  stop <title>          stop a title; releases WSL RAM if no servers left"
     echo "  scan                  show all running containers and which game ports they hold"
     echo "  kill <name|--all>     force-stop by project name (no directory needed)"
     echo "  clean [--yes]         stop stuck containers, remove incomplete installs, prune Docker"
@@ -1271,7 +1601,9 @@ esac
 '@
 
         # Convert CRLF -> LF before encoding so the installed script has Unix line endings
-        $DmlCliBytes = [System.Text.Encoding]::UTF8.GetBytes($DmlCli.Replace("`r`n", "`n"))
+        $DmlCliWinRoot = ($InstallRoot -replace '\\', '/')
+        $DmlCliResolved = $DmlCli.Replace('__DML_INSTALL_ROOT__', $DmlCliWinRoot).Replace('__DML_CLI_VERSION__', $DmlCliVersion).Replace("`r`n", "`n")
+        $DmlCliBytes = [System.Text.Encoding]::UTF8.GetBytes($DmlCliResolved)
         $DmlCliB64   = [Convert]::ToBase64String($DmlCliBytes)
 
         $exit10 = Invoke-WslBash -Distro $DmlDistroName -User root -Label 'phase3' -Script @"
@@ -1285,6 +1617,32 @@ chmod 0755 /usr/local/bin/dml
 
 echo "[phase3] Verifying dml CLI..."
 dml version
+dml status >/dev/null 2>&1 || true
+
+echo "[phase3] Installing Linux keepalive service (backup alongside vmIdleTimeout=-1)..."
+cat > /usr/local/bin/dml-keepalive.sh << 'KEEPEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+while true; do sleep 3600; done
+KEEPEOF
+chmod 0755 /usr/local/bin/dml-keepalive.sh
+cat > /etc/systemd/system/dml-keepalive.service << 'KEEPEOF'
+[Unit]
+Description=DML WSL keepalive (prevents vm idle poweroff)
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/dml-keepalive.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+KEEPEOF
+systemctl daemon-reload
+systemctl enable --now dml-keepalive.service
 
 echo "[phase3] Done"
 "@
@@ -1318,7 +1676,7 @@ echo "[phase3] Done"
             $LauncherCs  = "$LauncherDir\DML-Launcher.cs"
             $LauncherExe = "$LauncherDir\DML-Launcher.exe"
 
-            [System.IO.File]::WriteAllText($LauncherCs, @'
+            $LauncherSource = @'
 // DML-Launcher.cs -- Dad's MMO Lab system tray launcher
 // Compiled at install time: csc.exe /target:winexe /r:System.Windows.Forms.dll /r:System.Drawing.dll
 
@@ -1343,7 +1701,86 @@ class DmlLauncherEntry
 
 class TrayApp : ApplicationContext
 {
-    const string DISTRO = "dml-arch";
+    const string DISTRO   = "dml-arch";
+    const string VERSION  = "__DML_CLI_VERSION__";
+
+    string TrayTooltip(bool serverActive)
+    {
+        return serverActive
+            ? "DML Launcher v" + VERSION + " — Server Active"
+            : "DML Launcher v" + VERSION;
+    }
+
+    string TitlesCachePath {
+        get {
+            return System.IO.Path.Combine(
+                System.IO.Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location),
+                "dml-titles.cache");
+        }
+    }
+
+    // True only when dml-arch is Running — wsl -l -v does NOT boot the distro.
+    static bool IsDistroRunning()
+    {
+        try
+        {
+            var psi = new ProcessStartInfo();
+            psi.FileName               = "wsl.exe";
+            psi.Arguments              = "-l -v";
+            psi.UseShellExecute        = false;
+            psi.RedirectStandardOutput = true;
+            psi.CreateNoWindow         = true;
+            // wsl -l -v emits UTF-16 LE; UTF-8 decoding breaks "Running" matching
+            psi.StandardOutputEncoding = Encoding.Unicode;
+            using (var p = Process.Start(psi))
+            {
+                string output = p.StandardOutput.ReadToEnd();
+                p.WaitForExit(5000);
+                foreach (var line in output.Split(new char[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    string trimmed = line.Trim();
+                    if (trimmed.StartsWith(DISTRO, StringComparison.OrdinalIgnoreCase)
+                        || trimmed.StartsWith("* " + DISTRO, StringComparison.OrdinalIgnoreCase))
+                        return trimmed.IndexOf("Running", StringComparison.OrdinalIgnoreCase) >= 0;
+                }
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    void SaveTitleCache(System.Collections.Generic.IEnumerable<string> titles)
+    {
+        try
+        {
+            System.IO.File.WriteAllLines(TitlesCachePath, titles);
+        }
+        catch { }
+    }
+
+    string[] LoadTitleCache()
+    {
+        try
+        {
+            if (System.IO.File.Exists(TitlesCachePath))
+                return System.IO.File.ReadAllLines(TitlesCachePath);
+        }
+        catch { }
+        return new string[0];
+    }
+
+    string BuildStoppedStatusOutput()
+    {
+        var titles = LoadTitleCache();
+        if (titles.Length == 0) return "";
+        var lines = new System.Collections.Generic.List<string>();
+        foreach (var t in titles)
+        {
+            string title = (t ?? "").Trim();
+            if (title.Length > 0) lines.Add(title + ":stopped");
+        }
+        return string.Join("\n", lines);
+    }
 
     // Prevents Windows from sleeping while a server is running.
     // ES_CONTINUOUS makes the state persist until explicitly released.
@@ -1361,7 +1798,7 @@ class TrayApp : ApplicationContext
             System.IO.Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location),
             "dml.ico");
         _tray.Icon = System.IO.File.Exists(icoPath) ? new Icon(icoPath) : SystemIcons.Application;
-        _tray.Text    = "DML Launcher";
+        _tray.Text    = TrayTooltip(false);
         _tray.Visible = true;
 
         var menu = new ContextMenuStrip();
@@ -1382,7 +1819,9 @@ class TrayApp : ApplicationContext
             };
             pollTimer.Start();
             System.Threading.ThreadPool.QueueUserWorkItem(_ => {
-                try { r[0] = WslRun("dml status"); } catch { r[0] = ""; }
+                try {
+                    r[0] = IsDistroRunning() ? WslRun("dml status") : BuildStoppedStatusOutput();
+                } catch { r[0] = BuildStoppedStatusOutput(); }
             });
         };
         startupTimer.Start();
@@ -1394,12 +1833,12 @@ class TrayApp : ApplicationContext
         if (runningCount > 0)
         {
             SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED);
-            _tray.Text = "DML Launcher — Server Active (sleep blocked)";
+            _tray.Text = TrayTooltip(true);
         }
         else
         {
             SetThreadExecutionState(ES_CONTINUOUS);  // release
-            _tray.Text = "DML Launcher";
+            _tray.Text = TrayTooltip(false);
         }
     }
 
@@ -1421,7 +1860,7 @@ class TrayApp : ApplicationContext
         var menu = (ContextMenuStrip)sender;
         menu.Items.Clear();
 
-        var header = new ToolStripMenuItem("DML Launcher");
+        var header = new ToolStripMenuItem("DML Launcher v" + VERSION);
         header.Enabled = false;
         header.Font = new Font(SystemFonts.MenuFont, FontStyle.Bold);
         menu.Items.Add(header);
@@ -1465,11 +1904,14 @@ class TrayApp : ApplicationContext
 
         timer.Start();
 
-        // Background thread does the WSL call
+        // Background thread — do NOT boot WSL just to check status (that auto-starts Docker).
         System.Threading.ThreadPool.QueueUserWorkItem(delegate
         {
-            try   { result[0] = WslRun("dml status"); }
-            catch { result[0] = ""; }
+            try {
+                result[0] = IsDistroRunning() ? WslRun("dml status") : BuildStoppedStatusOutput();
+            } catch {
+                result[0] = BuildStoppedStatusOutput();
+            }
         });
     }
 
@@ -1508,20 +1950,25 @@ class TrayApp : ApplicationContext
             gameMenu.DropDownItems.Add(statusLbl);
             gameMenu.DropDownItems.Add(new ToolStripSeparator());
 
-            var startItem = new ToolStripMenuItem("Start");
-            var stopItem  = new ToolStripMenuItem("Stop");
-            startItem.Enabled = !running;
-            stopItem.Enabled  =  running;
+            var startItem   = new ToolStripMenuItem("Start");
+            var restartItem = new ToolStripMenuItem("Restart");
+            var stopItem    = new ToolStripMenuItem("Stop");
+            startItem.Enabled   = !running;
+            restartItem.Enabled =  running;
+            stopItem.Enabled    =  running;
 
             string captured = title;
-            startItem.Click += delegate { RunAndReport("start", captured); };
-            stopItem.Click  += delegate { RunAndReport("stop",  captured); };
+            startItem.Click   += delegate { RunAndReport("start",   captured); };
+            restartItem.Click += delegate { RunAndReport("restart", captured); };
+            stopItem.Click    += delegate { RunAndReport("stop",    captured); };
 
             gameMenu.DropDownItems.Add(startItem);
+            gameMenu.DropDownItems.Add(restartItem);
             gameMenu.DropDownItems.Add(stopItem);
             items.Add(gameMenu);
         }
 
+        SaveTitleCache(statusMap.Keys);
         UpdateSleepLock(runningCount);
         return items;
     }
@@ -1557,13 +2004,35 @@ class TrayApp : ApplicationContext
         menu.Items.Add(exitItem);
     }
 
+    void TriggerReleaseWsl()
+    {
+        try
+        {
+            string ps1 = System.IO.Path.Combine(
+                System.IO.Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location),
+                "DML-Release-WSL.ps1");
+            if (!System.IO.File.Exists(ps1)) return;
+            var psi = new ProcessStartInfo();
+            psi.FileName = "powershell.exe";
+            psi.Arguments = "-NoProfile -WindowStyle Hidden -File \"" + ps1 + "\"";
+            psi.UseShellExecute = false;
+            psi.CreateNoWindow = true;
+            psi.WindowStyle = ProcessWindowStyle.Hidden;
+            Process.Start(psi);
+        }
+        catch { }
+    }
+
     void RunAndReport(string cmd, string title)
     {
         string result  = WslRun("dml " + cmd + " " + title);
-        string caption = (cmd == "start" ? "Start " : "Stop ") + title;
+        string caption = (cmd == "start" ? "Start " : cmd == "restart" ? "Restart " : "Stop ") + title;
         MessageBoxIcon icon = (result.Contains("[error]") || result.ToLower().Contains("error"))
             ? MessageBoxIcon.Warning : MessageBoxIcon.Information;
         MessageBox.Show(result, caption, MessageBoxButtons.OK, icon);
+
+        if (cmd == "stop" && result.IndexOf("releasing WSL", StringComparison.OrdinalIgnoreCase) >= 0)
+            TriggerReleaseWsl();
 
         // Re-check server state after start/stop so the sleep lock updates
         // without requiring the user to reopen the menu.
@@ -1576,7 +2045,9 @@ class TrayApp : ApplicationContext
         };
         pollTimer.Start();
         System.Threading.ThreadPool.QueueUserWorkItem(_ => {
-            try { r[0] = WslRun("dml status"); } catch { r[0] = ""; }
+            try {
+                r[0] = IsDistroRunning() ? WslRun("dml status") : BuildStoppedStatusOutput();
+            } catch { r[0] = BuildStoppedStatusOutput(); }
         });
     }
 
@@ -1698,7 +2169,9 @@ class TrayApp : ApplicationContext
     }
 }
 
-'@, [System.Text.Encoding]::UTF8)
+'@
+            $LauncherSource = $LauncherSource.Replace('__DML_CLI_VERSION__', $DmlCliVersion)
+            [System.IO.File]::WriteAllText($LauncherCs, $LauncherSource, [System.Text.Encoding]::UTF8)
 
             Write-Diag "Compiling DML-Launcher.cs -> DML-Launcher.exe..."
             $IcoPath = Join-Path $LauncherDir "dml.ico"
@@ -1737,6 +2210,74 @@ class TrayApp : ApplicationContext
     }
 
     # -------------------------------------------------------------------------
+    # Step 12: WSL resource scripts (keepalive while playing, release RAM on stop)
+    # -------------------------------------------------------------------------
+    Write-Step "Installing WSL resource management scripts..."
+
+    $KeepalivePs1 = @'
+# Holds dml-arch open while a game server is running (started by dml start).
+$Distro = 'dml-arch'
+while ($true) {
+    try {
+        $p = Start-Process -FilePath 'wsl.exe' -ArgumentList @('-d', $Distro, '-e', 'sleep', 'infinity') -WindowStyle Hidden -PassThru
+        $p.WaitForExit()
+    } catch {}
+    Start-Sleep -Seconds 3
+}
+'@
+    Set-Content -Path "$InstallRoot\WSL-Keepalive.ps1" -Value $KeepalivePs1 -Encoding UTF8
+
+    $EnsureKeepalivePs1 = @'
+$InstallRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$script = Join-Path $InstallRoot 'WSL-Keepalive.ps1'
+if (-not (Test-Path $script)) { exit 0 }
+$running = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -like "*$script*" }
+if (-not $running) {
+    Start-Process pwsh -ArgumentList '-NoProfile', '-WindowStyle', 'Hidden', '-File', $script -WindowStyle Hidden
+}
+Remove-Item (Join-Path $InstallRoot '.dml-servers-stopped') -Force -ErrorAction SilentlyContinue
+'@
+    Set-Content -Path "$InstallRoot\DML-Ensure-Keepalive.ps1" -Value $EnsureKeepalivePs1 -Encoding UTF8
+
+    $ReleaseWslPs1 = @'
+# Returns WSL RAM to Windows when all game servers are stopped.
+# Spawned detached from Windows (or via async Start-Process from dml stop).
+param([int]$DelaySeconds = 3)
+$Distro = 'dml-arch'
+$InstallRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+Start-Sleep -Seconds $DelaySeconds
+
+# Kill Windows-side keepalive loops
+Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -match 'WSL-Keepalive\.ps1' } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+
+# Stop Linux services that pin RAM (auto-start again on next dml start / WSL boot)
+wsl.exe -d $Distro -u root -- systemctl stop dml-keepalive.service 2>$null | Out-Null
+wsl.exe -d $Distro -u root -- systemctl stop docker 2>$null | Out-Null
+
+Set-Content -Path "$InstallRoot\.dml-servers-stopped" -Value (Get-Date -Format o) -Encoding UTF8
+
+wsl.exe --terminate $Distro 2>$null | Out-Null
+Start-Sleep -Milliseconds 500
+
+# --terminate stops the distro; --shutdown kills the WSL VM (VmmemWSL).
+# Without --shutdown, Vmmem keeps ~1 GB even when all distros show Stopped.
+wsl.exe --shutdown 2>$null | Out-Null
+
+Write-Host "[dml] WSL released - memory returned to Windows"
+'@
+    Set-Content -Path "$InstallRoot\DML-Release-WSL.ps1" -Value $ReleaseWslPs1 -Encoding UTF8
+
+    # Remove legacy always-on keepalive (now started only by dml start)
+    Remove-Item "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\DML-WSL-Keepalive.vbs" -Force -ErrorAction SilentlyContinue
+    schtasks /Delete /TN 'DML-WSL-Keepalive' /F 2>$null | Out-Null
+
+    Write-Ok "WSL scripts installed (keepalive on start, release RAM on stop)"
+
+    # -------------------------------------------------------------------------
     # Done
     # -------------------------------------------------------------------------
     Write-Host ""
@@ -1745,7 +2286,7 @@ class TrayApp : ApplicationContext
     Write-Host "============================================================" -ForegroundColor Green
     Write-Host ""
     Write-Host "  Installed inside WSL2 (dml-arch):" -ForegroundColor White
-    Write-Host "    Arch Linux  +  systemd  +  Docker Engine  +  dml CLI v2.1" -ForegroundColor Green
+    Write-Host "    Arch Linux  +  systemd  +  Docker Engine  +  dml CLI v$DmlCliVersion" -ForegroundColor Green
     Write-Host "  Install location: $InstallRoot" -ForegroundColor DarkGray
     Write-Host ""
     if (Test-Path "$env:USERPROFILE\Desktop\DML Launcher.lnk") {
