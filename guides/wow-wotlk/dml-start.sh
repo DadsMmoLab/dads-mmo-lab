@@ -190,7 +190,7 @@ _close_prompt() {
   local ans
   echo ""
   if [[ -t 0 ]]; then
-    read -r -p "[dml] Close this window? [y/N]: " ans
+    read -r -p "[dml] Close this window? [y/N]: " ans || ans=""
     case "${ans,,}" in
       y|yes)
         _log "Closing — server keeps running in the background."
@@ -199,7 +199,7 @@ _close_prompt() {
     esac
   fi
   _log "Keeping window open — type 'exit' when you are done."
-  exec bash -l
+  exec bash -l </dev/tty >/dev/tty 2>/dev/null || sleep infinity
 }
 
 _wait_ready() {
@@ -297,6 +297,7 @@ if _wait_ready; then
   _log_ok "Login: admin / admin"
   docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' | grep -E 'NAMES|ac-'
   _close_prompt
+  exit 0
 fi
 
 echo "[dml] WARN: Timed out waiting for ready — server may still be starting" >&2

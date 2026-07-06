@@ -47,7 +47,7 @@ _close_prompt() {
   local ans release=0
   echo ""
   if [[ -t 0 ]]; then
-    read -r -p "[dml] Close this window? [y/N]: " ans
+    read -r -p "[dml] Close this window? [y/N]: " ans || ans=""
     case "${ans,,}" in
       y|yes) release=1 ;;
     esac
@@ -63,7 +63,7 @@ _close_prompt() {
   fi
 
   _log "Keeping window open — server is stopped; data is on disk. Type 'exit' when done."
-  exec bash -l
+  exec bash -l </dev/tty >/dev/tty 2>/dev/null || sleep infinity
 }
 
 touch "$DML_BUSY_MARKER"
