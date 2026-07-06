@@ -201,7 +201,7 @@ _close_prompt() {
   local ans
   echo ""
   if [[ -t 0 ]]; then
-    read -r -p "[dml] Close this window? [y/N]: " ans || ans=""
+    read -r -p "[dml] Close this window? [Y/N]: " ans || ans=""
     case "${ans,,}" in
       y|yes)
         _log "Closing — server keeps running in the background."

@@ -47,7 +47,7 @@ _close_prompt() {
   local ans release=0
   echo ""
   if [[ -t 0 ]]; then
-    read -r -p "[dml] Close this window? [y/N]: " ans || ans=""
+    read -r -p "[dml] Close this window? [Y/N]: " ans || ans=""
     case "${ans,,}" in
       y|yes) release=1 ;;
     esac
