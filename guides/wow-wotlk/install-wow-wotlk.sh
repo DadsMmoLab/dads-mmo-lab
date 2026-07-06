@@ -5,7 +5,7 @@
 #
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 #
-#  Version: 1.2.0
+#  Version: 1.2.1
 #
 #  Usage:
 #    chmod +x install-wow.sh
@@ -20,6 +20,9 @@
 #    6. Sets up the Gaming Mode launcher
 #
 #  Changelog:
+#    1.2.1 — DML staged restart hook (Windows/WSL)
+#      - Ships dml-start.sh: restarts auth/world without re-running db-import
+#      - Pins realm to 127.0.0.1; waits for DB healthy before starting servers
 #    1.2.0 — Playerbots-only focus
 #      - Removed Base WoW and NPCBots options
 #      - Single clear install path: Playerbots, compiled from source
@@ -35,7 +38,7 @@
 #      - Heredoc launcher synced with standalone launcher scripts
 # ============================================================
 
-WIZARD_VERSION="1.2.0"
+WIZARD_VERSION="1.2.1"
 
 set -o pipefail
 
@@ -316,6 +319,32 @@ show_summary() {
         echo -e "${WHITE}No problem! Run this script again when you're ready.${NC}"
         exit 0
     fi
+}
+
+# ─────────────────────────────────────────
+# DML START/RESTART HOOK
+# ─────────────────────────────────────────
+install_dml_start_hook() {
+    print_info "Installing DML staged start/restart hook..."
+
+    local src dest="$SERVER_DIR/dml-start.sh"
+    src="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/dml-start.sh"
+
+    if [ -f "$src" ]; then
+        cp "$src" "$dest"
+    elif curl -fsSL \
+        "https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/guides/wow-wotlk/dml-start.sh" \
+        -o "$dest"; then
+        :
+    else
+        print_warning "Could not install dml-start.sh"
+        print_info "Restarts via 'dml restart' may re-import the DB until this file is present."
+        return 1
+    fi
+
+    chmod +x "$dest"
+    print_success "DML restart hook installed: $dest"
+    print_info "On DML Windows: dml restart wow-server-playerbots"
 }
 
 # ─────────────────────────────────────────
@@ -674,9 +703,10 @@ REALMLIST (in your WoW client folder):
   Edit:  realmlist.wtf
   Set to: set realmlist 127.0.0.1
 
-USEFUL COMMANDS:
-  Start:   cd ${SERVER_DIR} && docker compose up -d
-  Stop:    cd ${SERVER_DIR} && docker compose down
+USEFUL COMMANDS (DML Windows/WSL):
+  Start:   dml start wow-server-playerbots
+  Restart: dml restart wow-server-playerbots
+  Stop:    dml stop wow-server-playerbots
   Logs:    cd ${SERVER_DIR} && docker compose logs -f
   Console: docker attach \$(docker ps --format '{{.Names}}' | grep worldserver | head -1)
     (Exit safely: Ctrl+P then Ctrl+Q. NOT Ctrl+C.)
@@ -810,6 +840,7 @@ trap "kill $SUDO_KEEPALIVE_PID 2>/dev/null; exit" EXIT INT TERM
 
 show_summary
 install_server
+install_dml_start_hook
 wait_for_server
 create_accounts
 setup_gaming_mode
