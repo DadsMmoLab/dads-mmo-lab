@@ -92,3 +92,4 @@ _log_ok "Next Start will bring everything back (no re-import needed)"
 
 rm -f "$DML_BUSY_MARKER"
 _close_prompt
+exit 0

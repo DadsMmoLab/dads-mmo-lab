@@ -24,6 +24,22 @@ class DmlLauncherEntry
     }
 }
 
+// Invisible UI-thread marshal target for the tray. ShowInTaskbar=false alone still lets
+// Windows list it as a blank Alt+Tab entry once it becomes the active window (e.g. right
+// after showing the context menu); WS_EX_TOOLWINDOW excludes it from Alt+Tab entirely.
+class SyncHostForm : Form
+{
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            var cp = base.CreateParams;
+            cp.ExStyle |= 0x80; // WS_EX_TOOLWINDOW
+            return cp;
+        }
+    }
+}
+
 class TrayApp : ApplicationContext
 {
     const string DISTRO   = "dml-arch";
@@ -165,7 +181,7 @@ class TrayApp : ApplicationContext
     public TrayApp()
     {
         // Hidden form gives a stable UI thread marshal target (ApplicationContext alone can leave _uiSync null).
-        _syncForm = new Form();
+        _syncForm = new SyncHostForm();
         _syncForm.FormBorderStyle = FormBorderStyle.None;
         _syncForm.ShowInTaskbar   = false;
         _syncForm.StartPosition   = FormStartPosition.Manual;
@@ -350,18 +366,26 @@ class TrayApp : ApplicationContext
 
     ServerDisplayState GetDisplayState(string title, string reportedStatus)
     {
-        if (string.Equals(reportedStatus, "stopped", StringComparison.OrdinalIgnoreCase))
-            return ServerDisplayState.Stopped;
-
         if (string.Equals(reportedStatus, "loading", StringComparison.OrdinalIgnoreCase))
             return ServerDisplayState.Loading;
 
         string expected;
-        if (_pendingTitleStatus.TryGetValue(title, out expected))
+        bool hasPending = _pendingTitleStatus.TryGetValue(title, out expected);
+
+        if (string.Equals(reportedStatus, "stopped", StringComparison.OrdinalIgnoreCase))
         {
-            if (!string.Equals(reportedStatus, expected, StringComparison.OrdinalIgnoreCase))
+            // While a start/restart is pending, "dml status" can briefly still read
+            // "stopped" before the container flips to loading (e.g. the console tab
+            // hasn't finished opening yet). Treat that as still-loading instead of
+            // flashing "Stopped" for one poll cycle.
+            if (hasPending && !string.Equals(expected, "stopped", StringComparison.OrdinalIgnoreCase))
                 return ServerDisplayState.Loading;
+            return ServerDisplayState.Stopped;
         }
+
+        if (hasPending && !string.Equals(reportedStatus, expected, StringComparison.OrdinalIgnoreCase))
+            return ServerDisplayState.Loading;
+
         return string.Equals(reportedStatus, "running", StringComparison.OrdinalIgnoreCase)
             ? ServerDisplayState.Running : ServerDisplayState.Stopped;
     }
@@ -475,6 +499,7 @@ class TrayApp : ApplicationContext
                 {
                     string title = item.Tag as string;
                     if (string.IsNullOrEmpty(title)) continue;
+                    if ("placeholder".Equals(title)) continue; // "Checking servers..." row, not a real title
                     var gameMenu = item as ToolStripMenuItem;
                     if (gameMenu == null) continue;
                     string reported;
