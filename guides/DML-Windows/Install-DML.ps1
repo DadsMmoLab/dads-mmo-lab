@@ -841,17 +841,21 @@ _title_world_ready() {
 _title_reported_status() {
     local compose_dir="${1%/}" count
     count=$(_compose_running "$compose_dir")
-    # Playable = running even if dml-start.sh is still at the close prompt
-    if [[ "$count" -gt 0 ]] && _title_bots_done "$compose_dir"; then
-        echo "running"
-        return
-    fi
     if _title_lifecycle_busy "$compose_dir"; then
         if [[ "$count" -eq 0 ]] && pgrep -f "${compose_dir}/dml-stop\\.sh" >/dev/null 2>&1; then
             echo "stopped"
             return
         fi
+        # Close prompt: start script still open but this boot's bots are done
+        if [[ "$count" -gt 0 ]] && _title_bots_done "$compose_dir"; then
+            echo "running"
+            return
+        fi
         echo "loading"
+        return
+    fi
+    if [[ "$count" -gt 0 ]] && _title_bots_done "$compose_dir"; then
+        echo "running"
         return
     fi
     if [[ "$count" -gt 0 ]] && _title_world_ready; then
