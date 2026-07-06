@@ -38,9 +38,18 @@ _log_ok() {
 _log_tail_pid=""
 
 _stop_log_tail() {
-  if [[ -n "${_log_tail_pid:-}" ]] && kill -0 "$_log_tail_pid" 2>/dev/null; then
+  if [[ -n "${_log_tail_pid:-}" ]]; then
+    # Pipeline jobs (docker logs -f | filter &) can hang wait forever if only the
+    # filter PID is killed — wrap in a subshell so we can reap the whole tail.
     kill "$_log_tail_pid" 2>/dev/null || true
+    local i
+    for i in $(seq 1 15); do
+      kill -0 "$_log_tail_pid" 2>/dev/null || break
+      sleep 0.2
+    done
+    kill -9 "$_log_tail_pid" 2>/dev/null || true
     wait "$_log_tail_pid" 2>/dev/null || true
+    pkill -f "docker logs -f ${WORLD_CONTAINER}" 2>/dev/null || true
   fi
   _log_tail_pid=""
 }
@@ -156,7 +165,9 @@ _start_world_log_tail() {
   local i
   for i in $(seq 1 30); do
     if docker ps -a --format '{{.Names}}' | grep -qx "$WORLD_CONTAINER"; then
-      docker logs -f "$WORLD_CONTAINER" 2>&1 | _filter_world_logs &
+      (
+        docker logs -f "$WORLD_CONTAINER" 2>&1 | _filter_world_logs
+      ) &
       _log_tail_pid=$!
       return 0
     fi
@@ -227,6 +238,7 @@ _wait_ready() {
   fi
 
   _wait_bots_populated
+  _log "All playerbots loaded — finishing startup..."
   _stop_log_tail
   return 0
 }
