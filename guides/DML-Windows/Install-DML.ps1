@@ -841,16 +841,17 @@ _title_world_ready() {
 _title_reported_status() {
     local compose_dir="${1%/}" count
     count=$(_compose_running "$compose_dir")
-    if [[ "$count" -gt 0 ]] && { _title_bots_done "$compose_dir" || _title_world_ready; }; then
-        echo "running"
-        return
-    fi
+    # Start/stop scripts own the UI — stay on loading until they exit (even if world logs "ready...")
     if _title_lifecycle_busy "$compose_dir"; then
         if [[ "$count" -eq 0 ]] && pgrep -f "${compose_dir}/dml-stop\\.sh" >/dev/null 2>&1; then
             echo "stopped"
             return
         fi
         echo "loading"
+        return
+    fi
+    if [[ "$count" -gt 0 ]] && { _title_bots_done "$compose_dir" || _title_world_ready; }; then
+        echo "running"
         return
     fi
     if [[ "$count" -gt 0 ]]; then echo "running"; else echo "stopped"; fi
