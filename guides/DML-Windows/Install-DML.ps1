@@ -1936,6 +1936,17 @@ echo "[phase3] Done"
     # Uses csc.exe from .NET Framework 4.8 -- pre-installed on Windows 10/11.
     # Output: $InstallRoot\DML-Launcher.exe + Desktop shortcut + startup shortcut.
     # -------------------------------------------------------------------------
+    # A running DML-Launcher.exe locks its own file; csc.exe can't overwrite it
+    # (re-runs/upgrades would silently fail to update the launcher otherwise).
+    $launcherWasRunning = $false
+    $runningLauncher = Get-Process -Name 'DML-Launcher' -ErrorAction SilentlyContinue
+    if ($runningLauncher) {
+        $launcherWasRunning = $true
+        Write-Diag "Stopping running DML-Launcher.exe so it can be updated..."
+        $runningLauncher | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 500
+    }
+
     # Always write the icon so re-runs and upgrades pick it up
     $LauncherDir = $InstallRoot
     New-Item -ItemType Directory -Force -Path $LauncherDir | Out-Null
@@ -3103,6 +3114,12 @@ class TrayApp : ApplicationContext
             if ($cscExit -ne 0) {
                 Write-Warn "Launcher compilation failed (exit $cscExit) -- DML environment still works without it."
                 Write-Warn "Try running Windows Update to repair .NET Framework, then re-run this installer."
+                if ($launcherWasRunning -and (Test-Path $LauncherExe)) {
+                    try {
+                        Start-Process -FilePath $LauncherExe
+                        Write-Diag "Restarted the previous DML Launcher (update failed, kept the working version running)"
+                    } catch { }
+                }
             } else {
                 Write-Ok "DML-Launcher.exe compiled to $LauncherDir"
 
@@ -3121,6 +3138,15 @@ class TrayApp : ApplicationContext
                     Write-Ok "Added DML Launcher to Windows startup"
                 } catch {
                     Write-Warn "Shortcut creation failed: $($_.Exception.Message)"
+                }
+
+                if ($launcherWasRunning) {
+                    try {
+                        Start-Process -FilePath $LauncherExe
+                        Write-Ok "DML Launcher restarted with the updated version"
+                    } catch {
+                        Write-Warn "Could not restart DML Launcher automatically: $($_.Exception.Message)"
+                    }
                 }
 
         Mark-StepDone 'launcher-v2-icons'
