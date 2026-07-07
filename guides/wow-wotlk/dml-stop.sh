@@ -34,6 +34,7 @@ _has_persisted_data() {
 }
 
 _release_wsl_windows() {
+  local delay="${1:-3}"
   command -v powershell.exe &>/dev/null || return 0
   local ps1="${DML_WIN_ROOT}/DML-Release-WSL.ps1"
   [[ -f "$ps1" ]] || return 0
@@ -42,7 +43,7 @@ _release_wsl_windows() {
   local win_ps1
   win_ps1="$(wslpath -w "$ps1" 2>/dev/null)" || win_ps1="${ps1//\//\\}"
   powershell.exe -NoProfile -WindowStyle Hidden -Command \
-    "Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-WindowStyle','Hidden','-File','${win_ps1}') -WindowStyle Hidden" \
+    "Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-WindowStyle','Hidden','-File','${win_ps1}','-DelaySeconds','${delay}') -WindowStyle Hidden" \
     2>/dev/null || true
 }
 
@@ -89,7 +90,8 @@ _log_ok "Next Start will bring everything back (no re-import needed)"
 
 if [[ "$(docker ps -q 2>/dev/null | wc -l | tr -d '[:space:]')" -eq 0 ]]; then
   _log "No servers running — releasing WSL memory to Windows..."
-  _release_wsl_windows
+  _log "This window will close on its own in a few seconds once WSL shuts down — that's expected, not an error."
+  _release_wsl_windows 8
 fi
 
 rm -f "$DML_BUSY_MARKER"
