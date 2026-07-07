@@ -332,7 +332,7 @@ function Invoke-Phase1 {
     $rawInput    = Read-Host "  Install location (press Enter for $defaultRoot)"
     $InstallRoot = if ([string]::IsNullOrWhiteSpace($rawInput)) { $defaultRoot } else { $rawInput.Trim().TrimEnd('\') }
     if ($InstallRoot -notmatch '^[A-Za-z]:') {
-        Write-Fail "Install path must start with a drive letter (e.g., D:\DML).`nNetwork paths and relative paths are not supported by WSL."
+        Write-Fail "Install path must start with a drive letter (e.g., D:\DML)`nNetwork paths and relative paths are not supported by WSL."
     }
     Write-Diag "Install root: $InstallRoot"
     Write-Ok "Installing to: $InstallRoot"
@@ -391,11 +391,31 @@ function Invoke-WslBash {
     )
     Write-Diag "[$Label] running in $Distro as $User"
     # PowerShell @'...'@ heredocs use CRLF; bash rejects lines ending with \r.
-    # Trailing "# end": absorbs any garbage bytes PowerShell's pipe appends.
-    ($Script.Replace("`r`n", "`n") + "# end") | wsl -d $Distro -u $User -- bash | Out-Host
+    # bash -s reads stdin; piping to bare "bash" can hang waiting for a TTY.
+    $Script.Replace("`r`n", "`n") | wsl -d $Distro -u $User -- bash -s | Out-Host
     $exit = $LASTEXITCODE
     Write-Diag "[$Label] exit code: $exit"
     return $exit
+}
+
+function Wait-DockerSocket {
+    param(
+        [string]$Distro,
+        [int]$TimeoutSec = 30
+    )
+    Write-Diag "[$Distro] Waiting for Docker socket (max ${TimeoutSec}s)..."
+    wsl -d $Distro -u root -- systemctl start docker 2>$null | Out-Null
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        wsl -d $Distro -u root -- test -S /var/run/docker.sock 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Diag "[$Distro] Docker socket ready"
+            return 0
+        }
+        Start-Sleep -Seconds 1
+    }
+    Write-Diag "[$Distro] Docker socket not ready within ${TimeoutSec}s"
+    return 1
 }
 
 # =============================================================================
@@ -426,8 +446,13 @@ function Invoke-Phase2 {
 
     # Load install root saved by Phase 1; fall back to C:\DML for legacy state files
     $stateJson   = $null
-    try { $stateJson = (Get-Content $StateFile -Raw | ConvertFrom-Json) } catch {}
-    $InstallRoot = if ($stateJson -and $stateJson.InstallRoot) { $stateJson.InstallRoot } else { 'C:\DML' }
+    $InstallRoot = 'C:\DML'
+    try {
+        $stateJson = (Get-Content $StateFile -Raw | ConvertFrom-Json)
+        if ($stateJson -and ($stateJson.PSObject.Properties.Name -contains 'InstallRoot')) {
+            $InstallRoot = [string]$stateJson.InstallRoot
+        }
+    } catch {}
     $WslDir      = "$InstallRoot\wsl"
     Write-Diag "Install root: $InstallRoot"
     Write-Diag "WSL dir:      $WslDir"
@@ -535,7 +560,7 @@ autoMemoryReclaim=gradual
             $archInstallExit = $LASTEXITCODE
             Write-Diag "wsl --install archlinux exit code: $archInstallExit"
             if ($archInstallExit -ne 0) {
-                Write-Fail "Failed to download Arch Linux from the Microsoft Store (exit $archInstallExit).`nCheck your internet connection and try again."
+                Write-Fail "Failed to download Arch Linux from the Microsoft Store (exit $archInstallExit)`nCheck your internet connection and try again."
             }
         } else {
             Write-Diag "Using pre-existing 'archlinux' as import source"
@@ -591,7 +616,7 @@ autoMemoryReclaim=gradual
             $unregExit = $LASTEXITCODE
             Write-Diag "wsl --unregister exit code: $unregExit"
             if ($unregExit -ne 0) {
-                Write-Warn "Could not remove temporary 'archlinux' distro (exit $unregExit).`nRemove it manually when convenient: wsl --unregister archlinux"
+                Write-Warn "Could not remove temporary 'archlinux' distro (exit $unregExit)`nRemove it manually when convenient: wsl --unregister archlinux"
             }
         }
 
@@ -604,7 +629,7 @@ autoMemoryReclaim=gradual
     $setDefaultExit = $LASTEXITCODE
     Write-Diag "wsl --set-default exit code: $setDefaultExit"
     if ($setDefaultExit -ne 0) {
-        Write-Warn "Could not set '$DmlDistroName' as default WSL distro (exit $setDefaultExit).`nFix manually: wsl --set-default dml-arch"
+        Write-Warn "Could not set '$DmlDistroName' as default WSL distro (exit $setDefaultExit)`nFix manually: wsl --set-default dml-arch"
     }
 
     # -------------------------------------------------------------------------
@@ -627,7 +652,7 @@ pacman -Syu --noconfirm
 echo "[arch] System up to date"
 '@
         if ($exit8a -ne 0) {
-            Write-Fail "Arch Linux keyring / system update failed (exit $exit8a).`nCheck your internet connection and the log: $LogFile"
+            Write-Fail "Arch Linux keyring / system update failed (exit $exit8a)`nCheck your internet connection and the log: $LogFile"
         }
         Write-Ok "Arch Linux packages up to date"
         Mark-StepDone 'arch-keyring'
@@ -713,21 +738,16 @@ timeout 30 bash -c 'until [ -S /var/run/docker.sock ]; do sleep 1; done'
 echo "[docker] Done"
 '@
         if ($exit9 -ne 0) {
-            Write-Fail "Docker Engine installation failed (exit $exit9).`nCheck the log: $LogFile"
+            Write-Fail "Docker Engine installation failed (exit $exit9)`nCheck the log: $LogFile"
         }
         Write-Ok "Docker Engine installed and enabled"
         Mark-StepDone 'docker-install'
     }
 
     Write-Step "Verifying Docker..."
-    # Wait for the Docker socket before running hello-world. This handles the case
-    # where the distro was just started fresh (systemd takes a few seconds to bring
-    # docker.service up) or a re-run where Docker was never stopped but is slow.
-    $socketWait = Invoke-WslBash -Distro $DmlDistroName -User root -Label 'docker-socket' -Script @'
-set -euo pipefail
-timeout 30 bash -c 'until [ -S /var/run/docker.sock ]; do sleep 1; done'
-echo "[docker] Socket ready"
-'@
+    # Wait for the Docker socket before running hello-world. Uses direct wsl test
+    # calls instead of a piped bash script (which can hang after wsl --shutdown).
+    $socketWait = Wait-DockerSocket -Distro $DmlDistroName -TimeoutSec 30
     if ($socketWait -ne 0) {
         Write-Warn "Docker socket not available within 30s (exit $socketWait) -- hello-world test may fail."
     }
@@ -1647,7 +1667,7 @@ systemctl enable --now dml-keepalive.service
 echo "[phase3] Done"
 "@
         if ($exit10 -ne 0) {
-            Write-Fail "Phase 3 bootstrap failed (exit $exit10).`nCheck the log: $LogFile"
+            Write-Fail "Phase 3 bootstrap failed (exit $exit10)`nCheck the log: $LogFile"
         }
         Write-Ok "Core dependencies and dml CLI installed"
         Mark-StepDone 'phase3-bootstrap'
