@@ -2018,6 +2018,14 @@ class TrayApp : ApplicationContext
         }
     }
 
+    string ManageScriptCachePath {
+        get {
+            return System.IO.Path.Combine(
+                System.IO.Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location),
+                "dml-manage-titles.cache");
+        }
+    }
+
     string StoppedMarkerPath {
         get {
             return System.IO.Path.Combine(
@@ -2358,12 +2366,15 @@ class TrayApp : ApplicationContext
 
     void RefreshManageScriptCache()
     {
-        var titles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (!IsDistroRunning())
         {
-            _manageScriptTitles = titles;
+            // Don't wipe the list just because WSL is offline right now (e.g. after
+            // "Stop WSL (release RAM)") — Manage should stay available while a title
+            // is stopped, since wow-manage.sh doesn't require the server to be running.
+            _manageScriptTitles = LoadManageScriptCache();
             return;
         }
+        var titles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         try
         {
             string output = WslRun(
@@ -2373,9 +2384,32 @@ class TrayApp : ApplicationContext
                 string title = line.Trim();
                 if (title.Length > 0) titles.Add(title);
             }
+            SaveManageScriptCache(titles);
         }
         catch { }
         _manageScriptTitles = titles;
+    }
+
+    void SaveManageScriptCache(IEnumerable<string> titles)
+    {
+        try { System.IO.File.WriteAllLines(ManageScriptCachePath, titles); }
+        catch { }
+    }
+
+    HashSet<string> LoadManageScriptCache()
+    {
+        var titles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            if (System.IO.File.Exists(ManageScriptCachePath))
+                foreach (var line in System.IO.File.ReadAllLines(ManageScriptCachePath))
+                {
+                    string title = (line ?? "").Trim();
+                    if (title.Length > 0) titles.Add(title);
+                }
+        }
+        catch { }
+        return titles;
     }
 
     bool TitleHasManageScript(string title)

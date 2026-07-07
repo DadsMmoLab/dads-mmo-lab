@@ -44,22 +44,16 @@ _release_wsl_windows() {
 }
 
 _close_prompt() {
-  local ans release=0
+  local ans
   echo ""
   if [[ -t 0 ]]; then
     read -r -p "[dml] Close this window? [Y/N]: " ans || ans=""
     case "${ans,,}" in
-      y|yes) release=1 ;;
+      y|yes)
+        _log "Closing — your server data is saved. Use Start when you want to play again."
+        exit 0
+        ;;
     esac
-  fi
-
-  if [[ "$release" -eq 1 ]]; then
-    if [[ "$(docker ps -q 2>/dev/null | wc -l | tr -d '[:space:]')" -eq 0 ]]; then
-      _log "Releasing WSL memory to Windows..."
-      _release_wsl_windows
-    fi
-    _log "Closing — your server data is saved. Use Start when you want to play again."
-    exit 0
   fi
 
   _log "Keeping window open — server is stopped; data is on disk. Type 'exit' when done."
@@ -89,6 +83,11 @@ echo ""
 _log_ok "wow-server-playerbots stopped"
 _log_ok "All progress preserved — database and client data remain in Docker volumes"
 _log_ok "Next Start will bring everything back (no re-import needed)"
+
+if [[ "$(docker ps -q 2>/dev/null | wc -l | tr -d '[:space:]')" -eq 0 ]]; then
+  _log "No servers running — releasing WSL memory to Windows..."
+  _release_wsl_windows
+fi
 
 rm -f "$DML_BUSY_MARKER"
 _close_prompt
