@@ -2702,6 +2702,10 @@ class TrayApp : ApplicationContext
         };
         menu.Items.Add(doctorItem);
 
+        var updateItem = new ToolStripMenuItem("Check for Updates...");
+        updateItem.Click += delegate { CheckForUpdates(); };
+        menu.Items.Add(updateItem);
+
         menu.Items.Add(new ToolStripSeparator());
 
         var minimizeItem = new ToolStripMenuItem("Minimize");
@@ -2726,6 +2730,87 @@ class TrayApp : ApplicationContext
             Application.Exit();
         };
         menu.Items.Add(exitItem);
+    }
+
+    const string UpdateScriptUrl =
+        "https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/guides/DML-Windows/Install-DML.ps1";
+    const string UpdatePageUrl =
+        "https://github.com/DadsMmoLab/dads-mmo-lab/blob/main/guides/DML-Windows/Install-DML.ps1";
+
+    // Notify-only by design: this checks and compares versions automatically,
+    // but never downloads-and-executes anything itself. Install-DML.ps1 needs
+    // Administrator rights, so updating always goes through a manual,
+    // explicit re-run -- the same trust model as the original install.
+    void CheckForUpdates()
+    {
+        DeferCloseMenu();
+        SetTrayProgress("Checking for updates...");
+        System.Threading.ThreadPool.QueueUserWorkItem(_ => {
+            string versionLine;
+            try
+            {
+                using (var wc = new System.Net.WebClient())
+                {
+                    wc.Headers.Add("User-Agent", "DML-Launcher");
+                    versionLine = wc.DownloadString(UpdateScriptUrl);
+                }
+            }
+            catch (Exception ex)
+            {
+                PostToUi(delegate {
+                    RefreshTrayFromStatus();
+                    MessageBox.Show("[error] Could not reach GitHub: " + ex.Message,
+                        "Check for Updates", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                });
+                return;
+            }
+
+            var match = System.Text.RegularExpressions.Regex.Match(
+                versionLine, @"\$DmlCliVersion\s*=\s*'([\d.]+)'");
+            Version remoteVersion, localVersion;
+            if (!match.Success
+                || !Version.TryParse(match.Groups[1].Value, out remoteVersion)
+                || !Version.TryParse(VERSION, out localVersion))
+            {
+                PostToUi(delegate {
+                    RefreshTrayFromStatus();
+                    MessageBox.Show("Could not determine the latest version from GitHub.",
+                        "Check for Updates", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                });
+                return;
+            }
+
+            string remoteVersionStr = match.Groups[1].Value;
+
+            if (remoteVersion.CompareTo(localVersion) <= 0)
+            {
+                PostToUi(delegate {
+                    RefreshTrayFromStatus();
+                    MessageBox.Show("You're already on the latest version (v" + VERSION + ").",
+                        "Check for Updates", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                });
+                return;
+            }
+
+            PostToUi(delegate {
+                RefreshTrayFromStatus();
+                DialogResult result = MessageBox.Show(
+                    "A newer version is available: v" + remoteVersionStr + " (you have v" + VERSION + ").\n\n"
+                    + "Updating means downloading and re-running Install-DML.ps1 yourself (it needs "
+                    + "Administrator rights) -- same as the original install. Your servers and their "
+                    + "data are not touched, only the Windows-side install and this launcher.\n\n"
+                    + "Open the installer's page on GitHub now?",
+                    "Update Available", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (result != DialogResult.Yes) return;
+
+                try { Process.Start(new ProcessStartInfo(UpdatePageUrl) { UseShellExecute = true }); }
+                catch (Exception ex)
+                {
+                    MessageBox.Show("[error] Could not open the page: " + ex.Message,
+                        "Update Available", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            });
+        });
     }
 
     void RestartActiveServers()
