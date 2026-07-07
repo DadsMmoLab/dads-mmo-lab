@@ -43,7 +43,7 @@ class SyncHostForm : Form
 class TrayApp : ApplicationContext
 {
     const string DISTRO   = "dml-arch";
-    const string VERSION  = "2.1.2";
+    const string VERSION  = "2.2";
 
     enum ServerDisplayState { Stopped, Running, Loading }
 

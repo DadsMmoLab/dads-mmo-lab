@@ -40,7 +40,7 @@ if (-not $ScriptPath) { $ScriptPath = $PSCommandPath }
 $DiskNeededBytes = 30GB
 $DmlDistroName   = 'dml-arch'
 $DmlLinuxUser    = 'dml'
-$DmlCliVersion   = '2.1.2'   # bundled dml CLI + launcher tooltip (keep in sync)
+$DmlCliVersion   = '2.2'   # bundled dml CLI + launcher tooltip (keep in sync)
 $TaskName        = 'DadsMmoLab-Phase2'
 
 $Script:FailReported = $false
@@ -2000,7 +2000,7 @@ class SyncHostForm : Form
 class TrayApp : ApplicationContext
 {
     const string DISTRO   = "dml-arch";
-    const string VERSION  = "2.1.2";
+    const string VERSION  = "2.2";
 
     enum ServerDisplayState { Stopped, Running, Loading }
 
