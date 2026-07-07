@@ -2302,8 +2302,11 @@ class TrayApp : ApplicationContext
 
     string LoadingDots()
     {
+        // Fixed width (padded with spaces) so the animation doesn't change the
+        // menu item's text length -- a variable-length suffix makes the whole
+        // ToolStripMenuItem (and the dropdown) resize every tick, which looks broken.
         int n = (_loadingDotFrame % 3) + 1;
-        return new string('.', n);
+        return new string('.', n).PadRight(3);
     }
 
     string FormatTitleText(string title, ServerDisplayState state)
