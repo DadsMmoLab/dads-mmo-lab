@@ -1,7 +1,7 @@
 # Dad's MMO Lab — Windows Installer: How-To Guide
 
 **Installer:** Dad's MMO Lab Windows Substrate (Install-DML.ps1)
-**Platform:** Windows 11 (build 22H2 or newer), any modern desktop or laptop
+**Platform:** Windows 10 (version 2004 or newer) and Windows 11 (22H2 or newer), any modern desktop or laptop
 
 ---
 
@@ -25,13 +25,13 @@ This installer sets up:
 
 | Requirement | Details |
 |---|---|
-| Windows version | **Windows 11, version 22H2** (build 22621 or newer) |
+| Windows version | **Windows 10, version 2004** (build 19041) or **Windows 11, version 22H2** (build 22621) or newer |
 | Disk space | **30 GB free** on your C: drive |
 | CPU virtualization | Must be enabled in BIOS/UEFI — most modern PCs have this on by default |
 | Internet | Required throughout the install |
 | Time | **~20 minutes** total (mostly automatic) |
 
-> **How to check your Windows version:** Press **Windows key + R**, type `winver`, press Enter. You need build **22621** or higher. If you're below that, run Windows Update first.
+> **How to check your Windows version:** Press **Windows key + R**, type `winver`, press Enter. You need build **19041** or higher on Windows 10, or **22621** or higher on Windows 11. If you're below that, run Windows Update first.
 
 ---
 
@@ -64,7 +64,7 @@ The installer runs these checks before touching anything:
 
 | Check | What it's looking for |
 |---|---|
-| Windows version | Build 22621+ (Win 11 22H2) |
+| Windows version | Build 19041+ (Win 10 2004) or 22621+ (Win 11 22H2) |
 | CPU virtualization | Intel VT-x or AMD-V enabled |
 | Disk space | 30 GB free on C: |
 | Internet | Can reach microsoft.com |
@@ -107,8 +107,10 @@ Immediately after Docker is verified, Phase 3 runs:
 
 - Installs `base-devel`, `git`, `curl`, and `jq` inside the Arch environment
 - Installs the `dml` command-line tool
+- Moves any servers found at legacy locations into `/home/dml/games/` (older installs)
 - Compiles and installs **DML Launcher** — a system tray app for managing your titles
 - Creates a **Desktop shortcut** and adds the launcher to **Windows startup**
+- Sets up the Windows firewall and port-proxy rules that make **LAN play** possible
 
 When it's done you'll see:
 
@@ -221,16 +223,20 @@ bash install.sh
 
 ### Using DML Launcher (easiest)
 
-Right-click the tray icon to see all installed titles. Each title shows its current status and a **Start** / **Stop** option.
+Right-click the tray icon to see all installed titles. Each title shows its current status and its own submenu:
 
 | Menu item | What it does |
 |---|---|
 | Title → Start | Starts the server (`docker compose up -d`) |
 | Title → Stop | Stops the server (`docker compose down`) |
+| Title → Attach to Console | Opens the live server console (exit safely with **Ctrl+P then Ctrl+Q** — Ctrl+C stops the server!) |
+| Title → LAN Play | Lets other PCs on your home network join — see the title's own HOWTO for the full walkthrough |
 | Install New Title... | Opens the install dialog — browse to a `.sh` file or paste a URL |
 | Open DML Shell | Opens a terminal inside `dml-arch` |
 | Run dml doctor | Runs a health check on your environment |
-| Exit | Closes the tray app (does not stop any servers) |
+| Exit | Closes the tray app — **running servers shut down seconds later** (the launcher warns you first) |
+
+> ⚠️ **Keep the DML Launcher running while you play.** Windows tears down the WSL2 environment — and every server inside it — shortly after the last connection to it closes. The launcher holds the environment open while a server is running, and blocks Windows from sleeping mid-session. Exiting the launcher with a server up means that server stops within seconds; nothing is damaged, but you'll have to start it again.
 
 ### Using the CLI
 
@@ -257,6 +263,20 @@ dml doctor
 
 # Install a title from GitHub
 dml run https://github.com/DadsMmoLab/<title>
+
+# LAN play: point the realm at your PC's LAN address / back to this PC only / check
+dml lan <title> on <lan-ip>
+dml lan <title> off
+dml lan <title> status
+
+# Show every running container and which game ports it holds
+dml scan
+
+# Force-stop a stuck project by name (no directory needed)
+dml kill <project-name>
+
+# Clean up stuck containers, incomplete installs, and Docker leftovers
+dml clean
 
 # Check dml version
 dml version
@@ -316,6 +336,7 @@ Run `Uninstall-DML.ps1` as Administrator to remove DML from a PC. The uninstalle
 - Desktop and startup shortcuts
 - The DML state directory (`%LOCALAPPDATA%\DadsMMOLab\`)
 - The scheduled Phase 2 task
+- The LAN play firewall and port proxy rules
 
 ```powershell
 # Standard uninstall (keeps WSL itself and any other distros):
@@ -379,7 +400,7 @@ Set-ExecutionPolicy Bypass -Scope Process -Force
 & "$env:USERPROFILE\Downloads\Install-DML.ps1"
 ```
 
-### "Windows 11 22H2 (build 22621) or later is required"
+### "Windows 10 version 2004 ... or Windows 11 22H2 ... or later is required"
 
 Your Windows version is too old. Run Windows Update until there are no more updates available, then try again.
 
@@ -444,14 +465,9 @@ The launcher starts automatically at login via a startup shortcut. If it's not i
 
 ### DML Launcher doesn't show an installed title
 
-The launcher scans `/home/dml/games/` inside WSL for titles. If a title installed to a different location, it won't appear. Fix from inside the DML Shell:
+The launcher scans `/home/dml/games/` inside WSL for titles. Very early installers placed servers directly in `/home/dml/` instead — those won't appear.
 
-```bash
-# Register a title that installed outside the games folder:
-ln -s /home/dml/<server-folder> /home/dml/games/<server-folder>
-```
-
-Then right-click the tray icon to refresh the menu.
+**Fix:** stop the server if it's running, then re-run `Install-DML.ps1`. It finds servers at legacy locations and moves them into `games/` automatically — you'll see a `[migrate] Moved legacy server ...` line during the install. (Don't create symlinks by hand; they confuse the migration.)
 
 ### `dml doctor` shows Docker warnings after install
 
