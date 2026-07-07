@@ -1,4 +1,4 @@
-#Requires -RunAsAdministrator
+﻿#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
     Dad's MMO Lab -- Windows Substrate Installer
@@ -1954,7 +1954,8 @@ echo "[phase3] Done"
             $LauncherCs  = "$LauncherDir\DML-Launcher.cs"
             $LauncherExe = "$LauncherDir\DML-Launcher.exe"
 
-            $LauncherSource = @'// DML-Launcher.cs -- Dad's MMO Lab system tray launcher
+            $LauncherSource = @'
+// DML-Launcher.cs -- Dad's MMO Lab system tray launcher
 // Compiled at install time: csc.exe /target:winexe /r:System.Windows.Forms.dll /r:System.Drawing.dll
 
 using System;
