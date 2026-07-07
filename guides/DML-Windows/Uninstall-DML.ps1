@@ -46,6 +46,7 @@ Write-Host "    - dml-arch WSL distro + ALL game data inside it" -ForegroundColo
 Write-Host "    - DML state files and VHD ($StateDir)" -ForegroundColor White
 Write-Host "    - Desktop and startup shortcuts" -ForegroundColor White
 Write-Host "    - DadsMmoLab-Phase2 scheduled task" -ForegroundColor White
+Write-Host "    - LAN play firewall and port proxy rules" -ForegroundColor White
 if ($RemoveWSL) {
     Write-Host "    - WSL Windows features (requires reboot)" -ForegroundColor Yellow
 }
@@ -154,7 +155,39 @@ if (Test-Path $WslConfig) {
     }
 }
 
-# Step 8 -- Disable WSL Windows features (-RemoveWSL switch)
+# Step 8 -- Remove LAN play network rules (firewall + port proxy)
+# Same match logic as the installer's Step 12: only port proxy rules that
+# point at 127.0.0.1 on DML's ports are touched (3306 covers rules from
+# pre-1.3.0 WoW installers), so unrelated rules survive.
+Write-Step "Removing LAN play network rules..."
+$fwRules = Get-NetFirewallRule -DisplayName 'DML LAN Play*' -ErrorAction SilentlyContinue
+if ($fwRules) {
+    $fwRules | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+    Write-Ok "$(@($fwRules).Count) firewall rule(s) removed"
+} else {
+    Write-Info "No DML firewall rules found"
+}
+
+$dmlProxyPorts = @('3306', '3724', '8085')
+$proxyRules = netsh interface portproxy show v4tov4 2>$null
+$swept = 0
+foreach ($line in @($proxyRules)) {
+    if ("$line" -match '^\s*(\S+)\s+(\d+)\s+(\S+)\s+(\d+)\s*$') {
+        $lAddr = $Matches[1]; $lPort = $Matches[2]
+        $cAddr = $Matches[3]; $cPort = $Matches[4]
+        if ($cAddr -eq '127.0.0.1' -and $dmlProxyPorts -contains $cPort) {
+            netsh interface portproxy delete v4tov4 listenaddress=$lAddr listenport=$lPort 2>$null | Out-Null
+            $swept++
+        }
+    }
+}
+if ($swept -gt 0) {
+    Write-Ok "$swept port proxy rule(s) removed"
+} else {
+    Write-Info "No DML port proxy rules found"
+}
+
+# Step 9 -- Disable WSL Windows features (-RemoveWSL switch)
 if ($RemoveWSL) {
     Write-Host ""
     Write-Step "Disabling WSL Windows features..."
