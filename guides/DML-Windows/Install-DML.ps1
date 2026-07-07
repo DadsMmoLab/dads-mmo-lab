@@ -2749,6 +2749,8 @@ class TrayApp : ApplicationContext
             string versionLine;
             try
             {
+                // .NET Framework doesn't always enable TLS 1.2 by default; GitHub requires it.
+                System.Net.ServicePointManager.SecurityProtocol = System.Net.SecurityProtocolType.Tls12;
                 using (var wc = new System.Net.WebClient())
                 {
                     wc.Headers.Add("User-Agent", "DML-Launcher");
