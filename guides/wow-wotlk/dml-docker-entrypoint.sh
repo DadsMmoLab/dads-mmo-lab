@@ -24,16 +24,22 @@ if compgen -G "/azerothcore/env/ref/etc/*" >/dev/null; then
     || true
 fi
 
-CONF="$CONF_DIR/$ACORE_COMPONENT.conf"
-CONF_DIST="$CONF_DIR/$ACORE_COMPONENT.conf.dist"
-
-if [[ -f "$CONF_DIST" ]]; then
-  cp --update=none "$CONF_DIST" "$CONF" 2>/dev/null \
-    || cp -n "$CONF_DIST" "$CONF" 2>/dev/null \
+# Materialize any *.conf.dist that doesn't have a matching *.conf yet -- this
+# covers the main component conf below AND every module conf under modules/.
+# Without this, a module added after the volume already existed (its
+# .conf.dist lands via the ref/etc copy above, but nothing turns it into a
+# real .conf) silently falls back to hardcoded defaults and spams "Missing
+# property" warnings for every option it checks.
+while IFS= read -r -d '' dist; do
+  conf="${dist%.dist}"
+  [[ -f "$conf" ]] && continue
+  cp --update=none "$dist" "$conf" 2>/dev/null \
+    || cp -n "$dist" "$conf" 2>/dev/null \
     || true
-else
-  touch "$CONF"
-fi
+done < <(find "$CONF_DIR" -name '*.conf.dist' -print0 2>/dev/null)
+
+CONF="$CONF_DIR/$ACORE_COMPONENT.conf"
+[[ -f "$CONF" ]] || touch "$CONF"
 
 echo "Starting $ACORE_COMPONENT..."
 
