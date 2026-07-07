@@ -36,8 +36,11 @@ _has_persisted_data() {
 _release_wsl_windows() {
   command -v powershell.exe &>/dev/null || return 0
   local ps1="${DML_WIN_ROOT}/DML-Release-WSL.ps1"
-  local win_ps1="${ps1//\//\\}"
   [[ -f "$ps1" ]] || return 0
+  # Must be a real Windows path (C:\...) for -File to resolve; a naive slash
+  # swap on the /mnt/c/... form yields \mnt\c\... which PowerShell can't find.
+  local win_ps1
+  win_ps1="$(wslpath -w "$ps1" 2>/dev/null)" || win_ps1="${ps1//\//\\}"
   powershell.exe -NoProfile -WindowStyle Hidden -Command \
     "Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-WindowStyle','Hidden','-File','${win_ps1}') -WindowStyle Hidden" \
     2>/dev/null || true
