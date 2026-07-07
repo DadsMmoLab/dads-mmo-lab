@@ -284,9 +284,7 @@ You are ready for the next step!
 
 ## 👤 PART 4 — Your Account (WoW)
 
-The installer automatically creates an **admin / admin** account with GM Level 3. You can use that to log in immediately — no extra setup required.
-
-To create additional accounts, open the GM console:
+The installer does **not** create any account for you — you create your own the first time you start the server. Open the GM console:
 
 ```bash
 docker attach $(docker ps --format '{{.Names}}' | grep -i "worldserver\|mangosd" | head -1)

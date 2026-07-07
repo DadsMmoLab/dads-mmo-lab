@@ -113,7 +113,9 @@ _log "Waiting for AzerothCore (playerbots first boot can take several minutes)..
 if _wait_ready; then
   _log "wow-server-playerbots is ready"
   _log "Realm: AzerothCore at ${REALM_ADDRESS}:8085"
-  _log "Login: admin / admin"
+  _log "No account yet? Attach to the worldserver console and run:"
+  _log "  account create USERNAME PASSWORD"
+  _log "  account set gmlevel USERNAME 3 -1   (for GM/admin access)"
   docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' | grep -E 'NAMES|ac-'
   exit 0
 fi
