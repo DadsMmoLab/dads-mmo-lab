@@ -1,7 +1,7 @@
 # Dad's MMO Lab — Uninstaller: How-To Guide
 
 **Uninstaller:** Dad's MMO Lab Windows Uninstaller (Uninstall-DML.ps1)
-**Platform:** Windows 11
+**Platform:** Windows 10 and Windows 11
 
 ---
 
@@ -15,6 +15,7 @@
 | Startup shortcut | `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\DML Launcher.lnk` |
 | DML state directory | `%LOCALAPPDATA%\DadsMMOLab\` — install log, state file, and the VHD folder |
 | Phase 2 scheduled task | The `DadsMmoLab-Phase2` task registered during install |
+| LAN play network rules | The `DML LAN Play` firewall rules and the port proxy entries for the game ports (only rules pointing at `127.0.0.1` on DML's ports — anything else you've configured is left alone) |
 
 The following are **not removed automatically** — the uninstaller prompts you about each:
 
@@ -68,6 +69,7 @@ The uninstaller opens, lists what it's about to remove, and asks you to confirm:
     - DML state files and VHD (...)
     - Desktop and startup shortcuts
     - DadsMmoLab-Phase2 scheduled task
+    - LAN play firewall and port proxy rules
 
   Type YES to continue:
 ```
@@ -180,6 +182,10 @@ Test-Path "C:\DML"    # should return False
 
 # Confirm state directory is gone:
 Test-Path "$env:LOCALAPPDATA\DadsMMOLab"    # should return False
+
+# Confirm the LAN play port proxy rules are gone (list should be empty
+# unless you created rules of your own for other software):
+netsh interface portproxy show v4tov4
 ```
 
 If you removed WSL features and rebooted, `wsl -l -v` will report that WSL has no installed distributions (or that WSL is not installed at all).
