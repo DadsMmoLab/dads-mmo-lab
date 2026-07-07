@@ -89,9 +89,13 @@ _log_ok "All progress preserved — database and client data remain in Docker vo
 _log_ok "Next Start will bring everything back (no re-import needed)"
 
 if [[ "$(docker ps -q 2>/dev/null | wc -l | tr -d '[:space:]')" -eq 0 ]]; then
+  echo ""
   _log "No servers running — releasing WSL memory to Windows..."
-  _log "This window will close on its own in a few seconds once WSL shuts down — that's expected, not an error."
+  _log "WSL is shutting down to free that RAM -- this window will close on its own in a few seconds."
+  _log "You may see \"process exited\" and a prompt to restart -- there's nothing to restart, just close the window."
   _release_wsl_windows 8
+  rm -f "$DML_BUSY_MARKER"
+  exit 0
 fi
 
 rm -f "$DML_BUSY_MARKER"
