@@ -24,7 +24,7 @@ All servers run in **Docker** via [AzerothCore's official Docker compose setup](
 ### 🧰 Install & First-Time Setup
 
 #### [WoW-WotLK-HOWTO.md](./WoW-WotLK-HOWTO.md)
-**Platform: Steam Deck + Linux (Ubuntu / Debian / Fedora)**
+**Steam Deck / Arch Linux**
 
 The full walkthrough for installing AzerothCore WotLK + Playerbots and managing your server. Steam Deck users get the fully automated installer script — Linux users will find the server management, account creation, and networking sections all apply directly.
 
@@ -34,6 +34,14 @@ The full walkthrough for installing AzerothCore WotLK + Playerbots and managing 
 - Walks through account creation, realmlist setup, and daily use
 - Includes the **Managing Your Server** section covering both `wow-manage.sh` and The Lab GUI
 - Covers troubleshooting, bot settings, and force-rebuild
+
+**Fedora / Bazzite**
+
+Go through the full install guide, but skip the Steam Deck-specific sections. The server management, account creation, and networking sections all apply directly. Use `install-wow-wotlk-fedora.sh` to install AzerothCore WotLK + Playerbots on Fedora systems.
+
+**Ubuntu / Debian / Linux Mint**
+
+Go through the full install guide, but skip the Steam Deck-specific sections. The server management, account creation, and networking sections all apply directly. Use `install-wow-wotlk-ubuntu.sh` to install AzerothCore WotLK + Playerbots on Ubuntu/Debian/Linux Mint systems.
 
 **Windows users:** See [DML-Windows-HOWTO.md](../DML-Windows/DML-Windows-HOWTO.md) for the Windows installer walkthrough.
 
