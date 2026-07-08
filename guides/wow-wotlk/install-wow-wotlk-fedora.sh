@@ -5,7 +5,7 @@
 #
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 #
-#  Version: 1.3.3 - Fedora
+#  Version: 1.3.4 - Fedora
 #
 #  Usage:
 #    chmod +x install-wow.sh
@@ -20,6 +20,18 @@
 #    6. Sets up the Gaming Mode launcher
 #
 #  Changelog:
+#    1.3.4 — containerd dependency + service failure diagnosis
+#      - Start containerd.service before docker.service — docker CE's unit file
+#        has Requires=containerd.service; starting docker without containerd
+#        caused silent startup failure (|| true swallowed the error).
+#      - When docker binary exists and packages are layered but daemon won't
+#        start, the script was falling through to rpm-ostree install which
+#        failed with "No packages in transaction" (already layered). Now:
+#        show `systemctl status docker` + `journalctl -u docker` and exit
+#        with a clear actionable error message instead.
+#      - Added --idempotent to the first-time rpm-ostree CE install.
+#      - Separated docker-ps check from compose check in the immutable block.
+#      - Extended readiness polling from 10 to 15 iterations (30 seconds).
 #    1.3.3 — Session permissions + first-install fixes (from Bazzite doc review)
 #      - CRITICAL: After the Bazzite early-return path, all docker compose calls
 #        in the rest of the script failed with permission denied because the
@@ -83,7 +95,7 @@
 #      - Heredoc launcher synced with standalone launcher scripts
 # ============================================================
 
-WIZARD_VERSION="1.3.3 - Fedora"
+WIZARD_VERSION="1.3.4 - Fedora"
 
 set -o pipefail
 
@@ -224,13 +236,11 @@ check_system() {
 # ─────────────────────────────────────────
 install_docker() {
     # ── On immutable systems (Bazzite), Docker may already be present as a
-    #    layered package from a prior install attempt, or in some Bazzite
-    #    variants pre-configured via the distrobox Docker image. Either way,
-    #    if the binary exists and the daemon can be started, skip any
-    #    rpm-ostree install — it will conflict with @System packages.
+    #    layered package from a prior install attempt. If the binary exists,
+    #    try to start the daemon before attempting any rpm-ostree install —
+    #    reinstalling packages that are already in @System will fail.
     if [[ "${FEDORA_IMMUTABLE:-false}" == "true" ]] && command -v docker &>/dev/null; then
-        # Guard against the podman-docker shim, which masquerades as docker
-        # but won't work with our docker compose server setup
+        # Guard against the podman-docker shim
         if [[ -L /usr/bin/docker ]] && readlink /usr/bin/docker 2>/dev/null | grep -q podman; then
             print_error "podman-docker shim detected at /usr/bin/docker. This script requires real Docker CE."
             print_info "Remove podman-docker and install Docker CE first, then re-run."
@@ -238,36 +248,71 @@ install_docker() {
         fi
 
         print_info "Docker binary found on immutable system — enabling and starting service..."
+        # containerd must start first — docker.service Requires=containerd.service
+        sudo systemctl enable --now containerd 2>/dev/null || true
+        sleep 2
         sudo systemctl enable --now docker 2>/dev/null || true
 
-        # Poll for daemon readiness — docker info is the canonical API probe
-        for i in {1..10}; do sudo docker info &>/dev/null && break; sleep 2; done
+        # Poll for daemon readiness — docker info tests the API, not just the socket
+        for i in {1..15}; do sudo docker info &>/dev/null && break; sleep 2; done
 
-        # Use sudo: user isn't in docker group yet so unprivileged docker ps fails
-        if sudo docker ps &>/dev/null && sudo docker compose version &>/dev/null; then
-            print_success "Docker is running on this immutable system."
-            sudo usermod -aG docker "$USER" 2>/dev/null || true
+        if sudo docker ps &>/dev/null 2>&1; then
+            # Daemon is up — check compose separately so we can handle each case
+            if sudo docker compose version &>/dev/null 2>&1; then
+                print_success "Docker is running on this immutable system."
+                sudo usermod -aG docker "$USER" 2>/dev/null || true
 
-            # ── Session fix: group change won't take effect until next login.
-            #    Set up passwordless sudo for docker so the rest of this install
-            #    session works transparently. User can remove the file after
-            #    their first logout:  sudo rm /etc/sudoers.d/docker-nopasswd
-            print_info "Setting up Docker permissions for this session..."
-            echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/docker" | \
-                sudo tee /etc/sudoers.d/docker-nopasswd > /dev/null 2>&1 || true
-            sudo chmod 0440 /etc/sudoers.d/docker-nopasswd 2>/dev/null || true
-            if ! docker ps &>/dev/null 2>&1; then
-                function docker() { sudo docker "$@"; }
-                export -f docker 2>/dev/null || true
-                print_info "Using sudo for Docker this session — works normally after next login"
+                # ── Session fix: group change won't take effect until next login.
+                #    Set up passwordless sudo for docker so the rest of this install
+                #    session works transparently. User can remove the file after
+                #    their first logout:  sudo rm /etc/sudoers.d/docker-nopasswd
+                print_info "Setting up Docker permissions for this session..."
+                echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/docker" | \
+                    sudo tee /etc/sudoers.d/docker-nopasswd > /dev/null 2>&1 || true
+                sudo chmod 0440 /etc/sudoers.d/docker-nopasswd 2>/dev/null || true
+                if ! docker ps &>/dev/null 2>&1; then
+                    function docker() { sudo docker "$@"; }
+                    export -f docker 2>/dev/null || true
+                    print_info "Using sudo for Docker this session — works normally after next login"
+                fi
+
+                print_success "Docker permissions configured!"
+                return 0
+            else
+                # Daemon runs but compose plugin is missing — layer it and reboot
+                print_warning "Docker is running but the Compose plugin is missing."
+                print_info "Layering docker-compose-plugin via rpm-ostree..."
+                sudo rpm-ostree install -y --idempotent docker-compose-plugin 2>/dev/null || \
+                sudo rpm-ostree install -y --idempotent docker-compose 2>/dev/null || {
+                    print_error "Could not install docker-compose-plugin via rpm-ostree."
+                    exit 1
+                }
+                print_success "docker-compose-plugin layered. Rebooting in 10 seconds — re-run this script after reboot."
+                sleep 10
+                sudo systemctl reboot
+                exit 0
             fi
-
-            print_success "Docker permissions configured!"
-            return 0
+        else
+            # Docker binary and packages are present but daemon won't start.
+            # Show the actual error — do NOT fall through to reinstall, it will
+            # fail with "No packages in transaction" since everything is already layered.
+            print_error "Docker is installed but the service failed to start."
+            echo ""
+            echo -e "${YELLOW}  Docker service status:${NC}"
+            sudo systemctl status docker --no-pager -l 2>&1 | head -20
+            echo ""
+            echo -e "${YELLOW}  Recent Docker logs:${NC}"
+            sudo journalctl -u docker --no-pager -n 20 2>&1
+            echo ""
+            print_info "Common fixes:"
+            print_info "  sudo systemctl restart containerd && sudo systemctl restart docker"
+            print_info "  If SELinux is blocking: sudo setenforce 0 (temporary) or check audit log"
+            print_error "Fix the Docker service issue above, then re-run this script."
+            exit 1
         fi
     fi
 
-    # Check for working Docker with Compose plugin.
+    # ── Check for a Docker + Compose setup that is already running ────────
     # On immutable systems also try sudo in case user isn't in docker group yet.
     if command -v docker &>/dev/null && \
        (docker ps &>/dev/null 2>&1 || { [[ "${FEDORA_IMMUTABLE:-false}" == "true" ]] && sudo docker ps &>/dev/null 2>&1; }); then
@@ -277,7 +322,6 @@ install_docker() {
         else
             print_warning "Docker is running but the Compose plugin is missing."
             print_info "Attempting to install docker-compose-plugin..."
-            # On immutable systems use rpm-ostree; on plain Fedora use dnf
             if [[ "${FEDORA_IMMUTABLE:-false}" == "true" ]]; then
                 if sudo rpm-ostree install -y --idempotent docker-compose-plugin 2>/dev/null || \
                    sudo rpm-ostree install -y --idempotent docker-compose 2>/dev/null; then
@@ -301,11 +345,12 @@ install_docker() {
         fi
     fi
 
+    # ── First-time install (no docker binary found) ───────────────────────
     print_info "Installing Docker..."
 
     if [[ "${FEDORA_IMMUTABLE:-false}" == "true" ]]; then
         # ── Bazzite / immutable Fedora path (rpm-ostree) ─────────────────
-        # Only reached if docker binary was not found (truly first-time install).
+        # Only reached if docker binary was not found at all (truly first install).
         # Must add the Docker CE repo first, then layer the correct packages.
         print_info "Immutable system detected — installing Docker CE via rpm-ostree..."
         print_warning "This will require a REBOOT to take effect."
@@ -325,7 +370,8 @@ install_docker() {
             exit 1
         fi
 
-        if ! sudo rpm-ostree install -y \
+        # --idempotent: succeeds cleanly if packages are already layered
+        if ! sudo rpm-ostree install -y --idempotent \
                 docker-ce docker-ce-cli containerd.io \
                 docker-buildx-plugin docker-compose-plugin; then
             print_error "rpm-ostree Docker install failed. Check your connection and try again."
