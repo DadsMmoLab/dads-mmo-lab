@@ -12,8 +12,8 @@ All servers run in **Docker** via [AzerothCore's official Docker compose setup](
 
 | My platform | Start here |
 |---|---|
-| **Steam Deck** | [WoW-WotLK-HOWTO.md](./WoW-WotLK-HOWTO.md) — full install walkthrough with automated installer |
-| **Ubuntu / Debian / Fedora** | [WoW-WotLK-HOWTO.md](./WoW-WotLK-HOWTO.md) — server setup, account creation, daily use commands |
+| **Steam Deck and Machine** | [WoW-WotLK-HOWTO.md](./WoW-WotLK-HOWTO.md) — full install walkthrough with automated installer |
+| **Linux (Debian, Fedora, Bazzite, Ubuntu, PopOS!, Arch Linux, Mint)** | [WoW-WotLK-HOWTO.md](./WoW-WotLK-HOWTO.md) — server setup, account creation, daily use commands |
 | **Windows 10/11** | [DML-Windows-HOWTO.md](../DML-Windows/DML-Windows-HOWTO.md) — full Windows installer walkthrough |
 | **Want multiplayer (LAN or internet)?** | [WoW-Wotlk-NETWORKING.md](./WoW-Wotlk-NETWORKING.md) — firewall, port forwarding, connecting friends |
 
@@ -39,9 +39,9 @@ The full walkthrough for installing AzerothCore WotLK + Playerbots and managing 
 
 Go through the full install guide, but skip the Steam Deck-specific sections. The server management, account creation, and networking sections all apply directly. Use `install-wow-wotlk-fedora.sh` to install AzerothCore WotLK + Playerbots on Fedora systems.
 
-**Ubuntu / Debian / Linux Mint**
+**Ubuntu / Debian / PopOS! / Linux Mint**
 
-Go through the full install guide, but skip the Steam Deck-specific sections. The server management, account creation, and networking sections all apply directly. Use `install-wow-wotlk-ubuntu.sh` to install AzerothCore WotLK + Playerbots on Ubuntu/Debian/Linux Mint systems.
+Go through the full install guide, but skip the Steam Deck-specific sections. The server management, account creation, and networking sections all apply directly. Use `install-wow-wotlk-ubuntu.sh` to install AzerothCore WotLK + Playerbots on Ubuntu/Debian/PopOS!/Linux Mint systems.
 
 **Windows users:** See [DML-Windows-HOWTO.md](../DML-Windows/DML-Windows-HOWTO.md) for the Windows installer walkthrough.
 
