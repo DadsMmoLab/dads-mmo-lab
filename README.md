@@ -8,14 +8,14 @@
 
 ## 🎯 What Is This?
 
-This is a collection of **step-by-step guides, Docker scripts, and automated installers** for running classic MMO private servers **completely offline** on a Steam Deck (or any Linux machine).
+This is a collection of **step-by-step guides, Docker scripts, and automated installers** for running classic MMO private servers **completely offline** on a Steam Deck, any Linux machine, or Windows 10/11 (via WSL2).
 
 No subscription. No internet required. No servers getting shut down. Just you and the games you love — forever.
 
 Every guide here is built around:
 - ✅ **Open source emulators only** — no copyrighted assets, no game files distributed
 - ✅ **Docker-based** — clean, repeatable, easy to remove
-- ✅ **Steam Deck tested** — every setup verified on SteamOS
+- ✅ **Steam Deck tested** — every setup verified on SteamOS; also runs on Linux and Windows 10/11 (WSL2)
 - ✅ **Dad-friendly** — written for people who love games, not just developers
 - ✅ **One command install** — automated installers handle everything
 
@@ -53,7 +53,7 @@ Turns out — for a lot of classic MMOs — you can. The emulator community has 
 | ⚔️ WoW Vanilla 1.12.1 | CMaNGOS Classic + Playerbots | Playerbots | ✅ Complete | [View Guide](./guides/wow-vanilla/HOWTO-WOW-VANILLA.md) |
 | ⚔️ WoW The Burning Crusade 2.4.3 | CMaNGOS TBC + Playerbots | Playerbots | ✅ Complete | [View Guide](./guides/wow-tbc/WoW-TBC-HOWTO.md) |
 | ⚔️ WoW Wrath of the Lich King 3.3.5a | AzerothCore + Playerbots | Playerbots | ✅ Complete | [View Guide](./guides/wow-wotlk/WoW-WotLK-HOWTO.md) |
-| ⚔️ WoW Wrath of the Lich King — Unbound Edition | AzerothCore + WoW Unbound | Playerbots | ✅ Complete | [View Guide](./guides/unbound-wrath/) |
+| ⚔️ WoW Wrath of the Lich King — Unbound Add-on | AzerothCore + Wrath Unbound | Playerbots | ✅ Complete | [View Guide](./guides/unbound-wrath/) |
 | 🏃 RuneScape 2009 (SD) | 2009scape Singleplayer | Bots | ✅ Complete | [View Guide](./guides/runescape/HOWTO-RUNESCAPE.md) |
 | 🏃 RuneScape 2009 (HD) | 2009scape + Saradomin Launcher | Bots | ✅ Complete | [View Guide](./guides/runescape/RuneScape-HD-HOWTO.md) |
 | 🍄 MapleStory v83 Pre-Big Bang | Cosmic | None | ✅ Complete | [View Guide](./guides/Maplestory/MapleStory-v83-HOWTO.md) |
@@ -112,16 +112,29 @@ Turns out — for a lot of classic MMOs — you can. The emulator community has 
 
 | File | What it does |
 |------|-------------|
-| `install-wow-wotlk.sh` | Full automated installer — one command does everything |
-| `WoW-WotLK-HOWTO.md` | Beginner install guide — zero Linux knowledge needed |
-| `manage-wow-modules.sh` | Enable / disable optional server modules in-place |
+| `install-wow-wotlk.sh` | Automated installer for Steam Deck / Arch Linux |
+| `install-wow-wotlk-fedora.sh` | Automated installer for Fedora / Bazzite |
+| `install-wow-wotlk-ubuntu.sh` | Automated installer for Ubuntu / Debian / PopOS! / Mint |
+| `Install-WoW-WotLK.ps1` | Automated installer for Windows 10/11 (WSL2) |
+| `wow-manage.sh` | Interactive menu-driven server manager (start, stop, mods, config) |
+| `dml-start.sh` | Lightweight server start script |
+| `WoW-WotLK-HOWTO.md` | Full install & beginner guide (Steam Deck / Linux) |
+| `WoW-Wotlk-NETWORKING.md` | LAN and internet multiplayer setup |
+| `WoW-WotLK-CONTROLS-1.md` | Server management reference — Part 1 (start/stop/accounts) |
+| `WoW-WotLK-CONTROLS-2.md` | Server management reference — Part 2 (GM console, troubleshooting) |
+| `WoW-WotLK-CREATE-ACCOUNTS.md` | Quick reference for creating player accounts |
+| `WoW-Playerbots-Windows-HOWTO.md` | Windows-specific Playerbots setup guide |
+| `ALE-Kegs/` | Optional Eluna Lua mods (Black Market AH, Season of Discovery) |
 
-### WoW Wrath of the Lich King — Unbound Edition (`guides/unbound-wrath/`)
+### Wrath Unbound Add-on (`guides/unbound-wrath/`)
+
+> **Requires a working WotLK Playerbots server first.** This is an add-on that layers onto an existing install — run the WotLK installer before this one.
 
 | File | What it does |
 |------|-------------|
-| `install-wow-unbound.sh` | Full automated installer — one command does everything |
-| `WoW-Unbound-HOWTO.md` | Beginner install guide — dual/triple class system explained |
+| `install-wrath-unbound-addon.sh` | Installs the Wrath Unbound multi-class mod onto your WotLK server |
+| `uninstall-wrath-unbound-addon.sh` | Removes the Wrath Unbound mod cleanly |
+| `Wrath-Unbound-Addon-HOWTO.md` | Setup guide — multi-class system, the Mentor NPC, unlocks |
 
 ### RuneScape 2009 (`guides/runescape/`)
 
@@ -146,6 +159,23 @@ Turns out — for a lot of classic MMOs — you can. The emulator community has 
 | `install-muonline.sh` | Full automated installer — one command does everything |
 | `MU-Online-HOWTO.md` | Beginner install guide — zero Linux knowledge needed |
 
+### Windows Support (`guides/DML-Windows/`)
+
+| File | What it does |
+|------|-------------|
+| `Install-DML.ps1` | Windows substrate installer — sets up WSL2 + Arch Linux + Docker + the `dml` CLI and tray app |
+| `Uninstall-DML.ps1` | Cleanly removes the DML Windows environment |
+| `DML-Windows-HOWTO.md` | Full Windows install walkthrough |
+| `HOWTO-WINDOWS-WSL2.md` | WSL2 setup and troubleshooting reference |
+| `Uninstall-DML-HOWTO.md` | Uninstall guide for Windows |
+
+### Uninstalling (`guides/`)
+
+| File | What it does |
+|------|-------------|
+| `uninstall.sh` | Removes a Dad's MMO Lab server install |
+| `Uninstall-HOWTO.md` | Uninstall guide |
+
 ---
 
 ## 🚀 Quick Start
@@ -167,9 +197,9 @@ chmod +x install-wow-tbc.sh && ./install-wow-tbc.sh
 chmod +x install-wow-wotlk.sh && ./install-wow-wotlk.sh
 ```
 
-**WoW Wrath of the Lich King — Unbound Edition:**
+**WoW Wrath of the Lich King — Unbound Add-on** *(run after the WotLK installer):*
 ```bash
-chmod +x install-wow-unbound.sh && ./install-wow-unbound.sh
+chmod +x install-wrath-unbound-addon.sh && ./install-wrath-unbound-addon.sh
 ```
 
 **RuneScape 2009:**
@@ -191,6 +221,13 @@ chmod +x install-maplestory.sh && ./install-maplestory.sh
 ```bash
 chmod +x install-muonline.sh && ./install-muonline.sh
 ```
+
+**Windows 10/11 (any game):** Open PowerShell as Administrator and run the Windows substrate installer first, then install your game:
+```powershell
+Set-ExecutionPolicy Bypass -Scope Process; .\Install-DML.ps1
+```
+
+Full walkthrough in [guides/DML-Windows/DML-Windows-HOWTO.md](./guides/DML-Windows/DML-Windows-HOWTO.md).
 
 Every WoW installer:
 - ✅ Detects SteamOS and fixes the pacman keyring
@@ -218,9 +255,11 @@ All WoW installers ship with **Playerbots** pre-configured — bots that roam th
 
 ---
 
-## ⚔️ WoW Unbound — Multi-Class System
+## ⚔️ Wrath Unbound — Multi-Class Add-on
 
-WoW Unbound is a custom dual/triple class mod built on AzerothCore. Play WotLK as a classless hybrid — combine any classes into a character that's uniquely yours.
+Wrath Unbound is a multi-class mod that layers onto Dad's MMO Lab's WotLK Playerbots server. Play WotLK as a classless hybrid — unlock additional classes through an NPC called **The Mentor** and buy that class's abilities with gold.
+
+> **Requires the WotLK server installed first.** Run `install-wow-wotlk.sh` (or the Windows/Fedora/Ubuntu equivalent) before installing the add-on.
 
 | Milestone | Unlock | Cost |
 |-----------|--------|------|
@@ -232,6 +271,7 @@ WoW Unbound is a custom dual/triple class mod built on AzerothCore. Play WotLK a
 - Hundreds of Playerbots fill the world
 - Runs completely offline — your server, your rules, forever
 - Open source under AGPL-3.0, consistent with AzerothCore
+- Covers 9 of WotLK's 10 classes (all except Death Knight)
 
 [📖 Full Guide](./guides/unbound-wrath/)
 
@@ -366,9 +406,6 @@ Or just:
 ## 📜 License
 
 Installer scripts and guides in this repo are released under the
-[MIT License](./LICENSE).
-
-WoW Unbound server modifications are released under the
 [GNU Affero General Public License v3.0](./LICENSE-AGPL),
 consistent with AzerothCore's licensing.
 
