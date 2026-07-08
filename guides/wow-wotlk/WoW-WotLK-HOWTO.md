@@ -5,7 +5,9 @@
 **Platform:** Steam Deck (SteamOS), Desktop Mode + Gaming Mode
 
 > 📍 **Not on a Steam Deck?**
-> - **Ubuntu / Debian / Fedora:** The server runs in Docker the same way — the server management, account creation, and networking sections in this guide all apply to you. The automated installer script is Steam Deck specific; skip to [Step 2](./WoW-WotLK-HOWTO.md#step-2--create-your-account) once your server is running.
+> - **Arch Linux / SteamOS:** The server runs in Docker the same way — the server management, account creation, and networking sections in this guide all apply to you. The automated installer script is Steam Deck specific.
+> - **Fedora / Bazzite:** The server runs in Docker the same way — the server management, account creation, and networking sections in this guide all apply to you. The automated installer script is Steam Deck specific. Use the fedora script.
+> - **Debian / Ubuntu / PopOS! / Linux Mint:** The server runs in Docker the same way — the server management, account creation, and networking sections in this guide all apply to you. The automated installer script is Steam Deck specific. Use the ubuntu script.
 > - **Windows 10/11:** Use the [DML Windows Installer guide](../DML-Windows/DML-Windows-HOWTO.md) for a full Windows walkthrough, then return here for the server management and networking sections.
 
 ---
@@ -15,7 +17,7 @@
 A fully offline, single-player-friendly Wrath of the Lich King server running on your Steam Deck. No internet required after install. Includes:
 
 - **AzerothCore WotLK** — the open-source WoW WotLK server core
-- **mod-playerbots** — 1,600–2,000 AI players that roam Azeroth and Northrend, group up, and run dungeons
+- **mod-playerbots** — Several hundred AI players that roam Azeroth and Northrend, group up, and run dungeons
 - **Gaming Mode launcher** — one-button start from your Steam library
 
 This installer uses AzerothCore's own Docker compose build system, which handles map data download automatically. No WoW client path is required.
@@ -33,12 +35,16 @@ This installer uses AzerothCore's own Docker compose build system, which handles
 
 **Before you start — make sure you have all of these:**
 
+__HOLD ON!__ Fedora / Bazzite users: skip the Steam Deck-specific instructions. Use `install-wow-wotlk-fedora.sh` to install AzerothCore WotLK + Playerbots on Fedora systems.
+
+__HOLD ON!__ Ubuntu / Debian / Linux Mint users: skip the Steam Deck-specific instructions. Use `install-wow-wotlk-ubuntu.sh` to install AzerothCore WotLK + Playerbots on Ubuntu/Debian/Linux Mint systems.
+
 - [ ] `install-wow-wotlk.sh` downloaded into your **Downloads** folder. To download it: go to [github.com/DadsMmoLab/dads-mmo-lab](https://github.com/DadsMmoLab/dads-mmo-lab) → open the `guides/wow-wotlk/` folder → click `install-wow-wotlk.sh` → click the **download** icon (arrow pointing down) → save to your Downloads folder.
 - [ ] A **WoW 3.3.5a (Wrath of the Lich King)** game client already on your Steam Deck. The server software does not include game files — you supply your own client.
 - [ ] **Docker** — the installer will install and start Docker automatically if it isn't already running. You don't need to install it manually. To verify Docker is already running (optional): open Konsole and run `docker ps`. If you see a table header (even empty), Docker is running. If you get an error, don't worry — the installer handles it.
 - [ ] **GE-Proton** installed in Steam (for the WoW client shortcut in Step 4). Install it via **ProtonUp-Qt** from the Discover app store.
 
-> **New to Steam Deck Desktop Mode?**  
+> **New to Steam Deck Desktop Mode?**
 > Press **Steam button → Power → Switch to Desktop** to reach the desktop. To get back to Gaming Mode, double-click **Return to Gaming Mode** on the desktop.
 
 ---

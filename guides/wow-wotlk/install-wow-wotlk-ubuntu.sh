@@ -5,7 +5,7 @@
 #
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 #
-#  Version: 1.3.0
+#  Version: 1.4.0
 #
 #  Usage:
 #    chmod +x install-wow.sh
@@ -20,6 +20,15 @@
 #    6. Sets up the Gaming Mode launcher
 #
 #  Changelog:
+#    1.4.0 — Debian / Ubuntu port
+#      - Replaced Fedora/dnf/rpm-ostree with apt + Docker CE (Debian)
+#      - Distro detection now targets Ubuntu, Debian, Mint, Pop!_OS
+#      - Removed immutable/rpm-ostree split — not applicable on Debian family
+#      - Docker CE installed via official apt repo with GPG keyring
+#      - Detects ubuntu vs debian Docker repo automatically
+#      - install_git() uses apt-get
+#      - Removed SELinux :Z volume label — not applicable on Debian family
+#      - Updated confirmation box to show apt as package manager
 #    1.3.0 — Fedora / Bazzite port
 #      - Replaced pacman/Arch package management with dnf (Fedora)
 #      - Removed check_pacman_keyring() — not applicable on Fedora
@@ -43,7 +52,7 @@
 #      - Heredoc launcher synced with standalone launcher scripts
 # ============================================================
 
-WIZARD_VERSION="1.3.0"
+WIZARD_VERSION="1.4.0"
 
 set -o pipefail
 
@@ -113,30 +122,34 @@ check_system() {
     print_step "Checking System Requirements"
 
     if [[ "$OSTYPE" != "linux-gnu"* ]]; then
-        print_error "This script supports Fedora-based Linux only (Fedora, Bazzite)."
+        print_error "This script supports Debian-based Linux only (Ubuntu, Mint, Pop!_OS, Debian)."
         exit 1
     fi
     print_success "Linux detected"
 
-    # Verify this is a Fedora-family distro
+    # Verify this is a supported Debian-family distro
     if [[ -f /etc/os-release ]]; then
         source /etc/os-release
-        if [[ "$ID" != "fedora" && "$ID_LIKE" != *"fedora"* && "$ID" != "bazzite" ]]; then
-            print_error "Unsupported distro: $PRETTY_NAME"
-            print_info "This script is for Fedora or Fedora-based distros (e.g., Bazzite)."
+        case "$ID" in
+            ubuntu|debian|linuxmint|pop) ;;
+            *)
+                print_error "Unsupported distro: ${PRETTY_NAME:-$ID}"
+                print_info "This script supports: Ubuntu, Debian, Linux Mint, Pop!_OS."
+                print_info "If you're on a derivative, try adapting the script manually."
+                exit 1
+                ;;
+        esac
+        print_success "Supported distro detected: ${PRETTY_NAME:-$ID}"
+
+        # Mint uses its own VERSION_CODENAME — Docker needs the upstream Ubuntu one
+        if [[ "$ID" == "linuxmint" ]] && [[ -z "$UBUNTU_CODENAME" ]]; then
+            print_error "Linux Mint detected but UBUNTU_CODENAME is not set in /etc/os-release."
+            print_info "Cannot safely resolve the Ubuntu codename needed for Docker's apt repo."
+            print_info "Make sure your /etc/os-release includes UBUNTU_CODENAME (standard on Mint 21+)."
             exit 1
         fi
-        print_success "Fedora-family distro detected: ${PRETTY_NAME:-$ID}"
     else
         print_warning "Could not read /etc/os-release — proceeding at your own risk."
-    fi
-
-    # Detect immutable/Bazzite (rpm-ostree)
-    if command -v rpm-ostree &>/dev/null; then
-        FEDORA_IMMUTABLE=true
-        print_info "Immutable Fedora (Bazzite / rpm-ostree) detected."
-    else
-        FEDORA_IMMUTABLE=false
     fi
 
     # ── Confirm detected package manager path with user ───────────────
@@ -145,15 +158,9 @@ check_system() {
     echo -e "${WHITE}${BOLD} Detected System Type${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
-    if [[ "$FEDORA_IMMUTABLE" == "true" ]]; then
-        echo -e "  ${GREEN}✅ Bazzite / Immutable Fedora${NC}"
-        echo -e "  ${WHITE}Package manager: ${CYAN}rpm-ostree${NC}"
-        echo -e "  ${DIM}Docker will be layered via rpm-ostree (requires reboot)${NC}"
-    else
-        echo -e "  ${GREEN}✅ Standard Fedora${NC}"
-        echo -e "  ${WHITE}Package manager: ${CYAN}dnf${NC}"
-        echo -e "  ${DIM}Docker will be installed via dnf + Docker CE repo${NC}"
-    fi
+    echo -e "  ${GREEN}✅ Debian-family Linux (${PRETTY_NAME:-$ID})${NC}"
+    echo -e "  ${WHITE}Package manager: ${CYAN}apt${NC}"
+    echo -e "  ${DIM}Docker will be installed via apt + Docker CE repo${NC}"
     echo ""
     echo -e "  ${YELLOW}Is this correct?${NC}"
     echo -e "  ${DIM}(If wrong, press Ctrl+C to exit and check your distro)${NC}"
@@ -161,7 +168,7 @@ check_system() {
     if ! ask_yes_no "Continue with the detected system type?"; then
         echo ""
         print_error "Aborted. Re-run once you've confirmed your distro."
-        print_info "Expected: Fedora (dnf) or Bazzite/Immutable Fedora (rpm-ostree)"
+        print_info "Expected: Ubuntu, Debian, Linux Mint, or Pop!_OS"
         exit 1
     fi
 
@@ -191,7 +198,7 @@ install_docker() {
         else
             print_warning "Docker is running but the Compose plugin is missing."
             print_info "Attempting to install docker-compose-plugin..."
-            if sudo dnf -y install docker-compose-plugin; then
+            if sudo apt-get install -y docker-compose-plugin; then
                 print_success "docker-compose-plugin installed!"
                 return 0
             else
@@ -201,63 +208,95 @@ install_docker() {
         fi
     fi
 
-    print_info "Installing Docker..."
-
-    if [[ "${FEDORA_IMMUTABLE:-false}" == "true" ]]; then
-        # ── Bazzite / immutable Fedora path (rpm-ostree) ─────────────────
-        print_info "Immutable system detected — installing Docker via rpm-ostree..."
-        print_warning "This will require a REBOOT to take effect."
+    # Detect snap-installed Docker and warn — snap Docker is not compatible with this script
+    if snap list docker &>/dev/null 2>&1; then
         echo ""
-        echo -e "${YELLOW}  rpm-ostree will layer Docker onto your system image.${NC}"
-        echo -e "${YELLOW}  After installation you MUST reboot, then re-run this script.${NC}"
+        print_warning "snap-installed Docker detected."
+        echo -e "${YELLOW}  Snap Docker is not compatible with this installer.${NC}"
+        echo -e "${YELLOW}  It must be removed before Docker CE can be installed.${NC}"
         echo ""
-        if ! ask_yes_no "Install Docker via rpm-ostree and reboot now?"; then
-            print_info "Skipped. Re-run after manually installing Docker."
-            exit 0
-        fi
-
-        if ! sudo rpm-ostree install -y docker docker-compose; then
-            print_error "rpm-ostree Docker install failed. Check your connection and try again."
+        if ask_yes_no "Remove snap Docker and install Docker CE instead?"; then
+            sudo snap remove docker
+            sleep 2
+        else
+            print_error "Cannot continue with snap Docker. Remove it manually and re-run."
             exit 1
         fi
+    fi
 
-        print_success "Docker layered. Rebooting in 10 seconds — re-run this script after reboot."
-        sleep 10
-        sudo systemctl reboot
-        exit 0
+    print_info "Installing Docker CE..."
+
+    # Remove conflicting distro-packaged Docker before installing CE
+    print_info "Removing any conflicting Docker packages..."
+    for pkg in docker.io docker-compose docker-compose-v2 docker-doc podman-docker containerd runc; do
+        sudo apt-get remove -y "$pkg" 2>/dev/null || true
+    done
+
+    # Install prerequisites
+    print_info "Installing prerequisites..."
+    if ! sudo apt-get update -qq; then
+        print_warning "apt-get update failed — attempting to continue."
+    fi
+    if ! sudo apt-get install -y ca-certificates curl; then
+        print_error "Failed to install prerequisites (ca-certificates, curl)."
+        exit 1
+    fi
+
+    # Add Docker's official GPG key
+    print_info "Adding Docker GPG key..."
+    sudo install -m 0755 -d /etc/apt/keyrings
+
+    # Determine correct Docker repo: ubuntu or debian
+    # Mint and Pop!_OS are Ubuntu-based; pure Debian uses its own repo
+    local DOCKER_REPO_DISTRO="ubuntu"
+    if [[ "$ID" == "debian" ]]; then
+        DOCKER_REPO_DISTRO="debian"
+    fi
+
+    if ! sudo curl -fsSL \
+            "https://download.docker.com/linux/${DOCKER_REPO_DISTRO}/gpg" \
+            -o /etc/apt/keyrings/docker.asc; then
+        print_error "Failed to download Docker GPG key."
+        exit 1
+    fi
+    sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+    # Resolve the correct codename:
+    # Mint sets UBUNTU_CODENAME (validated above); Ubuntu/Pop set VERSION_CODENAME
+    local CODENAME
+    if [[ "$ID" == "linuxmint" ]]; then
+        CODENAME="$UBUNTU_CODENAME"
     else
-        # ── Plain Fedora path (dnf) ───────────────────────────────────────
-        # Remove conflicting packages (e.g. podman-docker, moby-engine) before installing CE
-        print_info "Removing any conflicting Docker packages..."
-        for pkg in docker docker-client docker-client-latest docker-common \
-                   docker-latest docker-latest-logrotate docker-logrotate \
-                   docker-selinux docker-engine-selinux docker-engine moby-engine; do
-            sudo dnf -y remove "$pkg" 2>/dev/null || true
-        done
+        CODENAME="${VERSION_CODENAME}"
+    fi
+    if [[ -z "$CODENAME" ]]; then
+        CODENAME=$(lsb_release -cs 2>/dev/null || true)
+    fi
+    if [[ -z "$CODENAME" ]]; then
+        print_error "Could not determine OS codename. Cannot add Docker repo."
+        exit 1
+    fi
 
-        print_info "Installing dnf-plugins-core..."
-        if ! sudo dnf -y install dnf-plugins-core; then
-            print_error "Failed to install dnf-plugins-core."
-            exit 1
-        fi
+    print_info "Adding Docker CE repository (${DOCKER_REPO_DISTRO} / ${CODENAME})..."
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+https://download.docker.com/linux/${DOCKER_REPO_DISTRO} ${CODENAME} stable" | \
+        sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 
-        # Add Docker CE repo — use direct curl download so it works on both
-        # dnf4 (Fedora ≤40) and dnf5 (Fedora 41+, where config-manager syntax changed)
-        print_info "Adding Docker CE repository..."
-        if ! sudo curl -fsSL \
-                https://download.docker.com/linux/fedora/docker-ce.repo \
-                -o /etc/yum.repos.d/docker-ce.repo; then
-            print_error "Failed to download Docker CE repo file. Check your internet connection."
-            exit 1
-        fi
+    print_info "Updating package index with Docker CE repo..."
+    if ! sudo apt-get update -qq; then
+        print_error "apt-get update failed after adding Docker repo."
+        print_info "  Repo:     ${DOCKER_REPO_DISTRO}"
+        print_info "  Codename: ${CODENAME}"
+        print_info "Check that this distro/codename is supported at: https://download.docker.com/linux/${DOCKER_REPO_DISTRO}/dists/"
+        exit 1
+    fi
 
-        print_info "Installing Docker CE..."
-        if ! sudo dnf -y install \
-                docker-ce docker-ce-cli containerd.io \
-                docker-buildx-plugin docker-compose-plugin; then
-            print_error "Failed to install Docker. Check your internet connection."
-            exit 1
-        fi
+    print_info "Installing Docker CE packages..."
+    if ! sudo apt-get install -y \
+            docker-ce docker-ce-cli containerd.io \
+            docker-buildx-plugin docker-compose-plugin; then
+        print_error "Failed to install Docker. Check your internet connection and repo setup."
+        exit 1
     fi
 
     sudo usermod -aG docker "$USER"
@@ -304,20 +343,11 @@ install_git() {
     fi
     print_info "Installing Git..."
 
-    if [[ "${FEDORA_IMMUTABLE:-false}" == "true" ]]; then
-        if sudo rpm-ostree install -y git; then
-            print_success "Git layered via rpm-ostree — reboot required before first use."
-        else
-            print_warning "Git installation failed — some features may not work."
-            print_info "Try manually: sudo rpm-ostree install git"
-        fi
+    if sudo apt-get install -y git; then
+        print_success "Git installed!"
     else
-        if sudo dnf -y install git; then
-            print_success "Git installed!"
-        else
-            print_warning "Git installation failed — some features may not work."
-            print_info "Try manually: sudo dnf install -y git"
-        fi
+        print_warning "Git installation failed — some features may not work."
+        print_info "Try manually: sudo apt-get install -y git"
     fi
 }
 
@@ -427,7 +457,7 @@ services:
       context: .
       target: worldserver
     volumes:
-      - ./modules:/azerothcore/modules:Z
+      - ./modules:/azerothcore/modules
     environment:
       AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES: "1"
       AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN: "1"
@@ -548,12 +578,12 @@ setup_gaming_mode() {
     # Detect available terminal emulator (global — also used by show_completion)
     TERM_BIN=""
     TERM_ARGS=""
-    if command -v konsole &>/dev/null; then
-        TERM_BIN="/usr/bin/konsole"
-        TERM_ARGS="--hold -e bash ~/wow-playerbots-launcher.sh"
-    elif command -v gnome-terminal &>/dev/null; then
+    if command -v gnome-terminal &>/dev/null; then
         TERM_BIN="/usr/bin/gnome-terminal"
         TERM_ARGS="-- bash -c 'bash ~/wow-playerbots-launcher.sh; read -r'"
+    elif command -v konsole &>/dev/null; then
+        TERM_BIN="/usr/bin/konsole"
+        TERM_ARGS="--hold -e bash ~/wow-playerbots-launcher.sh"
     elif command -v xterm &>/dev/null; then
         TERM_BIN="/usr/bin/xterm"
         TERM_ARGS="-hold -e bash ~/wow-playerbots-launcher.sh"
