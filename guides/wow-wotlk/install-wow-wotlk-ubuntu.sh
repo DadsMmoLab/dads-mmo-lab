@@ -5,7 +5,7 @@
 #
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 #
-#  Version: 1.4.0
+#  Version: 1.3.0 - Debian
 #
 #  Usage:
 #    chmod +x install-wow.sh
@@ -52,7 +52,7 @@
 #      - Heredoc launcher synced with standalone launcher scripts
 # ============================================================
 
-WIZARD_VERSION="1.4.0"
+WIZARD_VERSION="1.3.0 - Debian"
 
 set -o pipefail
 

@@ -8,7 +8,7 @@
 > - **Arch Linux / SteamOS:** The server runs in Docker the same way — the server management, account creation, and networking sections in this guide all apply to you. The automated installer script is Steam Deck specific.
 > - **Fedora / Bazzite:** The server runs in Docker the same way — the server management, account creation, and networking sections in this guide all apply to you. The automated installer script is Steam Deck specific. Use the fedora script.
 > - **Debian / Ubuntu / PopOS! / Linux Mint:** The server runs in Docker the same way — the server management, account creation, and networking sections in this guide all apply to you. The automated installer script is Steam Deck specific. Use the ubuntu script.
-> - **Windows 10/11:** Use the [DML Windows Installer guide](../DML-Windows/DML-Windows-HOWTO.md) for a full Windows walkthrough, then return here for the server management and networking sections.
+> - **Windows 10/11:** Use the [DML Windows Installer guide](../DML-Windows/DML-Windows-HOWTO.md) for a full Windows walkthrough, then return here for the server management and networking sections. You should be using the `Install-WoW-WotLK.ps1` script from that guide, not the Linux installer scripts in this guide.
 
 ---
 
@@ -40,7 +40,22 @@ __HOLD ON!__ Fedora / Bazzite users: skip the Steam Deck-specific instructions. 
 __HOLD ON!__ Ubuntu / Debian / Linux Mint users: skip the Steam Deck-specific instructions. Use `install-wow-wotlk-ubuntu.sh` to install AzerothCore WotLK + Playerbots on Ubuntu/Debian/Linux Mint systems.
 
 - [ ] `install-wow-wotlk.sh` downloaded into your **Downloads** folder. To download it: go to [github.com/DadsMmoLab/dads-mmo-lab](https://github.com/DadsMmoLab/dads-mmo-lab) → open the `guides/wow-wotlk/` folder → click `install-wow-wotlk.sh` → click the **download** icon (arrow pointing down) → save to your Downloads folder.
-- [ ] A **WoW 3.3.5a (Wrath of the Lich King)** game client already on your Steam Deck. The server software does not include game files — you supply your own client.
+   - Alternative: You can use curl to download it directly;
+   - **SteamOS**:
+   ```bash
+   curl -o ~/Downloads/install-wow-wotlk.sh https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/guides/wow-wotlk/install-wow-wotlk.sh
+   ```
+
+   - **Fedora**:
+   ```bash
+   curl -o ~/Downloads/install-wow-wotlk-fedora.sh https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/guides/wow-wotlk/install-wow-wotlk-fedora.sh
+   ```
+
+   - **Debian**:
+   ```bash
+   curl -o ~/Downloads/install-wow-wotlk-ubuntu.sh https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/guides/wow-wotlk/install-wow-wotlk-ubuntu.sh
+   ```
+- [ ] A **WoW 3.3.5a (Wrath of the Lich King)** game client already on your device. The server software does not include game files — you supply your own client. Chromiecraft HD works great for this, or you can use your own legally obtained copy of the game. The client must be **3.3.5a** — other versions will not work, Classic Era from Battle.net does not work.
 - [ ] **Docker** — the installer will install and start Docker automatically if it isn't already running. You don't need to install it manually. To verify Docker is already running (optional): open Konsole and run `docker ps`. If you see a table header (even empty), Docker is running. If you get an error, don't worry — the installer handles it.
 - [ ] **GE-Proton** installed in Steam (for the WoW client shortcut in Step 4). Install it via **ProtonUp-Qt** from the Discover app store.
 
@@ -53,13 +68,26 @@ __HOLD ON!__ Ubuntu / Debian / Linux Mint users: skip the Steam Deck-specific in
 
 > **In Linux (and on your Steam Deck), `~` is a shortcut that means your home folder** — the personal folder where your files live. So `~/Downloads` is your Downloads folder.
 
-**Open Konsole** — the black terminal app. You'll find it pinned to the taskbar in Desktop Mode, or search for it in the application launcher. This is where you type commands.
+**Open Konsole or Terminal** — the black terminal app. You'll find it pinned to the taskbar in Desktop Mode, or search for it in the application launcher. This is where you type commands.
 
 Run these two commands:
 
+SteamOS / Arch Linux:
 ```bash
 chmod +x ~/Downloads/install-wow-wotlk.sh
 ~/Downloads/install-wow-wotlk.sh
+```
+
+Fedora / Bazzite:
+```bash
+chmod +x ~/Downloads/install-wow-wotlk-fedora.sh
+~/Downloads/install-wow-wotlk-fedora.sh
+```
+
+Ubuntu / Debian / Linux Mint / PopOS!:
+```bash
+chmod +x ~/Downloads/install-wow-wotlk-ubuntu.sh
+~/Downloads/install-wow-wotlk-ubuntu.sh
 ```
 
 > The first command (`chmod +x`) gives the file permission to run as a program. The second command starts it.  
@@ -175,8 +203,10 @@ You need two Steam shortcuts. A **Non-Steam Game** is just a shortcut in your St
 
 ### Shortcut 1: Server Launcher
 
-1. Steam → **Add a Non-Steam Game** → browse to `/usr/bin/konsole`  
+1. Steam → **Add a Non-Steam Game** → browse to `/usr/bin/konsole`
    *(In the file picker, navigate to the root of the filesystem `/`, then `usr` → `bin` → select `konsole`)*
+   - For Fedora, the path is `/usr/bin/konsole` as well if you have KDE installed. If you don't have KDE, use your terminal app's path instead (e.g., `gnome-terminal` or `xterm`).
+   - For Debian, Ubuntu, and PopOS!, the path is different, if you have gnome, use `/usr/bin/gnome-terminal` instead of `konsole`.
 2. Rename to: `WoW Playerbots Server`
 3. Right-click → **Properties** → Launch Options:
    ```
@@ -188,7 +218,8 @@ You need two Steam shortcuts. A **Non-Steam Game** is just a shortcut in your St
 ### Shortcut 2: WoW Client
 
 1. Steam → **Add a Non-Steam Game** → browse to `WoW.exe` in your client folder
-2. Rename to: `Wrath of the Lich King`
+2. Rename to: `World of Warcraft: Wrath of the Lich King`
+   - The name helps steam find controller layouts.
 3. Compatibility tab: **Force a specific Steam Play compatibility tool** → select **GE-Proton** (latest)  
    *(If you don't see GE-Proton, install it first via ProtonUp-Qt from the Discover app store)*
 
