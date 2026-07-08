@@ -5,7 +5,7 @@
 #
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 #
-#  Version: 1.3.1 - Fedora
+#  Version: 1.3.2 - Fedora
 #
 #  Usage:
 #    chmod +x install-wow.sh
@@ -20,14 +20,23 @@
 #    6. Sets up the Gaming Mode launcher
 #
 #  Changelog:
+#    1.3.2 — Bazzite docker group / sudo fix
+#      - Bazzite ships docker-ce (not moby-engine) in @System. After
+#        systemctl enable --now docker, the daemon is running but the user
+#        is not in the docker group yet, so unprivileged `docker ps` returns
+#        permission denied. Script fell through to rpm-ostree install which
+#        conflicted with @System packages. Fix: use `sudo docker ps` and
+#        `sudo docker compose version` for the immutable early-out check.
+#        If both pass, add user to docker group and return 0 — no
+#        rpm-ostree install attempted.
 #    1.3.1 — Bazzite pre-bundled Docker fix
-#      - On immutable systems, Docker (moby-engine) is part of the Bazzite
-#        base image and is not a layered package. The daemon just isn't started
-#        yet. The previous check (docker ps) required the daemon to be running,
-#        so it fell through to rpm-ostree install, which fatally conflicted with
-#        moby-engine/@System. Fix: on immutable systems, try systemctl enable
-#        --now docker first if the binary exists, then re-check before
-#        attempting any rpm-ostree install.
+#      - On immutable systems, Docker is part of the Bazzite base image and
+#        is not a layered package. The daemon just isn't started yet. The
+#        previous check (docker ps) required the daemon to be running, so it
+#        fell through to rpm-ostree install, which fatally conflicted with
+#        @System. Fix: on immutable systems, try systemctl enable --now docker
+#        first if the binary exists, then re-check before attempting any
+#        rpm-ostree install.
 #      - Added --idempotent flag to rpm-ostree install calls to avoid
 #        conflicts when packages are already provided by the base image.
 #      - Compose plugin missing fallback now correctly uses rpm-ostree on
@@ -55,7 +64,7 @@
 #      - Heredoc launcher synced with standalone launcher scripts
 # ============================================================
 
-WIZARD_VERSION="1.3.1 - Fedora"
+WIZARD_VERSION="1.3.2 - Fedora"
 
 set -o pipefail
 
@@ -195,14 +204,21 @@ check_system() {
 # INSTALL DOCKER
 # ─────────────────────────────────────────
 install_docker() {
-    # ── On immutable systems (Bazzite), Docker (moby-engine) is pre-bundled in the
-    #    base OS image — it won't show up as a layered package, but the binary exists.
-    #    The daemon just hasn't been started yet. Try to start it before attempting
-    #    any install, so we don't hit @System conflicts with rpm-ostree.
+    # ── On immutable systems (Bazzite), Docker CE is pre-bundled in the base
+    #    OS image as part of @System — it's not a layered package. The binary
+    #    exists but the daemon hasn't been started and the user isn't in the
+    #    docker group yet. Start the service and verify with sudo before
+    #    attempting any rpm-ostree install (which would conflict with @System).
     if [[ "${FEDORA_IMMUTABLE:-false}" == "true" ]] && command -v docker &>/dev/null; then
         print_info "Docker binary found on immutable system — enabling and starting service..."
         sudo systemctl enable --now docker 2>/dev/null || true
         sleep 3
+        # Use sudo: user isn't in docker group yet so unprivileged docker ps fails
+        if sudo docker ps &>/dev/null 2>&1 && sudo docker compose version &>/dev/null 2>&1; then
+            print_success "Docker is pre-installed and running (Bazzite base image)."
+            sudo usermod -aG docker "$USER" 2>/dev/null || true
+            return 0
+        fi
     fi
 
     # Check for working Docker with Compose plugin
