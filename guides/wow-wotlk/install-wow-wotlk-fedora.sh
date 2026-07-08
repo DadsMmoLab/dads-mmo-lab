@@ -5,7 +5,7 @@
 #
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 #
-#  Version: 1.3.0 - Fedora
+#  Version: 1.3.1 - Fedora
 #
 #  Usage:
 #    chmod +x install-wow.sh
@@ -20,6 +20,18 @@
 #    6. Sets up the Gaming Mode launcher
 #
 #  Changelog:
+#    1.3.1 — Bazzite pre-bundled Docker fix
+#      - On immutable systems, Docker (moby-engine) is part of the Bazzite
+#        base image and is not a layered package. The daemon just isn't started
+#        yet. The previous check (docker ps) required the daemon to be running,
+#        so it fell through to rpm-ostree install, which fatally conflicted with
+#        moby-engine/@System. Fix: on immutable systems, try systemctl enable
+#        --now docker first if the binary exists, then re-check before
+#        attempting any rpm-ostree install.
+#      - Added --idempotent flag to rpm-ostree install calls to avoid
+#        conflicts when packages are already provided by the base image.
+#      - Compose plugin missing fallback now correctly uses rpm-ostree on
+#        immutable systems instead of dnf.
 #    1.3.0 — Fedora / Bazzite port
 #      - Replaced pacman/Arch package management with dnf (Fedora)
 #      - Removed check_pacman_keyring() — not applicable on Fedora
@@ -43,7 +55,7 @@
 #      - Heredoc launcher synced with standalone launcher scripts
 # ============================================================
 
-WIZARD_VERSION="1.3.0 - Fedora"
+WIZARD_VERSION="1.3.1 - Fedora"
 
 set -o pipefail
 
@@ -183,7 +195,17 @@ check_system() {
 # INSTALL DOCKER
 # ─────────────────────────────────────────
 install_docker() {
-    # Check for working Docker CE with Compose plugin
+    # ── On immutable systems (Bazzite), Docker (moby-engine) is pre-bundled in the
+    #    base OS image — it won't show up as a layered package, but the binary exists.
+    #    The daemon just hasn't been started yet. Try to start it before attempting
+    #    any install, so we don't hit @System conflicts with rpm-ostree.
+    if [[ "${FEDORA_IMMUTABLE:-false}" == "true" ]] && command -v docker &>/dev/null; then
+        print_info "Docker binary found on immutable system — enabling and starting service..."
+        sudo systemctl enable --now docker 2>/dev/null || true
+        sleep 3
+    fi
+
+    # Check for working Docker with Compose plugin
     if command -v docker &>/dev/null && docker ps &>/dev/null 2>&1; then
         if docker compose version &>/dev/null 2>&1; then
             print_success "Docker (with Compose plugin) already installed and running"
@@ -191,12 +213,26 @@ install_docker() {
         else
             print_warning "Docker is running but the Compose plugin is missing."
             print_info "Attempting to install docker-compose-plugin..."
-            if sudo dnf -y install docker-compose-plugin; then
-                print_success "docker-compose-plugin installed!"
-                return 0
+            # On immutable systems use rpm-ostree; on plain Fedora use dnf
+            if [[ "${FEDORA_IMMUTABLE:-false}" == "true" ]]; then
+                if sudo rpm-ostree install -y --idempotent docker-compose-plugin 2>/dev/null || \
+                   sudo rpm-ostree install -y --idempotent docker-compose 2>/dev/null; then
+                    print_success "docker-compose-plugin layered. Rebooting in 10 seconds — re-run this script after reboot."
+                    sleep 10
+                    sudo systemctl reboot
+                    exit 0
+                else
+                    print_error "Could not install docker-compose-plugin via rpm-ostree."
+                    exit 1
+                fi
             else
-                print_error "Could not install docker-compose-plugin. Check your Docker CE repo setup."
-                exit 1
+                if sudo dnf -y install docker-compose-plugin; then
+                    print_success "docker-compose-plugin installed!"
+                    return 0
+                else
+                    print_error "Could not install docker-compose-plugin. Check your Docker CE repo setup."
+                    exit 1
+                fi
             fi
         fi
     fi
@@ -205,6 +241,7 @@ install_docker() {
 
     if [[ "${FEDORA_IMMUTABLE:-false}" == "true" ]]; then
         # ── Bazzite / immutable Fedora path (rpm-ostree) ─────────────────
+        # Only reached if docker binary was not found above (truly not installed).
         print_info "Immutable system detected — installing Docker via rpm-ostree..."
         print_warning "This will require a REBOOT to take effect."
         echo ""
@@ -216,7 +253,7 @@ install_docker() {
             exit 0
         fi
 
-        if ! sudo rpm-ostree install -y docker docker-compose; then
+        if ! sudo rpm-ostree install -y --idempotent docker docker-compose; then
             print_error "rpm-ostree Docker install failed. Check your connection and try again."
             exit 1
         fi
