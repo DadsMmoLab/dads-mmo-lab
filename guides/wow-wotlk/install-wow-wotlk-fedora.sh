@@ -5,7 +5,7 @@
 #
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 #
-#  Version: 1.3.4 - Fedora
+#  Version: 1.3.5 - Fedora
 #
 #  Usage:
 #    chmod +x install-wow.sh
@@ -20,6 +20,18 @@
 #    6. Sets up the Gaming Mode launcher
 #
 #  Changelog:
+#    1.3.5 — docker.socket failed-state recovery (Bazzite)
+#      - Root cause: on Bazzite, docker.socket can be left in a failed state
+#        from a prior run; docker.service then fails with "dependency failed"
+#        even after restart because the socket unit is still stuck.
+#      - Fix: call `systemctl reset-failed containerd docker docker.socket`
+#        before the enable attempts so stale failed state is cleared first.
+#      - Start docker.socket explicitly (enable --now docker.socket) before
+#        docker.service — the socket unit must be active for the service to start.
+#      - Improved diagnostics in the failure path: show docker.socket status,
+#        containerd status, and combined journal for all three units.
+#      - Updated recommended fix commands to the correct 3-step sequence
+#        (reset-failed → containerd → socket → service) instead of restart.
 #    1.3.4 — containerd dependency + service failure diagnosis
 #      - Start containerd.service before docker.service — docker CE's unit file
 #        has Requires=containerd.service; starting docker without containerd
@@ -248,9 +260,20 @@ install_docker() {
         fi
 
         print_info "Docker binary found on immutable system — enabling and starting service..."
+        # Reset any stale failed state — a failed docker.socket will block a fresh
+        # start even after the root cause is resolved (shows as "dependency failed").
+        sudo systemctl reset-failed containerd docker docker.socket 2>/dev/null || true
         # containerd must start first — docker.service Requires=containerd.service
         sudo systemctl enable --now containerd 2>/dev/null || true
         sleep 2
+        # Verify containerd is actually active before attempting docker
+        if ! sudo systemctl is-active --quiet containerd 2>/dev/null; then
+            print_warning "containerd did not start — will diagnose below if docker also fails."
+        fi
+        # Start docker.socket explicitly before docker.service — on Bazzite the
+        # socket unit can be stuck in a failed state, which cascades to the service.
+        sudo systemctl enable --now docker.socket 2>/dev/null || true
+        sleep 1
         sudo systemctl enable --now docker 2>/dev/null || true
 
         # Poll for daemon readiness — docker info tests the API, not just the socket
@@ -301,12 +324,24 @@ install_docker() {
             echo -e "${YELLOW}  Docker service status:${NC}"
             sudo systemctl status docker --no-pager -l 2>&1 | head -20
             echo ""
+            echo -e "${YELLOW}  docker.socket status:${NC}"
+            sudo systemctl status docker.socket --no-pager -l 2>&1 | head -10
+            echo ""
+            echo -e "${YELLOW}  containerd status:${NC}"
+            sudo systemctl status containerd --no-pager -l 2>&1 | head -10
+            echo ""
             echo -e "${YELLOW}  Recent Docker logs:${NC}"
-            sudo journalctl -u docker --no-pager -n 20 2>&1
+            sudo journalctl -u docker -u docker.socket -u containerd --no-pager -n 30 2>&1
             echo ""
             print_info "Common fixes:"
-            print_info "  sudo systemctl restart containerd && sudo systemctl restart docker"
+            print_info "  Step 1 — reset stale failed-unit state:"
+            print_info "    sudo systemctl reset-failed containerd docker docker.socket"
+            print_info "  Step 2 — start in order (containerd → socket → service):"
+            print_info "    sudo systemctl enable --now containerd"
+            print_info "    sudo systemctl enable --now docker.socket"
+            print_info "    sudo systemctl start docker"
             print_info "  If SELinux is blocking: sudo setenforce 0 (temporary) or check audit log"
+            print_info "  Then re-run this script."
             print_error "Fix the Docker service issue above, then re-run this script."
             exit 1
         fi
