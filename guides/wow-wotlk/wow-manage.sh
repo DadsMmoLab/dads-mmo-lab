@@ -1046,10 +1046,20 @@ detect_install() {
 
     local -a found_dirs=()
     local d
+    # Servers historically lived at $HOME/wow-server*; the DML Launcher moves
+    # them into $HOME/games/ (GAMES_DIR). Scan both locations so the manager
+    # finds the server no matter which layout is in use. Dedup by resolved
+    # path in case the same server shows up in both (mid-migration, or a
+    # games/ symlink back to the old directory).
+    local -A _seen=()
+    local _rp
     # Use a glob with nullglob behavior — handle "no matches" gracefully
     shopt -s nullglob
-    for d in "$HOME"/wow-server*; do
+    for d in "$HOME"/wow-server* "$HOME"/games/wow-server*; do
         if [ -d "$d" ] && [ -f "$d/docker-compose.yml" ]; then
+            _rp=$(realpath "$d" 2>/dev/null || echo "$d")
+            [ -n "${_seen[$_rp]:-}" ] && continue
+            _seen[$_rp]=1
             found_dirs+=("$d")
         fi
     done
@@ -1057,7 +1067,7 @@ detect_install() {
 
     if [ "${#found_dirs[@]}" -eq 0 ]; then
         print_error "No WoW installation found!"
-        print_info "Looked for any \$HOME/wow-server* directory with docker-compose.yml"
+        print_info "Looked for any wow-server* directory (with docker-compose.yml) in \$HOME or \$HOME/games"
         echo ""
         print_info "Run install-wow.sh first."
         exit 1
