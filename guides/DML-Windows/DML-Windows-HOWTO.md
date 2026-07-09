@@ -575,6 +575,8 @@ MMO servers with large databases need 20+ GB inside the Linux environment. Plan 
 
 **Still killed at the same spot?** Drop to **`processors=1`**, run `wsl --shutdown` again, and retry. Single-threaded is slower — it can take a couple of hours on a weak laptop — but it will finish, because only one compiler runs at a time.
 
+> **Good to know:** the installer now picks memory-safe build settings automatically based on your PC's RAM, so most machines won't hit this at all. And once a `.wslconfig` exists, **re-running the installer keeps it** — it won't overwrite your changes (or revert a tweak you made here).
+
 ### "archlinux distro" still visible after uninstalling
 
 The uninstaller prompts about the `archlinux` distro if it finds it registered. If you skipped that prompt (or used an older uninstaller), remove it manually:
