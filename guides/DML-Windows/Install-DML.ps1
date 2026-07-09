@@ -525,22 +525,52 @@ function Invoke-Phase2 {
     Write-Step "Configuring WSL2 resource limits (.wslconfig)..."
     $cs          = Get-CimInstance Win32_ComputerSystem
     $totalRamGB  = [math]::Round($cs.TotalPhysicalMemory / 1GB)
-    $hostCores   = $cs.NumberOfLogicalProcessors
-    $wslRamGB    = [math]::Max(2, [math]::Round($totalRamGB * 0.60))
-    $wslSwapGB   = [math]::Max(2, [math]::Round($wslRamGB / 2))
-    $wslCores    = [math]::Min(4, $hostCores)
+    $hostCores   = [int]$cs.NumberOfLogicalProcessors
+    $wslRamGB    = [int][math]::Max(2, [math]::Round($totalRamGB * 0.60))
+
+    # Bound build parallelism by MEMORY, not just core count. Compiling a WoW
+    # worldserver (the initial WotLK build, or the Wrath Unbound add-on) runs
+    # one C++ compiler per core, ~2 GB each at peak. Too many on a low-RAM
+    # machine exhaust WSL's memory and the build gets SIGKILLed mid-compile
+    # (dies at the same low % every retry). ~2 GB/core keeps it in budget;
+    # machines with enough RAM still get the full 4.
+    $memBoundCores = [int][math]::Max(1, [math]::Floor($wslRamGB / 2))
+    $wslCores      = [int][math]::Min([math]::Min(4, $hostCores), $memBoundCores)
+
+    # Swap is a dynamic file (grows only as used) -- a safety net for the memory
+    # spikes a compile produces. Floor at 8 GB so low-RAM machines can finish a
+    # worldserver build instead of getting killed.
+    $wslSwapGB   = [int][math]::Max(8, [math]::Round($wslRamGB / 2))
     Write-Diag "Host: ${totalRamGB} GB RAM, $hostCores logical cores"
-    Write-Diag "WSL2 cap: ${wslRamGB} GB RAM, $wslCores cores, ${wslSwapGB} GB swap"
+    Write-Diag "WSL2 recommendation: ${wslRamGB} GB RAM, $wslCores cores, ${wslSwapGB} GB swap"
 
     $wslConfigPath = "$env:USERPROFILE\.wslconfig"
-    @"
+    if (Test-Path $wslConfigPath) {
+        # Never overwrite an existing .wslconfig -- the user may have hand-tuned
+        # it (the HOWTO tells low-RAM users to). Keep it, but check it isn't set
+        # up in a way that will OOM a WoW build, and nudge toward the fix if so.
+        $existing  = Get-Content $wslConfigPath -Raw
+        $curProc   = if ($existing -match '(?im)^\s*processors\s*=\s*(\d+)') { [int]$Matches[1] } else { $null }
+        $curSwapGB = if ($existing -match '(?im)^\s*swap\s*=\s*(\d+)')       { [int]$Matches[1] } else { $null }
+        Write-Ok "Existing .wslconfig found -- keeping your settings (not overwriting)."
+        if (($null -ne $curProc -and $curProc -gt $wslCores) -or ($null -ne $curSwapGB -and $curSwapGB -lt $wslSwapGB)) {
+            Write-Warn "Your .wslconfig may be too aggressive for compiling a WoW server on this PC."
+            Write-Warn "If a build gets killed partway, set processors=$wslCores and swap=${wslSwapGB}GB in"
+            Write-Warn "  $wslConfigPath, then run 'wsl --shutdown'. (See the HOWTO troubleshooting.)"
+        }
+    } else {
+        @"
+# Dad's MMO Lab -- WSL2 resource limits. Safe to edit by hand; the installer
+# will not overwrite this file once it exists. If a WoW server build runs out
+# of memory, lower 'processors' and/or raise 'swap' (see the HOWTO).
 [wsl2]
 memory=${wslRamGB}GB
 processors=$wslCores
 swap=${wslSwapGB}GB
 localhostForwarding=true
 "@ | Set-Content -Path $wslConfigPath -Encoding UTF8
-    Write-Ok ".wslconfig written: ${wslRamGB} GB RAM, $wslCores cores, ${wslSwapGB} GB swap"
+        Write-Ok ".wslconfig written: ${wslRamGB} GB RAM, $wslCores cores, ${wslSwapGB} GB swap"
+    }
 
     # -------------------------------------------------------------------------
     # Step 7: Install Arch Linux as isolated 'dml-arch' distro
