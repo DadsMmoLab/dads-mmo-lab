@@ -1,4 +1,4 @@
-﻿#Requires -RunAsAdministrator
+#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
     Dad's MMO Lab -- Windows Substrate Installer
@@ -780,7 +780,7 @@ echo "[docker] Socket ready"
     # If the installed version doesn't match the bundled version, clear the
     # phase3-bootstrap marker so Step 10 re-installs the CLI automatically.
     # -------------------------------------------------------------------------
-    $ExpectedCliVersion = 'dml v2.2.0'
+    $ExpectedCliVersion = 'dml v2.6.0'
     $installedCliRaw = ''
     try {
         $installedCliRaw = (wsl -d $DmlDistroName -- dml version 2>$null)
@@ -807,7 +807,7 @@ echo "[docker] Socket ready"
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="2.2.0"
+VERSION="2.6.0"
 GAMES_DIR="$HOME/games"
 
 _require_docker() {
@@ -1286,6 +1286,122 @@ case "$cmd" in
     exec bash "$entrypoint"
     ;;
 
+  manage)
+    # Open the WoW Server Manager (wow-manage.sh) -- a self-contained TUI for
+    # AzerothCore WoW servers (modules, AH bot, server controls). It is NOT
+    # embedded in this installer: it is 7000+ lines and updated independently,
+    # so we pull the latest copy from GitHub on each launch and cache it under
+    # ~/.dml. That keeps the available options current without re-shipping the
+    # launcher. Offline, we fall back to the last cached copy.
+    manage_url="https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/guides/wow-wotlk/wow-manage.sh"
+    cache_dir="$HOME/.dml"
+    cache_file="$cache_dir/wow-manage.sh"
+    mkdir -p "$cache_dir"
+
+    tmp_file="$cache_file.download.$$"
+    if curl -fsSL --max-time 30 -o "$tmp_file" "$manage_url" 2>/dev/null; then
+        # Trust the download only if it looks like the manager. A captive
+        # portal login page or truncated transfer would otherwise clobber a
+        # known-good cached copy. (No pipe here -- a SIGPIPE under pipefail
+        # would read as a false validation failure.)
+        first_line=$(head -1 "$tmp_file")
+        if [[ "$first_line" == *bash* ]] && grep -q 'MANAGER_VERSION=' "$tmp_file"; then
+            mv -f "$tmp_file" "$cache_file"
+            echo "[dml] WoW Server Manager is up to date (latest from GitHub)."
+        else
+            rm -f "$tmp_file"
+            echo "[dml] Downloaded manager failed validation -- keeping existing copy." >&2
+        fi
+    else
+        rm -f "$tmp_file"
+        [[ -f "$cache_file" ]] && echo "[dml] Offline -- using the cached WoW Server Manager." >&2
+    fi
+
+    if [[ ! -f "$cache_file" ]]; then
+        echo "[dml] ERROR: Could not download the WoW Server Manager and no cached copy exists." >&2
+        echo "[dml] Check your internet connection and try 'dml manage' again." >&2
+        exit 1
+    fi
+
+    chmod +x "$cache_file" 2>/dev/null || true
+    exec bash "$cache_file"
+    ;;
+
+  unbound)
+    # Layer the Wrath Unbound multi-class add-on onto an existing WotLK
+    # Playerbots server. Same fetch-and-run model as 'dml manage': the
+    # installer is maintained upstream and pulled fresh each launch (validated,
+    # cached under ~/.dml, offline falls back to the cached copy). It force-
+    # rebuilds the worldserver, so it is left to run interactively in a
+    # terminal -- the tray only offers it for the running wow-server-playerbots
+    # title.
+    unbound_url="https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/guides/unbound-wrath/install-wrath-unbound-addon.sh"
+    cache_dir="$HOME/.dml"
+    cache_file="$cache_dir/install-wrath-unbound-addon.sh"
+    mkdir -p "$cache_dir"
+
+    tmp_file="$cache_file.download.$$"
+    if curl -fsSL --max-time 30 -o "$tmp_file" "$unbound_url" 2>/dev/null; then
+        first_line=$(head -1 "$tmp_file")
+        if [[ "$first_line" == *bash* ]] && grep -q 'WIZARD_VERSION=' "$tmp_file"; then
+            mv -f "$tmp_file" "$cache_file"
+            echo "[dml] Wrath Unbound add-on installer is up to date (latest from GitHub)."
+        else
+            rm -f "$tmp_file"
+            echo "[dml] Downloaded add-on installer failed validation -- keeping existing copy." >&2
+        fi
+    else
+        rm -f "$tmp_file"
+        [[ -f "$cache_file" ]] && echo "[dml] Offline -- using the cached Wrath Unbound add-on installer." >&2
+    fi
+
+    if [[ ! -f "$cache_file" ]]; then
+        echo "[dml] ERROR: Could not download the Wrath Unbound add-on installer and no cached copy exists." >&2
+        echo "[dml] Check your internet connection and try 'dml unbound' again." >&2
+        exit 1
+    fi
+
+    chmod +x "$cache_file" 2>/dev/null || true
+    exec bash "$cache_file"
+    ;;
+
+  unbound-remove)
+    # Uninstall the Wrath Unbound add-on: drops its tables, reverts the
+    # core-engine patch and worldserver.conf, removes module files, and
+    # rebuilds the worldserver without the module. Same fetch-and-run model as
+    # 'dml unbound'. The uninstaller has no version constant, so we validate on
+    # a structural sentinel (its detect_server_dir function) instead. It is
+    # interactive and prompts for confirmation before destructive steps.
+    unbound_rm_url="https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/guides/unbound-wrath/uninstall-wrath-unbound-addon.sh"
+    cache_dir="$HOME/.dml"
+    cache_file="$cache_dir/uninstall-wrath-unbound-addon.sh"
+    mkdir -p "$cache_dir"
+
+    tmp_file="$cache_file.download.$$"
+    if curl -fsSL --max-time 30 -o "$tmp_file" "$unbound_rm_url" 2>/dev/null; then
+        first_line=$(head -1 "$tmp_file")
+        if [[ "$first_line" == *bash* ]] && grep -q 'detect_server_dir' "$tmp_file"; then
+            mv -f "$tmp_file" "$cache_file"
+            echo "[dml] Wrath Unbound uninstaller is up to date (latest from GitHub)."
+        else
+            rm -f "$tmp_file"
+            echo "[dml] Downloaded uninstaller failed validation -- keeping existing copy." >&2
+        fi
+    else
+        rm -f "$tmp_file"
+        [[ -f "$cache_file" ]] && echo "[dml] Offline -- using the cached Wrath Unbound uninstaller." >&2
+    fi
+
+    if [[ ! -f "$cache_file" ]]; then
+        echo "[dml] ERROR: Could not download the Wrath Unbound uninstaller and no cached copy exists." >&2
+        echo "[dml] Check your internet connection and try 'dml unbound-remove' again." >&2
+        exit 1
+    fi
+
+    chmod +x "$cache_file" 2>/dev/null || true
+    exec bash "$cache_file"
+    ;;
+
   lan)
     # dml lan <title> on <ip> | off | status | refresh <ip>
     #
@@ -1328,21 +1444,40 @@ case "$cmd" in
     _require_docker
     cd "$compose_dir"
 
-    # Only AzerothCore-family titles are supported: they expose an
-    # 'ac-database' service and store the advertised address in
-    # acore_auth.realmlist.
-    if ! docker compose config --services 2>/dev/null | grep -qx 'ac-database'; then
-        echo "[dml] LAN play is not supported for '$title' yet."
-        echo "[dml] (Currently supported: AzerothCore-based servers like WoW WotLK Playerbots.)"
-        exit 1
+    # Two server families support LAN play. Both advertise their address in a
+    # 'realmlist' row (id=1), so everything below the family split is shared;
+    # only the database container, name, and credentials differ:
+    #   * AzerothCore  -- 'ac-database' service, DB acore_auth, root/password
+    #   * Tortoise WoW -- MaNGOS-Zero 'db' service, DB tw_logon; the MariaDB
+    #                     root password is field 4 of LoginDatabase.Info in
+    #                     etc/mangosd.conf ("db;3306;mangos;<pw>;tw_logon").
+    services=$(docker compose config --services 2>/dev/null || true)
+    if echo "$services" | grep -qx 'ac-database'; then
+        db=$(docker compose ps -q ac-database 2>/dev/null | head -1 || true)
+        if [[ -z "$db" ]]; then
+            echo "[dml] ERROR: '$title' is not running. Start the server first, then change LAN settings."
+            exit 1
+        fi
+        _lan_sql() { docker exec "$db" mysql -uroot -ppassword acore_auth -sN -e "$1" 2>/dev/null; }
+    else
+        # MaNGOS family. Only Tortoise (login DB 'tw_logon') is verified;
+        # CMaNGOS titles (DB 'realmd') fall through to "not supported yet".
+        conf="$compose_dir/etc/mangosd.conf"
+        login_info=$(grep -m1 -E '^[[:space:]]*LoginDatabase\.Info' "$conf" 2>/dev/null || true)
+        login_db=$(printf '%s' "$login_info" | cut -d';' -f5 | tr -d '"[:space:]')
+        if [[ "$login_db" != "tw_logon" ]]; then
+            echo "[dml] LAN play is not supported for '$title' yet."
+            echo "[dml] (Currently supported: AzerothCore servers and Tortoise WoW.)"
+            exit 1
+        fi
+        db=$(docker compose ps -q db 2>/dev/null | head -1 || true)
+        if [[ -z "$db" ]]; then
+            echo "[dml] ERROR: '$title' is not running. Start the server first, then change LAN settings."
+            exit 1
+        fi
+        dbpw=$(printf '%s' "$login_info" | cut -d';' -f4)
+        _lan_sql() { docker exec "$db" mariadb -uroot -p"$dbpw" tw_logon -sN -e "$1" 2>/dev/null; }
     fi
-    db=$(docker compose ps -q ac-database 2>/dev/null | head -1 || true)
-    if [[ -z "$db" ]]; then
-        echo "[dml] ERROR: '$title' is not running. Start the server first, then change LAN settings."
-        exit 1
-    fi
-
-    _lan_sql() { docker exec "$db" mysql -uroot -ppassword acore_auth -sN -e "$1" 2>/dev/null; }
 
     # The database can lag the containers (first boot imports take a while).
     # 'refresh' is fired automatically by the tray right after 'dml start',
@@ -1451,6 +1586,9 @@ case "$cmd" in
     echo "  clean [--yes]         stop stuck containers, remove incomplete installs, prune Docker"
     echo "  shell                 open an interactive shell"
     echo "  run <url|path>        install a title from GitHub URL or local folder"
+    echo "  manage                open the WoW Server Manager (AzerothCore; auto-updates from GitHub)"
+    echo "  unbound               install/update the Wrath Unbound add-on (wow-server-playerbots only)"
+    echo "  unbound-remove        uninstall the Wrath Unbound add-on (wow-server-playerbots only)"
     echo "  version               print version"
     echo ""
     echo "Game data lives in /home/dml/ (ext4), never /mnt/c."
@@ -1894,6 +2032,12 @@ class TrayApp : ApplicationContext
         var items     = new System.Collections.Generic.List<ToolStripItem>();
         var statusMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         int runningCount = 0;
+        // The WoW Server Manager only handles AzerothCore/WotLK installs, whose
+        // directories are named 'wow-server*' (matches wow-manage.sh's own
+        // discovery glob). MaNGOS titles -- tortoise-wow-server, wow-vanilla-
+        // server, wow-tbc-server -- do NOT start with 'wow-server', so this
+        // correctly excludes them.
+        bool hasAcore = false;
 
         foreach (var line in statusOut.Split(new char[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
         {
@@ -1917,6 +2061,7 @@ class TrayApp : ApplicationContext
             string title   = kv.Key;
             bool   running = string.Equals(kv.Value, "running", StringComparison.OrdinalIgnoreCase);
             if (running) runningCount++;
+            if (title.StartsWith("wow-server", StringComparison.OrdinalIgnoreCase)) hasAcore = true;
 
             var gameMenu  = new ToolStripMenuItem(title);
             var statusLbl = new ToolStripMenuItem(running ? "● Running" : "○ Stopped");
@@ -1958,7 +2103,38 @@ class TrayApp : ApplicationContext
             gameMenu.DropDownItems.Add(new ToolStripSeparator());
             gameMenu.DropDownItems.Add(attachItem);
             gameMenu.DropDownItems.Add(lanMenu);
+
+            // Wrath Unbound multi-class add-on -- Playerbots-only, so it is
+            // offered solely on the 'wow-server-playerbots' title, and only
+            // while running (it backs up the databases and rebuilds the
+            // worldserver, both of which need the stack up).
+            if (string.Equals(title, "wow-server-playerbots", StringComparison.OrdinalIgnoreCase))
+            {
+                var unboundItem = new ToolStripMenuItem("Install / Update Wrath Unbound Add-On...");
+                unboundItem.Enabled = running;
+                unboundItem.Click += delegate { OpenUnbound(); };
+
+                var unboundRemoveItem = new ToolStripMenuItem("Uninstall Wrath Unbound Add-On...");
+                unboundRemoveItem.Enabled = running;
+                unboundRemoveItem.Click += delegate { OpenUnboundRemove(); };
+
+                gameMenu.DropDownItems.Add(new ToolStripSeparator());
+                gameMenu.DropDownItems.Add(unboundItem);
+                gameMenu.DropDownItems.Add(unboundRemoveItem);
+            }
+
             items.Add(gameMenu);
+        }
+
+        // WoW Server Manager -- one global entry below the title list, shown
+        // only when an AzerothCore title exists. It self-discovers the server
+        // (and picks among several), so it is not per-title.
+        if (hasAcore)
+        {
+            items.Add(new ToolStripSeparator());
+            var manageItem = new ToolStripMenuItem("WoW Server Manager");
+            manageItem.Click += delegate { OpenManager(); };
+            items.Add(manageItem);
         }
 
         UpdateSleepLock(runningCount);
@@ -2061,7 +2237,7 @@ class TrayApp : ApplicationContext
             string container = result[0].Trim();
             if (string.IsNullOrEmpty(container)) {
                 MessageBox.Show(
-                    "No worldserver container found for '" + title + "'.\nIs the server running?",
+                    "No running WoW server container found for '" + title + "'.\nIs the server running?",
                     "Attach to Console", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
@@ -2081,8 +2257,14 @@ class TrayApp : ApplicationContext
                 string raw = WslRun("docker ps --format {{.Names}}");
                 string found = "";
                 foreach (var line in raw.Split(new char[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries)) {
-                    if (line.Trim().IndexOf("worldserver", StringComparison.OrdinalIgnoreCase) >= 0) {
-                        found = line.Trim();
+                    string name = line.Trim();
+                    // AzerothCore titles run 'worldserver'; MaNGOS/CMaNGOS titles
+                    // (Tortoise, Vanilla, TBC) run 'mangosd'. Match either -- the
+                    // db ('*-db') and auth ('*-realmd'/'*authserver') containers
+                    // contain neither substring, so there is no false match.
+                    if (name.IndexOf("worldserver", StringComparison.OrdinalIgnoreCase) >= 0
+                        || name.IndexOf("mangosd", StringComparison.OrdinalIgnoreCase) >= 0) {
+                        found = name;
                         break;
                     }
                 }
@@ -2295,6 +2477,33 @@ class TrayApp : ApplicationContext
         }
     }
 
+    // Opens the WoW Server Manager (wow-manage.sh) in a terminal. 'dml manage'
+    // pulls the latest copy from GitHub (falling back to a cached copy when
+    // offline) and runs its interactive menu. AzerothCore/WotLK only -- the
+    // menu item is offered only when a 'wow-server*' title exists.
+    void OpenManager()
+    {
+        OpenTerminal("-d " + DISTRO + " -u dml -- bash -lc \"dml manage\"");
+    }
+
+    // Opens the Wrath Unbound add-on installer in a terminal. 'dml unbound'
+    // pulls the latest installer from GitHub (cached copy offline) and runs it.
+    // Playerbots-only; it force-rebuilds the worldserver, so it runs
+    // interactively and the terminal must stay open until it finishes.
+    void OpenUnbound()
+    {
+        OpenTerminal("-d " + DISTRO + " -u dml -- bash -lc \"dml unbound\"");
+    }
+
+    // Opens the Wrath Unbound uninstaller in a terminal. 'dml unbound-remove'
+    // pulls the latest uninstaller from GitHub (cached copy offline) and runs
+    // it. It is interactive and confirms before destructive steps; it rebuilds
+    // the worldserver, so the terminal must stay open until it finishes.
+    void OpenUnboundRemove()
+    {
+        OpenTerminal("-d " + DISTRO + " -u dml -- bash -lc \"dml unbound-remove\"");
+    }
+
     void ShowInstallDialog()
     {
         using (var form = new Form())
@@ -2446,8 +2655,9 @@ class TrayApp : ApplicationContext
     # Enable time; the HOWTO suggests a DHCP reservation).
     #
     # Runs unconditionally: sweep+add is idempotent and self-heals rules a
-    # user may have removed. Ports cover the WoW-family titles (auth 3724,
-    # world 8085); other titles get ports here when they grow LAN support.
+    # user may have removed. Ports cover the WoW-family titles (auth 3724;
+    # world 8085 for AzerothCore, 8090 for Tortoise); other titles get ports
+    # here when they grow LAN support.
     # -------------------------------------------------------------------------
     Write-Step "Configuring LAN play plumbing (firewall + port proxy)..."
 
@@ -2485,7 +2695,7 @@ class TrayApp : ApplicationContext
     $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     $proxyRules = netsh interface portproxy show v4tov4
     $ErrorActionPreference = $prevEap
-    $dmlProxyPorts = @('3306', '3724', '8085')
+    $dmlProxyPorts = @('3306', '3724', '8085', '8090')
     foreach ($line in @($proxyRules)) {
         if ("$line" -match '^\s*(\S+)\s+(\d+)\s+(\S+)\s+(\d+)\s*$') {
             $lAddr = $Matches[1]; $lPort = $Matches[2]
@@ -2499,7 +2709,7 @@ class TrayApp : ApplicationContext
         }
     }
 
-    $LanPorts = @(3724, 8085)
+    $LanPorts = @(3724, 8085, 8090)
     foreach ($port in $LanPorts) {
         $ruleName = "DML LAN Play (TCP $port)"
         try {
