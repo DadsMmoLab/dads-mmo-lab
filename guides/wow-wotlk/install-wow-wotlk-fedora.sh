@@ -489,6 +489,41 @@ install_docker() {
     print_success "Docker installed and permissions configured!"
 }
 
+# ─────────────────────────────────────────
+# CHECK DOCKER HUB CONNECTIVITY
+# ─────────────────────────────────────────
+check_docker_hub() {
+    print_info "Checking Docker Hub connectivity..."
+    local registry="registry-1.docker.io"
+    local ok=false
+
+    if curl --silent --max-time 10 --head "https://${registry}/v2/" &>/dev/null; then
+        ok=true
+    elif wget --quiet --timeout=10 --spider "https://${registry}/v2/" &>/dev/null; then
+        ok=true
+    fi
+
+    if ! $ok; then
+        echo ""
+        print_error "Cannot reach Docker Hub (${registry})"
+        echo ""
+        echo -e "  ${YELLOW}This is a network issue — not a code compilation error.${NC}"
+        echo -e "  ${YELLOW}Docker cannot pull required images (e.g. mysql:8.4) without internet access.${NC}"
+        echo ""
+        echo -e "  ${CYAN}Troubleshooting steps:${NC}"
+        echo -e "    1. Check your internet connection: ${CYAN}curl -I https://registry-1.docker.io/v2/${NC}"
+        echo -e "    2. Check DNS:                      ${CYAN}nslookup registry-1.docker.io${NC}"
+        echo -e "    3. If behind a firewall, ensure outbound HTTPS (port 443) to Docker Hub is allowed"
+        echo -e "    4. If on a VPS, your provider may rate-limit Docker Hub — try a registry mirror:"
+        echo -e "       Add to /etc/docker/daemon.json:  ${CYAN}{ \"registry-mirrors\": [\"https://mirror.gcr.io\"] }${NC}"
+        echo -e "       Then restart Docker:              ${CYAN}sudo systemctl restart docker${NC}"
+        echo ""
+        exit 1
+    fi
+
+    print_success "Docker Hub is reachable"
+}
+
 install_git() {
     if command -v git &>/dev/null; then
         print_success "Git already installed"
@@ -638,6 +673,8 @@ services:
       context: .
       target: client-data
 OVERRIDE
+
+    check_docker_hub
 
     print_info "Compiling Playerbots server (2-4 hours)..."
     print_info "Progress saved to: ~/playerbots-build.log"
