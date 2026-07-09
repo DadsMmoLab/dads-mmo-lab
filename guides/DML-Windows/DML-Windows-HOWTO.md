@@ -27,6 +27,7 @@ This installer sets up:
 |---|---|
 | Windows version | **Windows 10, version 2004** (build 19041) or **Windows 11, version 22H2** (build 22621) or newer |
 | Disk space | **30 GB free** on your C: drive |
+| RAM | **8 GB minimum** for the environment and most titles. **16 GB recommended** if you'll compile a WoW server — the initial WotLK build and the Wrath Unbound add-on both recompile the worldserver, which is memory-heavy. On 8 GB machines see *"A WoW server build gets killed partway"* in Troubleshooting. |
 | CPU virtualization | Must be enabled in BIOS/UEFI — most modern PCs have this on by default |
 | Internet | Required throughout the install |
 | Time | **~20 minutes** total (mostly automatic) |
@@ -231,6 +232,9 @@ Right-click the tray icon to see all installed titles. Each title shows its curr
 | Title → Stop | Stops the server (`docker compose down`) |
 | Title → Attach to Console | Opens the live server console (exit safely with **Ctrl+P then Ctrl+Q** — Ctrl+C stops the server!) |
 | Title → LAN Play | Lets other PCs on your home network join — see the title's own HOWTO for the full walkthrough |
+| Title → Install / Update Wrath Unbound Add-On | *WotLK Playerbots only, shown while running* — layers on the Wrath Unbound multi-class mod (see [WoW Server Manager & Wrath Unbound](#managing-your-wow-server--manager--add-ons)) |
+| Title → Uninstall Wrath Unbound Add-On | *WotLK Playerbots only, shown while running* — removes Wrath Unbound and rebuilds the worldserver without it |
+| WoW Server Manager | *Appears when a WoW server is installed* — opens the AzerothCore server manager: modules, AH Bot, server controls (see [below](#managing-your-wow-server--manager--add-ons)) |
 | Install New Title... | Opens the install dialog — browse to a `.sh` file or paste a URL |
 | Open DML Shell | Opens a terminal inside `dml-arch` |
 | Run dml doctor | Runs a health check on your environment |
@@ -278,9 +282,59 @@ dml kill <project-name>
 # Clean up stuck containers, incomplete installs, and Docker leftovers
 dml clean
 
+# --- WoW servers (AzerothCore) ---
+# Open the WoW Server Manager: modules, AH Bot, server controls (auto-updates)
+dml manage
+
+# Install or update the Wrath Unbound add-on (WotLK Playerbots server only)
+dml unbound
+
+# Uninstall the Wrath Unbound add-on (WotLK Playerbots server only)
+dml unbound-remove
+
 # Check dml version
 dml version
 ```
+
+---
+
+## Managing Your WoW Server — Manager & Add-Ons
+
+WoW servers built on AzerothCore (the WotLK Playerbots title) have two extra tools, both reached from the DML Launcher and both **updated automatically from GitHub** each time you open them — so the available options stay current without you ever re-downloading anything. (If you're offline, they fall back to the last copy they downloaded.)
+
+### WoW Server Manager
+
+A full text menu for running and customizing your WoW server: add or remove modules (Auction House Bot, Solocraft, Transmog, and more), start/stop/restart, view live logs, attach to the console, and configure the AH Bot.
+
+**To open it:**
+- **DML Launcher:** right-click the tray icon → **WoW Server Manager** (this entry appears whenever a WoW server is installed)
+- **Command line:** `dml manage` inside `dml-arch`
+
+It opens in its own terminal window — follow the numbered on-screen menu.
+
+> Adding a module that includes a compiled component rebuilds the worldserver, which takes time and memory — see the build note below.
+
+### Wrath Unbound Add-On
+
+Wrath Unbound is a multi-class mod that layers onto your **WotLK Playerbots** server. Because it's a compiled C++ module, installing it **rebuilds the worldserver** — an incremental rebuild (much shorter than the original multi-hour compile, but still roughly 30–90 minutes depending on your PC).
+
+**Before you start:** your WotLK Playerbots server must already be installed and **running**. The menu entries only appear on the `wow-server-playerbots` title while it's running.
+
+**To install or update it:**
+- **DML Launcher:** right-click the tray icon → your **wow-server-playerbots** title → **Install / Update Wrath Unbound Add-On**
+- **Command line:** `dml unbound`
+
+Re-running it any time pulls and applies the latest version — that's also how you update Wrath Unbound.
+
+**To uninstall it:**
+- **DML Launcher:** the same title's submenu → **Uninstall Wrath Unbound Add-On**
+- **Command line:** `dml unbound-remove`
+
+The uninstaller removes Wrath Unbound's data, reverts its changes, and rebuilds the worldserver without the module. It asks for confirmation before making any changes.
+
+> ⚠️ **Keep the terminal window open during a rebuild.** Both installing and uninstalling recompile the worldserver. If you close the window mid-build, the rebuild stops. Keep your PC plugged in and awake until it finishes.
+
+> **Building on a low-RAM PC?** Compiling the worldserver needs a fair amount of memory. If a build gets killed partway through, see *"A WoW server build gets killed partway (out of memory)"* in Troubleshooting.
 
 ---
 
@@ -489,6 +543,37 @@ The `dml-arch` VHD lives in `%LOCALAPPDATA%\DadsMMOLab\wsl\`. WSL2 VHDs can grow
 ```
 
 MMO servers with large databases need 20+ GB inside the Linux environment. Plan accordingly.
+
+### A WoW server build gets killed partway (out of memory)
+
+**Symptom:** Installing the Wrath Unbound add-on — or any step that compiles/rebuilds a WoW worldserver — stops at roughly the **same low percentage every time** (often around 10–20%) and the build is killed. There's usually no clear error; the compile just stops.
+
+**Cause:** Compiling the worldserver runs several C++ compilers in parallel, and each one needs a lot of memory. On PCs with **8 GB of RAM or less**, WSL2's memory budget can't feed all of them at once, so Windows kills one and the build dies. It fails at the same place each time because the heaviest files compile there — and each retry restarts the compile from the beginning, which is why the percentage is always the same.
+
+**Fix — give WSL fewer parallel compilers and more swap.** Edit `.wslconfig` on the affected PC:
+
+1. In PowerShell:
+   ```powershell
+   notepad $env:USERPROFILE\.wslconfig
+   ```
+2. Set `processors` low and `swap` high. A good starting point for an 8 GB laptop:
+   ```ini
+   [wsl2]
+   memory=5GB
+   processors=2
+   swap=16GB
+   localhostForwarding=true
+   ```
+   - **`processors=2`** runs 2 compilers instead of 4 — roughly **halves the peak memory**. This is the main fix.
+   - **`swap=16GB`** gives disk-backed headroom so memory spikes swap out instead of killing the build. (The swap file only grows as needed, but make sure you have ~16 GB free on C:.)
+   - Leave `memory` as-is unless you have **16 GB+ RAM**, in which case you can raise it for a faster build.
+3. Save the file, then apply it:
+   ```powershell
+   wsl --shutdown
+   ```
+4. Wait ~10 seconds, then re-run the install (tray → **Install / Update Wrath Unbound Add-On**, or `dml unbound`).
+
+**Still killed at the same spot?** Drop to **`processors=1`**, run `wsl --shutdown` again, and retry. Single-threaded is slower — it can take a couple of hours on a weak laptop — but it will finish, because only one compiler runs at a time.
 
 ### "archlinux distro" still visible after uninstalling
 
