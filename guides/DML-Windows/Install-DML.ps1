@@ -2498,8 +2498,9 @@ class TrayApp : ApplicationContext
         {
             try
             {
+                var psEscapedArgs = wslArgs.Replace("\"", "\\\"");
                 var psi = new ProcessStartInfo("powershell.exe",
-                    "-NoExit -Command \"wsl " + wslArgs + "\"");
+                    "-NoExit -Command \"wsl " + psEscapedArgs + "\"");
                 psi.UseShellExecute = true;
                 Process.Start(psi);
             }
