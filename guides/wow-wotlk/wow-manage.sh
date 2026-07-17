@@ -455,6 +455,15 @@ _cmd_block_for() {
                 'npc add 999991 0 -8828.3 630.2 94.1 3.7   — Stormwind Arena Battlemaster (Alliance)' \
                 'npc add 999991 1 1600.2 -4413.7 17.5 4.5  — Orgrimmar Arena Battlemaster (Horde)'
             ;;
+        mod-auto-gather)
+            printf '%s\n' \
+                'Auto Gather' \
+                'Automatically gathers nearby mining nodes, herb nodes, and skinnable creatures as players walk near them. Loot goes directly into bags, while normal skill requirements, skill-ups, respawn cycles, and bag-space safety are preserved.' \
+                '' \
+                'Commands: (none — fully automatic)' \
+                '' \
+                'Configuration: edit mod_auto_gather.conf after a worldserver rebuild.'
+            ;;
         mod-arac)
             printf '%s\n' \
                 'All Races All Classes (ARAC)' \
@@ -1017,6 +1026,7 @@ _NPC_SPAWN_IDX=0
 # Module registry: key|name|repo url|sql dirs (comma-sep)
 declare -a MODULE_REGISTRY=(
     "mod-1v1-arena|1v1 Arena|https://github.com/azerothcore/mod-1v1-arena.git|characters"
+    "mod-auto-gather|Auto Gather|https://github.com/thanhtong89/mod-auto-gather.git|"
     "mod-aoe-loot|AoE Loot|https://github.com/azerothcore/mod-aoe-loot.git|world"
     "mod-ah-bot|Auction House Bot|https://github.com/azerothcore/mod-ah-bot.git|world"
     "mod-autobalance|Auto Balance (dynamic difficulty)|https://github.com/azerothcore/mod-autobalance.git|world"
@@ -2339,6 +2349,52 @@ configure_module_challenge_modes() {
     _open_text_file "$conf_dest"
     echo ""
     print_info "Restart the worldserver for conf changes to take effect."
+}
+
+# ─────────────────────────────────────────────────────────────
+# configure_module_auto_gather
+#   Copies mod_auto_gather.conf.dist → mod_auto_gather.conf and
+#   opens it for editing.
+# ─────────────────────────────────────────────────────────────
+configure_module_auto_gather() {
+    print_step "Configuring Auto Gather"
+
+    local module_dir="$SERVER_DIR/modules/mod-auto-gather"
+    if [ ! -d "$module_dir" ]; then
+        print_error "Auto Gather module not installed (expected at $module_dir)."
+        return 1
+    fi
+
+    local conf_dist="$module_dir/conf/mod_auto_gather.conf.dist"
+    local conf_dest="$SERVER_DIR/env/dist/etc/modules/mod_auto_gather.conf"
+    mkdir -p "$SERVER_DIR/env/dist/etc/modules"
+
+    if [ ! -f "$conf_dest" ]; then
+        if [ -f "$conf_dist" ]; then
+            cp "$conf_dist" "$conf_dest"
+            print_success "Created $conf_dest"
+        else
+            print_warning "conf.dist not found at $conf_dist"
+            print_info "The worldserver must be rebuilt once before conf files are generated."
+            print_info "After rebuilding, re-run this configure option."
+            return 0
+        fi
+    fi
+
+    echo ""
+    printf '%s\n' \
+        "AutoGather.Enable = 1             Enable or disable the module" \
+        "AutoGather.Announce = 1           Show a chat message on login" \
+        "AutoGather.AutoTrack = 1          Enable herb/mineral minimap tracking" \
+        "AutoGather.AutoLoot = 1           Auto-gather nodes and skin creatures" \
+        "AutoGather.LootRange = 10.0       Gathering range in yards" \
+        "AutoGather.ScanIntervalMs = 1000  Scan interval per player" \
+        "AutoGather.AllowInCombat = 0      Allow gathering during combat" \
+        "AutoGather.AllowWhileMounted = 1  Allow gathering while mounted"
+    echo ""
+    _open_text_file "$conf_dest"
+    echo ""
+    print_info "Run '.reload config' in-game or restart the worldserver for conf changes to take effect."
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -5007,6 +5063,16 @@ _get_about_text() {
                 '999991 (Arena Battlemaster 1v1) to be manually spawned in' \
                 'the world after rebuilding — install flow provides coordinates.'
             ;;
+        mod-auto-gather)
+            printf '%s\n' \
+                'Automatically harvests nearby mining nodes, herb nodes, and' \
+                'skinnable creatures as players walk near them. Loot goes' \
+                'directly into bags while respecting profession skill' \
+                'requirements, normal skill-ups, bag space, and respawn cycles.' \
+                'Auto-tracking for Herbalism and Mining can be enabled in' \
+                'mod_auto_gather.conf, along with range, scan interval, combat,' \
+                'mounted, announce, and enable settings.'
+            ;;
         mod-ale)
             printf '%s\n' \
                 'AzerothCore Lua Engine -- a powerful AzerothCore-specific' \
@@ -5512,6 +5578,12 @@ _module_post_install_hook() {
             _offer_npc_in_capitals 999991 "Arena Battlemaster 1v1" \
                 "Run these commands after rebuilding and starting the worldserver."
             ;;
+        mod-auto-gather)
+            echo ""
+            print_info "Auto Gather has a conf file with gathering, range, scan interval, and state settings."
+            print_info "Note: rebuild the worldserver first if the conf.dist is not yet present."
+            if ask_yes_no "Configure Auto Gather now?"; then configure_module_auto_gather; fi
+            ;;
         mod-arac)
             echo ""
             print_info "Run Configure (c) to apply SQL, copy server DBC files, and install Patch-A.MPQ."
@@ -5759,6 +5831,7 @@ menu_modules() {
                     mod-ah-bot)                  configure_ahbot ;;
                     mod-ale)                     configure_ale ;;
                     mod-arac)                    configure_mod_arac ;;
+                    mod-auto-gather)             configure_module_auto_gather ;;
                     mod-challenge-modes)         configure_module_challenge_modes ;;
                     mod-dungeon-master)          configure_module_dungeon_master ;;
                     mod-player-bot-level-brackets) configure_module_bot_level_brackets ;;
@@ -5795,6 +5868,7 @@ menu_modules() {
 _module_conf_name() {
     case "$1" in
         mod-1v1-arena)                  echo "1v1arena.conf" ;;
+        mod-auto-gather)                echo "mod_auto_gather.conf" ;;
         mod-aoe-loot)                   echo "mod_aoe_loot.conf" ;;
         mod-ah-bot)                     echo "mod_ahbot.conf" ;;
         mod-autobalance)                echo "AutoBalance.conf" ;;
@@ -5890,6 +5964,18 @@ _module_conf_hints() {
                 '  - Arena1v1.Costs' \
                 '  - Arena1v1.Announcer' \
                 '  - Arena1v1.PreventHealingTalents'
+            ;;
+        mod-auto-gather)
+            printf '%s\n' \
+                'Common options (defaults):' \
+                '  - AutoGather.Enable (1)' \
+                '  - AutoGather.Announce (1)' \
+                '  - AutoGather.AutoTrack (1)' \
+                '  - AutoGather.AutoLoot (1)' \
+                '  - AutoGather.LootRange (10.0 yards)' \
+                '  - AutoGather.ScanIntervalMs (1000 ms)' \
+                '  - AutoGather.AllowInCombat (0)' \
+                '  - AutoGather.AllowWhileMounted (1)'
             ;;
         mod-aoe-loot)
             printf '%s\n' \
