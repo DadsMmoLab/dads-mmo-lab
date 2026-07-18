@@ -5,7 +5,7 @@
 #
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 #
-#  Version: 1.2.1
+#  Version: 1.2.2
 #
 #  Usage:
 #    chmod +x install-wow.sh
@@ -20,6 +20,12 @@
 #    6. Sets up the Gaming Mode launcher
 #
 #  Changelog:
+#    1.2.2 — Preflight dependency check
+#      - Added preflight_check(): inspects docker daemon, docker compose,
+#        docker buildx, git, and curl before the install begins
+#      - Prints a visual status table (✅/❌) for each dependency
+#      - Auto-installs any missing deps via pacman (respects steamos-readonly)
+#      - Re-verifies all deps after install; exits with clear error if any fail
 #    1.2.1 — DML staged restart hook (Windows/WSL)
 #      - Ships dml-start.sh: restarts auth/world without re-running db-import
 #      - Pins realm to 127.0.0.1; waits for DB healthy before starting servers
@@ -38,7 +44,7 @@
 #      - Heredoc launcher synced with standalone launcher scripts
 # ============================================================
 
-WIZARD_VERSION="1.2.1"
+WIZARD_VERSION="1.2.2"
 
 set -o pipefail
 
@@ -105,7 +111,7 @@ check_system() {
     print_step "Checking System Requirements"
 
     if [[ "$OSTYPE" != "linux-gnu"* ]]; then
-        print_error "This script requires Linux (SteamOS). Are you in Desktop Mode?"
+        print_error "This script requires Linux (SteamOS, CachyOS). Are you in Desktop Mode?"
         exit 1
     fi
     print_success "Linux detected"
@@ -324,6 +330,129 @@ install_git() {
         print_warning "Git installation failed — some features may not work."
         print_info "Try manually: sudo pacman -Sy git"
     fi
+}
+
+# ─────────────────────────────────────────
+# PREFLIGHT CHECK — SYSTEM DEPENDENCIES
+# ─────────────────────────────────────────
+preflight_check() {
+    print_step "Preflight Check — System Dependencies"
+
+    local docker_ok=false docker_compose_ok=false docker_buildx_ok=false
+    local git_ok=false curl_ok=false all_ok=true
+
+    # ── docker daemon ────────────────────────────────────────────────
+    # Require unprivileged access — install_docker handles permission setup
+    # when the daemon is running but the user isn't in the docker group yet.
+    if command -v docker &>/dev/null && docker ps &>/dev/null 2>&1; then
+        docker_ok=true
+    else
+        all_ok=false
+    fi
+
+    # ── docker compose plugin ────────────────────────────────────────
+    # Only accept the plugin subcommand (`docker compose`); the legacy
+    # standalone `docker-compose` binary is never used by this script.
+    if docker compose version &>/dev/null 2>&1; then
+        docker_compose_ok=true
+    else
+        all_ok=false
+    fi
+
+    # ── docker buildx ────────────────────────────────────────────────
+    if docker buildx version &>/dev/null 2>&1; then
+        docker_buildx_ok=true
+    else
+        all_ok=false
+    fi
+
+    # ── git ──────────────────────────────────────────────────────────
+    if command -v git &>/dev/null; then
+        git_ok=true
+    else
+        all_ok=false
+    fi
+
+    # ── curl ─────────────────────────────────────────────────────────
+    if command -v curl &>/dev/null; then
+        curl_ok=true
+    else
+        all_ok=false
+    fi
+
+    # ── Print status table ───────────────────────────────────────────
+    echo ""
+    printf "  ${WHITE}${BOLD}%-28s %s${NC}\n" "Dependency" "Status"
+    echo -e "  ${DIM}──────────────────────────────────────${NC}"
+    local _label _status _entry
+    for _entry in \
+        "docker (daemon):$docker_ok" \
+        "docker compose:$docker_compose_ok" \
+        "docker buildx:$docker_buildx_ok" \
+        "git:$git_ok" \
+        "curl:$curl_ok"; do
+        _label="${_entry%%:*}"
+        _status="${_entry##*:}"
+        if [[ "$_status" == "true" ]]; then
+            printf "  ${GREEN}✅${NC}  %-26s ${GREEN}OK${NC}\n" "$_label"
+        else
+            printf "  ${RED}❌${NC}  %-26s ${RED}MISSING${NC}\n" "$_label"
+        fi
+    done
+    echo ""
+
+    if [[ "$all_ok" == "true" ]]; then
+        print_success "All dependencies satisfied — ready to build!"
+        return 0
+    fi
+
+    print_info "Some dependencies are missing — installing now..."
+    echo ""
+
+    # ── Install Docker + Compose + Buildx if needed ──────────────────
+    if [[ "$docker_ok" == "false" || "$docker_compose_ok" == "false" || \
+          "$docker_buildx_ok" == "false" ]]; then
+        install_docker
+    fi
+
+    # ── Install Git if needed ────────────────────────────────────────
+    if [[ "$git_ok" == "false" ]]; then
+        install_git
+    fi
+
+    # ── Install curl if needed (pacman) ──────────────────────────────
+    if [[ "$curl_ok" == "false" ]]; then
+        print_info "Installing curl..."
+        if command -v steamos-readonly &>/dev/null; then sudo steamos-readonly disable; fi
+        if ! sudo pacman -Sy --noconfirm curl; then
+            print_error "Failed to install curl. Run manually: sudo pacman -Sy curl"
+            if command -v steamos-readonly &>/dev/null; then
+                sudo steamos-readonly enable 2>/dev/null || true
+            fi
+            exit 1
+        fi
+        if command -v steamos-readonly &>/dev/null; then
+            sudo steamos-readonly enable 2>/dev/null || true
+        fi
+        print_success "curl installed!"
+    fi
+
+    # ── Re-verify after install ──────────────────────────────────────
+    print_info "Verifying all dependencies are now available..."
+    local failed=()
+    command -v docker &>/dev/null || failed+=("docker")
+    docker compose version &>/dev/null 2>&1 || failed+=("docker compose")
+    docker buildx version &>/dev/null 2>&1 || failed+=("docker buildx")
+    command -v git &>/dev/null || failed+=("git")
+    command -v curl &>/dev/null || failed+=("curl")
+
+    if [[ ${#failed[@]} -gt 0 ]]; then
+        print_error "The following dependencies could not be installed: ${failed[*]}"
+        print_info "Install them manually and re-run this script."
+        exit 1
+    fi
+
+    print_success "All dependencies installed and verified!"
 }
 
 # ─────────────────────────────────────────
@@ -875,6 +1004,7 @@ fi
 SUDO_KEEPALIVE_PID=$!
 trap "kill $SUDO_KEEPALIVE_PID 2>/dev/null; exit" EXIT INT TERM
 
+preflight_check
 show_summary
 install_server
 install_dml_start_hook
