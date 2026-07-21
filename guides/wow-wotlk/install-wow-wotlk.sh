@@ -327,8 +327,8 @@ install_git() {
     elif sudo apt-get install -y git; then
         print_success "Git installed!"
     else
-        print_warning "Git installation failed — some features may not work."
-        print_info "Try manually: sudo pacman -Sy git"
+        print_error "Git installation failed. Check your internet connection and try again."
+        exit 1
     fi
 }
 
@@ -424,17 +424,21 @@ preflight_check() {
     if [[ "$curl_ok" == "false" ]]; then
         print_info "Installing curl..."
         if command -v steamos-readonly &>/dev/null; then sudo steamos-readonly disable; fi
-        if ! sudo pacman -Sy --noconfirm curl; then
-            print_error "Failed to install curl. Run manually: sudo pacman -Sy curl"
-            if command -v steamos-readonly &>/dev/null; then
-                sudo steamos-readonly enable 2>/dev/null || true
-            fi
-            exit 1
+        local curl_installed=false
+        if sudo pacman -Sy --noconfirm curl 2>/dev/null; then
+            curl_installed=true
+        elif sudo apt-get install -y curl 2>/dev/null; then
+            curl_installed=true
         fi
         if command -v steamos-readonly &>/dev/null; then
             sudo steamos-readonly enable 2>/dev/null || true
         fi
-        print_success "curl installed!"
+        if [[ "$curl_installed" == "true" ]]; then
+            print_success "curl installed!"
+        else
+            print_error "Failed to install curl. Check your internet connection and try again."
+            exit 1
+        fi
     fi
 
     # ── Re-verify after install ──────────────────────────────────────
@@ -448,7 +452,7 @@ preflight_check() {
 
     if [[ ${#failed[@]} -gt 0 ]]; then
         print_error "The following dependencies could not be installed: ${failed[*]}"
-        print_info "Install them manually and re-run this script."
+        print_error "Automatic installation failed. Check the output above for errors, then re-run this script."
         exit 1
     fi
 
@@ -576,8 +580,17 @@ install_server() {
         "$SERVER_DIR/modules/mod-playerbots"; then
         print_success "mod-playerbots module cloned!"
     else
-        print_warning "mod-playerbots clone failed — check your connection."
-        print_info "You can add it manually later: git clone ... $SERVER_DIR/modules/mod-playerbots"
+        print_warning "Clone failed — retrying in 10 seconds..."
+        sleep 10
+        rm -rf "$SERVER_DIR/modules/mod-playerbots"
+        if git clone --depth 1 \
+            https://github.com/mod-playerbots/mod-playerbots.git \
+            --branch=master \
+            "$SERVER_DIR/modules/mod-playerbots"; then
+            print_success "mod-playerbots module cloned!"
+        else
+            print_warning "mod-playerbots clone failed after retry. The server will still build but bots may be limited."
+        fi
     fi
 
     cat > "$SERVER_DIR/docker-compose.override.yml" << 'OVERRIDE'
@@ -662,7 +675,7 @@ wait_for_server() {
     else
         print_warning "Server is taking longer than expected."
         print_info "Check progress: docker logs -f $WORLD_CONTAINER"
-        print_info "Wait for 'ready...' then create accounts manually."
+        print_info "Continuing to account setup — wait for 'ready...' in the server logs before running account commands."
     fi
 }
 
