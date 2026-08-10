@@ -907,6 +907,61 @@ INFO
 # ─────────────────────────────────────────
 # DONE
 # ─────────────────────────────────────────
+# ─────────────────────────────────────────
+# POST-INSTALL RESOURCES
+# ─────────────────────────────────────────
+post_install_resources() {
+    echo ""
+    echo -e "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${WHITE}${BOLD} STEP D — Resources & Server Management${NC}"
+    echo -e "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "  ${WHITE}The README covers everything you need next:${NC}"
+    echo -e "    • Networking (LAN / online play / port forwarding)"
+    echo -e "    • Server commands and GM tools"
+    echo -e "    • Playerbot configuration"
+    echo -e "    • Troubleshooting and FAQ"
+    echo ""
+    echo -e "  ${CYAN}${BOLD}https://github.com/DadsMmoLab/dads-mmo-lab${NC}"
+    echo ""
+    if ask_yes_no "Open the GitHub README in your browser now?"; then
+        if command -v xdg-open &>/dev/null; then
+            xdg-open "https://github.com/DadsMmoLab/dads-mmo-lab" &>/dev/null &
+            print_success "Opening browser..."
+        else
+            print_info "Open this URL in your browser:"
+            echo -e "  ${CYAN}https://github.com/DadsMmoLab/dads-mmo-lab${NC}"
+        fi
+    fi
+    echo ""
+    echo -e "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "  ${WHITE}${BOLD}wow-manage.sh${NC} is a post-install management tool:"
+    echo -e "    • Start / stop / restart the server"
+    echo -e "    • View live server logs"
+    echo -e "    • Add or remove modules (AH Bot, Solocraft, Transmog…)"
+    echo -e "    • Attach to the worldserver console"
+    echo ""
+    echo -e "  After downloading, run it any time with:"
+    echo -e "  ${GREEN}bash ~/wow-manage.sh${NC}"
+    echo ""
+    if ask_yes_no "Download wow-manage.sh to your home folder now?"; then
+        local manage_url="https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/guides/wow-wotlk/wow-manage.sh"
+        if curl -fsSL "$manage_url" -o "$HOME/wow-manage.sh"; then
+            chmod +x "$HOME/wow-manage.sh"
+            print_success "Downloaded to ~/wow-manage.sh"
+            print_info "Run it any time with: bash ~/wow-manage.sh"
+        else
+            print_error "Download failed. Get it manually from:"
+            echo -e "  ${CYAN}https://github.com/DadsMmoLab/dads-mmo-lab${NC}"
+        fi
+    fi
+    echo ""
+}
+
+# ─────────────────────────────────────────
+# COMPLETION
+# ─────────────────────────────────────────
 show_completion() {
     echo ""
     echo -e "${GOLD}${BOLD}╔══════════════════════════════════════════════════╗${NC}"
@@ -1019,7 +1074,7 @@ if ! sudo -v; then
 fi
 ( while true; do sudo -n true; sleep 60; done ) 2>/dev/null &
 SUDO_KEEPALIVE_PID=$!
-trap "kill $SUDO_KEEPALIVE_PID 2>/dev/null; exit" EXIT INT TERM
+trap "kill $SUDO_KEEPALIVE_PID 2>/dev/null; exit" EXIT INT TERM HUP
 
 preflight_check
 show_summary
@@ -1029,3 +1084,4 @@ wait_for_server
 create_accounts
 setup_gaming_mode
 show_completion
+post_install_resources

@@ -289,11 +289,14 @@ install_git() {
         return 0
     fi
     print_info "Installing Git..."
+    if command -v steamos-readonly &>/dev/null; then sudo steamos-readonly disable 2>/dev/null || true; fi
     if sudo pacman -Sy --noconfirm git; then
+        if command -v steamos-readonly &>/dev/null; then sudo steamos-readonly enable 2>/dev/null || true; fi
         print_success "Git installed!"
     elif sudo apt-get install -y git; then
         print_success "Git installed!"
     else
+        if command -v steamos-readonly &>/dev/null; then sudo steamos-readonly enable 2>/dev/null || true; fi
         print_error "Git installation failed. Check your internet connection and try again."
         exit 1
     fi
@@ -985,7 +988,7 @@ services:
     networks:
       - tbc-net
     healthcheck:
-      test: ["CMD", "mariadb", "-u", "root", "--password=${DB_PASSWORD}", "-e", "SELECT 1"]
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MARIADB_ROOT_PASSWORD mariadb -u root -e 'SELECT 1'"]
       interval: 10s
       timeout: 5s
       retries: 30

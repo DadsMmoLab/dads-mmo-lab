@@ -323,9 +323,13 @@ https://download.docker.com/linux/${DOCKER_REPO_DISTRO} ${CODENAME} stable" | \
     # Add passwordless sudo for docker so it works immediately
     # without requiring logout — fixes "permission denied" on docker socket
     print_info "Setting up Docker permissions..."
-    echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/docker" | \
-        sudo tee /etc/sudoers.d/docker-nopasswd > /dev/null 2>&1 || true
-    sudo chmod 0440 /etc/sudoers.d/docker-nopasswd 2>/dev/null || true
+    if [[ -n "$USER" ]]; then
+        echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/docker" | \
+            sudo tee /etc/sudoers.d/docker-nopasswd > /dev/null 2>&1 || true
+        sudo chmod 0440 /etc/sudoers.d/docker-nopasswd 2>/dev/null || true
+    else
+        print_warning "Could not determine current user — skipping sudoers entry. Docker may require a logout to work without sudo."
+    fi
 
     # If docker still not accessible without sudo — wrap it
     if ! docker ps &>/dev/null 2>&1; then
@@ -669,7 +673,7 @@ wait_for_server() {
             2>/dev/null | grep -i "worldserver" | head -1)
 
         if [ -n "$WORLD_CONTAINER" ]; then
-            if docker logs "$WORLD_CONTAINER" \
+            if docker logs --tail 100 "$WORLD_CONTAINER" \
                 2>/dev/null | grep -q "ready\.\.\."; then
                 READY=1
                 break
@@ -810,7 +814,7 @@ WORLD_CONTAINER=""
 while [ \$ELAPSED -lt \$TIMEOUT ]; do
     WORLD_CONTAINER=\$(docker ps --format '{{.Names}}' 2>/dev/null | grep -i "worldserver" | head -1)
     if [ -n "\$WORLD_CONTAINER" ]; then
-        if docker logs "\$WORLD_CONTAINER" 2>/dev/null | grep -q "ready\.\.\."; then
+        if docker logs --tail 100 "\$WORLD_CONTAINER" 2>/dev/null | grep -q "ready\.\.\."; then
             READY=1
             break
         fi
@@ -937,6 +941,58 @@ INFO
 # ─────────────────────────────────────────
 # DONE
 # ─────────────────────────────────────────
+# ─────────────────────────────────────────
+# POST-INSTALL RESOURCES
+# ─────────────────────────────────────────
+post_install_resources() {
+    echo ""
+    echo -e "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${WHITE}${BOLD} STEP D — Resources & Server Management${NC}"
+    echo -e "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "  ${WHITE}The README covers everything you need next:${NC}"
+    echo -e "    • Networking (LAN / online play / port forwarding)"
+    echo -e "    • Server commands and GM tools"
+    echo -e "    • Playerbot configuration"
+    echo -e "    • Troubleshooting and FAQ"
+    echo ""
+    echo -e "  ${CYAN}${BOLD}https://github.com/DadsMmoLab/dads-mmo-lab${NC}"
+    echo ""
+    if ask_yes_no "Open the GitHub README in your browser now?"; then
+        if command -v xdg-open &>/dev/null; then
+            xdg-open "https://github.com/DadsMmoLab/dads-mmo-lab" &>/dev/null &
+            print_success "Opening browser..."
+        else
+            print_info "Open this URL in your browser:"
+            echo -e "  ${CYAN}https://github.com/DadsMmoLab/dads-mmo-lab${NC}"
+        fi
+    fi
+    echo ""
+    echo -e "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "  ${WHITE}${BOLD}wow-manage.sh${NC} is a post-install management tool:"
+    echo -e "    • Start / stop / restart the server"
+    echo -e "    • View live server logs"
+    echo -e "    • Add or remove modules (AH Bot, Solocraft, Transmog…)"
+    echo -e "    • Attach to the worldserver console"
+    echo ""
+    echo -e "  After downloading, run it any time with:"
+    echo -e "  ${GREEN}bash ~/wow-manage.sh${NC}"
+    echo ""
+    if ask_yes_no "Download wow-manage.sh to your home folder now?"; then
+        local manage_url="https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/guides/wow-wotlk/wow-manage.sh"
+        if curl -fsSL "$manage_url" -o "$HOME/wow-manage.sh"; then
+            chmod +x "$HOME/wow-manage.sh"
+            print_success "Downloaded to ~/wow-manage.sh"
+            print_info "Run it any time with: bash ~/wow-manage.sh"
+        else
+            print_error "Download failed. Get it manually from:"
+            echo -e "  ${CYAN}https://github.com/DadsMmoLab/dads-mmo-lab${NC}"
+        fi
+    fi
+    echo ""
+}
+
 show_completion() {
     echo ""
     echo -e "${GOLD}${BOLD}╔══════════════════════════════════════════════════╗${NC}"
@@ -1063,3 +1119,4 @@ wait_for_server
 create_accounts
 setup_gaming_mode
 show_completion
+post_install_resources
