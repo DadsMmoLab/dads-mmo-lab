@@ -564,7 +564,7 @@ install_server() {
         print_success "Compiled images already found in $SERVER_DIR"
         print_info "Skipping compile — reusing your existing build."
         print_info "To force a fresh compile, remove the server folder:"
-        print_info "  sudo rm -rf $SERVER_DIR"
+        print_info "  sudo rm -rf \"$SERVER_DIR\""
         cd "$SERVER_DIR" || exit 1
         docker compose up -d 2>&1 | tail -5
         return 0
@@ -692,7 +692,7 @@ wait_for_server() {
         print_success "Server is READY! ⚔️"
     else
         print_warning "Server is taking longer than expected."
-        print_info "Check progress: docker logs -f $WORLD_CONTAINER"
+        print_info "Check progress: docker logs -f \"$WORLD_CONTAINER\""
         print_info "Wait for 'ready...' then create accounts manually."
     fi
 }
@@ -922,9 +922,9 @@ REALMLIST (in your WoW client folder):
   Set to: set realmlist 127.0.0.1
 
 USEFUL COMMANDS:
-  Start:   cd ${SERVER_DIR} && docker compose up -d
-  Stop:    cd ${SERVER_DIR} && docker compose down
-  Logs:    cd ${SERVER_DIR} && docker compose logs -f
+  Start:   cd "${SERVER_DIR}" && docker compose up -d
+  Stop:    cd "${SERVER_DIR}" && docker compose down
+  Logs:    cd "${SERVER_DIR}" && docker compose logs -f
   Console: docker attach \$(docker ps --format '{{.Names}}' | grep worldserver | head -1)
     (Exit safely: Ctrl+P then Ctrl+Q. NOT Ctrl+C.)
 

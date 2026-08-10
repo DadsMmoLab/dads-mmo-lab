@@ -890,7 +890,7 @@ USEFUL COMMANDS (DML Windows/WSL):
   Start:   dml start wow-server-playerbots
   Restart: dml restart wow-server-playerbots
   Stop:    dml stop wow-server-playerbots
-  Logs:    cd ${SERVER_DIR} && docker compose logs -f
+  Logs:    cd "${SERVER_DIR}" && docker compose logs -f
   Console: docker attach \$(docker ps --format '{{.Names}}' | grep worldserver | head -1)
     (Exit safely: Ctrl+P then Ctrl+Q. NOT Ctrl+C.)
 

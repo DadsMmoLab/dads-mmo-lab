@@ -1118,9 +1118,9 @@ REALMLIST (in your WoW client folder):
   Set to: set realmlist 127.0.0.1
 
 USEFUL COMMANDS:
-  Start:   cd ${SERVER_DIR} && docker compose up -d
-  Stop:    cd ${SERVER_DIR} && docker compose down
-  Logs:    cd ${SERVER_DIR} && docker compose logs -f
+  Start:   cd "${SERVER_DIR}" && docker compose up -d
+  Stop:    cd "${SERVER_DIR}" && docker compose down
+  Logs:    cd "${SERVER_DIR}" && docker compose logs -f
   Console: docker attach \$(docker ps --format '{{.Names}}' | grep worldserver | head -1)
     (Exit safely: Ctrl+P then Ctrl+Q. NOT Ctrl+C.)
 
