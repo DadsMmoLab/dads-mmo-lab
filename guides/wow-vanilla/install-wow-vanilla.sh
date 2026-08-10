@@ -248,7 +248,7 @@ install_docker() {
 
     # Install BOTH docker and docker-compose. The 'docker' Arch package alone
     # doesn't ship the compose subcommand reliably on SteamOS.
-    if ! sudo pacman -Sy --noconfirm docker docker-compose; then
+    if ! sudo pacman -Sy --noconfirm docker docker-compose docker-buildx; then
         print_error "Failed to install Docker via pacman."
         print_info "If keyring errors: sudo pacman-key --init && sudo pacman-key --populate"
         sudo steamos-readonly enable 2>/dev/null || true
@@ -295,6 +295,148 @@ SHIM
         exit 1
     fi
     print_success "'docker compose' verified working"
+}
+
+# ─────────────────────────────────────────
+# INSTALL GIT
+# ─────────────────────────────────────────
+install_git() {
+    if command -v git &>/dev/null; then
+        print_success "Git already installed"
+        return 0
+    fi
+    print_info "Installing Git..."
+    if sudo pacman -Sy --noconfirm git; then
+        print_success "Git installed!"
+    elif sudo apt-get install -y git; then
+        print_success "Git installed!"
+    else
+        print_error "Git installation failed. Check your internet connection and try again."
+        exit 1
+    fi
+}
+
+# ─────────────────────────────────────────
+# PREFLIGHT CHECK — SYSTEM DEPENDENCIES
+# ─────────────────────────────────────────
+preflight_check() {
+    print_step "Preflight Check — System Dependencies"
+
+    local docker_ok=false docker_compose_ok=false docker_buildx_ok=false
+    local git_ok=false curl_ok=false all_ok=true
+
+    # ── docker daemon ────────────────────────────────────────────────
+    if command -v docker &>/dev/null && docker ps &>/dev/null 2>&1; then
+        docker_ok=true
+    else
+        all_ok=false
+    fi
+
+    # ── docker compose plugin ────────────────────────────────────────
+    if docker compose version &>/dev/null 2>&1; then
+        docker_compose_ok=true
+    else
+        all_ok=false
+    fi
+
+    # ── docker buildx ────────────────────────────────────────────────
+    if docker buildx version &>/dev/null 2>&1; then
+        docker_buildx_ok=true
+    else
+        all_ok=false
+    fi
+
+    # ── git ──────────────────────────────────────────────────────────
+    if command -v git &>/dev/null; then
+        git_ok=true
+    else
+        all_ok=false
+    fi
+
+    # ── curl ─────────────────────────────────────────────────────────
+    if command -v curl &>/dev/null; then
+        curl_ok=true
+    else
+        all_ok=false
+    fi
+
+    # ── Print status table ───────────────────────────────────────────
+    echo ""
+    printf "  ${WHITE}${BOLD}%-28s %s${NC}\n" "Dependency" "Status"
+    echo -e "  ${DIM}──────────────────────────────────────${NC}"
+    local _label _status _entry
+    for _entry in \
+        "docker (daemon):$docker_ok" \
+        "docker compose:$docker_compose_ok" \
+        "docker buildx:$docker_buildx_ok" \
+        "git:$git_ok" \
+        "curl:$curl_ok"; do
+        _label="${_entry%%:*}"
+        _status="${_entry##*:}"
+        if [[ "$_status" == "true" ]]; then
+            printf "  ${GREEN}✅${NC}  %-26s ${GREEN}OK${NC}\n" "$_label"
+        else
+            printf "  ${RED}❌${NC}  %-26s ${RED}MISSING${NC}\n" "$_label"
+        fi
+    done
+    echo ""
+
+    if [[ "$all_ok" == "true" ]]; then
+        print_success "All dependencies satisfied — ready to build!"
+        return 0
+    fi
+
+    print_info "Some dependencies are missing — installing now..."
+    echo ""
+
+    # ── Install Docker + Compose + Buildx if needed ──────────────────
+    if [[ "$docker_ok" == "false" || "$docker_compose_ok" == "false" || \
+          "$docker_buildx_ok" == "false" ]]; then
+        install_docker
+    fi
+
+    # ── Install Git if needed ────────────────────────────────────────
+    if [[ "$git_ok" == "false" ]]; then
+        install_git
+    fi
+
+    # ── Install curl if needed ────────────────────────────────────────
+    if [[ "$curl_ok" == "false" ]]; then
+        print_info "Installing curl..."
+        if command -v steamos-readonly &>/dev/null; then sudo steamos-readonly disable; fi
+        local curl_installed=false
+        if sudo pacman -Sy --noconfirm curl 2>/dev/null; then
+            curl_installed=true
+        elif sudo apt-get install -y curl 2>/dev/null; then
+            curl_installed=true
+        fi
+        if command -v steamos-readonly &>/dev/null; then
+            sudo steamos-readonly enable 2>/dev/null || true
+        fi
+        if [[ "$curl_installed" == "true" ]]; then
+            print_success "curl installed!"
+        else
+            print_error "Failed to install curl. Check your internet connection and try again."
+            exit 1
+        fi
+    fi
+
+    # ── Re-verify after install ──────────────────────────────────────
+    print_info "Verifying all dependencies are now available..."
+    local failed=()
+    command -v docker &>/dev/null || failed+=("docker")
+    docker compose version &>/dev/null 2>&1 || failed+=("docker compose")
+    docker buildx version &>/dev/null 2>&1 || failed+=("docker buildx")
+    command -v git &>/dev/null || failed+=("git")
+    command -v curl &>/dev/null || failed+=("curl")
+
+    if [[ ${#failed[@]} -gt 0 ]]; then
+        print_error "The following dependencies could not be installed: ${failed[*]}"
+        print_error "Automatic installation failed. Check the output above for errors, then re-run this script."
+        exit 1
+    fi
+
+    print_success "All dependencies installed and verified!"
 }
 
 # ─────────────────────────────────────────
@@ -1930,7 +2072,7 @@ trap "kill $SUDO_KEEPALIVE_PID 2>/dev/null; exit" EXIT INT TERM
 
 locate_client
 show_summary
-install_docker
+preflight_check
 do_compile
 extract_client_data
 write_compose_and_configs

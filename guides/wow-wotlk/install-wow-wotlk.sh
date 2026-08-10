@@ -5,7 +5,7 @@
 #
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 #
-#  Version: 1.2.2
+#  Version: 1.2.3
 #
 #  Usage:
 #    chmod +x install-wow.sh
@@ -20,6 +20,10 @@
 #    6. Sets up the Gaming Mode launcher
 #
 #  Changelog:
+#    1.2.3 — Fix missing docker-buildx dependency
+#      - install_docker() now installs docker-buildx alongside docker and
+#        docker-compose; previously the preflight buildx check would fail
+#        with a missing-plugin error after a fresh Docker install
 #    1.2.2 — Preflight dependency check
 #      - Added preflight_check(): inspects docker daemon, docker compose,
 #        docker buildx, git, and curl before the install begins
@@ -44,7 +48,7 @@
 #      - Heredoc launcher synced with standalone launcher scripts
 # ============================================================
 
-WIZARD_VERSION="1.2.2"
+WIZARD_VERSION="1.2.3"
 
 set -o pipefail
 
@@ -233,7 +237,7 @@ install_docker() {
     fi
 
     # Install Docker — this must succeed
-    if ! sudo pacman -Sy --noconfirm docker docker-compose; then
+    if ! sudo pacman -Sy --noconfirm docker docker-compose docker-buildx; then
         print_error "Failed to install Docker. Check your internet connection and keyring."
         sudo steamos-readonly enable 2>/dev/null || true
         exit 1
