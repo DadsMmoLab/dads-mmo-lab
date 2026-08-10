@@ -5,7 +5,7 @@
 #
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 #
-#  Version: 1.1.2
+#  Version: 1.2.0
 #
 #  Usage:
 #    chmod +x install-wow-vanilla.sh
@@ -47,7 +47,7 @@
 #    - 3-5 hours of wall-clock time (mostly hands-off)
 # ============================================================
 
-INSTALLER_VERSION="1.1.2"
+INSTALLER_VERSION="1.2.0"
 
 set -o pipefail
 
