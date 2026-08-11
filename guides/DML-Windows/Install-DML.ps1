@@ -119,7 +119,16 @@ function Clear-DistroStepMarkers {
 # =============================================================================
 function Assert-WindowsBuild {
     Write-Step "Checking Windows version..."
-    $build      = [System.Environment]::OSVersion.Version.Build
+    # Registry is more reliable than [Environment]::OSVersion.Version.Build,
+    # which can be shimmed or affected by compatibility-mode manifests.
+    $build = $null
+    try {
+        $build = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop).CurrentBuildNumber -as [int]
+    } catch { }
+    if (-not $build) {
+        # Fallback -- should never be needed but keeps the check non-fatal.
+        $build = [System.Environment]::OSVersion.Version.Build
+    }
     $Win11Build = 22621  # Win11 22H2
     $Win10Build = 19041  # Win10 2004
     Write-Diag "Build: $build  (Win10 min: $Win10Build  Win11 min: $Win11Build)"
@@ -413,6 +422,9 @@ function Invoke-Phase1 {
     Assert-Internet
 
     Write-Step "Saving installer state..."
+    # Create the install root (and wsl sub-dir) eagerly so Phase 2 can never
+    # fail with a missing-parent error if the user deleted the folder between runs.
+    [System.IO.Directory]::CreateDirectory("$InstallRoot\wsl") | Out-Null
     Save-State -InstallRoot $InstallRoot
 
     $rebootNeeded = Enable-Wsl2Features
@@ -489,9 +501,11 @@ function Invoke-WslBash {
     # some Windows locale/codepage combinations injects a BOM or mis-encodes
     # characters before bash sees them. Writing raw UTF-8 bytes directly to the
     # WSL filesystem bypasses the encoding pipeline entirely.
+    # A GUID suffix prevents collisions between concurrent or rapidly-retried runs.
     $cleanScript = $Script -replace "`r`n|`r", "`n"
-    $tmpWin   = "$wslTmp\dml-step.sh"
-    $tmpLinux = '/tmp/dml-step.sh'
+    $id       = [guid]::NewGuid().ToString('N')
+    $tmpWin   = "$wslTmp\dml-step-$id.sh"
+    $tmpLinux = "/tmp/dml-step-$id.sh"
     [System.IO.File]::WriteAllBytes($tmpWin, [System.Text.UTF8Encoding]::new($false).GetBytes($cleanScript))
 
     # PS 5.1 with $ErrorActionPreference = 'Stop' promotes native-command stderr
@@ -506,9 +520,10 @@ function Invoke-WslBash {
         $exit = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $prevEap
+        # Best-effort cleanup in both success and failure paths.
+        Remove-Item $tmpWin -Force -ErrorAction SilentlyContinue
+        wsl -d $Distro -u $User -- rm -f -- "$tmpLinux" 2>$null | Out-Null
     }
-
-    wsl -d $Distro -u $User -- rm -f $tmpLinux | Out-Null
 
     Write-Diag "[$Label] exit code: $exit"
     return $exit
@@ -700,41 +715,53 @@ localhostForwarding=true
         Start-Sleep -Seconds 3
 
         # Export archlinux → import as dml-arch
-        New-Item -ItemType Directory -Force -Path $WslDir | Out-Null
+        # CreateDirectory is used instead of New-Item -Force because New-Item
+        # does not create missing parent directories and will throw if $InstallRoot
+        # (e.g. C:\DML) doesn't exist yet, producing a silent crash in the log.
+        [System.IO.Directory]::CreateDirectory($WslDir) | Out-Null
         $TmpTar = "$env:TEMP\dml-arch-rootfs.tar"
 
         # Remove any leftover tar from a prior interrupted run -- wsl --export will not overwrite.
         Remove-Item $TmpTar -Force -ErrorAction SilentlyContinue
 
-        Write-Step "Exporting Arch Linux filesystem to temp tar (this is silent -- may take 1-3 min)..."
-        Write-Host "  [Exporting Arch Linux to temp tar -- please wait, no progress bar...]" -ForegroundColor DarkGray
-        $prevEap = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        wsl --export archlinux "$TmpTar"
-        $exportExit = $LASTEXITCODE
-        $ErrorActionPreference = $prevEap
-        Write-Diag "wsl --export exit code: $exportExit"
-        if ($exportExit -ne 0) {
-            Remove-Item $TmpTar -Force -ErrorAction SilentlyContinue
-            Write-Fail "Failed to export Arch Linux filesystem (exit $exportExit)."
-        }
-
-        # Clean up any leftover partial VHD from a previously interrupted import.
-        # wsl --import fails if ext4.vhdx already exists in the target directory.
+        # Remove any leftover VHD from a previously interrupted import BEFORE starting
+        # the export -- wsl --import fails immediately if ext4.vhdx already exists, which
+        # would waste the entire export time.
         $staleVhd = "$WslDir\ext4.vhdx"
         if (Test-Path $staleVhd) {
             Write-Diag "Removing stale partial VHD from prior interrupted import: $staleVhd"
             Remove-Item $staleVhd -Force -ErrorAction SilentlyContinue
         }
 
+        Write-Step "Exporting Arch Linux filesystem to temp tar (this is silent -- may take 1-3 min)..."
+        Write-Host "  [Exporting Arch Linux to temp tar -- please wait, no progress bar...]" -ForegroundColor DarkGray
+        $exportExit = -1
+        $prevEap = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            wsl --export archlinux "$TmpTar"
+            $exportExit = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $prevEap
+        }
+        Write-Diag "wsl --export exit code: $exportExit"
+        if ($exportExit -ne 0) {
+            Remove-Item $TmpTar -Force -ErrorAction SilentlyContinue
+            Write-Fail "Failed to export Arch Linux filesystem (exit $exportExit)."
+        }
+
         Write-Step "Importing as '$DmlDistroName' to $WslDir (this is silent -- may take 5-15 min)..."
         Write-Host "  [Importing Arch Linux as dml-arch -- please wait, this can take 5-15 minutes...]" -ForegroundColor DarkGray
+        $importExit = -1
         $prevEap = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        wsl --import "$DmlDistroName" "$WslDir" "$TmpTar"
-        $importExit = $LASTEXITCODE
-        $ErrorActionPreference = $prevEap
-        Remove-Item $TmpTar -Force -ErrorAction SilentlyContinue
+        try {
+            $ErrorActionPreference = 'Continue'
+            wsl --import "$DmlDistroName" "$WslDir" "$TmpTar"
+            $importExit = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $prevEap
+            Remove-Item $TmpTar -Force -ErrorAction SilentlyContinue
+        }
         Write-Diag "wsl --import exit code: $importExit"
         if ($importExit -ne 0) {
             Write-Fail "Failed to import Arch Linux as '$DmlDistroName' (exit $importExit)."
@@ -2815,7 +2842,12 @@ class TrayApp : ApplicationContext
     try {
         Set-Service -Name iphlpsvc -StartupType Automatic -ErrorAction Stop
         Start-Service -Name iphlpsvc -ErrorAction Stop
-        Write-Diag "IP Helper service (iphlpsvc) running, startup Automatic"
+        $svcStatus = (Get-Service iphlpsvc -ErrorAction SilentlyContinue).Status
+        if ($svcStatus -eq 'Running') {
+            Write-Diag "IP Helper service (iphlpsvc) running, startup Automatic"
+        } else {
+            Write-Warn "IP Helper service started but is not in Running state (status: $svcStatus) -- LAN portproxy may not work."
+        }
     } catch {
         Write-Warn "Could not configure the IP Helper service: $($_.Exception.Message)"
         Write-Warn "LAN play may not work until it is started (services.msc -> IP Helper)."
@@ -2974,9 +3006,14 @@ try {
     if (-not $Script:FailReported) {
         Write-Host ""
         Write-Host "[FAIL] $($_.Exception.Message)" -ForegroundColor Red
+        # Also write to log so the crash is visible when the user shares their log.
+        # Use a fallback path in case $LogFile was never set (very early crash).
+        $effectiveLog = if ($LogFile) { $LogFile } else { "$env:LOCALAPPDATA\DML\install-fallback.log" }
+        try { Add-Content -Path $effectiveLog -Value "$(Get-Date -Format 'HH:mm:ss') [FAIL] $($_.Exception.Message)" } catch {}
     }
     Write-Host ""
     Write-Host "  Installation stopped. Share this log if you need help:" -ForegroundColor Yellow
-    Write-Host "  $LogFile" -ForegroundColor Yellow
+    $effectiveLog = if ($LogFile) { $LogFile } else { "$env:LOCALAPPDATA\DML\install-fallback.log" }
+    Write-Host "  $effectiveLog" -ForegroundColor Yellow
     exit 1
 }
