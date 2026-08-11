@@ -6,7 +6,7 @@ https://github.com/DadsMmoLab/dads-mmo-lab/blob/main/guides/wow-wotlk/README.md
 > Run offline MMO servers on any Windows 10 or 11 PC.
 > No Steam Deck required!
 >
-> **Estimated time:** 30–45 minutes setup, then your game's install time
+> **Estimated time:** 30-45 minutes setup, then your game's install time
 > **Difficulty:** Beginner friendly — just copy and paste!
 
 ---
@@ -151,7 +151,7 @@ Everything from here runs inside the **Ubuntu terminal**, not PowerShell. Open U
 sudo apt-get update && sudo apt-get upgrade -y
 ```
 
-Enter your password when asked. This takes 1–2 minutes.
+Enter your password when asked. This takes 1-2 minutes.
 
 ---
 
@@ -633,7 +633,7 @@ Note: Windows 10 does not support mirrored networking or WSLg (GUI apps). Use th
 
 **Does this work on a laptop?**
 
-Yes! Any Windows laptop made in the last 8 years works fine. Keep your laptop plugged in during any compilation step — the Playerbots installer compiles C++ source and takes 2–4 hours on older machines.
+Yes! Any Windows laptop made in the last 8 years works fine. Keep your laptop plugged in during any compilation step — the Playerbots installer compiles C++ source and takes 2-4 hours on older machines.
 
 ---
 

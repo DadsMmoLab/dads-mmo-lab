@@ -1229,7 +1229,7 @@ EOF
         print_success "realmd.conf patched"
     fi
 
-    # ── Playerbots: 600–800 random bots (Steam Deck RAM limit) ──────
+    # ── Playerbots: 600-800 random bots (Steam Deck RAM limit) ──────
     if [ -f "$SERVER_DIR/etc/aiplayerbot.conf" ]; then
         sed -i "s|^AiPlayerbot\.MinRandomBots .*|AiPlayerbot.MinRandomBots = 600|" \
             "$SERVER_DIR/etc/aiplayerbot.conf"
@@ -1243,7 +1243,7 @@ EOF
             "$SERVER_DIR/etc/aiplayerbot.conf"
         sed -i "s|^#\? *AiPlayerbot\.SyncLevelNoPlayer .*|AiPlayerbot.SyncLevelNoPlayer = 1|" \
             "$SERVER_DIR/etc/aiplayerbot.conf"
-        print_success "aiplayerbot.conf patched (600–800 bots, 200 accounts, level-synced to player+5)"
+        print_success "aiplayerbot.conf patched (600-800 bots, 200 accounts, level-synced to player+5)"
     fi
 
     # ── AHBot: high-volume auction house (~15k items target) ─────────

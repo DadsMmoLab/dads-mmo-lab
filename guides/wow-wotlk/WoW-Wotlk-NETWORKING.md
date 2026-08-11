@@ -106,7 +106,7 @@ docker compose up -d
 ```
 > `-d` means Docker runs in the background and doesn't take over your terminal.
 
-**Step 3.** Verify all containers started (wait 30–60 seconds first):
+**Step 3.** Verify all containers started (wait 30-60 seconds first):
 ```
 docker compose ps
 ```
@@ -117,7 +117,7 @@ ac-authserver     Up
 ac-worldserver    Up
 ac-database       Up
 ```
-> **Tip:** First-time database setup can take **10–15 minutes**. Re-run `docker compose ps` until all show `Up`.
+> **Tip:** First-time database setup can take **10-15 minutes**. Re-run `docker compose ps` until all show `Up`.
 
 > 🪟 **Windows:** Check that the STATUS column shows ports like `0.0.0.0:3724->3724/tcp`. If it shows `127.0.0.1:3724->3724/tcp` instead, LAN access may not work — check your Docker Compose port bindings.
 

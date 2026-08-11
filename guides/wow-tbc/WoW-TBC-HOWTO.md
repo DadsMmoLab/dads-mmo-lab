@@ -11,12 +11,12 @@
 A fully offline, single-player-friendly Burning Crusade server running on your Steam Deck. No internet connection required after install. Includes:
 
 - **CMaNGOS TBC** — the open-source WoW TBC server core
-- **Playerbots** — 1,600–2,000 AI players that roam Azeroth and Outland, form parties, and run dungeons
+- **Playerbots** — 1,600-2,000 AI players that roam Azeroth and Outland, form parties, and run dungeons
 - **AHBot** — populates the Auction House automatically (~15k items at steady state)
 - **All four databases** — world content (creatures, items, quests, Outland), realmd, characters, logs
 - **Gaming Mode launcher** — one button to start the server from your Steam library
 
-The installer compiles everything from source inside Docker. This takes 2–4 hours on first run. Subsequent starts take seconds.
+The installer compiles everything from source inside Docker. This takes 2-4 hours on first run. Subsequent starts take seconds.
 
 ---
 
@@ -27,7 +27,7 @@ The installer compiles everything from source inside Docker. This takes 2–4 ho
 | WoW TBC client | Version **2.4.3, build 8606** — must contain `Data/expansion.MPQ` |
 | Disk space | **20 GB free** minimum |
 | RAM | 16 GB (standard Steam Deck spec) |
-| Time | 3–5 hours wall-clock (mostly hands-off) |
+| Time | 3-5 hours wall-clock (mostly hands-off) |
 | Power | Deck plugged in; flat hard surface for airflow |
 
 > **Client note:** Your client must have `Data/expansion.MPQ` (the Burning Crusade expansion archive). Without it the installer will detect a Vanilla or damaged client and warn you. The locale folder `Data/enUS/` (or your locale equivalent) must also be present.
@@ -57,7 +57,7 @@ Verifies Linux, disk space, internet, and RAM. Installs Docker if it's not alrea
 ### Phase 2: Pre-Compile Summary (~1 min)
 Shows what will be built and asks you to confirm before the long compile starts.
 
-### Phase 3: Compile CMaNGOS TBC (2–4 hours)
+### Phase 3: Compile CMaNGOS TBC (2-4 hours)
 Builds a Docker image with:
 - CMaNGOS TBC core (`mangosd`, `realmd`, map extractors)
 - Playerbots module compiled in
@@ -68,18 +68,18 @@ A heartbeat prints every 5 minutes so you know it's still running. The fan will 
 
 > **If it fails:** The most common cause is a network drop mid-clone. Re-run the installer and it will detect the existing image if compile succeeded, or restart the compile if it didn't.
 
-### Phase 4: Extract Client Data (15–50 min)
+### Phase 4: Extract Client Data (15-50 min)
 
 Reads your WoW TBC client and extracts three things into `~/wow-tbc-server/data/`:
 
 | Output | What it is | Expected count |
 |---|---|---|
-| `maps/` | Zone geometry + encounter data | 3,000–6,000 files |
+| `maps/` | Zone geometry + encounter data | 3,000-6,000 files |
 | `dbc/` | Game data tables | 150+ files |
 | `vmaps/` | Line-of-sight obstacles | 2,000+ files |
 | `mmaps/` | Pathfinding mesh (Playerbots) | 3,000+ files |
 
-The mmap generation is the last big wait (~30–50 min). Progress streams to your terminal.
+The mmap generation is the last big wait (~30-50 min). Progress streams to your terminal.
 
 > **Extraction writes temporary folders into your client folder** (`Buildings/`, `Cameras/`, etc.) and moves them out automatically when done.
 
@@ -172,7 +172,7 @@ You need **two** Steam shortcuts: one for the server launcher, one for the WoW c
 5. Launch **Burning Crusade WoW**
 6. Log in: **player / player** — realmlist: **127.0.0.1**
 7. Select a Blood Elf, Draenei, or any race — all TBC races and classes are available
-8. **Bots need 5–10 minutes after server startup to populate the world** — be patient on first login
+8. **Bots need 5-10 minutes after server startup to populate the world** — be patient on first login
 
 When you close WoW, the launcher detects this and shuts the server down automatically. If WoW isn't detected within 5 minutes of launch, the server stays alive for 3 hours as a fallback.
 
@@ -291,7 +291,7 @@ Verify your client has both `Data/expansion.MPQ` and a locale folder (`Data/enUS
 
 The installer is **safe to re-run**. It detects:
 
-- **Compiled image already exists** → skips the 2–4 hour compile and asks if you want to rebuild
+- **Compiled image already exists** → skips the 2-4 hour compile and asks if you want to rebuild
 - **Server folder + image both exist** → asks if you want a full fresh install or to continue
 - **DB password saved** → loads it automatically so it doesn't generate a new one that conflicts with the existing MariaDB volume
 
@@ -299,7 +299,7 @@ The installer is **safe to re-run**. It detects:
 
 ## What's Coming
 
-Dad's MMO Lab is building a pre-built Docker image publishing pipeline via GitHub Actions. When it ships, a separate `install-wow-tbc-fast.sh` will do a 5-minute image pull instead of a 3–4 hour source compile.
+Dad's MMO Lab is building a pre-built Docker image publishing pipeline via GitHub Actions. When it ships, a separate `install-wow-tbc-fast.sh` will do a 5-minute image pull instead of a 3-4 hour source compile.
 
 Watch: [github.com/DadsMmoLab/dads-mmo-lab](https://github.com/DadsMmoLab/dads-mmo-lab)
 

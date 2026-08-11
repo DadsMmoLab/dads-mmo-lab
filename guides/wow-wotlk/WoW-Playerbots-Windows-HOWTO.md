@@ -12,7 +12,7 @@
 A fully offline, single-player-friendly Wrath of the Lich King server running inside WSL2 on your Windows PC. No internet required after install. Includes:
 
 - **AzerothCore WotLK** — the open-source WoW WotLK server core
-- **mod-playerbots** — 200–250 AI players that roam Azeroth and Northrend, group up, and run dungeons
+- **mod-playerbots** — 200-250 AI players that roam Azeroth and Northrend, group up, and run dungeons
 - **DML Launcher integration** — start, stop, and manage the server from your system tray
 
 This installer uses AzerothCore's own Docker Compose build system, which handles map data download automatically. No WoW client path is required.
@@ -28,7 +28,7 @@ This installer uses AzerothCore's own Docker Compose build system, which handles
 | DML substrate | `Install-DML.ps1` completed successfully |
 | Disk space | **30 GB free** inside WSL2 (`dml-arch`) |
 | RAM | 8 GB minimum; 16 GB recommended |
-| Time | 2–4 hours compile (hands-off) + first-boot database setup (see below) |
+| Time | 2-4 hours compile (hands-off) + first-boot database setup (see below) |
 | Power | Keep your PC running and plugged in during compile |
 | Internet | Required during install |
 
@@ -71,7 +71,7 @@ The script walks you through everything interactively. Answer the prompts at the
 
 If any check fails the installer stops and tells you exactly what to fix.
 
-### Step 2/3: Compile AzerothCore + Playerbots (2–4 hours)
+### Step 2/3: Compile AzerothCore + Playerbots (2-4 hours)
 
 The installer confirms what it's about to build and asks you to confirm before starting. Once you say yes:
 
@@ -82,14 +82,14 @@ The installer confirms what it's about to build and asks you to confirm before s
 
 Your CPU will be loud during compile — that's normal.
 
-> **If it fails:** Re-run the installer. It detects existing compiled images and skips the 2–4 hour compile automatically, then resumes where it left off. Re-running is always safe.
+> **If it fails:** Re-run the installer. It detects existing compiled images and skips the 2-4 hour compile automatically, then resumes where it left off. Re-running is always safe.
 
 ### First Boot: Database Setup (varies — be patient!)
 
 After compile, the server starts in three phases, and the installer shows progress for each:
 
-1. **`Starting database...`** — MySQL sets itself up for the first time. On most PCs this takes 1–5 minutes, but on slower drives it can take much longer. You'll see `Database still starting... (90s elapsed)` progress messages every 30 seconds — **as long as those keep appearing, everything is working.** The installer waits up to a full hour before giving up.
-2. **`Importing world databases...`** — all of Azeroth's data is loaded (5–10 minutes).
+1. **`Starting database...`** — MySQL sets itself up for the first time. On most PCs this takes 1-5 minutes, but on slower drives it can take much longer. You'll see `Database still starting... (90s elapsed)` progress messages every 30 seconds — **as long as those keep appearing, everything is working.** The installer waits up to a full hour before giving up.
+2. **`Importing world databases...`** — all of Azeroth's data is loaded (5-10 minutes).
 3. **`Initializing acore_playerbots...`** then the world server and auth server start.
 
 Subsequent server starts take ~30 seconds — the slow part is first boot only.
@@ -156,7 +156,7 @@ Common locations:
 3. The server starts in the background — no terminal window needed
 4. Wait 30 seconds, then launch your WoW client
 5. Log in: your username / password — realmlist: **127.0.0.1**
-6. **Bots take 5–10 minutes after server start to populate** — be patient on first login
+6. **Bots take 5-10 minutes after server start to populate** — be patient on first login
 
 To stop the server: right-click the tray icon → **wow-server-playerbots** → **Stop**
 
@@ -368,7 +368,7 @@ Look for `[DatabaseLoader]` entries — these are the database import steps. The
 
 ### Server starts but bots don't appear
 
-Bots log in gradually after server start — watch the `N/200 Bot ... logged in` counter in the logs (tray → Attach to Console). Populating a few hundred bots can take 10–15 minutes, longer on slower drives. If nothing is logging in at all:
+Bots log in gradually after server start — watch the `N/200 Bot ... logged in` counter in the logs (tray → Attach to Console). Populating a few hundred bots can take 10-15 minutes, longer on slower drives. If nothing is logging in at all:
 
 1. Check the bot settings are present (see *Bot Settings* above):
    ```powershell
@@ -425,7 +425,7 @@ Common causes:
 
 ### Re-running the installer
 
-Safe to re-run at any time. If compiled images already exist, the installer detects them, skips the 2–4 hour compile, and resumes any unfinished setup steps. To force a complete rebuild from scratch:
+Safe to re-run at any time. If compiled images already exist, the installer detects them, skips the 2-4 hour compile, and resumes any unfinished setup steps. To force a complete rebuild from scratch:
 
 ```powershell
 wsl -d dml-arch -u dml -- bash -c "cd ~/games/wow-server-playerbots && docker compose down -v"

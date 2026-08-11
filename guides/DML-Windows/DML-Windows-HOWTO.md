@@ -91,18 +91,18 @@ Type **y** and press Enter. Your PC restarts, you log back in, and Phase 2 start
 
 > **If WSL2 is already fully active** on your PC (the hypervisor is running), the installer detects this and skips the reboot entirely.
 
-### Phase 2: Arch Linux + Docker Setup (~15–20 min, automatic)
+### Phase 2: Arch Linux + Docker Setup (~15-20 min, automatic)
 
 After you log back in, a PowerShell window opens and runs Phase 2. You can watch the progress or walk away:
 
 | Step | What's happening | Approx. time |
 |---|---|---|
-| WSL update | Updates WSL2 to the latest version | 1–2 min |
+| WSL update | Updates WSL2 to the latest version | 1-2 min |
 | `.wslconfig` | Sets RAM/CPU/swap limits for the Linux environment | < 1 min |
-| Arch Linux install | Downloads the official Arch Linux image, imports it as `dml-arch` | 3–5 min |
-| Keyring + updates | Initializes pacman's keyring, runs full system update | 2–3 min |
+| Arch Linux install | Downloads the official Arch Linux image, imports it as `dml-arch` | 3-5 min |
+| Keyring + updates | Initializes pacman's keyring, runs full system update | 2-3 min |
 | User setup | Creates the `dml` Linux user with sudo access | < 1 min |
-| Docker Engine | Installs Docker, enables it with systemd | 3–5 min |
+| Docker Engine | Installs Docker, enables it with systemd | 3-5 min |
 | Docker test | Runs `hello-world` to confirm Docker works | < 1 min |
 
 ### Phase 3: dml CLI + DML Launcher (~2 min, automatic)
@@ -319,7 +319,7 @@ It opens in its own terminal window — follow the numbered on-screen menu.
 
 ### Wrath Unbound Add-On
 
-Wrath Unbound is a multi-class mod that layers onto your **WotLK Playerbots** server. Because it's a compiled C++ module, installing it **rebuilds the worldserver** — an incremental rebuild (much shorter than the original multi-hour compile, but still roughly 30–90 minutes depending on your PC).
+Wrath Unbound is a multi-class mod that layers onto your **WotLK Playerbots** server. Because it's a compiled C++ module, installing it **rebuilds the worldserver** — an incremental rebuild (much shorter than the original multi-hour compile, but still roughly 30-90 minutes depending on your PC).
 
 **Before you start:** your WotLK Playerbots server must already be installed and **running**. The menu entries only appear on the `wow-server-playerbots` title while it's running.
 
@@ -549,7 +549,7 @@ MMO servers with large databases need 20+ GB inside the Linux environment. Plan 
 
 ### A WoW server build gets killed partway (out of memory)
 
-**Symptom:** Installing the Wrath Unbound add-on — or any step that compiles/rebuilds a WoW worldserver — stops at roughly the **same low percentage every time** (often around 10–20%) and the build is killed. There's usually no clear error; the compile just stops.
+**Symptom:** Installing the Wrath Unbound add-on — or any step that compiles/rebuilds a WoW worldserver — stops at roughly the **same low percentage every time** (often around 10-20%) and the build is killed. There's usually no clear error; the compile just stops.
 
 **Cause:** Compiling the worldserver runs several C++ compilers in parallel, and each one needs a lot of memory. On PCs with **8 GB of RAM or less**, WSL2's memory budget can't feed all of them at once, so Windows kills one and the build dies. It fails at the same place each time because the heaviest files compile there — and each retry restarts the compile from the beginning, which is why the percentage is always the same.
 

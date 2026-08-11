@@ -198,7 +198,7 @@ Check your `realmlist.wtf` — the value depends on your setup:
 
 See the [Networking Guide](./WoW-Wotlk-NETWORKING.md) for LAN and internet setup.
 
-Give it time — first launch takes 5–15 minutes.
+Give it time — first launch takes 5-15 minutes.
 
 ---
 

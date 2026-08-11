@@ -248,8 +248,8 @@ All WoW installers ship with **Playerbots** pre-configured — bots that roam th
 | | Vanilla | TBC | WotLK | WotLK Unbound |
 |---|---|---|---|---|
 | **Bot engine** | CMaNGOS Playerbots | CMaNGOS Playerbots | AzerothCore Playerbots | AzerothCore Playerbots |
-| **Bot count** | 600–800 active | 600–800 active | 600–800 active | 600–800 active |
-| **Level range** | Endgame 50–60 | Outlands 57–70 | Full 1–80 (syncs to player) | Full 1–80 (syncs to player) |
+| **Bot count** | 600-800 active | 600-800 active | 600-800 active | 600-800 active |
+| **Level range** | Endgame 50-60 | Outlands 57-70 | Full 1-80 (syncs to player) | Full 1-80 (syncs to player) |
 | **Auction House** | Stocked | Stocked | Stocked | Stocked |
 | **Install time** | ~30 min | ~30 min | ~30 min | ~30 min |
 

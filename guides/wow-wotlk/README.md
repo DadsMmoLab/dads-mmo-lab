@@ -29,7 +29,7 @@ All servers run in **Docker** via [AzerothCore's official Docker compose setup](
 The full walkthrough for installing AzerothCore WotLK + Playerbots and managing your server. Steam Deck users get the fully automated installer script — Linux users will find the server management, account creation, and networking sections all apply directly.
 
 - **Steam Deck:** Runs the `install-wow-wotlk.sh` script — fully automated, hands-off build
-- Installs **AzerothCore WotLK** + **mod-playerbots** (1,600–2,000 AI players), compiled from source
+- Installs **AzerothCore WotLK** + **mod-playerbots** (1,600-2,000 AI players), compiled from source
 - Sets up a one-button **Gaming Mode launcher** in your Steam library (Steam Deck)
 - Walks through account creation, realmlist setup, and daily use
 - Includes the **Managing Your Server** section covering both `wow-manage.sh` and The Lab GUI
@@ -52,7 +52,7 @@ Go through the full install guide, but skip the Steam Deck-specific sections. Th
 
 Everything you need to let other players connect to your server — on the same Wi-Fi (LAN) or over the internet.
 
-- **Part 1–2:** Open a terminal and start your server
+- **Part 1-2:** Open a terminal and start your server
 - **Part 3:** Find your local and public IP addresses
 - **Part 4:** Open firewall ports — platform-specific blocks for SteamOS, Fedora, Ubuntu/Debian, and Windows
 - **WSL2 portproxy:** How to forward ports from Windows into WSL2 (only needed if Docker binds to 127.0.0.1)
@@ -118,7 +118,7 @@ The installer script that `WoW-WotLK-HOWTO.md` walks you through. It automates t
 **Version:** 1.2.0 | **What it does:**
 1. Installs Docker and Git if not already present
 2. Shows a build summary and asks you to confirm
-3. Clones and compiles AzerothCore WotLK + mod-playerbots (~2–4 hours)
+3. Clones and compiles AzerothCore WotLK + mod-playerbots (~2-4 hours)
 4. Waits for the worldserver to initialize, then guides you through account creation
 5. Creates the Gaming Mode launcher script and reference card
 

@@ -310,6 +310,58 @@ function Register-Phase2Task {
 function Invoke-Phase1 {
     New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 
+    # ── Early-exit guards: detect already-installed / in-progress states ──────
+    # Check 1: dml-arch already registered → install is complete (or Phase 2 just
+    # finished). Skip Phase 1 entirely to avoid a confusing re-run.
+    $existingDistros = (wsl -l --quiet 2>$null) -replace "`0", ""
+    if ($existingDistros | Where-Object { $_ -match "^${DmlDistroName}$" }) {
+        Write-Host ""
+        Write-Host "============================================================" -ForegroundColor Green
+        Write-Host "  DML is already installed" -ForegroundColor Green
+        Write-Host "============================================================" -ForegroundColor Green
+        Write-Host ""
+        Write-Host "  The '$DmlDistroName' environment is already set up." -ForegroundColor White
+        Write-Host "  Use the DML Launcher shortcut on your Desktop to get started," -ForegroundColor White
+        Write-Host "  or open a terminal and run:" -ForegroundColor White
+        Write-Host "    wsl -d $DmlDistroName" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "  To reinstall from scratch, first run:" -ForegroundColor DarkGray
+        Write-Host "    wsl --unregister $DmlDistroName" -ForegroundColor DarkGray
+        Write-Host "  then re-run this installer." -ForegroundColor DarkGray
+        Write-Host ""
+        return
+    }
+
+    # Check 2: Phase 2 scheduled task is still registered → Phase 2 hasn't started
+    # yet (it removes the task the moment it begins). Tell the user to log in/wait.
+    $p2Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if ($p2Task) {
+        Write-Host ""
+        Write-Host "  Phase 2 is scheduled to run automatically on your next login." -ForegroundColor Yellow
+        Write-Host "  If you just rebooted, log out and back in to trigger it." -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "  To restart Phase 1 from scratch instead, run:" -ForegroundColor DarkGray
+        Write-Host "    Unregister-ScheduledTask -TaskName '$TaskName' -Confirm:`$false" -ForegroundColor DarkGray
+        Write-Host "  then re-run this installer." -ForegroundColor DarkGray
+        Write-Host ""
+        return
+    }
+
+    # Check 3: Phase 2 is actively running right now (another powershell with
+    # -ResumePhase2 in its command line). Warn the user to wait.
+    $p2Active = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" `
+                    -ErrorAction SilentlyContinue |
+                Where-Object { $_.CommandLine -like '*ResumePhase2*' }
+    if ($p2Active) {
+        Write-Host ""
+        Write-Host "  Phase 2 is currently running — installation is in progress." -ForegroundColor Yellow
+        Write-Host "  This can take 10-20 minutes. Please wait for it to complete." -ForegroundColor Yellow
+        Write-Host "  Check the other PowerShell window for progress details." -ForegroundColor White
+        Write-Host ""
+        return
+    }
+    # ─────────────────────────────────────────────────────────────────────────
+
     Write-Host ""
     Write-Host "============================================================" -ForegroundColor Cyan
     Write-Host "  Dad's MMO Lab -- Environment Setup  [Phase 1 of 2]" -ForegroundColor Cyan

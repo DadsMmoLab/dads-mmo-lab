@@ -65,9 +65,9 @@ local FillRateUltra    = 1.00   -- final 5%  (100% - 95%) for ultraRareItems
 --  FillCountThreshold3 ≤ FillCountThreshold4 (must be 1.0)
 --
 local FillCountThreshold1 = 0.64   -- e.g. 64% chance to insert FillCount1 rows
-local FillCountThreshold2 = 0.76   -- next 12% (76%–64%) → FillCount2
-local FillCountThreshold3 = 0.88   -- next 12% (88%–76%) → FillCount3
-local FillCountThreshold4 = 1.00   -- final 12% (100%–88%) → FillCount4
+local FillCountThreshold2 = 0.76   -- next 12% (76%-64%) → FillCount2
+local FillCountThreshold3 = 0.88   -- next 12% (88%-76%) → FillCount3
+local FillCountThreshold4 = 1.00   -- final 12% (100%-88%) → FillCount4
 
 local FillCount1 = 3               -- rows if r < 0.64
 local FillCount2 = 2               -- rows if r < 0.76
@@ -97,7 +97,7 @@ local FlushMailBody        = [[
 Congratulations! You have successfully won an item off the Black Market Auction House.
 After spending %dg, “%s” is now yours! Enjoy.
 
-– The Black Market AH
+- The Black Market AH
 ]]
 -- ───────────────────────────────────────────────────────────────────────────────
 

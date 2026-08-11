@@ -43,13 +43,13 @@ GOLD='\033[38;5;220m'; DIM='\033[2m'
 # Layout modes (1-indexed rows):
 #
 #   Full-logo mode  (_IN_MENU=false, e.g. intro / first-run):
-#     Rows 1–9  : 8-line logo + animation   →  MENU_START_ROW=15
+#     Rows 1-9  : 8-line logo + animation   →  MENU_START_ROW=15
 #
 #   Slim-banner mode  (_IN_MENU=true, i.e. any menu screen):
-#     Rows 1–4  : 4-row compact banner      →  MENU_START_ROW=5
+#     Rows 1-4  : 4-row compact banner      →  MENU_START_ROW=5
 #
 #   Narrow-fallback mode  (terminal width < 80 cols):
-#     Rows 1–5  : minimal header            →  MENU_START_ROW=6
+#     Rows 1-5  : minimal header            →  MENU_START_ROW=6
 #
 MENU_START_ROW=15
 _TERM_LINES=24
@@ -1430,7 +1430,7 @@ server_start() {
             print_info "Most common causes and fixes:"
             print_info ""
             print_info "  • ${CYAN}'Table X already exists' errors${RST}: a previous module install"
-            print_info "    corrupted update tracking. Use option 14 → Server Maintenance → Repair install state."
+            print_info "    corrupted update tracking. Use Main Menu → 4) Server Maintenance → Repair install state."
             print_info ""
             print_info "  • ${CYAN}'Permission denied' errors${RST}: UID/GID mismatch on env/dist."
             print_info "    Run: sudo chown -R 1000:1000 env/dist/etc env/dist/logs"
@@ -6238,7 +6238,7 @@ show_first_run_welcome() {
     echo -e "${GOLD}  1) AzerothCore Modules${RST}"
     echo -e "${WHITE}     C++ plugins that rebuild into the worldserver binary. Add new${RST}"
     echo -e "${WHITE}     features, mechanics, and systems. Require a ${BOLD}worldserver rebuild${RST}"
-    echo -e "${WHITE}     (30–90 min on Steam Deck) before they take effect.${RST}"
+    echo -e "${WHITE}     (30-90 min on Steam Deck) before they take effect.${RST}"
     echo ""
     echo -e "${GOLD}  2) ALE Lua Mods${RST}"
     echo -e "${WHITE}     Lightweight Lua scripts that run inside the server at runtime —${RST}"
@@ -6260,7 +6260,7 @@ show_first_run_welcome() {
     echo -e "${GREEN}  ✓${RST} ${WHITE}You'll be asked before anything destructive.${RST}"
     echo -e "${WHITE}    Installs, removes, rebuilds, and database operations all ask first.${RST}"
     echo ""
-    echo -e "${GREEN}  ✓${RST} ${WHITE}Option 14 → Server Maintenance has backup, restore, and repair tools.${RST}"
+    echo -e "${GREEN}  ✓${RST} ${WHITE}Main Menu → 4) Server Maintenance has backup, restore, repair, and update tools.${RST}"
     echo -e "${WHITE}    Repair only clears SQL update-tracking rows — it never drops tables.${RST}"
     echo ""
 
@@ -6277,7 +6277,7 @@ show_first_run_welcome() {
         echo -e "${WHITE}  • Option ${CYAN}2${WHITE} (ALE Lua Mods) — manage Lua scripts (needs ALE installed)${RST}"
         echo -e "${WHITE}  • Option ${CYAN}3${WHITE} (SQL Mods) — database tweaks, no rebuild required${RST}"
         echo -e "${WHITE}  • Option ${CYAN}8${WHITE} (Server status) — check container state${RST}"
-        echo -e "${WHITE}  • Option ${CYAN}14${WHITE} (Server Maintenance) — backup, restore, repair${RST}"
+        echo -e "${WHITE}  • ${CYAN}Main Menu → 4)${WHITE} Server Maintenance — backup, restore, repair, updates${RST}"
     fi
     echo ""
     echo -e "${DIM}This welcome shows once per install. The marker file at${RST}"
@@ -6715,7 +6715,303 @@ cleanup_docker() {
     echo ""
     echo -e "${WHITE}Next step: rebuild the worldserver${RST}"
     echo -e "  ${CYAN}Configuration → Rebuild Worldserver${RST}"
-    echo -e "${DIM}  The first rebuild after this will take 30–90 min (full recompile).${RST}"
+    echo -e "${DIM}  The first rebuild after this will take 30-90 min (full recompile).${RST}"
+}
+
+# ─────────────────────────────────────────────────────────────
+# SERVER UPDATES
+# ─────────────────────────────────────────────────────────────
+update_azerothcore() {
+    print_step "Update AzerothCore"
+    echo ""
+
+    # Base / npcbots: no local source tree — offer docker image pull instead
+    if [ "$SERVER_TYPE" != "playerbots" ]; then
+        echo -e "${WHITE}Your server type (${CYAN}${SERVER_TYPE}${WHITE}) uses prebuilt Docker images.${RST}"
+        echo -e "${WHITE}There is no local source code to update — instead, we can pull${RST}"
+        echo -e "${WHITE}the latest prebuilt images from Docker Hub.${RST}"
+        echo ""
+        print_warning "This will download updated images; a server restart is required to apply them."
+        print_warning "Back up your databases before proceeding. This MAY break your server if the new images are incompatible with your current database or modules. Do NOT update regularly without checking the AzerothCore changelog for breaking changes."
+        echo ""
+        if ! ask_yes_no "Pull latest Docker images for AzerothCore?"; then return; fi
+        echo ""
+        print_info "Pulling latest AzerothCore images (this may take a few minutes)..."
+        if (cd "$SERVER_DIR" && docker compose pull 2>&1); then
+            echo ""
+            print_success "Images updated. Restart the server (Server Controls → Restart) to apply."
+        else
+            echo ""
+            print_error "Image pull failed. Check your internet connection and try again."
+        fi
+        return
+    fi
+
+    # Playerbots: full source-build via git pull + rebuild
+    echo -e "${WHITE}This updates AzerothCore's source code and rebuilds the server.${RST}"
+    echo -e "${WHITE}The rebuild typically takes ${CYAN}30-90 minutes${WHITE} depending on your hardware.${RST}"
+    echo ""
+    print_warning "⚠️  BEFORE UPDATING — PLEASE NOTE:"
+    echo -e "${WHITE}  • AzerothCore updates may introduce breaking changes.${RST}"
+    echo -e "${WHITE}  • Database schemas may be altered by the DB import on next start.${RST}"
+    echo -e "${WHITE}  • Module C++ code may fail to compile against a newer AzerothCore version.${RST}"
+    echo -e "${WHITE}  • ${BOLD}We strongly recommend backing up your databases first.${RST}"
+    echo ""
+    if ask_yes_no "Back up databases now before proceeding?"; then
+        echo ""
+        if ! _maintenance_backup_all; then
+            echo ""
+            print_warning "Backup did not complete successfully."
+            if ! ask_yes_no "Continue with the update anyway (without a backup)?"; then
+                print_info "Update cancelled."
+                return
+            fi
+        fi
+        echo ""
+    else
+        if ! ask_yes_no "Skip backup and continue anyway?"; then
+            print_info "Update cancelled."
+            return
+        fi
+    fi
+
+    # Verify the source tree is a git repository
+    if [ ! -d "$SERVER_DIR/.git" ]; then
+        print_error "SERVER_DIR ($SERVER_DIR) does not appear to be a git repository."
+        print_info "Cannot update — the source tree may have been set up manually."
+        return 1
+    fi
+
+    # Show current state; guard against detached HEAD
+    echo ""
+    local cur_branch cur_hash
+    cur_branch=$(git -C "$SERVER_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+    cur_hash=$(git -C "$SERVER_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+
+    if [ -z "$cur_branch" ] || [ "$cur_branch" = "HEAD" ]; then
+        print_error "Repository is in detached HEAD state — cannot safely update."
+        print_info "Check out the correct branch first:"
+        print_info "  git -C \"$SERVER_DIR\" checkout Playerbot"
+        return 1
+    fi
+
+    print_info "Current branch: ${CYAN}${cur_branch}${RST}  (${DIM}${cur_hash}${RST})"
+    echo ""
+
+    if ! ask_yes_no "Proceed with git pull and full rebuild?"; then
+        print_info "Update cancelled."
+        return
+    fi
+
+    echo ""
+    print_info "Fetching latest changes from remote..."
+    if ! git -C "$SERVER_DIR" fetch origin 2>&1; then
+        print_error "git fetch failed. Check your internet connection."
+        return 1
+    fi
+
+    # Verify remote tracking ref exists before comparing
+    local local_hash remote_hash
+    local_hash=$(git -C "$SERVER_DIR" rev-parse HEAD 2>/dev/null || echo "")
+    remote_hash=$(git -C "$SERVER_DIR" rev-parse "refs/remotes/origin/${cur_branch}" 2>/dev/null || echo "")
+
+    if [ -z "$remote_hash" ]; then
+        print_error "Could not find remote branch: origin/${cur_branch}"
+        print_info "Verify the remote exists with:  git -C \"$SERVER_DIR\" remote -v"
+        return 1
+    fi
+
+    if [ "$local_hash" = "$remote_hash" ]; then
+        echo ""
+        print_success "AzerothCore is already up to date (${cur_hash})."
+        echo -e "${DIM}  No rebuild needed — nothing changed.${RST}"
+        return
+    fi
+
+    print_info "Merging changes..."
+    if ! git -C "$SERVER_DIR" merge --ff-only "origin/${cur_branch}" 2>&1; then
+        echo ""
+        print_error "Merge failed — local source tree has diverged or has uncommitted changes."
+        print_info "Inspect with:  git -C \"$SERVER_DIR\" status"
+        print_info "To force-sync (discards any local edits):"
+        print_info "  git -C \"$SERVER_DIR\" reset --hard origin/${cur_branch}"
+        return 1
+    fi
+
+    local new_hash
+    new_hash=$(git -C "$SERVER_DIR" rev-parse --short HEAD 2>/dev/null)
+    echo ""
+    print_success "Source updated: ${DIM}${cur_hash}${RST} → ${GREEN}${new_hash}${RST}"
+    echo ""
+
+    # Update bundled mod-playerbots if present.
+    # Core and mod-playerbots are tightly coupled — a failure here is critical.
+    local pb_dir="$SERVER_DIR/modules/mod-playerbots"
+    if [ -d "$pb_dir/.git" ]; then
+        print_info "Updating bundled mod-playerbots module..."
+        local pb_branch
+        pb_branch=$(git -C "$pb_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "master")
+        if git -C "$pb_dir" fetch origin "$pb_branch" --depth=1 2>&1 && \
+           git -C "$pb_dir" reset --hard FETCH_HEAD 2>&1; then
+            print_success "mod-playerbots updated."
+        else
+            echo ""
+            print_error "mod-playerbots update failed."
+            print_warning "Core and mod-playerbots may now be out of sync, which can cause build failures."
+            if ! ask_yes_no "Continue with the rebuild anyway?"; then
+                print_info "Rebuild cancelled. Resolve mod-playerbots manually before retrying."
+                return 1
+            fi
+        fi
+        echo ""
+    fi
+
+    print_info "Starting rebuild — this will take 30-90 minutes..."
+    echo -e "${DIM}  Follow progress in another terminal:${RST}"
+    echo -e "${DIM}  docker compose -f \"${SERVER_DIR}/docker-compose.yml\" logs -f ac-worldserver${RST}"
+    echo ""
+    if (cd "$SERVER_DIR" && docker compose up -d --build 2>&1); then
+        echo ""
+        print_success "Rebuild complete and server started!"
+        echo -e "${WHITE}AzerothCore will apply any new DB migrations automatically on first start.${RST}"
+    else
+        echo ""
+        print_error "Build failed. Check the output above for compiler errors."
+        print_info "Common fixes:"
+        print_info "  • Remove a recently added module that may be incompatible with this version"
+        print_info "  • Run  Server Maintenance → Clean Docker cache / build artifacts  then retry"
+    fi
+}
+
+# Pull the latest commit for a shallow-cloned module directory.
+# Uses fetch + reset --hard to handle diverged shallow histories reliably.
+_module_git_pull() {
+    local mod_dir="$1"
+    local branch
+    branch=$(git -C "$mod_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "master")
+    git -C "$mod_dir" fetch origin "$branch" --depth=1 2>/dev/null && \
+    git -C "$mod_dir" reset --hard FETCH_HEAD 2>/dev/null
+}
+
+update_all_modules() {
+    print_step "Update All Modules"
+    echo ""
+
+    if [ "$SERVER_TYPE" != "playerbots" ]; then
+        print_warning "Module updates only apply to Playerbots (source-build) installs."
+        print_info "Base and NPCBots installs use prebuilt images; modules are not separately compiled."
+        return
+    fi
+
+    # Gather installed C++ modules from the registry
+    local -a update_keys=()
+    local -a update_names=()
+    local entry key name url _db
+    for entry in "${MODULE_REGISTRY[@]}"; do
+        IFS='|' read -r key name url _db <<< "$entry"
+        if module_is_installed "$key"; then
+            update_keys+=("$key")
+            update_names+=("$name")
+        fi
+    done
+
+    # mod-playerbots is bundled with the source build, not in MODULE_REGISTRY
+    if [ -d "$SERVER_DIR/modules/mod-playerbots/.git" ]; then
+        update_keys+=("mod-playerbots")
+        update_names+=("Playerbots (bundled)")
+    fi
+
+    if [ "${#update_keys[@]}" -eq 0 ]; then
+        print_info "No modules currently installed."
+        return
+    fi
+
+    echo -e "${WHITE}Installed modules that will be updated:${RST}"
+    echo ""
+    local i
+    for (( i=0; i<${#update_keys[@]}; i++ )); do
+        printf "  ${WHITE}%2d)${RST} %s\n" "$((i+1))" "${update_names[$i]}"
+    done
+    echo ""
+    print_warning "C++ module changes require a worldserver rebuild to take effect."
+    print_warning "Module SQL updates may alter your databases on next server start."
+    echo ""
+    if ask_yes_no "Back up databases before updating modules?"; then
+        echo ""
+        if ! _maintenance_backup_all; then
+            echo ""
+            print_warning "Backup did not complete successfully."
+            if ! ask_yes_no "Continue with module updates anyway (without a backup)?"; then
+                print_info "Update cancelled."
+                return
+            fi
+        fi
+        echo ""
+    fi
+
+    if ! ask_yes_no "Pull latest changes for all installed modules?"; then
+        print_info "Update cancelled."
+        return
+    fi
+
+    echo ""
+    local -a updated_mods=()
+    local -a uptodate_mods=()
+    local -a failed_mods=()
+
+    for (( i=0; i<${#update_keys[@]}; i++ )); do
+        local mod_key="${update_keys[$i]}"
+        local mod_name="${update_names[$i]}"
+        local mod_dir="$SERVER_DIR/modules/$mod_key"
+        printf "  ${BLUE}→${RST} %-50s" "$mod_name ..."
+        local before_hash after_hash
+        before_hash=$(git -C "$mod_dir" rev-parse --short HEAD 2>/dev/null || echo "")
+        if _module_git_pull "$mod_dir"; then
+            after_hash=$(git -C "$mod_dir" rev-parse --short HEAD 2>/dev/null || echo "")
+            if [ "$before_hash" != "$after_hash" ]; then
+                printf "${GREEN}updated${RST} ${DIM}(%s → %s)${RST}\n" "$before_hash" "$after_hash"
+                updated_mods+=("$mod_name")
+            else
+                printf "${DIM}already up to date${RST}\n"
+                uptodate_mods+=("$mod_name")
+            fi
+        else
+            printf "${RED}failed${RST}\n"
+            failed_mods+=("$mod_name")
+        fi
+    done
+
+    echo ""
+    print_success "Results: ${#updated_mods[@]} updated, ${#uptodate_mods[@]} up to date, ${#failed_mods[@]} failed."
+    echo ""
+
+    if [ "${#failed_mods[@]}" -gt 0 ]; then
+        print_warning "Failed modules:"
+        for m in "${failed_mods[@]}"; do
+            echo -e "  ${RED}✗${RST} $m"
+        done
+        print_info "Try removing and reinstalling the failed module via Server Modifications → Manage Modules."
+        echo ""
+    fi
+
+    if [ "${#updated_mods[@]}" -gt 0 ]; then
+        echo -e "${WHITE}Some modules were updated and require a rebuild to take effect.${RST}"
+        echo ""
+        if ask_yes_no "Rebuild the worldserver now? (30-90 min)"; then
+            echo ""
+            print_info "Starting rebuild..."
+            if (cd "$SERVER_DIR" && docker compose up -d --build 2>&1); then
+                echo ""
+                print_success "Rebuild complete and server restarted!"
+            else
+                echo ""
+                print_error "Rebuild failed. Check the output above for errors."
+                print_info "Retry via  Configuration → Rebuild Worldserver."
+            fi
+        else
+            print_info "Rebuild skipped. Run  Configuration → Rebuild Worldserver  when ready."
+        fi
+    fi
 }
 
 menu_server_maintenance() {
@@ -6726,7 +7022,8 @@ menu_server_maintenance() {
             _setup_screen
         fi
         print_header
-        printf "  ${GOLD}${BOLD}Server Maintenance${RST}\n"
+        print_install_info
+        printf "\n\n  ${GOLD}${BOLD}Server Maintenance${RST}\n"
         printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
         printf "  ${WHITE}1)${RST} Repair install state\n"
         printf "  ${WHITE}2)${RST} Backup databases\n"
@@ -6735,6 +7032,8 @@ menu_server_maintenance() {
         printf "  ${WHITE}5)${RST} Fix: BattlePass NPC missing (entry 90100)\n"
         printf "  ${WHITE}6)${RST} Fix: BattlePass crash (remove duplicate CSMH require)\n"
         printf "  ${WHITE}7)${RST} Clean Docker cache / build artifacts\n"
+        printf "  ${WHITE}8)${RST} Update AzerothCore\n"
+        printf "  ${WHITE}9)${RST} Update all installed modules\n"
         printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
         printf "  ${DIM}  [ENTER] Back${RST}\n"
 
@@ -6754,8 +7053,10 @@ menu_server_maintenance() {
             5) fix_battlepass_npc; press_enter ;;
             6) fix_battlepass_csmh_crash; press_enter ;;
             7) cleanup_docker; press_enter ;;
+            8) update_azerothcore; press_enter ;;
+            9) update_all_modules; press_enter ;;
             "") return ;;
-            *) print_warning "Enter 1–7 or ENTER to go back."; press_enter ;;
+            *) print_warning "Enter 1-9 or ENTER to go back."; press_enter ;;
         esac
     done
 }
@@ -6926,7 +7227,7 @@ menu_configuration() {
             4)  show_ingame_commands ;;
             5)  rebuild_worldserver; press_enter ;;
             "")  return ;;
-            *)  print_warning "Enter C, 1–5 or ENTER to go back."; press_enter ;;
+            *)  print_warning "Enter C, 1-5 or ENTER to go back."; press_enter ;;
         esac
     done
 }
@@ -6957,7 +7258,7 @@ menu_server_modifications() {
             2)  menu_ale_scripts ;;
             3)  menu_sql_mods ;;
             "")  return ;;
-            *)  print_warning "Enter 1–3 or ENTER to go back."; press_enter ;;
+            *)  print_warning "Enter 1-3 or ENTER to go back."; press_enter ;;
         esac
     done
 }
@@ -6977,7 +7278,6 @@ menu_server_controls() {
         printf "  ${WHITE}4)${RST} Restart server\n"
         printf "  ${WHITE}5)${RST} View logs\n"
         printf "  ${WHITE}6)${RST} Attach to console\n"
-        printf "  ${WHITE}7)${RST} Server maintenance\n"
         printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
         printf "  ${DIM}  [ENTER] Back${RST}\n"
         local _tlines; _tlines=$_TERM_LINES
@@ -6994,9 +7294,8 @@ menu_server_controls() {
             4)  server_restart; press_enter ;;
             5)  with_full_screen server_logs ;;
             6)  with_full_screen server_attach ;;
-            7)  menu_server_maintenance ;;
             "")  return ;;
-            *)  print_warning "Enter 1–7 or ENTER to go back."; press_enter ;;
+            *)  print_warning "Enter 1-6 or ENTER to go back."; press_enter ;;
         esac
     done
 }
@@ -7014,6 +7313,7 @@ main_menu() {
         printf "  ${WHITE}1)${RST} Configurations\n"
         printf "  ${WHITE}2)${RST} Server Modifications\n"
         printf "  ${WHITE}3)${RST} Server Controls\n"
+        printf "  ${WHITE}4)${RST} Server Maintenance\n"
         printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
         printf "  ${GOLD} Q)${RST} Quit\n"
         local _tlines; _tlines=$_TERM_LINES
@@ -7028,6 +7328,7 @@ main_menu() {
             1)  menu_configuration ;;
             2)  menu_server_modifications ;;
             3)  menu_server_controls ;;
+            4)  menu_server_maintenance ;;
             q)  echo ""; print_info "Goodbye!"; exit 0 ;;
         esac
     done

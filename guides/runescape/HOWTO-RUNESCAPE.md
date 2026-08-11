@@ -46,7 +46,7 @@ The installer takes about 5 minutes and handles everything automatically.
 
 ## What Happens During Install
 
-### Step 1: Dependencies (~1–2 min)
+### Step 1: Dependencies (~1-2 min)
 Installs:
 - **Java 11** (`jre11-openjdk`) — pinned version for Nashorn support
 - **git + git-lfs** — needed to clone the repo and download JAR files

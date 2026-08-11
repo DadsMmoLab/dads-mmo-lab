@@ -776,7 +776,7 @@ INSERT IGNORE INTO `unbound_milestones` (`milestone_index`, `required_level`, `u
 
 -- ============================================================
 -- Purchasable spell catalog, populated from Playerbots trainer
--- data (npc_trainer IDs 200002–200018).
+-- data (npc_trainer IDs 200002-200018).
 --
 -- class_id follows WoW class constants:
 --   1=Warrior  2=Paladin  3=Hunter   4=Rogue   5=Priest
@@ -1155,7 +1155,7 @@ WU_PAYLOAD_EOF_10
 --
 -- These spells appear in WotLK class trainers (trainer_spell IDs 1-34) but were
 -- absent from the catalog, which was originally populated from Playerbots
--- synthetic trainer data (npc_trainer IDs 200002–200018). The Playerbots
+-- synthetic trainer data (npc_trainer IDs 200002-200018). The Playerbots
 -- templates omit some low-level rank-1 spells, particularly those that native
 -- characters receive at creation.
 --

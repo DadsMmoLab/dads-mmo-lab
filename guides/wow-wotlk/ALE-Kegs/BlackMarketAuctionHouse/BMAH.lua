@@ -66,7 +66,7 @@ local HOTBID_REQ = "BMAH_HOTBID" -- client places bid on hot item
 local COPPER_PER_SILVER = 100
 local SILVER_PER_GOLD   = 100
 
--- Fill-rarity thresholds (cumulative roll 0–1):
+-- Fill-rarity thresholds (cumulative roll 0-1):
 --   0.00 ≤ r < FillRateCommon              → common
 --   FillRateCommon ≤ r < FillRateRare      → rare
 --   FillRateRare   ≤ r ≤ 1.0              → ultraRare
@@ -74,7 +74,7 @@ local FillRateCommon = 0.85
 local FillRateRare   = 0.95
 -- FillRateUltra = 1.00 (implicit)
 
--- Row-count thresholds (cumulative roll 0–1):
+-- Row-count thresholds (cumulative roll 0-1):
 local FillCountThreshold1 = 0.64
 local FillCountThreshold2 = 0.76
 local FillCountThreshold3 = 0.88
@@ -104,7 +104,7 @@ local FlushMailBody       = [[
 Congratulations! You have successfully won an item off the Black Market Auction House.
 After spending %dg, "%s" is now yours! Enjoy.
 
-– The Black Market AH
+- The Black Market AH
 ]]
 
 -- ── Pricing ───────────────────────────────────────────────────────────────────

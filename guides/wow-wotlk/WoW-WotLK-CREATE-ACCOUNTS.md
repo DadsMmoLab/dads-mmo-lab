@@ -89,7 +89,7 @@ Make sure your `realmlist.wtf` is set to `127.0.0.1` if you haven't already:
 
 ## Creating More Accounts
 
-Just repeat Steps 1–3 for each account. You can
+Just repeat Steps 1-3 for each account. You can
 create as many as you need — one per family member,
 one for testing, whatever you like.
 

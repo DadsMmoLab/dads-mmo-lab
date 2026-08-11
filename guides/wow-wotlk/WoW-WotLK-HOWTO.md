@@ -30,7 +30,7 @@ This installer uses AzerothCore's own Docker compose build system, which handles
 |---|---|
 | Disk space | **15 GB free** minimum |
 | RAM | 16 GB (standard Steam Deck spec) |
-| Time | 2–4 hours compile (hands-off) + ~15 min first-boot DB import |
+| Time | 2-4 hours compile (hands-off) + ~15 min first-boot DB import |
 | Power | Deck plugged in; flat hard surface for airflow |
 
 **Before you start — make sure you have all of these:**
@@ -93,7 +93,7 @@ chmod +x ~/Downloads/install-wow-wotlk-ubuntu.sh
 > The first command (`chmod +x`) gives the file permission to run as a program. The second command starts it.  
 > **To paste in Konsole:** right-click → Paste, or press **Ctrl+Shift+V**.
 
-The script will ask you a few setup questions in the terminal — read each one, type your answer, and press **Enter**. After that, it runs unattended for 2–4 hours while it compiles everything.
+The script will ask you a few setup questions in the terminal — read each one, type your answer, and press **Enter**. After that, it runs unattended for 2-4 hours while it compiles everything.
 
 ---
 
@@ -104,7 +104,7 @@ The installer handles everything automatically. This section is just for referen
 ### Phase 1: Summary & Confirm (~1 min)
 Confirms what will be built and asks you to start.
 
-### Phase 2: Compile AzerothCore + Playerbots (2–4 hours)
+### Phase 2: Compile AzerothCore + Playerbots (2-4 hours)
 The installer automatically:
 - Downloads the server source code from [mod-playerbots/azerothcore-wotlk](https://github.com/mod-playerbots/azerothcore-wotlk) and [mod-playerbots/mod-playerbots](https://github.com/mod-playerbots/mod-playerbots)
 - Builds the server using Docker (a tool that packages software in a self-contained way — you don't need to understand it)
@@ -114,8 +114,8 @@ The fan will be loud during compile — that's normal.
 
 > **If it fails:** Re-run the installer. It detects an existing project directory and skips the compile automatically.
 
-### Phase 3: Wait for Server Ready (~5–15 min first boot)
-The installer waits for the world server to print `ready...` before continuing. The first launch after compilation includes a full game database import — this is normal and takes 10–15 minutes once. Every start after that takes ~30 seconds.
+### Phase 3: Wait for Server Ready (~5-15 min first boot)
+The installer waits for the world server to print `ready...` before continuing. The first launch after compilation includes a full game database import — this is normal and takes 10-15 minutes once. Every start after that takes ~30 seconds.
 
 ### Phase 4: Create Your Account
 The installer pauses here and shows you the exact commands. See **Step 2** below.
@@ -233,7 +233,7 @@ You need two Steam shortcuts. A **Non-Steam Game** is just a shortcut in your St
 4. Press the Steam button → switch to your library
 5. Launch **Wrath of the Lich King**
 6. Log in using the **username and password you created in Step 2** — this only works if your `realmlist.wtf` is set to `127.0.0.1`
-7. **Bots take 5–10 minutes after server start to populate** — be patient on first login
+7. **Bots take 5-10 minutes after server start to populate** — be patient on first login
 
 When you close WoW, the launcher shuts the server down automatically. If WoW isn't detected within 5 minutes, the server stays alive for 3 hours as a fallback.
 
@@ -369,7 +369,7 @@ cd ~/wow-server-playerbots && docker compose logs --tail 50 ac-worldserver
 
 ### "ready..." never appears
 
-AzerothCore's first boot includes a full database import. This can take 10–15 minutes on a fresh compile. Watch the logs:
+AzerothCore's first boot includes a full database import. This can take 10-15 minutes on a fresh compile. Watch the logs:
 ```bash
 cd ~/wow-server-playerbots && docker compose logs -f ac-worldserver
 ```
@@ -392,7 +392,7 @@ Check `~/playerbots-build.log` for the last error. Common causes:
 
 ### Re-running the installer
 
-Safe to re-run. If an existing project directory is detected at `~/wow-server-playerbots/`, the installer skips the 2–4 hour compile and restarts the server instead.
+Safe to re-run. If an existing project directory is detected at `~/wow-server-playerbots/`, the installer skips the 2-4 hour compile and restarts the server instead.
 
 To force a completely clean rebuild:
 

@@ -45,7 +45,7 @@ chmod +x install-maplestory.sh
 ./install-maplestory.sh
 ```
 
-The installer handles everything server-side automatically (~10–15 minutes, mostly Java compilation). It will then walk you through the client setup steps interactively.
+The installer handles everything server-side automatically (~10-15 minutes, mostly Java compilation). It will then walk you through the client setup steps interactively.
 
 ---
 
@@ -186,7 +186,7 @@ docker logs maplestory-server-maplestory-1 | tail -20
 
 **Server doesn't start / "Cosmic is now online" never appears**
 - Check logs: `docker compose logs -f` from `~/maplestory-server/`
-- First launch is slow — database initialisation takes 3–5 minutes
+- First launch is slow — database initialisation takes 3-5 minutes
 
 **Client hangs / black screen at startup in Gaming Mode**
 - You almost certainly have a `gamescope …` launch option set. Remove it — set Launch Options to just `%command%`. Gaming Mode is already a gamescope session and nesting another one inside it hangs the client. (It works in Desktop Mode but not Gaming Mode — that's the tell.)

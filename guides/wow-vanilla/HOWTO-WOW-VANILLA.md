@@ -11,12 +11,12 @@
 A fully offline, single-player-friendly Vanilla WoW server running on your Steam Deck. No internet required after install. Includes:
 
 - **CMaNGOS Classic** — the open-source WoW 1.12.1 server core
-- **Playerbots** — 1,600–2,000 AI players that roam Azeroth, form parties, and run dungeons
+- **Playerbots** — 1,600-2,000 AI players that roam Azeroth, form parties, and run dungeons
 - **AHBot** — populates the Auction House automatically (~15k items at steady state)
 - **All four databases** — world content (creatures, items, quests), realmd, characters, logs
 - **Gaming Mode launcher** — one-button start from your Steam library
 
-The installer compiles everything from source inside Docker. This takes 2–4 hours on first run. Subsequent starts take seconds.
+The installer compiles everything from source inside Docker. This takes 2-4 hours on first run. Subsequent starts take seconds.
 
 ---
 
@@ -27,7 +27,7 @@ The installer compiles everything from source inside Docker. This takes 2–4 ho
 | WoW Vanilla client | Version **1.12.1, build 5875** — must contain `Data/dbc.MPQ` |
 | Disk space | **20 GB free** minimum |
 | RAM | 16 GB (standard Steam Deck spec) |
-| Time | 3–5 hours wall-clock (mostly hands-off) |
+| Time | 3-5 hours wall-clock (mostly hands-off) |
 | Power | Deck plugged in; flat hard surface for airflow |
 
 > **Client note:** Your client must have `Data/dbc.MPQ` (the DBC data archive). This is the most critical check — without it, extraction will fail after the 3-hour compile. The installer verifies this before starting the compile.
@@ -58,7 +58,7 @@ Verifies Linux, disk space, internet, and RAM. Then asks for your WoW client pat
 ### Phase 2: Pre-Compile Summary (~1 min)
 Shows what will be built and asks you to confirm before the long compile.
 
-### Phase 3: Compile CMaNGOS Classic (2–4 hours)
+### Phase 3: Compile CMaNGOS Classic (2-4 hours)
 Builds a Docker image containing:
 - CMaNGOS Classic core (`mangosd`, `realmd`, map extractors)
 - Playerbots module compiled in
@@ -67,13 +67,13 @@ Builds a Docker image containing:
 
 A heartbeat prints every 5 minutes. The fan will be loud — that's normal.
 
-### Phase 4: Extract Client Data (15–50 min)
+### Phase 4: Extract Client Data (15-50 min)
 
 Reads your WoW Vanilla client and extracts into `~/wow-vanilla-server/data/`:
 
 | Output | What it is | Expected count |
 |---|---|---|
-| `maps/` | Zone geometry + encounter data | 2,000–4,000 files |
+| `maps/` | Zone geometry + encounter data | 2,000-4,000 files |
 | `dbc/` | Game data tables | 150+ files |
 | `vmaps/` | Line-of-sight obstacles | 3,000+ files |
 | `mmaps/` | Pathfinding mesh (Playerbots) | 2,000+ files |
@@ -159,7 +159,7 @@ The installer tries to write `realmlist.wtf` automatically. If it succeeded you'
 2. Wait for: **`AZEROTH IS READY!`**
 3. Press Steam button → launch **Vanilla WoW**
 4. Log in: **player / player** — realmlist: **127.0.0.1**
-5. **Bots take 5–10 minutes to populate** — be patient on first login
+5. **Bots take 5-10 minutes to populate** — be patient on first login
 
 The server shuts down automatically when WoW closes. If WoW isn't detected within 5 minutes, the server stays alive for 3 hours as a fallback.
 
@@ -263,7 +263,7 @@ Check `/tmp/wow-vanilla-build.log`. Common causes:
 
 ### Re-running the installer
 
-Safe to re-run. If the compiled image exists, it skips the 2–4 hour compile. To force a full rebuild, choose "Start completely fresh" when prompted.
+Safe to re-run. If the compiled image exists, it skips the 2-4 hour compile. To force a full rebuild, choose "Start completely fresh" when prompted.
 
 ---
 
