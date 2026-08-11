@@ -5,7 +5,7 @@
 #
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 #
-#  Version: 1.4.1 - Debian
+#  Version: 1.4.2 - Debian
 #
 #  Usage:
 #    chmod +x install-wow.sh
@@ -20,6 +20,13 @@
 #    6. Sets up the Gaming Mode launcher
 #
 #  Changelog:
+#    1.4.2 — Custom server files install location
+#      - Added choose_install_dir(): prompts user for a custom SERVER_DIR
+#        before the install begins (blank = keep default ~/wow-server-playerbots)
+#      - Useful for installing server files to an external drive or SD card;
+#        Docker containers still live on the main disk
+#      - Validates the chosen path: creates parent dir, checks write access,
+#        and verifies at least 15 GB free at the target location
 #    1.4.1 — Preflight dependency check
 #      - Added preflight_check(): inspects docker daemon, docker compose,
 #        docker buildx, git, and curl before the install begins
@@ -58,7 +65,7 @@
 #      - Heredoc launcher synced with standalone launcher scripts
 # ============================================================
 
-WIZARD_VERSION="1.4.1 - Debian"
+WIZARD_VERSION="1.4.2 - Debian"
 
 set -euo pipefail
 
@@ -120,6 +127,121 @@ SERVER_DIR="$HOME/wow-server-playerbots"
 # Terminal detection — set globally so setup_gaming_mode and show_completion share state
 TERM_BIN=""
 TERM_ARGS=""
+
+# ─────────────────────────────────────────
+# CHOOSE INSTALL LOCATION
+# ─────────────────────────────────────────
+choose_install_dir() {
+    print_step "Choose Server Files Location"
+
+    local default_dir="$HOME/wow-server-playerbots"
+
+    echo ""
+    echo -e "  ${WHITE}${BOLD}Where should the server files be installed?${NC}"
+    echo ""
+    echo -e "  ${DIM}Default:${NC} ${CYAN}${default_dir}${NC}"
+    echo ""
+    echo -e "  ${WHITE}You can install the server files to a different location,${NC}"
+    echo -e "  ${WHITE}such as an external drive or SD card, to save space on${NC}"
+    echo -e "  ${WHITE}your main disk.${NC}"
+    echo ""
+    echo -e "  ${YELLOW}⚠️  Note: Docker containers (the compiled server images)${NC}"
+    echo -e "  ${YELLOW}always live on your main disk regardless of this choice.${NC}"
+    echo -e "  ${YELLOW}Only the source code, configs, and data files go here.${NC}"
+    echo ""
+    echo -e "  ${DIM}Leave blank and press ENTER to use the default location.${NC}"
+    echo -e "  ${DIM}Example custom path: /media/user/external/wow-server${NC}"
+    echo ""
+    echo -ne "  ${WHITE}Install path: ${NC}"
+    read -r user_input
+
+    if [[ -z "$user_input" ]]; then
+        SERVER_DIR="$default_dir"
+        print_info "Using default location: ${SERVER_DIR}"
+    else
+        # Expand ~ and ensure the path is absolute
+        user_input="${user_input/#\~/$HOME}"
+        if [[ "$user_input" != /* ]]; then
+            user_input="$(pwd)/$user_input"
+        fi
+        SERVER_DIR="$user_input"
+        print_info "Using custom location: ${SERVER_DIR}"
+    fi
+
+    # Canonicalize (resolves .., repeated slashes, trailing slash) so the safety
+    # checks below correctly handle /tmp/.., /, /tmp/ etc.
+    SERVER_DIR=$(realpath -m -- "$SERVER_DIR")
+    local _canon_default
+    _canon_default=$(realpath -m -- "$default_dir")
+
+    # Reject dangerous / well-known system roots
+    case "$SERVER_DIR" in
+        /|"$HOME"|/root|/tmp|/var|/etc|/usr|/boot|/proc|/sys|/dev)
+            print_error "Cannot use '${SERVER_DIR}' as the install location."
+            print_info "Choose a dedicated subdirectory (e.g. ${default_dir})."
+            exit 1
+            ;;
+    esac
+
+    # Reject if the destination already exists and is not a directory (incl. dangling symlinks)
+    if [[ ( -e "$SERVER_DIR" || -L "$SERVER_DIR" ) && ! -d "$SERVER_DIR" ]]; then
+        print_error "Install path exists but is not a directory: $SERVER_DIR"
+        exit 1
+    fi
+
+    # For custom (non-default) paths: require the parent to already exist.
+    # Don't silently mkdir deep paths — if a drive isn't mounted, that would
+    # install onto the main disk instead.
+    local parent_dir
+    parent_dir="$(dirname "$SERVER_DIR")"
+
+    if [[ "$SERVER_DIR" == "$_canon_default" ]]; then
+        mkdir -p "$parent_dir" 2>/dev/null || {
+            print_error "Cannot create directory: $parent_dir"
+            exit 1
+        }
+    elif [[ ! -d "$parent_dir" ]]; then
+        print_error "Parent directory does not exist: $parent_dir"
+        print_info "Make sure your external drive or SD card is mounted first, then re-run."
+        exit 1
+    fi
+
+    # Write probe using mktemp to avoid clobbering any existing user files
+    local _write_probe
+    _write_probe=$(mktemp "$parent_dir/.dml_probe_XXXXXX" 2>/dev/null) || {
+        print_error "Cannot write to: $parent_dir"
+        print_info "Check permissions or ensure the drive is mounted before running the installer."
+        exit 1
+    }
+    rm -f "$_write_probe"
+
+    # Check free space — probe SERVER_DIR if it already exists (may be a separate
+    # mount point with a different filesystem than its parent); otherwise probe parent.
+    local _space_probe
+    [[ -d "$SERVER_DIR" ]] && _space_probe="$SERVER_DIR" || _space_probe="$parent_dir"
+
+    local avail_gb
+    avail_gb=$(df -BG "$_space_probe" 2>/dev/null | awk 'NR==2 {print $4}' | sed 's/G//' | tr -d ' ') || true
+    if [[ -z "$avail_gb" ]]; then
+        print_error "Could not determine free space at ${_space_probe}. Cannot verify the 15 GB requirement."
+        exit 1
+    fi
+    if [[ "$avail_gb" -lt 15 ]]; then
+        print_error "Not enough space at ${_space_probe}. Need at least 15 GB, found ${avail_gb} GB."
+        exit 1
+    fi
+    print_success "Install location OK — ${avail_gb} GB available at ${_space_probe}"
+
+    echo ""
+    echo -e "  ${WHITE}${BOLD}Server files will be installed to:${NC}"
+    echo -e "  ${CYAN}${SERVER_DIR}${NC}"
+    echo ""
+    if ! ask_yes_no "Confirm this install location?"; then
+        echo ""
+        print_info "Re-run the installer to choose a different location."
+        exit 0
+    fi
+}
 
 # ─────────────────────────────────────────
 # SYSTEM CHECKS
@@ -1113,6 +1235,7 @@ SUDO_KEEPALIVE_PID=$!
 trap "kill $SUDO_KEEPALIVE_PID 2>/dev/null; exit" EXIT INT TERM
 
 preflight_check
+choose_install_dir
 show_summary
 install_server
 wait_for_server

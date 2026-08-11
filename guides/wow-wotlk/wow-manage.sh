@@ -28,7 +28,7 @@
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 # ============================================================
 
-MANAGER_VERSION="2.2.1 - ALE House Edition"
+MANAGER_VERSION="2.2.2 - ALE House Edition"
 
 set -o pipefail
 
@@ -7014,6 +7014,304 @@ update_all_modules() {
     fi
 }
 
+# ─────────────────────────────────────────────────────────────
+# MOVE SERVER FILES
+# ─────────────────────────────────────────────────────────────
+# Relocates the server source/config/data directory to a new path
+# (e.g. an external drive or SD card). Docker containers/images always
+# live on the main disk — only the files in SERVER_DIR move.
+# After a successful move the old location can be removed or replaced with
+# a symlink so wow-manage.sh auto-detects the server on next launch.
+move_server_files() {
+    print_step "Move Server Files"
+
+    echo ""
+    echo -e "  ${WHITE}${BOLD}Current location:${RST} ${CYAN}${SERVER_DIR}${RST}"
+
+    local src_size
+    src_size=$(du -sh "$SERVER_DIR" 2>/dev/null | awk '{print $1}')
+    echo -e "  ${DIM}Disk usage: ${src_size:-unknown}${RST}"
+    echo ""
+    echo -e "  ${WHITE}You can move the server files to another location,${RST}"
+    echo -e "  ${WHITE}such as an external drive or SD card.${RST}"
+    echo ""
+    echo -e "  ${YELLOW}⚠️  Docker containers (compiled images) stay on the main disk.${RST}"
+    echo -e "  ${YELLOW}Only source code, configs, and data files are moved.${RST}"
+    echo ""
+    echo -e "  ${DIM}The server must be stopped before moving.${RST}"
+    echo -e "  ${DIM}A symlink will be offered at the old location so this tool${RST}"
+    echo -e "  ${DIM}can still find your server automatically next time.${RST}"
+    echo ""
+    echo -ne "  ${WHITE}New location (ENTER to cancel): ${RST}"
+    read -r raw_dest
+
+    [ -z "$raw_dest" ] && { print_info "Cancelled."; return; }
+
+    # Expand ~ and ensure absolute path
+    raw_dest="${raw_dest/#\~/$HOME}"
+    if [[ "$raw_dest" != /* ]]; then
+        raw_dest="$(pwd)/$raw_dest"
+    fi
+
+    # Canonicalize both source and destination to prevent alias/subdirectory bypasses
+    local new_dir canon_src
+    new_dir=$(realpath -m -- "$raw_dest")
+    canon_src=$(realpath -m -- "$SERVER_DIR")
+
+    # Reject same-as-current or either path being inside the other
+    if [[ "$new_dir" == "$canon_src" ]]; then
+        print_error "New location is the same as the current one. Nothing to do."
+        return
+    fi
+    if [[ "$new_dir" == "$canon_src/"* || "$canon_src" == "$new_dir/"* ]]; then
+        print_error "New location cannot be inside (or contain) the current server directory."
+        return
+    fi
+
+    # Reject dangerous / well-known system roots
+    case "$new_dir" in
+        /|"$HOME"|/root|/tmp|/var|/etc|/usr|/boot|/proc|/sys|/dev)
+            print_error "Cannot move to '${new_dir}' — choose a dedicated subdirectory."
+            return
+            ;;
+    esac
+
+    # Reject if destination already exists and is not a directory (incl. dangling symlinks)
+    if [[ ( -e "$new_dir" || -L "$new_dir" ) && ! -d "$new_dir" ]]; then
+        print_error "Destination exists but is not a directory: $new_dir"
+        return
+    fi
+
+    # Reject non-empty destination — prevents silent merging into an existing install
+    if [[ -d "$new_dir" ]] && [[ -n "$(ls -A "$new_dir" 2>/dev/null)" ]]; then
+        print_error "Destination already exists and is not empty: $new_dir"
+        print_info "Choose a new, empty, or nonexistent directory."
+        return
+    fi
+
+    # Parent must already exist (guards against unmounted drives silently resolving to main disk)
+    local new_parent
+    new_parent="$(dirname "$new_dir")"
+    if [[ ! -d "$new_parent" ]]; then
+        print_error "Parent directory does not exist: $new_parent"
+        print_info "Make sure your external drive or SD card is mounted first."
+        return
+    fi
+
+    # Write-access probe on the destination parent
+    local _probe
+    _probe=$(mktemp "$new_parent/.dml_probe_XXXXXX" 2>/dev/null) || {
+        print_error "Cannot write to: $new_parent"
+        print_info "Check permissions or ensure the drive is mounted."
+        return
+    }
+    rm -f "$_probe"
+
+    # Free space check — require source size + 2 GB headroom
+    local _space_target
+    [[ -d "$new_dir" ]] && _space_target="$new_dir" || _space_target="$new_parent"
+
+    local avail_gb src_gb
+    src_gb=$(du -sB1G "$SERVER_DIR" 2>/dev/null | awk '{print $1}')
+    if [[ -z "$src_gb" || ! "$src_gb" =~ ^[0-9]+$ ]]; then
+        print_error "Could not determine size of ${SERVER_DIR}. Cannot proceed safely."
+        return
+    fi
+    local need_gb=$(( src_gb + 2 ))
+
+    avail_gb=$(df -BG "$_space_target" 2>/dev/null | awk 'NR==2 {print $4}' | sed 's/G//' | tr -d ' ')
+    if [[ -z "$avail_gb" ]]; then
+        print_error "Could not determine free space at ${_space_target}."
+        return
+    fi
+    if [[ "$avail_gb" -lt "$need_gb" ]]; then
+        print_error "Not enough space at ${_space_target}. Need ~${need_gb} GB, found ${avail_gb} GB."
+        return
+    fi
+    print_success "${avail_gb} GB available at ${_space_target} (need ~${need_gb} GB)"
+
+    # Note if basenames differ — Docker Compose project name will need preserving
+    local old_basename new_basename
+    old_basename=$(basename "$SERVER_DIR")
+    new_basename=$(basename "$new_dir")
+
+    echo ""
+    echo -e "  ${WHITE}${BOLD}From:${RST} ${CYAN}${SERVER_DIR}${RST}"
+    echo -e "  ${WHITE}${BOLD}To:  ${RST} ${CYAN}${new_dir}${RST}"
+    if [[ "$old_basename" != "$new_basename" ]]; then
+        echo ""
+        echo -e "  ${YELLOW}⚠️  Directory basename changes: '${old_basename}' → '${new_basename}'${RST}"
+        echo -e "  ${YELLOW}COMPOSE_PROJECT_NAME will be written to .env to preserve your${RST}"
+        echo -e "  ${YELLOW}Docker Compose project and prevent orphaned containers/volumes.${RST}"
+    fi
+    echo ""
+    if ! ask_yes_no "Proceed with move?"; then
+        print_info "Cancelled."
+        return
+    fi
+
+    # ── Stop all project containers (including DB) ────────────────────
+    # Always run compose down to remove stale stopped containers before moving,
+    # preventing Compose project-name confusion after a rename. Named volumes
+    # are NOT removed (no -v flag) — character/world data is preserved.
+    refresh_container_names
+    local any_running=false
+    local _c
+    for _c in "$WORLD_CONTAINER" "$AUTH_CONTAINER" "$DB_CONTAINER"; do
+        [ -n "$_c" ] && container_running "$_c" && any_running=true
+    done
+
+    if [[ "$any_running" == true ]]; then
+        print_warning "Server is running — it must be stopped before moving files."
+        if ! ask_yes_no "Stop the server now?"; then
+            print_info "Move cancelled. Stop the server manually and try again."
+            return
+        fi
+    fi
+
+    print_info "Bringing down project containers (volumes preserved)..."
+    (cd "$SERVER_DIR" && docker compose down --remove-orphans 2>/dev/null) || true
+    sleep 2
+
+    # Verify no project containers are still running
+    refresh_container_names
+    for _c in "$WORLD_CONTAINER" "$AUTH_CONTAINER" "$DB_CONTAINER"; do
+        if [[ -n "$_c" ]] && container_running "$_c"; then
+            print_error "Container still running: ${_c} — cannot move safely."
+            print_info "Stop the server manually and try again."
+            return
+        fi
+    done
+
+    # ── Copy files ────────────────────────────────────────────────────
+    echo ""
+    print_info "Copying files to new location (this may take several minutes)..."
+    echo ""
+
+    local _dest_was_created=false
+    [[ ! -d "$new_dir" ]] && _dest_was_created=true
+
+    local copy_ok=false
+    if command -v rsync &>/dev/null; then
+        if rsync -a --info=progress2 --no-inc-recursive \
+                "$SERVER_DIR/" "$new_dir/"; then
+            copy_ok=true
+        fi
+    else
+        print_info "(rsync not found — falling back to cp -a)"
+        if mkdir -p "$new_dir" && cp -a "$SERVER_DIR/." "$new_dir/"; then
+            copy_ok=true
+        fi
+    fi
+
+    if [[ "$copy_ok" != true ]]; then
+        print_error "Copy failed. The original location is untouched."
+        print_info "Check disk space and permissions, then try again."
+        if [[ "$_dest_was_created" == true ]]; then
+            rm -rf "$new_dir" 2>/dev/null || true
+        fi
+        return
+    fi
+
+    # ── Verify ───────────────────────────────────────────────────────
+    if [[ ! -f "$new_dir/docker-compose.yml" ]]; then
+        print_error "Verification failed: docker-compose.yml not found in ${new_dir}."
+        print_info "The copy may be incomplete. Original location is untouched."
+        return
+    fi
+
+    # ── Preserve Docker Compose project name ─────────────────────────
+    # Compose defaults the project name to the directory basename. If the basename
+    # changed, pin it in .env so containers/volumes stay associated correctly.
+    if [[ "$old_basename" != "$new_basename" ]]; then
+        local env_file="$new_dir/.env"
+        if [[ -f "$env_file" ]] && grep -q "^COMPOSE_PROJECT_NAME=" "$env_file"; then
+            print_info "COMPOSE_PROJECT_NAME already set in ${env_file} — leaving unchanged."
+        else
+            printf '\nCOMPOSE_PROJECT_NAME=%s\n' "$old_basename" >> "$env_file"
+            print_success "Pinned COMPOSE_PROJECT_NAME=${old_basename} in ${env_file}"
+        fi
+    fi
+
+    print_success "Copy complete and verified: ${new_dir}"
+    echo ""
+
+    local old_dir="$SERVER_DIR"
+
+    # ── Update live session variables ────────────────────────────────
+    SERVER_DIR="$new_dir"
+    INGAME_COMMANDS_FILE="$SERVER_DIR/ingame-commands.txt"
+    # Reset sqlmod dirs so sqlmod_init() re-derives them from the new SERVER_DIR
+    SQLMOD_BASE_DIR=""
+    SQLMOD_MARKER_DIR=""
+    SQLMOD_CLONE_DIR=""
+    SQLMOD_CONFIG_DIR=""
+    SQLMOD_BACKUP_DIR=""
+    print_success "Session updated → using ${SERVER_DIR}"
+
+    echo ""
+
+    # ── Old location cleanup ─────────────────────────────────────────
+    echo -e "  ${YELLOW}Old location:${RST} ${CYAN}${old_dir}${RST}"
+    echo ""
+    echo -e "  ${WHITE}What should happen to the old directory?${RST}"
+    echo -e "  ${WHITE}1)${RST} Delete it and leave a symlink  ${DIM}(recommended — saves disk space, auto-detect works)${RST}"
+    echo -e "  ${WHITE}2)${RST} Leave a symlink only  ${DIM}(keep original files for now; old dir must be gone first)${RST}"
+    echo -e "  ${WHITE}3)${RST} Delete it (no symlink)"
+    echo -e "  ${WHITE}4)${RST} Leave it as-is"
+    echo ""
+    echo -ne "  ${WHITE}Choice [1-4]: ${RST}"
+    local old_choice; read -r old_choice
+
+    case "$old_choice" in
+        1)
+            if rm -rf "$old_dir" 2>/dev/null || sudo rm -rf "$old_dir" 2>/dev/null; then
+                if ln -s "$new_dir" "$old_dir" 2>/dev/null; then
+                    print_success "Deleted old directory and created symlink: ${old_dir} → ${new_dir}"
+                else
+                    print_warning "Old directory removed but symlink creation failed."
+                    print_info "To create it manually: ln -s \"$new_dir\" \"$old_dir\""
+                fi
+            else
+                print_error "Could not remove old directory — check permissions."
+                print_info "To do it manually: rm -rf \"$old_dir\" && ln -s \"$new_dir\" \"$old_dir\""
+            fi
+            ;;
+        2)
+            if [[ -e "$old_dir" || -L "$old_dir" ]]; then
+                print_warning "Old directory still exists — a symlink cannot be created at the same path."
+                print_info "Remove it first, then run:"
+                print_info "  ln -s \"$new_dir\" \"$old_dir\""
+            elif ln -s "$new_dir" "$old_dir" 2>/dev/null; then
+                print_success "Symlink created: ${old_dir} → ${new_dir}"
+                print_info "Original files still at ${old_dir} — free that space when ready."
+            else
+                print_warning "Could not create symlink."
+                print_info "To create it manually: ln -s \"$new_dir\" \"$old_dir\""
+            fi
+            ;;
+        3)
+            if rm -rf "$old_dir" 2>/dev/null || sudo rm -rf "$old_dir" 2>/dev/null; then
+                print_success "Old directory removed."
+                print_warning "wow-manage.sh scans \$HOME/wow-server* on next launch — this install won't be found automatically."
+                print_info "To restore auto-detection, create a symlink in a scanned location:"
+                print_info "  ln -s \"$new_dir\" \"\$HOME/$(basename "$old_dir")\""
+            else
+                print_error "Could not remove old directory — check permissions."
+            fi
+            ;;
+        *)
+            print_info "Old directory left unchanged."
+            print_warning "Two copies of the server files now exist — free up space when ready."
+            ;;
+    esac
+
+    echo ""
+    print_success "Move complete!"
+    echo -e "  ${DIM}Server files are now at: ${CYAN}${SERVER_DIR}${RST}"
+    echo -e "  ${DIM}Docker containers remain on the main disk and are unaffected.${RST}"
+}
+
 menu_server_maintenance() {
     _setup_screen
     while true; do
@@ -7034,6 +7332,7 @@ menu_server_maintenance() {
         printf "  ${WHITE}7)${RST} Clean Docker cache / build artifacts\n"
         printf "  ${WHITE}8)${RST} Update AzerothCore\n"
         printf "  ${WHITE}9)${RST} Update all installed modules\n"
+        printf "  ${WHITE}M)${RST} Move server files to a new location\n"
         printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
         printf "  ${DIM}  [ENTER] Back${RST}\n"
 
@@ -7055,8 +7354,9 @@ menu_server_maintenance() {
             7) cleanup_docker; press_enter ;;
             8) update_azerothcore; press_enter ;;
             9) update_all_modules; press_enter ;;
+            m) move_server_files; press_enter ;;
             "") return ;;
-            *) print_warning "Enter 1-9 or ENTER to go back."; press_enter ;;
+            *) print_warning "Enter 1-9, M, or ENTER to go back."; press_enter ;;
         esac
     done
 }
