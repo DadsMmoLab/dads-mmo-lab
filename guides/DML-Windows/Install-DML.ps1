@@ -408,10 +408,15 @@ function Invoke-Phase1 {
     Write-Host ""
     $defaultRoot = 'C:\DML'
     $rawInput    = Read-Host "  Install location (press Enter for $defaultRoot)"
-    $InstallRoot = if ([string]::IsNullOrWhiteSpace($rawInput)) { $defaultRoot } else { $rawInput.Trim().TrimEnd('\') }
-    if ($InstallRoot -notmatch '^[A-Za-z]:') {
-        Write-Fail "Install path must start with a drive letter (e.g., D:\DML).`nNetwork paths and relative paths are not supported by WSL."
+    $InstallRoot = if ([string]::IsNullOrWhiteSpace($rawInput)) { $defaultRoot } else { $rawInput.Trim() }
+    # Require a fully-qualified local drive path (e.g. D:\DML).
+    # '^[A-Za-z]:\\' rejects drive-relative paths like C:foo and bare drive roots
+    # like C: (which TrimEnd('\') would have silently produced from a C:\ entry).
+    if ($InstallRoot -notmatch '^[A-Za-z]:\\') {
+        Write-Fail "Install path must be an absolute drive path (e.g., D:\DML).`nNetwork paths and relative paths are not supported by WSL."
     }
+    # Strip trailing backslash only from non-root paths -- C:\ must stay as-is.
+    if ($InstallRoot.Length -gt 3) { $InstallRoot = $InstallRoot.TrimEnd('\') }
     Write-Diag "Install root: $InstallRoot"
     Write-Ok "Installing to: $InstallRoot"
     Write-Host ""
@@ -635,10 +640,13 @@ function Invoke-Phase2 {
         # it (the HOWTO tells low-RAM users to). Keep it, but check it isn't set
         # up in a way that will OOM a WoW build, and nudge toward the fix if so.
         $existing  = Get-Content $wslConfigPath -Raw
-        $curProc   = if ($existing -match '(?im)^\s*processors\s*=\s*(\d+)') { [int]$Matches[1] } else { $null }
-        $curSwapGB = if ($existing -match '(?im)^\s*swap\s*=\s*(\d+)')       { [int]$Matches[1] } else { $null }
+        $curProc   = if ($existing -match '(?im)^\s*processors\s*=\s*(\d+)')    { [int]$Matches[1] } else { $null }
+        $curSwapGB = if ($existing -match '(?im)^\s*swap\s*=\s*(\d+)')         { [int]$Matches[1] } else { $null }
+        $curMemGB  = if ($existing -match '(?im)^\s*memory\s*=\s*(\d+)\s*GB') { [int]$Matches[1] } else { $null }
         Write-Ok "Existing .wslconfig found -- keeping your settings (not overwriting)."
-        if (($null -ne $curProc -and $curProc -gt $wslCores) -or ($null -ne $curSwapGB -and $curSwapGB -lt $wslSwapGB)) {
+        if (($null -ne $curProc -and $curProc -gt $wslCores) -or
+            ($null -ne $curSwapGB -and $curSwapGB -lt $wslSwapGB) -or
+            ($null -ne $curMemGB  -and $curMemGB  -lt $wslRamGB)) {
             Write-Warn "Your .wslconfig may be too aggressive for compiling a WoW server on this PC."
             Write-Warn "If a build gets killed partway, set processors=$wslCores and swap=${wslSwapGB}GB in"
             Write-Warn "  $wslConfigPath, then run 'wsl --shutdown'. (See the HOWTO troubleshooting.)"
@@ -689,6 +697,8 @@ localhostForwarding=true
             }
         } else {
             Write-Diag "Using pre-existing 'archlinux' as import source"
+            Write-Host "  Found a leftover 'archlinux' distro from a previous install attempt." -ForegroundColor Yellow
+            Write-Host "  Reusing it as the import source -- no download needed." -ForegroundColor Yellow
         }
 
         # Brief init run to ensure the filesystem is fully unpacked before export
@@ -705,7 +715,7 @@ localhostForwarding=true
         # rather than the whole filesystem -- live sockets in other locations are
         # not created during a brief init run and don't need to be swept.
         Write-Diag "Removing socket files before export (bsdtar cannot archive sockets)..."
-        wsl -d archlinux -u root -- find /run /var/run /tmp -xdev -type s -delete 2>/dev/null
+        wsl -d archlinux -u root -- bash -c 'find /run /var/run /tmp -xdev -type s -delete 2>/dev/null'
         Write-Diag "Socket cleanup exit code: $LASTEXITCODE"
 
         wsl --terminate archlinux
@@ -719,7 +729,8 @@ localhostForwarding=true
         # does not create missing parent directories and will throw if $InstallRoot
         # (e.g. C:\DML) doesn't exist yet, producing a silent crash in the log.
         [System.IO.Directory]::CreateDirectory($WslDir) | Out-Null
-        $TmpTar = "$env:TEMP\dml-arch-rootfs.tar"
+        # Use a unique temp filename so parallel installer runs don't clobber each other.
+        $TmpTar = [System.IO.Path]::Combine($env:TEMP, "dml-arch-$([System.IO.Path]::GetRandomFileName()).tar")
 
         # Remove any leftover tar from a prior interrupted run -- wsl --export will not overwrite.
         Remove-Item $TmpTar -Force -ErrorAction SilentlyContinue
@@ -747,7 +758,11 @@ localhostForwarding=true
         Write-Diag "wsl --export exit code: $exportExit"
         if ($exportExit -ne 0) {
             Remove-Item $TmpTar -Force -ErrorAction SilentlyContinue
-            Write-Fail "Failed to export Arch Linux filesystem (exit $exportExit)."
+            Write-Fail ("Failed to export Arch Linux filesystem (exit $exportExit).`n" +
+                        "The 'archlinux' distro may be corrupt or locked by another process.`n" +
+                        "Try closing all WSL windows, then run: wsl --shutdown`n" +
+                        "If the problem persists, run: wsl --unregister archlinux`n" +
+                        "then re-run this installer to download a fresh copy.")
         }
 
         Write-Step "Importing as '$DmlDistroName' to $WslDir (this is silent -- may take 5-15 min)..."
@@ -764,7 +779,12 @@ localhostForwarding=true
         }
         Write-Diag "wsl --import exit code: $importExit"
         if ($importExit -ne 0) {
-            Write-Fail "Failed to import Arch Linux as '$DmlDistroName' (exit $importExit)."
+            Write-Fail ("Failed to import Arch Linux as '$DmlDistroName' (exit $importExit).`n" +
+                        "Possible causes:`n" +
+                        "  - Not enough disk space in $WslDir`n" +
+                        "  - A partial VHD was left from a prior attempt (check $WslDir\ext4.vhdx)`n" +
+                        "  - WSL is in a bad state -- try: wsl --shutdown, then re-run this installer.`n" +
+                        "To clean up and retry: delete $WslDir, then re-run this installer.")
         }
 
         if (-not $archlinuxPreExisted) {
@@ -830,9 +850,11 @@ pacman -S --noconfirm --needed sudo
 if id dml &>/dev/null; then
     echo "[arch] User 'dml' already exists"
 else
-    useradd -m -G wheel dml
+    useradd -m dml
     echo "[arch] User 'dml' created"
 fi
+# Ensure wheel membership regardless of whether user pre-existed
+usermod -aG wheel dml
 mkdir -p /etc/sudoers.d
 echo '%wheel ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/wheel
 chmod 0440 /etc/sudoers.d/wheel
