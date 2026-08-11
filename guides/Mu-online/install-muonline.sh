@@ -36,7 +36,7 @@
 
 INSTALLER_VERSION="2.0.0"
 
-set -o pipefail
+set -euo pipefail
 
 RST='\033[0m'; BOLD='\033[1m'; DIM='\033[2m'
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'

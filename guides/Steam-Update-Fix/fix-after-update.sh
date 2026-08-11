@@ -16,6 +16,8 @@ WHITE='\033[1;37m'
 NC='\033[0m'
 BOLD='\033[1m'
 
+set -euo pipefail
+
 clear
 echo ""
 echo -e "${CYAN}╔══════════════════════════════════════════════════╗${NC}"

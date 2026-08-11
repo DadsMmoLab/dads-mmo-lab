@@ -62,7 +62,7 @@ WIZARD_VERSION="1.2.2"
 # detect_server_dir() in MAIN will auto-detect if this path doesn't exist.
 SERVER_DIR="$HOME/wow-server-playerbots"
 
-set -o pipefail
+set -euo pipefail
 
 # ─────────────────────────────────────────
 # COLORS  (matching install-wow-wotlk.sh conventions)

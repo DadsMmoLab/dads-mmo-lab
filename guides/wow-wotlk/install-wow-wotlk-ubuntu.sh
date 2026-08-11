@@ -60,7 +60,7 @@
 
 WIZARD_VERSION="1.4.1 - Debian"
 
-set -o pipefail
+set -euo pipefail
 
 # ─────────────────────────────────────────
 # COLORS

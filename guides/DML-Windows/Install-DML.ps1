@@ -633,7 +633,7 @@ localhostForwarding=true
         Remove-Item $TmpTar -Force -ErrorAction SilentlyContinue
 
         Write-Step "Exporting Arch Linux filesystem to temp tar..."
-        wsl --export archlinux $TmpTar
+        wsl --export archlinux "$TmpTar"
         $exportExit = $LASTEXITCODE
         Write-Diag "wsl --export exit code: $exportExit"
         if ($exportExit -ne 0) {
@@ -642,7 +642,7 @@ localhostForwarding=true
         }
 
         Write-Step "Importing as '$DmlDistroName' to $WslDir..."
-        wsl --import $DmlDistroName $WslDir $TmpTar
+        wsl --import "$DmlDistroName" "$WslDir" "$TmpTar"
         $importExit = $LASTEXITCODE
         Remove-Item $TmpTar -Force -ErrorAction SilentlyContinue
         Write-Diag "wsl --import exit code: $importExit"
@@ -2639,13 +2639,17 @@ class TrayApp : ApplicationContext
                     $wshShell = New-Object -ComObject WScript.Shell
 
                     $desktopLnk = $wshShell.CreateShortcut("$env:USERPROFILE\Desktop\DML Launcher.lnk")
-                    $desktopLnk.TargetPath = $LauncherExe
+                    $desktopLnk.TargetPath      = $LauncherExe
+                    $desktopLnk.WorkingDirectory = $LauncherDir
+                    $desktopLnk.IconLocation    = "$IcoPath,0"
                     $desktopLnk.Save()
                     Write-Ok "Desktop shortcut created"
 
                     $startupDir = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup"
                     $startupLnk = $wshShell.CreateShortcut("$startupDir\DML Launcher.lnk")
-                    $startupLnk.TargetPath = $LauncherExe
+                    $startupLnk.TargetPath      = $LauncherExe
+                    $startupLnk.WorkingDirectory = $LauncherDir
+                    $startupLnk.IconLocation    = "$IcoPath,0"
                     $startupLnk.Save()
                     Write-Ok "Added DML Launcher to Windows startup"
                 } catch {
@@ -2780,7 +2784,7 @@ class TrayApp : ApplicationContext
     Write-Host "============================================================" -ForegroundColor Green
     Write-Host ""
     Write-Host "  Installed inside WSL2 (dml-arch):" -ForegroundColor White
-    Write-Host "    Arch Linux  +  systemd  +  Docker Engine  +  dml CLI v2.1" -ForegroundColor Green
+    Write-Host "    Arch Linux  +  systemd  +  Docker Engine  +  dml CLI v2.6.0" -ForegroundColor Green
     Write-Host "  Install location: $InstallRoot" -ForegroundColor DarkGray
     Write-Host ""
     if (Test-Path "$env:USERPROFILE\Desktop\DML Launcher.lnk") {

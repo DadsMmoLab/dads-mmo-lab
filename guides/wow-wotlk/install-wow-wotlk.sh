@@ -50,7 +50,7 @@
 
 WIZARD_VERSION="1.2.3"
 
-set -o pipefail
+set -euo pipefail
 
 # ─────────────────────────────────────────
 # COLORS

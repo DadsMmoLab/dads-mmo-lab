@@ -30,7 +30,7 @@
 
 INSTALLER_VERSION="1.2.1"
 
-set -o pipefail
+set -euo pipefail
 
 # ─────────────────────────────────────────
 # COLORS — Hot pink for MapleStory's iconic aesthetic
