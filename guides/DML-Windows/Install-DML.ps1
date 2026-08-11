@@ -729,8 +729,13 @@ localhostForwarding=true
         # does not create missing parent directories and will throw if $InstallRoot
         # (e.g. C:\DML) doesn't exist yet, producing a silent crash in the log.
         [System.IO.Directory]::CreateDirectory($WslDir) | Out-Null
-        # Use a unique temp filename so parallel installer runs don't clobber each other.
-        $TmpTar = [System.IO.Path]::Combine($env:TEMP, "dml-arch-$([System.IO.Path]::GetRandomFileName()).tar")
+        # Store the tar inside $InstallRoot (e.g. C:\DML) rather than $env:TEMP.
+        # On systems where the Windows username contains spaces, $env:TEMP may be
+        # stored as a Windows 8.3 short path (e.g. C:\Users\MEM~1\...) and if 8.3
+        # short-name generation is disabled that path doesn't exist, causing Remove-Item
+        # to throw even with -ErrorAction SilentlyContinue once EAP is restored to Stop.
+        # $InstallRoot is always a clean short drive path (e.g. C:\DML) with no spaces.
+        $TmpTar = "$InstallRoot\dml-arch-$([System.IO.Path]::GetRandomFileName()).tar"
 
         # Remove any leftover tar from a prior interrupted run -- wsl --export will not overwrite.
         Remove-Item $TmpTar -Force -ErrorAction SilentlyContinue
@@ -757,7 +762,7 @@ localhostForwarding=true
         }
         Write-Diag "wsl --export exit code: $exportExit"
         if ($exportExit -ne 0) {
-            Remove-Item $TmpTar -Force -ErrorAction SilentlyContinue
+            try { Remove-Item $TmpTar -Force -ErrorAction SilentlyContinue } catch {}
             Write-Fail ("Failed to export Arch Linux filesystem (exit $exportExit).`n" +
                         "The 'archlinux' distro may be corrupt or locked by another process.`n" +
                         "Try closing all WSL windows, then run: wsl --shutdown`n" +
@@ -775,7 +780,10 @@ localhostForwarding=true
             $importExit = $LASTEXITCODE
         } finally {
             $ErrorActionPreference = $prevEap
-            Remove-Item $TmpTar -Force -ErrorAction SilentlyContinue
+            # Wrap in try/catch: EAP is restored to Stop above, and on systems
+            # with 8.3 short-name paths disabled Remove-Item can throw a terminating
+            # ItemNotFoundException even with -ErrorAction SilentlyContinue.
+            try { Remove-Item $TmpTar -Force -ErrorAction SilentlyContinue } catch {}
         }
         Write-Diag "wsl --import exit code: $importExit"
         if ($importExit -ne 0) {
