@@ -290,12 +290,17 @@ function Register-Phase2Task {
 
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
 
+    # Use the full qualified identity (DOMAIN\User or AzureAD\User) so the task
+    # triggers and runs correctly on domain-joined and AAD-joined machines where
+    # $env:USERNAME alone is ambiguous.
+    $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+
     $action    = New-ScheduledTaskAction -Execute 'powershell.exe' `
                      -Argument "-ExecutionPolicy Bypass -WindowStyle Normal -File `"$ScriptPath`" -ResumePhase2"
-    $trigger   = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+    $trigger   = New-ScheduledTaskTrigger -AtLogOn -User $currentIdentity
     $settings  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 6) `
                      -RunOnlyIfNetworkAvailable:$false
-    $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -RunLevel Highest
+    $principal = New-ScheduledTaskPrincipal -UserId $currentIdentity -RunLevel Highest
 
     Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
         -Settings $settings -Principal $principal -Force | Out-Null
@@ -336,6 +341,19 @@ function Invoke-Phase1 {
     # yet (it removes the task the moment it begins). Tell the user to log in/wait.
     $p2Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     if ($p2Task) {
+        # If the state file is also missing, Phase 1 never fully completed --
+        # this is a broken install, not a normal pending-reboot state.
+        if (-not (Test-Path $StateFile)) {
+            Write-Host ""
+            Write-Host "  A Phase 2 task is registered but the install state file is missing." -ForegroundColor Red
+            Write-Host "  This usually means a previous install was interrupted before completing Phase 1." -ForegroundColor Red
+            Write-Host ""
+            Write-Host "  To restart the installation from scratch, run:" -ForegroundColor DarkGray
+            Write-Host "    Unregister-ScheduledTask -TaskName '$TaskName' -Confirm:`$false" -ForegroundColor DarkGray
+            Write-Host "  then re-run this installer." -ForegroundColor DarkGray
+            Write-Host ""
+            return
+        }
         Write-Host ""
         Write-Host "  Phase 2 is scheduled to run automatically on your next login." -ForegroundColor Yellow
         Write-Host "  If you just rebooted, log out and back in to trigger it." -ForegroundColor Yellow
@@ -471,7 +489,7 @@ function Invoke-WslBash {
     # some Windows locale/codepage combinations injects a BOM or mis-encodes
     # characters before bash sees them. Writing raw UTF-8 bytes directly to the
     # WSL filesystem bypasses the encoding pipeline entirely.
-    $cleanScript = $Script.Replace("`r`n", "`n")
+    $cleanScript = $Script -replace "`r`n|`r", "`n"
     $tmpWin   = "$wslTmp\dml-step.sh"
     $tmpLinux = '/tmp/dml-step.sh'
     [System.IO.File]::WriteAllBytes($tmpWin, [System.Text.UTF8Encoding]::new($false).GetBytes($cleanScript))
@@ -668,14 +686,18 @@ localhostForwarding=true
         }
 
         # bsdtar (used by wsl --export) cannot archive Unix socket files and hard-fails.
-        # Socket files are created by gpg-agent and other daemons during init and persist in
-        # the VHD after forced termination. Remove them while the distro is still live.
+        # Limit deletion to ephemeral runtime directories only (/run, /var/run, /tmp)
+        # rather than the whole filesystem -- live sockets in other locations are
+        # not created during a brief init run and don't need to be swept.
         Write-Diag "Removing socket files before export (bsdtar cannot archive sockets)..."
-        wsl -d archlinux -u root -- find / -xdev -type s -delete
+        wsl -d archlinux -u root -- find /run /var/run /tmp -xdev -type s -delete 2>/dev/null
         Write-Diag "Socket cleanup exit code: $LASTEXITCODE"
 
         wsl --terminate archlinux
         Write-Diag "wsl --terminate archlinux exit code: $LASTEXITCODE"
+
+        # Brief pause so WSL fully releases the VHD lock before we export.
+        Start-Sleep -Seconds 3
 
         # Export archlinux → import as dml-arch
         New-Item -ItemType Directory -Force -Path $WslDir | Out-Null
@@ -684,18 +706,34 @@ localhostForwarding=true
         # Remove any leftover tar from a prior interrupted run -- wsl --export will not overwrite.
         Remove-Item $TmpTar -Force -ErrorAction SilentlyContinue
 
-        Write-Step "Exporting Arch Linux filesystem to temp tar..."
+        Write-Step "Exporting Arch Linux filesystem to temp tar (this is silent -- may take 1-3 min)..."
+        Write-Host "  [Exporting Arch Linux to temp tar -- please wait, no progress bar...]" -ForegroundColor DarkGray
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
         wsl --export archlinux "$TmpTar"
         $exportExit = $LASTEXITCODE
+        $ErrorActionPreference = $prevEap
         Write-Diag "wsl --export exit code: $exportExit"
         if ($exportExit -ne 0) {
             Remove-Item $TmpTar -Force -ErrorAction SilentlyContinue
             Write-Fail "Failed to export Arch Linux filesystem (exit $exportExit)."
         }
 
-        Write-Step "Importing as '$DmlDistroName' to $WslDir..."
+        # Clean up any leftover partial VHD from a previously interrupted import.
+        # wsl --import fails if ext4.vhdx already exists in the target directory.
+        $staleVhd = "$WslDir\ext4.vhdx"
+        if (Test-Path $staleVhd) {
+            Write-Diag "Removing stale partial VHD from prior interrupted import: $staleVhd"
+            Remove-Item $staleVhd -Force -ErrorAction SilentlyContinue
+        }
+
+        Write-Step "Importing as '$DmlDistroName' to $WslDir (this is silent -- may take 5-15 min)..."
+        Write-Host "  [Importing Arch Linux as dml-arch -- please wait, this can take 5-15 minutes...]" -ForegroundColor DarkGray
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
         wsl --import "$DmlDistroName" "$WslDir" "$TmpTar"
         $importExit = $LASTEXITCODE
+        $ErrorActionPreference = $prevEap
         Remove-Item $TmpTar -Force -ErrorAction SilentlyContinue
         Write-Diag "wsl --import exit code: $importExit"
         if ($importExit -ne 0) {
@@ -790,8 +828,29 @@ echo "[arch] sudo configured"
 
         $exit8c = Invoke-WslBash -Distro $DmlDistroName -User root -Label 'wsl.conf' -Script @'
 set -euo pipefail
-printf '[boot]\nsystemd=true\n\n[user]\ndefault=dml\n' > /etc/wsl.conf
-echo "[arch] /etc/wsl.conf written"
+# Merge [boot] systemd=true and [user] default=dml into /etc/wsl.conf without
+# destroying any existing user settings (e.g. automount, network, interop).
+conf=/etc/wsl.conf
+
+# Helper: set or add a key under a given section, leaving other sections intact.
+set_wsl_conf() {
+    local section="$1" key="$2" value="$3"
+    if grep -qE "^\[${section}\]" "$conf" 2>/dev/null; then
+        if grep -qE "^${key}\s*=" "$conf" 2>/dev/null; then
+            sed -i "s|^${key}\s*=.*|${key}=${value}|" "$conf"
+        else
+            sed -i "/^\[${section}\]/a ${key}=${value}" "$conf"
+        fi
+    else
+        printf '\n[%s]\n%s=%s\n' "$section" "$key" "$value" >> "$conf"
+    fi
+}
+
+touch "$conf"
+set_wsl_conf boot    systemd true
+set_wsl_conf user    default dml
+echo "[arch] /etc/wsl.conf updated (systemd=true, default=dml)"
+cat /etc/wsl.conf
 '@
         if ($exit8c -ne 0) {
             Write-Fail "Failed to write /etc/wsl.conf (exit $exit8c)."
@@ -1775,7 +1834,11 @@ exit 0
 
     $CscPath = Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
     if (-not (Test-Path $CscPath)) {
-        Write-Warn "csc.exe not found at $CscPath -- skipping launcher (DML environment still fully works)."
+        # Fall back to the 32-bit framework path (present on all Windows 10/11 installs)
+        $CscPath = Join-Path $env:SystemRoot 'Microsoft.NET\Framework\v4.0.30319\csc.exe'
+    }
+    if (-not (Test-Path $CscPath)) {
+        Write-Warn "csc.exe not found in .NET Framework 4.x paths -- skipping launcher (DML environment still fully works)."
     } else {
             $LauncherCs  = "$LauncherDir\DML-Launcher.cs"
             $LauncherExe = "$LauncherDir\DML-Launcher.exe"
@@ -2762,10 +2825,32 @@ class TrayApp : ApplicationContext
     # IPv4 default gateway (WSL/Hyper-V virtual switches never have one).
     $lanIp = $null
     try {
+        # Filter out virtual/VPN/Hyper-V adapters by description keywords and prefer
+        # private-range addresses so a VPN or Hyper-V virtual switch doesn't win.
         $nic = Get-NetIPConfiguration |
-            Where-Object { $_.IPv4DefaultGateway -ne $null -and $_.NetAdapter.Status -eq 'Up' } |
+            Where-Object {
+                $_.IPv4DefaultGateway -ne $null -and
+                $_.NetAdapter.Status -eq 'Up' -and
+                $_.NetAdapter.InterfaceDescription -notmatch 'Virtual|Hyper-V|TAP|VPN|Tunnel|Loopback|Teredo|WAN Miniport|isatap|6to4'
+            } |
+            Where-Object {
+                # Must have a private-range IPv4 address (10.x, 172.16-31.x, 192.168.x.x)
+                ($_.IPv4Address | Where-Object {
+                    $a = $_.IPAddress
+                    $a -match '^10\.' -or
+                    ($a -match '^172\.(\d+)\.' -and [int]$Matches[1] -ge 16 -and [int]$Matches[1] -le 31) -or
+                    $a -match '^192\.168\.'
+                })
+            } |
             Select-Object -First 1
-        if ($nic) { $lanIp = ($nic.IPv4Address | Select-Object -First 1).IPAddress }
+        if ($nic) {
+            $lanIp = ($nic.IPv4Address | Where-Object {
+                $a = $_.IPAddress
+                $a -match '^10\.' -or
+                ($a -match '^172\.(\d+)\.' -and [int]$Matches[1] -ge 16 -and [int]$Matches[1] -le 31) -or
+                $a -match '^192\.168\.'
+            } | Select-Object -First 1).IPAddress
+        }
     } catch { }
     if ($lanIp) {
         Write-Diag "LAN IP detected: $lanIp"
@@ -2801,12 +2886,29 @@ class TrayApp : ApplicationContext
         $ruleName = "DML LAN Play (TCP $port)"
         try {
             $existing = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
+            $needsCreate = $false
             if (-not $existing) {
+                $needsCreate = $true
+            } else {
+                # Validate the existing rule has the correct port, profile, direction, and action.
+                $existingFilter  = $existing | Get-NetFirewallPortFilter -ErrorAction SilentlyContinue
+                $existingProfile = $existing.Profile
+                $portOk    = $existingFilter -and ($existingFilter.LocalPort -eq $port -or $existingFilter.LocalPort -eq "$port")
+                $profileOk = ($existingProfile -band 6) -eq 6   # Domain(2) + Private(4) = 6
+                $actionOk  = $existing.Action -eq 'Allow'
+                $dirOk     = $existing.Direction -eq 'Inbound'
+                if (-not ($portOk -and $profileOk -and $actionOk -and $dirOk)) {
+                    Write-Diag "Firewall rule '$ruleName' exists but is misconfigured -- recreating"
+                    Remove-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
+                    $needsCreate = $true
+                } else {
+                    Write-Diag "Firewall rule already correct: $ruleName"
+                }
+            }
+            if ($needsCreate) {
                 New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Action Allow `
                     -Protocol TCP -LocalPort $port -Profile Domain,Private | Out-Null
                 Write-Ok "Firewall: allow inbound TCP $port (home/work networks only)"
-            } else {
-                Write-Diag "Firewall rule already present: $ruleName"
             }
         } catch {
             Write-Warn "Firewall rule for TCP $port failed: $($_.Exception.Message)"
