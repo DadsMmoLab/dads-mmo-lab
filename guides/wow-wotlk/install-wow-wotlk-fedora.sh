@@ -375,6 +375,48 @@ check_system() {
 # ─────────────────────────────────────────
 # INSTALL DOCKER
 # ─────────────────────────────────────────
+install_buildx() {
+    if docker buildx version &>/dev/null 2>&1; then
+        return 0
+    fi
+    print_info "Installing docker-buildx-plugin..."
+    if [[ "${FEDORA_IMMUTABLE:-false}" == "true" ]]; then
+        # Immutable system — layer via rpm-ostree; returns 2 to signal reboot needed
+        if sudo rpm-ostree install -y --idempotent docker-buildx-plugin 2>/dev/null; then
+            print_success "docker-buildx-plugin layered. A reboot is required to activate it."
+            return 2
+        else
+            print_warning "rpm-ostree install of docker-buildx-plugin failed — trying CLI plugin fallback..."
+            _install_buildx_binary_fallback
+        fi
+    else
+        # Regular Fedora — dnf
+        if sudo dnf -y install docker-buildx-plugin 2>/dev/null; then
+            print_success "docker-buildx-plugin installed!"
+        else
+            print_warning "dnf install of docker-buildx-plugin failed — trying CLI plugin fallback..."
+            _install_buildx_binary_fallback
+        fi
+    fi
+}
+
+_install_buildx_binary_fallback() {
+    local arch
+    arch=$(uname -m)
+    [[ "$arch" == "x86_64" ]] && arch="amd64"
+    [[ "$arch" == "aarch64" ]] && arch="arm64"
+    local plugin_dir="$HOME/.docker/cli-plugins"
+    mkdir -p "$plugin_dir"
+    if curl -fsSL "https://github.com/docker/buildx/releases/download/v0.23.0/buildx-v0.23.0.linux-${arch}" \
+            -o "$plugin_dir/docker-buildx" 2>/dev/null; then
+        chmod +x "$plugin_dir/docker-buildx"
+        print_success "docker-buildx plugin installed to ~/.docker/cli-plugins/"
+    else
+        print_warning "Could not auto-install docker-buildx — the installer cannot continue without it."
+        print_info "Install manually with: sudo dnf install docker-buildx-plugin  then re-run this script."
+    fi
+}
+
 install_docker() {
     # ── On immutable systems (Bazzite), Docker may already be present as a
     #    layered package from a prior install attempt. If the binary exists,
@@ -433,6 +475,8 @@ install_docker() {
                 fi
 
                 print_success "Docker permissions configured!"
+                # Ensure buildx is present before returning
+                install_buildx
                 return 0
             else
                 # Daemon runs but compose plugin is missing — layer it and reboot
@@ -813,6 +857,16 @@ preflight_check() {
     fi
 
     # ── Re-verify after install ──────────────────────────────────────
+    # If buildx is still missing, attempt a direct targeted install.
+    # On immutable systems install_buildx returns 2 when a reboot is needed.
+    if ! docker buildx version &>/dev/null 2>&1; then
+        install_buildx
+        local _buildx_rc=$?
+        if [[ $_buildx_rc -eq 2 ]]; then
+            _pf_reboot_needed=true
+        fi
+    fi
+
     print_info "Verifying all dependencies are now available..."
     local failed=()
     command -v docker &>/dev/null || failed+=("docker")

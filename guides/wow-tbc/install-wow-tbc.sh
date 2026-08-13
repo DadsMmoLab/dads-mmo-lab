@@ -209,8 +209,9 @@ install_docker() {
         exit 1
     fi
 
-    # ── If real Docker is present AND compose works, we're done ──────
+    # ── If real Docker is present AND compose works, ensure buildx too ──
     if [ $has_docker -eq 1 ] && docker compose version &>/dev/null; then
+        install_buildx
         print_success "Docker + Compose already installed and working"
         return 0
     fi
@@ -278,6 +279,42 @@ SHIM
         exit 1
     fi
     print_success "'docker compose' verified working"
+}
+
+# ─────────────────────────────────────────
+# INSTALL BUILDX
+# ─────────────────────────────────────────
+install_buildx() {
+    if docker buildx version &>/dev/null 2>&1; then
+        return 0
+    fi
+    print_info "Installing docker-buildx..."
+    if command -v steamos-readonly &>/dev/null; then
+        sudo steamos-readonly disable 2>/dev/null || true
+        trap 'sudo steamos-readonly enable 2>/dev/null || true' RETURN
+    fi
+    if sudo pacman -Sy --noconfirm docker-buildx 2>/dev/null; then
+        print_success "docker-buildx installed!"
+    else
+        print_warning "pacman install of docker-buildx failed — trying CLI plugin fallback..."
+        local arch
+        arch=$(uname -m)
+        [[ "$arch" == "x86_64" ]] && arch="amd64"
+        [[ "$arch" == "aarch64" ]] && arch="arm64"
+        local plugin_dir="$HOME/.docker/cli-plugins"
+        mkdir -p "$plugin_dir"
+        if curl -fsSL "https://github.com/docker/buildx/releases/download/v0.23.0/buildx-v0.23.0.linux-${arch}" \
+                -o "$plugin_dir/docker-buildx" 2>/dev/null; then
+            chmod +x "$plugin_dir/docker-buildx"
+            print_success "docker-buildx installed to ~/.docker/cli-plugins/"
+        else
+            print_warning "Could not auto-install docker-buildx — the installer cannot continue without it."
+            print_info "Install manually with: sudo pacman -S docker-buildx  then re-run this script."
+        fi
+    fi
+    if command -v steamos-readonly &>/dev/null; then
+        sudo steamos-readonly enable 2>/dev/null || true
+    fi
 }
 
 # ─────────────────────────────────────────
@@ -408,11 +445,18 @@ preflight_check() {
     fi
 
     # ── Re-verify after install ──────────────────────────────────────
+    # If buildx is still missing, attempt a direct targeted install.
+    # Use ${DOCKER_CMD:-docker} — on a fresh install the docker group may not
+    # be active yet, so install_docker sets DOCKER_CMD="sudo docker".
+    if ! ${DOCKER_CMD:-docker} buildx version &>/dev/null 2>&1; then
+        install_buildx
+    fi
+
     print_info "Verifying all dependencies are now available..."
     local failed=()
     command -v docker &>/dev/null || failed+=("docker")
-    docker compose version &>/dev/null 2>&1 || failed+=("docker compose")
-    docker buildx version &>/dev/null 2>&1 || failed+=("docker buildx")
+    ${DOCKER_CMD:-docker} compose version &>/dev/null 2>&1 || failed+=("docker compose")
+    ${DOCKER_CMD:-docker} buildx version &>/dev/null 2>&1 || failed+=("docker buildx")
     command -v git &>/dev/null || failed+=("git")
     command -v curl &>/dev/null || failed+=("curl")
 
