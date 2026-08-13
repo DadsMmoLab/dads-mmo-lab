@@ -332,7 +332,7 @@ check_pacman_keyring() {
 # INSTALL DOCKER
 # ─────────────────────────────────────────
 install_buildx() {
-    if docker buildx version &>/dev/null 2>&1; then
+    if ${DOCKER_CMD:-docker} buildx version &>/dev/null 2>&1; then
         return 0
     fi
     print_info "Installing docker-buildx..."
@@ -429,8 +429,7 @@ install_docker() {
     # If docker still not accessible without sudo — wrap it
     if ! docker ps &>/dev/null 2>&1; then
         if sudo docker ps &>/dev/null 2>&1; then
-            function docker() { sudo docker "$@"; }
-            export -f docker 2>/dev/null || true
+            DOCKER_CMD="sudo docker"
             print_info "Using sudo for Docker — will work normally after next login"
         else
             print_error "Docker failed to start. Try rebooting and running again."
@@ -507,6 +506,11 @@ preflight_check() {
     # when the daemon is running but the user isn't in the docker group yet.
     if command -v docker &>/dev/null && docker ps &>/dev/null 2>&1; then
         docker_ok=true
+    elif command -v docker &>/dev/null && sudo docker ps &>/dev/null 2>&1; then
+        # Daemon is up but user lacks socket permission — set DOCKER_CMD now
+        # so all subsequent checks in this preflight use sudo docker.
+        DOCKER_CMD="sudo docker"
+        docker_ok=true
     else
         all_ok=false
     fi
@@ -514,14 +518,14 @@ preflight_check() {
     # ── docker compose plugin ────────────────────────────────────────
     # Only accept the plugin subcommand (`docker compose`); the legacy
     # standalone `docker-compose` binary is never used by this script.
-    if docker compose version &>/dev/null 2>&1; then
+    if ${DOCKER_CMD:-docker} compose version &>/dev/null 2>&1; then
         docker_compose_ok=true
     else
         all_ok=false
     fi
 
     # ── docker buildx ────────────────────────────────────────────────
-    if docker buildx version &>/dev/null 2>&1; then
+    if ${DOCKER_CMD:-docker} buildx version &>/dev/null 2>&1; then
         docker_buildx_ok=true
     else
         all_ok=false
@@ -603,16 +607,18 @@ preflight_check() {
     fi
 
     # ── Re-verify after install ──────────────────────────────────────
-    # If buildx is still missing after install_docker ran, try a direct install
-    if ! docker buildx version &>/dev/null 2>&1; then
+    # If buildx is still missing after install_docker ran, try a direct install.
+    # Use ${DOCKER_CMD:-docker} — install_docker sets DOCKER_CMD="sudo docker"
+    # when the user isn't yet in the docker group (fresh install).
+    if ! ${DOCKER_CMD:-docker} buildx version &>/dev/null 2>&1; then
         install_buildx
     fi
 
     print_info "Verifying all dependencies are now available..."
     local failed=()
     command -v docker &>/dev/null || failed+=("docker")
-    docker compose version &>/dev/null 2>&1 || failed+=("docker compose")
-    docker buildx version &>/dev/null 2>&1 || failed+=("docker buildx")
+    ${DOCKER_CMD:-docker} compose version &>/dev/null 2>&1 || failed+=("docker compose")
+    ${DOCKER_CMD:-docker} buildx version &>/dev/null 2>&1 || failed+=("docker buildx")
     command -v git &>/dev/null || failed+=("git")
     command -v curl &>/dev/null || failed+=("curl")
 
