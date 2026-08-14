@@ -5,7 +5,7 @@
 #
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 #
-#  Version: 1.1.0
+#  Version: 1.1.1
 #
 #  Usage:
 #    chmod +x install-wow-tbc.sh
@@ -47,7 +47,7 @@
 #    - 3-5 hours of wall-clock time (mostly hands-off)
 # ============================================================
 
-INSTALLER_VERSION="1.1.0"
+INSTALLER_VERSION="1.1.1"
 
 set -o pipefail
 
@@ -445,10 +445,9 @@ preflight_check() {
     fi
 
     # ── Re-verify after install ──────────────────────────────────────
-    # If buildx is still missing, attempt a direct targeted install.
-    # Use ${DOCKER_CMD:-docker} — on a fresh install the docker group may not
-    # be active yet, so install_docker sets DOCKER_CMD="sudo docker".
-    if ! ${DOCKER_CMD:-docker} buildx version &>/dev/null 2>&1; then
+    # buildx is a client-side plugin — its availability is independent of
+    # socket permissions (DOCKER_CMD). Always check with plain `docker`.
+    if ! docker buildx version &>/dev/null 2>&1; then
         install_buildx
     fi
 
@@ -456,7 +455,8 @@ preflight_check() {
     local failed=()
     command -v docker &>/dev/null || failed+=("docker")
     ${DOCKER_CMD:-docker} compose version &>/dev/null 2>&1 || failed+=("docker compose")
-    ${DOCKER_CMD:-docker} buildx version &>/dev/null 2>&1 || failed+=("docker buildx")
+    # buildx: client-side only — check without sudo regardless of DOCKER_CMD
+    docker buildx version &>/dev/null 2>&1 || failed+=("docker buildx")
     command -v git &>/dev/null || failed+=("git")
     command -v curl &>/dev/null || failed+=("curl")
 

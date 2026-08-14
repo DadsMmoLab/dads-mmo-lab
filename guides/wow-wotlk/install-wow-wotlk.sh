@@ -5,7 +5,7 @@
 #
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 #
-#  Version: 1.2.4
+#  Version: 1.2.5
 #
 #  Usage:
 #    chmod +x install-wow.sh
@@ -20,6 +20,16 @@
 #    6. Sets up the Gaming Mode launcher
 #
 #  Changelog:
+#    1.2.5 — Fix docker-buildx false-negative under sudo (SteamOS)
+#      - Root cause: install_docker() sets DOCKER_CMD="sudo docker" when the
+#        user isn't yet in the docker group. All subsequent preflight buildx
+#        checks then ran `sudo docker buildx version`, which fails on SteamOS
+#        because sudo resets $HOME to /root and the Docker CLI plugin path
+#        diverges from the user-facing path where pacman installed the plugin.
+#      - Fix: docker buildx is a client-side plugin — it has no dependency on
+#        socket access and must never run via DOCKER_CMD/sudo. All three call
+#        sites (install_buildx guard, preflight first-pass, preflight re-verify
+#        and failed[] check) now use plain `docker buildx version`.
 #    1.2.4 — Custom server files install location
 #      - Added choose_install_dir(): prompts user for a custom SERVER_DIR
 #        before the install begins (blank = keep default ~/wow-server-playerbots)
@@ -55,7 +65,7 @@
 #      - Heredoc launcher synced with standalone launcher scripts
 # ============================================================
 
-WIZARD_VERSION="1.2.4"
+WIZARD_VERSION="1.2.5"
 
 set -euo pipefail
 
@@ -332,7 +342,8 @@ check_pacman_keyring() {
 # INSTALL DOCKER
 # ─────────────────────────────────────────
 install_buildx() {
-    if ${DOCKER_CMD:-docker} buildx version &>/dev/null 2>&1; then
+    # buildx version is a client-side check — no socket access needed, never use sudo here.
+    if docker buildx version &>/dev/null 2>&1; then
         return 0
     fi
     print_info "Installing docker-buildx..."
@@ -525,7 +536,8 @@ preflight_check() {
     fi
 
     # ── docker buildx ────────────────────────────────────────────────
-    if ${DOCKER_CMD:-docker} buildx version &>/dev/null 2>&1; then
+    # buildx is a client-side plugin — check without sudo regardless of DOCKER_CMD.
+    if docker buildx version &>/dev/null 2>&1; then
         docker_buildx_ok=true
     else
         all_ok=false
@@ -607,10 +619,9 @@ preflight_check() {
     fi
 
     # ── Re-verify after install ──────────────────────────────────────
-    # If buildx is still missing after install_docker ran, try a direct install.
-    # Use ${DOCKER_CMD:-docker} — install_docker sets DOCKER_CMD="sudo docker"
-    # when the user isn't yet in the docker group (fresh install).
-    if ! ${DOCKER_CMD:-docker} buildx version &>/dev/null 2>&1; then
+    # buildx is a client-side plugin — its availability is independent of
+    # socket permissions (DOCKER_CMD). Always check with plain `docker`.
+    if ! docker buildx version &>/dev/null 2>&1; then
         install_buildx
     fi
 
@@ -618,7 +629,8 @@ preflight_check() {
     local failed=()
     command -v docker &>/dev/null || failed+=("docker")
     ${DOCKER_CMD:-docker} compose version &>/dev/null 2>&1 || failed+=("docker compose")
-    ${DOCKER_CMD:-docker} buildx version &>/dev/null 2>&1 || failed+=("docker buildx")
+    # buildx: client-side only — check without sudo regardless of DOCKER_CMD
+    docker buildx version &>/dev/null 2>&1 || failed+=("docker buildx")
     command -v git &>/dev/null || failed+=("git")
     command -v curl &>/dev/null || failed+=("curl")
 
