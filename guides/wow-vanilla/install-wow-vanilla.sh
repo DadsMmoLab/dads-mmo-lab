@@ -5,7 +5,7 @@
 #
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 #
-#  Version: 1.2.1
+#  Version: 1.2.2
 #
 #  Usage:
 #    chmod +x install-wow-vanilla.sh
@@ -47,7 +47,7 @@
 #    - 3-5 hours of wall-clock time (mostly hands-off)
 # ============================================================
 
-INSTALLER_VERSION="1.2.1"
+INSTALLER_VERSION="1.2.2"
 
 set -o pipefail
 
@@ -312,6 +312,8 @@ install_buildx() {
     fi
     if sudo pacman -Sy --noconfirm docker-buildx 2>/dev/null; then
         print_success "docker-buildx installed!"
+        hash -r 2>/dev/null || true
+        sleep 1
     else
         print_warning "pacman install of docker-buildx failed — trying CLI plugin fallback..."
         local arch
@@ -320,6 +322,7 @@ install_buildx() {
         [[ "$arch" == "aarch64" ]] && arch="arm64"
         local plugin_dir="$HOME/.docker/cli-plugins"
         mkdir -p "$plugin_dir"
+        print_info "Downloading docker-buildx binary to ${plugin_dir}/ ..."
         if curl -fsSL "https://github.com/docker/buildx/releases/download/v0.23.0/buildx-v0.23.0.linux-${arch}" \
                 -o "$plugin_dir/docker-buildx" 2>/dev/null; then
             chmod +x "$plugin_dir/docker-buildx"
@@ -332,6 +335,92 @@ install_buildx() {
     if command -v steamos-readonly &>/dev/null; then
         sudo steamos-readonly enable 2>/dev/null || true
     fi
+}
+
+# ─────────────────────────────────────────
+# BUILDX DIAGNOSTIC
+# ─────────────────────────────────────────
+diagnose_buildx_failure() {
+    echo ""
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${WHITE}${BOLD} 🔍 docker-buildx Diagnostic Report${NC}"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+    echo ""
+    echo -e "${WHITE}── pacman package status ──────────────────────────${NC}"
+    if pacman -Q docker-buildx 2>/dev/null; then
+        echo -e "  ${GREEN}docker-buildx IS listed in pacman database${NC}"
+        echo -e "  ${WHITE}Files owned by package:${NC}"
+        pacman -Ql docker-buildx 2>/dev/null | while read -r _p _f; do
+            echo "    $_f"
+        done
+        echo -e "  ${WHITE}Package integrity check:${NC}"
+        pacman -Qkk docker-buildx 2>/dev/null || echo "    (integrity check unavailable)"
+    else
+        echo -e "  ${RED}docker-buildx is NOT in pacman database${NC}"
+    fi
+
+    echo ""
+    echo -e "${WHITE}── Plugin binary locations ────────────────────────${NC}"
+    local _found_any=false
+    local _effective_cfg="${DOCKER_CONFIG:-$HOME/.docker}"
+    for _dir in \
+        "/usr/lib/docker/cli-plugins" \
+        "/usr/local/lib/docker/cli-plugins" \
+        "/usr/libexec/docker/cli-plugins" \
+        "/usr/local/libexec/docker/cli-plugins" \
+        "${_effective_cfg}/cli-plugins" \
+        "/root/.docker/cli-plugins"; do
+        if [[ -f "$_dir/docker-buildx" ]]; then
+            _found_any=true
+            echo -e "  ${GREEN}FOUND:${NC} $(ls -la "$_dir/docker-buildx" 2>/dev/null)"
+        else
+            echo -e "  ${DIM}ABSENT: $_dir/docker-buildx${NC}"
+        fi
+    done
+    [[ "$_found_any" == false ]] && \
+        echo -e "  ${RED}No docker-buildx binary found in any known plugin path${NC}"
+
+    echo ""
+    echo -e "${WHITE}── docker info plugin discovery ───────────────────${NC}"
+    docker info 2>/dev/null | grep -i "plugin\|buildx\|cli" || \
+        echo "  (docker info unavailable or no plugin entries)"
+
+    echo ""
+    echo -e "${WHITE}── docker buildx version (raw output) ─────────────${NC}"
+    docker buildx version 2>&1 || true
+
+    echo ""
+    echo -e "${WHITE}── Environment variables ───────────────────────────${NC}"
+    echo -e "  DOCKER_CONFIG=${DOCKER_CONFIG:-'(not set, defaults to ~/.docker)'}"
+    echo -e "  DOCKER_CLI_PLUGIN_HOME=${DOCKER_CLI_PLUGIN_HOME:-'(not set)'}"
+    echo -e "  XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-'(not set)'}"
+    echo -e "  HOME=${HOME}"
+    echo -e "  USER=${USER}"
+
+    echo ""
+    echo -e "${WHITE}── Docker binary and version ───────────────────────${NC}"
+    if command -v docker &>/dev/null; then
+        echo -e "  $(command -v docker)"
+        docker --version 2>/dev/null || true
+    else
+        echo "  (docker binary not found)"
+    fi
+
+    echo ""
+    echo -e "${WHITE}── SteamOS read-only state ─────────────────────────${NC}"
+    if command -v steamos-readonly &>/dev/null; then
+        sudo steamos-readonly status 2>/dev/null || echo "  (steamos-readonly status unavailable)"
+    else
+        echo "  (not a SteamOS system)"
+    fi
+
+    echo ""
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${WHITE}  Please share the output above when reporting this issue.${NC}"
+    echo -e "${WHITE}  github.com/DadsMmoLab/dads-mmo-lab/issues${NC}"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
 }
 
 # ─────────────────────────────────────────
@@ -465,20 +554,65 @@ preflight_check() {
     # buildx is a client-side plugin — its availability is independent of
     # socket permissions (DOCKER_CMD). Always check with plain `docker`.
     if ! docker buildx version &>/dev/null 2>&1; then
+        print_info "buildx not yet visible — attempting targeted install..."
         install_buildx
+        hash -r 2>/dev/null || true
+        sleep 1
     fi
 
     print_info "Verifying all dependencies are now available..."
+    echo ""
+
     local failed=()
-    command -v docker &>/dev/null || failed+=("docker")
-    ${DOCKER_CMD:-docker} compose version &>/dev/null 2>&1 || failed+=("docker compose")
-    # buildx: client-side only — check without sudo regardless of DOCKER_CMD
-    docker buildx version &>/dev/null 2>&1 || failed+=("docker buildx")
-    command -v git &>/dev/null || failed+=("git")
-    command -v curl &>/dev/null || failed+=("curl")
+
+    if command -v docker &>/dev/null; then
+        print_success "docker binary:    $(command -v docker)"
+    else
+        print_error  "docker binary:    NOT FOUND"
+        failed+=("docker")
+    fi
+
+    local _compose_ver
+    if _compose_ver=$(${DOCKER_CMD:-docker} compose version 2>&1); then
+        print_success "docker compose:   $(echo "$_compose_ver" | head -1)"
+    else
+        print_error  "docker compose:   NOT AVAILABLE"
+        print_info   "  Raw output: $_compose_ver"
+        failed+=("docker compose")
+    fi
+
+    local _buildx_ver
+    if _buildx_ver=$(docker buildx version 2>&1); then
+        print_success "docker buildx:    $_buildx_ver"
+    else
+        print_error  "docker buildx:    NOT AVAILABLE"
+        print_info   "  Raw output: $_buildx_ver"
+        failed+=("docker buildx")
+    fi
+
+    if command -v git &>/dev/null; then
+        print_success "git:              $(git --version 2>/dev/null)"
+    else
+        print_error  "git:              NOT FOUND"
+        failed+=("git")
+    fi
+
+    if command -v curl &>/dev/null; then
+        print_success "curl:             $(curl --version 2>/dev/null | head -1)"
+    else
+        print_error  "curl:             NOT FOUND"
+        failed+=("curl")
+    fi
+
+    echo ""
 
     if [[ ${#failed[@]} -gt 0 ]]; then
         print_error "The following dependencies could not be installed: ${failed[*]}"
+        echo ""
+        if printf '%s\n' "${failed[@]}" | grep -q "docker buildx"; then
+            print_warning "docker buildx was installed but is not discoverable — running diagnostics..."
+            diagnose_buildx_failure
+        fi
         print_error "Automatic installation failed. Check the output above for errors, then re-run this script."
         exit 1
     fi
