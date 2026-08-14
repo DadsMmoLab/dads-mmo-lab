@@ -1137,6 +1137,28 @@ install_server() {
         print_info "You can add it manually later: git clone ... $SERVER_DIR/modules/mod-playerbots"
     fi
 
+    # AzerothCore's compose file resolves ${DOCKER_DB_ROOT_PASSWORD:-password}
+    # and ${DOCKER_DB_EXTERNAL_PORT:-3306}:3306. Without a .env both defaults
+    # apply, so MySQL is published on every interface with the root password
+    # "password". The port value is substituted into compose short syntax, so
+    # "127.0.0.1:3306" becomes "127.0.0.1:3306:3306" and binds loopback only.
+    #
+    # This has to be written before the first `up`: the MySQL image only reads
+    # MYSQL_ROOT_PASSWORD when it initialises the data volume.
+    #
+    # The game ports (3724 auth, 8085 world) are deliberately left alone.
+    if [ ! -f "$SERVER_DIR/.env" ]; then
+        umask 077
+        cat > "$SERVER_DIR/.env" << ENVEOF
+DOCKER_DB_ROOT_PASSWORD=$(openssl rand -hex 24)
+DOCKER_DB_EXTERNAL_PORT=127.0.0.1:3306
+DOCKER_SOAP_EXTERNAL_PORT=127.0.0.1:7878
+ENVEOF
+        umask 022
+        chmod 600 "$SERVER_DIR/.env"
+        print_success "Database secured (random root password, bound to localhost)"
+    fi
+
     cat > "$SERVER_DIR/docker-compose.override.yml" << 'OVERRIDE'
 services:
   ac-worldserver:
