@@ -1085,8 +1085,15 @@ install_server() {
     # If they already exist in $SERVER_DIR, skip the 2-4 hour compile
     # and just start the server — the rest of the install continues
     # normally (account creation, launcher setup, etc.).
+    # `docker compose images` only lists images belonging to the project's
+    # CONTAINERS, so after an ordinary `docker compose down` it reports nothing
+    # even though the built images are still on the system. Without the second
+    # test, a complete install looks uncompiled here and falls through to the
+    # "Remove it and start fresh?" prompt below, which deletes the database
+    # volume and the server folder.
     if [ -d "$SERVER_DIR" ] && \
-       (cd "$SERVER_DIR" && docker compose images 2>/dev/null | grep -qi "worldserver"); then
+       (cd "$SERVER_DIR" && { docker compose images 2>/dev/null | grep -qi "worldserver" \
+          || docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -qi "worldserver"; }); then
         print_success "Compiled images already found in $SERVER_DIR"
         print_info "Skipping compile — reusing your existing build."
         print_info "To force a fresh compile, remove the server folder:"
