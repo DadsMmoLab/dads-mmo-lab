@@ -949,9 +949,12 @@ OVERRIDE
     print_info "Go make a coffee — this will take a while! ☕"
 
     cd "$SERVER_DIR"
-    docker compose up -d --build 2>&1 | tee ~/playerbots-build.log
-
-    if [ ${PIPESTATUS[0]} -ne 0 ]; then
+    # Test the pipeline directly rather than checking PIPESTATUS afterwards:
+    # with `set -euo pipefail` (line 70) a failed build aborts the script AT
+    # this line, so a check on the following line is never reached and the
+    # error below is never printed. Inside `if !`, errexit is suspended for
+    # this command while pipefail still reports docker's real exit status.
+    if ! docker compose up -d --build 2>&1 | tee ~/playerbots-build.log; then
         print_error "Compilation failed. Check ~/playerbots-build.log"
         exit 1
     fi
