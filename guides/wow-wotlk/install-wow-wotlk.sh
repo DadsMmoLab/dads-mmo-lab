@@ -20,6 +20,20 @@
 #    6. Sets up the Gaming Mode launcher
 #
 #  Changelog:
+#    1.2.8 — Shadow binary bug fix (SteamOS docker-buildx false-negative)
+#      - Root cause: a corrupt user-level ~/.docker/cli-plugins/docker-buildx
+#        (e.g. an HTML rate-limit response from a prior curl fallback attempt)
+#        shadows the valid pacman-installed system binary because Docker CLI
+#        scans ~/.docker/cli-plugins BEFORE /usr/lib/docker/cli-plugins.
+#      - Fix 1 (install_buildx): after pacman succeeds, detect and remove any
+#        stale user-level binary that is either <10 MB or smaller than the
+#        system binary, preventing it from blocking plugin discovery.
+#      - Fix 2 (install_buildx curl fallback): validate the downloaded file is
+#        a real ELF binary (magic bytes 7f454c46) and ≥10 MB before installing;
+#        reject HTML error pages and partial downloads.
+#      - Fix 3 (diagnose_dep_failure): add "Shadow binary check" that compares
+#        system vs user-level binary sizes and prints a clear fix command when
+#        a corrupt shadow file is detected.
 #    1.2.5 — Fix docker-buildx false-negative under sudo (SteamOS)
 #      - Root cause: install_docker() sets DOCKER_CMD="sudo docker" when the
 #        user isn't yet in the docker group. All subsequent preflight buildx
@@ -65,7 +79,7 @@
 #      - Heredoc launcher synced with standalone launcher scripts
 # ============================================================
 
-WIZARD_VERSION="1.2.7"
+WIZARD_VERSION="1.2.9"
 
 set -euo pipefail
 
@@ -349,6 +363,8 @@ install_buildx() {
     print_info "Installing docker-buildx..."
     if command -v steamos-readonly &>/dev/null; then
         sudo steamos-readonly disable 2>/dev/null || true
+        # RETURN trap ensures SteamOS filesystem is re-locked even if the shell
+        # exits early due to set -euo pipefail before we reach the explicit enable.
         trap 'sudo steamos-readonly enable 2>/dev/null || true' RETURN
     fi
     if sudo pacman -Sy --noconfirm docker-buildx 2>/dev/null; then
@@ -358,22 +374,66 @@ install_buildx() {
         # Docker discovers dynamically — give the filesystem a moment to sync.
         hash -r 2>/dev/null || true
         sleep 1
+
+        # Resolve the effective Docker config dir the same way Docker CLI does,
+        # so the shadow check targets the path Docker would actually consult first.
+        local _docker_cfg="${DOCKER_CONFIG:-$HOME/.docker}"
+        local _sys_bin="/usr/lib/docker/cli-plugins/docker-buildx"
+        local _user_bin="${_docker_cfg}/cli-plugins/docker-buildx"
+
+        # If a user-level binary exists alongside the system one, check whether
+        # it is actually functional. Docker CLI scans the user path first, so a
+        # broken file there will silently block the valid system binary.
+        if [[ -f "$_sys_bin" && -f "$_user_bin" ]]; then
+            if ! "$_user_bin" docker-cli-plugin-metadata &>/dev/null 2>&1 && \
+               ! "$_user_bin" version &>/dev/null 2>&1; then
+                local _usr_sz
+                _usr_sz=$(stat -c%s "$_user_bin" 2>/dev/null || echo 0)
+                print_warning "User-level docker-buildx (${_usr_sz} bytes) at ${_user_bin} may be shadowing"
+                print_warning "the system binary but fails to execute — removing it..."
+                rm -f "$_user_bin" || true
+                print_info "Removed non-functional ${_user_bin}."
+            fi
+        fi
     else
         print_warning "pacman install of docker-buildx failed — trying Docker CLI plugin fallback..."
         local arch
         arch=$(uname -m)
         [[ "$arch" == "x86_64" ]] && arch="amd64"
         [[ "$arch" == "aarch64" ]] && arch="arm64"
-        local plugin_dir="$HOME/.docker/cli-plugins"
-        mkdir -p "$plugin_dir"
+        local _docker_cfg="${DOCKER_CONFIG:-$HOME/.docker}"
+        local plugin_dir="${_docker_cfg}/cli-plugins"
+        mkdir -p "$plugin_dir" || true
+        local _dl_tmp="${plugin_dir}/docker-buildx.tmp"
         print_info "Downloading docker-buildx binary to ${plugin_dir}/ ..."
         if curl -fsSL "https://github.com/docker/buildx/releases/download/v0.23.0/buildx-v0.23.0.linux-${arch}" \
-                -o "$plugin_dir/docker-buildx" 2>/dev/null; then
-            chmod +x "$plugin_dir/docker-buildx"
-            print_success "docker-buildx plugin installed to ~/.docker/cli-plugins/"
+                -o "$_dl_tmp" 2>/dev/null; then
+            # Validate: must be an ELF binary and at least 10 MB.
+            # This guards against GitHub rate-limit HTML responses and partial downloads.
+            local _dl_sz
+            _dl_sz=$(stat -c%s "$_dl_tmp" 2>/dev/null || echo 0)
+            local _dl_magic
+            _dl_magic=$(head -c 4 "$_dl_tmp" 2>/dev/null | od -A n -t x1 | tr -d ' \n' || echo "")
+            if (( _dl_sz < 10485760 )) || [[ "$_dl_magic" != "7f454c46" ]]; then
+                print_warning "Downloaded file is not a valid binary (${_dl_sz} bytes, magic=${_dl_magic})."
+                print_warning "This is likely a GitHub rate-limit or network error."
+                print_info "  Manual fix: sudo pacman -S docker-buildx  then re-run this script."
+                rm -f "$_dl_tmp" || true
+                return 1
+            fi
+            if mv "$_dl_tmp" "${plugin_dir}/docker-buildx" && \
+               chmod +x "${plugin_dir}/docker-buildx"; then
+                print_success "docker-buildx plugin installed to ${plugin_dir}/"
+            else
+                print_warning "Could not finalize docker-buildx installation."
+                rm -f "$_dl_tmp" "${plugin_dir}/docker-buildx" 2>/dev/null || true
+                return 1
+            fi
         else
+            rm -f "$_dl_tmp" 2>/dev/null || true
             print_warning "Could not auto-install docker-buildx — the installer cannot continue without it."
             print_info "Install manually with: sudo pacman -S docker-buildx  then re-run this script."
+            return 1
         fi
     fi
     if command -v steamos-readonly &>/dev/null; then
@@ -473,7 +533,40 @@ diagnose_dep_failure() {
                     echo -e "  ${DIM}ABSENT: $_dir/docker-buildx${NC}"
                 fi
             done
-            echo -e "  ${WHITE}pacman package:${NC}"
+
+            # ── Shadow binary check ──────────────────────────────────────
+            # Docker CLI scans ~/.docker/cli-plugins BEFORE /usr/lib/docker/cli-plugins.
+            # A corrupt/small file at the user path silently blocks the system binary.
+            local _bx_sys="/usr/lib/docker/cli-plugins/docker-buildx"
+            local _bx_usr="${_effective_cfg}/cli-plugins/docker-buildx"
+            if [[ -f "$_bx_sys" && -f "$_bx_usr" ]]; then
+                local _bx_sys_sz _bx_usr_sz
+                _bx_sys_sz=$(stat -c%s "$_bx_sys" 2>/dev/null || echo 0)
+                _bx_usr_sz=$(stat -c%s "$_bx_usr" 2>/dev/null || echo 0)
+                echo -e "  ${WHITE}Shadow binary check:${NC}"
+                echo -e "    System binary:    ${_bx_sys_sz} bytes  (${_bx_sys})"
+                echo -e "    User-level copy:  ${_bx_usr_sz} bytes  (${_bx_usr})"
+                if (( _bx_usr_sz < 10485760 )); then
+                    # Also try to execute it — a corrupt file (HTML, partial) will fail with exec format error
+                    local _bx_exec_ok=false
+                    "$_bx_usr" docker-cli-plugin-metadata &>/dev/null 2>&1 && _bx_exec_ok=true
+                    if [[ "$_bx_exec_ok" == "false" ]]; then
+                        echo -e "  ${RED}⚠ LIKELY SHADOW BUG:${NC} user-level binary is only ${_bx_usr_sz} bytes and fails to execute"
+                        echo -e "  ${RED}  It may be a corrupt download (HTML error page, partial file) that shadows the system binary.${NC}"
+                        echo -e "  ${YELLOW}  Fix: rm -f \"${_bx_usr}\"  then re-run this script.${NC}"
+                    else
+                        echo -e "  ${YELLOW}⚠ User-level binary is small (${_bx_usr_sz}B) but executes; may shadow system binary.${NC}"
+                        echo -e "  ${YELLOW}  If buildx is still broken, try: rm -f \"${_bx_usr}\"  then re-run.${NC}"
+                    fi
+                elif (( _bx_usr_sz < _bx_sys_sz )); then
+                    echo -e "  ${YELLOW}⚠ User-level binary (${_bx_usr_sz}B) is smaller than system binary (${_bx_sys_sz}B) and may shadow it.${NC}"
+                    echo -e "  ${YELLOW}  If buildx is still broken, try: rm -f \"${_bx_usr}\"  then re-run.${NC}"
+                else
+                    echo -e "  ${GREEN}OK:${NC} user-level and system binaries look comparable in size."
+                fi
+            fi
+
+            echo -e "  ${WHITE}pacman package status:${NC}"
             if pacman -Q docker-buildx 2>/dev/null; then
                 echo -e "  ${WHITE}Files owned by package:${NC}"
                 pacman -Ql docker-buildx 2>/dev/null | while read -r _p _f; do echo "    $_f"; done
