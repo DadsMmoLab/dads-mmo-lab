@@ -1079,14 +1079,29 @@ install_server() {
     #
     # The game ports (3724 auth, 8085 world) are deliberately left alone.
     if [ ! -f "$SERVER_DIR/.env" ]; then
+        # Generate the password FIRST and verify it is non-empty. If this were
+        # inlined in the heredoc and openssl were missing, the value would be an
+        # empty string -- and compose treats ${VAR:-password} as unset when empty,
+        # silently restoring the very default this is meant to replace.
+        _db_pw="$(openssl rand -hex 24 2>/dev/null || true)"
+        if [ -z "$_db_pw" ]; then
+            _db_pw="$(tr -dc 'a-f0-9' < /dev/urandom 2>/dev/null | head -c 48 || true)"
+        fi
+        if [ -z "$_db_pw" ]; then
+            print_error "Could not generate a database password (no openssl, no /dev/urandom)."
+            print_error "Refusing to continue - the database would be left with the default password."
+            exit 1
+        fi
+
         umask 077
         cat > "$SERVER_DIR/.env" << ENVEOF
-DOCKER_DB_ROOT_PASSWORD=$(openssl rand -hex 24)
+DOCKER_DB_ROOT_PASSWORD=$_db_pw
 DOCKER_DB_EXTERNAL_PORT=127.0.0.1:3306
 DOCKER_SOAP_EXTERNAL_PORT=127.0.0.1:7878
 ENVEOF
         umask 022
         chmod 600 "$SERVER_DIR/.env"
+        unset _db_pw
         print_success "Database secured (random root password, bound to localhost)"
     fi
 
