@@ -5,7 +5,7 @@
 #
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 #
-#  Version: 1.2.2
+#  Version: 1.2.3
 #
 #  Usage:
 #    chmod +x install-wow-vanilla.sh

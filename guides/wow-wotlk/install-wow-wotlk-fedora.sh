@@ -5,7 +5,7 @@
 #
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 #
-#  Version: 1.3.8 - Fedora
+#  Version: 1.3.9 - Fedora
 #
 #  Usage:
 #    chmod +x install-wow.sh

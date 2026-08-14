@@ -5,7 +5,7 @@
 #
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 #
-#  Version: 1.4.3 - Debian
+#  Version: 1.4.4 - Debian
 #
 #  Usage:
 #    chmod +x install-wow.sh

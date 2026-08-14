@@ -5,7 +5,7 @@
 #
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 #
-#  Version: 1.2.7
+#  Version: 1.2.8
 #
 #  Usage:
 #    chmod +x install-wow.sh
