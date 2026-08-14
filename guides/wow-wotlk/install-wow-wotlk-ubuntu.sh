@@ -5,7 +5,7 @@
 #
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 #
-#  Version: 1.4.2 - Debian
+#  Version: 1.4.3 - Debian
 #
 #  Usage:
 #    chmod +x install-wow.sh
@@ -65,7 +65,7 @@
 #      - Heredoc launcher synced with standalone launcher scripts
 # ============================================================
 
-WIZARD_VERSION="1.4.2 - Debian"
+WIZARD_VERSION="1.4.3 - Debian"
 
 set -euo pipefail
 
@@ -312,6 +312,113 @@ check_system() {
         exit 1
     fi
     print_success "Internet connection OK"
+}
+
+# ─────────────────────────────────────────
+# DEPENDENCY DIAGNOSTIC
+# ─────────────────────────────────────────
+# Usage: diagnose_dep_failure "docker" "docker compose" ...
+diagnose_dep_failure() {
+    local _deps=("$@")
+    echo ""
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${WHITE}${BOLD} 🔍 Dependency Diagnostic Report${NC}"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  ${RED}Failed:${NC} ${_deps[*]}"
+
+    echo ""
+    echo -e "${WHITE}── System environment ─────────────────────────────${NC}"
+    echo -e "  HOME=${HOME}   USER=${USER}"
+    echo -e "  OS: $(lsb_release -ds 2>/dev/null || grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d= -f2 || echo 'unknown')"
+    echo -e "  DOCKER_CONFIG=${DOCKER_CONFIG:-'(not set, defaults to ~/.docker)'}"
+    echo -e "  DOCKER_CLI_PLUGIN_HOME=${DOCKER_CLI_PLUGIN_HOME:-'(not set)'}"
+    echo -e "  XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-'(not set)'}"
+
+    local _dep
+    for _dep in "${_deps[@]}"; do
+        echo ""
+        echo -e "${WHITE}── Diagnosing: ${YELLOW}${_dep}${NC} ──────────────────────────────${NC}"
+
+        case "$_dep" in
+        "docker")
+            echo -e "  ${WHITE}Binary:${NC}"
+            command -v docker 2>/dev/null && ls -la "$(command -v docker)" 2>/dev/null \
+                || echo "  docker binary not found in PATH"
+            echo -e "  ${WHITE}dpkg status (docker-ce / docker.io):${NC}"
+            dpkg -l docker-ce docker.io 2>/dev/null | grep -E "^[uihr]" \
+                || echo "  (neither docker-ce nor docker.io installed)"
+            echo -e "  ${WHITE}apt-cache policy docker-ce:${NC}"
+            apt-cache policy docker-ce 2>/dev/null | head -6 || echo "  (apt-cache unavailable)"
+            echo -e "  ${WHITE}Docker daemon status:${NC}"
+            sudo systemctl status docker 2>/dev/null | head -8 || echo "  (systemctl unavailable)"
+            echo -e "  ${WHITE}Docker socket:${NC}"
+            ls -la /var/run/docker.sock 2>/dev/null || echo "  /var/run/docker.sock not found"
+            ;;
+        "docker compose")
+            echo -e "  ${WHITE}Raw command output:${NC}"
+            docker compose version 2>&1 || true
+            echo -e "  ${WHITE}Plugin locations:${NC}"
+            local _ecfg="${DOCKER_CONFIG:-$HOME/.docker}"
+            for _dir in "/usr/lib/docker/cli-plugins" "/usr/local/lib/docker/cli-plugins" \
+                        "/usr/libexec/docker/cli-plugins" "${_ecfg}/cli-plugins"; do
+                [[ -f "$_dir/docker-compose" ]] \
+                    && echo -e "  ${GREEN}FOUND:${NC} $(ls -la "$_dir/docker-compose" 2>/dev/null)" \
+                    || echo -e "  ${DIM}ABSENT: $_dir/docker-compose${NC}"
+            done
+            echo -e "  ${WHITE}dpkg package:${NC}"
+            dpkg -l docker-compose-plugin 2>/dev/null | grep -E "^[uihr]" \
+                || echo "  (docker-compose-plugin not installed)"
+            ;;
+        "docker buildx")
+            echo -e "  ${WHITE}Raw command output:${NC}"
+            docker buildx version 2>&1 || true
+            echo -e "  ${WHITE}Plugin locations:${NC}"
+            local _ecfg="${DOCKER_CONFIG:-$HOME/.docker}"
+            for _dir in "/usr/lib/docker/cli-plugins" "/usr/local/lib/docker/cli-plugins" \
+                        "/usr/libexec/docker/cli-plugins" "${_ecfg}/cli-plugins"; do
+                [[ -f "$_dir/docker-buildx" ]] \
+                    && echo -e "  ${GREEN}FOUND:${NC} $(ls -la "$_dir/docker-buildx" 2>/dev/null)" \
+                    || echo -e "  ${DIM}ABSENT: $_dir/docker-buildx${NC}"
+            done
+            echo -e "  ${WHITE}dpkg package:${NC}"
+            dpkg -l docker-buildx-plugin 2>/dev/null | grep -E "^[uihr]" \
+                || echo "  (docker-buildx-plugin not installed)"
+            echo -e "  ${WHITE}dpkg file integrity:${NC}"
+            local _dpkg_verify
+            _dpkg_verify=$(dpkg --verify docker-buildx-plugin 2>/dev/null)
+            local _dpkg_rc=$?
+            if [[ $_dpkg_rc -ne 0 ]]; then
+                echo "  Package missing or dpkg verify unavailable"
+            elif [[ -z "$_dpkg_verify" ]]; then
+                echo "  OK (all files intact)"
+            else
+                echo "  Altered files detected:"
+                echo "  $_dpkg_verify"
+            fi
+            ;;
+        "git")
+            command -v git 2>/dev/null || echo "  git not found in PATH"
+            dpkg -l git 2>/dev/null | grep -E "^[uihr]" || echo "  git not in dpkg database"
+            ;;
+        "curl")
+            command -v curl 2>/dev/null || echo "  curl not found in PATH"
+            dpkg -l curl 2>/dev/null | grep -E "^[uihr]" || echo "  curl not in dpkg database"
+            ;;
+        *)
+            command -v "$_dep" 2>/dev/null || echo "  '$_dep' not found in PATH"
+            ;;
+        esac
+    done
+
+    echo ""
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${WHITE}${BOLD}  📋 Install log saved to:${NC}"
+    echo -e "  ${CYAN}${INSTALL_LOG}${NC}"
+    echo ""
+    echo -e "${WHITE}  To report this issue, upload the log file to:${NC}"
+    echo -e "  ${CYAN}https://github.com/DadsMmoLab/dads-mmo-lab/issues${NC}"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
 }
 
 # ─────────────────────────────────────────
@@ -647,22 +754,62 @@ preflight_check() {
     fi
 
     # ── Re-verify after install ──────────────────────────────────────
-    # If buildx is still missing, attempt a direct targeted install
     if ! docker buildx version &>/dev/null 2>&1; then
         install_buildx
     fi
 
     print_info "Verifying all dependencies are now available..."
+    echo ""
+
     local failed=()
-    command -v docker &>/dev/null || failed+=("docker")
-    docker compose version &>/dev/null 2>&1 || failed+=("docker compose")
-    docker buildx version &>/dev/null 2>&1 || failed+=("docker buildx")
-    command -v git &>/dev/null || failed+=("git")
-    command -v curl &>/dev/null || failed+=("curl")
+
+    if command -v docker &>/dev/null; then
+        print_success "docker binary:    $(command -v docker)"
+    else
+        print_error  "docker binary:    NOT FOUND"
+        failed+=("docker")
+    fi
+
+    local _compose_ver
+    if _compose_ver=$(docker compose version 2>&1); then
+        print_success "docker compose:   $(echo "$_compose_ver" | head -1)"
+    else
+        print_error  "docker compose:   NOT AVAILABLE"
+        print_info   "  Raw output: $_compose_ver"
+        failed+=("docker compose")
+    fi
+
+    local _buildx_ver
+    if _buildx_ver=$(docker buildx version 2>&1); then
+        print_success "docker buildx:    $_buildx_ver"
+    else
+        print_error  "docker buildx:    NOT AVAILABLE"
+        print_info   "  Raw output: $_buildx_ver"
+        failed+=("docker buildx")
+    fi
+
+    if command -v git &>/dev/null; then
+        print_success "git:              $(git --version 2>/dev/null)"
+    else
+        print_error  "git:              NOT FOUND"
+        failed+=("git")
+    fi
+
+    if command -v curl &>/dev/null; then
+        print_success "curl:             $(curl --version 2>/dev/null | head -1)"
+    else
+        print_error  "curl:             NOT FOUND"
+        failed+=("curl")
+    fi
+
+    echo ""
 
     if [[ ${#failed[@]} -gt 0 ]]; then
         print_error "The following dependencies could not be installed: ${failed[*]}"
-        print_info "Install them manually and re-run this script."
+        echo ""
+        print_warning "Running diagnostics for failed dependencies..."
+        diagnose_dep_failure "${failed[@]}"
+        print_error "Automatic installation failed. Check the output above for errors, then re-run this script."
         exit 1
     fi
 
@@ -1254,6 +1401,19 @@ if ! ask_yes_no "Ready to begin?"; then
 fi
 
 check_system
+
+# ─────────────────────────────────────────
+# SESSION LOGGING
+# ─────────────────────────────────────────
+INSTALL_LOG="${HOME}/dads-mmo-lab-install-$(date +%Y%m%d-%H%M%S).log"
+if ! : > "$INSTALL_LOG" 2>/dev/null; then
+    echo -e "${YELLOW}⚠️  Could not create log file at ${INSTALL_LOG} — continuing without logging.${NC}"
+    INSTALL_LOG="/dev/null"
+fi
+exec > >(tee -a "$INSTALL_LOG") 2>&1
+[[ "$INSTALL_LOG" != "/dev/null" ]] && \
+    echo -e "${DIM}📋 Logging this session to: ${INSTALL_LOG}${NC}" && \
+    echo -e "${DIM}   Upload this file if you need help at: github.com/DadsMmoLab/dads-mmo-lab/issues${NC}"
 
 echo ""
 echo -e "\033[1;33m⚠️  This installer needs sudo access for:\033[0m"

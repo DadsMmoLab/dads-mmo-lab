@@ -338,87 +338,143 @@ install_buildx() {
 }
 
 # ─────────────────────────────────────────
-# BUILDX DIAGNOSTIC
+# DEPENDENCY DIAGNOSTIC
 # ─────────────────────────────────────────
-diagnose_buildx_failure() {
+# Usage: diagnose_dep_failure "docker" "docker compose" "docker buildx" ...
+# Runs targeted diagnostics for each failed dependency.
+diagnose_dep_failure() {
+    local _deps=("$@")
     echo ""
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${WHITE}${BOLD} 🔍 docker-buildx Diagnostic Report${NC}"
+    echo -e "${WHITE}${BOLD} 🔍 Dependency Diagnostic Report${NC}"
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  ${RED}Failed:${NC} ${_deps[*]}"
 
+    # ── System info (always shown) ───────────────────────────────────
     echo ""
-    echo -e "${WHITE}── pacman package status ──────────────────────────${NC}"
-    if pacman -Q docker-buildx 2>/dev/null; then
-        echo -e "  ${GREEN}docker-buildx IS listed in pacman database${NC}"
-        echo -e "  ${WHITE}Files owned by package:${NC}"
-        pacman -Ql docker-buildx 2>/dev/null | while read -r _p _f; do
-            echo "    $_f"
-        done
-        echo -e "  ${WHITE}Package integrity check:${NC}"
-        pacman -Qkk docker-buildx 2>/dev/null || echo "    (integrity check unavailable)"
-    else
-        echo -e "  ${RED}docker-buildx is NOT in pacman database${NC}"
-    fi
-
-    echo ""
-    echo -e "${WHITE}── Plugin binary locations ────────────────────────${NC}"
-    local _found_any=false
-    local _effective_cfg="${DOCKER_CONFIG:-$HOME/.docker}"
-    for _dir in \
-        "/usr/lib/docker/cli-plugins" \
-        "/usr/local/lib/docker/cli-plugins" \
-        "/usr/libexec/docker/cli-plugins" \
-        "/usr/local/libexec/docker/cli-plugins" \
-        "${_effective_cfg}/cli-plugins" \
-        "/root/.docker/cli-plugins"; do
-        if [[ -f "$_dir/docker-buildx" ]]; then
-            _found_any=true
-            echo -e "  ${GREEN}FOUND:${NC} $(ls -la "$_dir/docker-buildx" 2>/dev/null)"
-        else
-            echo -e "  ${DIM}ABSENT: $_dir/docker-buildx${NC}"
-        fi
-    done
-    [[ "$_found_any" == false ]] && \
-        echo -e "  ${RED}No docker-buildx binary found in any known plugin path${NC}"
-
-    echo ""
-    echo -e "${WHITE}── docker info plugin discovery ───────────────────${NC}"
-    docker info 2>/dev/null | grep -i "plugin\|buildx\|cli" || \
-        echo "  (docker info unavailable or no plugin entries)"
-
-    echo ""
-    echo -e "${WHITE}── docker buildx version (raw output) ─────────────${NC}"
-    docker buildx version 2>&1 || true
-
-    echo ""
-    echo -e "${WHITE}── Environment variables ───────────────────────────${NC}"
+    echo -e "${WHITE}── System environment ─────────────────────────────${NC}"
+    echo -e "  HOME=${HOME}   USER=${USER}"
     echo -e "  DOCKER_CONFIG=${DOCKER_CONFIG:-'(not set, defaults to ~/.docker)'}"
     echo -e "  DOCKER_CLI_PLUGIN_HOME=${DOCKER_CLI_PLUGIN_HOME:-'(not set)'}"
     echo -e "  XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-'(not set)'}"
-    echo -e "  HOME=${HOME}"
-    echo -e "  USER=${USER}"
-
-    echo ""
-    echo -e "${WHITE}── Docker binary and version ───────────────────────${NC}"
-    if command -v docker &>/dev/null; then
-        echo -e "  $(command -v docker)"
-        docker --version 2>/dev/null || true
-    else
-        echo "  (docker binary not found)"
-    fi
-
-    echo ""
-    echo -e "${WHITE}── SteamOS read-only state ─────────────────────────${NC}"
     if command -v steamos-readonly &>/dev/null; then
-        sudo steamos-readonly status 2>/dev/null || echo "  (steamos-readonly status unavailable)"
-    else
-        echo "  (not a SteamOS system)"
+        echo -e "  SteamOS read-only: $(sudo steamos-readonly status 2>/dev/null || echo 'unknown')"
     fi
+
+    # ── Per-dependency diagnostics ───────────────────────────────────
+    local _dep
+    for _dep in "${_deps[@]}"; do
+        echo ""
+        echo -e "${WHITE}── Diagnosing: ${YELLOW}${_dep}${NC} ──────────────────────────────${NC}"
+
+        case "$_dep" in
+
+        "docker")
+            echo -e "  ${WHITE}Binary location:${NC}"
+            command -v docker 2>/dev/null && ls -la "$(command -v docker)" 2>/dev/null \
+                || echo "  docker binary not found in PATH"
+            echo -e "  ${WHITE}pacman package:${NC}"
+            if pacman -Q docker 2>/dev/null; then
+                pacman -Ql docker 2>/dev/null | grep "bin/" || true
+                pacman -Qkk docker 2>/dev/null || echo "    (integrity check unavailable)"
+            else
+                echo "  docker package not in pacman database"
+            fi
+            echo -e "  ${WHITE}Docker daemon status:${NC}"
+            sudo systemctl status docker 2>/dev/null | head -8 || echo "  (systemctl unavailable)"
+            echo -e "  ${WHITE}Docker socket:${NC}"
+            ls -la /var/run/docker.sock 2>/dev/null || echo "  /var/run/docker.sock not found"
+            ;;
+
+        "docker compose")
+            echo -e "  ${WHITE}Raw command output:${NC}"
+            docker compose version 2>&1 || true
+            sudo docker compose version 2>&1 || true
+            echo -e "  ${WHITE}Compose plugin locations:${NC}"
+            local _effective_cfg="${DOCKER_CONFIG:-$HOME/.docker}"
+            for _dir in \
+                "/usr/lib/docker/cli-plugins" \
+                "/usr/local/lib/docker/cli-plugins" \
+                "/usr/libexec/docker/cli-plugins" \
+                "/usr/local/libexec/docker/cli-plugins" \
+                "${_effective_cfg}/cli-plugins" \
+                "/root/.docker/cli-plugins"; do
+                if [[ -f "$_dir/docker-compose" ]]; then
+                    echo -e "  ${GREEN}FOUND:${NC} $(ls -la "$_dir/docker-compose" 2>/dev/null)"
+                else
+                    echo -e "  ${DIM}ABSENT: $_dir/docker-compose${NC}"
+                fi
+            done
+            echo -e "  ${WHITE}pacman package:${NC}"
+            pacman -Q docker-compose 2>/dev/null \
+                && pacman -Ql docker-compose 2>/dev/null | grep "bin\|plugins" \
+                || echo "  docker-compose package not in pacman database"
+            ;;
+
+        "docker buildx")
+            echo -e "  ${WHITE}Raw command output:${NC}"
+            docker buildx version 2>&1 || true
+            echo -e "  ${WHITE}Plugin binary locations:${NC}"
+            local _effective_cfg="${DOCKER_CONFIG:-$HOME/.docker}"
+            for _dir in \
+                "/usr/lib/docker/cli-plugins" \
+                "/usr/local/lib/docker/cli-plugins" \
+                "/usr/libexec/docker/cli-plugins" \
+                "/usr/local/libexec/docker/cli-plugins" \
+                "${_effective_cfg}/cli-plugins" \
+                "/root/.docker/cli-plugins"; do
+                if [[ -f "$_dir/docker-buildx" ]]; then
+                    echo -e "  ${GREEN}FOUND:${NC} $(ls -la "$_dir/docker-buildx" 2>/dev/null)"
+                else
+                    echo -e "  ${DIM}ABSENT: $_dir/docker-buildx${NC}"
+                fi
+            done
+            echo -e "  ${WHITE}pacman package:${NC}"
+            if pacman -Q docker-buildx 2>/dev/null; then
+                echo -e "  ${WHITE}Files owned by package:${NC}"
+                pacman -Ql docker-buildx 2>/dev/null | while read -r _p _f; do echo "    $_f"; done
+                echo -e "  ${WHITE}Integrity check:${NC}"
+                pacman -Qkk docker-buildx 2>/dev/null || echo "    (integrity check unavailable)"
+            else
+                echo "  docker-buildx package not in pacman database"
+            fi
+            echo -e "  ${WHITE}docker info plugin entries:${NC}"
+            docker info 2>/dev/null | grep -i "plugin\|buildx\|cli" \
+                || echo "  (docker info unavailable or no plugin entries)"
+            ;;
+
+        "git")
+            echo -e "  ${WHITE}Binary:${NC}"
+            command -v git 2>/dev/null || echo "  git not found in PATH"
+            echo -e "  ${WHITE}pacman package:${NC}"
+            pacman -Q git 2>/dev/null \
+                && pacman -Qkk git 2>/dev/null \
+                || echo "  git not in pacman database"
+            ;;
+
+        "curl")
+            echo -e "  ${WHITE}Binary:${NC}"
+            command -v curl 2>/dev/null || echo "  curl not found in PATH"
+            echo -e "  ${WHITE}pacman package:${NC}"
+            pacman -Q curl 2>/dev/null \
+                && pacman -Qkk curl 2>/dev/null \
+                || echo "  curl not in pacman database"
+            ;;
+
+        *)
+            echo -e "  ${WHITE}Binary search:${NC}"
+            command -v "$_dep" 2>/dev/null || echo "  '$_dep' not found in PATH"
+            ;;
+        esac
+    done
 
     echo ""
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${WHITE}  Please share the output above when reporting this issue.${NC}"
-    echo -e "${WHITE}  github.com/DadsMmoLab/dads-mmo-lab/issues${NC}"
+    echo -e "${WHITE}${BOLD}  📋 Install log saved to:${NC}"
+    echo -e "  ${CYAN}${INSTALL_LOG}${NC}"
+    echo ""
+    echo -e "${WHITE}  To report this issue, upload the log file to:${NC}"
+    echo -e "  ${CYAN}https://github.com/DadsMmoLab/dads-mmo-lab/issues${NC}"
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
 }
@@ -609,10 +665,8 @@ preflight_check() {
     if [[ ${#failed[@]} -gt 0 ]]; then
         print_error "The following dependencies could not be installed: ${failed[*]}"
         echo ""
-        if printf '%s\n' "${failed[@]}" | grep -q "docker buildx"; then
-            print_warning "docker buildx was installed but is not discoverable — running diagnostics..."
-            diagnose_buildx_failure
-        fi
+        print_warning "Running diagnostics for failed dependencies..."
+        diagnose_dep_failure "${failed[@]}"
         print_error "Automatic installation failed. Check the output above for errors, then re-run this script."
         exit 1
     fi
@@ -2233,6 +2287,20 @@ show_welcome
 # user will get an unexpected password prompt at hour 3 of the
 # compile — often when they're not at the Deck. Cache the cred
 # proactively so they only enter the password once, here.
+
+# ─────────────────────────────────────────
+# SESSION LOGGING
+# ─────────────────────────────────────────
+INSTALL_LOG="${HOME}/dads-mmo-lab-install-$(date +%Y%m%d-%H%M%S).log"
+if ! : > "$INSTALL_LOG" 2>/dev/null; then
+    echo -e "${YELLOW}⚠️  Could not create log file at ${INSTALL_LOG} — continuing without logging.${NC}"
+    INSTALL_LOG="/dev/null"
+fi
+exec > >(tee -a "$INSTALL_LOG") 2>&1
+[[ "$INSTALL_LOG" != "/dev/null" ]] && \
+    echo -e "${DIM}📋 Logging this session to: ${INSTALL_LOG}${NC}" && \
+    echo -e "${DIM}   Upload this file if you need help at: github.com/DadsMmoLab/dads-mmo-lab/issues${NC}"
+
 echo ""
 echo -e "\033[1;33m⚠️  This installer needs sudo access for:\033[0m"
 echo -e "\033[1;33m   • Installing Docker (if not present)\033[0m"

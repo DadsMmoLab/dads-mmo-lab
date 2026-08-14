@@ -6,7 +6,7 @@
     Installs AzerothCore WotLK + Playerbots inside the dml-arch WSL2 distro.
     Requires Install-DML.ps1 to have been run first.
 
-    Version: 1.0.0
+    Version: 1.3.1
 
     What this does:
       1. Verifies dml-arch and Docker are ready
@@ -33,7 +33,7 @@ $ErrorActionPreference = 'Stop'
 # =============================================================================
 # Config
 # =============================================================================
-$WizardVersion       = '1.3.0'
+$WizardVersion       = '1.3.1'
 $DmlDistro           = 'dml-arch'
 $DmlUser             = 'dml'
 $ServerDir           = '/home/dml/games/wow-server-playerbots'
@@ -524,6 +524,11 @@ if [ -d "$ServerDir" ]; then
     docker compose -f "$ServerDir/docker-compose.yml" down -v 2>/dev/null || true
     rm -rf "$ServerDir"
 fi
+
+# Ensure the games directory exists — git clone requires the parent to exist.
+# This is normally created by Install-DML.ps1, but we create it here too so
+# Install-WoW-WotLK.ps1 is self-contained and safe to re-run independently.
+mkdir -p /home/dml/games
 
 git clone https://github.com/mod-playerbots/azerothcore-wotlk.git \
     --branch=Playerbot \

@@ -1816,6 +1816,10 @@ chmod 0755 /usr/local/bin/dml
 echo "[phase3] Verifying dml CLI..."
 dml version
 
+echo "[phase3] Creating games directory..."
+mkdir -p /home/dml/games
+chown dml:dml /home/dml/games
+
 echo "[phase3] Done"
 "@
         if ($exit10 -ne 0) {
