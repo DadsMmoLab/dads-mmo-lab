@@ -172,35 +172,90 @@ check_pacman_keyring() {
 }
 
 install_docker() {
+    local has_docker=0
     if command -v docker &>/dev/null && docker ps &>/dev/null; then
-        print_success "Docker already installed and running"
+        has_docker=1
+    fi
+
+    if [ "$IS_WSL2" -eq 1 ]; then
+        if [ $has_docker -eq 1 ] && docker compose version &>/dev/null; then
+            print_success "Docker + Compose available (Docker Desktop / WSL2)"
+            DOCKER_CMD="docker"
+            return 0
+        fi
+        print_error "Docker not available in WSL."
+        print_info ""
+        print_info "On Windows/WSL2, install Docker via Docker Desktop:"
+        print_info "  1. Install Docker Desktop for Windows"
+        print_info "  2. Settings → Resources → WSL Integration"
+        print_info "     → Enable integration for your distro"
+        print_info "  3. Re-run this installer"
+        exit 1
+    fi
+
+    if [ $has_docker -eq 1 ] && docker compose version &>/dev/null; then
+        print_success "Docker + Compose already installed and working"
         DOCKER_CMD="docker"
         return 0
     fi
 
-    print_info "Installing Docker..."
+    if [ $has_docker -eq 1 ]; then
+        print_warning "Docker is installed but 'docker compose' is not working."
+        print_info "Will install docker-compose alongside existing Docker."
+    else
+        print_info "Installing Docker + Compose..."
+    fi
     check_pacman_keyring
-    sudo steamos-readonly disable 2>/dev/null || print_info "(root may already be writable)"
+    if command -v steamos-readonly &>/dev/null; then
+        sudo steamos-readonly disable 2>/dev/null || print_info "(root may already be writable)"
+    fi
 
-    if ! sudo pacman -Sy --noconfirm docker; then
+    if ! sudo pacman -Sy --noconfirm docker docker-compose; then
         print_error "Failed to install Docker via pacman."
-        print_info  "If keyring errors: sudo pacman-key --init && sudo pacman-key --populate archlinux holo"
-        sudo steamos-readonly enable 2>/dev/null || true
+        print_info "If keyring errors: sudo pacman-key --init && sudo pacman-key --populate archlinux holo"
+        if command -v steamos-readonly &>/dev/null; then
+            sudo steamos-readonly enable 2>/dev/null || true
+        fi
         exit 1
     fi
-    sudo steamos-readonly enable 2>/dev/null || true
+    if command -v steamos-readonly &>/dev/null; then
+        sudo steamos-readonly enable 2>/dev/null || true
+    fi
 
     sudo systemctl enable --now docker
     sudo usermod -aG docker "$USER"
-    print_success "Docker installed"
+    print_success "Docker + Compose installed"
+
+    if ! sudo docker compose version &>/dev/null; then
+        if command -v docker-compose &>/dev/null; then
+            print_info "Shimming docker-compose into ~/.docker/cli-plugins/..."
+            mkdir -p "$HOME/.docker/cli-plugins"
+            cat > "$HOME/.docker/cli-plugins/docker-compose" <<'SHIM'
+#!/bin/bash
+exec /usr/bin/docker-compose "$@"
+SHIM
+            chmod +x "$HOME/.docker/cli-plugins/docker-compose"
+        else
+            print_error "docker-compose binary missing after install — bailing."
+            print_info "Try: sudo pacman -S docker-compose"
+            exit 1
+        fi
+    fi
 
     if ! docker ps &>/dev/null; then
         print_warning "Docker group not active in this shell yet."
         print_info "Using sudo for this install. After it finishes: log out/in once."
-        DOCKER_CMD="sudo docker"
+        DOCKER_CMD="sudo env DOCKER_CONFIG=${DOCKER_CONFIG:-$HOME/.docker} docker"
     else
         DOCKER_CMD="docker"
     fi
+
+    if ! $DOCKER_CMD compose version &>/dev/null; then
+        print_error "'docker compose' still not working after install."
+        print_info "Run for diagnosis: $DOCKER_CMD compose version"
+        exit 1
+    fi
+    print_success "'docker compose' verified working"
 }
 
 # ─────────────────────────────────────────
@@ -244,6 +299,10 @@ locate_client() {
     while true; do
         echo -e "${WHITE}Enter path to your client folder:${NC}"
         read -r raw_path
+        raw_path="${raw_path%\"}"
+        raw_path="${raw_path#\"}"
+        raw_path="${raw_path%\'}"
+        raw_path="${raw_path#\'}"
         CLIENT_DIR="${raw_path/#\~/$HOME}"
 
         if [ ! -d "$CLIENT_DIR" ]; then

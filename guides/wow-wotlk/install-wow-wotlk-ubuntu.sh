@@ -120,6 +120,18 @@ press_enter() {
     read -r
 }
 
+enable_docker_sudo_wrapper() {
+    if [[ -n "${USER:-}" ]]; then
+        sudo usermod -aG docker "$USER" 2>/dev/null || true
+        echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/docker" | \
+            sudo tee /etc/sudoers.d/docker-nopasswd > /dev/null 2>&1 || true
+        sudo chmod 0440 /etc/sudoers.d/docker-nopasswd 2>/dev/null || true
+    fi
+    function docker() { sudo docker "$@"; }
+    export -f docker 2>/dev/null || true
+    print_info "Using sudo for Docker this session — works normally after next login"
+}
+
 # ─────────────────────────────────────────
 # CONFIGURATION
 # ─────────────────────────────────────────
@@ -371,7 +383,7 @@ diagnose_dep_failure() {
             ;;
         "docker buildx")
             echo -e "  ${WHITE}Raw command output:${NC}"
-            docker buildx version 2>&1 || true
+            command docker buildx version 2>&1 || true
             echo -e "  ${WHITE}Plugin locations:${NC}"
             local _ecfg="${DOCKER_CONFIG:-$HOME/.docker}"
             for _dir in "/usr/lib/docker/cli-plugins" "/usr/local/lib/docker/cli-plugins" \
@@ -425,7 +437,7 @@ diagnose_dep_failure() {
 # INSTALL DOCKER
 # ─────────────────────────────────────────
 install_buildx() {
-    if docker buildx version &>/dev/null 2>&1; then
+    if command docker buildx version &>/dev/null 2>&1; then
         return 0
     fi
     print_info "Installing docker-buildx-plugin..."
@@ -453,17 +465,35 @@ install_buildx() {
 
 install_docker() {
     # Check for working Docker CE with Compose plugin
-    if command -v docker &>/dev/null && docker ps &>/dev/null 2>&1; then
-        if docker compose version &>/dev/null 2>&1; then
-            # Docker + Compose running — still ensure buildx is present
-            install_buildx
-            print_success "Docker (with Compose plugin) already installed and running"
-            return 0
-        else
+    if command -v docker &>/dev/null; then
+        if docker ps &>/dev/null 2>&1; then
+            if docker compose version &>/dev/null 2>&1; then
+                install_buildx
+                print_success "Docker (with Compose plugin) already installed and running"
+                return 0
+            fi
             print_warning "Docker is running but the Compose plugin is missing."
             print_info "Attempting to install docker-compose-plugin..."
             sudo apt-get update -qq 2>/dev/null || true
             if sudo apt-get install -y docker-compose-plugin; then
+                print_success "docker-compose-plugin installed!"
+                return 0
+            else
+                print_error "Could not install docker-compose-plugin. Check your Docker CE repo setup."
+                exit 1
+            fi
+        elif sudo docker ps &>/dev/null 2>&1; then
+            if sudo docker compose version &>/dev/null 2>&1; then
+                install_buildx
+                enable_docker_sudo_wrapper
+                print_success "Docker (with Compose plugin) already installed and running"
+                return 0
+            fi
+            print_warning "Docker is running but the Compose plugin is missing."
+            print_info "Attempting to install docker-compose-plugin..."
+            sudo apt-get update -qq 2>/dev/null || true
+            if sudo apt-get install -y docker-compose-plugin; then
+                enable_docker_sudo_wrapper
                 print_success "docker-compose-plugin installed!"
                 return 0
             else
@@ -593,9 +623,7 @@ https://download.docker.com/linux/${DOCKER_REPO_DISTRO} ${CODENAME} stable" | \
     # If docker still not accessible without sudo — wrap it
     if ! docker ps &>/dev/null 2>&1; then
         if sudo docker ps &>/dev/null 2>&1; then
-            function docker() { sudo docker "$@"; }
-            export -f docker 2>/dev/null || true
-            print_info "Using sudo for Docker — will work normally after next login"
+            enable_docker_sudo_wrapper
         else
             print_error "Docker failed to start. Try rebooting and running again."
             exit 1
@@ -662,13 +690,16 @@ preflight_check() {
     print_step "Preflight Check — System Dependencies"
 
     local docker_ok=false docker_compose_ok=false docker_buildx_ok=false
-    local git_ok=false curl_ok=false all_ok=true
+    local git_ok=false curl_ok=false all_ok=true docker_via_sudo=false
 
     # ── docker daemon ────────────────────────────────────────────────
     # Require unprivileged access — install_docker handles permission setup
     # when the daemon is running but the user isn't in the docker group yet.
     if command -v docker &>/dev/null && docker ps &>/dev/null 2>&1; then
         docker_ok=true
+    elif command -v docker &>/dev/null && sudo docker ps &>/dev/null 2>&1; then
+        docker_ok=true
+        docker_via_sudo=true
     else
         all_ok=false
     fi
@@ -676,14 +707,20 @@ preflight_check() {
     # ── docker compose plugin ────────────────────────────────────────
     # Only accept the plugin subcommand (`docker compose`); the legacy
     # standalone `docker-compose` binary is never used by this script.
-    if docker compose version &>/dev/null 2>&1; then
+    if [[ "$docker_via_sudo" == "true" ]]; then
+        if sudo docker compose version &>/dev/null 2>&1; then
+            docker_compose_ok=true
+        else
+            all_ok=false
+        fi
+    elif docker compose version &>/dev/null 2>&1; then
         docker_compose_ok=true
     else
         all_ok=false
     fi
 
     # ── docker buildx ────────────────────────────────────────────────
-    if docker buildx version &>/dev/null 2>&1; then
+    if command docker buildx version &>/dev/null 2>&1; then
         docker_buildx_ok=true
     else
         all_ok=false
@@ -725,6 +762,9 @@ preflight_check() {
     echo ""
 
     if [[ "$all_ok" == "true" ]]; then
+        if [[ "$docker_via_sudo" == "true" ]]; then
+            enable_docker_sudo_wrapper
+        fi
         print_success "All dependencies satisfied — ready to build!"
         return 0
     fi
@@ -754,7 +794,7 @@ preflight_check() {
     fi
 
     # ── Re-verify after install ──────────────────────────────────────
-    if ! docker buildx version &>/dev/null 2>&1; then
+    if ! command docker buildx version &>/dev/null 2>&1; then
         install_buildx
     fi
 
@@ -771,7 +811,12 @@ preflight_check() {
     fi
 
     local _compose_ver
-    if _compose_ver=$(docker compose version 2>&1); then
+    if [[ "$docker_via_sudo" == "true" ]]; then
+        _compose_ver=$(sudo docker compose version 2>&1) && _compose_ok=true || _compose_ok=false
+    else
+        _compose_ver=$(docker compose version 2>&1) && _compose_ok=true || _compose_ok=false
+    fi
+    if [[ "${_compose_ok}" == "true" ]]; then
         print_success "docker compose:   $(echo "$_compose_ver" | head -1)"
     else
         print_error  "docker compose:   NOT AVAILABLE"
@@ -780,7 +825,7 @@ preflight_check() {
     fi
 
     local _buildx_ver
-    if _buildx_ver=$(docker buildx version 2>&1); then
+    if _buildx_ver=$(command docker buildx version 2>&1); then
         print_success "docker buildx:    $_buildx_ver"
     else
         print_error  "docker buildx:    NOT AVAILABLE"

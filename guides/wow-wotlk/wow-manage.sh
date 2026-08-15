@@ -265,6 +265,10 @@ _setup_screen() {
     if ! $_IN_ALT_SCREEN; then
         printf '\033[?1049h'
         _IN_ALT_SCREEN=true
+        # Register the EXIT trap as soon as we enter the alt screen so any
+        # subsequent exit (e.g. "no installation found") restores the terminal
+        # before printing its error message to the normal screen buffer.
+        trap 'tput smam 2>/dev/null || true; printf "\033[r\033[?1049l\033[?25h"' EXIT
     fi
     _get_term_size
     if [ "$_IN_MENU" = true ]; then
@@ -284,7 +288,6 @@ _setup_screen() {
 # then freezes the logo statically for the rest of the session.
 start_logo_animation() {
     _setup_screen
-    trap 'tput smam 2>/dev/null || true; printf "\033[r\033[?1049l\033[?25h"' EXIT
     trap '_screen_int_handler' INT
     trap '_screen_term_handler' TERM
     trap '_handle_resize' WINCH

@@ -1132,16 +1132,64 @@ function New-DefaultAccount([hashtable]$state) {
         return
     }
     Write-Step 'Creating Default Account (player / player)'
+    $pw = $Script:DbPassword
     $exit = Invoke-DmlBash -Label 'account' -Script @"
+set -o pipefail
+
+_console() {
+    # Exit code deliberately ignored -- docker attach + timeout can report
+    # failure even when the console commands already landed.
+    printf 'account create player player\naccount set gmlevel player 3 -1\n' | \
+        timeout 20 docker attach tortoise-mangosd >/dev/null 2>&1 || true
+}
+_account_row() {
+    docker exec tortoise-db mariadb -uroot -p'$pw' tw_logon -sN -e \
+        "SELECT COUNT(*) FROM account WHERE UPPER(username)='PLAYER'" 2>/dev/null
+}
+_gm_level() {
+    docker exec tortoise-db mariadb -uroot -p'$pw' tw_logon -sN -e \
+        "SELECT gmlevel FROM account WHERE UPPER(username)='PLAYER'" 2>/dev/null
+}
+
 sleep 8
-if printf 'account create player player\naccount set gmlevel player 3 -1\n' | timeout 20 docker attach tortoise-mangosd >/dev/null 2>&1; then
-    echo "[tortoise] Account player/player created (GM level 3)."
+_console
+ok=no
+for i in 1 2 3; do
+    sleep 5
+    if [ "`$(_account_row)" = "1" ]; then ok=yes; break; fi
+done
+if [ "`$ok" = "no" ]; then
+    echo "[tortoise] First attempt did not land -- retrying console commands..."
+    _console
+    sleep 10
+    [ "`$(_account_row)" = "1" ] && ok=yes
+fi
+if [ "`$ok" = "no" ]; then
+    exit 3
+fi
+
+gm=`$(_gm_level)
+if [ "`$gm" != "3" ]; then
+    echo "[tortoise] Account exists but GM level is '`$gm' -- retrying gmlevel command..."
+    printf 'account set gmlevel player 3 -1\n' | timeout 15 docker attach tortoise-mangosd >/dev/null 2>&1 || true
+    sleep 5
+    gm=`$(_gm_level)
+fi
+if [ "`$gm" = "3" ]; then
+    echo "[tortoise] Account player/player created and verified (GM level 3)."
     exit 0
 fi
-exit 3
+echo "[tortoise] Account player/player created (GM level: `${gm:-unknown})."
+exit 4
 "@
     if ($exit -eq 0) {
-        Write-Ok 'Account player/player created (GM level 3)'
+        Write-Ok 'Account player/player created and verified in the database (GM level 3)'
+    } elseif ($exit -eq 4) {
+        Write-Warn 'Account created, but the GM level could not be verified as 3.'
+        Write-Info 'You can log in. To grant GM later, in the server console:'
+        Write-Info '  wsl -d dml-arch -u dml -- docker attach tortoise-mangosd'
+        Write-Info '  account set gmlevel player 3 -1'
+        Write-Info '  (exit safely: Ctrl+P then Ctrl+Q -- NEVER Ctrl+C, that stops the server)'
     } else {
         Write-Warn 'Auto account-create did not confirm. Create it manually:'
         Write-Info '  wsl -d dml-arch -u dml'

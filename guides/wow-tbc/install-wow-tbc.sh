@@ -268,7 +268,7 @@ SHIM
         print_warning "Docker group not yet active in this shell."
         print_info "Run: newgrp docker  — or log out and back in, then re-run installer."
         print_info "Continuing with sudo for this install..."
-        DOCKER_CMD="sudo docker"
+        DOCKER_CMD="sudo env DOCKER_CONFIG=${DOCKER_CONFIG:-$HOME/.docker} docker"
     else
         DOCKER_CMD="docker"
     fi
@@ -285,13 +285,15 @@ SHIM
 # INSTALL BUILDX
 # ─────────────────────────────────────────
 install_buildx() {
+    local needs_readonly_restore=0
+
     if docker buildx version &>/dev/null 2>&1; then
         return 0
     fi
     print_info "Installing docker-buildx..."
     if command -v steamos-readonly &>/dev/null; then
         sudo steamos-readonly disable 2>/dev/null || true
-        trap 'sudo steamos-readonly enable 2>/dev/null || true' RETURN
+        needs_readonly_restore=1
     fi
     if sudo pacman -Sy --noconfirm docker-buildx 2>/dev/null; then
         print_success "docker-buildx installed!"
@@ -340,6 +342,9 @@ install_buildx() {
                 print_warning "This is likely a GitHub rate-limit or network error."
                 print_info "  Manual fix: sudo pacman -S docker-buildx  then re-run this script."
                 rm -f "$_dl_tmp" || true
+                if [ "$needs_readonly_restore" -eq 1 ]; then
+                    sudo steamos-readonly enable 2>/dev/null || true
+                fi
                 return 1
             fi
             if mv "$_dl_tmp" "${plugin_dir}/docker-buildx" && \
@@ -348,16 +353,22 @@ install_buildx() {
             else
                 print_warning "Could not finalize docker-buildx installation."
                 rm -f "$_dl_tmp" "${plugin_dir}/docker-buildx" 2>/dev/null || true
+                if [ "$needs_readonly_restore" -eq 1 ]; then
+                    sudo steamos-readonly enable 2>/dev/null || true
+                fi
                 return 1
             fi
         else
             rm -f "$_dl_tmp" 2>/dev/null || true
             print_warning "Could not auto-install docker-buildx — the installer cannot continue without it."
             print_info "Install manually with: sudo pacman -S docker-buildx  then re-run this script."
+            if [ "$needs_readonly_restore" -eq 1 ]; then
+                sudo steamos-readonly enable 2>/dev/null || true
+            fi
             return 1
         fi
     fi
-    if command -v steamos-readonly &>/dev/null; then
+    if [ "$needs_readonly_restore" -eq 1 ]; then
         sudo steamos-readonly enable 2>/dev/null || true
     fi
 }

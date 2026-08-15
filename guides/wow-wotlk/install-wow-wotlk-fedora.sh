@@ -176,6 +176,18 @@ press_enter() {
     read -r
 }
 
+enable_docker_sudo_wrapper() {
+    if [[ -n "${USER:-}" ]]; then
+        sudo usermod -aG docker "$USER" 2>/dev/null || true
+        echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/docker" | \
+            sudo tee /etc/sudoers.d/docker-nopasswd > /dev/null 2>&1 || true
+        sudo chmod 0440 /etc/sudoers.d/docker-nopasswd 2>/dev/null || true
+    fi
+    function docker() { sudo docker "$@"; }
+    export -f docker 2>/dev/null || true
+    print_info "Using sudo for Docker this session — works normally after next login"
+}
+
 # ─────────────────────────────────────────
 # CONFIGURATION
 # ─────────────────────────────────────────
@@ -428,7 +440,7 @@ diagnose_dep_failure() {
             ;;
         "docker buildx")
             echo -e "  ${WHITE}Raw command output:${NC}"
-            docker buildx version 2>&1 || true
+            command docker buildx version 2>&1 || true
             echo -e "  ${WHITE}Plugin locations:${NC}"
             local _ecfg="${DOCKER_CONFIG:-$HOME/.docker}"
             for _dir in "/usr/lib/docker/cli-plugins" "/usr/local/lib/docker/cli-plugins" \
@@ -477,7 +489,7 @@ diagnose_dep_failure() {
 # INSTALL DOCKER
 # ─────────────────────────────────────────
 install_buildx() {
-    if docker buildx version &>/dev/null 2>&1; then
+    if command docker buildx version &>/dev/null 2>&1; then
         return 0
     fi
     print_info "Installing docker-buildx-plugin..."
@@ -570,9 +582,7 @@ install_docker() {
                     print_warning "Could not determine current user — skipping sudoers entry. Docker may require a logout to work without sudo."
                 fi
                 if ! docker ps &>/dev/null 2>&1; then
-                    function docker() { sudo docker "$@"; }
-                    export -f docker 2>/dev/null || true
-                    print_info "Using sudo for Docker this session — works normally after next login"
+                    enable_docker_sudo_wrapper
                 fi
 
                 print_success "Docker permissions configured!"
@@ -628,7 +638,10 @@ install_docker() {
     # ── Check for a Docker + Compose setup that is already running ────────
     # On immutable systems also try sudo in case user isn't in docker group yet.
     if command -v docker &>/dev/null && \
-       (docker ps &>/dev/null 2>&1 || { [[ "${FEDORA_IMMUTABLE:-false}" == "true" ]] && sudo docker ps &>/dev/null 2>&1; }); then
+       (docker ps &>/dev/null 2>&1 || sudo docker ps &>/dev/null 2>&1); then
+        if ! docker ps &>/dev/null 2>&1; then
+            enable_docker_sudo_wrapper
+        fi
         if docker compose version &>/dev/null 2>&1; then
             print_success "Docker (with Compose plugin) already installed and running"
             return 0
@@ -759,9 +772,7 @@ install_docker() {
     # If docker still not accessible without sudo — wrap it
     if ! docker ps &>/dev/null 2>&1; then
         if sudo docker ps &>/dev/null 2>&1; then
-            function docker() { sudo docker "$@"; }
-            export -f docker 2>/dev/null || true
-            print_info "Using sudo for Docker — will work normally after next login"
+            enable_docker_sudo_wrapper
         else
             print_error "Docker failed to start. Try rebooting and running again."
             exit 1
@@ -837,13 +848,16 @@ preflight_check() {
     print_step "Preflight Check — System Dependencies"
 
     local docker_ok=false docker_compose_ok=false docker_buildx_ok=false
-    local git_ok=false curl_ok=false all_ok=true _pf_reboot_needed=false
+    local git_ok=false curl_ok=false all_ok=true _pf_reboot_needed=false docker_via_sudo=false
 
     # ── docker daemon ────────────────────────────────────────────────
     # Require unprivileged access — install_docker handles permission setup
     # when the daemon is running but the user isn't in the docker group yet.
     if command -v docker &>/dev/null && docker ps &>/dev/null 2>&1; then
         docker_ok=true
+    elif command -v docker &>/dev/null && sudo docker ps &>/dev/null 2>&1; then
+        docker_ok=true
+        docker_via_sudo=true
     else
         all_ok=false
     fi
@@ -851,14 +865,20 @@ preflight_check() {
     # ── docker compose plugin ────────────────────────────────────────
     # Only accept the plugin subcommand (`docker compose`); the legacy
     # standalone `docker-compose` binary is never used by this script.
-    if docker compose version &>/dev/null 2>&1; then
+    if [[ "$docker_via_sudo" == "true" ]]; then
+        if sudo docker compose version &>/dev/null 2>&1; then
+            docker_compose_ok=true
+        else
+            all_ok=false
+        fi
+    elif docker compose version &>/dev/null 2>&1; then
         docker_compose_ok=true
     else
         all_ok=false
     fi
 
     # ── docker buildx ────────────────────────────────────────────────
-    if docker buildx version &>/dev/null 2>&1; then
+    if command docker buildx version &>/dev/null 2>&1; then
         docker_buildx_ok=true
     else
         all_ok=false
@@ -900,6 +920,9 @@ preflight_check() {
     echo ""
 
     if [[ "$all_ok" == "true" ]]; then
+        if [[ "$docker_via_sudo" == "true" ]]; then
+            enable_docker_sudo_wrapper
+        fi
         print_success "All dependencies satisfied — ready to build!"
         return 0
     fi
@@ -960,7 +983,7 @@ preflight_check() {
     # ── Re-verify after install ──────────────────────────────────────
     # If buildx is still missing, attempt a direct targeted install.
     # On immutable systems install_buildx returns 2 when a reboot is needed.
-    if ! docker buildx version &>/dev/null 2>&1; then
+    if ! command docker buildx version &>/dev/null 2>&1; then
         install_buildx
         local _buildx_rc=$?
         if [[ $_buildx_rc -eq 2 ]]; then
@@ -1002,7 +1025,7 @@ preflight_check() {
     fi
 
     local _buildx_ver
-    if _buildx_ver=$(docker buildx version 2>&1); then
+    if _buildx_ver=$(command docker buildx version 2>&1); then
         print_success "docker buildx:    $_buildx_ver"
     else
         print_error  "docker buildx:    NOT AVAILABLE"
