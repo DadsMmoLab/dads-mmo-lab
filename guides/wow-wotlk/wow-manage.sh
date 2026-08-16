@@ -511,6 +511,18 @@ _cmd_block_for() {
                 '[GM] .ahbotoptions alliance <n>     — Configure Alliance AH separately' \
                 '[GM] .ahbotoptions horde <n>        — Configure Horde AH separately'
             ;;
+        mod-ah-bot-plus)
+            printf '%s\n' \
+                'AHbot Plus (Enhanced Auction House Bot)' \
+                'A complete, drop-rate-aware replacement for the original AH Bot. Features: buyer + seller modes, item prices driven by in-game drop rates (makes rare items truly rare on the AH), advanced listing rules, complete item value overrides, vendor-price-aware pricing, and bid/price randomization. Fully configurable via mod_ahbot.conf — no SQL settings needed.' \
+                '' \
+                'IMPORTANT: AHbot Plus is incompatible with the original AH Bot. Remove mod-ah-bot first.' \
+                '' \
+                'Commands (GM Rank 3+ only):' \
+                '[GM] .ahbot reload              — Reload AHbot configuration from mod_ahbot.conf' \
+                '[GM] .ahbot empty               — Clear all bot-posted auctions from all auction houses' \
+                '[GM] .ahbot update              — Force an immediate buy/sell update cycle'
+            ;;
         mod-autobalance)
             printf '%s\n' \
                 'AutoBalance' \
@@ -572,6 +584,39 @@ _cmd_block_for() {
                 'Configuration: TalentButton.Enable = 1 in mod_talentbutton.conf' \
                 '' \
                 'Commands: (none — talent reset button available in the in-game talent UI)'
+            ;;
+        mod-profession-progression)
+            printf '%s\n' \
+                'Profession Progression' \
+                'Unlocks additional primary profession slots as players level their skills. Players start' \
+                'with 2 slots. When the top two professions both reach 75, a 3rd slot opens. At 150, a 4th.' \
+                'Each subsequent pair unlocks the next when both reach the current era skill cap.' \
+                '' \
+                'Era caps and active profession pools are configurable:' \
+                '  Vanilla (stage 0): cap 300, 9 professions (Alchemy, BS, Enchanting, Engineering,' \
+                '                    Herbalism, Leatherworking, Mining, Skinning, Tailoring)' \
+                '  TBC    (stage 1): cap 375, adds Jewelcrafting (10 total)' \
+                '  Wrath  (stage 2): cap 425, adds Inscription (11 total)' \
+                '' \
+                'Commands: (none — slot unlocks fire automatically on skill-up events)'
+            ;;
+        mod-mount-scaling)
+            printf '%s\n' \
+                'Mount Scaling' \
+                'Replaces the fixed mount-speed tiers with smooth, level-based speed scaling.' \
+                'Apprentice Riding can be learned at level 1 (down from 20) and mounts get' \
+                'progressively faster as you level, in real time while mounted. Journeyman,' \
+                'Expert, and Artisan tiers keep their level requirements but scale within tier.' \
+                '' \
+                'Speed caps: Apprentice 100% @ L40, Journeyman 150% @ L60,' \
+                'Expert (flying) 200% @ L70, Artisan (flying) 280% @ L80. All formula values' \
+                'are configurable in mount_scaling.conf.' \
+                '' \
+                'SQL (auto-applied) lowers Apprentice Riding + ground-mount item level reqs to 1.' \
+                'NOTE: after the SQL applies, players must delete their client Cache folder' \
+                '(Cache/WDB/enUS/itemcache.wdb) for the item level change to show client-side.' \
+                '' \
+                'Commands: (none — speed scales automatically; test with GM .learn / .levelup)'
             ;;
         mod-individual-progression)
             printf '%s\n' \
@@ -775,28 +820,28 @@ _cmd_block_for() {
         buff-mobs)
             printf '%s\n' \
                 'Buff Mobs (SQL Mod)' \
-                'Increases all creature HP, damage, armor, and attack speed (HP×2, DMG×1.5, ARM×1.5) for a more challenging experience. Mutually exclusive with Nerf Mobs, XBuff Mobs, and Baby Mobs.' \
+                'Increases all creature HP, damage, armor, and attack speed (HPx2, DMGx1.5, ARMx1.5) for a more challenging experience. Mutually exclusive with Nerf Mobs, XBuff Mobs, and Baby Mobs.' \
                 '' \
                 'Commands: (none — database multipliers applied to creature_template)'
             ;;
         xbuff-mobs)
             printf '%s\n' \
                 'XBuff Mobs — Extreme Difficulty (SQL Mod)' \
-                'Significantly increases all creature stats (HP×4, DMG×2, ARM×2). The hardest mob difficulty option. Mutually exclusive with all other mob tweak SQL mods.' \
+                'Significantly increases all creature stats (HPx4, DMGx2, ARMx2). The hardest mob difficulty option. Mutually exclusive with all other mob tweak SQL mods.' \
                 '' \
                 'Commands: (none — database multipliers applied to creature_template)'
             ;;
         nerf-mobs)
             printf '%s\n' \
                 'Nerf Mobs (SQL Mod)' \
-                'Reduces all creature stats (HP×0.5, DMG×0.75, ARM×0.75) for an easier experience. Mutually exclusive with Buff Mobs, XBuff Mobs, and Baby Mobs.' \
+                'Reduces all creature stats (HPx0.5, DMGx0.75, ARMx0.75) for an easier experience. Mutually exclusive with Buff Mobs, XBuff Mobs, and Baby Mobs.' \
                 '' \
                 'Commands: (none — database multipliers applied to creature_template)'
             ;;
         baby-mobs)
             printf '%s\n' \
                 'Baby Mobs — Trivial Difficulty (SQL Mod)' \
-                'Drastically reduces all creature stats (HP×0.25, DMG×0.25, ARM×0.25). Best for testing or casual play. Mutually exclusive with all other mob tweak SQL mods.' \
+                'Drastically reduces all creature stats (HPx0.25, DMGx0.25, ARMx0.25). Best for testing or casual play. Mutually exclusive with all other mob tweak SQL mods.' \
                 '' \
                 'Commands: (none — database multipliers applied to creature_template)'
             ;;
@@ -1022,6 +1067,7 @@ declare -a MODULE_REGISTRY=(
     "mod-1v1-arena|1v1 Arena|https://github.com/azerothcore/mod-1v1-arena.git|characters"
     "mod-aoe-loot|AoE Loot|https://github.com/azerothcore/mod-aoe-loot.git|world"
     "mod-ah-bot|Auction House Bot|https://github.com/azerothcore/mod-ah-bot.git|world"
+    "mod-ah-bot-plus|AH Bot Plus (drop-rate-aware, enhanced AH Bot)|https://github.com/NathanHandley/mod-ah-bot-plus.git|"
     "mod-autobalance|Auto Balance (dynamic difficulty)|https://github.com/azerothcore/mod-autobalance.git|world"
     "mod-ale|AzerothCore Lua Engine (ALE)|https://github.com/azerothcore/mod-ale.git|"
     "mod-player-bot-level-brackets|Bot Level Brackets (Playerbot distribution)|https://github.com/DustinHendrickson/mod-player-bot-level-brackets.git|characters"
@@ -1036,6 +1082,8 @@ declare -a MODULE_REGISTRY=(
     "mod-solocraft|Solocraft (solo dungeon/raid scaling)|https://github.com/azerothcore/mod-solocraft.git|world"
     "mod-talentbutton|Talent Button (dual-spec at 10 + anywhere talent reset)|https://github.com/brian8544/mod-talentbutton.git|"
     "mod-transmog|Transmogrification|https://github.com/azerothcore/mod-transmog.git|world,characters"
+    "mod-profession-progression|Profession Progression (unlock extra profession slots by leveling)|https://github.com/TopHatMan/mod-profession-progression.git|"
+    "mod-mount-scaling|Mount Scaling (level-based progressive mount speed)|https://github.com/claudevandort/mod-mount-scaling.git|world"
 )
 
 # ─────────────────────────────────────────────────────────────
@@ -1204,7 +1252,7 @@ detect_wow_client() {
     )
     local _wow_heuristic='[ -f "$p/Wow.exe" ] || [ -f "$p/wow.exe" ] || [ -f "$p/WowT.exe" ] || [ -d "$p/Interface" ]'
     local pd n p
-    # 1) Scan every parent × name combination
+    # 1) Scan every parent x name combination
     for pd in "${_parent_dirs[@]}"; do
         [ -d "$pd" ] || continue
         for n in "${_names[@]}"; do
@@ -1587,6 +1635,8 @@ declare -a MODULE_UPDATE_FILES=(
     "mod-dungeon-master|acore_world|dm_setup.sql"
     "mod-dungeon-master|acore_characters|dm_characters_setup.sql"
     "mod-ah-bot|acore_world|auctionhousebot_professionItems.sql mod_auctionhousebot.sql"
+    "mod-ah-bot-plus|acore_world|"
+    "mod-mount-scaling|acore_world|mount_scaling_trainer.sql"
     "mod-npc-beastmaster|acore_world|beastmaster_tames.sql beastmaster_tames_inserts.sql"
     "mod-transmog|acore_characters|trasmorg.sql"
     "mod-1v1-arena|acore_characters|"
@@ -1628,13 +1678,13 @@ declare -a ALE_SCRIPT_REGISTRY=(
 #   conf_xp           — edits worldserver.conf XP rate settings (no DB change)
 declare -a SQL_MOD_REGISTRY=(
     "all-stackables|All Stackables to 200|https://github.com/AsgavinYT/azerothcore-all-stackables-200.git|clone_sql"
-    "baby-mobs|Baby Mobs (HP×0.25 / DMG×0.25 / ARM×0.25)||tweak_world"
-    "buff-mobs|Buff Mobs (HP×2 / DMG×1.5 / ARM×1.5)||tweak_world"
+    "baby-mobs|Baby Mobs (HPx0.25 / DMGx0.25 / ARMx0.25)||tweak_world"
+    "buff-mobs|Buff Mobs (HPx2 / DMGx1.5 / ARMx1.5)||tweak_world"
     "mod-custom-login|Custom Login (starter gear + rep on first login)|https://github.com/azerothcore/mod-custom-login.git|conf_module"
-    "xbuff-mobs|Extreme Buff Mobs (HP×4 / DMG×2 / ARM×2)||tweak_world"
+    "xbuff-mobs|Extreme Buff Mobs (HPx4 / DMGx2 / ARMx2)||tweak_world"
     "hearthstone-cd|Hearthstone Cooldown Tweaks|https://github.com/AsgavinYT/hearthstone-cooldowns.git|clone_sql_pick"
     "lvl1-mounts|Level One Mounts (ride at level 1)|https://github.com/tomcoffingiii/mod-level-one-mounts.git|clone_sql"
-    "nerf-mobs|Nerf Mobs (HP×0.5 / DMG×0.75 / ARM×0.75)||tweak_world"
+    "nerf-mobs|Nerf Mobs (HPx0.5 / DMGx0.75 / ARMx0.75)||tweak_world"
     "npc-teleporter|NPC Teleporter (capital + starting zones)|https://github.com/Zoidwaffle/sql-npc-teleporter.git|clone_dist"
     "portals-capitals|Portals in All Capitals|https://github.com/azerothcore/portals-in-all-capitals.git|clone_sql"
     "rare-drops|Rare Drops (450 Classic rares loot)|https://github.com/StraysFromPath/mod-rare-drops.git|clone_sql_norevert"
@@ -1646,7 +1696,9 @@ declare -a SQL_MOD_REGISTRY=(
 # Returns space-separated filenames, or empty if dir doesn't exist.
 discover_module_sql_files() {
     local key="$1" db_short="$2"  # db_short is "world", "characters", etc.
+    # Module SQL dirs vary: db-world (hyphen), db_world (underscore), or sql/world.
     local sql_dir="$SERVER_DIR/modules/$key/data/sql/db-${db_short}"
+    [ ! -d "$sql_dir" ] && sql_dir="$SERVER_DIR/modules/$key/data/sql/db_${db_short}"
     [ ! -d "$sql_dir" ] && sql_dir="$SERVER_DIR/modules/$key/sql/${db_short}"
     [ ! -d "$sql_dir" ] && return 0
     # Find .sql files at top level only (subdirs are usually versioned variants)
@@ -2026,6 +2078,16 @@ module_install() {
         print_success "Cloned $name"
     fi
 
+    # AzerothCore's module discovery requires an include.sh marker file at the module
+    # root. Without it, CMake's CollectSourceFiles() silently skips the module.
+    # Some third-party modules (e.g. mod-profession-progression) intentionally omit
+    # this file — create it automatically so the player never has to think about it.
+    local _inc="$SERVER_DIR/modules/$key/include.sh"
+    if [ ! -f "$_inc" ]; then
+        touch "$_inc" 2>/dev/null && \
+            print_info "Created missing include.sh marker (required for CMake module discovery)."
+    fi
+
     # SQL is applied automatically on next worldserver start. No manual import.
     if [ -n "$sql_dirs" ]; then
         print_info "Module SQL will be auto-applied on next server start"
@@ -2145,9 +2207,18 @@ list_characters() {
 configure_ahbot() {
     print_step "Configuring Auction House Bot"
 
-    if ! module_is_installed "mod-ah-bot"; then
-        print_error "mod-ah-bot is not installed yet!"
-        print_info "Add it first via main menu option 1 (Manage AzerothCore Modules)."
+    # Determine which AH bot module is active — Plus takes precedence if both
+    # somehow exist, but normally only one should be installed at a time.
+    local _ahbot_key=""
+    if module_is_installed "mod-ah-bot-plus"; then
+        _ahbot_key="mod-ah-bot-plus"
+    elif module_is_installed "mod-ah-bot"; then
+        _ahbot_key="mod-ah-bot"
+    fi
+
+    if [ -z "$_ahbot_key" ]; then
+        print_error "Neither mod-ah-bot nor mod-ah-bot-plus is installed!"
+        print_info "Add one via main menu option 1 (Manage AzerothCore Modules)."
         return 1
     fi
 
@@ -2207,9 +2278,11 @@ configure_ahbot() {
     local bot_name=$(echo "$bot_info" | cut -f2)
     print_success "Selected: $bot_name (GUID $bot_guid, account $bot_account)"
 
-    local conf_dist="$SERVER_DIR/modules/mod-ah-bot/conf/mod_ahbot.conf.dist"
+    local conf_dist="$SERVER_DIR/modules/${_ahbot_key}/conf/mod_ahbot.conf.dist"
     if [ ! -f "$conf_dist" ]; then
         print_error "Couldn't find $conf_dist"
+        print_info "The worldserver must be rebuilt once after cloning the module"
+        print_info "before the conf.dist file is generated."
         return 1
     fi
 
@@ -2217,14 +2290,23 @@ configure_ahbot() {
     local conf_active="$SERVER_DIR/env/dist/etc/modules/mod_ahbot.conf"
     cp "$conf_dist" "$conf_active"
 
-    sed -i \
-        -e "s|^AuctionHouseBot.Account *=.*|AuctionHouseBot.Account = ${bot_account}|" \
-        -e "s|^AuctionHouseBot.GUID *=.*|AuctionHouseBot.GUID = ${bot_guid}|" \
-        -e "s|^AuctionHouseBot.GUIDs *=.*|AuctionHouseBot.GUIDs = \"${bot_guid}\"|" \
-        -e "s|^AuctionHouseBot.EnableSeller *=.*|AuctionHouseBot.EnableSeller = 1|" \
-        -e "s|^AuctionHouseBot.EnableBuyer *=.*|AuctionHouseBot.EnableBuyer = 1|" \
-        -e "s|^AHBot.enabled *=.*|AHBot.enabled = 1|" \
-        "$conf_active"
+    if [ "$_ahbot_key" = "mod-ah-bot-plus" ]; then
+        # AH Bot Plus: uses GUIDs (plural, unquoted integer) — no Account/GUID keys
+        sed -i \
+            -e "s|^AuctionHouseBot.GUIDs *=.*|AuctionHouseBot.GUIDs = ${bot_guid}|" \
+            -e "s|^AuctionHouseBot.EnableSeller *=.*|AuctionHouseBot.EnableSeller = true|" \
+            "$conf_active"
+    else
+        # Original mod-ah-bot: uses Account + GUID (singular) keys
+        sed -i \
+            -e "s|^AuctionHouseBot.Account *=.*|AuctionHouseBot.Account = ${bot_account}|" \
+            -e "s|^AuctionHouseBot.GUID *=.*|AuctionHouseBot.GUID = ${bot_guid}|" \
+            -e "s|^AuctionHouseBot.GUIDs *=.*|AuctionHouseBot.GUIDs = ${bot_guid}|" \
+            -e "s|^AuctionHouseBot.EnableSeller *=.*|AuctionHouseBot.EnableSeller = 1|" \
+            -e "s|^AuctionHouseBot.EnableBuyer *=.*|AuctionHouseBot.EnableBuyer = 1|" \
+            -e "s|^AHBot.enabled *=.*|AHBot.enabled = 1|" \
+            "$conf_active"
+    fi
 
     print_success "Wrote $conf_active"
 
@@ -2238,8 +2320,14 @@ configure_ahbot() {
     fi
 
     echo ""
-    print_info "AH Bot will start populating auctions on next worldserver start."
-    print_info "It adds ~75 items per cycle — full population takes hours."
+    if [ "$_ahbot_key" = "mod-ah-bot-plus" ]; then
+        print_info "AH Bot Plus will start populating auctions on next worldserver start."
+        print_info "Default: 150 items per cycle — full population takes several hours."
+        print_info "Enable the buyer bot and fine-tune pricing in mod_ahbot.conf."
+    else
+        print_info "AH Bot will start populating auctions on next worldserver start."
+        print_info "It adds ~75 items per cycle — full population takes hours."
+    fi
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -2519,6 +2607,88 @@ configure_module_talentbutton() {
     fi
     echo ""
     print_warning "Requires an UNPATCHED WoW 3.3.5a client — RCEPatcher clients will not see the button."
+    echo ""
+    _open_text_file "$conf_dest"
+    echo ""
+    print_info "Restart the worldserver for conf changes to take effect."
+}
+
+# ─────────────────────────────────────────────────────────────
+# configure_module_mount_scaling
+#   Copies mount_scaling.conf.dist → mount_scaling.conf and opens
+#   it for editing. Also reminds the user about the client cache
+#   deletion step the module's SQL requires.
+# ─────────────────────────────────────────────────────────────
+configure_module_mount_scaling() {
+    print_step "Configuring Mount Scaling"
+    local module_dir="$SERVER_DIR/modules/mod-mount-scaling"
+    if [ ! -d "$module_dir" ]; then
+        print_error "Mount Scaling module not installed (expected at $module_dir)."
+        return 1
+    fi
+    local conf_dist="$module_dir/conf/mount_scaling.conf.dist"
+    local conf_dest="$SERVER_DIR/env/dist/etc/modules/mount_scaling.conf"
+    mkdir -p "$SERVER_DIR/env/dist/etc/modules"
+    if [ ! -f "$conf_dest" ]; then
+        if [ -f "$conf_dist" ]; then
+            cp "$conf_dist" "$conf_dest"
+            print_success "Created $conf_dest"
+        else
+            print_warning "conf.dist not found at $conf_dist"
+            print_info "The worldserver must be rebuilt once before conf files are generated."
+            print_info "After rebuilding, re-run this configure option."
+            return 0
+        fi
+    fi
+    echo ""
+    print_info "Speed caps: Apprentice 100%@L40, Journeyman 150%@L60, Expert 200%@L70, Artisan 280%@L80."
+    print_info "Every SpeedPerLevel / MinSpeed / MaxSpeed value is editable in the conf."
+    echo ""
+    print_warning "After the module SQL applies (auto, on next server start), players must delete their"
+    print_warning "WoW client cache: Cache/WDB/<locale>/itemcache.wdb (e.g. enUS) — otherwise the lowered"
+    print_warning "mount level requirement won't show client-side."
+    echo ""
+    _open_text_file "$conf_dest"
+    echo ""
+    print_info "Restart the worldserver for conf changes to take effect."
+}
+
+# ─────────────────────────────────────────────────────────────
+# configure_module_profession_progression
+#   Copies mod-profession-progression.conf.dist →
+#   mod-profession-progression.conf and opens it for editing.
+#   Key knob for a Classic-gated server: ExpansionStage (0/1/2).
+# ─────────────────────────────────────────────────────────────
+configure_module_profession_progression() {
+    print_step "Configuring Profession Progression"
+    local module_dir="$SERVER_DIR/modules/mod-profession-progression"
+    if [ ! -d "$module_dir" ]; then
+        print_error "Profession Progression module not installed (expected at $module_dir)."
+        return 1
+    fi
+    local conf_dist="$module_dir/conf/mod-profession-progression.conf.dist"
+    local conf_dest="$SERVER_DIR/env/dist/etc/modules/mod-profession-progression.conf"
+    mkdir -p "$SERVER_DIR/env/dist/etc/modules"
+    if [ ! -f "$conf_dest" ]; then
+        if [ -f "$conf_dist" ]; then
+            cp "$conf_dist" "$conf_dest"
+            print_success "Created $conf_dest"
+        else
+            print_warning "conf.dist not found at $conf_dist"
+            print_info "The worldserver must be rebuilt once before conf files are generated."
+            print_info "After rebuilding, re-run this configure option."
+            return 0
+        fi
+    fi
+    echo ""
+    print_info "Key settings:"
+    print_info "  ProfessionProgression.ExpansionStage  0=Vanilla (cap 300), 1=TBC (375), 2=Wrath (425)"
+    print_info "  ProfessionProgression.BaseSlots       primary slots before any unlock (default 2)"
+    print_info "  ProfessionProgression.UnlockThirdAt   skill both top pros need for a 3rd slot (75)"
+    print_info "  ProfessionProgression.UnlockFourthAt  skill both top pros need for a 4th slot (150)"
+    print_info "  ProfessionProgression.AutoExpansionProfessions  auto-add JC at TBC, Inscription at Wrath"
+    echo ""
+    print_info "For a Classic-gated server, leave ExpansionStage = 0."
     echo ""
     _open_text_file "$conf_dest"
     echo ""
@@ -4408,7 +4578,7 @@ _sqlmod_install_tweak() {
         spd_mult="${TWEAK_SPD_MULT:-$spd_mult}"
     fi
 
-    print_info "Applying $name (HP×${h_mult} / DMG×${d_mult} / ARM×${a_mult} / SPD×${spd_mult})..."
+    print_info "Applying $name (HPx${h_mult} / DMGx${d_mult} / ARMx${a_mult} / SPDx${spd_mult})..."
     local sql
     sql="UPDATE creature_template SET HealthModifier = HealthModifier * ${h_mult};"
     sql+=" UPDATE creature_template SET DamageModifier = DamageModifier * ${d_mult};"
@@ -4591,7 +4761,7 @@ _sqlmod_remove_tweak() {    local key="$1" name="$2"
     inv_a=$(awk   "BEGIN{printf \"%.6f\", 1/$a_mult}")
     inv_spd=$(awk "BEGIN{printf \"%.6f\", 1/$spd_mult}")
 
-    print_info "Reversing $name (HP×${inv_h} / DMG×${inv_d} / ARM×${inv_a})..."
+    print_info "Reversing $name (HPx${inv_h} / DMGx${inv_d} / ARMx${inv_a})..."
     local sql
     sql="UPDATE creature_template SET HealthModifier = HealthModifier * ${inv_h};"
     sql+=" UPDATE creature_template SET DamageModifier = DamageModifier * ${inv_d};"
@@ -4954,6 +5124,16 @@ _get_about_text() {
                 'then enable seller, buyer, or both modes. Item quotas per' \
                 'quality tier are adjustable in config or the database table.'
             ;;
+        mod-ah-bot-plus)
+            printf '%s\n' \
+                'A complete, drop-rate-aware replacement for the original' \
+                'Auction House Bot. Uses in-game enemy/object drop rates to' \
+                'control item rarity on the AH — rare drops appear less often.' \
+                'Adds a full buyer bot, advanced listing rules, complete value' \
+                'overrides, vendor-price-aware pricing, and bid/buyout variation.' \
+                'All config is file-based (mod_ahbot.conf) — no SQL tweaks needed.' \
+                'INCOMPATIBLE with the original mod-ah-bot: remove it first.'
+            ;;
         mod-solocraft)
             printf '%s\n' \
                 'Scales player stats inside dungeons and raids based on group' \
@@ -5085,6 +5265,24 @@ _get_about_text() {
                 'script injection for the in-game button. IMPORTANT: requires an' \
                 'unpatched WoW 3.3.5a client; tools like RCEPatcher break the injection.' \
                 'Activate by setting TalentButton.Enable = 1 in mod_talentbutton.conf.'
+            ;;
+        mod-profession-progression)
+            printf '%s\n' \
+                'Unlocks additional primary profession slots as players level their skills.' \
+                'Starts at 2 slots; reaching 75 in both top professions opens a 3rd, 150 a 4th.' \
+                'Each subsequent pair opens the next when both hit the era cap. Era is' \
+                'configurable: Vanilla/TBC/Wrath, with per-era skill caps and profession pools.' \
+                'No SQL required — pure C++ hook on skill-up events.'
+            ;;
+        mod-mount-scaling)
+            printf '%s\n' \
+                'Replaces WoW'"'"'s binary mount-speed tiers with smooth, level-based scaling.' \
+                'Mounts get progressively faster as the character levels instead of jumping at' \
+                'fixed thresholds. Apprentice Riding drops to level 1; Journeyman/Expert/Artisan' \
+                'keep their level gates but scale within each tier, updating live while mounted.' \
+                'Every speed formula parameter is configurable in mount_scaling.conf. A small' \
+                'world SQL (auto-applied) lowers the riding/item level requirements to 1 — after' \
+                'which players should clear their client Cache/WDB folder.'
             ;;
         accountwide)
             printf '%s\n' \
@@ -5225,30 +5423,30 @@ _get_about_text() {
             ;;
         buff-mobs)
             printf '%s\n' \
-                'Multiplies all creature HP (×2), damage (×1.5), armor (×1.5),' \
-                'and attack speed (×0.8 interval = faster). Makes open-world' \
+                'Multiplies all creature HP (x2), damage (x1.5), armor (x1.5),' \
+                'and attack speed (x0.8 interval = faster). Makes open-world' \
                 'mobs noticeably harder without touching dungeon scripting.' \
                 'Multipliers are configurable. Remove applies the exact inverse' \
                 'to restore original values (floating-point accuracy may vary).'
             ;;
         xbuff-mobs)
             printf '%s\n' \
-                'Extreme buff: creature HP×4, damage×2, armor×2, attack speed' \
-                '×0.5 (double attack rate). Designed for hardcore or challenge' \
+                'Extreme buff: creature HPx4, damagex2, armorx2, attack speed' \
+                'x0.5 (double attack rate). Designed for hardcore or challenge' \
                 'servers where trash mobs are genuinely dangerous. Multipliers' \
                 'are configurable. Remove applies the inverse multipliers.'
             ;;
         nerf-mobs)
             printf '%s\n' \
-                'Reduces creature HP (×0.5), damage (×0.75), armor (×0.75),' \
-                'and slows attacks (×1.2 interval). Makes open-world content' \
+                'Reduces creature HP (x0.5), damage (x0.75), armor (x0.75),' \
+                'and slows attacks (x1.2 interval). Makes open-world content' \
                 'more accessible for casual players or fast leveling servers.' \
                 'Multipliers are configurable. Remove applies the inverse.'
             ;;
         baby-mobs)
             printf '%s\n' \
-                'Sets creatures to baby difficulty: HP×0.25, damage×0.25,' \
-                'armor×0.25, very slow attacks (×1.5 interval). Ideal for' \
+                'Sets creatures to baby difficulty: HPx0.25, damagex0.25,' \
+                'armorx0.25, very slow attacks (x1.5 interval). Ideal for' \
                 'families, new players, or near-trivial open-world combat.' \
                 'Multipliers are configurable. Remove applies the exact inverse.'
             ;;
@@ -5450,6 +5648,11 @@ _module_post_install_hook() {
             print_info "AH Bot installed — configure a bot character?"
             if ask_yes_no "Configure AH Bot now?"; then configure_ahbot; fi
             ;;
+        mod-ah-bot-plus)
+            echo ""
+            print_info "AH Bot Plus installed — configure a bot character?"
+            if ask_yes_no "Configure AH Bot now?"; then configure_ahbot; fi
+            ;;
         mod-ale)
             echo ""
             print_info "ALE requires post-install setup (lua_scripts dir + conf)."
@@ -5536,6 +5739,18 @@ _module_post_install_hook() {
             print_warning "Talent Button requires an UNPATCHED WoW 3.3.5a client (RCEPatcher blocks script injection)."
             print_info "Note: rebuild the worldserver first if the conf.dist is not yet present."
             if ask_yes_no "Configure Talent Button now?"; then configure_module_talentbutton; fi
+            ;;
+        mod-profession-progression)
+            echo ""
+            print_info "Note: rebuild the worldserver first if the conf.dist is not yet present."
+            if ask_yes_no "Configure Profession Progression now?"; then configure_module_profession_progression; fi
+            ;;
+        mod-mount-scaling)
+            echo ""
+            print_info "Mount Scaling SQL (lowers riding/item level reqs) auto-applies on next server start."
+            print_info "Note: rebuild the worldserver first if the conf.dist is not yet present."
+            # (Client-cache reminder is shown by configure_module_mount_scaling to avoid duplication.)
+            if ask_yes_no "Configure Mount Scaling now?"; then configure_module_mount_scaling; fi
             ;;
         mod-learn-spells)
             echo ""
@@ -5696,6 +5911,21 @@ menu_modules() {
                     if ! ask_yes_no "Continue anyway?"; then continue; fi
                 fi
 
+                # ── Incompatibility guard: AHbot Plus ↔ original AH Bot ──
+                if [ "$key" = "mod-ah-bot-plus" ] && module_is_installed "mod-ah-bot"; then
+                    print_error "AHbot Plus is incompatible with the original Auction House Bot!"
+                    print_info "Both modules define the same C++ classes — they cannot compile together."
+                    print_info "Remove 'mod-ah-bot' first (r<num> in this menu), rebuild the worldserver,"
+                    print_info "then re-install AHbot Plus afterward."
+                    press_enter; continue
+                fi
+                if [ "$key" = "mod-ah-bot" ] && module_is_installed "mod-ah-bot-plus"; then
+                    print_error "Original AH Bot is incompatible with AH Bot Plus!"
+                    print_info "Remove 'mod-ah-bot-plus' first (r<num> in this menu), rebuild the worldserver,"
+                    print_info "then re-install the original AH Bot afterward."
+                    press_enter; continue
+                fi
+                # ────────────────────────────────────────────────────────────
                 print_header
                 module_install "$key" "$name" "$url" "$sql_dirs" || true
                 upsert_mod_commands "$key"
@@ -5760,6 +5990,7 @@ menu_modules() {
                 print_header
                 case "$key" in
                     mod-ah-bot)                  configure_ahbot ;;
+                    mod-ah-bot-plus)             configure_ahbot ;;
                     mod-ale)                     configure_ale ;;
                     mod-arac)                    configure_mod_arac ;;
                     mod-challenge-modes)         configure_module_challenge_modes ;;
@@ -5769,6 +6000,8 @@ menu_modules() {
                     mod-quest-loot-party)        configure_module_quest_loot_party ;;
                     mod-talentbutton)            configure_module_talentbutton ;;
                     mod-learn-spells)            configure_module_learn_spells ;;
+                    mod-profession-progression)  configure_module_profession_progression ;;
+                    mod-mount-scaling)           configure_module_mount_scaling ;;
                     *)
                         print_info "$name has no dedicated configure option."
                         print_info "Edit its .conf file in $SERVER_DIR/env/dist/etc/modules/ directly."
@@ -5800,10 +6033,13 @@ _module_conf_name() {
         mod-1v1-arena)                  echo "1v1arena.conf" ;;
         mod-aoe-loot)                   echo "mod_aoe_loot.conf" ;;
         mod-ah-bot)                     echo "mod_ahbot.conf" ;;
+        mod-ah-bot-plus)                echo "mod_ahbot.conf" ;;
         mod-autobalance)                echo "AutoBalance.conf" ;;
         mod-arac)                       echo "" ;;
         mod-dungeon-master)             echo "mod_dungeon_master.conf" ;;
         mod-talentbutton)               echo "mod_talentbutton.conf" ;;
+        mod-profession-progression)     echo "mod-profession-progression.conf" ;;
+        mod-mount-scaling)              echo "mount_scaling.conf" ;;
         mod-ale)                        echo "mod_ale.conf" ;;
         mod-player-bot-level-brackets)  echo "mod_player_bot_level_brackets.conf" ;;
         mod-challenge-modes)            echo "challenge_modes.conf" ;;
@@ -5840,7 +6076,7 @@ _module_conf_dist_path() {
 
 _module_conf_sync_legacy_if_needed() {
     local key="$1"
-    [ "$key" != "mod-ah-bot" ] && return 0
+    [[ "$key" != "mod-ah-bot" && "$key" != "mod-ah-bot-plus" ]] && return 0
     local active legacy
     active=$(_module_conf_active_path "$key") || return 0
     legacy="$SERVER_DIR/conf/modules/mod_ahbot.conf"
@@ -5909,6 +6145,18 @@ _module_conf_hints() {
                 '  - AuctionHouseBot.EnableBuyer' \
                 '  - AuctionHouseBot.Account / GUID / GUIDs' \
                 '  - AuctionHouseBot.Trace* debugging flags' \
+                'Tip: use top-level option 4 for guided AH Bot setup.'
+            ;;
+        mod-ah-bot-plus)
+            printf '%s\n' \
+                'Common options:' \
+                '  - AuctionHouseBot.GUIDs               (bot character GUID — set via Configure)' \
+                '  - AuctionHouseBot.EnableSeller         (true/false)' \
+                '  - AuctionHouseBot.Buyer.Enabled        (true/false)' \
+                '  - AuctionHouseBot.ItemsPerCycle        (listings per update, default 150)' \
+                '  - AuctionHouseBot.MinutesBetweenSellCycle' \
+                '  - AuctionHouseBot.ListProportion.*     (per-category/quality weighting)' \
+                '  - AuctionHouseBot.AdvancedListingRules.UseDropRates.Enabled' \
                 'Tip: use top-level option 4 for guided AH Bot setup.'
             ;;
         mod-autobalance)
@@ -5993,6 +6241,16 @@ _module_conf_hints() {
                 '  - ShowSetDisclaimer' \
                 '  - UseCollectionSystem / UseVendorInterface' \
                 '  - AllowHiddenTransmog'
+            ;;
+        mod-mount-scaling)
+            printf '%s\n' \
+                'Common options:' \
+                '  - MountScaling.Enable' \
+                '  - MountScaling.Ground.SpeedPerLevel / MinSpeed / MaxSpeed' \
+                '  - MountScaling.Ground.Journeyman.SpeedPerLevel / MinSpeed / MaxSpeed' \
+                '  - MountScaling.Flying.Expert.SpeedPerLevel / MinSpeed / MaxSpeed' \
+                '  - MountScaling.Flying.Artisan.SpeedPerLevel / MinSpeed / MaxSpeed' \
+                'After the SQL applies, players must clear their client Cache/WDB folder.'
             ;;
     esac
 }

@@ -1,3 +1,9 @@
+---
+name: Dad's MMO Lab — Project Guide for Developers
+description: Project context, conventions, and architecture guide for the DML codebase
+alwaysApply: true
+---
+
 # Dad's MMO Lab — Project Guide for Developers
 
 ## 1. Project Overview
