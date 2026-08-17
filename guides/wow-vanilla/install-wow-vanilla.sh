@@ -1426,7 +1426,7 @@ services:
     networks:
       - vanilla-net
     healthcheck:
-      test: ["CMD-SHELL", "MYSQL_PWD=$$MARIADB_ROOT_PASSWORD mariadb -u root -e 'SELECT 1'"]
+      test: ["CMD-SHELL", "MYSQL_PWD=\$\$MARIADB_ROOT_PASSWORD mariadb -u root -e 'SELECT 1'"]
       interval: 10s
       timeout: 5s
       retries: 30
