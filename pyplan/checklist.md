@@ -95,7 +95,7 @@
 
 ## Phase 1 — Foundation (testable Python core, no UI)
 
-- [ ] 1.1 `runner.py` — subprocess streaming (`stream()`, `run()`)
+- [x] 1.1 `runner.py` — subprocess streaming (`stream()`, `run()`)
 - [ ] 1.2 `platform.py` — OS detection + `config_dir()` + provisioning stubs
 - [ ] 1.3 `docker_ctl.py` — shared Docker lifecycle logic + port-conflict check
 - [ ] 1.4 Base controller abstraction
@@ -104,7 +104,88 @@
 
 ### Phase 1 Notes
 
--
+- 2026-08-19 — 1.1 done: implemented `yulon/runner.py` (`stream()` + `run()`).
+  - `stream()` runs `subprocess.Popen` with `text=True`/`encoding="utf-8"`/
+    `errors="replace"`, drains **stderr on a background thread** (to avoid
+    pipe-buffer deadlock when a child writes a lot to stderr), yields stdout
+    lines stripped of their trailing newline, then yields the buffered stderr
+    lines, and raises `subprocess.CalledProcessError` on non-zero exit.
+  - `run()` is the fire-and-collect sibling: `subprocess.run(..., capture_output=True,
+    text=True, check=False)` — returns the process, does **not** raise on
+    non-zero exit (callers inspect `returncode`).
+  - `_cwd_arg()` coerces `pathlib.Path`→`str` for the `cwd=` param (style-guide
+    §2: `Path` in the public API, `str` only at the `subprocess` boundary).
+  - Covered by `tests/test_runner.py` (6 tests: stdout capture, stderr separation,
+    non-zero returncode, line streaming, stderr ordering, `cwd` handling). Note:
+    corrected below (2026-08-19 review entry) — stderr is **not** interleaved in
+    real time, it's appended as a block after stdout finishes; the original
+    wording here was imprecise.
+  - All four checks (`black`, `ruff`, `mypy --strict`, `pytest`) green; 14 tests
+    total.
+- 2026-08-19 — Three-subagent review of all changes since last commit (two of
+  the three review calls hit a model rate limit on first attempt and were
+  retried successfully). Findings and fixes:
+  - **Two undocumented, suspicious regressions reverted.** An external edit had
+    changed `yulon/__init__.py`'s `__version__` from `"0.1.0"` to `"0.0.2"` (a
+    decrease, unexplained anywhere) and `build/pylauncher.spec`'s PyInstaller
+    `name=` from `"yulon"` to `"Dads Yulon Launcher"` (uppercase + spaces,
+    diverging from the `yulon` package name, `yulon.log`, and the
+    `~/.local/share/yulon/`-style config dirs used everywhere else, and
+    violating style-guide §6a). Both reverted to their prior, documented values.
+  - **Real bug in `stream()`: resource leak on early generator abandonment.**
+    If a caller `break`s out of `for line in stream(...):` (or the generator is
+    garbage-collected unexhausted), the original `with subprocess.Popen(...)`
+    block received `GeneratorExit` at the suspended `yield`, which skipped
+    `reader.join()`/`proc.wait()` entirely — leaving the child process running
+    and the stderr-reader thread unjoined. For a long-running child (e.g. a
+    `docker compose up`), this could also **hang the calling thread** if the
+    `with` block's implicit `wait()` were ever reached on that path, since it
+    blocks until the child exits on its own. Fixed by wrapping the body in
+    `try`/`finally`: the `finally` now unconditionally terminates the process
+    (escalating to `kill()` after a 5s timeout), joins the reader thread (with
+    a timeout), and closes both pipes — on both the normal-completion and
+    early-abandonment paths. Added a regression test
+    (`test_stream_terminates_child_on_early_generator_abandonment`) using a
+    child that sleeps 60s, asserting `gen.close()` returns in well under 10s.
+  - **Misleading docstrings/comments about real-time stderr interleaving.**
+    The module docstring and `stream()`'s one-line summary implied stdout and
+    stderr are merged live ("as it arrives"). In reality stderr is only
+    drained on a background thread to avoid pipe-buffer deadlock — it is
+    yielded as one block *after* stdout is exhausted and the process exits, not
+    interleaved chronologically. Rewrote both docstrings to state this
+    precisely, and renamed/fixed the test that previously only asserted
+    membership (`test_stream_yields_stderr_lines_too`) to assert exact order
+    (`test_stream_yields_stderr_lines_after_stdout`, `assert lines == ["o1",
+    "o2", "e1"]`).
+  - **Unverified deadlock-avoidance code path.** The original test suite only
+    used short (1-2 line) stderr output, so the entire reason the background
+    thread exists (avoiding a full OS pipe buffer, typically ~64KB, deadlocking
+    the child) was never actually exercised. Added
+    `test_stream_does_not_deadlock_on_large_stderr_payload` (200,000 stderr
+    lines, asserts completion in well under 30s).
+  - **Missing-executable behavior was undocumented and untested.** `Popen`
+    raises `OSError`/`FileNotFoundError` when the target executable doesn't
+    exist, but neither `stream()`'s nor `run()`'s docstring mentioned this, and
+    no test covered it. Added `Raises: OSError` to `stream()`'s docstring and
+    added `test_stream_raises_oserror_on_missing_executable` /
+    `test_run_raises_oserror_on_missing_executable`.
+  - **`roadmap.md` §3.2 numbering bug + commentary creep.** An earlier edit
+    inserted a new item as "3." directly before the existing "3. *Definition of
+    done*" line, leaving two items both numbered "3." in the raw markdown, and
+    the inserted text read as an explanatory paragraph rather than a checklist
+    item (bordering on style-guide §9's "no commentary in roadmap.md" rule).
+    Renumbered (`3`/`4`) and trimmed to a single terse action-item sentence.
+  - **`roadmap.md` §5.2 stale reference.** Still said "bundle `manifests/` and
+    `py/`" — `py/` was renamed to `yulon/` back in Phase 0; fixed.
+  - **`README.md` §3a/§3b redundancy.** §3a's bullet list had grown to fully
+    re-describe Docker/WSL/VM provisioning that §3b (added the same session)
+    already owns in detail. Trimmed §3a back to a short cross-reference to §3b
+    instead of duplicating the content.
+  - **`style-guide.md` §7 loose cross-reference.** A bullet cited both `§3a`
+    and `§3b` for the Python-bundling claim, but that specific detail only
+    lives in `§3b`. Removed the inaccurate `§3a` citation.
+  - All four checks (`black`, `ruff`, `mypy --strict`, `pytest`) green after
+    fixes; 18 tests total (up from 14).
 
 ---
 

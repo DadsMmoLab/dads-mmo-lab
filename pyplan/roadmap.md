@@ -190,7 +190,9 @@ code changes needed to add a module.
    installer orchestrates; it does not contain UI or per-game hardcoding (that's manifest data).
 2. Enforce the legal boundary: never fetch client assets; locate/prompt for the user's own client
    (README §3a).
-3. *Definition of done:* `installer.run()` completes a working server install with zero shell
+3. Provisions Docker + the virtualization layer and installs modules/mods as part of the install
+   path (README §1 goal 5, §3b) — no dependency is left for the user to install by hand.
+4. *Definition of done:* `installer.run()` completes a working server install with zero shell
    interaction, **invoked directly via a CLI entry point or test harness (no GUI exists yet —
    Phase 4 hasn't built the "install" button)**. Verified on a platform where Docker is already
    manually installed (realistically Linux with Docker Engine present) — automatic Windows/macOS
@@ -264,7 +266,9 @@ GUI only.
 
 ### 5.2 PyInstaller specs
 
-1. Finalize `build/pylauncher.spec` to bundle `manifests/` and `py/` correctly for each target.
+1. Finalize `build/pylauncher.spec` to bundle `manifests/` and `yulon/` correctly for each target.
+   **Bundles a self-contained Python interpreter + all deps (PySide6, etc.) so end users never
+   install Python themselves** (README §3b).
 2. *Definition of done:* `pyinstaller build/pylauncher.spec` produces a runnable binary locally.
 
 ### 5.3 GitHub Actions release matrix

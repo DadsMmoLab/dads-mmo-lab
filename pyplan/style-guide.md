@@ -233,6 +233,11 @@ guide is a complete reference on its own:
   only — never a piracy source (`README.md` §3a).
 - **The app never bundles or fetches copyrighted client assets.** Users always supply their own
   legally obtained client (`README.md` §3a).
+- **The app installs everything, including Docker, the WSL/VM virtualization layer, and Python.**
+  Docker Engine (Linux) / Docker Desktop + WSL2 (Windows) / Docker Desktop + Linux VM (macOS),
+  the emulator, modules/mods, and the app's own runtime are all provisioned silently — Python via
+  a bundled PyInstaller interpreter so end users never install it themselves (`README.md` §1 goal 5
+  and §3b).
 - **Testing uses `pytest`**, with `subprocess` calls mocked in unit tests and a smaller
   integration suite that exercises real Docker (`README.md` §7, Phase 1).
 - **Per-OS app config/state lives under a dedicated directory**, separate from server data:

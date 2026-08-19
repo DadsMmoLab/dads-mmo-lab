@@ -15,6 +15,7 @@ Goals:
 2. **One unified codebase.** Write once, run on macOS, Windows, and Linux (Arch/Debian/Fedora/Bazzite/SteamOS).
 3. **Catalog + Controller.** A catalog of installable servers ("Catalog") that holds the users hand tightly, and a per-install management surface ("Controller").
 4. **Data-driven module/mod management.** Modules and mods become JSON manifests fetched from GitHub, so adding content is a data-entry task, not a code task.
+5. **The app installs everything.** Every dependency is silently installed and verified by the app — including **Docker itself** (Docker Engine on Linux, Docker Desktop on Windows/macOS), the **virtualization layer it needs** (WSL2 on Windows, the Linux VM on macOS), the open-source emulator server (cloned from its official repo), any modules/mods, and even the app's own runtime. The user never installs anything by hand — not Docker, not WSL, not Python. See §3a (what the app may and may not install) and §3b (how the platform dep stack, Docker, WSL/VM, and Python are each handled).
 
 ---
 
@@ -54,10 +55,51 @@ This means each installer carries platform-specific "ensure a Linux container en
 
 The intro to this document promises the app helps "stay within the legal boundaries of software distribution of this kind." That promise must be enforced as a concrete rule on the Catalog/Installer design, matching the project's existing ethos (see root `README.md`: "open source emulators only — no copyrighted assets, no game files distributed"):
 
-- **The app never downloads, bundles, or redistributes copyrighted game client files or assets.** The Catalog only ever installs: open-source emulator server software (cloned/pulled from its official repo), Docker images, and configuration. Nothing proprietary.
+- **The app never downloads, bundles, or redistributes copyrighted game client files or assets.** The Catalog only ever installs: open-source emulator server software (cloned/pulled from its official repo), platform dependencies (Docker, its virtualization backend — see §3b), Docker images, and configuration. Nothing proprietary.
 - **The user always supplies their own legally obtained client.** The installer's job is to *locate* an existing client install (or prompt the user to point at one / acquire one themselves) — never to fetch it on the user's behalf.
 - **Manifests must not reference or link to piracy sources.** Any `repo` field in a module/mod manifest must point at a legitimate open-source project (e.g. `azerothcore/mod-ah-bot`), never a ROM/warez site.
 - **This rule applies uniformly across all games in the Catalog**, not just WotLK — it should be checked as part of Phase 3's `installer.py` design and Phase 2's manifest schema validation (reject any manifest whose `repo` isn't an allowed source).
+
+---
+
+## 3b. Platform Dependencies Are Installed Automatically (Docker, WSL/VM, and Python)
+
+Goal 5 (§1) says "the app installs everything." Concretely, this means all three layers of the
+platform dependency stack are provisioned automatically, never by the user:
+
+### Docker (the container runtime)
+
+- **Linux (any distro):** the app installs **Docker Engine** directly (via the distro's package
+  manager, e.g. `pacman`/`apt`/`dnf`), then verifies the daemon is running. No virtualization
+  layer is needed on Linux.
+- **Windows:** the app installs **Docker Desktop**, whose backend is **WSL2** — it silently
+  provisions WSL2 first, then Docker Desktop, then verifies both. The user never sees "WSL".
+- **macOS:** the app installs **Docker Desktop**, which runs the Linux containers inside a
+  **Linux VM** that Docker Desktop manages itself.
+
+### The virtualization layer (Windows/macOS only)
+
+- This is a *consequence* of §3's kernel constraint — Linux containers can't run natively on
+  Windows/macOS — so provisioning Docker Desktop already implies provisioning its VM/WSL2 backend.
+  The app treats this as one silent, atomic "make containers work" operation, not a separate step
+  the user must be aware of.
+
+### Python (the app's own runtime)
+
+- **End users never install Python.** Each distributable artifact (`.AppImage` / `.dmg` / `.exe`,
+  §4) is built with **PyInstaller**, which bundles a self-contained Python interpreter and all
+  third-party packages (PySide6, etc.) directly into the binary. The user runs one file: no
+  `python3` install, no `pip`, no virtualenv.
+- **The Python-install burden is shifted to the build machine, not the user.** Only the CI build
+  runner (GitHub Actions, §4) needs a real Python toolchain; the shipped artifact carries what it
+  needs.
+- **This supersedes the developer-facing setup path** — `pylauncher/development.md`'s
+  "`python3 -m venv .venv`" instructions exist *only* for contributors running from source; they
+  are never part of the end-user experience.
+- **If a platform can't bundle Python** (e.g. a future distribution format forbidding
+  self-contained runtimes), the app falls back to *silently detecting and installing* the smallest
+  available Python runtime the same way it provisions Docker — still no user-facing shell. Flag
+  this as a deviation in `pyplan/checklist.md` if it ever arises.
 
 ---
 
