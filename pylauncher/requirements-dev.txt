@@ -1,0 +1,7 @@
+# Dev/test tooling for pylauncher. See pyplan/roadmap.md Phase 0.1.
+-r requirements.txt
+
+pytest>=8.3
+mypy>=1.11
+black>=24.8
+ruff>=0.6

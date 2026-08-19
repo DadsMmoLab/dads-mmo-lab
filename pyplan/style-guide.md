@@ -1,7 +1,7 @@
 # Yu'lon Style Guide
 
 > **Audience:** this document is written to be read by both **humans** and **LLM coding agents**
-> working on `py-launcher/`. Every rule here is a hard constraint, not a preference, unless
+> working on `pylauncher/`. Every rule here is a hard constraint, not a preference, unless
 > explicitly marked "recommended". If a change conflicts with this guide, fix the change — don't
 > update the guide to match the change, unless the guide itself is the thing under review.
 >
@@ -26,6 +26,8 @@
    treats it as statically typed: every function signature, variable where it isn't obvious, and
    class attribute is annotated, and CI enforces it with a type checker. Untyped/`Any`-typed code
    is treated as a bug, not a style nit. See §2.
+7. **`pyplan/roadmap.md` stays a clean checklist — no notes, decision logs, or commentary.**
+   That content goes in `pyplan/checklist.md` instead. See §9.
 
 ---
 
@@ -34,7 +36,7 @@
 Baseline: **Python 3.11+** (per `pyplan/README.md` §2). Beyond PEP 8:
 
 - **This is a typed codebase, full stop.** Python doesn't enforce types at runtime by default —
-  we do it anyway, deliberately, via annotations + a static checker. Nothing in `py-launcher/`
+  we do it anyway, deliberately, via annotations + a static checker. Nothing in `pylauncher/`
   should ship unannotated just because "Python doesn't require it."
 - **Type hints everywhere.** All function signatures are fully annotated, including return types
   (including `-> None` where a function returns nothing — don't omit it). Annotate module-level
@@ -78,7 +80,7 @@ Baseline: **Python 3.11+** (per `pyplan/README.md` §2). Beyond PEP 8:
 
 ## 3. Strict Separation of Concerns
 
-Every file in `py-launcher/py/` has exactly one job. This is the most important structural rule
+Every file in `pylauncher/yulon/` has exactly one job. This is the most important structural rule
 in the codebase because the whole point of Yu'lon is to be more maintainable than the shell
 scripts it replaces.
 
@@ -87,12 +89,12 @@ scripts it replaces.
 | `runner.py` | Running a subprocess and streaming its output | Know anything about Docker, games, or manifests |
 | `platform.py` | OS detection, config dir paths, Docker/WSL provisioning | Know anything about a specific game or module |
 | `catalog/installer.py` | Orchestrating an install (deps → clone → build → config) for *one* catalog entry | Contain UI code, or hardcode per-game logic that belongs in a manifest |
-| `controller-<acronym>/docker_ctl.py` | Docker lifecycle for *that one game's* containers | Reach into another game's controller, or contain UI code |
-| `controller-<acronym>/modules.py` | Loading/validating/applying that game's manifests | Hardcode module data that should live in `manifests/` JSON |
+| `controller_<acronym>/docker_ctl.py` | Docker lifecycle for *that one game's* containers | Reach into another game's controller, or contain UI code |
+| `controller_<acronym>/modules.py` | Loading/validating/applying that game's manifests | Hardcode module data that should live in `manifests/` JSON |
 | `ui/*_view.py` | Rendering widgets and wiring signals | Contain business logic, subprocess calls, or Docker calls directly — delegate to controller/catalog objects |
 
 **Rule of thumb:** if you're writing Docker-related code inside a `ui/` file, or UI-related code
-inside a `controller-*/` file, stop — that logic belongs in the other layer, connected by a
+inside a `controller_*/` file, stop — that logic belongs in the other layer, connected by a
 signal or a plain method call (see §5).
 
 **Manifests hold data, code holds behavior.** If a piece of information could be different for a
@@ -179,7 +181,7 @@ async) and lets the caller decide what happens next.
 | The Burning Crusade | **TBC** (`wow-tbc`) |
 
 - This applies to Python identifiers, JSON `game`/`id` values, directory names
-  (`controller-wow-wotlk/`, not `controller-world-of-warcraft-wrath-of-the-lich-king/`), and log
+  (`controller_wow_wotlk/`, not `controller_world_of_warcraft_wrath_of_the_lich_king/`), and log
   output.
 - **User-facing UI copy is the one exception where clarity matters more than the rule** — a
   first-run screen may need to spell out "World of Warcraft (WoW) — Wrath of the Lich King" once
@@ -197,10 +199,22 @@ async) and lets the caller decide what happens next.
 modules, JSON manifests, markdown docs, and directories.
 
 - `catalog_view.py`, not `Catalog_view.py`
-- `controller-wow-wotlk/`, not `Controller-WoW-WotLK/`
+- `controller_wow_wotlk/`, not `Controller-WoW-WotLK/`
 - Use `snake_case` for Python module files (`docker_ctl.py`), and `kebab-case` for
-  non-Python files and directories where multiple words are needed (`py-launcher/`,
+  non-Python files and directories where multiple words are needed (`pylauncher/`,
   `release.yml` stays as-is since it's a tool-mandated name).
+- **Hard override: any directory that is an importable Python package (i.e. contains an
+  `__init__.py`) MUST use `snake_case`, never `kebab-case`, even though it's "a directory."**
+  A hyphen is not a legal character in a Python identifier/import path — `import
+  controller-wow-wotlk` is a syntax error, and tools like `mypy` reject such a directory outright
+  ("contains `__init__.py` but is not a valid Python package name"). This isn't a style
+  preference; a hyphenated package directory is broken, not just inconsistently named. `kebab-case`
+  is reserved for directories that are *not* Python packages (e.g. `pylauncher/` itself, the repo
+  root, is fine since nothing imports it as `import pylauncher`).
+- **Also avoid a top-level package literally named `py`.** It shadows the third-party `py` PyPI
+  package that `pytest` depends on internally, which breaks `pytest` at import time
+  (`AttributeError: module 'py' has no attribute 'path'`). This project's top-level package is
+  named `yulon`, not `py`, for this reason.
 - Class names inside a file still use `PascalCase` as normal Python convention — this rule is
   about the **filename on disk**, not identifiers inside the file.
 
@@ -252,3 +266,29 @@ If you are an LLM making changes to this codebase:
   otherwise for that specific case.
 - **Never emit unannotated function signatures or `Any`-typed code to "get it working first."**
   Per §2, treat missing types as a defect at write-time, not something to add in a follow-up pass.
+- **Never add notes, decision-log commentary, "flagged conflict" callouts, or discovery write-ups
+  into `pyplan/roadmap.md`.** Per §9, that file is a clean, checklist-style execution plan only.
+  Put that content in `pyplan/checklist.md` instead.
+
+---
+
+## 9. Document Hygiene — `roadmap.md` Stays a Clean Checklist
+
+`pyplan/roadmap.md` is the execution plan. It is **not** a scratchpad, decision log, or running
+commentary. Keep it terse and checklist-shaped:
+
+- **`roadmap.md` may only contain:** phase/step headers, numbered action items, and
+  "Definition of done" lines. Short one-line clarifications of scope (e.g. "out of scope for this
+  step: ...") are fine when they change what the step actually requires.
+- **`roadmap.md` may NOT contain:** "flagged conflict" essays, historical narration of bugs found
+  during implementation, justifications for why an ordering choice was made, or any other prose
+  that reads as a note-to-self rather than an instruction. If you catch yourself writing more than
+  2-3 sentences of explanation for *why* a step is what it is, that explanation belongs in
+  `pyplan/checklist.md`, not `roadmap.md`.
+- **`pyplan/checklist.md`** is the designated home for exactly that kind of content: a running,
+  checkable list mirroring the roadmap's steps, plus a free-form notes/decision-log section per
+  phase for anything discovered, decided, or flagged while doing the work. See that file directly
+  for its structure.
+- **Rationale:** `roadmap.md` needs to stay skimmable as a plan. Mixing in retrospective narration
+  makes it harder to tell "what to do next" from "what already happened," especially for an LLM
+  agent re-reading the file cold in a future session.

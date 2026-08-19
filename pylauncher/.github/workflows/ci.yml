@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint-type-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements-dev.txt
+
+      - name: ruff (lint)
+        run: python -m ruff check .
+
+      - name: black (format check)
+        run: python -m black --check .
+
+      - name: mypy (types)
+        run: python -m mypy yulon main.py
+
+      - name: pytest (tests)
+        run: python -m pytest -q

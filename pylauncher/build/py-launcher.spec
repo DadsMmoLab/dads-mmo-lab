@@ -4,7 +4,7 @@
 
 from PyInstaller.utils.hooks import collect_submodules
 
-hiddenimports = collect_submodules("py")
+hiddenimports = collect_submodules("yulon")
 
 a = Analysis(
     ["main.py"],
@@ -12,7 +12,7 @@ a = Analysis(
     binaries=[],
     datas=[
         ("manifests", "manifests"),
-        ("py", "py"),
+        ("yulon", "yulon"),
     ],
     hiddenimports=hiddenimports,
     hookspath=[],

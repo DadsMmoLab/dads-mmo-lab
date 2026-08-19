@@ -28,7 +28,7 @@ jobs:
       - run: pip install -r requirements.txt pyinstaller
 
       - name: Build binary
-        run: pyinstaller build/py-launcher.spec --noconfirm
+        run: pyinstaller build/pylauncher.spec --noconfirm
 
       # Linux-only: wrap the PyInstaller output in an AppImage.
       - name: Package AppImage

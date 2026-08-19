@@ -1,10 +1,12 @@
 """Docker lifecycle for the WotLK server.
 
 Mirrors the polling logic in dml-start.sh (_wait_db_healthy, _wait_ready,
-_pin_realm_local). Wraps `docker compose` / `docker inspect` via py.runner.
+_pin_realm_local). Wraps `docker compose` / `docker inspect` via yulon.runner.
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 # Default container names (mirrors dml-start.sh constants).
 DB_CONTAINER = "ac-database"
@@ -12,12 +14,12 @@ AUTH_CONTAINER = "ac-authserver"
 WORLD_CONTAINER = "ac-worldserver"
 
 
-def start(server_dir: str) -> None:
+def start(server_dir: Path) -> None:
     """Bring the compose project up."""
     raise NotImplementedError
 
 
-def stop(server_dir: str) -> None:
+def stop(server_dir: Path) -> None:
     """Take the compose project down."""
     raise NotImplementedError
 

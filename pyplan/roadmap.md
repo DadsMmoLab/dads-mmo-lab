@@ -21,16 +21,12 @@
 - Steps marked **[style]** carry a specific style-guide obligation that must be satisfied before
   the step is considered complete.
 - Steps marked **[blocked]** depend on an earlier step/phase and must not be started out of order.
-
-> **Flagged deviation from README §7:** the README's own text recommends the order
-> **"2 → 1 → 3 → 4 → 5"** (manifest schema before the foundation code). This roadmap instead
-> sequences **Phase 1 before Phase 2** (foundation first). This is a deliberate, flagged deviation,
-> not a silent contradiction: `runner.py`/`docker_ctl.py` need to exist and be testable (Phase 1)
-> before the manifest-driven module loader (`modules.py`, Phase 2.3) has anything concrete to load
-> into. Phase 2.1/2.2 (schema definition and the data port from `wow-manage.sh`) could genuinely
-> start in parallel with Phase 1 with no blocking dependency, if capacity allows — only Phase 2.3
-> depends on Phase 1 being done. If you want to strictly honor README's literal order, treat
-> Phase 2.1/2.2 as running concurrently with Phase 1 rather than strictly after it.
+- This roadmap sequences **Phase 1 before Phase 2**. Phase 2.1/2.2 (schema definition and the data
+  port from `wow-manage.sh`) may run concurrently with Phase 1; only Phase 2.3 (`modules.py`)
+  depends on Phase 1 being complete.
+- See `pyplan/checklist.md` for the running checklist, decision log, and working notes as this
+  roadmap is executed. Nothing in this file should be edited to record notes, decisions made
+  during implementation, or discoveries — that all belongs in `checklist.md` (style-guide §9).
 
 ---
 
@@ -45,17 +41,18 @@
 2. **Add a CI lint/type/test job** (separate from the release matrix in `release.yml`). It runs
    `ruff`, `mypy`/`pyright`, and `pytest` on every push/PR.
    - *Definition of done:* a deliberately broken commit fails CI on type/lint, not just tests.
-3. **Resolve remaining naming debt.** Confirm no uppercase filenames remain under `py-launcher/`
-   (the `Catalog/` → `catalog/` and `Catalog_view.py` → `catalog_view.py` renames are already
-   done; verify nothing else slipped through). **[style]** — style-guide §6a.
-   - *Definition of done:* `find py-launcher -name '*[A-Z]*'` returns nothing unexpected.
+3. **Resolve remaining naming debt.** Confirm no uppercase filenames remain under `pylauncher/`,
+   and that every importable package directory uses `snake_case` (never hyphens), per
+   style-guide §6a. **[style]**
+   - *Definition of done:* `find pylauncher -name '*[A-Z]*'` returns nothing unexpected, and
+     every directory containing `__init__.py` has a valid, importable, `snake_case` name.
 4. **Pin an AzerothCore compose fixture for integration tests.** Choose and document a specific
    AzerothCore version/tag and compose file used by Phase 1.5's integration suite and by CI, so
    "a real running AzerothCore compose project" is a reproducible fixture, not an ambient
    assumption.
    - *Definition of done:* a documented fixture (version pin + compose file location) that any
      contributor or CI runner can bring up identically.
-5. **Write a minimal contributor/dev-setup doc for `py-launcher/`.** Cover venv creation,
+5. **Write a minimal contributor/dev-setup doc for `pylauncher/`.** Cover venv creation,
    installing `requirements.txt` + `requirements-dev.txt`, running `main.py`, and running
    `pytest`/`mypy`/`ruff` locally.
    - *Definition of done:* a new contributor can go from clone to a passing local `pytest` run
@@ -93,18 +90,12 @@
 4. *Definition of done:* `config_dir()` returns the correct path on each OS (tested via
    monkeypatched `sys.platform`/env).
 
-### 1.3 `docker_ctl.py` — shared Docker lifecycle logic (flagged naming/placement conflict)
+### 1.3 `docker_ctl.py` — shared Docker lifecycle logic
 
-> **Flagged conflict:** README §5's project-structure tree and style-guide §3's ownership table
-> both place `docker_ctl.py` *inside* each `controller-<acronym>/` package (per-game), while
-> README §12 talks about "the shared `docker_ctl.py` / `runner.py` layer." This roadmap resolves
-> the conflict as follows, rather than silently picking one reading: the **per-game
-> `controller-<acronym>/docker_ctl.py` files stay** (matching README §5 and the actual scaffold on
-> disk), but their `start`/`stop`/`status`/port-conflict logic is implemented **once** in a shared
-> base class/helper (see 1.4) that each per-game `docker_ctl.py` calls into — so the *behavior* is
-> shared and DRY (satisfying README §12's intent) while the *file* stays per-game (satisfying
-> README §5 and style-guide §3's ownership table). If this reading is wrong, README §5/§12 should
-> be reconciled directly rather than left ambiguous.
+Each per-game `controller_<acronym>/docker_ctl.py` file stays per-game (matching README §5 and
+the scaffold on disk), but its `start`/`stop`/`status`/port-conflict logic is implemented **once**
+in a shared base class/helper (see 1.4) that each per-game `docker_ctl.py` calls into — the
+*behavior* is shared and DRY (README §12); the *file* stays per-game (README §5, style-guide §3).
 
 1. Implement the shared `start(server_dir)`, `stop(server_dir)`, `status()`, `health(container)`
    behavior (used by every per-game `docker_ctl.py`) by shelling out to the `docker` CLI via
@@ -121,13 +112,13 @@
 ### 1.4 Base controller abstraction
 
 1. Introduce a base `Controller` class (or protocol) that per-game controllers
-   (`controller-<acronym>/`) subclass, holding the shared `docker_ctl` behavior and the
+   (`controller_<acronym>/`) subclass, holding the shared `docker_ctl` behavior and the
    port-conflict check from 1.3. **[style]** — composition over inheritance except where "is-a"
    is genuine (style-guide §2); call-down/signal-up (§5).
 2. **Out of scope for this step:** manifest-driven behavior. The base `Controller` does *not* read
    or know about module/mod manifests yet — that's Phase 2.3's `modules.py`, layered on top later.
    Don't stub manifest reads here prematurely.
-3. *Definition of done:* `controller-wow-wotlk/` can subclass it and inherit start/stop/status
+3. *Definition of done:* `controller_wow_wotlk/` can subclass it and inherit start/stop/status
    with zero reimplementation.
 
 ### 1.5 Tests
@@ -170,7 +161,7 @@ running AzerothCore compose project, and the mocked `pytest` suite passes in CI 
 
 ### 2.3 `modules.py` — load/validate/fetch
 
-1. Implement `load_module(path)` and `apply_module(manifest)` in `controller-wow-wotlk/modules.py`.
+1. Implement `load_module(path)` and `apply_module(manifest)` in `controller_wow_wotlk/modules.py`.
    **[style]** — convert JSON to a dataclass/Pydantic model at the parse boundary; no bare `Any`
    beyond `json.load()` (style-guide §2).
 2. Implement manifest fetch-from-GitHub with a cache + ETag/timestamp (README §11).
@@ -243,7 +234,7 @@ once Phase 4's `catalog_view.py` exists.
 
 1. One tab per install: docker lifecycle (start/stop/status/logs), live console, maintenance
    (cache clear, backups, SQL), and module/mod management driven by manifests.
-   **[style]** — the view calls down into `controller-wow-wotlk/` methods; it never shells out
+   **[style]** — the view calls down into `controller_wow_wotlk/` methods; it never shells out
    directly.
 2. Surface the single-instance/port-conflict block as a clear user message (README §12).
 3. *Definition of done:* full start/stop/logs/accounts/module-toggle workflow via GUI only.
@@ -273,8 +264,8 @@ GUI only.
 
 ### 5.2 PyInstaller specs
 
-1. Finalize `build/py-launcher.spec` to bundle `manifests/` and `py/` correctly for each target.
-2. *Definition of done:* `pyinstaller build/py-launcher.spec` produces a runnable binary locally.
+1. Finalize `build/pylauncher.spec` to bundle `manifests/` and `py/` correctly for each target.
+2. *Definition of done:* `pyinstaller build/pylauncher.spec` produces a runnable binary locally.
 
 ### 5.3 GitHub Actions release matrix
 

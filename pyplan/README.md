@@ -75,17 +75,30 @@ The intro to this document promises the app helps "stay within the legal boundar
 
 ## 5. Proposed Project Structure
 
-> This reflects the structure actually scaffolded in `py-launcher/` (see repo). Each package has an `__init__.py`; manifests are indexed by a top-level JSON per category, with individual mod/module files added under `mods/` as Phase 2 data-porting work produces them (not created empty ahead of time).
+> This reflects the structure actually scaffolded in `pylauncher/` (see repo). Each package has an `__init__.py`; manifests are indexed by a top-level JSON per category, with individual mod/module files added under `mods/` as Phase 2 data-porting work produces them (not created empty ahead of time).
+>
+> **Two naming fixes discovered during Phase 0 setup, applied and reflected below:**
+> 1. The top-level package is `yulon/`, not `py/` — a package literally named `py` shadows the
+>    third-party `py` PyPI package that `pytest` itself depends on internally, which crashes
+>    pytest with `AttributeError: module 'py' has no attribute 'path'`. This is not a style
+>    preference; it's a real, reproducible bug.
+> 2. Per-game controller packages use underscores, not hyphens (`controller_wow_wotlk/`, not
+>    `controller-wow-wotlk/`) — a directory name containing a hyphen is not a valid Python
+>    package name and cannot be imported (`import controller-wow-wotlk` is a syntax error; `mypy`
+>    also rejects it: "contains `__init__.py` but is not a valid Python package name"). This
+>    corrects style-guide §6a's own kebab-case-for-non-Python-directories guidance, which didn't
+>    account for the fact that these directories *are* real Python packages.
 
 ```
-py-launcher/
-├── py/
+pylauncher/
+├── yulon/
 │   ├── __init__.py
 │   ├── catalog/
 │   │   ├── __init__.py
 │   │   ├── catalog.json          # list of games + install metadata
 │   │   └── installer.py          # orchestrates install (deps → clone → build → config)
-│   ├── controller-(server)/      # each server has its own controller folder for siloing
+│   ├── controller_wow_wotlk/     # each server has its own controller package for siloing
+│   │   ├── __init__.py
 │   │   ├── docker_ctl.py         # start/stop/status/logs/health
 │   │   ├── console.py            # attach to worldserver console
 │   │   ├── maintenance.py        # cache clear, backups, SQL changes
@@ -106,15 +119,22 @@ py-launcher/
 │       ├── mods.json             # index; per-mod files (ah-bot.json, solocraft.json, transmog.json, ...) added in Phase 2
 │       └── kegs/                 # Unique to WotLK for LUA mods with ALE
 │           └── account-wide.json
+├── tests/                        # pytest suite (see pyplan/roadmap.md Phase 0/1)
 ├── main.py
 ├── requirements.txt
+├── requirements-dev.txt          # pytest, mypy, black, ruff — pinned dev tooling
+├── pyproject.toml                # black/ruff/mypy/pytest config
+├── DEVELOPMENT.md                # contributor setup doc
 ├── build/                        # PyInstaller specs
-│   └── py-launcher.spec
+│   └── pylauncher.spec
 └── .github/workflows/
+    ├── ci.yml                    # lint + type-check + test on every push/PR
     └── release.yml               # build matrix → AppImage/dmg/exe
 ```
 
-As additional servers are added beyond WotLK, they get their own `controller-<server>/` package (e.g. `controller-wow-vanilla/`, `controller-runescape/`) following the same file layout.
+As additional servers are added beyond WotLK, they get their own `controller_<acronym>/` package
+(e.g. `controller_wow_vanilla/`, `controller_rs/` — see style-guide §6 for acronym conventions)
+following the same file layout and underscore naming.
 
 ---
 
@@ -256,15 +276,15 @@ Existing docs are explicit: **"Only run ONE server at a time — they share the 
 
 - Before starting a server, the Controller checks whether another managed install is already running (via `docker_ctl.status()` across all known installs) and whether the required ports (e.g. 3724, 8085) are free.
 - If a conflict is found, the UI blocks the "Start" action and clearly tells the user which install is already running and needs to be stopped first — no raw port-in-use errors surfaced from Docker.
-- This check belongs in the shared `docker_ctl.py` / `runner.py` layer (Phase 1) so every per-game controller inherits it for free, rather than each `controller-<server>/` reimplementing the check.
+- This check belongs in the shared `docker_ctl.py` / `runner.py` layer (Phase 1) so every per-game controller inherits it for free, rather than each `controller_<acronym>/` reimplementing the check.
 
 ---
 
 ## 13. Next Actions
 
-1. ~~Scaffold `py-launcher/` project structure (folders + stub files + `requirements.txt`).~~ — **done**.
+1. ~~Scaffold `pylauncher/` project structure (folders + stub files + `requirements.txt`).~~ — **done**.
 2. Implement `runner.py` + `docker_ctl.py` + `platform.py` for real (Phase 1), including the single-instance/port-conflict check (§12) and `config_dir()` helper (§11).
 3. Add `pytest` unit tests (mocked `subprocess`) and a small integration suite against a real Docker/AzerothCore install.
-4. Flesh out `.github/workflows/release.yml` build matrix (currently a placeholder AppImage packaging step) and `build/py-launcher.spec`.
+4. Flesh out `.github/workflows/release.yml` build matrix (currently a placeholder AppImage packaging step) and `build/pylauncher.spec`.
 5. Begin Phase 2: manifest schema finalization, WotLK module port from `wow-manage.sh`, and manifest `repo` allow-list validation (§3a).
 6. Design the self-update check (§10) as part of Phase 1's `platform.py`/`main.py` wiring, even though the UI hook lands later.

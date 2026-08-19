@@ -1,0 +1,1 @@
+"""Catalog subsystem — hands-on install flow for each supported game."""
