@@ -21,9 +21,9 @@ python main.py
 
 ```bash
 pytest              # tests
-mypy py main.py      # static types
-ruff check .         # lint
-black --check .      # formatting
+mypy yulon main.py  # static types
+ruff check .        # lint
+black --check .     # formatting
 ```
 
 Run `black .` (without `--check`) to auto-format.

@@ -105,6 +105,7 @@ pylauncher/
 │   │   └── modules.py            # reads/writes module JSON manifests
 │   ├── runner.py                 # subprocess streaming (shared by all)
 │   ├── platform.py               # OS detection + silent Docker/WSL provisioning
+│   ├── log.py                    # shared logging convention (get_logger/configure — Phase 0.6)
 │   └── ui/
 │       ├── __init__.py
 │       ├── catalog_view.py
@@ -120,11 +121,15 @@ pylauncher/
 │       └── kegs/                 # Unique to WotLK for LUA mods with ALE
 │           └── account-wide.json
 ├── tests/                        # pytest suite (see pyplan/roadmap.md Phase 0/1)
+│   ├── __init__.py
+│   ├── fixture.md                # pinned AzerothCore compose fixture (Phase 0.4)
+│   ├── test_setup_sanity.py
+│   └── test_log.py               # covers yulon/log.py
 ├── main.py
 ├── requirements.txt
 ├── requirements-dev.txt          # pytest, mypy, black, ruff — pinned dev tooling
 ├── pyproject.toml                # black/ruff/mypy/pytest config
-├── DEVELOPMENT.md                # contributor setup doc
+├── development.md                # contributor setup doc
 ├── build/                        # PyInstaller specs
 │   └── pylauncher.spec
 └── .github/workflows/
