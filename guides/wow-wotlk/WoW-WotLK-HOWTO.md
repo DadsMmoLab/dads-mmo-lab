@@ -255,8 +255,10 @@ After install, you have two tools to manage your server — pick whichever suits
 ```bash
 curl -o ~/Downloads/wow-manage.sh https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/guides/wow-wotlk/wow-manage.sh
 chmod +x ~/Downloads/wow-manage.sh
-~/Downloads/wow-manage.sh
+bash ~/Downloads/wow-manage.sh
 ```
+
+> `wow-manage.sh` requires Bash. Do not run it with `sh wow-manage.sh`.
 
 It opens a full-screen interactive menu with three sub-menus:
 

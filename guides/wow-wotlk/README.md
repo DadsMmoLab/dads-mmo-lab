@@ -142,8 +142,10 @@ A full-screen, menu-driven terminal script for managing your server after it's i
 ```bash
 curl -o ~/Downloads/wow-manage.sh https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/guides/wow-wotlk/wow-manage.sh
 chmod +x ~/Downloads/wow-manage.sh
-~/Downloads/wow-manage.sh
+bash ~/Downloads/wow-manage.sh
 ```
+
+`wow-manage.sh` requires Bash. Do not launch it with `sh wow-manage.sh`.
 
 **Menus:**
 

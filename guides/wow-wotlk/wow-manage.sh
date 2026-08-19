@@ -23,7 +23,9 @@
 #
 #  Usage:
 #    chmod +x wow-manage.sh
-#    ./wow-manage.sh
+#    bash wow-manage.sh
+#
+#  This is a Bash script. Do not run it with `sh wow-manage.sh`.
 #
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 # ============================================================

@@ -164,6 +164,18 @@ To stop the server: right-click the tray icon → **wow-server-playerbots** → 
 
 > **The tray shows all your installed DML servers** — if you install other titles later they appear here too.
 
+### Server Manager
+
+Right-click the **DML Launcher** icon → **wow-server-playerbots** → **Manage** to open the WoW Server Manager.
+
+To launch it manually from PowerShell, run:
+
+```powershell
+wsl -d dml-arch -u dml -- bash -lc "dml manage"
+```
+
+The manager requires Bash. Do not use `sh wow-manage.sh`, which produces `Syntax error: "(" unexpected`.
+
 ---
 
 ## Play Together — LAN Play
