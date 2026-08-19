@@ -17,6 +17,8 @@ Goals:
 4. **Data-driven module/mod management.** Modules and mods become JSON manifests fetched from GitHub, so adding content is a data-entry task, not a code task.
 5. **The app installs everything.** Every dependency is silently installed and verified by the app — including **Docker itself** (Docker Engine on Linux, Docker Desktop on Windows/macOS), the **virtualization layer it needs** (WSL2 on Windows, the Linux VM on macOS), the open-source emulator server (cloned from its official repo), any modules/mods, and even the app's own runtime. The user never installs anything by hand — not Docker, not WSL, not Python. See §3a (what the app may and may not install) and §3b (how the platform dep stack, Docker, WSL/VM, and Python are each handled).
 
+**v1 scope — four servers.** Until v1 is complete, the Catalog/Controller focuses on exactly four servers: **WoW** (Vanilla 1.12), **WoW TBC**, **WoW WotLK**, and **WoW Tortoise** (the Turtle-WoW solo fork). These are the only acronyms/`game` ids the v1 Catalog needs to know about; other games in the wider DML catalogue are explicitly out of v1 scope (README's planned/in-progress lists) and are only added after v1 ships. **This is a target, not current state** — as of Phase 1, only WotLK has a controller package; see §5's status note and `roadmap.md` §3.1 for the catalog work that will cover the other three.
+
 ---
 
 ## 2. Technology Decisions
@@ -146,6 +148,7 @@ pylauncher/
 │   │   ├── maintenance.py        # cache clear, backups, SQL changes
 │   │   └── modules.py            # reads/writes module JSON manifests
 │   ├── runner.py                 # subprocess streaming (shared by all)
+│   ├── docker.py                 # shared Docker lifecycle + port-conflict check (shared)
 │   ├── platform.py               # OS detection + silent Docker/WSL provisioning
 │   ├── log.py                    # shared logging convention (get_logger/configure — Phase 0.6)
 │   └── ui/
@@ -179,9 +182,13 @@ pylauncher/
     └── release.yml               # build matrix → AppImage/dmg/exe
 ```
 
-As additional servers are added beyond WotLK, they get their own `controller_<acronym>/` package
-(e.g. `controller_wow_vanilla/`, `controller_rs/` — see style-guide §6 for acronym conventions)
-following the same file layout and underscore naming.
+**Status as of this writing:** only `controller_wow_wotlk/` exists. The other three v1 servers
+(§1 goal 5's "four servers") — WoW, WoW TBC, and WoW Tortoise — do **not** have controller
+packages, catalog entries, or manifests yet; that work is tracked in Phase 3 (`roadmap.md` §3.1)
+and beyond, not implemented as of Phase 1. Each will get its own `controller_<acronym>/` package
+(`controller_wow_vanilla/`, `controller_wow_tbc/`, `controller_wow_tortoise/`) following the same
+file layout and underscore naming, in that order, before any server outside v1's four-server
+scope is considered (see style-guide §6 for acronym conventions).
 
 ---
 

@@ -87,9 +87,10 @@ scripts it replaces.
 | Layer | Owns | Must never |
 |---|---|---|
 | `runner.py` | Running a subprocess and streaming its output | Know anything about Docker, games, or manifests |
+| `docker.py` | Shared, game-agnostic Docker lifecycle (start/stop/status/health/polling/port-conflict check) via `runner.py` | Know anything about a specific game's containers/ports — those are passed in by callers via `ContainerSpec` |
 | `platform.py` | OS detection, config dir paths, Docker/WSL provisioning | Know anything about a specific game or module |
 | `catalog/installer.py` | Orchestrating an install (deps → clone → build → config) for *one* catalog entry | Contain UI code, or hardcode per-game logic that belongs in a manifest |
-| `controller_<acronym>/docker_ctl.py` | Docker lifecycle for *that one game's* containers | Reach into another game's controller, or contain UI code |
+| `controller_<acronym>/docker_ctl.py` | Holding *that one game's* `ContainerSpec` and re-exporting `docker.py`'s shared operations | Reimplement Docker lifecycle logic itself, reach into another game's controller, or contain UI code |
 | `controller_<acronym>/modules.py` | Loading/validating/applying that game's manifests | Hardcode module data that should live in `manifests/` JSON |
 | `ui/*_view.py` | Rendering widgets and wiring signals | Contain business logic, subprocess calls, or Docker calls directly — delegate to controller/catalog objects |
 
@@ -105,15 +106,18 @@ manifest under `manifests/`, not in a Python conditional. See `pyplan/README.md`
 
 ## 4. DRY — Don't Repeat Yourself
 
-- **Shared subprocess/Docker logic lives in `runner.py` and a common base controller.** Per-game
-  controllers (`controller-wow/`, `controller-rs/`, etc.) subclass shared behavior — they do not
-  each reimplement "wait for container healthy" or "check port conflict" from scratch.
-- **The single-instance/port-conflict check (`pyplan/README.md` §12) is implemented once**, in the
-  shared layer, and inherited by every controller.
+- **Shared subprocess/Docker logic lives in `runner.py` and `docker.py`.** Per-game controllers
+  (`controller_wow_wotlk/`, `controller_wow_tbc/`, etc.) hold only their own `ContainerSpec` and
+  re-export the shared operations (or use the `*_for(spec, ...)` convenience wrappers) — they do
+  not each reimplement "wait for container healthy" or "check port conflict" from scratch. (Phase
+  1.4's base `Controller` class layers a shared, subclassable surface on top of this for behavior
+  that genuinely needs inheritance — the module-level sharing in `docker.py` doesn't require it.)
+- **The single-instance/port-conflict check (`pyplan/README.md` §12) is implemented once**, in
+  `docker.py`'s `port_conflicts()`/`port_conflicts_for()`, and used by every controller.
 - **Manifests are the DRY mechanism for game/module data.** Adding a new mod is a new JSON file,
   not new Python code, specifically so behavior isn't duplicated per mod.
-- **If you find yourself copy-pasting a function between two `controller-*/` packages, stop.**
-  Promote it to a shared base class or a shared utility module instead.
+- **If you find yourself copy-pasting a function between two `controller_*/` packages, stop.**
+  Promote it to the shared `docker.py` module (or another shared utility module) instead.
 - **Constants defined once.** Container name prefixes, default ports, config dir names — one
   source of truth, imported everywhere else.
 
@@ -179,6 +183,7 @@ async) and lets the caller decide what happens next.
 | Mu Online | **MU** |
 | Wrath of the Lich King | **WotLK** (append to the game acronym: `wow-wotlk`) |
 | The Burning Crusade | **TBC** (`wow-tbc`) |
+| Tortoise WoW (Turtle-WoW solo fork) | **WoW Tortoise** (`wow-tortoise`, or **Tortoise** for short) |
 
 - This applies to Python identifiers, JSON `game`/`id` values, directory names
   (`controller_wow_wotlk/`, not `controller_world_of_warcraft_wrath_of_the_lich_king/`), and log
@@ -291,9 +296,7 @@ commentary. Keep it terse and checklist-shaped:
   2-3 sentences of explanation for *why* a step is what it is, that explanation belongs in
   `pyplan/checklist.md`, not `roadmap.md`.
 - **`pyplan/checklist.md`** is the designated home for exactly that kind of content: a running,
-  checkable list mirroring the roadmap's steps, plus a free-form notes/decision-log section per
-  phase for anything discovered, decided, or flagged while doing the work. See that file directly
-  for its structure.
+  checkable list mirroring the roadmap's steps.
 - **Rationale:** `roadmap.md` needs to stay skimmable as a plan. Mixing in retrospective narration
   makes it harder to tell "what to do next" from "what already happened," especially for an LLM
   agent re-reading the file cold in a future session.

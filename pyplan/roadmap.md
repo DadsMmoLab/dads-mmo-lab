@@ -59,7 +59,7 @@
      using only this doc.
 6. **Establish a shared logging convention.** Decide the `logging` setup (logger naming,
    format, where logs are written per-OS — likely alongside `config_dir()` from §11) that
-   `runner.py`, `docker_ctl.py`, and every later module will use. **[style]** — style-guide §2
+   `runner.py`, `docker.py`, and every later module will use. **[style]** — style-guide §2
    mandates `logging`, not `print`, everywhere except throwaway local debugging.
    - *Definition of done:* a `logging.getLogger(__name__)`-based helper exists and is used by at
      least one Phase 1 module as a working example for the rest of the codebase to follow.
@@ -90,11 +90,11 @@
 4. *Definition of done:* `config_dir()` returns the correct path on each OS (tested via
    monkeypatched `sys.platform`/env).
 
-### 1.3 `docker_ctl.py` — shared Docker lifecycle logic
+### 1.3 `docker.py` — shared Docker lifecycle logic
 
 Each per-game `controller_<acronym>/docker_ctl.py` file stays per-game (matching README §5 and
 the scaffold on disk), but its `start`/`stop`/`status`/port-conflict logic is implemented **once**
-in a shared base class/helper (see 1.4) that each per-game `docker_ctl.py` calls into — the
+in a shared `yulon/docker.py` module that each per-game `docker_ctl.py` re-exports — the
 *behavior* is shared and DRY (README §12); the *file* stays per-game (README §5, style-guide §3).
 
 1. Implement the shared `start(server_dir)`, `stop(server_dir)`, `status()`, `health(container)`
@@ -102,8 +102,8 @@ in a shared base class/helper (see 1.4) that each per-game `docker_ctl.py` calls
    `runner.py`. **[style]** — no Docker SDK; `docker compose` semantics preserved (README §2).
 2. Port the polling logic from `dml-start.sh` (`_wait_db_healthy`, `_wait_ready`) into typed
    helpers with timeouts.
-3. Implement the **single-instance / port-conflict check** once, in this shared behavior
-   (README §12). **[style]** — DRY: this must be inherited by every per-game controller, never
+3. Implement the **single-instance / port-conflict check** once, in this shared module
+   (README §12). **[style]** — DRY: this must be used by every per-game controller, never
    reimplemented.
 4. *Definition of done:* `start()`/`stop()`/`status()` work against a real running AzerothCore
    compose project (per the Phase 0.4 fixture); the port-conflict check correctly blocks a second
@@ -112,7 +112,7 @@ in a shared base class/helper (see 1.4) that each per-game `docker_ctl.py` calls
 ### 1.4 Base controller abstraction
 
 1. Introduce a base `Controller` class (or protocol) that per-game controllers
-   (`controller_<acronym>/`) subclass, holding the shared `docker_ctl` behavior and the
+   (`controller_<acronym>/`) subclass, holding the shared `yulon.docker` behavior and the
    port-conflict check from 1.3. **[style]** — composition over inheritance except where "is-a"
    is genuine (style-guide §2); call-down/signal-up (§5).
 2. **Out of scope for this step:** manifest-driven behavior. The base `Controller` does *not* read
@@ -123,14 +123,15 @@ in a shared base class/helper (see 1.4) that each per-game `docker_ctl.py` calls
 
 ### 1.5 Tests
 
-1. `pytest` unit tests (mocked `subprocess`) for `runner.py` and `docker_ctl.py` control flow.
-2. A small integration suite (marked/skipped when Docker is absent) exercising `docker_ctl.py`
+1. `pytest` unit tests (mocked `subprocess`) for `runner.py` and `docker.py` control flow.
+2. A small integration suite (marked/skipped when Docker is absent) exercising `docker.py`
    against a real compose project.
 3. *Definition of done:* mocked suite passes in CI without Docker; integration suite passes on a
    machine with Docker.
 
-**Phase 1 exit criteria (README §7):** `docker_ctl.start()`/`stop()`/`status()` work against a
-running AzerothCore compose project, and the mocked `pytest` suite passes in CI without Docker.
+**Phase 1 exit criteria (README §7):** `docker.start()`/`stop()`/`status()` (via the WotLK
+`docker_ctl.py` re-exports) work against a running AzerothCore compose project, and the mocked
+`pytest` suite passes in CI without Docker.
 
 ---
 
@@ -180,8 +181,10 @@ code changes needed to add a module.
 ### 3.1 `catalog.json` — game list
 
 1. Populate `catalog.json` with install metadata per game (repo, script, ports, client steps),
-   using acronyms for `game` ids. **[style]** — acronyms only (§6).
-2. *Definition of done:* at least one game (WoW WotLK) is fully described in the catalog.
+   using acronyms for `game` ids. **[style]** — acronyms only (§6). **v1 scope is exactly four
+   servers:** WoW (Vanilla 1.12), WoW TBC, WoW WotLK, and WoW Tortoise.
+2. *Definition of done:* the four v1 servers are described in the catalog (WotLK fully first;
+   the other three follow the same `game`-id + metadata shape).
 
 ### 3.2 `installer.py` — orchestration (Phase 3a)
 
