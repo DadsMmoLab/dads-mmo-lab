@@ -934,7 +934,7 @@ _rebuild_npc_spawn_header() {
 
     # Build the new header block
     local tmpdir; tmpdir=$(dirname "$outfile")
-    local tmpblock; tmpblock=$(mktemp "$tmpdir/.tmp.dad")
+    local tmpblock; tmpblock=$(mktemp "$tmpdir/.tmp.xxxxx")
     {
         printf '%s\n' "$header_marker"
         printf '%s\n' "Consolidated NPC spawn commands for all installed mods that require NPCs."
@@ -956,7 +956,7 @@ _rebuild_npc_spawn_header() {
 
     # Place at the very top of the file (replace if header exists, otherwise prepend)
     local tmpdir; tmpdir=$(dirname "$outfile")
-    local tmpout; tmpout=$(mktemp "$tmpdir/.tmp.dad")
+    local tmpout; tmpout=$(mktemp "$tmpdir/.tmp.xxxxx")
     if grep -Fxq "$header_marker" "$outfile" 2>/dev/null; then
         awk -v marker="$header_marker" -v newfile="$tmpblock" '
         $0 == marker {
@@ -987,7 +987,7 @@ upsert_mod_commands() {
 
     # Each section ends with a trailing blank line for readability
     local tmpdir; tmpdir=$(dirname "$outfile")
-    local tmpblock; tmpblock=$(mktemp "$tmpdir/.tmp.dad")
+    local tmpblock; tmpblock=$(mktemp "$tmpdir/.tmp.xxxxx")
     printf '%s\n%s\n\n' "$marker" "$content" > "$tmpblock"
 
     if [ ! -f "$outfile" ]; then
@@ -998,7 +998,7 @@ upsert_mod_commands() {
     fi
 
     if grep -Fxq "$marker" "$outfile" 2>/dev/null; then
-        local tmpout; tmpout=$(mktemp "$tmpdir/.tmp.dad")
+        local tmpout; tmpout=$(mktemp "$tmpdir/.tmp.xxxxx")
         awk -v marker="$marker" -v newfile="$tmpblock" '
         $0 == marker {
             while ((getline line < newfile) > 0) print line
@@ -1025,7 +1025,7 @@ remove_mod_commands() {
     grep -Fxq "$marker" "$outfile" 2>/dev/null || return 0
 
     local tmpdir; tmpdir=$(dirname "$outfile")
-    local tmpout; tmpout=$(mktemp "$tmpdir/.tmp.dad")
+    local tmpout; tmpout=$(mktemp "$tmpdir/.tmp.xxxxx")
     awk -v marker="$marker" '
     $0 == marker { skip=1; next }
     skip && /^=== .+ ===$/ { skip=0 }
@@ -1485,7 +1485,7 @@ server_start() {
     fi
 
     print_info "Bringing up containers..."
-    local up_log; up_log=$(mktemp /tmp/wow-server-start.dad)
+    local up_log; up_log=$(mktemp /tmp/wow-server-start.xxxxx)
     local up_rc
     if [ "$has_phpmyadmin" = "true" ]; then
         docker compose up -d --scale phpmyadmin=0 > "$up_log" 2>&1
