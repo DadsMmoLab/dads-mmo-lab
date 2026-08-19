@@ -27,7 +27,8 @@ Goals:
 | Packaging | **PyInstaller** | De-facto standard; one binary per platform. Can be setup with GH Actions for automated builds. |
 | CI | **GitHub Actions build matrix** | Required because PyInstaller cannot cross-compile — each platform builds on its own runner. |
 | Docker interaction | **Docker CLI via `subprocess`** (Docker SDK later) | 100% parity with existing scripts; `docker compose` semantics preserved. |
-| Module catalog (for WotLK) | **JSON manifests** fetched from GitHub | Makes the controller extensible without code changes. |
+| Module & ALE catalog (for WotLK) | **JSON manifests** fetched from GitHub | Makes the controller extensible without code changes. |
+| Modification Catalog (all servers) | **JSON manifests** fetched from GitHub | Makes the controller extensible without code changes. Focus on simple database and GM commands that can be run to modify the server. |
 
 ---
 
@@ -49,6 +50,17 @@ This means each installer carries platform-specific "ensure a Linux container en
 
 ---
 
+## 3a. Legal & Distribution Boundaries
+
+The intro to this document promises the app helps "stay within the legal boundaries of software distribution of this kind." That promise must be enforced as a concrete rule on the Catalog/Installer design, matching the project's existing ethos (see root `README.md`: "open source emulators only — no copyrighted assets, no game files distributed"):
+
+- **The app never downloads, bundles, or redistributes copyrighted game client files or assets.** The Catalog only ever installs: open-source emulator server software (cloned/pulled from its official repo), Docker images, and configuration. Nothing proprietary.
+- **The user always supplies their own legally obtained client.** The installer's job is to *locate* an existing client install (or prompt the user to point at one / acquire one themselves) — never to fetch it on the user's behalf.
+- **Manifests must not reference or link to piracy sources.** Any `repo` field in a module/mod manifest must point at a legitimate open-source project (e.g. `azerothcore/mod-ah-bot`), never a ROM/warez site.
+- **This rule applies uniformly across all games in the Catalog**, not just WotLK — it should be checked as part of Phase 3's `installer.py` design and Phase 2's manifest schema validation (reject any manifest whose `repo` isn't an allowed source).
+
+---
+
 ## 4. Package Targets (per platform)
 
 | Platform | Artifact | Tooling | Notes |
@@ -57,19 +69,23 @@ This means each installer carries platform-specific "ensure a Linux container en
 | Windows | `.exe` (or MSI) | PyInstaller | Built on `windows-latest` runner. |
 | Linux (all) | `.AppImage` | PyInstaller + `appimagetool` | **Hero artifact** — one file runs on Arch/Debian/Fedora/Bazzite/SteamOS. |
 
-**Key insight:** the Linux `.AppImage` erases the distro matrix. Ship AppImage first; add `.deb`/`.rpm` only on request. SteamOS (Arch-based) runs AppImages natively — same as The Lab did.
+**Key insight:** the Linux `.AppImage` erases the distro matrix. Focus on appimage as it should run *fine* on most linux distros that people actually use.
 
 ---
 
 ## 5. Proposed Project Structure
 
+> This reflects the structure actually scaffolded in `py-launcher/` (see repo). Each package has an `__init__.py`; manifests are indexed by a top-level JSON per category, with individual mod/module files added under `mods/` as Phase 2 data-porting work produces them (not created empty ahead of time).
+
 ```
 py-launcher/
 ├── py/
-│   ├── Catalog/
+│   ├── __init__.py
+│   ├── catalog/
+│   │   ├── __init__.py
 │   │   ├── catalog.json          # list of games + install metadata
 │   │   └── installer.py          # orchestrates install (deps → clone → build → config)
-│   ├── controller/
+│   ├── controller-(server)/      # each server has its own controller folder for siloing
 │   │   ├── docker_ctl.py         # start/stop/status/logs/health
 │   │   ├── console.py            # attach to worldserver console
 │   │   ├── maintenance.py        # cache clear, backups, SQL changes
@@ -77,17 +93,19 @@ py-launcher/
 │   ├── runner.py                 # subprocess streaming (shared by all)
 │   ├── platform.py               # OS detection + silent Docker/WSL provisioning
 │   └── ui/
-│       ├── Catalog_view.py
+│       ├── __init__.py
+│       ├── catalog_view.py
 │       ├── controller_view.py
 │       └── widgets/
+│           ├── __init__.py
 │           └── log_panel.py      # streaming log output widget
 ├── manifests/                    # module/mod JSON (synced from GitHub)
 │   └── wow-wotlk/
-│       ├── modules.json
-│       └── mods/
-│           ├── ah-bot.json
-│           ├── solocraft.json
-│           └── transmog.json
+│       ├── modules.json          # index; per-module files added here in Phase 2
+│       ├── ale.json              # index; per-ALE-mod files added here in Phase 2
+│       ├── mods.json             # index; per-mod files (ah-bot.json, solocraft.json, transmog.json, ...) added in Phase 2
+│       └── kegs/                 # Unique to WotLK for LUA mods with ALE
+│           └── account-wide.json
 ├── main.py
 ├── requirements.txt
 ├── build/                        # PyInstaller specs
@@ -95,6 +113,8 @@ py-launcher/
 └── .github/workflows/
     └── release.yml               # build matrix → AppImage/dmg/exe
 ```
+
+As additional servers are added beyond WotLK, they get their own `controller-<server>/` package (e.g. `controller-wow-vanilla/`, `controller-runescape/`) following the same file layout.
 
 ---
 
@@ -113,7 +133,7 @@ The entire project succeeds or fails on the module/mod manifest format. It must 
   "sql": ["data/sql/db-world/*.sql"],
   "conf": "conf/ahbot.conf",
   "build_targets": ["MODULES=mod-ah-bot"],
-  "requires": ["playerbots"],
+  "requires": [],
   "description": "Populates the auction house with bot-posted items."
 }
 ```
@@ -125,7 +145,7 @@ The entire project succeeds or fails on the module/mod manifest format. It must 
 - **Module config key differences** — e.g. `AuctionHouseBot.GUIDs` (AH Bot Plus, plural) vs the original `AuctionHouseBot.GUID` (singular) + `Account` key. This kind of nuance must be explicit in the JSON.
 - **SQL apply ordering** and glob patterns per module.
 - **Build targets** — which modules require a worldserver rebuild vs. pure-SQL.
-- **Dependencies** — e.g. AH Bot requires Playerbots.
+- **Dependencies** — e.g. `mod-player-bot-level-brackets` requires the Playerbots module to function (verified in `wow-manage.sh`; AH Bot has no such dependency — an earlier draft of this doc incorrectly used AH Bot as the dependency example).
 
 ---
 
@@ -138,10 +158,10 @@ The entire project succeeds or fails on the module/mod manifest format. It must 
 - `runner.py` — subprocess wrapper with live line-by-line stdout/stderr streaming.
 - `docker_ctl.py` — start/stop/status/logs/health, mirroring `dml-start.sh` (`_wait_db_healthy`, `_wait_ready` polling logic).
 - `platform.py` — OS detection; stubs for Docker/WSL provisioning.
-- Unit tests proving the core works against a real Docker install.
+- Unit tests using **`pytest`**: mock `subprocess` calls in `runner.py` (no real Docker required to test control flow), then a smaller set of integration tests that exercise `docker_ctl.py` against a real running AzerothCore compose project.
 
 **Exit criteria:** `docker_ctl.start()` / `stop()` / `status()` work against a running AzerothCore
-compose project.
+compose project, and the mocked `pytest` suite passes in CI without Docker present.
 
 ### Phase 2 — Manifest schema & data port
 
@@ -163,7 +183,7 @@ interaction, verified on at least one platform.
 
 ### Phase 4 — Controller UI (PySide6)
 
-- `Catalog_view.py` — browsable catalog of games.
+- `catalog_view.py` — browsable catalog of games.
 - `controller_view.py` — one tab per install: docker lifecycle, live console, maintenance (cache clear, backups, SQL), module/mod management (driven by manifests).
 - `log_panel.py` — reusable streaming output widget.
 
@@ -189,6 +209,7 @@ interaction, verified on at least one platform.
 | Porting `wow-manage.sh` tacit knowledge | Do it as an explicit Phase 2 with exit criteria; don't fold it into the UI work. |
 | "No WSL" expectation vs reality | Communicate honestly in docs (WSL is hidden, not removed). |
 | Scope creep on bot-party/item-mail features | Treat in-game tools (My Party, item mail, teleport) as a *separate later project*; they are not part of the launcher. |
+| Unsigned binaries trigger OS gatekeeper warnings (Windows SmartScreen, macOS Gatekeeper) | For v1, document the click-through steps for users. Revisit code signing/notarization once the project has a budget/identity for certificates; track as a post-v1 milestone, not a blocker. |
 
 ---
 
@@ -198,13 +219,52 @@ interaction, verified on at least one platform.
 - **Item database + in-game mail** — separate later milestone.
 - **Teleport / GM in-game tools** — later.
 - **Full native reimplementation of installers** — start by wrapping existing scripts.
+- **Code signing / notarization** — accept OS gatekeeper warnings for v1; revisit later (see §8).
 
 ---
 
-## 10. Next Actions
+## 10. Application Self-Update
 
-1. Scaffold `py-launcher/` project structure (folders + stub files + `requirements.txt`).
-2. Implement `runner.py` + `docker_ctl.py` + `platform.py` (Phase 1).
-3. Add unit tests.
-4. Add GitHub Actions `release.yml` with the build matrix.
-5. Begin Phase 2 (manifest schema + WotLK module port).
+Users download this app directly (AppImage/exe/dmg) with no package manager tracking updates, so the app must check for new versions itself.
+
+- On launch, check the GitHub Releases API for a newer tag than the running `__version__`.
+- If found, show a non-blocking banner/dialog with a link/button to download the new artifact for the user's platform.
+- **v1 scope:** check + notify only. Auto-download/auto-replace-the-running-binary is deferred — replacing a running AppImage/exe from within itself is fiddly per-platform and not worth the risk before the core app is stable.
+- Revisit in-place auto-update once Phase 5 packaging is proven reliable.
+
+---
+
+## 11. Local Data & Config Storage
+
+The app needs a per-OS location to persist its own state — remembered server install paths, last-used settings, cached manifests — separate from the server data itself (which lives under the user-chosen server directory, e.g. `~/wow-server-playerbots/`).
+
+| Platform | Config/state directory |
+|---|---|
+| Linux | `~/.local/share/yulon/` (XDG Base Dir convention) |
+| Windows | `%APPDATA%\Yulon\` |
+| macOS | `~/Library/Application Support/Yulon/` |
+
+- Store: known install locations per game, chosen client paths, last-checked update version, cached copies of fetched manifests (with an ETag/timestamp for refresh).
+- This directory is **not** the server directory — never conflate app state with server/database files. Server files stay wherever the user chose during install (matching existing script behavior, e.g. `choose_install_dir()` in `install-wow-wotlk.sh`).
+- Owned by `platform.py` (add a `config_dir()` helper alongside `detect()`); implemented in Phase 1, consumed by Catalog/Controller from Phase 3 onward.
+
+---
+
+## 12. Single-Instance / Port Conflict Rule
+
+Existing docs are explicit: **"Only run ONE server at a time — they share the same ports"** (`WoW-WotLK-CONTROLS-1.md`). The Controller must enforce this instead of silently reproducing the shell version's foot-gun:
+
+- Before starting a server, the Controller checks whether another managed install is already running (via `docker_ctl.status()` across all known installs) and whether the required ports (e.g. 3724, 8085) are free.
+- If a conflict is found, the UI blocks the "Start" action and clearly tells the user which install is already running and needs to be stopped first — no raw port-in-use errors surfaced from Docker.
+- This check belongs in the shared `docker_ctl.py` / `runner.py` layer (Phase 1) so every per-game controller inherits it for free, rather than each `controller-<server>/` reimplementing the check.
+
+---
+
+## 13. Next Actions
+
+1. ~~Scaffold `py-launcher/` project structure (folders + stub files + `requirements.txt`).~~ — **done**.
+2. Implement `runner.py` + `docker_ctl.py` + `platform.py` for real (Phase 1), including the single-instance/port-conflict check (§12) and `config_dir()` helper (§11).
+3. Add `pytest` unit tests (mocked `subprocess`) and a small integration suite against a real Docker/AzerothCore install.
+4. Flesh out `.github/workflows/release.yml` build matrix (currently a placeholder AppImage packaging step) and `build/py-launcher.spec`.
+5. Begin Phase 2: manifest schema finalization, WotLK module port from `wow-manage.sh`, and manifest `repo` allow-list validation (§3a).
+6. Design the self-update check (§10) as part of Phase 1's `platform.py`/`main.py` wiring, even though the UI hook lands later.

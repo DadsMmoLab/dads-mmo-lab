@@ -1,0 +1,43 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: AppImage
+          - os: windows-latest
+            artifact: exe
+          - os: macos-latest
+            artifact: dmg
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt pyinstaller
+
+      - name: Build binary
+        run: pyinstaller build/py-launcher.spec --noconfirm
+
+      # Linux-only: wrap the PyInstaller output in an AppImage.
+      - name: Package AppImage
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          echo "AppImage packaging hook — implement in Phase 5 (pyplan/README.md §4)"
+        shell: bash
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yulon-${{ matrix.os }}
+          path: dist/**

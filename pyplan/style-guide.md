@@ -1,0 +1,254 @@
+# Yu'lon Style Guide
+
+> **Audience:** this document is written to be read by both **humans** and **LLM coding agents**
+> working on `py-launcher/`. Every rule here is a hard constraint, not a preference, unless
+> explicitly marked "recommended". If a change conflicts with this guide, fix the change — don't
+> update the guide to match the change, unless the guide itself is the thing under review.
+>
+> This guide is downstream of `pyplan/README.md`. If the two conflict, `README.md` (the design
+> doc) wins on *architecture*, and this document wins on *code style*. Flag the conflict rather
+> than silently picking one.
+
+---
+
+## 1. Non-negotiable rules (read this section first)
+
+1. **Strict separation of concerns.** Every module has exactly one job. See §3.
+2. **DRY — Don't Repeat Yourself.** Shared behavior lives in one place (`runner.py`, `platform.py`,
+   base controller classes), never copy-pasted per game. See §4.
+3. **Call down / signal up.** Parents talk to children by calling their methods directly.
+   Children never reach up into a parent or hold a parent reference — they emit a signal and let
+   whoever is listening decide what to do. See §5.
+4. **Never refer to a game by its full/trademarked name — acronyms only.** Never "Warcraft",
+   always "WoW". Never "RuneScape", always "RS". See §6.
+5. **All filenames are lowercase.** No exceptions.
+6. **Python is fully typed.** Despite Python being dynamically typed by default, this codebase
+   treats it as statically typed: every function signature, variable where it isn't obvious, and
+   class attribute is annotated, and CI enforces it with a type checker. Untyped/`Any`-typed code
+   is treated as a bug, not a style nit. See §2.
+
+---
+
+## 2. Modern Python Standards
+
+Baseline: **Python 3.11+** (per `pyplan/README.md` §2). Beyond PEP 8:
+
+- **This is a typed codebase, full stop.** Python doesn't enforce types at runtime by default —
+  we do it anyway, deliberately, via annotations + a static checker. Nothing in `py-launcher/`
+  should ship unannotated just because "Python doesn't require it."
+- **Type hints everywhere.** All function signatures are fully annotated, including return types
+  (including `-> None` where a function returns nothing — don't omit it). Annotate module-level
+  and class-level variables whose type isn't obvious from an inline literal. Use
+  `from __future__ import annotations` at the top of every module so annotations don't pay a
+  runtime cost and forward references just work.
+- **Static type checking is enforced in CI**, not just recommended. Use **`mypy`** or **`pyright`**
+  (either is fine to start with; pick one and be consistent — `pyright` is the natural pairing if
+  editors/agents are already using Pylance, since it's the same engine). Add it to CI alongside
+  `pytest` from Phase 1 onward (`pyplan/README.md` §7) so type errors fail the build, the same as
+  a failing test.
+- **No `Any` as an escape hatch.** `typing.Any` is only acceptable at a genuine untyped boundary
+  (e.g. immediately after `json.load()`, before converting into a dataclass/Pydantic model — see
+  below) and should be narrowed away as close to that boundary as possible. Reaching for `Any`
+  because a real type is inconvenient to write is not allowed — use `TypeAlias`, `Protocol`,
+  generics, or a union instead.
+- **No untyped `**kwargs`/`*args` without a `ParamSpec`/explicit types** unless wrapping a
+  genuinely dynamic third-party API (e.g. some Qt signal plumbing) — and even then, type what you
+  can.
+- **`pathlib.Path`, never raw string paths.** No `os.path.join`; no manual `/` or `\` string
+  concatenation. This matters doubly here since the app is cross-platform (macOS/Windows/Linux).
+- **f-strings only** for string interpolation. No `%`-formatting, no `.format()`.
+- **Dataclasses (or Pydantic, for manifest validation) over bare dicts** for any structured data
+  that has a known shape — e.g. a loaded manifest, a catalog entry, a container status result.
+  Bare `dict[str, Any]` is acceptable only at the JSON parse boundary, immediately converted.
+- **No bare `except:`.** Catch specific exceptions. If you must catch broadly at a boundary
+  (e.g. top-level UI error handling), catch `Exception` and log/report it — never silently swallow.
+- **Context managers for resources.** Subprocess handles, file handles, DB connections — always
+  `with`.
+- **No mutable default arguments.** `def f(x: list | None = None)`, never `def f(x: list = [])`.
+- **Prefer composition over inheritance**, except where inheritance expresses genuine
+  "is-a" hierarchy (e.g. a base `Controller` class that per-game controllers subclass — see §3).
+- **Docstrings on every public function/class** — one-line summary is the minimum; explain
+  *why*, not just *what*, when the "why" isn't obvious from the name.
+- **Logging, not `print`.** Use the standard `logging` module (or a thin wrapper) everywhere
+  except throwaway local debugging that never gets committed.
+- **Formatting/linting:** `black` for formatting, `ruff` for linting (recommended tools — pin
+  versions in `requirements-dev.txt` once that file exists). Line length 100.
+
+---
+
+## 3. Strict Separation of Concerns
+
+Every file in `py-launcher/py/` has exactly one job. This is the most important structural rule
+in the codebase because the whole point of Yu'lon is to be more maintainable than the shell
+scripts it replaces.
+
+| Layer | Owns | Must never |
+|---|---|---|
+| `runner.py` | Running a subprocess and streaming its output | Know anything about Docker, games, or manifests |
+| `platform.py` | OS detection, config dir paths, Docker/WSL provisioning | Know anything about a specific game or module |
+| `catalog/installer.py` | Orchestrating an install (deps → clone → build → config) for *one* catalog entry | Contain UI code, or hardcode per-game logic that belongs in a manifest |
+| `controller-<acronym>/docker_ctl.py` | Docker lifecycle for *that one game's* containers | Reach into another game's controller, or contain UI code |
+| `controller-<acronym>/modules.py` | Loading/validating/applying that game's manifests | Hardcode module data that should live in `manifests/` JSON |
+| `ui/*_view.py` | Rendering widgets and wiring signals | Contain business logic, subprocess calls, or Docker calls directly — delegate to controller/catalog objects |
+
+**Rule of thumb:** if you're writing Docker-related code inside a `ui/` file, or UI-related code
+inside a `controller-*/` file, stop — that logic belongs in the other layer, connected by a
+signal or a plain method call (see §5).
+
+**Manifests hold data, code holds behavior.** If a piece of information could be different for a
+different mod/module/game (a repo URL, a config key name, a SQL glob), it belongs in a JSON
+manifest under `manifests/`, not in a Python conditional. See `pyplan/README.md` §6.
+
+---
+
+## 4. DRY — Don't Repeat Yourself
+
+- **Shared subprocess/Docker logic lives in `runner.py` and a common base controller.** Per-game
+  controllers (`controller-wow/`, `controller-rs/`, etc.) subclass shared behavior — they do not
+  each reimplement "wait for container healthy" or "check port conflict" from scratch.
+- **The single-instance/port-conflict check (`pyplan/README.md` §12) is implemented once**, in the
+  shared layer, and inherited by every controller.
+- **Manifests are the DRY mechanism for game/module data.** Adding a new mod is a new JSON file,
+  not new Python code, specifically so behavior isn't duplicated per mod.
+- **If you find yourself copy-pasting a function between two `controller-*/` packages, stop.**
+  Promote it to a shared base class or a shared utility module instead.
+- **Constants defined once.** Container name prefixes, default ports, config dir names — one
+  source of truth, imported everywhere else.
+
+---
+
+## 5. Call Down / Signal Up
+
+This is the governing UI architecture pattern and applies to **all** parent/child relationships
+in the codebase, not just Qt widgets.
+
+- **Calling down:** a parent (a view, a controller, an orchestrator) calls methods on its children
+  directly. A `controller_view.py` calls `docker_ctl.start()` directly. A `CatalogView`'s parent
+  window calls `catalog_view.refresh()` directly.
+- **Signaling up:** a child never calls back into its parent by holding a reference to it, and
+  never mutates parent state directly. Instead, a child **emits a signal** (PySide6 `Signal`) that
+  the parent (or whoever composed the child) connects to. The child has no idea who's listening,
+  or whether anyone is.
+
+```python
+# GOOD — child signals up, has no reference to its parent
+class InstallPanel(QWidget):
+    install_finished = Signal(bool)  # emits success/failure, doesn't know who's listening
+
+    def _on_process_done(self, ok: bool) -> None:
+        self.install_finished.emit(ok)
+
+
+# GOOD — parent calls down directly
+class CatalogView(QWidget):
+    def __init__(self) -> None:
+        self.panel = InstallPanel()
+        self.panel.install_finished.connect(self._handle_install_finished)
+
+    def start_install(self, entry: CatalogEntry) -> None:
+        self.panel.begin(entry)  # calling down
+
+
+# BAD — child reaches up into a parent it was handed a reference to
+class InstallPanel(QWidget):
+    def __init__(self, parent_window) -> None:
+        self._parent_window = parent_window  # ✗ never do this
+
+    def _on_process_done(self, ok: bool) -> None:
+        self._parent_window.refresh_catalog()  # ✗ child mutating parent directly
+```
+
+This applies equally outside the UI layer: a `docker_ctl.py` function that starts a container
+should not call back into `installer.py` or the UI — it returns a result (or emits an event, if
+async) and lets the caller decide what happens next.
+
+---
+
+## 6. Game Naming — Acronyms Only
+
+**Never refer to a game by its full or trademarked name anywhere in code, filenames, manifest
+`id`/`game` fields, log messages, or UI copy shown to developers.** Use the acronym.
+
+| Never write | Always write |
+|---|---|
+| Warcraft, World of Warcraft | **WoW** |
+| RuneScape | **RS** |
+| MapleStory | **MS** |
+| Mu Online | **MU** |
+| Wrath of the Lich King | **WotLK** (append to the game acronym: `wow-wotlk`) |
+| The Burning Crusade | **TBC** (`wow-tbc`) |
+
+- This applies to Python identifiers, JSON `game`/`id` values, directory names
+  (`controller-wow-wotlk/`, not `controller-world-of-warcraft-wrath-of-the-lich-king/`), and log
+  output.
+- **User-facing UI copy is the one exception where clarity matters more than the rule** — a
+  first-run screen may need to spell out "World of Warcraft (WoW) — Wrath of the Lich King" once
+  for a new user's benefit. Even then, default to the acronym after first mention on a given
+  screen.
+- When adding a new game to the catalog, pick its acronym convention (check for existing community
+  convention first — e.g. RS for RuneScape is already used in this repo's `guides/runescape/`) and
+  use it consistently across manifest `game` values, directory names, and container name prefixes.
+- Rationale: keeps the codebase, logs, and filenames neutral of trademarked terms, and keeps
+  naming short and consistent with how the community already refers to these servers.
+
+### 6a. Filenames — always lowercase
+
+**Every filename in this repository, without exception, is lowercase.** This includes Python
+modules, JSON manifests, markdown docs, and directories.
+
+- `catalog_view.py`, not `Catalog_view.py`
+- `controller-wow-wotlk/`, not `Controller-WoW-WotLK/`
+- Use `snake_case` for Python module files (`docker_ctl.py`), and `kebab-case` for
+  non-Python files and directories where multiple words are needed (`py-launcher/`,
+  `release.yml` stays as-is since it's a tool-mandated name).
+- Class names inside a file still use `PascalCase` as normal Python convention — this rule is
+  about the **filename on disk**, not identifiers inside the file.
+
+---
+
+## 7. Extrapolated Conventions (from `pyplan/README.md`)
+
+These aren't new rules — they're existing decisions from the design doc, restated here so this
+guide is a complete reference on its own:
+
+- **UI toolkit is PySide6 (Qt).** No Tkinter, no web views, no JS of any kind (`README.md` §2).
+- **Docker is driven via the `docker` CLI through `subprocess`**, not the Docker SDK, to keep
+  parity with `docker compose` semantics (`README.md` §2).
+- **Game/module/mod data lives in JSON manifests** under `manifests/<game>/`, not hardcoded in
+  Python (`README.md` §6). Manifest `repo` fields must point at legitimate open-source projects
+  only — never a piracy source (`README.md` §3a).
+- **The app never bundles or fetches copyrighted client assets.** Users always supply their own
+  legally obtained client (`README.md` §3a).
+- **Testing uses `pytest`**, with `subprocess` calls mocked in unit tests and a smaller
+  integration suite that exercises real Docker (`README.md` §7, Phase 1).
+- **Per-OS app config/state lives under a dedicated directory**, separate from server data:
+  `~/.local/share/yulon/` (Linux), `%APPDATA%\Yulon\` (Windows),
+  `~/Library/Application Support/Yulon/` (macOS) (`README.md` §11).
+- **Only one server runs at a time**; the shared controller layer enforces this centrally rather
+  than leaving it to each per-game controller (`README.md` §12).
+- **Packaging targets:** `.AppImage` (Linux, all distros), `.exe`/MSI (Windows), `.dmg` (macOS),
+  built via a GitHub Actions matrix since PyInstaller cannot cross-compile (`README.md` §4).
+- **Code signing/notarization is out of scope for v1** — unsigned-binary OS warnings are an
+  accepted, documented tradeoff for now (`README.md` §8–9).
+
+---
+
+## 8. For LLM Agents Specifically
+
+If you are an LLM making changes to this codebase:
+
+- **Check this file and `pyplan/README.md` before writing code**, not after. Both are short
+  enough to read in full.
+- **If a requested change would violate §1's non-negotiable rules, say so explicitly** and propose
+  a compliant alternative rather than silently applying the requested change as-is.
+- **When adding a new game, mod, or module, prefer adding/editing a JSON manifest over writing new
+  Python**, per §3 and §4. Only write Python if the manifest schema genuinely can't express the
+  new behavior — and if so, consider extending the schema instead.
+- **When naming anything — files, directories, identifiers, manifest fields — apply §6 (acronyms)
+  and §6a (lowercase filenames) before finalizing.** Don't wait to be asked to fix casing or naming
+  after the fact.
+- **Do not invent new architectural patterns.** Use call-down/signal-up (§5) for any new
+  parent/child relationship, even outside the UI layer, unless the design doc explicitly says
+  otherwise for that specific case.
+- **Never emit unannotated function signatures or `Any`-typed code to "get it working first."**
+  Per §2, treat missing types as a defect at write-time, not something to add in a follow-up pass.
