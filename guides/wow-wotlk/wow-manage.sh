@@ -30,7 +30,7 @@
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 # ============================================================
 
-MANAGER_VERSION="2.2.2 - ALE House Edition"
+MANAGER_VERSION="2.2.8 - ALE Tavern Edition"
 
 set -o pipefail
 
@@ -212,6 +212,7 @@ _open_text_file() {
 
 _screen_int_handler() {
     if [ "$_ALLOW_INT_EXIT" = true ]; then
+        stop_logo_animation
         printf '\033[r\033[?1049l\033[?25h'
         exit 0
     fi
@@ -220,8 +221,21 @@ _screen_int_handler() {
 
 _screen_term_handler() {
     # SIGTERM always restores the terminal and exits cleanly.
+    stop_logo_animation
     printf '\033[r\033[?1049l\033[?25h'
     exit 0
+}
+
+# Restore the normal screen buffer immediately (idempotent). Anything printed
+# while _IN_ALT_SCREEN is true vanishes the instant the EXIT trap flips back
+# to the main buffer — call this BEFORE printing a fatal error and exiting,
+# or the message disappears and the script looks like it silently crashed.
+_leave_alt_screen() {
+    if $_IN_ALT_SCREEN; then
+        tput smam 2>/dev/null || true
+        printf '\033[r\033[?1049l\033[?25h'
+        _IN_ALT_SCREEN=false
+    fi
 }
 
 # Draw the logo + subtitle bar statically (full clear + redraw).
@@ -429,7 +443,7 @@ _offer_npc_in_capitals() {
     echo -e "  ${WHITE}In-game GM:${RST}  ${CYAN}.npc add $npc_entry 1 $og_x $og_y 17.5 4.5${RST}"
     echo -e "  ${WHITE}WS console:${RST}  ${CYAN}npc add $npc_entry 1 $og_x $og_y 17.5 4.5${RST}"
     echo ""
-    print_info "Access the worldserver console via option 13 from the main menu."
+    print_info "Access the worldserver console via Server Controls → 6 (Attach to console)."
     print_info "If the NPC lands in a bad spot, use .npc delete (in-game) or"
     print_info "npc delete (console) then re-place with your own coordinates."
     echo ""
@@ -919,7 +933,8 @@ _rebuild_npc_spawn_header() {
     fi
 
     # Build the new header block
-    local tmpblock; tmpblock=$(mktemp)
+    local tmpdir; tmpdir=$(dirname "$outfile")
+    local tmpblock; tmpblock=$(mktemp "$tmpdir/.tmp.dad")
     {
         printf '%s\n' "$header_marker"
         printf '%s\n' "Consolidated NPC spawn commands for all installed mods that require NPCs."
@@ -940,7 +955,8 @@ _rebuild_npc_spawn_header() {
     } > "$tmpblock"
 
     # Place at the very top of the file (replace if header exists, otherwise prepend)
-    local tmpout; tmpout=$(mktemp)
+    local tmpdir; tmpdir=$(dirname "$outfile")
+    local tmpout; tmpout=$(mktemp "$tmpdir/.tmp.dad")
     if grep -Fxq "$header_marker" "$outfile" 2>/dev/null; then
         awk -v marker="$header_marker" -v newfile="$tmpblock" '
         $0 == marker {
@@ -970,7 +986,8 @@ upsert_mod_commands() {
     local marker="=== ${key} ==="
 
     # Each section ends with a trailing blank line for readability
-    local tmpblock; tmpblock=$(mktemp)
+    local tmpdir; tmpdir=$(dirname "$outfile")
+    local tmpblock; tmpblock=$(mktemp "$tmpdir/.tmp.dad")
     printf '%s\n%s\n\n' "$marker" "$content" > "$tmpblock"
 
     if [ ! -f "$outfile" ]; then
@@ -981,7 +998,7 @@ upsert_mod_commands() {
     fi
 
     if grep -Fxq "$marker" "$outfile" 2>/dev/null; then
-        local tmpout; tmpout=$(mktemp)
+        local tmpout; tmpout=$(mktemp "$tmpdir/.tmp.dad")
         awk -v marker="$marker" -v newfile="$tmpblock" '
         $0 == marker {
             while ((getline line < newfile) > 0) print line
@@ -1007,7 +1024,8 @@ remove_mod_commands() {
     local marker="=== ${key} ==="
     grep -Fxq "$marker" "$outfile" 2>/dev/null || return 0
 
-    local tmpout; tmpout=$(mktemp)
+    local tmpdir; tmpdir=$(dirname "$outfile")
+    local tmpout; tmpout=$(mktemp "$tmpdir/.tmp.dad")
     awk -v marker="$marker" '
     $0 == marker { skip=1; next }
     skip && /^=== .+ ===$/ { skip=0 }
@@ -1098,27 +1116,34 @@ detect_install() {
     print_step "Detecting WoW installations"
 
     local -a found_dirs=()
+    local -a _seen=()
     local d
     # Servers historically lived at $HOME/wow-server*; the DML Launcher moves
     # them into $HOME/games/ (GAMES_DIR). Scan both locations so the manager
     # finds the server no matter which layout is in use. Dedup by resolved
     # path in case the same server shows up in both (mid-migration, or a
     # games/ symlink back to the old directory).
-    local -A _seen=()
-    local _rp
+    # Uses a plain array (not `local -A`) — associative arrays need Bash 4+,
+    # but macOS ships Bash 3.2 as /bin/bash, where `-A` is an invalid option.
+    local _rp _seen_entry _dup
     # Use a glob with nullglob behavior — handle "no matches" gracefully
     shopt -s nullglob
     for d in "$HOME"/wow-server* "$HOME"/games/wow-server*; do
         if [ -d "$d" ] && [ -f "$d/docker-compose.yml" ]; then
             _rp=$(realpath "$d" 2>/dev/null || echo "$d")
-            [ -n "${_seen[$_rp]:-}" ] && continue
-            _seen[$_rp]=1
+            _dup=false
+            for _seen_entry in "${_seen[@]}"; do
+                [ "$_seen_entry" = "$_rp" ] && { _dup=true; break; }
+            done
+            $_dup && continue
+            _seen+=("$_rp")
             found_dirs+=("$d")
         fi
     done
     shopt -u nullglob
 
     if [ "${#found_dirs[@]}" -eq 0 ]; then
+        _leave_alt_screen
         print_error "No WoW installation found!"
         print_info "Looked for any wow-server* directory (with docker-compose.yml) in \$HOME or \$HOME/games"
         echo ""
@@ -1169,12 +1194,19 @@ detect_install() {
     print_success "Type:   $SERVER_NAME"
 
     # Check docker is usable
+    if ! command -v docker >/dev/null 2>&1; then
+        _leave_alt_screen
+        print_error "Docker is not installed."
+        print_info "Install Docker first, then re-run this manager."
+        exit 1
+    fi
     if ! docker ps &>/dev/null 2>&1; then
         if sudo docker ps &>/dev/null 2>&1; then
-            docker() { sudo /usr/bin/docker "$@"; }
+            docker() { sudo docker "$@"; }
             export -f docker
             print_info "Using sudo for docker (no group membership active in this shell)"
         else
+            _leave_alt_screen
             print_error "Docker is not running."
             print_info "Try: sudo systemctl start docker"
             exit 1
@@ -1300,7 +1332,7 @@ detect_wow_client() {
         return 0
     elif [ -n "$_manual" ]; then
         print_warning "Directory not found: $_manual"
-        print_info "Check the path and try again via option 16 in the main menu."
+        print_info "Check the path and try again via Configurations → C (Set WoW Client Folder)."
     fi
     print_warning "WoW client path not set — addon and client data auto-install skipped."
     return 1
@@ -1357,10 +1389,6 @@ server_status() {
 
     local any_running=false
     local all=$(docker ps -a --format '{{.Names}}\t{{.Status}}' 2>/dev/null)
-
-    # Filter to just THIS install's containers — use the project name (dir name)
-    local project
-    project=$(basename "$SERVER_DIR" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')
 
     echo ""
     echo -e "${WHITE}Containers for this install:${RST}"
@@ -1457,7 +1485,7 @@ server_start() {
     fi
 
     print_info "Bringing up containers..."
-    local up_log="/tmp/wow-server-start.log"
+    local up_log; up_log=$(mktemp /tmp/wow-server-start.dad)
     local up_rc
     if [ "$has_phpmyadmin" = "true" ]; then
         docker compose up -d --scale phpmyadmin=0 > "$up_log" 2>&1
@@ -1470,7 +1498,7 @@ server_start() {
     if [ "$up_rc" -ne 0 ]; then
         print_error "Failed to start server (exit code: $up_rc)"
         echo ""
-        print_info "Last 20 lines of /tmp/wow-server-start.log:"
+        print_info "Last 20 lines of $up_log:"
         tail -20 "$up_log" 2>/dev/null | sed 's/^/    /'
         echo ""
         # Diagnose the most common failure modes
@@ -1534,7 +1562,7 @@ server_stop() {
         print_success "Server stopped"
     else
         print_warning "docker compose down had non-zero exit — checking state..."
-        if ! docker ps --format '{{.Names}}' | grep -qE "worldserver|authserver"; then
+        if ! docker ps -a --format '{{.Names}}' | grep -qE "worldserver|authserver"; then
             print_success "Containers are gone — stop was effective"
         else
             print_error "Some containers may still be running"
@@ -1707,10 +1735,20 @@ discover_module_sql_files() {
     (cd "$sql_dir" && ls *.sql 2>/dev/null | tr '\n' ' ')
 }
 
+# Return 0 if $1 looks like a legitimate SQL update filename (letters, digits,
+# dots, underscores, hyphens, and spaces — the exact shape of the filenames AC
+# records in `updates.name`). Rejects single quotes, semicolons, backslashes,
+# and other SQL metacharacters so user-typed filenames can't inject SQL.
+_sql_filename_ok() {
+    local re='^[-A-Za-z0-9._ ]+$'
+    [[ "$1" =~ $re ]]
+}
+
 # Run a DELETE on the updates table for a given database and SQL file name.
 # Returns the number of rows affected (0 if nothing matched, useful diagnostic).
 clear_update_tracking_row() {
     local db_full="$1" sql_filename="$2"
+    _sql_filename_ok "$sql_filename" || { print_error "Invalid SQL filename: $sql_filename"; return 1; }
     # Count rows first so we can report success accurately
     local rows
     rows=$(docker exec "$DB_CONTAINER" mysql -uroot -p"$DB_ROOT_PASSWORD" -N \
@@ -1786,6 +1824,7 @@ compute_sql_hash() {
 # the file — which causes ac-db-import to fail with "Table X already exists".
 mark_sql_applied() {
     local db_full="$1" sql_filename="$2"
+    _sql_filename_ok "$sql_filename" || { print_error "Invalid SQL filename: $sql_filename"; return 1; }
     local sql_file
     sql_file=$(find "$SERVER_DIR/modules" -name "$sql_filename" 2>/dev/null | head -1)
     if [ -z "$sql_file" ]; then
@@ -2034,7 +2073,7 @@ repair_install_state() {
     esac
 
     echo ""
-    print_info "Done. Restart the server (menu option 9) to apply changes."
+    print_info "Done. Restart the server (Server Controls → 4) to apply changes."
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -2156,9 +2195,10 @@ rebuild_worldserver() {
 
             print_info "Building... (output below — full log: /tmp/wow-modules-build.log)"
             echo ""
-            if docker compose up -d --build 2>&1 | \
-                tee /tmp/wow-modules-build.log | \
-                grep -E "Step|Building|Compiling|Linking|Successfully|ERROR|error:|Created"; then
+            docker compose up -d --build > /tmp/wow-modules-build.log 2>&1
+            local _build_rc=$?
+            grep -E "Step|Building|Compiling|Linking|Successfully|ERROR|error:|Created" /tmp/wow-modules-build.log
+            if [ "$_build_rc" -eq 0 ]; then
                 print_success "Rebuild complete!"
             else
                 print_warning "Build had non-zero exit — check /tmp/wow-modules-build.log"
@@ -2220,7 +2260,7 @@ configure_ahbot() {
 
     if [ -z "$_ahbot_key" ]; then
         print_error "Neither mod-ah-bot nor mod-ah-bot-plus is installed!"
-        print_info "Add one via main menu option 1 (Manage AzerothCore Modules)."
+        print_info "Add one via Server Modifications → 1 (Manage AzerothCore Modules)."
         return 1
     fi
 
@@ -2348,7 +2388,7 @@ configure_ale() {
 
     if ! module_is_installed "mod-ale"; then
         print_error "mod-ale is not installed yet!"
-        print_info "Add it first via main menu option 1 (Manage AzerothCore Modules)."
+        print_info "Add it first via Server Modifications → 1 (Manage AzerothCore Modules)."
         return 1
     fi
 
@@ -3041,7 +3081,7 @@ copy_server_dbc() {
 }
 
 # Interactive: set or change the WoW client folder.
-# Called from the main menu (option 16) and optionally from first-run.
+# Called from Configurations → C and optionally from first-run.
 configure_wow_client() {
     echo ""
     print_step "WoW Client Folder"
@@ -3290,7 +3330,7 @@ configure_ale_paragon() {
 _sed_patch_config() {
     local file="$1" expr="$2" desc="${3:-config value}"
     local _spc_tmp
-    _spc_tmp=$(mktemp "${TMPDIR:-/tmp}/ale_cfg_XXXXXX") || {
+    _spc_tmp=$(mktemp "${TMPDIR:-/tmp}/ale_cfg_dad") || {
         print_warning "  mktemp failed; cannot patch ${desc}."
         return 1
     }
@@ -3466,8 +3506,7 @@ configure_ale_bmah() {
     local _bmah_sql="$clone_dir/guides/wow-wotlk/ALE-Kegs/BlackMarketAuctionHouse/sql/BMAH_Up.sql"
     if [ -f "$_bmah_sql" ] && container_running "$DB_CONTAINER"; then
         print_info "Re-applying BMAH_Up.sql (fixes NPC model)..."
-        docker exec "$DB_CONTAINER" mysql -uroot -p"$DB_ROOT_PASSWORD" acore_world \
-            < "$_bmah_sql" 2>/dev/null && \
+        ale_run_sql_file "acore_world" "$_bmah_sql" && \
             print_success "BMAH SQL applied — NPC model set." || \
             print_warning "BMAH SQL apply failed — check DB container logs."
     fi
@@ -3528,7 +3567,7 @@ _aw_enable() {
         return 1
     fi
     local _aw_tmp
-    _aw_tmp=$(mktemp "${TMPDIR:-/tmp}/aw_enable_XXXXXX") || {
+    _aw_tmp=$(mktemp "${TMPDIR:-/tmp}/aw_enable_dad") || {
         print_warning "  mktemp failed; cannot patch ${flag}."
         return 1
     }
@@ -3753,13 +3792,17 @@ configure_ale_activechat() {
     [ -f "$_ac_dest/data/chatter.lua" ] && mv "$_ac_dest/data/chatter.lua" "$_ac_dest/data/chatter_data.lua" && _fixed=true
     [ -f "$_ac_dest/data/context.lua" ] && mv "$_ac_dest/data/context.lua" "$_ac_dest/data/context_data.lua" && _fixed=true
     if $_fixed; then
-        find "$_ac_dest" -name "*.lua" -exec \
-            sed -i '' \
+        # Portable rewrite: `sed -i ''` is BSD/macOS-only; GNU sed (Linux)
+        # treats '' as a filename and skips the real file. Use temp-file rewrite.
+        local _ac_file
+        while IFS= read -r _ac_file; do
+            sed \
                 -e 's/require("data\.chatter")/require("data.chatter_data")/g' \
                 -e "s/require('data\.chatter')/require('data.chatter_data')/g" \
                 -e 's/require("data\.context")/require("data.context_data")/g' \
                 -e "s/require('data\.context')/require('data.context_data')/g" \
-            {} \;
+                "$_ac_file" > "$_ac_file.tmp" && mv "$_ac_file.tmp" "$_ac_file"
+        done < <(find "$_ac_dest" -name "*.lua")
         print_success "Duplicate filename collision fixed (data/chatter→chatter_data, data/context→context_data)."
     else
         print_info "No duplicate files found — already fixed or not present."
@@ -3801,14 +3844,17 @@ ale_deploy_lua_files() {
                 # Rename conflicting data/ files
                 [ -f "$_ac_dest/data/chatter.lua"  ] && mv "$_ac_dest/data/chatter.lua"  "$_ac_dest/data/chatter_data.lua"
                 [ -f "$_ac_dest/data/context.lua"  ] && mv "$_ac_dest/data/context.lua"  "$_ac_dest/data/context_data.lua"
-                # Patch all require("data.chatter") / require("data.context") references
-                find "$_ac_dest" -name "*.lua" -exec \
-                    sed -i '' \
+                # Patch all require("data.chatter") / require("data.context") references.
+                # Portable temp-file rewrite (GNU sed has no BSD `sed -i ''` syntax).
+                local _ac_file
+                while IFS= read -r _ac_file; do
+                    sed \
                         -e 's/require("data\.chatter")/require("data.chatter_data")/g' \
                         -e "s/require('data\.chatter')/require('data.chatter_data')/g" \
                         -e 's/require("data\.context")/require("data.context_data")/g' \
                         -e "s/require('data\.context')/require('data.context_data')/g" \
-                    {} \;
+                        "$_ac_file" > "$_ac_file.tmp" && mv "$_ac_file.tmp" "$_ac_file"
+                done < <(find "$_ac_dest" -name "*.lua")
                 print_success "Deployed → lua_scripts/AzerothChatter/ (duplicate filenames resolved)"
             else
                 print_warning "Expected directory not found: $src"
@@ -3819,7 +3865,7 @@ ale_deploy_lua_files() {
             if [ -d "$clone_dir/lua_scripts" ]; then
                 cp -r "$clone_dir/lua_scripts/." "$lua_dir/" && \
                     print_success "Deployed → lua_scripts/ (battlepass/ + lib/CSMH)" || \
-                    { print_warning "Copy failed — check $clone_dir/lua_scripts"; break; }
+                    { print_warning "Copy failed — check $clone_dir/lua_scripts"; return 1; }
                 # ALE auto-loads all .ext files BEFORE any .lua scripts run.
                 # So by the time 05_BP_Communication.lua executes, RegisterClientRequests
                 # and Player:SendServerResponse are already defined by CSMH_SMH.ext.
@@ -4938,9 +4984,15 @@ configure_sqlmod_npc_teleporter() {
     printf "  Install Capital Teleporter NPC?      (true/false) [current: %s]: " "$cur_capital"
     local new_capital; read -r new_capital
     [ -z "$new_capital" ] && new_capital="$cur_capital"
+    [[ "$new_capital" == "true" || "$new_capital" == "false" ]] || {
+        print_error "Must be true or false."; press_enter; return
+    }
     printf "  Install Starting Zone Teleporter NPC? (true/false) [current: %s]: " "$cur_startzone"
     local new_startzone; read -r new_startzone
     [ -z "$new_startzone" ] && new_startzone="$cur_startzone"
+    [[ "$new_startzone" == "true" || "$new_startzone" == "false" ]] || {
+        print_error "Must be true or false."; press_enter; return
+    }
 
     printf 'NPC_TELEPORTER_ONY_LEVEL=%s\nNPC_TELEPORTER_CAPITAL=%s\nNPC_TELEPORTER_STARTZONE=%s\n' \
         "$new_ony" "$new_capital" "$new_startzone" > "$cfg_file"
@@ -5492,7 +5544,7 @@ menu_ale_scripts() {
 
         if ! module_is_installed "mod-ale"; then
             printf "  ${RED}✗ mod-ale (ALE Lua Engine) is not installed.${RST}\n"
-            printf "  ${WHITE}Install via main menu option 1, then configure via option 5.${RST}\n"
+            printf "  ${WHITE}Install via Server Modifications → 1, then configure via Configurations → 2.${RST}\n"
             printf "\n  ${DIM}Press ENTER to return...${RST}\n"
             read -r _
             return
@@ -5559,8 +5611,9 @@ menu_ale_scripts() {
         [ "$total_pages" -gt 1 ] && page_hint="   ${WHITE}< >${RST} Page"
         printf "  ${WHITE}i<num>${RST} Install   ${WHITE}r<num>${RST} Remove   ${WHITE}c<num>${RST} Config   ${WHITE}?<num>${RST} About${page_hint}   ${WHITE}ENTER${RST} Back\n"
 
-        if ! _read_menu_input "$(( tlines - 1 ))"; then
-            local _read_rc=$?
+        _read_menu_input "$(( tlines - 1 ))"
+        local _read_rc=$?
+        if [ "$_read_rc" -ne 0 ]; then
             [ "$_read_rc" -eq 2 ] && continue
             return
         fi
@@ -5621,12 +5674,11 @@ menu_ale_scripts() {
                 press_enter
                 ;;
             [?])
-                local anum; anum="${nums//[[:space:]]/}"
-                if ! [[ "$anum" =~ ^[0-9]+$ ]] || \
-                    [ "$anum" -lt 1 ] || [ "$anum" -gt "$total" ]; then
+                if ! _parse_single_index "$nums" "$total"; then
                     print_warning "Invalid script number -- e.g. ?5"
                     press_enter; continue
                 fi
+                local anum="$_PARSED_INDEX"
                 IFS='|' read -r key name url branch <<< "${available_entries[$((anum - 1))]}"
                 show_about "$key" "$name" "$url"
                 ;;
@@ -5873,8 +5925,9 @@ menu_modules() {
         [ "$total_pages" -gt 1 ] && page_hint="   ${WHITE}< >${RST} Page"
         printf "  ${WHITE}i<num>${RST} Install   ${WHITE}r<num>${RST} Remove   ${WHITE}c<num>${RST} Config   ${WHITE}?<num>${RST} About${page_hint}   ${WHITE}ENTER${RST} Back\n"
 
-        if ! _read_menu_input "$(( tlines - 1 ))"; then
-            local _read_rc=$?
+        _read_menu_input "$(( tlines - 1 ))"
+        local _read_rc=$?
+        if [ "$_read_rc" -ne 0 ]; then
             [ "$_read_rc" -eq 2 ] && continue
             return
         fi
@@ -5982,12 +6035,11 @@ menu_modules() {
                 press_enter
                 ;;
             c)
-                local cnum; cnum="${nums//[[:space:]]/}"
-                if ! [[ "$cnum" =~ ^[0-9]+$ ]] || \
-                    [ "$cnum" -lt 1 ] || [ "$cnum" -gt "$total" ]; then
+                if ! _parse_single_index "$nums" "$total"; then
                     print_warning "Invalid module number — e.g. c3"
                     press_enter; continue
                 fi
+                local cnum="$_PARSED_INDEX"
                 IFS='|' read -r key name _ _ <<< "${available_entries[$((cnum - 1))]}"
                 print_header
                 case "$key" in
@@ -6012,12 +6064,11 @@ menu_modules() {
                 press_enter
                 ;;
             [?])
-                local anum; anum="${nums//[[:space:]]/}"
-                if ! [[ "$anum" =~ ^[0-9]+$ ]] || \
-                    [ "$anum" -lt 1 ] || [ "$anum" -gt "$total" ]; then
+                if ! _parse_single_index "$nums" "$total"; then
                     print_warning "Invalid module number -- e.g. ?3"
                     press_enter; continue
                 fi
+                local anum="$_PARSED_INDEX"
                 IFS='|' read -r key name url _sql_dirs <<< "${available_entries[$((anum - 1))]}"
                 show_about "$key" "$name" "$url"
                 ;;
@@ -6147,7 +6198,7 @@ _module_conf_hints() {
                 '  - AuctionHouseBot.EnableBuyer' \
                 '  - AuctionHouseBot.Account / GUID / GUIDs' \
                 '  - AuctionHouseBot.Trace* debugging flags' \
-                'Tip: use top-level option 4 for guided AH Bot setup.'
+                'Tip: use Configurations → 1 (Configure AH Bot) for guided setup.'
             ;;
         mod-ah-bot-plus)
             printf '%s\n' \
@@ -6159,7 +6210,7 @@ _module_conf_hints() {
                 '  - AuctionHouseBot.MinutesBetweenSellCycle' \
                 '  - AuctionHouseBot.ListProportion.*     (per-category/quality weighting)' \
                 '  - AuctionHouseBot.AdvancedListingRules.UseDropRates.Enabled' \
-                'Tip: use top-level option 4 for guided AH Bot setup.'
+                'Tip: use Configurations → 1 (Configure AH Bot) for guided setup.'
             ;;
         mod-autobalance)
             printf '%s\n' \
@@ -6173,7 +6224,7 @@ _module_conf_hints() {
                 'Common options:' \
                 '  - ALE.ScriptPath' \
                 '  - ALE.EnableLuaEngine' \
-                'Tip: use top-level option 5 for guided ALE setup.'
+                'Tip: use Configurations → 2 (Configure ALE) for guided setup.'
             ;;
         mod-player-bot-level-brackets)
             printf '%s\n' \
@@ -6309,8 +6360,9 @@ menu_module_management() {
         [ "$total_pages" -gt 1 ] && page_hint="   ${WHITE}< >${RST} Page"
         printf "  ${WHITE}a<num>${RST} Activate conf   ${WHITE}e<num>${RST} Edit conf   ${WHITE}r<num>${RST} Reset defaults   ${WHITE}?<num>${RST} Help${page_hint}   ${WHITE}ENTER${RST} Back\n"
 
-        if ! _read_menu_input "$(( tlines - 1 ))"; then
-            local _read_rc=$?
+        _read_menu_input "$(( tlines - 1 ))"
+        local _read_rc=$?
+        if [ "$_read_rc" -ne 0 ]; then
             [ "$_read_rc" -eq 2 ] && continue
             return
         fi
@@ -6374,7 +6426,7 @@ menu_module_management() {
                 fi
                 if ! module_is_installed "$key"; then
                     print_warning "$name is not installed."
-                    print_info "Install it first via main menu option 1 (Manage AzerothCore Modules), then rebuild via option 7 (Rebuild worldserver)."
+                    print_info "Install it first via Server Modifications → 1 (Manage AzerothCore Modules), then rebuild via Configurations → 5 (Rebuild worldserver)."
                     press_enter
                     continue
                 fi
@@ -6387,7 +6439,7 @@ menu_module_management() {
                 if [ "${action,,}" = "a" ]; then
                     if [ -z "$conf_dist" ] || [ ! -f "$conf_dist" ]; then
                         print_warning "Template .dist not found for $name."
-                        print_info "Run top-level option Rebuild worldserver, then try again."
+                        print_info "Run Configurations → 5 (Rebuild worldserver), then try again."
                         press_enter
                         continue
                     fi
@@ -6424,7 +6476,7 @@ menu_module_management() {
                 if [ "${action,,}" = "r" ]; then
                     if [ -z "$conf_dist" ] || [ ! -f "$conf_dist" ]; then
                         print_warning "Template .dist not found for $name."
-                        print_info "Run top-level option Rebuild worldserver, then try again."
+                        print_info "Run Configurations → 5 (Rebuild worldserver), then try again."
                         press_enter
                         continue
                     fi
@@ -6507,7 +6559,8 @@ show_first_run_welcome() {
     echo -e "${WHITE}     Lightweight Lua scripts that run inside the server at runtime —${RST}"
     echo -e "${WHITE}     no rebuild needed after the first time. ${BOLD}Requires the AzerothCore${RST}"
     echo -e "${WHITE}     ${BOLD}Lua Engine (ALE) module to be installed and configured first${RST}${WHITE}.${RST}"
-    echo -e "${WHITE}     Install ALE via option 1, then configure it via option 5.${RST}"
+    echo -e "${WHITE}     Install ALE via Server Modifications → 1 (Modules), then configure${RST}"
+    echo -e "${WHITE}     it via Configurations → 2 (Configure ALE).${RST}"
     echo ""
     echo -e "${GOLD}  3) SQL Mods${RST}"
     echo -e "${WHITE}     Direct database tweaks: buff/nerf mobs, custom login messages,${RST}"
@@ -6518,7 +6571,7 @@ show_first_run_welcome() {
     echo -e "${WHITE}${BOLD}A few things to know:${RST}"
     echo ""
     echo -e "${GREEN}  ✓${RST} ${WHITE}Nothing changes until you explicitly choose an action.${RST}"
-    echo -e "${WHITE}    Options 8 (Server status) and 12 (View logs) are read-only.${RST}"
+    echo -e "${WHITE}    Server Controls → 1 (Server status) and 5 (View logs) are read-only.${RST}"
     echo ""
     echo -e "${GREEN}  ✓${RST} ${WHITE}You'll be asked before anything destructive.${RST}"
     echo -e "${WHITE}    Installs, removes, rebuilds, and database operations all ask first.${RST}"
@@ -6529,17 +6582,17 @@ show_first_run_welcome() {
 
     if [ "$user_module_count" -eq 0 ]; then
         echo -e "${WHITE}${BOLD}Suggested first steps for a fresh install:${RST}"
-        echo -e "${WHITE}  1. Option ${CYAN}8${WHITE} (Server status) — confirm your containers are running${RST}"
-        echo -e "${WHITE}  2. Option ${CYAN}3${WHITE} (SQL Mods) — safe first tweaks, no rebuild needed${RST}"
-        echo -e "${WHITE}  3. Option ${CYAN}1${WHITE} (Modules) — browse and install C++ modules${RST}"
-        echo -e "${WHITE}  4. Option ${CYAN}5${WHITE} (Configure ALE) — if you installed the ALE module,${RST}"
-        echo -e "${WHITE}     configure it here, then use option ${CYAN}2${WHITE} to add Lua mods${RST}"
+        echo -e "${WHITE}  1. Server Controls → 1 (Server status) — confirm your containers are running${RST}"
+        echo -e "${WHITE}  2. Server Modifications → 3 (SQL Mods) — safe first tweaks, no rebuild needed${RST}"
+        echo -e "${WHITE}  3. Server Modifications → 1 (Modules) — browse and install C++ modules${RST}"
+        echo -e "${WHITE}  4. Configurations → 2 (Configure ALE) — if you installed the ALE module,${RST}"
+        echo -e "${WHITE}     configure it here, then use Server Modifications → 2 to add Lua mods${RST}"
     else
         echo -e "${WHITE}${BOLD}Useful options for an existing install:${RST}"
-        echo -e "${WHITE}  • Option ${CYAN}1${WHITE} (Modules) — browse installed and available C++ modules${RST}"
-        echo -e "${WHITE}  • Option ${CYAN}2${WHITE} (ALE Lua Mods) — manage Lua scripts (needs ALE installed)${RST}"
-        echo -e "${WHITE}  • Option ${CYAN}3${WHITE} (SQL Mods) — database tweaks, no rebuild required${RST}"
-        echo -e "${WHITE}  • Option ${CYAN}8${WHITE} (Server status) — check container state${RST}"
+        echo -e "${WHITE}  • Server Modifications → 1 (Modules) — browse installed and available C++ modules${RST}"
+        echo -e "${WHITE}  • Server Modifications → 2 (ALE Lua Mods) — manage Lua scripts (needs ALE installed)${RST}"
+        echo -e "${WHITE}  • Server Modifications → 3 (SQL Mods) — database tweaks, no rebuild required${RST}"
+        echo -e "${WHITE}  • Server Controls → 1 (Server status) — check container state${RST}"
         echo -e "${WHITE}  • ${CYAN}Main Menu → 4)${WHITE} Server Maintenance — backup, restore, repair, updates${RST}"
     fi
     echo ""
@@ -6553,10 +6606,10 @@ show_first_run_welcome() {
     echo -e "${WHITE}Some mods include WoW client addons. Detecting your client${RST}"
     echo -e "${WHITE}folder now lets the manager auto-install them for you.${RST}"
     echo ""
-    if ask_yes_no "Detect WoW client folder now? (can skip and do later via option 16)"; then
+    if ask_yes_no "Detect WoW client folder now? (can skip and do later via Configurations → C)"; then
         detect_wow_client || true
     else
-        print_info "You can set this anytime from the main menu → option 16."
+        print_info "You can set this anytime from Configurations → C (Set WoW Client Folder)."
     fi
     echo ""
     press_enter
@@ -6632,8 +6685,9 @@ menu_sql_mods() {
         [ "$total_pages" -gt 1 ] && page_hint="   ${WHITE}< >${RST} Page"
         printf "  ${WHITE}i<num>${RST} Install   ${WHITE}r<num>${RST} Remove   ${WHITE}c<num>${RST} Config   ${WHITE}?<num>${RST} About${page_hint}   ${WHITE}ENTER${RST} Back\n"
 
-        if ! _read_menu_input "$(( tlines - 1 ))"; then
-            local _read_rc=$?
+        _read_menu_input "$(( tlines - 1 ))"
+        local _read_rc=$?
+        if [ "$_read_rc" -ne 0 ]; then
             [ "$_read_rc" -eq 2 ] && continue
             return
         fi
@@ -6771,8 +6825,8 @@ fix_dbimport_table_exists() {
     else
         print_info "No untracked files found (all already marked or no known files)."
         if [ "$skipped" -gt 0 ]; then
-            print_info "If ac-db-import still fails, try option 1 (Repair install state) to"
-            print_info "clear stale hashes and force a re-apply with mode C (Clear tracking)."
+            print_info "If ac-db-import still fails, try option 1 (Repair install state) in"
+            print_info "Server Maintenance to clear stale hashes and force a re-apply."
         fi
     fi
 }
@@ -7331,9 +7385,9 @@ move_server_files() {
         return
     fi
 
-    # Reject dangerous / well-known system roots
+    # Reject dangerous / well-known system roots and their subdirectories.
     case "$new_dir" in
-        /|"$HOME"|/root|/tmp|/var|/etc|/usr|/boot|/proc|/sys|/dev)
+        /|"$HOME"|"$HOME"/*|/root|/root/*|/tmp|/tmp/*|/var|/var/*|/etc|/etc/*|/usr|/usr/*|/boot|/boot/*|/proc|/proc/*|/sys|/sys/*|/dev|/dev/*)
             print_error "Cannot move to '${new_dir}' — choose a dedicated subdirectory."
             return
             ;;
@@ -7363,7 +7417,7 @@ move_server_files() {
 
     # Write-access probe on the destination parent
     local _probe
-    _probe=$(mktemp "$new_parent/.dml_probe_XXXXXX" 2>/dev/null) || {
+    _probe=$(mktemp "$new_parent/.dml_probe_dad" 2>/dev/null) || {
         print_error "Cannot write to: $new_parent"
         print_info "Check permissions or ensure the drive is mounted."
         return
@@ -7451,18 +7505,31 @@ move_server_files() {
     print_info "Copying files to new location (this may take several minutes)..."
     echo ""
 
+    # Re-validate immediately before the copy to close the TOCTOU window
+    # between the earlier checks and this point (a confirmation prompt, a
+    # `docker compose down`, and a `sleep 2` all elapse in between).
+    canon_src=$(realpath -m -- "$SERVER_DIR" 2>/dev/null || echo "$SERVER_DIR")
+    if [[ "$new_dir" == "$canon_src" || "$new_dir" == "$canon_src/"* || "$canon_src" == "$new_dir/"* ]]; then
+        print_error "Paths changed since validation — aborting move."
+        return
+    fi
+    if [[ -d "$new_dir" ]] && [[ -n "$(ls -A "$new_dir" 2>/dev/null)" ]]; then
+        print_error "Destination became non-empty: $new_dir — aborting move."
+        return
+    fi
+
     local _dest_was_created=false
     [[ ! -d "$new_dir" ]] && _dest_was_created=true
 
     local copy_ok=false
     if command -v rsync &>/dev/null; then
         if rsync -a --info=progress2 --no-inc-recursive \
-                "$SERVER_DIR/" "$new_dir/"; then
+                "$canon_src/" "$new_dir/"; then
             copy_ok=true
         fi
     else
         print_info "(rsync not found — falling back to cp -a)"
-        if mkdir -p "$new_dir" && cp -a "$SERVER_DIR/." "$new_dir/"; then
+        if mkdir -p "$new_dir" && cp -a "$canon_src/." "$new_dir/"; then
             copy_ok=true
         fi
     fi
@@ -7499,7 +7566,7 @@ move_server_files() {
     print_success "Copy complete and verified: ${new_dir}"
     echo ""
 
-    local old_dir="$SERVER_DIR"
+    local old_dir="$canon_src"
 
     # ── Update live session variables ────────────────────────────────
     SERVER_DIR="$new_dir"
@@ -7600,8 +7667,9 @@ menu_server_maintenance() {
         printf "  ${DIM}  [ENTER] Back${RST}\n"
 
         local _tlines; _tlines=$_TERM_LINES
-        if ! _read_menu_input "$(( _tlines - 1 ))"; then
-            local _read_rc=$?
+        _read_menu_input "$(( _tlines - 1 ))"
+        local _read_rc=$?
+        if [ "$_read_rc" -ne 0 ]; then
             [ "$_read_rc" -eq 2 ] && continue
             return
         fi
@@ -7776,8 +7844,9 @@ menu_configuration() {
         printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
         printf "  ${DIM}  [ENTER] Back${RST}\n"
         local _tlines; _tlines=$_TERM_LINES
-        if ! _read_menu_input "$(( _tlines - 1 ))"; then
-            local _read_rc=$?
+        _read_menu_input "$(( _tlines - 1 ))"
+        local _read_rc=$?
+        if [ "$_read_rc" -ne 0 ]; then
             [ "$_read_rc" -eq 2 ] && continue
             return
         fi
@@ -7810,8 +7879,9 @@ menu_server_modifications() {
         printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
         printf "  ${DIM}  [ENTER] Back${RST}\n"
         local _tlines; _tlines=$_TERM_LINES
-        if ! _read_menu_input "$(( _tlines - 1 ))"; then
-            local _read_rc=$?
+        _read_menu_input "$(( _tlines - 1 ))"
+        local _read_rc=$?
+        if [ "$_read_rc" -ne 0 ]; then
             [ "$_read_rc" -eq 2 ] && continue
             return
         fi
@@ -7844,8 +7914,9 @@ menu_server_controls() {
         printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
         printf "  ${DIM}  [ENTER] Back${RST}\n"
         local _tlines; _tlines=$_TERM_LINES
-        if ! _read_menu_input "$(( _tlines - 1 ))"; then
-            local _read_rc=$?
+        _read_menu_input "$(( _tlines - 1 ))"
+        local _read_rc=$?
+        if [ "$_read_rc" -ne 0 ]; then
             [ "$_read_rc" -eq 2 ] && continue
             return
         fi
@@ -7881,8 +7952,9 @@ main_menu() {
         printf "  ${GOLD} Q)${RST} Quit\n"
         local _tlines; _tlines=$_TERM_LINES
         local _irow=$(( _tlines - 1 ))
-        if ! _read_menu_input "$_irow"; then
-            local _read_rc=$?
+        _read_menu_input "$_irow"
+        local _read_rc=$?
+        if [ "$_read_rc" -ne 0 ]; then
             [ "$_read_rc" -eq 2 ] && continue
             return
         fi
@@ -7893,6 +7965,7 @@ main_menu() {
             3)  menu_server_controls ;;
             4)  menu_server_maintenance ;;
             q)  echo ""; print_info "Goodbye!"; exit 0 ;;
+            *)  print_warning "Enter 1-4 or Q."; press_enter ;;
         esac
     done
 }
