@@ -241,8 +241,8 @@ guide is a complete reference on its own:
 - **Testing uses `pytest`**, with `subprocess` calls mocked in unit tests and a smaller
   integration suite that exercises real Docker (`README.md` §7, Phase 1).
 - **Per-OS app config/state lives under a dedicated directory**, separate from server data:
-  `~/.local/share/yulon/` (Linux), `%APPDATA%\Yulon\` (Windows),
-  `~/Library/Application Support/Yulon/` (macOS) (`README.md` §11).
+  `~/.local/share/yulon/` (Linux), `%APPDATA%\yulon\` (Windows),
+  `~/Library/Application Support/yulon/` (macOS) (`README.md` §11).
 - **Only one server runs at a time**; the shared controller layer enforces this centrally rather
   than leaving it to each per-game controller (`README.md` §12).
 - **Packaging targets:** `.AppImage` (Linux, all distros), `.exe`/MSI (Windows), `.dmg` (macOS),

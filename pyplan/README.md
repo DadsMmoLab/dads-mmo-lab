@@ -308,8 +308,8 @@ The app needs a per-OS location to persist its own state — remembered server i
 | Platform | Config/state directory |
 |---|---|
 | Linux | `~/.local/share/yulon/` (XDG Base Dir convention) |
-| Windows | `%APPDATA%\Yulon\` |
-| macOS | `~/Library/Application Support/Yulon/` |
+| Windows | `%APPDATA%\yulon\` |
+| macOS | `~/Library/Application Support/yulon/` |
 
 - Store: known install locations per game, chosen client paths, last-checked update version, cached copies of fetched manifests (with an ETag/timestamp for refresh).
 - This directory is **not** the server directory — never conflate app state with server/database files. Server files stay wherever the user chose during install (matching existing script behavior, e.g. `choose_install_dir()` in `install-wow-wotlk.sh`).

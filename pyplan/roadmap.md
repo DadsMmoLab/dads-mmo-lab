@@ -83,7 +83,7 @@
 
 1. Implement `detect()` returning a normalized platform id (`linux`/`windows`/`macos`).
 2. Implement `config_dir()` returning the per-OS state dir from `README.md` §11
-   (`~/.local/share/yulon/`, `%APPDATA%\Yulon\`, `~/Library/Application Support/Yulon/`).
+   (`~/.local/share/yulon/`, `%APPDATA%\yulon\`, `~/Library/Application Support/yulon/`).
    **[style]** — `pathlib.Path`, no string path munging.
 3. Stub `ensure_docker()` / `ensure_wsl2()` (raise `NotImplementedError` with a clear message;
    real logic lands in Phase 5). **[style]** — keep provisioning out of this phase's scope.
