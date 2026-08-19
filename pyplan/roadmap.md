@@ -24,9 +24,9 @@
 - This roadmap sequences **Phase 1 before Phase 2**. Phase 2.1/2.2 (schema definition and the data
   port from `wow-manage.sh`) may run concurrently with Phase 1; only Phase 2.3 (`modules.py`)
   depends on Phase 1 being complete.
-- See `pyplan/checklist.md` for the running checklist, decision log, and working notes as this
-  roadmap is executed. Nothing in this file should be edited to record notes, decisions made
-  during implementation, or discoveries — that all belongs in `checklist.md` (style-guide §9).
+- See `pyplan/checklist.md` for the running checklist as this roadmap is executed. Nothing in
+  this file should be edited to record notes, decisions made during implementation, or
+  discoveries — keep it a clean plan (style-guide §9).
 
 ---
 
@@ -210,6 +210,22 @@ code changes needed to add a module.
    "Docker isn't available yet — automatic setup lands in a future update" error rather than an
    unhandled exception or silent hang.
 
+### 3.4 Networking auto-setup (README §13)
+
+1. Implement `platform.py` firewall helpers (`open_ports(ports)` / `detect_lan_ip()` /
+   `detect_public_ip()`), shelling out via `runner.py`: UFW (Debian/Ubuntu/SteamOS), firewalld
+   (Fedora), `netsh` + network-profile check (Windows/WSL2), and WSL2 `netsh portproxy` when
+   compose ports are `127.0.0.1`-bound. Carry the auth/world/db port table (3724/8085/3306) as
+   `catalog.json` data, not hardcoded Python. **[style]** — one shared implementation (§4), data
+   in manifests (§3), typed `pathlib`/dataclass return values (§2).
+2. Add a `realmlist` updater that sets `address`/`localAddress` in the auth DB for **LAN**
+   (local IP) or **internet play** (public IP), mirroring the `archive/.../WoW-Wotlk-NETWORKING.md`
+   SQL and the `0.0.0.0` vs `127.0.0.1` port-binding check.
+3. Detect and **prompt** (not silently fail) for the steps the app can't automate: DHCP
+   reservation + TCP port forwarding on the router, and CGNAT/public-IP-change/DuckDNS guidance.
+4. *Definition of done:* LAN mode completes end-to-end with no shell; internet mode detects a
+   missing forward/CGNAT block and reports a clear, actionable message.
+
 **Phase 3 exit criteria (README §7, with the caveat above):** one-game install completes with
 zero shell interaction *at the orchestration layer*, verified on at least one platform that
 already has Docker installed. The literal "click install" end-user experience is only exercisable
@@ -242,7 +258,10 @@ once Phase 4's `catalog_view.py` exists.
    **[style]** — the view calls down into `controller_wow_wotlk/` methods; it never shells out
    directly.
 2. Surface the single-instance/port-conflict block as a clear user message (README §12).
-3. *Definition of done:* full start/stop/logs/accounts/module-toggle workflow via GUI only.
+3. Surface the LAN / internet-play networking auto-setup (§3.4) as a selectable control, showing
+   progress and the router-step prompts the app can't automate. **[style]** — the view delegates
+   to §3.4's helpers via the controller; no `netsh`/`ufw` shelling in the view (§3/§5).
+4. *Definition of done:* full start/stop/logs/accounts/module-toggle workflow via GUI only.
 
 **Phase 4 exit criteria (README §7):** full start/stop/logs/accounts/module-toggle workflow via
 GUI only.
@@ -284,7 +303,7 @@ GUI only.
 ### 5.4 Application self-update check (README §10)
 
 1. Implement the GitHub Releases version check (compare running `__version__` against the latest
-   tag) and a non-blocking notify banner/dialog with a download link, per README §10 and §13
+   tag) and a non-blocking notify banner/dialog with a download link, per README §10 and §14
    Next Action 6. **v1 scope is check + notify only** — no auto-download/auto-replace.
 2. *Definition of done:* running an old build against a newer published release shows the notify
    banner; running the latest build shows nothing.
@@ -309,6 +328,9 @@ automatically.
 - **[style]** `logging`, not `print`, for anything that ships (style-guide §2; see Phase 0.6).
 - **[style]** No bare `except:`; no mutable default arguments; docstrings on every public
   function/class (style-guide §2).
+- **[style]** Networking auto-setup ships once in `platform.py` + `catalog.json` data, not once
+  per game (README §13); the app detects/prompts for router steps it can't automate rather than
+  failing silently.
 - **[legal]** Never bundle/fetch copyrighted client assets; user supplies their own client
   (README §3a).
 

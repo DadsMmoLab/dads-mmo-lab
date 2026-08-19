@@ -1,10 +1,10 @@
-# Yu'lon Checklist & Notes
+# Yu'lon Checklist
 
-> Companion to `pyplan/roadmap.md`. This file is where **checkable progress**, while `roadmap.md` itself stays a clean plan with no commentary (style-guide §9).
+> Companion to `pyplan/roadmap.md`. This file is where **checkable progress** is tracked, while `roadmap.md` itself stays a clean plan with no commentary (style-guide §9).
 >
 > **How to use this file:**
 > - Check items off as they're completed. Leave unchecked items as-is; don't delete steps even if scope changes — note the change instead.
-> - This file is expected to grow throughout the project. That's fine; it's a log, not a plan.
+> - This file is expected to grow throughout the project. That's fine; it's a checklist, not a plan.
 
 ---
 
@@ -44,6 +44,7 @@
 - [ ] 3.1 `catalog.json` — game list
 - [ ] 3.2 `installer.py` — orchestration (Phase 3a: shells out to existing scripts)
 - [ ] 3.3 Silent Docker/WSL provisioning stubs wired in (graceful failure until Phase 5)
+- [ ] 3.4 Networking auto-setup (LAN + internet play; firewall helpers, realmlist updater, router-step prompts) — README §13
 - [ ] **Phase 3 exit criteria met** (verified via CLI/test harness — no UI yet)
 
 ---
@@ -52,7 +53,7 @@
 
 - [ ] 4.1 `log_panel.py` — streaming output widget
 - [ ] 4.2 `catalog_view.py` — browsable catalog
-- [ ] 4.3 `controller_view.py` — per-install management
+- [ ] 4.3 `controller_view.py` — per-install management (+ LAN/internet networking auto-setup control)
 - [ ] **Phase 4 exit criteria met**
 
 ---

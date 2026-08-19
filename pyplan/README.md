@@ -11,7 +11,7 @@ Dad's MMO Lab currently ships installers and managers as **Bash scripts** (`inst
 
 Goals:
 
-1. **No user-facing shell.** Users click buttons, never touch Konsole/PowerShell/WSL.
+1. **No user-facing shell.** Users click buttons, never touch Konsole/PowerShell/WSL — including networking (LAN & internet play) auto-setup (§13).
 2. **One unified codebase.** Write once, run on macOS, Windows, and Linux (Arch/Debian/Fedora/Bazzite/SteamOS).
 3. **Catalog + Controller.** A catalog of installable servers ("Catalog") that holds the users hand tightly, and a per-install management surface ("Controller").
 4. **Data-driven module/mod management.** Modules and mods become JSON manifests fetched from GitHub, so adding content is a data-entry task, not a code task.
@@ -100,8 +100,7 @@ platform dependency stack are provisioned automatically, never by the user:
   are never part of the end-user experience.
 - **If a platform can't bundle Python** (e.g. a future distribution format forbidding
   self-contained runtimes), the app falls back to *silently detecting and installing* the smallest
-  available Python runtime the same way it provisions Docker — still no user-facing shell. Flag
-  this as a deviation in `pyplan/checklist.md` if it ever arises.
+  available Python runtime the same way it provisions Docker — still no user-facing shell.
 
 ---
 
@@ -334,7 +333,43 @@ Existing docs are explicit: **"Only run ONE server at a time — they share the 
 
 ---
 
-## 13. Next Actions
+## 13. Networking Auto-Setup (LAN & Internet Play)
+
+Goal 1 (§1) promises "no user-facing shell." That extends to getting other players connected —
+the most error-prone, shell-heavy part of the current experience, covered today by the manual
+guide `archive/guides/wow-wotlk/WoW-Wotlk-NETWORKING.md`. The Controller automatically sets up
+both modes, surfacing only clear prompts/status rather than terminal commands.
+
+**Two modes, two levels of automation:**
+
+| Mode | Audience | What the app automates | What it cannot automate |
+|---|---|---|---|
+| **LAN** (same Wi-Fi) | Friends/household on the local network | Detect local IP; set `realmlist` `address`/`localAddress` (ports 3724/8085) in the auth DB; open the host firewall (UFW / firewalld / `netsh` + Windows "Private" network check); on WSL2, add `netsh interface portproxy` if ports are bound to `127.0.0.1`; write `realmlist.wtf` for each client | Nothing — LAN is fully automatable |
+| **Internet play** (anyone, anywhere) | Remote friends | Everything in LAN mode, plus: detect the public IP; set `realmlist` `address` to it | Router admin — DHCP reservation, port forwarding (TCP 3724/8085). The app **detects and prompts** for these steps (with router-specific pointers) rather than silently failing; a router without UPnP cannot be configured by the app |
+
+**Cross-platform realities the app must handle** (all documented in the existing guide):
+- **Windows/WSL2:** the `172.x.x.x` WSL2 address is *not* the LAN address — always use the
+  Windows IPv4 from `ipconfig`. The app must read the Windows host address, not the WSL2 guest.
+- **Ports must be bound to `0.0.0.0`, not `127.0.0.1`**, or LAN players can't connect. The app
+  verifies the compose port bindings and warns/fixes before starting.
+- **CGNAT** (mobile/LTE ISPs) blocks port forwarding entirely — the app detects a failed
+  forwarding attempt and explains it clearly rather than reporting a silent timeout.
+- **Dynamic public IP** — the app re-checks the public IP on change and offers a free dynamic-DNS
+  option (DuckDNS) for persistent hosting, mirroring the guide's "Dynamic IP Warning."
+
+**Design constraints:**
+- This is **data + orchestration, not UI or per-game hardcoding.** The port table (auth 3724,
+  world 8085, optional db 3306 — see the guide's "Port Reference") and the per-OS firewall
+  commands belong in `catalog.json`/manifests and a `platform.py` firewall helper, following
+  style-guide §3 (separation of concerns), §4 (DRY — one shared implementation, not one per game).
+- **UI copy may spell out for the user what the app is doing** (style-guide §6's "one exception"),
+  but logs/identifiers stay acronym-only.
+- **Sequenced as its own step** in `roadmap.md` Phase 3/4 (installer + controller wiring), since
+  it depends on both the shared port-conflict check (§12) and the UI's controller surface.
+
+---
+
+## 14. Next Actions
 
 1. ~~Scaffold `pylauncher/` project structure (folders + stub files + `requirements.txt`).~~ — **done**.
 2. Implement `runner.py` + `docker_ctl.py` + `platform.py` for real (Phase 1), including the single-instance/port-conflict check (§12) and `config_dir()` helper (§11).
@@ -342,3 +377,4 @@ Existing docs are explicit: **"Only run ONE server at a time — they share the 
 4. Flesh out `.github/workflows/release.yml` build matrix (currently a placeholder AppImage packaging step) and `build/pylauncher.spec`.
 5. Begin Phase 2: manifest schema finalization, WotLK module port from `wow-manage.sh`, and manifest `repo` allow-list validation (§3a).
 6. Design the self-update check (§10) as part of Phase 1's `platform.py`/`main.py` wiring, even though the UI hook lands later.
+7. Implement networking auto-setup (§13) — LAN fully automated; internet play with router-step detection/prompting — as part of the Phase 3 installer and Phase 4 controller surface.

@@ -26,8 +26,7 @@
    treats it as statically typed: every function signature, variable where it isn't obvious, and
    class attribute is annotated, and CI enforces it with a type checker. Untyped/`Any`-typed code
    is treated as a bug, not a style nit. See §2.
-7. **`pyplan/roadmap.md` stays a clean checklist — no notes, decision logs, or commentary.**
-   That content goes in `pyplan/checklist.md` instead. See §9.
+7. **`pyplan/roadmap.md` stays a clean plan — no notes, decision logs, or commentary.** See §9.
 
 ---
 
@@ -88,7 +87,7 @@ scripts it replaces.
 |---|---|---|
 | `runner.py` | Running a subprocess and streaming its output | Know anything about Docker, games, or manifests |
 | `docker.py` | Shared, game-agnostic Docker lifecycle (start/stop/status/health/polling/port-conflict check) via `runner.py` | Know anything about a specific game's containers/ports — those are passed in by callers via `ContainerSpec` |
-| `platform.py` | OS detection, config dir paths, Docker/WSL provisioning | Know anything about a specific game or module |
+| `platform.py` | OS detection, config dir paths, Docker/WSL provisioning, network auto-setup (LAN/internet-play firewall, IP detection, WSL2 portproxy — README §13) | Know anything about a specific game or module |
 | `catalog/installer.py` | Orchestrating an install (deps → clone → build → config) for *one* catalog entry | Contain UI code, or hardcode per-game logic that belongs in a manifest |
 | `controller_<acronym>/docker_ctl.py` | Holding *that one game's* `ContainerSpec` and re-exporting `docker.py`'s shared operations | Reimplement Docker lifecycle logic itself, reach into another game's controller, or contain UI code |
 | `controller_<acronym>/modules.py` | Loading/validating/applying that game's manifests | Hardcode module data that should live in `manifests/` JSON |
@@ -250,6 +249,11 @@ guide is a complete reference on its own:
   `~/Library/Application Support/yulon/` (macOS) (`README.md` §11).
 - **Only one server runs at a time**; the shared controller layer enforces this centrally rather
   than leaving it to each per-game controller (`README.md` §12).
+- **Networking auto-setup (LAN & internet play)** is automated by the app, not left to shell
+  commands (`README.md` §13). LAN is fully automatable; internet play additionally requires
+  router steps (DHCP reservation, TCP port forwarding) the app **detects and prompts** for rather
+  than silently failing. The per-OS firewall commands and the auth/world/db port table are shared
+  `platform.py`-owned behavior + manifest data, never per-game copy-pasted.
 - **Packaging targets:** `.AppImage` (Linux, all distros), `.exe`/MSI (Windows), `.dmg` (macOS),
   built via a GitHub Actions matrix since PyInstaller cannot cross-compile (`README.md` §4).
 - **Code signing/notarization is out of scope for v1** — unsigned-binary OS warnings are an
@@ -278,7 +282,6 @@ If you are an LLM making changes to this codebase:
   Per §2, treat missing types as a defect at write-time, not something to add in a follow-up pass.
 - **Never add notes, decision-log commentary, "flagged conflict" callouts, or discovery write-ups
   into `pyplan/roadmap.md`.** Per §9, that file is a clean, checklist-style execution plan only.
-  Put that content in `pyplan/checklist.md` instead.
 
 ---
 
@@ -293,10 +296,7 @@ commentary. Keep it terse and checklist-shaped:
 - **`roadmap.md` may NOT contain:** "flagged conflict" essays, historical narration of bugs found
   during implementation, justifications for why an ordering choice was made, or any other prose
   that reads as a note-to-self rather than an instruction. If you catch yourself writing more than
-  2-3 sentences of explanation for *why* a step is what it is, that explanation belongs in
-  `pyplan/checklist.md`, not `roadmap.md`.
-- **`pyplan/checklist.md`** is the designated home for exactly that kind of content: a running,
-  checkable list mirroring the roadmap's steps.
+  2-3 sentences of explanation for *why* a step is what it is, trim it back to the instruction.
 - **Rationale:** `roadmap.md` needs to stay skimmable as a plan. Mixing in retrospective narration
   makes it harder to tell "what to do next" from "what already happened," especially for an LLM
   agent re-reading the file cold in a future session.
