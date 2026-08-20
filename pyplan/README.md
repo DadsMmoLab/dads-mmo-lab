@@ -152,6 +152,7 @@ pylauncher/
 │   ├── docker.py                 # shared Docker lifecycle + port-conflict check (shared)
 │   ├── platform.py               # OS detection + silent Docker/WSL provisioning
 │   ├── log.py                    # shared logging convention (get_logger/configure — Phase 0.6)
+│   ├── manifest.py               # the manifest schema: pydantic models + repo allow-list (Phase 2.1)
 │   └── ui/
 │       ├── __init__.py
 │       ├── catalog_view.py
@@ -160,12 +161,13 @@ pylauncher/
 │           ├── __init__.py
 │           └── log_panel.py      # streaming log output widget
 ├── manifests/                    # module/mod JSON (synced from GitHub)
+│   ├── schema/
+│   │   └── manifest.schema.json  # JSON Schema generated from yulon/manifest.py (Phase 2.1)
 │   └── wow-wotlk/
-│       ├── modules.json          # index; per-module files added here in Phase 2
-│       ├── ale.json              # index; per-ALE-mod files added here in Phase 2
-│       ├── mods.json             # index; per-mod files (ah-bot.json, solocraft.json, transmog.json, ...) added in Phase 2
-│       └── kegs/                 # Unique to WotLK for LUA mods with ALE
-│           └── account-wide.json
+│       ├── modules.json          # index (ids); per-module files in modules/<id>.json (Phase 2.2)
+│       ├── ale.json              # index; per-ALE-mod files in ale/<id>.json
+│       ├── mods.json             # index; per-SQL-mod files in mods/<id>.json
+│       └── kegs.json             # index; per-keg files in kegs/<id>.json — kegs are the in-repo ALE bundles (bmah, sod)
 ├── tests/                        # pytest suite (see pyplan/roadmap.md Phase 0/1)
 │   ├── __init__.py
 │   ├── fixture.md                # pinned AzerothCore compose fixture (Phase 0.4)
@@ -175,6 +177,7 @@ pylauncher/
 │   ├── test_platform.py          # covers yulon/platform.py (Phase 1.2)
 │   ├── test_docker.py            # covers yulon/docker.py + WotLK docker_ctl (Phase 1.3)
 │   ├── test_controller.py        # covers yulon/controller.py + WotlkController (Phase 1.4)
+│   ├── test_manifest.py          # covers yulon/manifest.py (Phase 2.1)
 │   └── integration/              # live-Docker suite, marked `integration`, self-skipping without a daemon (Phase 1.5)
 │       ├── conftest.py           # docker gate + throwaway busybox compose project shaped like an install
 │       ├── test_docker_live.py   # real compose up/healthy/ready/status/conflict-guard/down
@@ -205,21 +208,44 @@ scope is considered (see style-guide §6 for acronym conventions).
 
 The entire project succeeds or fails on the module/mod manifest format. It must capture everything `wow-manage.sh` currently hardcodes as **data**, not code.
 
+**Finalized in Phase 2.1** as the pydantic models in `pylauncher/yulon/manifest.py`; the
+language-neutral JSON Schema is checked in at `pylauncher/manifests/schema/manifest.schema.json`
+(regenerate with `python -m yulon.manifest --dump-schema`; a test fails if it drifts). One schema
+serves all four families (`type`: `module` | `ale` | `mod` | `keg`) — the primitives are a closed
+set (`source`, `build`, `sql`, `conf`, `deploy`, `patches`, `client`, `server_dbc`, `npcs`,
+`prompts`, `notes`); unknown keys are rejected, ids/game are lowercase kebab slugs, and `source.repo`
+must be a GitHub `owner/name` slug or an `https://` URL on an allow-listed forge (§3a). Every
+field except `id`/`name`/`type`/`game` is optional, so a simple module stays short:
+
 ```json
 {
-  "id": "ah-bot",
+  "schema_version": 1,
+  "id": "mod-ah-bot",
   "name": "Auction House Bot",
   "type": "module",
   "game": "wow-wotlk",
-  "repo": "azerothcore/mod-ah-bot",
-  "branch": "master",
-  "sql": ["data/sql/db-world/*.sql"],
-  "conf": "conf/ahbot.conf",
-  "build_targets": ["MODULES=mod-ah-bot"],
-  "requires": [],
-  "description": "Populates the auction house with bot-posted items."
+  "description": "Populates the auction house with bot-posted items.",
+  "source": {"repo": "azerothcore/mod-ah-bot"},
+  "build": {"rebuild": true},
+  "conflicts_with": ["mod-ah-bot-plus"],
+  "sql": [{"db": "world", "path": "data/sql/db-world/*.sql", "applied_by": "db-import"}],
+  "conf": [{
+    "file": "env/dist/etc/modules/mod_ahbot.conf",
+    "template": "conf/mod_ahbot.conf.dist",
+    "keys": [
+      {"key": "AuctionHouseBot.Account", "default": "{bot_account}"},
+      {"key": "AuctionHouseBot.GUID", "default": "{bot_guid}"}
+    ]
+  }],
+  "prompts": [
+    {"key": "bot_guid", "question": "GUID of the bot character", "kind": "int"}
+  ]
 }
 ```
+
+Per-category index files (`modules.json`, `ale.json`, `mods.json`, `kegs.json`) are
+`{"schema_version": 1, "game": "wow-wotlk", "type": "module", "items": ["mod-ah-bot", ...]}` and
+the per-item files live in the matching subdirectory (`modules/mod-ah-bot.json`, ...).
 
 ### Tacit knowledge to port (from `wow-manage.sh`)
 

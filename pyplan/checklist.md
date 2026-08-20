@@ -32,7 +32,7 @@
 
 ## Phase 2 — Manifest schema & data port
 
-- [ ] 2.1 Finalize the manifest schema (+ `repo` allow-list validation)
+- [x] 2.1 Finalize the manifest schema (+ `repo` allow-list validation)
 - [ ] 2.2 Port WotLK modules from `wow-manage.sh` into `manifests/wow-wotlk/`
 - [ ] 2.3 `modules.py` — load/validate/fetch
 - [ ] **Phase 2 exit criteria met**
@@ -84,5 +84,15 @@
   containers out of `docker.port_conflicts_for()`'s global scan, so a restart of the same install
   is never reported as a README §12 conflict; only a foreign container binding the ports blocks
   `start()` (`PortConflictError`, carrying the offending names for the UI to show).
+- **2.1 decisions (2026-08-20):** the schema is pydantic v2 models (`yulon/manifest.py`, new
+  runtime dependency `pydantic>=2.7` in `requirements.txt`) plus a generated JSON Schema at
+  `manifests/schema/manifest.schema.json` (test-pinned against drift). README §6's example was
+  updated to the finalized shape: `conf` is a list of `{file, template, keys[]}` (not a bare
+  path) and `build_targets` became `build: {rebuild}` — `wow-manage.sh` has no per-module build
+  target, a rebuild is always `docker compose up -d --build`. Index files are now
+  `{schema_version, game, type, items: [ids]}`; `kegs/account-wide.json` was removed because the
+  script's `accountwide` is a plain ALE script (Aldori15's repo), while the only real kegs are the
+  in-repo `ALE-Kegs` bundles `bmah` and `sod` (`archive/guides/wow-wotlk/ALE-Kegs/README.md`
+  defines the term) — they get `kegs.json` + `kegs/<id>.json` like every other family.
 - **Tooling:** the `integration` pytest marker is registered in `pyproject.toml`; CI's plain
   `pytest -q` runs the busybox live test on runners that have Docker and skips it elsewhere.

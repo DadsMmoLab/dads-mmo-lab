@@ -1,0 +1,622 @@
+{
+  "$defs": {
+    "Build": {
+      "additionalProperties": false,
+      "description": "Whether installing/removing needs the worldserver rebuilt.",
+      "properties": {
+        "rebuild": {
+          "default": true,
+          "title": "Rebuild",
+          "type": "boolean"
+        }
+      },
+      "title": "Build",
+      "type": "object"
+    },
+    "ClientFile": {
+      "additionalProperties": false,
+      "description": "Open-source client-side files (an addon, a patch) copied into the USER'S client.\n\nREADME \u00a73a: the app never ships game assets \u2014 these come from the item's\nown open-source repo and go into the user-supplied client directory.",
+      "properties": {
+        "dest": {
+          "enum": [
+            "addons",
+            "interface",
+            "data"
+          ],
+          "title": "Dest",
+          "type": "string"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Subfolder name for `addons` dests.",
+          "title": "Name"
+        },
+        "src": {
+          "minLength": 1,
+          "title": "Src",
+          "type": "string"
+        }
+      },
+      "required": [
+        "src",
+        "dest"
+      ],
+      "title": "ClientFile",
+      "type": "object"
+    },
+    "ConfFile": {
+      "additionalProperties": false,
+      "description": "A config file belonging to the item: where it lives, its template, its keys.\n\n`file` is relative to the server dir (e.g. `env/dist/etc/modules/mod_ahbot.conf`);\n`template` is relative to the clone (the `.conf.dist` copied on activation).\nLua-script config lives in the deployed `.lua` itself \u2014 then `file` points\nat it and keys are patched in place.",
+      "properties": {
+        "file": {
+          "minLength": 1,
+          "title": "File",
+          "type": "string"
+        },
+        "keys": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ConfKey"
+          },
+          "title": "Keys",
+          "type": "array"
+        },
+        "template": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Template"
+        }
+      },
+      "required": [
+        "file"
+      ],
+      "title": "ConfFile",
+      "type": "object"
+    },
+    "ConfKey": {
+      "additionalProperties": false,
+      "description": "A config key the app sets or surfaces, with its default and the why.",
+      "properties": {
+        "default": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Value written at configure time; template `{prompt_key}` ok.",
+          "title": "Default"
+        },
+        "key": {
+          "minLength": 1,
+          "title": "Key",
+          "type": "string"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "title": "ConfKey",
+      "type": "object"
+    },
+    "Deploy": {
+      "additionalProperties": false,
+      "description": "Copy `src` (relative to the clone) to `dest` (relative to the server dir).",
+      "properties": {
+        "dest": {
+          "minLength": 1,
+          "title": "Dest",
+          "type": "string"
+        },
+        "rename": {
+          "default": [],
+          "description": "(from, to) basename renames applied after the copy.",
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "type": "array"
+          },
+          "title": "Rename",
+          "type": "array"
+        },
+        "src": {
+          "minLength": 1,
+          "title": "Src",
+          "type": "string"
+        }
+      },
+      "required": [
+        "src",
+        "dest"
+      ],
+      "title": "Deploy",
+      "type": "object"
+    },
+    "Npc": {
+      "additionalProperties": false,
+      "description": "An NPC the item adds that the user may need to spawn (`.npc add <entry>`).",
+      "properties": {
+        "auto_spawned": {
+          "default": false,
+          "title": "Auto Spawned",
+          "type": "boolean"
+        },
+        "entry": {
+          "exclusiveMinimum": 0,
+          "title": "Entry",
+          "type": "integer"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        }
+      },
+      "required": [
+        "entry",
+        "name"
+      ],
+      "title": "Npc",
+      "type": "object"
+    },
+    "Patch": {
+      "additionalProperties": false,
+      "description": "A find/replace applied to a file after deploy/clone (the script's `sed -i`s).\n\n`file` is relative to the server dir for deployed files, or to the clone when\n`in_clone` is true (e.g. a source patch before a rebuild). `replace` may use\n`{prompt_key}` templates. Regex patches use Python `re` syntax.",
+      "properties": {
+        "file": {
+          "minLength": 1,
+          "title": "File",
+          "type": "string"
+        },
+        "find": {
+          "minLength": 1,
+          "title": "Find",
+          "type": "string"
+        },
+        "in_clone": {
+          "default": false,
+          "title": "In Clone",
+          "type": "boolean"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        },
+        "regex": {
+          "default": false,
+          "title": "Regex",
+          "type": "boolean"
+        },
+        "replace": {
+          "title": "Replace",
+          "type": "string"
+        },
+        "when": {
+          "default": "install",
+          "enum": [
+            "install",
+            "remove",
+            "configure"
+          ],
+          "title": "When",
+          "type": "string"
+        }
+      },
+      "required": [
+        "file",
+        "find",
+        "replace"
+      ],
+      "title": "Patch",
+      "type": "object"
+    },
+    "Prompt": {
+      "additionalProperties": false,
+      "description": "A value asked of the user at configure time, referenced as `{key}` elsewhere.",
+      "properties": {
+        "choices": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Choices",
+          "type": "array"
+        },
+        "default": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Default"
+        },
+        "key": {
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+          "title": "Key",
+          "type": "string"
+        },
+        "kind": {
+          "default": "string",
+          "enum": [
+            "string",
+            "int",
+            "float",
+            "bool",
+            "choice"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "question": {
+          "minLength": 1,
+          "title": "Question",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "question"
+      ],
+      "title": "Prompt",
+      "type": "object"
+    },
+    "ServerDbc": {
+      "additionalProperties": false,
+      "description": "DBC files from the clone copied into the server's `data/dbc/` volume.",
+      "properties": {
+        "src": {
+          "minLength": 1,
+          "title": "Src",
+          "type": "string"
+        }
+      },
+      "required": [
+        "src"
+      ],
+      "title": "ServerDbc",
+      "type": "object"
+    },
+    "Source": {
+      "additionalProperties": false,
+      "description": "Where the content is cloned from. `repo` is `owner/name` (GitHub) or a URL.",
+      "properties": {
+        "branch": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Branch"
+        },
+        "repo": {
+          "minLength": 3,
+          "title": "Repo",
+          "type": "string"
+        },
+        "sparse_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Subdirectory to sparse-checkout (kegs inside a larger repo).",
+          "title": "Sparse Path"
+        }
+      },
+      "required": [
+        "repo"
+      ],
+      "title": "Source",
+      "type": "object"
+    },
+    "SqlStep": {
+      "additionalProperties": false,
+      "description": "One SQL application: a file/glob from the clone, or an inline statement.\n\n`applied_by=\"db-import\"` means AzerothCore's own `ac-db-import` picks the\nfiles up on next start and ledgers them in the `updates` table (the default\nfor C++ modules \u2014 applying those by hand breaks that tracking). `\"direct\"`\nmeans the app runs it via `mysql` itself (ALE mods, SQL mods). Inline\n`statement` templates may reference prompt keys as `{key}`.",
+      "properties": {
+        "applied_by": {
+          "default": "direct",
+          "enum": [
+            "db-import",
+            "direct"
+          ],
+          "title": "Applied By",
+          "type": "string"
+        },
+        "db": {
+          "enum": [
+            "auth",
+            "characters",
+            "world",
+            "playerbots",
+            "ale"
+          ],
+          "title": "Db",
+          "type": "string"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "File or glob, relative to the clone.",
+          "title": "Path"
+        },
+        "statement": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Inline SQL (template).",
+          "title": "Statement"
+        },
+        "when": {
+          "default": "install",
+          "enum": [
+            "install",
+            "remove",
+            "configure"
+          ],
+          "title": "When",
+          "type": "string"
+        }
+      },
+      "required": [
+        "db"
+      ],
+      "title": "SqlStep",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "One installable item \u2014 a C++ module, an ALE Lua mod, a SQL mod, or a keg.",
+  "properties": {
+    "build": {
+      "$ref": "#/$defs/Build",
+      "default": {
+        "rebuild": false
+      }
+    },
+    "client": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ClientFile"
+      },
+      "title": "Client",
+      "type": "array"
+    },
+    "conf": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ConfFile"
+      },
+      "title": "Conf",
+      "type": "array"
+    },
+    "conflicts_with": {
+      "default": [],
+      "items": {
+        "minLength": 1,
+        "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+        "type": "string"
+      },
+      "title": "Conflicts With",
+      "type": "array"
+    },
+    "deploy": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Deploy"
+      },
+      "title": "Deploy",
+      "type": "array"
+    },
+    "description": {
+      "default": "",
+      "title": "Description",
+      "type": "string"
+    },
+    "game": {
+      "minLength": 1,
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+      "title": "Game",
+      "type": "string"
+    },
+    "id": {
+      "minLength": 1,
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+      "title": "Id",
+      "type": "string"
+    },
+    "name": {
+      "minLength": 1,
+      "title": "Name",
+      "type": "string"
+    },
+    "notes": {
+      "default": [],
+      "description": "Tacit knowledge worth showing a human; not machine-read.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Notes",
+      "type": "array"
+    },
+    "npcs": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Npc"
+      },
+      "title": "Npcs",
+      "type": "array"
+    },
+    "patches": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Patch"
+      },
+      "title": "Patches",
+      "type": "array"
+    },
+    "prompts": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Prompt"
+      },
+      "title": "Prompts",
+      "type": "array"
+    },
+    "requires": {
+      "default": [],
+      "items": {
+        "minLength": 1,
+        "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+        "type": "string"
+      },
+      "title": "Requires",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "server_dbc": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ServerDbc"
+      },
+      "title": "Server Dbc",
+      "type": "array"
+    },
+    "source": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Source"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "sql": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/SqlStep"
+      },
+      "title": "Sql",
+      "type": "array"
+    },
+    "type": {
+      "enum": [
+        "module",
+        "ale",
+        "mod",
+        "keg"
+      ],
+      "title": "Type",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "name",
+    "type",
+    "game"
+  ],
+  "title": "Manifest",
+  "type": "object"
+}
