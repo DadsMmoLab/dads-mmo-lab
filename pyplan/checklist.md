@@ -42,10 +42,10 @@
 ## Phase 3 — Catalog (catalog + installer)
 
 - [x] 3.1 `catalog.json` — game list
-- [ ] 3.2 `installer.py` — orchestration (Phase 3a: shells out to existing scripts) — **code-complete + unit-tested (2026-08-20); the live Linux run of `python -m yulon.catalog.installer wow-wotlk` is outstanding**
+- [x] 3.2 `installer.py` — orchestration (Phase 3a: shells out to existing scripts) — **live Linux run passed 2026-08-21 on a fresh Ubuntu 24.04 VM (see Cross-cutting → Phase 3 live gate)**
 - [x] 3.3 Silent Docker/WSL provisioning stubs wired in (graceful failure until Phase 5)
 - [x] 3.4 Networking auto-setup (LAN + internet play; firewall helpers, realmlist updater, router-step prompts) — README §13
-- [ ] **Phase 3 exit criteria met** (verified via CLI/test harness — no UI yet) — code for 3.1–3.4 is in and unit-tested; the one-game live install on a Linux box with Docker (`python -m yulon.catalog.installer wow-wotlk`) has not been run yet
+- [x] **Phase 3 exit criteria met** (verified via CLI/test harness — no UI yet): `python -m yulon.catalog.installer wow-wotlk --server-dir ~/wow-server-playerbots` on a fresh Ubuntu 24.04 VM (12 vCPU, Docker provided by `ensure_docker()`) answered every prompt, built AzerothCore + playerbots (~11 min compile), and ended with `install of wow-wotlk finished` and all three containers up (2026-08-21 00:27)
 
 ---
 
@@ -173,6 +173,14 @@
   `wow-tortoise` have NO Debian/Fedora script ports in the repo, so on apt/dnf hosts they run
   the pacman script; tbc/vanilla carry partial `apt-get` fallbacks and Docker is provided by
   `ensure_docker()` first, but that path is unverified.)
+  6. Upstream script bug (not Yu'lon): the Debian installer's wait loop greps only
+     `docker logs --tail 100` for `ready...`; on first boot that line is ~1,900 lines back, so
+     the script waits its full 30-min timeout and then continues with a warning. Yu'lon's own
+     `wait_ready()` reads the full log and was unaffected. Worth a PR to the script.
+  7. Under the OLD unanchored rules one stray answer reached "Would you like to stop the server
+     now? (y/n)" ("Please answer y or n", then `n` was accepted) — the re-ask is harmless; the
+     next live run (with anchored rules) should show no re-ask. Outcome of the run: finished,
+     server left running, `MY_SERVER.txt` written, realmlist 127.0.0.1.
   5. 5.1 Linux path passed for real on the same VM: `ensure_docker()` ran `apt-get update`,
      `apt-get install -y docker.io docker-compose-v2`, `systemctl enable --now docker`,
      `usermod -aG docker pk` and reported "log out and back in" honestly (`docker_ready=False`
