@@ -17,6 +17,7 @@ or a silent hang.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -32,6 +33,8 @@ logger = get_logger(__name__)
 
 # Where `archive/guides/...` resolves from: the repo root, or the bundle when frozen.
 DEFAULT_REPO_ROOT = resources.repo_root()
+# What the scripts see as their terminal when the app was not started from one.
+DEFAULT_TERM = "xterm-256color"
 
 
 class InstallerError(RuntimeError):
@@ -157,6 +160,20 @@ class Installer:
         """
         return self.repo_root / self.entry.install.script_for(self._package_manager())
 
+    def script_env(self) -> dict[str, str]:
+        """The environment the script runs in: ours, plus `env` overrides, plus a `TERM`.
+
+        The scripts call `clear`/`tput`, which exit non-zero when `TERM` is unset
+        — and a desktop-launched app has no `TERM` (Phase 3 live-gate finding,
+        2026-08-20: `TERM environment variable not set.` → exit 1 before the
+        first prompt). The ANSI output this enables is stripped by `runner`.
+        """
+        env = dict(os.environ)
+        env.setdefault("TERM", DEFAULT_TERM)
+        if self._env:
+            env.update(self._env)
+        return env
+
     def preflight(self, options: InstallOptions) -> None:
         """Everything that must be true before a single line of the script runs.
 
@@ -202,7 +219,7 @@ class Installer:
                 ["bash", str(self.script)],
                 cwd=self.script.parent,
                 respond=make_responder(opts),
-                env=self._env,
+                env=self.script_env(),
             )
         except subprocess.CalledProcessError as exc:
             raise InstallerError(f"{self.script.name} exited with status {exc.returncode}") from exc

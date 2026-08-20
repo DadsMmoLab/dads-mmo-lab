@@ -138,6 +138,19 @@ def test_installer_picks_the_script_variant_for_the_host_package_manager(
     assert installer.script == tmp_path / expected
 
 
+def test_script_env_inherits_ours_and_defaults_term(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A desktop-launched app has no TERM; the scripts' `clear` needs one. Overrides win."""
+    entry = load_catalog().get("wow-wotlk")
+    monkeypatch.delenv("TERM", raising=False)
+    monkeypatch.setenv("YULON_MARKER", "1")
+    env = Installer(entry, env={"EXIT_CODE": "3"}).script_env()
+    assert env["TERM"] == installer_module.DEFAULT_TERM
+    assert env["YULON_MARKER"] == "1" and env["EXIT_CODE"] == "3"
+    monkeypatch.setenv("TERM", "screen")
+    assert Installer(entry, env={"TERM": "dumb"}).script_env()["TERM"] == "dumb"
+    assert Installer(entry).script_env()["TERM"] == "screen"
+
+
 def test_host_package_manager_is_none_off_linux(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(installer_module.sys, "platform", "win32")
     assert installer_module.host_package_manager() is None
