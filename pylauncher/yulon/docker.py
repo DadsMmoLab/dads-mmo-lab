@@ -232,3 +232,27 @@ def wait_ready_for(spec: ContainerSpec, realm_host: str, realm_port: int, **kwar
 def port_conflicts_for(spec: ContainerSpec) -> list[str]:
     """`port_conflicts()` for `spec.ports` — the convenience form callers want."""
     return port_conflicts(spec.ports)
+
+
+def published_bindings() -> dict[int, str]:
+    """Host address each published port is bound to, parsed from `docker ps` (`{{.Ports}}`).
+
+    The guide's LAN check: `0.0.0.0:3724->3724/tcp` reaches the network,
+    `127.0.0.1:3724->3724/tcp` does not (and on WSL2 needs a portproxy). IPv6
+    publishes (`[::]:3724->`) are ignored; the first IPv4 binding per port wins.
+    """
+    logger.debug("published_bindings() called")
+    proc = _run(["ps", "--format", "{{.Ports}}"])
+    bindings: dict[int, str] = {}
+    for line in proc.stdout.splitlines():
+        for part in line.split(","):
+            part = part.strip()
+            if "->" not in part or part.startswith("["):
+                continue
+            host_side = part.split("->", 1)[0]
+            if ":" not in host_side:
+                continue
+            address, _, port_text = host_side.rpartition(":")
+            if port_text.isdigit():
+                bindings.setdefault(int(port_text), address)
+    return bindings

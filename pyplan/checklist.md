@@ -44,8 +44,8 @@
 - [x] 3.1 `catalog.json` — game list
 - [ ] 3.2 `installer.py` — orchestration (Phase 3a: shells out to existing scripts) — **code-complete + unit-tested (2026-08-20); the live Linux run of `python -m yulon.catalog.installer wow-wotlk` is outstanding**
 - [x] 3.3 Silent Docker/WSL provisioning stubs wired in (graceful failure until Phase 5)
-- [ ] 3.4 Networking auto-setup (LAN + internet play; firewall helpers, realmlist updater, router-step prompts) — README §13
-- [ ] **Phase 3 exit criteria met** (verified via CLI/test harness — no UI yet)
+- [x] 3.4 Networking auto-setup (LAN + internet play; firewall helpers, realmlist updater, router-step prompts) — README §13
+- [ ] **Phase 3 exit criteria met** (verified via CLI/test harness — no UI yet) — code for 3.1–3.4 is in and unit-tested; the one-game live install on a Linux box with Docker (`python -m yulon.catalog.installer wow-wotlk`) has not been run yet
 
 ---
 
@@ -147,5 +147,18 @@
   needs passwordless/cached sudo (Phase 4/5 must hand the UI a real password path, e.g.
   `SUDO_ASKPASS` + `-A` or pkexec). 3.3's graceful error is `DockerUnavailableError` raised
   from `preflight()` before the script starts, pinned by test.
+- **3.4 record (2026-08-20):** mirrors `WoW-Wotlk-NETWORKING.md` exactly — ufw/firewalld/netsh
+  command blocks (SteamOS wraps ufw in `steamos-readonly disable/enable`), `ip route`-equivalent
+  LAN detection (inside WSL it asks Windows via `powershell.exe`, never the 172.x guest IP),
+  icanhazip/ipify public IP with IPv4 validation, the `0.0.0.0` vs `127.0.0.1` binding check
+  (`docker.published_bindings()`) with a WSL2/Windows portproxy stopgap, `UPDATE
+  <auth>.realmlist SET address[, localAddress] WHERE id=1` built from the new catalog
+  `realmlist` field (Tortoise has no `localAddress` column), CGNAT detection (100.64/10 or a
+  private 'public' IP), and the router DHCP-reservation / TCP-forwarding / DuckDNS / hairpin-NAT
+  steps as `manual_steps`. Linux firewall commands run under `sudo -n`; a password-needing sudo
+  is a reported skip with the exact command, not a hang. `write_client_realmlist()` edits the
+  user's own client (retail `Data/<locale>/` or repack top-level layout). Not done: a true
+  from-outside port-forward probe (needs an external checker; from inside the LAN most routers
+  have no hairpin NAT, so a local connect proves nothing — `platform.probe_tcp` says `unknown`).
 - **Tooling:** the `integration` pytest marker is registered in `pyproject.toml`; CI's plain
   `pytest -q` runs the busybox live test on runners that have Docker and skips it elsewhere.

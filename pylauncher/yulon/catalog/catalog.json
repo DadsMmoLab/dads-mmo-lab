@@ -123,6 +123,7 @@
         "world": "tw_world",
         "extra": ["tw_logs"]
       },
+      "realmlist": {"table": "realmlist", "address_column": "address", "local_address_column": null},
       "client": {
         "version": "1.18.1",
         "build": 7272,

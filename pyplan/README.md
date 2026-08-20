@@ -151,7 +151,8 @@ pylauncher/
 │   ├── controller.py             # base Controller: ContainerSpec + server dir, start guarded by §12 (Phase 1.4)
 │   ├── runner.py                 # subprocess streaming (stream/run) + interact(): answer prompts of an interactive child (shared by all)
 │   ├── docker.py                 # shared Docker lifecycle + port-conflict check (shared)
-│   ├── platform.py               # OS detection + silent Docker/WSL provisioning
+│   ├── platform.py               # OS detection, config_dir, provisioning stubs + §13 helpers: firewall detect/commands, LAN/public IP, WSL2 portproxy, CGNAT check
+│   ├── networking.py             # §13 orchestration: plan() (pure) + apply() for LAN/internet play, realmlist UPDATE, router-step prompts, client realmlist writer (Phase 3.4)
 │   ├── log.py                    # shared logging convention (get_logger/configure — Phase 0.6)
 │   ├── manifest.py               # the manifest schema: pydantic models + repo allow-list (Phase 2.1)
 │   ├── manifest_store.py         # load manifests from a tree + refresh from GitHub with ETags (Phase 2.3)
@@ -185,6 +186,7 @@ pylauncher/
 │   ├── test_apply.py             # covers yulon/apply.py (Phase 2.3)
 │   ├── test_catalog.py           # covers yulon/catalog/catalog.py + catalog.json (Phase 3.1)
 │   ├── test_installer.py         # covers runner.interact (real bash) + catalog/installer.py seams (Phase 3.2/3.3)
+│   ├── test_networking.py        # covers yulon/networking.py + platform §13 helpers + docker.published_bindings (Phase 3.4)
 │   └── integration/              # live-Docker suite, marked `integration`, self-skipping without a daemon (Phase 1.5)
 │       ├── conftest.py           # docker gate + throwaway busybox compose project shaped like an install
 │       ├── test_docker_live.py   # real compose up/healthy/ready/status/conflict-guard/down

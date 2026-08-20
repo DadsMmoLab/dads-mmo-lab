@@ -78,6 +78,17 @@ class Databases(_Strict):
     extra: tuple[str, ...] = ()
 
 
+class Realmlist(_Strict):
+    """Where the realm's advertised address lives in the auth DB (README §13 updater)."""
+
+    table: str = "realmlist"
+    address_column: str = "address"
+    local_address_column: str | None = Field(
+        default="localAddress", description="None for cores whose realmlist has no LAN column."
+    )
+    realm_id: int = 1
+
+
 class Client(_Strict):
     """The client the USER supplies (README §3a) and how to point it at the server."""
 
@@ -100,6 +111,7 @@ class CatalogEntry(_Strict):
     ports: Ports
     databases: Databases
     client: Client
+    realmlist: Realmlist = Realmlist()
     has_manifests: bool = Field(
         default=False, description="Whether manifests/<id>/ exists for module management."
     )
