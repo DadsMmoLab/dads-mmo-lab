@@ -160,3 +160,30 @@ def test_fetcher_refuses_a_broken_upstream_without_clobbering_the_cache(tmp_path
         fetcher.refresh("wow-wotlk", "module")
     # mod-x is still loadable from the cache.
     assert ManifestStore(tmp_path, "wow-wotlk").load("module", "mod-x").id == "mod-x"
+
+
+def test_a_truncated_download_never_replaces_a_good_cached_file(tmp_path: Path) -> None:
+    """Validation happens BEFORE the replace, so the previous good cache survives."""
+    base = "https://example.test/manifests"
+    http = _FakeHttp(
+        {
+            f"{base}/wow-wotlk/modules.json": ("e-idx", _index(["mod-x"])),
+            f"{base}/wow-wotlk/modules/mod-x.json": ("e-x", _item("mod-x")),
+        }
+    )
+    fetcher = ManifestFetcher(base, tmp_path, http)
+    fetcher.refresh("wow-wotlk", "module")
+    good = (tmp_path / "wow-wotlk" / "modules" / "mod-x.json").read_bytes()
+
+    # Upstream now serves half a file under a new ETag.
+    http.files[f"{base}/wow-wotlk/modules/mod-x.json"] = ("e-x-bad", b'{"id": "mod-x", "nam')
+    with pytest.raises(ManifestError, match="not a manifest"):
+        fetcher.refresh("wow-wotlk", "module")
+    assert (tmp_path / "wow-wotlk" / "modules" / "mod-x.json").read_bytes() == good
+    assert ManifestStore(tmp_path, "wow-wotlk").load("module", "mod-x").name == "X"
+
+    # A well-formed JSON file that is not a manifest is refused just the same.
+    http.files[f"{base}/wow-wotlk/modules.json"] = ("e-idx-bad", b'{"hello": "world"}')
+    with pytest.raises(ManifestError, match="not a manifest"):
+        fetcher.refresh("wow-wotlk", "module")
+    assert ManifestStore(tmp_path, "wow-wotlk").load_index("module").items == ("mod-x",)

@@ -61,3 +61,9 @@ def test_send_command_wraps_popen_failure() -> None:
 
     with pytest.raises(console.ConsoleError, match="no docker"):
         console.send_command("server info", popen=boom)  # type: ignore[arg-type]
+
+
+def test_send_command_rejects_carriage_returns_too() -> None:
+    """CR is a line control on the wire as much as LF - refuse both (review, 2026-08-21)."""
+    with pytest.raises(ValueError):
+        console.send_command("server info\rserver shutdown 1")

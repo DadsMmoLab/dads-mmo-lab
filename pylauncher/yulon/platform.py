@@ -301,6 +301,7 @@ def probe_tcp(host: str, port: int, timeout: float = 3.0) -> PortProbe:
 
 PackageManager = Literal["pacman", "apt", "dnf", "zypper"]
 
+SINGLE_QUOTE = chr(39)
 DOCKER_DESKTOP_WINDOWS_URL = (
     "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe"
 )
@@ -498,6 +499,11 @@ def _ensure_docker_linux(
     return ProvisionReport("linux", tuple(done), tuple(skipped), tuple(manual), False, ready)
 
 
+def _ps_quote(value: object) -> str:
+    """`value` as a PowerShell single-quoted literal (inner quotes doubled)."""
+    return SINGLE_QUOTE + str(value).replace(SINGLE_QUOTE, SINGLE_QUOTE * 2) + SINGLE_QUOTE
+
+
 def ensure_wsl2(*, run: RunCmd | None = None, dry_run: bool = False) -> ProvisionReport:
     """Ensure WSL2 exists on Windows (`wsl --status`; else `wsl --install --no-distribution`).
 
@@ -565,7 +571,10 @@ def _ensure_docker_windows(
             "powershell.exe",
             "-NoProfile",
             "-Command",
-            f"Start-Process '{installer}' -Verb RunAs -Wait -ArgumentList "
+            # A quote inside a PowerShell '...' literal is escaped by doubling it:
+            # an apostrophe in the profile path must not end the string, in a
+            # command that runs elevated (review finding, 2026-08-21).
+            f"Start-Process {_ps_quote(installer)} -Verb RunAs -Wait -ArgumentList "
             "'install','--quiet','--accept-license','--backend=wsl-2'",
         ]
         if dry_run:

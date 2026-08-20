@@ -24,3 +24,17 @@ def test_state_roundtrip_remember_forget(tmp_path: Path) -> None:
 
 def test_state_path_lives_under_config_dir(tmp_path: Path) -> None:
     assert state_path(tmp_path) == tmp_path / "state.json"
+
+
+def test_broken_state_file_is_moved_aside_not_raised(tmp_path: Path) -> None:
+    """A corrupt or schema-drifted state.json must never stop the window from opening."""
+    target = tmp_path / "state.json"
+    target.write_text("{not json", encoding="utf-8")
+    assert load_state(target).installs == []
+    assert (tmp_path / "state.json.broken").read_text(encoding="utf-8") == "{not json"
+    assert not target.exists()
+
+    # Schema drift (extra="forbid") is handled the same way.
+    target.write_text('{"schema_version": 1, "installs": [], "from_the_future": true}', "utf-8")
+    assert load_state(target).installs == []
+    assert '"from_the_future"' in (tmp_path / "state.json.broken").read_text(encoding="utf-8")

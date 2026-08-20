@@ -185,3 +185,27 @@ def test_ensure_wsl2_is_a_noop_off_windows(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(platform.sys, "platform", "linux")
     report = platform.ensure_wsl2(run=_Run(docker_rc=0))
     assert report.done == ("WSL2 not needed on this OS",) and report.docker_ready is True
+
+
+def test_powershell_quoting_survives_an_apostrophe_in_the_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A user profile like `O'Brien` must not break out of the elevated command string."""
+    home = tmp_path / "O'Brien"
+    monkeypatch.setattr(platform.sys, "platform", "win32")
+    monkeypatch.setattr(platform, "config_dir", lambda: home)
+
+    class _WinRun(_Run):
+        def __call__(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
+            self.calls.append(argv)
+            return subprocess.CompletedProcess(
+                argv, 0 if argv[:2] != ["docker", "info"] else 1, "", ""
+            )
+
+    run = _WinRun()
+    platform.ensure_docker(run=run, which=lambda n: None, download=lambda u, d: d, wait_seconds=0.0)
+    install = [c for c in run.calls if "--accept-license" in " ".join(c)]
+    assert install, "the silent install command was never built"
+    command = install[0][-1]
+    assert "O''Brien" in command  # doubled, i.e. escaped
+    assert command.count("Start-Process '") == 1

@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from yulon import platform
 from yulon.log import get_logger
@@ -68,12 +68,27 @@ def state_path(config_dir: Path | None = None) -> Path:
 
 
 def load_state(path: Path | None = None) -> AppState:
-    """Read the state file; a missing file is an empty state, a broken one is an error."""
+    """Read the state file; a missing file is an empty state.
+
+    A broken file (bad JSON, or schema drift - `extra="forbid"` makes every
+    future field fatal) must never stop the app from opening a window: it is
+    moved aside as `state.json.broken` and an empty state is returned
+    (review finding, 2026-08-21).
+    """
     target = path if path is not None else state_path()
     if not target.is_file():
         return AppState()
-    with target.open(encoding="utf-8") as fh:
-        return AppState.model_validate(json.load(fh))
+    try:
+        with target.open(encoding="utf-8") as fh:
+            return AppState.model_validate(json.load(fh))
+    except (OSError, ValueError, ValidationError) as exc:
+        backup = target.with_name(target.name + ".broken")
+        try:
+            target.replace(backup)
+            logger.error(f"unreadable state file moved to {backup}: {exc}")
+        except OSError:
+            logger.error(f"unreadable state file left at {target}: {exc}")
+        return AppState()
 
 
 def save_state(state: AppState, path: Path | None = None) -> Path:

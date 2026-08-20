@@ -28,7 +28,7 @@ from typing import Literal, Protocol
 
 from yulon import runner
 from yulon.log import get_logger
-from yulon.manifest import Db, Manifest, ManifestType, Patch, SqlStep, When
+from yulon.manifest import Db, Deploy, Manifest, ManifestType, Patch, SqlStep, When
 
 logger = get_logger(__name__)
 
@@ -254,13 +254,7 @@ class Applier:
         self._patches(manifest, clone, vals, "remove", log)
         self._sql(manifest, clone, vals, "remove", log)
         for step in manifest.deploy:
-            target = self._deploy_target(step.src, step.dest)
-            if target.is_dir():
-                shutil.rmtree(target)
-                log.done.append(f"rm -r {_rel(self.server_dir, target)}")
-            elif target.is_file():
-                target.unlink()
-                log.done.append(f"rm {_rel(self.server_dir, target)}")
+            self._undeploy(step, clone, log)
         if clone.exists():
             shutil.rmtree(clone)
             log.done.append(f"rm -r {_rel(self.server_dir, clone)}")
@@ -283,6 +277,43 @@ class Applier:
             for old, new in step.rename:
                 (target / old).replace(target / new)
                 log.done.append(f"rename {old} → {new}")
+
+    def _undeploy(self, step: Deploy, clone: Path, log: _Log) -> None:
+        """Delete exactly what `_deploy()` put under `dest` — never the dest dir itself.
+
+        A directory source may land in a SHARED dir (battlepass: `lua_scripts/` →
+        `.../lua_scripts/`, next to every other ALE script), so the deployed set is
+        re-derived from the clone's `src` listing plus `rename`. Without the clone
+        that set is unknowable for a directory: the files stay and the step is
+        reported skipped — never guessed at (review finding, 2026-08-21).
+        """
+        target = self._deploy_target(step.src, step.dest)
+        src = clone / step.src
+        if src.is_dir():
+            deployed = {entry.name for entry in src.iterdir()}
+            for old, new in step.rename:
+                old_parts, new_parts = Path(old).parts, Path(new).parts
+                if len(old_parts) == 1 and old_parts[0] in deployed:
+                    deployed.discard(old_parts[0])
+                    deployed.add(new_parts[0])
+            for name in sorted(deployed):
+                self._rm(target / name, log)
+            return
+        if target.is_file():
+            self._rm(target, log)
+        elif target.is_dir():
+            log.skipped.append(
+                f"{step.src}: clone missing, so the files deployed into "
+                f"{_rel(self.server_dir, target)} are unknown and were left in place"
+            )
+
+    def _rm(self, path: Path, log: _Log) -> None:
+        if path.is_dir():
+            shutil.rmtree(path)
+            log.done.append(f"rm -r {_rel(self.server_dir, path)}")
+        elif path.is_file() or path.is_symlink():
+            path.unlink()
+            log.done.append(f"rm {_rel(self.server_dir, path)}")
 
     def _deploy_target(self, src: str, dest: str) -> Path:
         target = self.server_dir / dest

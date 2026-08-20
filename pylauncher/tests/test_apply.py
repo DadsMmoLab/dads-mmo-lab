@@ -295,3 +295,61 @@ def test_runner_git_sparse_clone_sequence(monkeypatch: pytest.MonkeyPatch, tmp_p
     ]
     assert (dest / ".git" / "info" / "sparse-checkout").read_text(encoding="utf-8") == "guides/x/\n"
     assert seen[-1] == ["git", "pull", "--depth=1", "origin", "HEAD"]
+
+
+def test_remove_of_a_shared_dir_deploy_leaves_other_scripts_alone(tmp_path: Path) -> None:
+    """battlepass deploys `lua_scripts/` INTO the shared lua_scripts dir — remove() must not
+    rmtree that dir (review finding 2026-08-21: it deleted every other ALE script)."""
+    m = parse_manifest(
+        {
+            "id": "battlepass",
+            "name": "Battle Pass",
+            "type": "ale",
+            "game": "wow-wotlk",
+            "source": {"repo": "x/battlepass"},
+            "deploy": [{"src": "lua_scripts/", "dest": f"{LUA}/"}],
+        }
+    )
+    git = _FakeGit(
+        {"lua_scripts/battlepass/init.lua": "-- bp", "lua_scripts/lib/CSMH/c.lua": "-- c"}
+    )
+    applier = Applier(tmp_path, git=git)
+    foreign = tmp_path / LUA / "SomeOtherMod.lua"
+    foreign.parent.mkdir(parents=True)
+    foreign.write_text("-- keep me", encoding="utf-8")
+    applier.install(m)
+    assert (tmp_path / LUA / "battlepass" / "init.lua").exists()
+
+    report = applier.remove(m)
+    assert foreign.exists()  # the shared dir survives
+    assert (tmp_path / LUA).is_dir()
+    assert not (tmp_path / LUA / "battlepass").exists()
+    assert not (tmp_path / LUA / "lib").exists()
+    assert report.skipped == ()
+
+    # Clone already gone: a directory deploy cannot be undone safely → skipped, not guessed.
+    applier.install(m)
+    import shutil
+
+    shutil.rmtree(applier.clone_dir(m))
+    report = applier.remove(m)
+    assert foreign.exists() and (tmp_path / LUA / "battlepass").exists()
+    assert any("left in place" in s for s in report.skipped)
+
+
+def test_remove_renamed_top_level_file_from_dir_deploy(tmp_path: Path) -> None:
+    m = parse_manifest(
+        {
+            "id": "ren",
+            "name": "Ren",
+            "type": "ale",
+            "game": "wow-wotlk",
+            "source": {"repo": "x/ren"},
+            "deploy": [{"src": "scripts/", "dest": f"{LUA}/", "rename": [["a.lua", "b.lua"]]}],
+        }
+    )
+    applier = Applier(tmp_path, git=_FakeGit({"scripts/a.lua": "a"}))
+    applier.install(m)
+    assert (tmp_path / LUA / "b.lua").exists()
+    applier.remove(m)
+    assert not (tmp_path / LUA / "b.lua").exists() and (tmp_path / LUA).is_dir()

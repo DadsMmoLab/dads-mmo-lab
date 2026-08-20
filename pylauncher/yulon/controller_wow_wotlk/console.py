@@ -50,7 +50,7 @@ def send_command(
     popen: type[subprocess.Popen[bytes]] = subprocess.Popen,
 ) -> ConsoleReply:
     """Send one console line to the worldserver and return what it printed within `window`."""
-    if "\n" in command.strip("\n") or not command.strip():
+    if any(ch in command.strip("\n") for ch in ("\n", "\r")) or not command.strip():
         raise ValueError("send_command() takes exactly one non-empty command line")
     logger.info(f"console → {container}: {command.split(' ', 2)[0:2]}")  # never log passwords
     try:
@@ -78,6 +78,8 @@ def send_command(
         proc.stdin.flush()
     except (BrokenPipeError, OSError) as exc:
         proc.kill()
+        proc.wait()  # reap: this is the path right after a worldserver crash
+        reader.join(timeout=2)
         raise ConsoleError(f"could not write to the worldserver console: {exc}") from exc
     time.sleep(window)
     # Detach: closing our end is all a non-TTY attach needs; the server keeps running.

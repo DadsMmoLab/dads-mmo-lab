@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -148,6 +148,16 @@ class RefreshResult:
     unchanged: tuple[str, ...]
 
 
+def _parse_index_bytes(body: bytes) -> object:
+    """Validate raw index bytes before they are allowed to replace a cached file."""
+    return parse_index(json.loads(body.decode("utf-8")))
+
+
+def _parse_manifest_bytes(body: bytes) -> object:
+    """Validate raw manifest bytes before they are allowed to replace a cached file."""
+    return parse_manifest(json.loads(body.decode("utf-8")))
+
+
 class ManifestFetcher:
     """Mirror a game's manifest family from `base_url` into `cache_root`, with ETags.
 
@@ -165,22 +175,33 @@ class ManifestFetcher:
         self.http = http
 
     def refresh(self, game: str, kind: ManifestType) -> RefreshResult:
-        """Fetch the family index, then every item it lists. Raises on HTTP/validation error."""
+        """Fetch the family index, then every item it lists. Raises on HTTP/validation error.
+
+        Every download is parsed BEFORE it replaces the cached file, so a
+        truncated or invalid upstream response leaves the previous good cache
+        untouched - what this module always promised (review finding,
+        2026-08-21).
+        """
         index_rel = f"{game}/{FAMILY_FILES[kind]}.json"
         updated: list[str] = []
         unchanged: list[str] = []
-        self._fetch_one(index_rel, updated, unchanged)
+        self._fetch_one(index_rel, updated, unchanged, _parse_index_bytes)
         index = parse_index(_read_json(self.cache_root / index_rel))
         for item_id in index.items:
             rel = f"{game}/{FAMILY_FILES[kind]}/{item_id}.json"
-            self._fetch_one(rel, updated, unchanged)
-            parse_manifest(_read_json(self.cache_root / rel))
+            self._fetch_one(rel, updated, unchanged, _parse_manifest_bytes)
         logger.info(
             f"manifests refreshed: {game}/{kind} updated={len(updated)} unchanged={len(unchanged)}"
         )
         return RefreshResult(tuple(updated), tuple(unchanged))
 
-    def _fetch_one(self, rel: str, updated: list[str], unchanged: list[str]) -> None:
+    def _fetch_one(
+        self,
+        rel: str,
+        updated: list[str],
+        unchanged: list[str],
+        validate: Callable[[bytes], object],
+    ) -> None:
         target = self.cache_root / rel
         etag_file = target.with_name(target.name + _ETAG_SUFFIX)
         cached_etag = etag_file.read_text(encoding="utf-8").strip() if etag_file.is_file() else None
@@ -190,6 +211,10 @@ class ManifestFetcher:
             return
         if resp.status != 200:
             raise ManifestError(f"GET {rel} returned HTTP {resp.status}")
+        try:
+            validate(resp.body)
+        except (ValueError, ManifestError) as exc:
+            raise ManifestError(f"GET {rel} returned data that is not a manifest: {exc}") from exc
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_name(target.name + ".tmp")
         tmp.write_bytes(resp.body)
