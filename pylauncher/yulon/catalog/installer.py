@@ -174,7 +174,8 @@ class Installer:
         first prompt). The ANSI output this enables is stripped by `runner`.
         """
         env = dict(os.environ)
-        env.setdefault("TERM", DEFAULT_TERM)
+        if not env.get("TERM"):  # unset OR empty — some session managers export TERM=""
+            env["TERM"] = DEFAULT_TERM
         if self._env:
             env.update(self._env)
         return env

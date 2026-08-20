@@ -46,6 +46,32 @@ def test_install_scripts_exist_in_the_repo() -> None:
         assert game.install.script_for("zypper") == game.install.script
 
 
+def test_script_variant_keys_must_be_known_package_managers() -> None:
+    """A typo like "ubuntu" would silently fall back to the pacman script — refuse it."""
+    bad = {
+        "schema_version": 1,
+        "games": [
+            {
+                "id": "x-y",
+                "name": "X",
+                "status": "wip",
+                "emulator": {"name": "e", "sources": [{"repo": "a/b"}]},
+                "install": {
+                    "script": "s.sh",
+                    "default_server_dir": "d",
+                    "script_variants": {"ubuntu": "s-ubuntu.sh"},
+                },
+                "containers": {"db": "d", "auth": "a", "world": "w"},
+                "ports": {"auth": 1, "world": 2, "db": 3},
+                "databases": {"auth": "a", "characters": "c", "world": "w"},
+                "client": {"version": "1", "build": 1},
+            }
+        ],
+    }
+    with pytest.raises(ValidationError):
+        parse_catalog(bad)
+
+
 def test_only_one_server_runs_at_a_time_is_visible_in_the_data() -> None:
     """Every v1 server publishes the same auth port, so the §12 guard will engage."""
     ports = {g.ports.auth for g in load_catalog().games}

@@ -157,6 +157,8 @@ def test_script_env_inherits_ours_and_defaults_term(monkeypatch: pytest.MonkeyPa
     env = Installer(entry, env={"EXIT_CODE": "3"}).script_env()
     assert env["TERM"] == installer_module.DEFAULT_TERM
     assert env["YULON_MARKER"] == "1" and env["EXIT_CODE"] == "3"
+    monkeypatch.setenv("TERM", "")
+    assert Installer(entry).script_env()["TERM"] == installer_module.DEFAULT_TERM
     monkeypatch.setenv("TERM", "screen")
     assert Installer(entry, env={"TERM": "dumb"}).script_env()["TERM"] == "dumb"
     assert Installer(entry).script_env()["TERM"] == "screen"

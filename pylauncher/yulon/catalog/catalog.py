@@ -23,6 +23,8 @@ CATALOG_FILE = Path(__file__).resolve().with_name("catalog.json")
 
 Slug = Annotated[str, Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")]
 Status = Literal["stable", "beta", "wip"]
+# Keys of `Install.script_variants` — the same names `platform.linux_package_manager()` returns.
+PackageManager = Literal["apt", "dnf", "pacman", "zypper"]
 
 
 class _Strict(BaseModel):
@@ -51,7 +53,7 @@ class Install(_Strict):
         default=False,
         description="The script asks for the user's client folder and loops until given one.",
     )
-    script_variants: dict[str, str] = Field(
+    script_variants: dict[PackageManager, str] = Field(
         default_factory=dict,
         description=(
             "Per-package-manager overrides of `script` (keys: apt, dnf, pacman, zypper) for "
@@ -61,9 +63,10 @@ class Install(_Strict):
 
     def script_for(self, package_manager: str | None) -> str:
         """The repo-relative script to run on a host with `package_manager` (None → default)."""
-        if package_manager is None:
-            return self.script
-        return self.script_variants.get(package_manager, self.script)
+        for pm, script in self.script_variants.items():
+            if pm == package_manager:
+                return script
+        return self.script
 
 
 class Containers(_Strict):

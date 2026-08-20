@@ -53,11 +53,20 @@ def build_window() -> object:
     splitter.addWidget(log_panel)
     tabs.addTab(splitter, "Catalog")
 
+    controllers: dict[tuple[str, Path], QWidget] = {}
+
     def add_controller(game: str, server_dir: Path, client_dir: Path | None) -> None:
+        """One tab per (game, server dir); a repeat (e.g. "Use existing…" twice) just focuses it."""
+        key = (game, server_dir)
+        if key in controllers:
+            tabs.setCurrentWidget(controllers[key])
+            return
         entry = catalog.get(game)
         services = ControllerServices.for_wotlk(entry, server_dir, client_dir)
         view = ControllerView(entry, services)
+        controllers[key] = view
         tabs.addTab(view, f"{entry.name} — {server_dir.name}")
+        tabs.setCurrentWidget(view)
 
     for install in state.installs:
         try:

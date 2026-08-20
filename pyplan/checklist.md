@@ -167,6 +167,12 @@
      Product answer is sudo's own: set `SUDO_ASKPASS` to a helper that hands over a password the
      UI asked for once (sudo falls back to the helper when no terminal is present). Note that
      `sudo -v` still prompts when a password-requiring group rule coexists with a NOPASSWD rule.
+  (Step review, 2026-08-21: `script_variants` keys are now the `PackageManager` Literal, an
+  empty `TERM=""` is defaulted too, and `main.py` keeps one controller tab per (game, server
+  dir) — a repeat "Use existing…" focuses it. Known limitation kept: `wow-tbc`/`wow-vanilla`/
+  `wow-tortoise` have NO Debian/Fedora script ports in the repo, so on apt/dnf hosts they run
+  the pacman script; tbc/vanilla carry partial `apt-get` fallbacks and Docker is provided by
+  `ensure_docker()` first, but that path is unverified.)
   5. 5.1 Linux path passed for real on the same VM: `ensure_docker()` ran `apt-get update`,
      `apt-get install -y docker.io docker-compose-v2`, `systemctl enable --now docker`,
      `usermod -aG docker pk` and reported "log out and back in" honestly (`docker_ready=False`
