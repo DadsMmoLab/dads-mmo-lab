@@ -138,7 +138,8 @@ pylauncher/
 │   ├── __init__.py
 │   ├── catalog/
 │   │   ├── __init__.py
-│   │   ├── catalog.json          # list of games + install metadata
+│   │   ├── catalog.json          # the four v1 servers: emulator sources, install script, containers, ports, DBs, client (Phase 3.1)
+│   │   ├── catalog.py            # typed Catalog/CatalogEntry models + load_catalog(); entry.container_spec() feeds the controller
 │   │   └── installer.py          # orchestrates install (deps → clone → build → config)
 │   ├── controller_wow_wotlk/     # each server has its own controller package for siloing
 │   │   ├── __init__.py
@@ -182,6 +183,7 @@ pylauncher/
 │   ├── test_manifest.py          # covers yulon/manifest.py (Phase 2.1)
 │   ├── test_manifest_store.py    # covers yulon/manifest_store.py + the WotLK modules.py binding (Phase 2.3)
 │   ├── test_apply.py             # covers yulon/apply.py (Phase 2.3)
+│   ├── test_catalog.py           # covers yulon/catalog/catalog.py + catalog.json (Phase 3.1)
 │   └── integration/              # live-Docker suite, marked `integration`, self-skipping without a daemon (Phase 1.5)
 │       ├── conftest.py           # docker gate + throwaway busybox compose project shaped like an install
 │       ├── test_docker_live.py   # real compose up/healthy/ready/status/conflict-guard/down

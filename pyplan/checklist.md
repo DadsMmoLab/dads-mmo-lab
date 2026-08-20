@@ -41,7 +41,7 @@
 
 ## Phase 3 — Catalog (catalog + installer)
 
-- [ ] 3.1 `catalog.json` — game list
+- [x] 3.1 `catalog.json` — game list
 - [ ] 3.2 `installer.py` — orchestration (Phase 3a: shells out to existing scripts)
 - [ ] 3.3 Silent Docker/WSL provisioning stubs wired in (graceful failure until Phase 5)
 - [ ] 3.4 Networking auto-setup (LAN + internet play; firewall helpers, realmlist updater, router-step prompts) — README §13
@@ -124,5 +124,14 @@
   bundled copy is used. Dependency resolution (`requires`/`conflicts_with`, incl. the
   `mod-playerbots` pseudo-id) is not in the engine yet — it belongs to the controller/UI layer
   that decides what to install (Phase 4.3), not to the applier.
+- **3.1 record (2026-08-20):** `catalog.json` describes exactly the four v1 servers from their
+  installers — WotLK (AzerothCore mod-playerbots fork, `ac-*`, 3724/8085/3306, root `password`),
+  TBC and Vanilla (CMaNGOS + cmangos/playerbots, `tbc-*`/`vanilla-*`, MariaDB root password
+  generated into `.db_password`), Tortoise (`Penqle/tortoise-wow`, `tortoise-*`, world port
+  **8090**, client 1.18.1 build 7272, status `wip` — its installer is unverified with a real
+  client). The port table README §13/3.4 needs lives here (`ports.auth/world/db`), and
+  `CatalogEntry.container_spec()` is how a future `controller_wow_tbc/` etc. gets its
+  `ContainerSpec` without retyping the names. Tests pin that every referenced install script
+  exists and that the WotLK entry equals `docker_ctl.SPEC`.
 - **Tooling:** the `integration` pytest marker is registered in `pyproject.toml`; CI's plain
   `pytest -q` runs the busybox live test on runners that have Docker and skips it elsewhere.
