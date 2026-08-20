@@ -26,7 +26,7 @@
 - [x] 1.3 `docker.py` — shared Docker lifecycle logic + port-conflict check
 - [x] 1.4 Base controller abstraction
 - [x] 1.5 Tests (mocked unit tests + real-Docker integration suite)
-- [ ] **Phase 1 exit criteria met**
+- [x] **Phase 1 exit criteria met** (live AzerothCore run passed 2026-08-20 — see Cross-cutting)
 
 ---
 
@@ -73,13 +73,16 @@
 > Anything that doesn't cleanly belong to one phase — style-guide amendments, cross-document
 > corrections, tooling gotchas, etc.
 
-- **Phase 1 exit criteria — what is still open (2026-08-20):** 1.1–1.5 are implemented and
-  green (60 mocked tests; the live suite `tests/integration/test_docker_live.py` passed against a
-  real Docker daemon, exercising compose up/healthy/ready/status/port-conflict-guard/down through
-  `Controller`). The one unticked half is the literal "against a running AzerothCore compose
-  project" check: `tests/integration/test_wotlk_live.py` is written and opt-in
-  (`YULON_WOTLK_SERVER_DIR=<fixture dir> pytest -m integration tests/integration`) but has not
-  yet been run against a built `tests/fixture.md` install. Tick the exit-criteria box once it has.
+- **Phase 1 exit criteria — CLOSED (2026-08-20):** 1.1–1.5 are implemented and green (60 mocked
+  tests). The live suite ran on the Ubuntu 22.04 test box (4 cores, Docker 29) against a real,
+  already-built AzerothCore + playerbots compose project:
+  `YULON_WOTLK_SERVER_DIR=~/games/wow-server-playerbots YULON_WOTLK_REALM_ADDRESS=100.78.24.50
+  pytest -m integration tests/integration` → 3 passed in 57 s (busybox lifecycle, db-healthy
+  timeout, and `WotlkController` start → db healthy → `ready...` → stop). Lesson recorded: the
+  first attempt timed out in `wait_ready()` because that install's realm is registered at the
+  box's Tailscale IP, not `127.0.0.1` — the auth-log marker is `<realm_host>:<realm_port>`, so
+  the realm address MUST match `acore_auth.realmlist.address`. Follow-up for the controller (not
+  done): read the realm address from the DB/`realmlist` instead of trusting a default.
 - **1.4 design note:** the base `Controller.port_conflicts()` filters this install's *own*
   containers out of `docker.port_conflicts_for()`'s global scan, so a restart of the same install
   is never reported as a README §12 conflict; only a foreign container binding the ports blocks
