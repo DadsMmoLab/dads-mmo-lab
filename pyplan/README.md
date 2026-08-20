@@ -249,6 +249,10 @@ the per-item files live in the matching subdirectory (`modules/mod-ah-bot.json`,
 
 ### Tacit knowledge to port (from `wow-manage.sh`)
 
+> **Ported in Phase 2.2** — every item below now lives as data in `pylauncher/manifests/wow-wotlk/`
+> (41 manifests; see `pyplan/checklist.md` Cross-cutting for the port record). Kept here as the
+> statement of what the schema had to be able to say.
+
 `wow-manage.sh` is ~2,300 lines with heavy embedded knowledge that must become manifest fields:
 
 - **Module config key differences** — e.g. `AuctionHouseBot.GUIDs` (AH Bot Plus, plural) vs the original `AuctionHouseBot.GUID` (singular) + `Account` key. This kind of nuance must be explicit in the JSON.

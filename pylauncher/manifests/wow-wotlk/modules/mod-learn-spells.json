@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "id": "mod-learn-spells",
+  "name": "Learn Spells on Levelup",
+  "type": "module",
+  "game": "wow-wotlk",
+  "description": "Characters learn class spells automatically on level-up.",
+  "source": {
+    "repo": "azerothcore/mod-learn-spells"
+  },
+  "build": {
+    "rebuild": true
+  },
+  "sql": [
+    {
+      "db": "world",
+      "path": "data/sql/db-world/*.sql",
+      "applied_by": "db-import"
+    }
+  ],
+  "conf": [
+    {
+      "file": "env/dist/etc/modules/mod_learnspells.conf",
+      "keys": [
+        {
+          "key": "LearnSpells.Enable",
+          "default": "1"
+        },
+        {
+          "key": "LearnSpells.Announce",
+          "default": "1"
+        },
+        {
+          "key": "LearnSpells.OnFirstLogin",
+          "default": "0"
+        },
+        {
+          "key": "LearnSpells.MaxLevel",
+          "default": "80"
+        }
+      ],
+      "template": "conf/mod_learnspells.conf.dist"
+    }
+  ],
+  "notes": [
+    "The conf must exist or the module spams config warnings on every bot login; if the clone ships no conf.dist the defaults above are written under a [worldserver] header. wow-manage.sh 2746-2772."
+  ]
+}

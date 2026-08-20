@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "id": "mod-custom-login",
+  "name": "Custom Login",
+  "type": "module",
+  "game": "wow-wotlk",
+  "description": "Starter gear and reputation on first login.",
+  "source": {
+    "repo": "azerothcore/mod-custom-login"
+  },
+  "build": {
+    "rebuild": true
+  },
+  "conf": [
+    {
+      "file": "env/dist/etc/modules/mod_customlogin.conf",
+      "keys": [],
+      "template": "conf/mod_customlogin.conf.dist"
+    }
+  ],
+  "notes": [
+    "wow-manage.sh registers this in SQL_MOD_REGISTRY as install_type conf_module, but it is a C++ module (clone into modules/, rebuild). A legacy modules/custom-login dir (no mod- prefix) breaks the build because AzerothCore derives Add<dirname>Scripts() from the directory name; the script renames it at startup (1233-1247)."
+  ]
+}

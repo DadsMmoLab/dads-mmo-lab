@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "id": "mod-profession-progression",
+  "name": "Profession Progression",
+  "type": "module",
+  "game": "wow-wotlk",
+  "description": "Unlock extra profession slots by leveling.",
+  "source": {
+    "repo": "TopHatMan/mod-profession-progression"
+  },
+  "build": {
+    "rebuild": true
+  },
+  "conf": [
+    {
+      "file": "env/dist/etc/modules/mod-profession-progression.conf",
+      "keys": [
+        {
+          "key": "ProfessionProgression.ExpansionStage",
+          "note": "0=Vanilla(300) 1=TBC(375) 2=Wrath(425)"
+        },
+        {
+          "key": "ProfessionProgression.BaseSlots",
+          "note": "default 2"
+        },
+        {
+          "key": "ProfessionProgression.UnlockThirdAt",
+          "note": "75"
+        },
+        {
+          "key": "ProfessionProgression.UnlockFourthAt",
+          "note": "150"
+        },
+        {
+          "key": "ProfessionProgression.AutoExpansionProfessions"
+        }
+      ],
+      "template": "conf/mod-profession-progression.conf.dist"
+    }
+  ],
+  "notes": [
+    "Upstream omits include.sh on purpose; the generic install touches modules/<id>/include.sh so CMake's CollectSourceFiles() discovers the module (wow-manage.sh 2122-2130)."
+  ]
+}

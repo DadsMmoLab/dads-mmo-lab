@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "id": "mod-transmog",
+  "name": "Transmogrification",
+  "type": "module",
+  "game": "wow-wotlk",
+  "description": "Transmogrify gear appearance via the Transmogrifier NPC.",
+  "source": {
+    "repo": "azerothcore/mod-transmog"
+  },
+  "build": {
+    "rebuild": true
+  },
+  "sql": [
+    {
+      "db": "world",
+      "path": "data/sql/db-world/*.sql",
+      "applied_by": "db-import"
+    },
+    {
+      "db": "characters",
+      "path": "data/sql/db-characters/*.sql",
+      "applied_by": "db-import",
+      "note": "updates.name: trasmorg.sql (sic)"
+    }
+  ],
+  "conf": [
+    {
+      "file": "env/dist/etc/modules/transmog.conf",
+      "keys": [
+        {
+          "key": "Transmogrification.Enable"
+        },
+        {
+          "key": "Transmogrification.ShowSetDisclaimer"
+        },
+        {
+          "key": "Transmogrification.UseCollectionSystem"
+        },
+        {
+          "key": "Transmogrification.UseVendorInterface"
+        },
+        {
+          "key": "Transmogrification.AllowHiddenTransmog"
+        }
+      ],
+      "template": "conf/transmog.conf.dist"
+    }
+  ],
+  "npcs": [
+    {
+      "entry": 190010,
+      "name": "Transmogrifier",
+      "note": "Spawn manually: .npc add 190010"
+    }
+  ]
+}

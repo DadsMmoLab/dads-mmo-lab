@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "id": "npc-teleporter",
+  "name": "NPC Teleporter",
+  "type": "mod",
+  "game": "wow-wotlk",
+  "description": "Teleporter NPCs in capitals (entry 190000) and starting zones (190001).",
+  "source": {
+    "repo": "Zoidwaffle/sql-npc-teleporter"
+  },
+  "sql": [
+    {
+      "db": "world",
+      "path": "data/sql/db-world/teleporter_capital.dist",
+      "note": "applied if {capital}; '@ONY_LEVEL := N' is replaced with {ony_level} first"
+    },
+    {
+      "db": "world",
+      "path": "data/sql/db-world/teleporter_starting_zone.dist",
+      "note": "applied if {startzone}"
+    },
+    {
+      "db": "world",
+      "statement": "DELETE FROM creature WHERE id1 IN (190000,190001); DELETE FROM creature_template WHERE entry IN (190000,190001);",
+      "when": "remove"
+    }
+  ],
+  "prompts": [
+    {
+      "key": "ony_level",
+      "question": "Onyxia level",
+      "kind": "choice",
+      "choices": [
+        "60",
+        "80"
+      ],
+      "default": "60"
+    },
+    {
+      "key": "capital",
+      "question": "Install the capital-city NPC?",
+      "kind": "bool",
+      "default": "true"
+    },
+    {
+      "key": "startzone",
+      "question": "Install the starting-zone NPC?",
+      "kind": "bool",
+      "default": "true"
+    }
+  ],
+  "npcs": [
+    {
+      "entry": 190000,
+      "name": "Teleporter (capitals)"
+    },
+    {
+      "entry": 190001,
+      "name": "Teleporter (starting zones)"
+    }
+  ],
+  "notes": [
+    "Install fails if both NPCs are disabled. Originally by Rochet2."
+  ]
+}

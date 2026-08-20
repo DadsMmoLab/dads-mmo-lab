@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "id": "lootpet",
+  "name": "Loot Pet",
+  "type": "ale",
+  "game": "wow-wotlk",
+  "description": "A vanity pet auto-loots nearby corpses (default pet Warbot 34587 / item 46767).",
+  "source": {
+    "repo": "Brytenwally/Lootpet"
+  },
+  "requires": [
+    "mod-ale"
+  ],
+  "deploy": [
+    {
+      "src": "LootPet.lua",
+      "dest": "env/dist/etc/modules/lua_scripts/"
+    }
+  ]
+}

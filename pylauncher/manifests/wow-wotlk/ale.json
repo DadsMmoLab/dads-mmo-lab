@@ -2,5 +2,13 @@
   "schema_version": 1,
   "game": "wow-wotlk",
   "type": "ale",
-  "items": []
+  "items": [
+    "accountwide",
+    "activechat",
+    "battlepass",
+    "lootpet",
+    "paragon",
+    "sitmeanrest",
+    "unlimitedammo"
+  ]
 }

@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "id": "mod-autobalance",
+  "name": "Auto Balance",
+  "type": "module",
+  "game": "wow-wotlk",
+  "description": "Dynamic dungeon/raid difficulty scaling by group size.",
+  "source": {
+    "repo": "azerothcore/mod-autobalance"
+  },
+  "build": {
+    "rebuild": true
+  },
+  "sql": [
+    {
+      "db": "world",
+      "path": "data/sql/db-world/*.sql",
+      "applied_by": "db-import"
+    }
+  ],
+  "conf": [
+    {
+      "file": "env/dist/etc/modules/AutoBalance.conf",
+      "keys": [
+        {
+          "key": "AutoBalance.Enable.*"
+        }
+      ],
+      "template": "conf/AutoBalance.conf.dist"
+    }
+  ],
+  "notes": [
+    "Config hot-reloads via .reload config."
+  ]
+}

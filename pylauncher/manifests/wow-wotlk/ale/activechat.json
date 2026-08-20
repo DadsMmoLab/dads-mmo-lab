@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "id": "activechat",
+  "name": "Azeroth Chatter",
+  "type": "ale",
+  "game": "wow-wotlk",
+  "description": "Lore-grounded ambient world RP chat.",
+  "source": {
+    "repo": "svey-xyz/ActiveChat"
+  },
+  "requires": [
+    "mod-ale"
+  ],
+  "deploy": [
+    {
+      "src": "AzerothChatter/",
+      "dest": "env/dist/etc/modules/lua_scripts/AzerothChatter/",
+      "rename": [
+        [
+          "data/chatter.lua",
+          "data/chatter_data.lua"
+        ],
+        [
+          "data/context.lua",
+          "data/context_data.lua"
+        ]
+      ]
+    }
+  ],
+  "patches": [
+    {
+      "file": "env/dist/etc/modules/lua_scripts/AzerothChatter/**/*.lua",
+      "find": "require\\(([\"\\'])data\\.chatter\\1\\)",
+      "replace": "require(\\1data.chatter_data\\1)",
+      "regex": true
+    },
+    {
+      "file": "env/dist/etc/modules/lua_scripts/AzerothChatter/**/*.lua",
+      "find": "require\\(([\"\\'])data\\.context\\1\\)",
+      "replace": "require(\\1data.context_data\\1)",
+      "regex": true
+    }
+  ],
+  "notes": [
+    "ALE rejects duplicate Lua basenames across subdirs: data/chatter.lua collides with logic/chatter.lua (same for context.lua) — hence the rename + require patch. wow-manage.sh 3774-3811."
+  ]
+}

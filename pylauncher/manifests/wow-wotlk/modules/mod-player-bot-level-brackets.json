@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "id": "mod-player-bot-level-brackets",
+  "name": "Bot Level Brackets",
+  "type": "module",
+  "game": "wow-wotlk",
+  "description": "Keeps the Playerbot population distributed across level brackets.",
+  "source": {
+    "repo": "DustinHendrickson/mod-player-bot-level-brackets"
+  },
+  "build": {
+    "rebuild": true
+  },
+  "requires": [
+    "mod-playerbots"
+  ],
+  "sql": [
+    {
+      "db": "characters",
+      "path": "data/sql/db-characters/*.sql",
+      "applied_by": "db-import"
+    }
+  ],
+  "conf": [
+    {
+      "file": "env/dist/etc/modules/mod_player_bot_level_brackets.conf",
+      "keys": [
+        {
+          "key": "BotLevelBrackets.Enabled"
+        },
+        {
+          "key": "BotLevelBrackets.CheckFrequency"
+        },
+        {
+          "key": "BotLevelBrackets.CheckFlaggedFrequency"
+        },
+        {
+          "key": "BotLevelBrackets.IgnoreGuildBotsWithRealPlayers"
+        },
+        {
+          "key": "BotLevelBrackets.IgnoreArenaTeamBots"
+        }
+      ],
+      "template": "conf/mod_player_bot_level_brackets.conf.dist"
+    }
+  ],
+  "notes": [
+    ".reload applies bracket config without restart. wow-manage.sh 2482-2512."
+  ]
+}

@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "mod-ah-bot",
+  "name": "Auction House Bot",
+  "type": "module",
+  "game": "wow-wotlk",
+  "description": "Populates the auction house with bot-posted items (~75 items per cycle; full population takes hours).",
+  "source": {
+    "repo": "azerothcore/mod-ah-bot"
+  },
+  "build": {
+    "rebuild": true
+  },
+  "conflicts_with": [
+    "mod-ah-bot-plus"
+  ],
+  "sql": [
+    {
+      "db": "world",
+      "path": "data/sql/db-world/*.sql",
+      "applied_by": "db-import",
+      "note": "updates.name values: auctionhousebot_professionItems.sql, mod_auctionhousebot.sql (professionItems lacks CREATE TABLE IF NOT EXISTS — classic 'Table already exists' if applied twice by hand)"
+    }
+  ],
+  "conf": [
+    {
+      "file": "env/dist/etc/modules/mod_ahbot.conf",
+      "keys": [
+        {
+          "key": "AuctionHouseBot.Account",
+          "default": "{bot_account}",
+          "note": "account id owning the bot character"
+        },
+        {
+          "key": "AuctionHouseBot.GUID",
+          "default": "{bot_guid}",
+          "note": "singular on the original module"
+        },
+        {
+          "key": "AuctionHouseBot.EnableSeller",
+          "default": "1"
+        },
+        {
+          "key": "AuctionHouseBot.EnableBuyer",
+          "default": "1"
+        }
+      ],
+      "template": "conf/mod_ahbot.conf.dist"
+    }
+  ],
+  "prompts": [
+    {
+      "key": "bot_guid",
+      "question": "GUID of the AH bot character (create the AHBOT account + ONE character first, log it out)",
+      "kind": "int"
+    },
+    {
+      "key": "bot_account",
+      "question": "Account id of the AH bot character (looked up from acore_characters.characters by GUID)",
+      "kind": "int"
+    }
+  ],
+  "notes": [
+    "Configure copies conf/mod_ahbot.conf.dist fresh over the active conf on every run (overwrites prior edits), then sets the keys above; if the worldserver is running the conf is also docker cp'd into the container and a restart is required. wow-manage.sh 2249-2373.",
+    "Legacy path <server>/conf/modules/mod_ahbot.conf is migrated to env/dist/etc/modules/ when the new one is missing (6130-6140)."
+  ]
+}

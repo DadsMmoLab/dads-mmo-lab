@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "id": "mod-aoe-loot",
+  "name": "AoE Loot",
+  "type": "module",
+  "game": "wow-wotlk",
+  "description": "Loot every nearby corpse in one click.",
+  "source": {
+    "repo": "azerothcore/mod-aoe-loot"
+  },
+  "build": {
+    "rebuild": true
+  },
+  "sql": [
+    {
+      "db": "world",
+      "path": "data/sql/db-world/*.sql",
+      "applied_by": "db-import"
+    }
+  ],
+  "conf": [
+    {
+      "file": "env/dist/etc/modules/mod_aoe_loot.conf",
+      "keys": [
+        {
+          "key": "AOELoot.Enable"
+        },
+        {
+          "key": "AOELoot.Message"
+        },
+        {
+          "key": "AOELoot.Range"
+        },
+        {
+          "key": "AOELoot.Group"
+        }
+      ],
+      "template": "conf/mod_aoe_loot.conf.dist"
+    }
+  ],
+  "notes": [
+    "wow-manage.sh 677-685, 6186-6193."
+  ]
+}

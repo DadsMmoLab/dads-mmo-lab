@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "id": "mod-arac",
+  "name": "All Races All Classes (ARAC)",
+  "type": "module",
+  "game": "wow-wotlk",
+  "description": "Data-only module: every race can be every class (SQL + server DBC + client MPQ). No rebuild.",
+  "source": {
+    "repo": "heyitsbench/mod-arac"
+  },
+  "build": {
+    "rebuild": false
+  },
+  "sql": [
+    {
+      "db": "world",
+      "path": "data/sql/db-world/arac.sql",
+      "applied_by": "direct",
+      "note": "applied by the app, NOT db-import; wow-manage.sh keeps a marker modules/mod-arac/.arac_sql_applied and only re-applies on request (after a DB wipe)"
+    }
+  ],
+  "server_dbc": [
+    {
+      "src": "patch-contents/DBFilesContent"
+    }
+  ],
+  "client": [
+    {
+      "src": "Patch-A.MPQ",
+      "dest": "data"
+    }
+  ],
+  "notes": [
+    "Lives under modules/ and is detected like a C++ module, but the install flow skips the rebuild. Removing the clone does NOT revert the SQL/DBC/MPQ. wow-manage.sh 2780-2874.",
+    "Restart the worldserver after the DBC copy."
+  ]
+}

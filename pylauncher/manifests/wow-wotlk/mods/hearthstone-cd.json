@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "id": "hearthstone-cd",
+  "name": "Hearthstone Cooldown Tweaks",
+  "type": "mod",
+  "game": "wow-wotlk",
+  "description": "Shorten the Hearthstone cooldown.",
+  "source": {
+    "repo": "AsgavinYT/hearthstone-cooldowns"
+  },
+  "sql": [
+    {
+      "db": "world",
+      "path": "Hearthstone_{cooldown}.sql",
+      "note": "one of Hearthstone_1_Sec / _1_Min / _5_Min / _15_Min / _30_Min"
+    },
+    {
+      "db": "world",
+      "statement": "UPDATE spell_dbc SET RecoveryTime = 1800000, CategoryRecoveryTime = 1800000 WHERE Id = 8690;",
+      "when": "remove",
+      "note": "30-minute default"
+    }
+  ],
+  "prompts": [
+    {
+      "key": "cooldown",
+      "question": "Hearthstone cooldown",
+      "kind": "choice",
+      "choices": [
+        "1_Sec",
+        "1_Min",
+        "5_Min",
+        "15_Min",
+        "30_Min"
+      ],
+      "default": "30_Min"
+    }
+  ],
+  "notes": [
+    "Applies after a restart or .reload spells."
+  ]
+}

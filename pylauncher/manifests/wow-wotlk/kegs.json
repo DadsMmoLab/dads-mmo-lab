@@ -2,5 +2,8 @@
   "schema_version": 1,
   "game": "wow-wotlk",
   "type": "keg",
-  "items": []
+  "items": [
+    "bmah",
+    "sod"
+  ]
 }

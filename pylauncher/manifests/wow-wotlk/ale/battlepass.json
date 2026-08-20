@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "id": "battlepass",
+  "name": "Battle Pass System",
+  "type": "ale",
+  "game": "wow-wotlk",
+  "description": "XP progression with rewards and a client addon (/bp, /battlepass).",
+  "source": {
+    "repo": "Shonik/lua-battlepass"
+  },
+  "requires": [
+    "mod-ale"
+  ],
+  "deploy": [
+    {
+      "src": "lua_scripts/",
+      "dest": "env/dist/etc/modules/lua_scripts/"
+    }
+  ],
+  "patches": [
+    {
+      "file": "env/dist/etc/modules/lua_scripts/battlepass/05_BP_Communication.lua",
+      "find": "^require\\(\"lib\\.CSMH\\.CSMH_SMH\"\\)",
+      "replace": "-- require removed: CSMH_SMH.ext is auto-loaded by ALE before .lua scripts; requiring it double-loads CSMH and crashes the server",
+      "regex": true
+    }
+  ],
+  "sql": [
+    {
+      "db": "world",
+      "path": "sql/battlepass_world.sql",
+      "note": "tables must exist BEFORE the server starts"
+    },
+    {
+      "db": "characters",
+      "path": "sql/battlepass_characters.sql"
+    },
+    {
+      "db": "world",
+      "statement": "UPDATE battlepass_config SET config_value='{enabled}' WHERE config_key='enabled'; UPDATE battlepass_config SET config_value='{max_level}' WHERE config_key='max_level'; UPDATE battlepass_config SET config_value='{exp_per_level}' WHERE config_key='exp_per_level'; UPDATE battlepass_config SET config_value='{exp_scaling}' WHERE config_key='exp_scaling'; UPDATE battlepass_config SET config_value='{npc_entry}' WHERE config_key='npc_entry'; UPDATE battlepass_config SET config_value='{debug_mode}' WHERE config_key='debug_mode';",
+      "when": "configure"
+    },
+    {
+      "db": "world",
+      "statement": "DELETE FROM creature_template WHERE entry=90100; INSERT INTO creature_template (entry, name, subname, minlevel, maxlevel, faction, npcflag, unit_class, unit_flags, type, AIName, ScriptName) VALUES (90100, 'Battle Pass Vendor', 'Battle Pass', 80, 80, 35, 1, 1, 512, 7, '', '');",
+      "note": "NPC 90100 is NOT in upstream SQL; wow-manage.sh inserts it (schema-adaptive display 25478 via creature_template_model or modelid1, 6834-6946). Worldserver restart required before .npc add — creature_template is not hot-loaded."
+    }
+  ],
+  "client": [
+    {
+      "src": "BattlePass",
+      "dest": "addons",
+      "name": "BattlePass"
+    }
+  ],
+  "npcs": [
+    {
+      "entry": 90100,
+      "name": "Battle Pass Vendor",
+      "note": "Spawn manually after a restart: .npc add 90100"
+    }
+  ],
+  "prompts": [
+    {
+      "key": "enabled",
+      "question": "Enabled?",
+      "kind": "int",
+      "default": "1"
+    },
+    {
+      "key": "max_level",
+      "question": "Max battle pass level",
+      "kind": "int",
+      "default": "100"
+    },
+    {
+      "key": "exp_per_level",
+      "question": "XP per level",
+      "kind": "int",
+      "default": "1000"
+    },
+    {
+      "key": "exp_scaling",
+      "question": "XP scaling per level",
+      "kind": "float",
+      "default": "1.1"
+    },
+    {
+      "key": "npc_entry",
+      "question": "Vendor NPC entry",
+      "kind": "int",
+      "default": "90100"
+    },
+    {
+      "key": "debug_mode",
+      "question": "Debug mode?",
+      "kind": "int",
+      "default": "0"
+    }
+  ]
+}

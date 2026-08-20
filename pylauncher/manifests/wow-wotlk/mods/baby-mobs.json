@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "id": "baby-mobs",
+  "name": "Baby Mobs",
+  "type": "mod",
+  "game": "wow-wotlk",
+  "description": "HP x0.25 / DMG x0.25 / ARM x0.25, slower attacks.",
+  "conflicts_with": [
+    "buff-mobs",
+    "xbuff-mobs",
+    "nerf-mobs"
+  ],
+  "sql": [
+    {
+      "db": "world",
+      "statement": "UPDATE creature_template SET HealthModifier=HealthModifier*{hp}, DamageModifier=DamageModifier*{dmg}, ArmorModifier=ArmorModifier*{arm}, BaseAttackTime=BaseAttackTime*{spd}, RangeAttackTime=RangeAttackTime*{spd};"
+    },
+    {
+      "db": "world",
+      "statement": "UPDATE creature_template SET HealthModifier=HealthModifier/{hp}, DamageModifier=DamageModifier/{dmg}, ArmorModifier=ArmorModifier/{arm}, BaseAttackTime=BaseAttackTime/{spd}, RangeAttackTime=RangeAttackTime/{spd};",
+      "when": "remove",
+      "note": "inverse of the APPLIED values (wow-manage.sh stores them in the marker file); applying twice stacks multipliers"
+    }
+  ],
+  "prompts": [
+    {
+      "key": "hp",
+      "question": "HP multiplier",
+      "kind": "float",
+      "default": "0.25"
+    },
+    {
+      "key": "dmg",
+      "question": "Damage multiplier",
+      "kind": "float",
+      "default": "0.25"
+    },
+    {
+      "key": "arm",
+      "question": "Armor multiplier",
+      "kind": "float",
+      "default": "0.25"
+    },
+    {
+      "key": "spd",
+      "question": "Attack-time multiplier (>1 = slower)",
+      "kind": "float",
+      "default": "1.5"
+    }
+  ],
+  "notes": [
+    "Mob tweaks are mutually exclusive: installing one removes any sibling first (wow-manage.sh 4601-4611). Back up acore_world before applying."
+  ]
+}

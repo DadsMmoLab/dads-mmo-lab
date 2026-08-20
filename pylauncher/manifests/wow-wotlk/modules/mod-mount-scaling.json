@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "id": "mod-mount-scaling",
+  "name": "Mount Scaling",
+  "type": "module",
+  "game": "wow-wotlk",
+  "description": "Level-based progressive mount speed; ride from level 1.",
+  "source": {
+    "repo": "claudevandort/mod-mount-scaling"
+  },
+  "build": {
+    "rebuild": true
+  },
+  "sql": [
+    {
+      "db": "world",
+      "path": "data/sql/db-world/*.sql",
+      "applied_by": "db-import",
+      "note": "mount_scaling_trainer.sql lowers Apprentice Riding + ground-mount item level requirements to 1"
+    }
+  ],
+  "conf": [
+    {
+      "file": "env/dist/etc/modules/mount_scaling.conf",
+      "keys": [
+        {
+          "key": "MountScaling.Enable"
+        },
+        {
+          "key": "MountScaling.Ground.SpeedPerLevel"
+        },
+        {
+          "key": "MountScaling.Ground.MinSpeed"
+        },
+        {
+          "key": "MountScaling.Ground.MaxSpeed"
+        },
+        {
+          "key": "MountScaling.Ground.Journeyman.*"
+        },
+        {
+          "key": "MountScaling.Flying.Expert.*"
+        },
+        {
+          "key": "MountScaling.Flying.Artisan.*"
+        }
+      ],
+      "template": "conf/mount_scaling.conf.dist"
+    }
+  ],
+  "notes": [
+    "Players must delete the client Cache/WDB/<locale>/itemcache.wdb after the SQL applies."
+  ]
+}

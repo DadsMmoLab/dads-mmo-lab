@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "id": "lvl1-mounts",
+  "name": "Level One Mounts",
+  "type": "mod",
+  "game": "wow-wotlk",
+  "description": "Ride at level 1 (pure SQL despite the 'mod-' repo name).",
+  "source": {
+    "repo": "tomcoffingiii/mod-level-one-mounts"
+  },
+  "sql": [
+    {
+      "db": "world",
+      "path": "level-one-mounts.sql"
+    },
+    {
+      "db": "world",
+      "path": "level-twenty-mounts.sql",
+      "when": "remove",
+      "note": "reverts to level 20"
+    }
+  ]
+}

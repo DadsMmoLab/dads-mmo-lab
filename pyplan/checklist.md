@@ -33,7 +33,7 @@
 ## Phase 2 — Manifest schema & data port
 
 - [x] 2.1 Finalize the manifest schema (+ `repo` allow-list validation)
-- [ ] 2.2 Port WotLK modules from `wow-manage.sh` into `manifests/wow-wotlk/`
+- [x] 2.2 Port WotLK modules from `wow-manage.sh` into `manifests/wow-wotlk/`
 - [ ] 2.3 `modules.py` — load/validate/fetch
 - [ ] **Phase 2 exit criteria met**
 
@@ -94,5 +94,20 @@
   script's `accountwide` is a plain ALE script (Aldori15's repo), while the only real kegs are the
   in-repo `ALE-Kegs` bundles `bmah` and `sod` (`archive/guides/wow-wotlk/ALE-Kegs/README.md`
   defines the term) — they get `kegs.json` + `kegs/<id>.json` like every other family.
+- **2.2 port record (2026-08-20):** `wow-manage.sh` v2.2.8 (8,017 lines — README said ~2,300)
+  was read in full and its four registries (`MODULE_REGISTRY`, `ALE_SCRIPT_REGISTRY`,
+  `SQL_MOD_REGISTRY`, `MODULE_UPDATE_FILES`) plus every per-key `case` table were ported into 41
+  manifests: 21 `modules/` (incl. `mod-custom-login`, which the script files under SQL mods as
+  `conf_module` but is a C++ module, and `mod-arac`, the one data-only module with
+  `build.rebuild=false` and directly-applied SQL), 7 `ale/`, 11 `mods/` (4 mutually exclusive mob
+  tweaks + xp-rates are inline/no-clone), 2 `kegs/` (`bmah`, `sod` — sparse checkouts of this
+  repo's `ALE-Kegs`). Not ported: the script's `levelupreward` ALE key — it has install/remove
+  code paths but is in no registry and names no repo, so it is unreachable from the menus.
+  `mod-player-bot-level-brackets` declares `requires: ["mod-playerbots"]`; there is no
+  `mod-playerbots` manifest yet (it is the installer's core choice, not a toggleable module) —
+  2.3's dependency check must treat it as satisfied by the playerbots server type.
+  Config markers/state files the script keeps (`sql_scripts/installed/*.installed`,
+  `sql_scripts/config/*.conf`, `.arac_sql_applied`) are deliberately NOT manifest data — they are
+  app state and belong under `platform.config_dir()` (README §11).
 - **Tooling:** the `integration` pytest marker is registered in `pyproject.toml`; CI's plain
   `pytest -q` runs the busybox live test on runners that have Docker and skips it elsewhere.

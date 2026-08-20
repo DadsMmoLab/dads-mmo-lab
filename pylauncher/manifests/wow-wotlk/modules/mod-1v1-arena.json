@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "id": "mod-1v1-arena",
+  "name": "1v1 Arena",
+  "type": "module",
+  "game": "wow-wotlk",
+  "description": "1v1 arena matches via a Battlemaster NPC.",
+  "source": {
+    "repo": "azerothcore/mod-1v1-arena"
+  },
+  "build": {
+    "rebuild": true
+  },
+  "sql": [
+    {
+      "db": "characters",
+      "path": "data/sql/db-characters/*.sql",
+      "applied_by": "db-import"
+    }
+  ],
+  "conf": [
+    {
+      "file": "env/dist/etc/modules/1v1arena.conf",
+      "keys": [
+        {
+          "key": "Arena1v1.Enable"
+        },
+        {
+          "key": "Arena1v1.MinLevel"
+        },
+        {
+          "key": "Arena1v1.Costs"
+        },
+        {
+          "key": "Arena1v1.Announcer"
+        },
+        {
+          "key": "Arena1v1.PreventHealingTalents"
+        }
+      ],
+      "template": "conf/1v1arena.conf.dist"
+    }
+  ],
+  "npcs": [
+    {
+      "entry": 999991,
+      "name": "1v1 Arena Battlemaster",
+      "note": "Spawn manually after the rebuild: .npc add 999991"
+    }
+  ],
+  "notes": [
+    "wow-manage.sh 463-476, 6177-6185."
+  ]
+}
