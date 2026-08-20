@@ -34,8 +34,8 @@
 
 - [x] 2.1 Finalize the manifest schema (+ `repo` allow-list validation)
 - [x] 2.2 Port WotLK modules from `wow-manage.sh` into `manifests/wow-wotlk/`
-- [ ] 2.3 `modules.py` — load/validate/fetch
-- [ ] **Phase 2 exit criteria met**
+- [x] 2.3 `modules.py` — load/validate/fetch
+- [x] **Phase 2 exit criteria met** (41 manifests + 4 indexes validate in CI; adding a module is a JSON file and an index entry, no Python)
 
 ---
 
@@ -109,5 +109,20 @@
   Config markers/state files the script keeps (`sql_scripts/installed/*.installed`,
   `sql_scripts/config/*.conf`, `.arac_sql_applied`) are deliberately NOT manifest data — they are
   app state and belong under `platform.config_dir()` (README §11).
+- **2.3 decisions (2026-08-20):** loading/fetching live in the shared `yulon/manifest_store.py`
+  (`ManifestStore` over any tree, `ManifestFetcher` mirroring `<game>/<family>.json` + items
+  from a raw-GitHub prefix into the cache with `.etag` sidecars and `If-None-Match`, atomic per
+  file, validated before use) and the apply engine in `yulon/apply.py` (`Applier.install/
+  configure/remove` over seams `Git`/`SqlRunner`/`DbcCopier`; clones go to `modules/<id>`,
+  `ale_scripts/<id>`, `sql_scripts/clones/<id>` like the script; `db-import` SQL is never run by
+  the app; every step a run could not perform is listed in `ApplyReport.skipped`; templates
+  `{key}` render from prompt values with prompt defaults as fallback, and a missing value is an
+  `ApplyError`; bool prompt values render as the strings `true`/`false`). `controller_wow_wotlk/
+  modules.py` only binds game id, bundled dir, refresh URL and the DB container.
+  **Open:** `MANIFEST_BASE_URL` points at `DadsMmoLab/dads-mmo-lab` `main`, which will only
+  serve manifests once this branch lands there — until then refresh 404s (cleanly) and the
+  bundled copy is used. Dependency resolution (`requires`/`conflicts_with`, incl. the
+  `mod-playerbots` pseudo-id) is not in the engine yet — it belongs to the controller/UI layer
+  that decides what to install (Phase 4.3), not to the applier.
 - **Tooling:** the `integration` pytest marker is registered in `pyproject.toml`; CI's plain
   `pytest -q` runs the busybox live test on runners that have Docker and skips it elsewhere.

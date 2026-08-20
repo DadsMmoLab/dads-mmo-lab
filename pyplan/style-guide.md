@@ -89,11 +89,13 @@ scripts it replaces.
 | `docker.py` | Shared, game-agnostic Docker lifecycle (start/stop/status/health/polling/port-conflict check) via `runner.py` | Know anything about a specific game's containers/ports — those are passed in by callers via `ContainerSpec` |
 | `controller.py` | The base `Controller`: composes one `ContainerSpec` + server dir, exposes start/stop/status/polling by delegating to `docker.py`, and applies the README §12 single-instance guard (refuse `start()` while a *foreign* container binds our ports) once for every game | Know anything about a specific game; reimplement `docker.py` behavior; read manifests (Phase 2.3 layers that on top) |
 | `manifest.py` | The manifest schema: pydantic models for every family, the `repo` allow-list, the JSON Schema export | Know how to *apply* a manifest (that is each controller's `modules.py`); hardcode any per-item data |
+| `manifest_store.py` | Reading one game's manifest tree (indexes + items) and mirroring it from GitHub with ETag revalidation | Know what any item does; apply anything |
+| `apply.py` | The shared apply engine: turns manifest primitives into install/configure/remove steps through small seams (`Git`, `SqlRunner`, `DbcCopier`); reports every skipped step | Contain per-item conditionals (that is manifest data); rebuild/restart/touch the Docker lifecycle itself (the controller decides) |
 | `platform.py` | OS detection, config dir paths, Docker/WSL provisioning, network auto-setup (LAN/internet-play firewall, IP detection, WSL2 portproxy — README §13) | Know anything about a specific game or module |
 | `catalog/installer.py` | Orchestrating an install (deps → clone → build → config) for *one* catalog entry | Contain UI code, or hardcode per-game logic that belongs in a manifest |
 | `controller_<acronym>/docker_ctl.py` | Holding *that one game's* `ContainerSpec` and re-exporting `docker.py`'s shared operations | Reimplement Docker lifecycle logic itself, reach into another game's controller, or contain UI code |
 | `controller_<acronym>/controller.py` | That game's `Controller` subclass — passes its `ContainerSpec` to the base and nothing else | Override the inherited lifecycle methods (if a game needs different behavior, extend `docker.py`/the base instead) |
-| `controller_<acronym>/modules.py` | Loading/validating/applying that game's manifests | Hardcode module data that should live in `manifests/` JSON |
+| `controller_<acronym>/modules.py` | Binding the shared store/fetcher/applier to that game (game id, bundled manifest dir, refresh URL, DB container) | Hardcode module data that should live in `manifests/` JSON; reimplement loading or applying |
 | `ui/*_view.py` | Rendering widgets and wiring signals | Contain business logic, subprocess calls, or Docker calls directly — delegate to controller/catalog objects |
 
 **Rule of thumb:** if you're writing Docker-related code inside a `ui/` file, or UI-related code

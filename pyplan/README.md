@@ -146,13 +146,15 @@ pylauncher/
 │   │   ├── docker_ctl.py         # start/stop/status/logs/health
 │   │   ├── console.py            # attach to worldserver console
 │   │   ├── maintenance.py        # cache clear, backups, SQL changes
-│   │   └── modules.py            # reads/writes module JSON manifests
+│   │   └── modules.py            # binds the shared store/fetcher/applier to WotLK (game id, bundled dir, DB container)
 │   ├── controller.py             # base Controller: ContainerSpec + server dir, start guarded by §12 (Phase 1.4)
 │   ├── runner.py                 # subprocess streaming (shared by all)
 │   ├── docker.py                 # shared Docker lifecycle + port-conflict check (shared)
 │   ├── platform.py               # OS detection + silent Docker/WSL provisioning
 │   ├── log.py                    # shared logging convention (get_logger/configure — Phase 0.6)
 │   ├── manifest.py               # the manifest schema: pydantic models + repo allow-list (Phase 2.1)
+│   ├── manifest_store.py         # load manifests from a tree + refresh from GitHub with ETags (Phase 2.3)
+│   ├── apply.py                  # declarative apply engine: manifest → install/configure/remove steps (Phase 2.3)
 │   └── ui/
 │       ├── __init__.py
 │       ├── catalog_view.py
@@ -178,6 +180,8 @@ pylauncher/
 │   ├── test_docker.py            # covers yulon/docker.py + WotLK docker_ctl (Phase 1.3)
 │   ├── test_controller.py        # covers yulon/controller.py + WotlkController (Phase 1.4)
 │   ├── test_manifest.py          # covers yulon/manifest.py (Phase 2.1)
+│   ├── test_manifest_store.py    # covers yulon/manifest_store.py + the WotLK modules.py binding (Phase 2.3)
+│   ├── test_apply.py             # covers yulon/apply.py (Phase 2.3)
 │   └── integration/              # live-Docker suite, marked `integration`, self-skipping without a daemon (Phase 1.5)
 │       ├── conftest.py           # docker gate + throwaway busybox compose project shaped like an install
 │       ├── test_docker_live.py   # real compose up/healthy/ready/status/conflict-guard/down
