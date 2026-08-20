@@ -379,7 +379,9 @@ def docker_engine_commands(pm: PackageManager, *, steamos: bool, user: str) -> l
     elif pm == "apt":
         install = [
             ["apt-get", "update"],
-            ["apt-get", "install", "-y", "docker.io", "docker-compose-v2"],
+            # docker-buildx too: `docker.io` ships no BuildKit plugin and the server
+            # images are built with `compose up --build` (live gate, Ubuntu 24.04).
+            ["apt-get", "install", "-y", "docker.io", "docker-compose-v2", "docker-buildx"],
         ]
     elif pm == "dnf":
         install = [["dnf", "-y", "install", "moby-engine", "docker-compose"]]

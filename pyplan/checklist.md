@@ -60,7 +60,7 @@
 
 ## Phase 5 — Windows/macOS provisioning + packaging
 
-- [x] 5.1 Silent Docker Desktop / WSL2 provisioning + doc update — **code + doc in, unit-tested through seams; a fresh-machine run on Windows/macOS is NOT yet verified (see Cross-cutting)**
+- [x] 5.1 Silent Docker Desktop / WSL2 provisioning + doc update — **Linux path verified for real on a fresh Ubuntu 24.04 VM (2026-08-20, see Cross-cutting); Windows/macOS fresh-machine runs NOT yet verified**
 - [x] 5.2 PyInstaller specs finalized (local `pyinstaller build/pylauncher.spec` builds `build/dist/yulon/`; bundles manifests/, catalog.json and the install scripts; `YULON_SMOKE_TEST=1` runs the frozen exe headless)
 - [ ] 5.3 GitHub Actions release matrix complete — **workflow written (AppImage/zip/dmg, attaches to the Release) but unverified: it lives at `pylauncher/.github/workflows/`, and GitHub only runs workflows from the repo root `.github/workflows/` — moving/merging it there is an upstream decision**
 - [x] 5.4 Application self-update check (README §10)
@@ -150,6 +150,29 @@
   needs passwordless/cached sudo (Phase 4/5 must hand the UI a real password path, e.g.
   `SUDO_ASKPASS` + `-A` or pkexec). 3.3's graceful error is `DockerUnavailableError` raised
   from `preflight()` before the script starts, pinned by test.
+- **Phase 3 live gate — findings from the first real run (2026-08-20, fresh Ubuntu 24.04 VM,
+  12 vCPU, Docker absent, `python -m yulon.catalog.installer wow-wotlk --server-dir ~/wow-server-playerbots`):**
+  1. `catalog.json` pointed `wow-wotlk` at the pacman/SteamOS script; on Debian hosts it would
+     call `pacman`. Fixed: `install.script_variants` (`apt` → `-ubuntu.sh`, `dnf` → `-fedora.sh`)
+     + `Installer(package_manager=…)` seam (`host_package_manager()`; None off Linux).
+  2. The script calls `clear` and exits 1 with `TERM environment variable not set.` — the normal
+     state of a desktop-launched app. Fixed: `Installer.script_env()` inherits `os.environ`,
+     defaults `TERM=xterm-256color`, applies `env` overrides on top (overrides used to REPLACE
+     the environment).
+  3. The unanchored `Press ENTER` rule answered the hint "Leave blank and press ENTER to use the
+     default location." and the blank was consumed by `Install path:` → the chosen server dir was
+     silently dropped. Fixed: rules anchored (`^\s*Press ENTER`, `press ENTER to shut down`).
+  4. **Open (needs design):** the Debian script runs `sudo -v` up front; without a TTY sudo
+     cannot ask for the password and the script aborts. The gate ran with passwordless sudo.
+     Product answer is sudo's own: set `SUDO_ASKPASS` to a helper that hands over a password the
+     UI asked for once (sudo falls back to the helper when no terminal is present). Note that
+     `sudo -v` still prompts when a password-requiring group rule coexists with a NOPASSWD rule.
+  5. 5.1 Linux path passed for real on the same VM: `ensure_docker()` ran `apt-get update`,
+     `apt-get install -y docker.io docker-compose-v2`, `systemctl enable --now docker`,
+     `usermod -aG docker pk` and reported "log out and back in" honestly (`docker_ready=False`
+     for the current process; a new session had the group). `docker.io` ships no buildx — the
+     script fell back to a manual plugin download — so the apt list now includes
+     `docker-buildx` (24.04 candidate 0.30.1).
 - **3.4 record (2026-08-20):** mirrors `WoW-Wotlk-NETWORKING.md` exactly — ufw/firewalld/netsh
   command blocks (SteamOS wraps ufw in `steamos-readonly disable/enable`), `ip route`-equivalent
   LAN detection (inside WSL it asks Windows via `powershell.exe`, never the 172.x guest IP),

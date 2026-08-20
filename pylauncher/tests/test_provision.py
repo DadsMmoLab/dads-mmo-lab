@@ -50,6 +50,7 @@ def test_linux_engine_plan_per_package_manager() -> None:
     ]
     apt = platform.docker_engine_commands("apt", steamos=False, user="pk")
     assert apt[0] == ["apt-get", "update"] and "docker.io" in apt[1]
+    assert "docker-buildx" in apt[1]  # compose build needs BuildKit; docker.io lacks it
     assert platform.docker_engine_commands("dnf", steamos=False, user="u")[0][:3] == [
         "dnf",
         "-y",
