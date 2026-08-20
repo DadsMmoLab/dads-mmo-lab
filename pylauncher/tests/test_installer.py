@@ -87,6 +87,17 @@ def test_prompt_rules_are_ordered_and_decline_optional_offers() -> None:
     assert respond("Type yes to reset the keyring, or anything else to cancel: ") == "yes"
     assert respond("Ready to build your Playerbots server? (y/n): ") == "y"
     assert respond("Building worldserver 42%") is None
+    # Hints that merely MENTION the key are not prompts (the live gate caught this one).
+    assert respond("  Leave blank and press ENTER to use the default location.") is None
+    assert respond("Press ENTER to continue...") == ""
+    assert respond("Press ENTER when done creating accounts...") == ""
+    assert respond("  ── or press ENTER to shut down manually ──") == ""
+    assert respond("  WoW not detected — press ENTER to shut down.") == ""
+    assert respond("Install path: ") == ""  # blank = default when no server_dir was chosen
+    assert (
+        make_responder(InstallOptions(server_dir=Path("/srv/wow")))("  Install path: ")
+        == "/srv/wow"
+    )
     assert len(PROMPT_RULES) >= 8
 
 

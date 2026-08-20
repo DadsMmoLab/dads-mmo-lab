@@ -83,7 +83,12 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
         r"Remove it and start fresh\?", lambda o: "y" if o.reinstall else "n", "existing server dir"
     ),
     PromptRule(r"Type yes to reset the keyring", "yes", "Steam Deck pacman keyring repair"),
-    PromptRule(r"Press ENTER", ""),
+    # Anchored: `respond()` sees every line, and the scripts also print
+    # "Leave blank and press ENTER to use the default location." — an
+    # unanchored match answered that *hint* and the blank line was consumed
+    # by the `Install path:` prompt (Phase 3 live-gate finding, 2026-08-20).
+    PromptRule(r"^\s*Press ENTER", "", "'to continue' / 'when done creating accounts'"),
+    PromptRule(r"press ENTER to shut down", "", "end of install: let the script finish"),
     PromptRule(r"Continue anyway\?", "n", "the script found the wrong client"),
     PromptRule(r"Open the GitHub README", "n"),
     PromptRule(r"Download wow-manage\.sh", "n"),
