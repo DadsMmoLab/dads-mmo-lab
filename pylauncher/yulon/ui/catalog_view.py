@@ -10,6 +10,7 @@ into the `LogPanel`. No Docker, no subprocess, no business logic here
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -27,7 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from yulon.catalog.catalog import Catalog, CatalogEntry
-from yulon.catalog.installer import Installer, InstallerError, InstallOptions
+from yulon.catalog.installer import Installer, InstallOptions
 from yulon.log import get_logger
 from yulon.ui.widgets.log_panel import LogPanel
 
@@ -177,17 +178,23 @@ class CatalogView(QWidget):
                 return False
         options = InstallOptions(server_dir=server_dir, client_dir=client_dir)
         installer = self._make_installer(entry)
-        try:
-            installer.preflight(options)
-        except InstallerError as exc:
-            QMessageBox.warning(self, "Cannot install", str(exc))
-            self.install_finished.emit(entry.id, False, str(exc))
-            return False
+        # No synchronous preflight here: `run()` re-preflights on the worker
+        # thread, and preflight can mean full Docker provisioning — minutes of
+        # work that used to freeze the window (review finding, 2026-08-21).
+        # Failures surface through `_on_run_finished` as a dialog instead.
+        cancel = threading.Event()
         self._current = (entry.id, server_dir, client_dir)
         self._set_buttons_enabled(False)
-        started = self._log.run(lambda: installer.run(options), title=f"Installing {entry.name}")
+        started = self._log.run(
+            lambda: installer.run(options, cancel=cancel),
+            title=f"Installing {entry.name}",
+            cancel=cancel,
+        )
         if started:
             self.install_started.emit(entry.id)
+        else:
+            self._current = None
+            self._set_buttons_enabled(True)
         return started
 
     def _on_run_finished(self, ok: bool, message: str) -> None:
@@ -196,6 +203,8 @@ class CatalogView(QWidget):
         game_id, server_dir, client_dir = self._current
         self._current = None
         self._set_buttons_enabled(True)
+        if not ok:
+            QMessageBox.warning(self, "Install failed", message)
         self.install_finished.emit(game_id, ok, message)
         if ok:
             self.installed.emit(game_id, server_dir, client_dir)

@@ -12,6 +12,7 @@ never reaches into the runner or into its parent.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable, Iterator
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
@@ -80,6 +81,7 @@ class LogPanel(QWidget):
         layout.addLayout(header)
         layout.addWidget(self._text, 1)
 
+        self._cancel: threading.Event | None = None
         self._thread: QThread | None = None
         self._worker: _StreamWorker | None = None
 
@@ -102,11 +104,23 @@ class LogPanel(QWidget):
         """Append one line (thread-safe only from the UI thread; the worker uses signals)."""
         self._text.appendPlainText(line)
 
-    def run(self, source: LineSource, *, title: str = "running") -> bool:
-        """Start streaming `source()` into the panel. Returns False if a job is already running."""
+    def run(
+        self,
+        source: LineSource,
+        *,
+        title: str = "running",
+        cancel: threading.Event | None = None,
+    ) -> bool:
+        """Start streaming `source()` into the panel. Returns False if a job is already running.
+
+        `cancel`, when given, is set by `stop()` so a source that supports it
+        (e.g. `Installer.run(cancel=...)`) can be interrupted even while blocked
+        between lines (review finding, 2026-08-21).
+        """
         if self.running:
             logger.debug("log panel busy; run() ignored")
             return False
+        self._cancel = cancel
         self._status.setText(title)
         self._stop_button.setEnabled(True)
         thread = QThread(self)
@@ -124,7 +138,9 @@ class LogPanel(QWidget):
 
     @Slot()
     def stop(self) -> None:
-        """Ask the running job to stop after its current line."""
+        """Ask the running job to stop after its current line (and cancel a blocked one)."""
+        if self._cancel is not None:
+            self._cancel.set()
         if self._worker is not None:
             self._worker.request_stop()
 

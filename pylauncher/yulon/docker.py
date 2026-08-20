@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import subprocess
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -256,3 +257,13 @@ def published_bindings() -> dict[int, str]:
             if port_text.isdigit():
                 bindings.setdefault(int(port_text), address)
     return bindings
+
+
+def follow_logs(container: str, tail: int = 200) -> Iterator[str]:
+    """Stream `docker logs -f` for one container (the Console tab's log source).
+
+    Lives here so no `ui/` module ever builds a docker argv itself
+    (style-guide §3; review finding, 2026-08-21).
+    """
+    logger.debug(f"follow_logs() called: container={container} tail={tail}")
+    yield from runner.stream(["docker", "logs", "-f", "--tail", str(tail), container])

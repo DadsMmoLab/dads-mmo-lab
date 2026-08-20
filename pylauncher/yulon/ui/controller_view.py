@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from yulon import docker, networking, runner
+from yulon import docker, networking
 from yulon.apply import Applier, ApplyReport, DockerSql
 from yulon.catalog.catalog import CatalogEntry
 from yulon.controller import Controller, PortConflictError
@@ -74,9 +74,7 @@ class ControllerServices:
         sql = DockerSql(spec.db, password)
         return cls(
             controller=controller,
-            logs_source=lambda: runner.stream(
-                ["docker", "logs", "-f", "--tail", "200", spec.world]
-            ),
+            logs_source=lambda: docker.follow_logs(spec.world),
             send_console=lambda cmd: wotlk_console.send_command(cmd, container=spec.world),
             store=wotlk_modules.store() if entry.has_manifests else None,
             applier=(

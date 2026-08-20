@@ -160,8 +160,13 @@ def interact(
     respond: Responder,
     env: Mapping[str, str] | None = None,
     quiet_seconds: float = _PROMPT_QUIET_SECONDS,
+    cancel: threading.Event | None = None,
 ) -> Iterator[str]:
     """Run an interactive command, yielding its output live and answering its prompts.
+
+    `cancel` is checked every loop turn: setting it interrupts even a child
+    sitting on a prompt no rule answers, which otherwise blocks forever
+    (review finding, 2026-08-21) — the child is then terminated as usual.
 
     Stdout and stderr are merged and read in chunks, so a prompt that does not
     end in a newline (`read -p`, `echo -n ...; read`) still surfaces: once a
@@ -219,7 +224,11 @@ def interact(
 
     try:
         eof = False
+        cancelled = False
         while not eof or buffer:
+            if cancel is not None and cancel.is_set():
+                cancelled = True
+                break
             try:
                 data = chunks.get(timeout=quiet_seconds)
             except queue.Empty:
@@ -244,10 +253,11 @@ def interact(
                 line = line.rstrip("\r")
                 yield line
                 _answer(line)
-        reader.join()
-        proc.wait()
-        if proc.returncode:
-            raise subprocess.CalledProcessError(proc.returncode, command)
+        if not cancelled:
+            reader.join()
+            proc.wait()
+            if proc.returncode:
+                raise subprocess.CalledProcessError(proc.returncode, command)
     finally:
         if proc.poll() is None:
             proc.terminate()

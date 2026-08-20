@@ -21,6 +21,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -211,11 +212,17 @@ class Installer:
                     + (details or "Install Docker, start it, and try again.")
                 )
 
-    def run(self, options: InstallOptions | None = None) -> Iterator[str]:
+    def run(
+        self,
+        options: InstallOptions | None = None,
+        *,
+        cancel: threading.Event | None = None,
+    ) -> Iterator[str]:
         """Run the install, yielding output lines live; answers prompts itself.
 
         Raises `InstallerError` if the script exits non-zero (after yielding
         everything it printed), or any `preflight()` error before it starts.
+        Setting `cancel` interrupts the script (see `runner.interact()`).
         """
         opts = options or InstallOptions()
         self.preflight(opts)
@@ -226,6 +233,7 @@ class Installer:
                 cwd=self.script.parent,
                 respond=make_responder(opts),
                 env=self.script_env(),
+                cancel=cancel,
             )
         except subprocess.CalledProcessError as exc:
             raise InstallerError(f"{self.script.name} exited with status {exc.returncode}") from exc

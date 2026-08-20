@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -24,13 +25,20 @@ class _FakeInstaller(Installer):
         super().__init__(entry, docker_check=lambda: True)
         self.lines = lines
         self.ran_with: list[InstallOptions] = []
+        self.cancels: list[threading.Event | None] = []
 
     def preflight(self, options: InstallOptions) -> None:
         if self.entry.install.requires_client_dir and options.client_dir is None:
             raise AssertionError("view must not run without a client dir")
 
-    def run(self, options: InstallOptions | None = None) -> Iterator[str]:
+    def run(
+        self,
+        options: InstallOptions | None = None,
+        *,
+        cancel: threading.Event | None = None,
+    ) -> Iterator[str]:
         self.ran_with.append(options or InstallOptions())
+        self.cancels.append(cancel)
         yield from self.lines
 
 

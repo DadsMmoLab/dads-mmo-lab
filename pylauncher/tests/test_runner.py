@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 
 import pytest
 
+from yulon import runner
 from yulon.runner import run, stream
+
+needs_bash = pytest.mark.skipif(shutil.which("bash") is None, reason="bash not on PATH")
 
 
 def _python_cmd(script: str) -> list[str]:
@@ -128,3 +133,23 @@ def test_stream_terminates_child_on_early_generator_abandonment() -> None:
     # Cleanup (terminate + join) must complete promptly, not wait for the
     # child's full 60-second sleep.
     assert elapsed < 10
+
+
+@needs_bash
+def test_interact_cancel_interrupts_a_child_stuck_on_a_prompt(tmp_path: Path) -> None:
+    """An unanswered no-newline prompt used to block forever; `cancel` gets out of it."""
+    script = tmp_path / "stuck.sh"
+    script.write_text(
+        "#!/bin/bash\necho hello\necho -n 'A question no rule answers: '\nread -r answer\n",
+        encoding="utf-8",
+    )
+    cancel = threading.Event()
+    lines: list[str] = []
+    started = time.monotonic()
+    threading.Timer(1.0, cancel.set).start()
+    for line in runner.interact(
+        ["bash", str(script)], respond=lambda _line: None, quiet_seconds=0.2, cancel=cancel
+    ):
+        lines.append(line)
+    assert time.monotonic() - started < 20  # would never return before this fix
+    assert lines and lines[0] == "hello"

@@ -20,7 +20,7 @@ logger = get_logger(__name__)
 
 def build_window() -> object:
     """Create the main window (imports Qt lazily so `--help`-style tooling stays cheap)."""
-    from PySide6.QtCore import QObject, QThread, Signal
+    from PySide6.QtCore import QObject, QThread, Signal, Slot
     from PySide6.QtWidgets import QLabel, QMainWindow, QSplitter, QTabWidget, QVBoxLayout, QWidget
 
     from yulon import __version__
@@ -47,6 +47,7 @@ def build_window() -> object:
     window.setCentralWidget(central)
 
     log_panel = LogPanel()
+    panels: list[LogPanel] = [log_panel]
     catalog_view = CatalogView(catalog, lambda entry: Installer(entry), log_panel)
     splitter = QSplitter()
     splitter.addWidget(catalog_view)
@@ -65,6 +66,7 @@ def build_window() -> object:
         services = ControllerServices.for_wotlk(entry, server_dir, client_dir)
         view = ControllerView(entry, services)
         controllers[key] = view
+        panels.append(view.console_log)
         tabs.addTab(view, f"{entry.name} — {server_dir.name}")
         tabs.setCurrentWidget(view)
 
@@ -90,25 +92,39 @@ def build_window() -> object:
         def run(self) -> None:
             self.done.emit(check_for_update())
 
-    def show_update(result: object) -> None:
-        if isinstance(result, UpdateCheck) and result.available:
-            banner.setText(
-                f"A newer Yu'lon ({result.latest}) is available — "
-                f'<a href="{result.url}">download it</a> (you have {result.current}).'
-            )
-            banner.setVisible(True)
+    class _BannerHost(QObject):
+        """Owns the banner slot ON THE GUI THREAD so the worker's signal is queued.
+
+        A plain function has no thread affinity: connected to a worker-thread
+        signal it runs on the WORKER (verified on PySide6 6.11.2 — an explicit
+        QueuedConnection does not change that), touching `banner` off the GUI
+        thread. Only a QObject-bound slot is delivered on this thread
+        (review finding, 2026-08-21).
+        """
+
+        @Slot(object)
+        def show_update(self, result: object) -> None:
+            if isinstance(result, UpdateCheck) and result.available:
+                banner.setText(
+                    f"A newer Yu'lon ({result.latest}) is available — "
+                    f'<a href="{result.url}">download it</a> (you have {result.current}).'
+                )
+                banner.setVisible(True)
+
+    banner_host = _BannerHost(window)
 
     update_thread = QThread(window)
     update_worker = _UpdateWorker()
     update_worker.moveToThread(update_thread)
     update_thread.started.connect(update_worker.run)
-    update_worker.done.connect(show_update)
+    update_worker.done.connect(banner_host.show_update)
     update_worker.done.connect(update_thread.quit)
     window.setProperty("update_thread", update_thread)  # keep references alive with the window
     window.setProperty("update_worker", update_worker)
     update_thread.start()
     window.resize(1100, 750)
     window.setProperty("tabs", tabs)
+    window.setProperty("log_panels", panels)
     assert isinstance(window, QWidget)
     return window
 
@@ -134,10 +150,19 @@ def main() -> int:
 
 
 def _stop_background_threads(window: object) -> None:
-    """Let the update-check thread finish before the interpreter tears Qt down."""
+    """Stop every live worker before the interpreter tears Qt down.
+
+    A `QThread` destroyed while running does not warn — it ABORTS the process
+    (0xC0000409, verified): closing the window mid-install or while following
+    a log must first stop and join those panels (review finding, 2026-08-21).
+    """
     from PySide6.QtCore import QThread
 
-    thread = getattr(window, "property", lambda _name: None)("update_thread")
+    prop = getattr(window, "property", lambda _name: None)
+    for panel in prop("log_panels") or []:
+        panel.stop()
+        panel.wait(5000)
+    thread = prop("update_thread")
     if isinstance(thread, QThread) and thread.isRunning():
         thread.quit()
         thread.wait(8000)
