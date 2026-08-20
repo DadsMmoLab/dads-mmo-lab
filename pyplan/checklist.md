@@ -54,7 +54,7 @@
 - [x] 4.1 `log_panel.py` — streaming output widget
 - [x] 4.2 `catalog_view.py` — browsable catalog
 - [x] 4.3 `controller_view.py` — per-install management (+ LAN/internet networking auto-setup control)
-- [ ] **Phase 4 exit criteria met** — every workflow exists and is exercised offscreen by tests (start/stop with the §12 message, live log, console command + account create, module install/remove via the applier, LAN/internet plan+apply); the human click-through against a live server (`python main.py`) is outstanding
+- [x] **Phase 4 exit criteria met** — human click-through against a live server on the Ubuntu 24.04 VM, 2026-08-21 (see Cross-cutting → Phase 4 click-through)
 
 ---
 
@@ -187,6 +187,31 @@
      for the current process; a new session had the group). `docker.io` ships no buildx — the
      script fell back to a manual plugin download — so the apt list now includes
      `docker-buildx` (24.04 candidate 0.30.1).
+- **Phase 4 click-through (2026-08-21, Ubuntu 24.04 VM, live AzerothCore install):** exercised in
+  the GUI: Modules (install `mod-transmog` → 3 steps, rebuild-required; then remove), Networking
+  (internet plan + apply → 4 done / 4 manual router steps; LAN apply → 4 done / 0 manual), and
+  Stop (all three containers down, no raw Docker error). The console was verified against the
+  same live worldserver but headlessly (`console.send_command("server info")` returned the real
+  reply), not through the Console tab; Start was not re-clicked after the last fix. Three real
+  bugs came out of this session and are fixed:
+  1. **Nothing happened when a button was clicked.** PySide6 connects to a bound method through a
+     WEAK reference, so the job worker was collected the moment the factory returned and its slot
+     never fired — no work, no callback, no error (Server tab stuck on "status: unknown", Start on
+     "status: starting…"). `ThreadedJobRunner` holds every live (thread, worker) pair now, and
+     `tests/test_job.py` fails without it.
+  2. **The window froze** for the length of every action: start/stop, module install, the network
+     plan and each console command ran in the button's slot. They all run on a worker thread now
+     (`yulon/ui/widgets/job.py`), answering on the GUI thread through the view's own slots.
+  3. **The console could not send anything**: the worldserver container runs with `tty: true`, so
+     `docker attach` refuses a non-terminal stdin ("the input device is not a TTY"), and writing to
+     `/proc/1/fd/0` only prints to the terminal without reaching the console's input. It opens a
+     pty now; Windows has no pty, so it refuses with an explanation and the terminal command —
+     **SOAP is the follow-up that fixes Windows** (what the Rust launcher does: `soap.rs` +
+     `srp6.rs`/`account_write.rs` write the first GM account straight into `acore_auth`).
+  Also found: a fresh Linux box needs the app RESTARTED after `ensure_docker()` adds the user to
+  the `docker` group — the running process keeps its old groups, so it reports "Docker not
+  reachable" until relaunched. The report already says "log out and back in"; the UI should say it
+  where the status is shown (follow-up).
 - **3.4 record (2026-08-20):** mirrors `WoW-Wotlk-NETWORKING.md` exactly — ufw/firewalld/netsh
   command blocks (SteamOS wraps ufw in `steamos-readonly disable/enable`), `ip route`-equivalent
   LAN detection (inside WSL it asks Windows via `powershell.exe`, never the 172.x guest IP),
