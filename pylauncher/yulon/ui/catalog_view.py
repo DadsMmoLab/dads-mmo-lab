@@ -1,7 +1,155 @@
-"""Catalog view — browsable list of installable games (the "store")."""
+"""Catalog view — the browsable "store" of installable servers (roadmap 4.2).
+
+Renders `catalog.json` as one tile per game with an Install button. The view
+delegates: clicking Install asks the user for the server folder (and, where
+the game needs it, their own client folder — README §3a), builds an
+`Installer` through the factory it was given, and streams `installer.run()`
+into the `LogPanel`. No Docker, no subprocess, no business logic here
+(style-guide §3); results go up as signals (§5).
+"""
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from pathlib import Path
 
-class CatalogView:
-    """Placeholder — Phase 4 in pyplan/README.md."""
+from PySide6.QtCore import Signal
+from PySide6.QtWidgets import (
+    QFileDialog,
+    QFrame,
+    QGridLayout,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
+)
+
+from yulon.catalog.catalog import Catalog, CatalogEntry
+from yulon.catalog.installer import Installer, InstallerError, InstallOptions
+from yulon.log import get_logger
+from yulon.ui.widgets.log_panel import LogPanel
+
+logger = get_logger(__name__)
+
+InstallerFactory = Callable[[CatalogEntry], Installer]
+DirPicker = Callable[[QWidget, str, Path | None], Path | None]
+
+
+def _qt_dir_picker(parent: QWidget, title: str, start: Path | None) -> Path | None:
+    chosen = QFileDialog.getExistingDirectory(parent, title, str(start) if start else "")
+    return Path(chosen) if chosen else None
+
+
+class CatalogView(QWidget):
+    """One tile per catalog entry; Install streams the Phase 3a installer into `log_panel`."""
+
+    install_started = Signal(str)  # game id
+    install_finished = Signal(str, bool, str)  # game id, ok, message
+    installed = Signal(str, object, object)  # game id, server_dir (Path), client_dir (Path|None)
+
+    def __init__(
+        self,
+        catalog: Catalog,
+        installer_factory: InstallerFactory,
+        log_panel: LogPanel,
+        *,
+        pick_dir: DirPicker = _qt_dir_picker,
+        home: Path | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._catalog = catalog
+        self._make_installer = installer_factory
+        self._log = log_panel
+        self._pick_dir = pick_dir
+        self._home = home if home is not None else Path.home()
+        self._buttons: dict[str, QPushButton] = {}
+        self._current: tuple[str, Path, Path | None] | None = None
+
+        grid = QGridLayout()
+        for index, entry in enumerate(catalog.games):
+            grid.addWidget(self._tile(entry), index // 2, index % 2)
+        inner = QWidget()
+        inner.setLayout(grid)
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(inner)
+        layout = QVBoxLayout(self)
+        layout.addWidget(scroll, 1)
+        self._log.run_finished.connect(self._on_run_finished)
+
+    # -- tiles ----------------------------------------------------------
+
+    def _tile(self, entry: CatalogEntry) -> QFrame:
+        frame = QFrame(self)
+        frame.setFrameShape(QFrame.Shape.StyledPanel)
+        box = QVBoxLayout(frame)
+        title = QLabel(f"<b>{entry.name}</b> <i>({entry.status})</i>", frame)
+        box.addWidget(title)
+        box.addWidget(QLabel(entry.description, frame))
+        box.addWidget(QLabel(f"Client: {entry.client.version} (build {entry.client.build})", frame))
+        box.addWidget(QLabel(f"Emulator: {entry.emulator.name}", frame))
+        button = QPushButton("Install", frame)
+        button.setObjectName(f"install-{entry.id}")
+        button.clicked.connect(lambda _checked=False, e=entry: self.start_install(e))
+        box.addWidget(button)
+        self._buttons[entry.id] = button
+        return frame
+
+    def button_for(self, game_id: str) -> QPushButton:
+        """The Install button of a tile (tests / accessibility)."""
+        return self._buttons[game_id]
+
+    # -- install --------------------------------------------------------
+
+    def start_install(self, entry: CatalogEntry) -> bool:
+        """Ask for folders, then run the installer into the log panel. False if not started."""
+        if self._log.running:
+            QMessageBox.information(self, "Busy", "Another job is still running.")
+            return False
+        server_dir = self._pick_dir(
+            self,
+            f"Where should {entry.name} be installed?",
+            self._home / entry.install.default_server_dir,
+        )
+        if server_dir is None:
+            return False
+        client_dir: Path | None = None
+        if entry.install.requires_client_dir:
+            client_dir = self._pick_dir(
+                self,
+                f"Select your {entry.client.version} client folder (the app never downloads one)",
+                self._home,
+            )
+            if client_dir is None:
+                return False
+        options = InstallOptions(server_dir=server_dir, client_dir=client_dir)
+        installer = self._make_installer(entry)
+        try:
+            installer.preflight(options)
+        except InstallerError as exc:
+            QMessageBox.warning(self, "Cannot install", str(exc))
+            self.install_finished.emit(entry.id, False, str(exc))
+            return False
+        self._current = (entry.id, server_dir, client_dir)
+        self._set_buttons_enabled(False)
+        started = self._log.run(lambda: installer.run(options), title=f"Installing {entry.name}")
+        if started:
+            self.install_started.emit(entry.id)
+        return started
+
+    def _on_run_finished(self, ok: bool, message: str) -> None:
+        if self._current is None:
+            return  # a job this view did not start
+        game_id, server_dir, client_dir = self._current
+        self._current = None
+        self._set_buttons_enabled(True)
+        self.install_finished.emit(game_id, ok, message)
+        if ok:
+            self.installed.emit(game_id, server_dir, client_dir)
+
+    def _set_buttons_enabled(self, enabled: bool) -> None:
+        for button in self._buttons.values():
+            button.setEnabled(enabled)

@@ -51,10 +51,10 @@
 
 ## Phase 4 — Controller UI (PySide6)
 
-- [ ] 4.1 `log_panel.py` — streaming output widget
-- [ ] 4.2 `catalog_view.py` — browsable catalog
-- [ ] 4.3 `controller_view.py` — per-install management (+ LAN/internet networking auto-setup control)
-- [ ] **Phase 4 exit criteria met**
+- [x] 4.1 `log_panel.py` — streaming output widget
+- [x] 4.2 `catalog_view.py` — browsable catalog
+- [x] 4.3 `controller_view.py` — per-install management (+ LAN/internet networking auto-setup control)
+- [ ] **Phase 4 exit criteria met** — every workflow exists and is exercised offscreen by tests (start/stop with the §12 message, live log, console command + account create, module install/remove via the applier, LAN/internet plan+apply); the human click-through against a live server (`python main.py`) is outstanding
 
 ---
 
@@ -160,5 +160,26 @@
   user's own client (retail `Data/<locale>/` or repack top-level layout). Not done: a true
   from-outside port-forward probe (needs an external checker; from inside the LAN most routers
   have no hairpin NAT, so a local connect proves nothing — `platform.probe_tcp` says `unknown`).
+- **Phase 4 record (2026-08-20):** UI is three widgets + `main.py` wiring, all call-down/signal-up.
+  `LogPanel.run(source)` runs any `Iterator[str]` factory on a `QThread` (`_StreamWorker` emits
+  `line`/`finished`; `run_finished(ok, msg)` goes up; Stop cooperatively ends an endless job).
+  `CatalogView(catalog, installer_factory, log_panel, pick_dir=…)` asks for the server folder
+  (+ the user's client folder only for `requires_client_dir` games), preflights, streams
+  `Installer.run()` into the panel, emits `installed(game, server_dir, client_dir)`.
+  `ControllerView(entry, ControllerServices)` — Server (status/start/stop, §12 message), Console
+  (`docker logs -f` follow, command line, Create-account form = `account create` + `account set
+  gmlevel … -1`, passwords never echoed; transport is `controller_wow_wotlk/console.py`'s
+  `docker attach --sig-proxy=false` one-shot), Modules (every manifest family from the store;
+  install/remove through the applier; report shows rebuild/restart), Networking (LAN/internet
+  radio → `networking.plan()` text incl. manual steps → Apply → report). `ControllerServices.
+  for_wotlk()` is the real wiring; tests inject fakes. `state.py` remembers installs in
+  `config_dir()/state.json`; `main.py` builds Catalog + one tab per remembered install and adds a
+  tab when the catalog view reports a finished install. UI tests run offscreen
+  (`tests/conftest.py` sets `QT_QPA_PLATFORM=offscreen`). Not built (later phases/UI polish): a
+  Maintenance tab (cache clear/backups/SQL — `maintenance.py` is still placeholders), module
+  prompts UI (values come from manifest defaults for now), a rebuild button (the report names
+  the need; `docker compose up -d --build` wiring is a follow-up), per-game controllers beyond
+  WotLK (`for_wotlk()` is the only services factory; other catalog entries get a Catalog tile
+  but no controller tab until their `controller_<acronym>/` exists).
 - **Tooling:** the `integration` pytest marker is registered in `pyproject.toml`; CI's plain
   `pytest -q` runs the busybox live test on runners that have Docker and skips it elsewhere.

@@ -154,16 +154,17 @@ pylauncher/
 │   ├── platform.py               # OS detection, config_dir, provisioning stubs + §13 helpers: firewall detect/commands, LAN/public IP, WSL2 portproxy, CGNAT check
 │   ├── networking.py             # §13 orchestration: plan() (pure) + apply() for LAN/internet play, realmlist UPDATE, router-step prompts, client realmlist writer (Phase 3.4)
 │   ├── log.py                    # shared logging convention (get_logger/configure — Phase 0.6)
+│   ├── state.py                  # per-user app state (state.json under config_dir: remembered installs) (Phase 4)
 │   ├── manifest.py               # the manifest schema: pydantic models + repo allow-list (Phase 2.1)
 │   ├── manifest_store.py         # load manifests from a tree + refresh from GitHub with ETags (Phase 2.3)
 │   ├── apply.py                  # declarative apply engine: manifest → install/configure/remove steps (Phase 2.3)
 │   └── ui/
 │       ├── __init__.py
-│       ├── catalog_view.py
-│       ├── controller_view.py
+│       ├── catalog_view.py       # tiles from catalog.json; Install → folder prompts → Installer streamed into the LogPanel (4.2)
+│       ├── controller_view.py    # per-install tabs Server/Console/Modules/Networking over ControllerServices seams (4.3)
 │       └── widgets/
 │           ├── __init__.py
-│           └── log_panel.py      # streaming log output widget
+│           └── log_panel.py      # streaming log output widget: QThread worker → line/finished signals (4.1)
 ├── manifests/                    # module/mod JSON (synced from GitHub)
 │   ├── schema/
 │   │   └── manifest.schema.json  # JSON Schema generated from yulon/manifest.py (Phase 2.1)
@@ -187,11 +188,17 @@ pylauncher/
 │   ├── test_catalog.py           # covers yulon/catalog/catalog.py + catalog.json (Phase 3.1)
 │   ├── test_installer.py         # covers runner.interact (real bash) + catalog/installer.py seams (Phase 3.2/3.3)
 │   ├── test_networking.py        # covers yulon/networking.py + platform §13 helpers + docker.published_bindings (Phase 3.4)
+│   ├── conftest.py               # offscreen QApplication fixture (QT_QPA_PLATFORM=offscreen) for the UI tests
+│   ├── test_state.py             # covers yulon/state.py
+│   ├── test_console.py           # covers controller_wow_wotlk/console.py (docker attach transport, fake Popen)
+│   ├── test_log_panel.py         # covers ui/widgets/log_panel.py (4.1)
+│   ├── test_catalog_view.py      # covers ui/catalog_view.py (4.2)
+│   ├── test_controller_view.py   # covers ui/controller_view.py (4.3)
 │   └── integration/              # live-Docker suite, marked `integration`, self-skipping without a daemon (Phase 1.5)
 │       ├── conftest.py           # docker gate + throwaway busybox compose project shaped like an install
 │       ├── test_docker_live.py   # real compose up/healthy/ready/status/conflict-guard/down
 │       └── test_wotlk_live.py    # WotlkController vs the AzerothCore fixture; opt-in via YULON_WOTLK_SERVER_DIR
-├── main.py
+├── main.py                       # wires logging → config_dir, Catalog tab + one ControllerView tab per remembered install
 ├── requirements.txt
 ├── requirements-dev.txt          # pytest, mypy, black, ruff — pinned dev tooling
 ├── pyproject.toml                # black/ruff/mypy/pytest config
