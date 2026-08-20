@@ -15,9 +15,22 @@ from yulon.controller import Controller
 from yulon.controller_wow_wotlk import console, modules
 from yulon.controller_wow_wotlk.console import ConsoleReply
 from yulon.networking import NetworkPlan, NetworkReport
+from yulon.ui import controller_view as controller_view_module
 from yulon.ui.controller_view import ControllerServices, ControllerView
+from yulon.ui.widgets.job import run_inline
 
 WOTLK = load_catalog().get("wow-wotlk")
+
+
+@pytest.fixture(autouse=True)
+def _inline_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the view's background jobs synchronously.
+
+    In the app every service call goes to a worker thread (that is the point —
+    the window must not freeze); in tests the same calls run inline so a click's
+    effect is visible on the next line.
+    """
+    monkeypatch.setattr(controller_view_module, "threaded_job_runner", lambda _parent: run_inline)
 
 
 class _Ps:

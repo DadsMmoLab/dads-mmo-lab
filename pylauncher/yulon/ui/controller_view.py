@@ -39,13 +39,14 @@ from PySide6.QtWidgets import (
 from yulon import docker, networking
 from yulon.apply import Applier, ApplyReport, DockerSql
 from yulon.catalog.catalog import CatalogEntry
-from yulon.controller import Controller, PortConflictError
+from yulon.controller import Controller, InstallStatus, PortConflictError
 from yulon.controller_wow_wotlk import console as wotlk_console
 from yulon.controller_wow_wotlk import modules as wotlk_modules
 from yulon.log import get_logger
 from yulon.manifest import Manifest
 from yulon.manifest_store import FAMILY_FILES, ManifestStore
 from yulon.networking import Mode, NetworkPlan, NetworkReport
+from yulon.ui.widgets.job import JobRunner, threaded_job_runner
 from yulon.ui.widgets.log_panel import LogPanel
 
 logger = get_logger(__name__)
@@ -106,11 +107,20 @@ class ControllerView(QWidget):
         services: ControllerServices,
         *,
         status_poll_ms: int = 5000,
+        job_runner: JobRunner | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.entry = entry
         self.services = services
+        # Every service call goes through this: on a worker thread in the app,
+        # inline in tests (review finding, 2026-08-21 — the window used to
+        # freeze for the length of a `docker compose up`).
+        self._jobs: JobRunner = job_runner or threaded_job_runner(self)
+        self._busy = False
+        self._status_pending = False
+        self._module_pending: str | None = None
+        self._pending_console: Callable[[], None] | None = None
         self._tabs = QTabWidget(self)
         layout = QVBoxLayout(self)
         layout.addWidget(self._tabs)
@@ -149,13 +159,31 @@ class ControllerView(QWidget):
         box.addStretch(1)
         self._tabs.addTab(tab, "Server")
 
+    # -------------------------------------------------------- background work
+
+    def _run(
+        self,
+        work: Callable[[], object],
+        on_done: Callable[[object], None],
+        on_error: Callable[[object], None],
+    ) -> None:
+        """Run `work` off the GUI thread. `on_done`/`on_error` MUST be this view's own
+        bound slots - a plain callable would be delivered on the worker thread."""
+        self._jobs(work, on_done, on_error)
+
     @Slot()
     def refresh_status(self) -> None:
-        """Re-read `docker ps` and update the Server tab."""
-        try:
-            status = self.services.controller.status()
-        except docker.DockerCommandError as exc:
-            self.status_label.setText(f"status: Docker not reachable ({exc})")
+        """Re-read `docker ps` off the GUI thread and update the Server tab."""
+        if self._status_pending:
+            return  # a poll is already in flight; never queue them up
+        self._status_pending = True
+        self._run(self.services.controller.status, self._status_ready, self._status_failed)
+
+    @Slot(object)
+    def _status_ready(self, result: object) -> None:
+        self._status_pending = False
+        status = result
+        if not isinstance(status, InstallStatus):
             return
         parts = [
             f"db {'up' if status.db else 'down'}",
@@ -163,34 +191,59 @@ class ControllerView(QWidget):
             f"world {'up' if status.world else 'down'}",
         ]
         self.status_label.setText("status: " + ", ".join(parts))
-        self.start_button.setEnabled(not status.all_running)
-        self.stop_button.setEnabled(status.any_running)
+        self.start_button.setEnabled(not status.all_running and not self._busy)
+        self.stop_button.setEnabled(status.any_running and not self._busy)
         self.status_changed.emit(status)
+
+    @Slot(object)
+    def _status_failed(self, exc: object) -> None:
+        self._status_pending = False
+        self.status_label.setText(f"status: Docker not reachable ({exc})")
+
+    def _set_busy(self, busy: bool) -> None:
+        """Lock the Server buttons while an action of ours is running."""
+        self._busy = busy
+        if busy:
+            self.start_button.setEnabled(False)
+            self.stop_button.setEnabled(False)
 
     @Slot()
     def start_server(self) -> None:
         """Start the install; a README §12 conflict is shown, never a raw Docker error."""
-        try:
-            self.services.controller.start()
-            self.conflict_label.setText("")
-        except PortConflictError as exc:
+        self.conflict_label.setText("")
+        self._set_busy(True)
+        self.status_label.setText("status: starting…")
+        self._run(self.services.controller.start, self._server_action_done, self._start_failed)
+
+    @Slot()
+    def stop_server(self) -> None:
+        self._set_busy(True)
+        self.status_label.setText("status: stopping…")
+        self._run(self.services.controller.stop, self._server_action_done, self._stop_failed)
+
+    @Slot(object)
+    def _server_action_done(self, _result: object) -> None:
+        self._set_busy(False)
+        self.refresh_status()
+
+    @Slot(object)
+    def _start_failed(self, exc: object) -> None:
+        self._set_busy(False)
+        if isinstance(exc, PortConflictError):
             msg = (
                 f"Another server is already using ports {exc.ports}: {', '.join(exc.containers)}. "
                 "Stop it first — only one server can run at a time."
             )
-            self.conflict_label.setText(msg)
-            self.action_failed.emit(msg)
-        except docker.DockerCommandError as exc:
-            self.conflict_label.setText(str(exc))
-            self.action_failed.emit(str(exc))
+        else:
+            msg = str(exc)
+        self.conflict_label.setText(msg)
+        self.action_failed.emit(msg)
         self.refresh_status()
 
-    @Slot()
-    def stop_server(self) -> None:
-        try:
-            self.services.controller.stop()
-        except docker.DockerCommandError as exc:
-            self.action_failed.emit(str(exc))
+    @Slot(object)
+    def _stop_failed(self, exc: object) -> None:
+        self._set_busy(False)
+        self.action_failed.emit(str(exc))
         self.refresh_status()
 
     # ----------------------------------------------------------- console tab
@@ -240,18 +293,35 @@ class ControllerView(QWidget):
             self._send(command)
             self.command_edit.clear()
 
-    def _send(self, command: str) -> wotlk_console.ConsoleReply | None:
-        try:
-            reply = self.services.send_console(command)
-        except (wotlk_console.ConsoleError, ValueError) as exc:
-            self.console_log.append(f"!! {exc}")
-            self.action_failed.emit(str(exc))
-            return None
+    def _send(self, command: str, then: Callable[[], None] | None = None) -> None:
+        """Send one console command off the GUI thread (it waits for the reply window).
+
+        `then` runs after a successful reply — that is how `create_account()`
+        chains `account set gmlevel` without blocking the window.
+        """
         shown = command if not command.startswith("account create") else "account create ****"
         self.console_log.append(f"> {shown}")
-        for line in reply.lines:
-            self.console_log.append(line)
-        return reply
+        self._pending_console = then
+        self._run(
+            lambda: self.services.send_console(command),
+            self._console_reply,
+            self._console_failed,
+        )
+
+    @Slot(object)
+    def _console_reply(self, result: object) -> None:
+        then, self._pending_console = self._pending_console, None
+        if isinstance(result, wotlk_console.ConsoleReply):
+            for line in result.lines:
+                self.console_log.append(line)
+        if then is not None:
+            then()
+
+    @Slot(object)
+    def _console_failed(self, exc: object) -> None:
+        self._pending_console = None
+        self.console_log.append(f"!! {exc}")
+        self.action_failed.emit(str(exc))
 
     @Slot()
     def create_account(self) -> None:
@@ -261,10 +331,14 @@ class ControllerView(QWidget):
         if not name or not password:
             self.action_failed.emit("username and password are required")
             return
-        if self._send(f"account create {name} {password}") is None:
-            return
-        if self.account_gm.value() > 0:
-            self._send(f"account set gmlevel {name} {self.account_gm.value()} -1")
+        gm_level = self.account_gm.value()
+        follow_up = None
+        if gm_level > 0:
+
+            def follow_up() -> None:  # noqa: F811 - the chained second command
+                self._send(f"account set gmlevel {name} {gm_level} -1")
+
+        self._send(f"account create {name} {password}", follow_up)
         self.account_password.clear()
 
     # ----------------------------------------------------------- modules tab
@@ -326,13 +400,21 @@ class ControllerView(QWidget):
         if manifest is None or applier is None:
             return
         run = applier.install if action == "install" else applier.remove
-        try:
-            report = run(manifest)
-        except Exception as exc:  # boundary: show, never crash the window
-            self.module_report.setPlainText(f"{action} {manifest.id} FAILED: {exc}")
-            self.action_failed.emit(str(exc))
-            return
-        self.module_report.setPlainText(_format_report(report))
+        self._module_pending = f"{action} {manifest.id}"
+        self.module_report.setPlainText(f"{self._module_pending}…")
+        self._run(lambda: run(manifest), self._module_done, self._module_failed)
+
+    @Slot(object)
+    def _module_done(self, result: object) -> None:
+        self._module_pending = None
+        if isinstance(result, ApplyReport):
+            self.module_report.setPlainText(_format_report(result))
+
+    @Slot(object)
+    def _module_failed(self, exc: object) -> None:
+        what, self._module_pending = self._module_pending or "module action", None
+        self.module_report.setPlainText(f"{what} FAILED: {exc}")
+        self.action_failed.emit(str(exc))
 
     # -------------------------------------------------------- networking tab
 
@@ -368,26 +450,42 @@ class ControllerView(QWidget):
 
     @Slot()
     def show_network_plan(self) -> None:
-        try:
-            self._plan = self.services.network_plan(self.network_mode())
-        except Exception as exc:  # boundary
-            self.network_text.setPlainText(f"could not plan: {exc}")
-            self.action_failed.emit(str(exc))
+        mode = self.network_mode()
+        self.network_text.setPlainText("working out the plan… (this can take a few seconds)")
+        self._run(lambda: self.services.network_plan(mode), self._plan_ready, self._plan_failed)
+
+    @Slot(object)
+    def _plan_ready(self, result: object) -> None:
+        if not isinstance(result, NetworkPlan):
             return
-        self.network_text.setPlainText(_format_plan(self._plan))
-        self.apply_button.setEnabled(self._plan.ready)
+        self._plan = result
+        self.network_text.setPlainText(_format_plan(result))
+        self.apply_button.setEnabled(result.ready)
+
+    @Slot(object)
+    def _plan_failed(self, exc: object) -> None:
+        self.network_text.setPlainText(f"could not plan: {exc}")
+        self.action_failed.emit(str(exc))
 
     @Slot()
     def apply_network_plan(self) -> None:
-        if self._plan is None:
+        plan = self._plan
+        if plan is None:
             return
-        try:
-            report = self.services.network_apply(self._plan)
-        except Exception as exc:  # boundary
-            self.network_text.appendPlainText(f"\nAPPLY FAILED: {exc}")
-            self.action_failed.emit(str(exc))
-            return
-        self.network_text.appendPlainText("\n" + _format_network_report(report))
+        self.apply_button.setEnabled(False)
+        self._run(lambda: self.services.network_apply(plan), self._apply_done, self._apply_failed)
+
+    @Slot(object)
+    def _apply_done(self, result: object) -> None:
+        if isinstance(result, NetworkReport):
+            self.network_text.appendPlainText("\n" + _format_network_report(result))
+        self.apply_button.setEnabled(True)
+
+    @Slot(object)
+    def _apply_failed(self, exc: object) -> None:
+        self.network_text.appendPlainText(f"\nAPPLY FAILED: {exc}")
+        self.action_failed.emit(str(exc))
+        self.apply_button.setEnabled(True)
 
 
 # ------------------------------------------------------------- formatting
