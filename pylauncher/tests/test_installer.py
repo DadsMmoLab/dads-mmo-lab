@@ -189,6 +189,7 @@ def test_installer_fails_gracefully_without_docker(tmp_path: Path) -> None:
             "linux", manual_steps=("Install Docker Engine by hand: https://docs.docker.com/",)
         ),
         interact=_fake_interact(calls),  # type: ignore[arg-type]
+        package_manager=lambda: None,  # the file below is the default script, not a variant
     )
     with pytest.raises(DockerUnavailableError, match="could not be set up automatically"):
         list(installer.run())
@@ -237,7 +238,11 @@ def test_installer_wraps_script_failure(tmp_path: Path) -> None:
         raise subprocess.CalledProcessError(7, command)
 
     installer = Installer(
-        entry, repo_root=tmp_path, docker_check=lambda: True, interact=failing  # type: ignore[arg-type]
+        entry,
+        repo_root=tmp_path,
+        docker_check=lambda: True,
+        interact=failing,  # type: ignore[arg-type]
+        package_manager=lambda: None,  # the file below is the default script, not a variant
     )
     got: list[str] = []
     with pytest.raises(InstallerError, match="status 7"):
