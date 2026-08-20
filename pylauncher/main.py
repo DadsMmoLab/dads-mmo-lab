@@ -55,6 +55,7 @@ def build_window() -> object:
     tabs.addTab(splitter, "Catalog")
 
     controllers: dict[tuple[str, Path], QWidget] = {}
+    controller_views: list[QWidget] = []
 
     def add_controller(game: str, server_dir: Path, client_dir: Path | None) -> None:
         """One tab per (game, server dir); a repeat (e.g. "Use existing…" twice) just focuses it."""
@@ -66,6 +67,7 @@ def build_window() -> object:
         services = ControllerServices.for_wotlk(entry, server_dir, client_dir)
         view = ControllerView(entry, services)
         controllers[key] = view
+        controller_views.append(view)
         panels.append(view.console_log)
         tabs.addTab(view, f"{entry.name} — {server_dir.name}")
         tabs.setCurrentWidget(view)
@@ -125,6 +127,7 @@ def build_window() -> object:
     window.resize(1100, 750)
     window.setProperty("tabs", tabs)
     window.setProperty("log_panels", panels)
+    window.setProperty("controllers", controller_views)
     assert isinstance(window, QWidget)
     return window
 
@@ -159,6 +162,8 @@ def _stop_background_threads(window: object) -> None:
     from PySide6.QtCore import QThread
 
     prop = getattr(window, "property", lambda _name: None)
+    for view in prop("controllers") or []:
+        view.shutdown()
     for panel in prop("log_panels") or []:
         panel.stop()
         panel.wait(5000)

@@ -159,6 +159,15 @@ class ControllerView(QWidget):
         box.addStretch(1)
         self._tabs.addTab(tab, "Server")
 
+    def shutdown(self) -> None:
+        """Stop this tab's timers and join its background jobs (called before teardown)."""
+        self._timer.stop()
+        self.console_log.stop()
+        self.console_log.wait(5000)
+        waiter = getattr(self._jobs, "wait", None)
+        if callable(waiter):
+            waiter(10_000)
+
     # -------------------------------------------------------- background work
 
     def _run(
