@@ -142,10 +142,12 @@ pylauncher/
 │   │   └── installer.py          # orchestrates install (deps → clone → build → config)
 │   ├── controller_wow_wotlk/     # each server has its own controller package for siloing
 │   │   ├── __init__.py
+│   │   ├── controller.py         # WotlkController(Controller) — supplies SPEC, inherits the rest (Phase 1.4)
 │   │   ├── docker_ctl.py         # start/stop/status/logs/health
 │   │   ├── console.py            # attach to worldserver console
 │   │   ├── maintenance.py        # cache clear, backups, SQL changes
 │   │   └── modules.py            # reads/writes module JSON manifests
+│   ├── controller.py             # base Controller: ContainerSpec + server dir, start guarded by §12 (Phase 1.4)
 │   ├── runner.py                 # subprocess streaming (shared by all)
 │   ├── docker.py                 # shared Docker lifecycle + port-conflict check (shared)
 │   ├── platform.py               # OS detection + silent Docker/WSL provisioning
@@ -168,7 +170,11 @@ pylauncher/
 │   ├── __init__.py
 │   ├── fixture.md                # pinned AzerothCore compose fixture (Phase 0.4)
 │   ├── test_setup_sanity.py
-│   └── test_log.py               # covers yulon/log.py
+│   ├── test_log.py               # covers yulon/log.py
+│   ├── test_runner.py            # covers yulon/runner.py (Phase 1.1)
+│   ├── test_platform.py          # covers yulon/platform.py (Phase 1.2)
+│   ├── test_docker.py            # covers yulon/docker.py + WotLK docker_ctl (Phase 1.3)
+│   └── test_controller.py        # covers yulon/controller.py + WotlkController (Phase 1.4)
 ├── main.py
 ├── requirements.txt
 ├── requirements-dev.txt          # pytest, mypy, black, ruff — pinned dev tooling

@@ -24,7 +24,7 @@
 - [x] 1.1 `runner.py` — subprocess streaming (`stream()`, `run()`)
 - [x] 1.2 `platform.py` — OS detection + `config_dir()` + provisioning stubs
 - [x] 1.3 `docker.py` — shared Docker lifecycle logic + port-conflict check
-- [ ] 1.4 Base controller abstraction
+- [x] 1.4 Base controller abstraction
 - [ ] 1.5 Tests (mocked unit tests + real-Docker integration suite)
 - [ ] **Phase 1 exit criteria met**
 
