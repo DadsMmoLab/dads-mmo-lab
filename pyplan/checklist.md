@@ -60,10 +60,10 @@
 
 ## Phase 5 — Windows/macOS provisioning + packaging
 
-- [ ] 5.1 Silent Docker Desktop / WSL2 provisioning + doc update
-- [ ] 5.2 PyInstaller specs finalized
-- [ ] 5.3 GitHub Actions release matrix complete
-- [ ] 5.4 Application self-update check (README §10)
+- [x] 5.1 Silent Docker Desktop / WSL2 provisioning + doc update — **code + doc in, unit-tested through seams; a fresh-machine run on Windows/macOS is NOT yet verified (see Cross-cutting)**
+- [x] 5.2 PyInstaller specs finalized (local `pyinstaller build/pylauncher.spec` builds `build/dist/yulon/`; bundles manifests/, catalog.json and the install scripts; `YULON_SMOKE_TEST=1` runs the frozen exe headless)
+- [ ] 5.3 GitHub Actions release matrix complete — **workflow written (AppImage/zip/dmg, attaches to the Release) but unverified: it lives at `pylauncher/.github/workflows/`, and GitHub only runs workflows from the repo root `.github/workflows/` — moving/merging it there is an upstream decision**
+- [x] 5.4 Application self-update check (README §10)
 - [ ] **Phase 5 exit criteria met**
 
 ---
@@ -181,5 +181,25 @@
   the need; `docker compose up -d --build` wiring is a follow-up), per-game controllers beyond
   WotLK (`for_wotlk()` is the only services factory; other catalog entries get a Catalog tile
   but no controller tab until their `controller_<acronym>/` exists).
+- **Phase 5 record (2026-08-20):** 5.4 `yulon/update.py` compares `__version__` with the latest
+  GitHub release tag (numeric compare; offline/rate-limit/odd tag → no banner, never a crash)
+  and `main.py` shows a non-blocking banner with the release link from a background thread.
+  5.2 `build/pylauncher.spec` bundles `manifests/`, `yulon/catalog/catalog.json` (non-Python
+  package data — the first frozen run crashed on exactly this) and the install scripts under
+  `archive/guides/**` (748 KB; NOT the 160 MB of guides/MPQs/DBCs), and `yulon/resources.py`
+  resolves `manifests_dir()`/`repo_root()` from `sys._MEIPASS` when frozen; local build verified
+  with `YULON_SMOKE_TEST=1 build/dist/yulon/yulon.exe` exiting 0. 5.1 `platform.ensure_docker()`
+  (Linux: Docker Engine via the distro package manager under `sudo -n`, SteamOS readonly
+  toggles, `usermod -aG docker` + a reported re-login; Windows: `ensure_wsl2()` = `wsl --status`
+  else elevated `wsl --install --no-distribution` with `reboot_required`, then Docker Desktop
+  downloaded to `config_dir()/downloads` and installed silently/elevated with
+  `--accept-license --backend=wsl-2`, then started and polled; macOS: Docker.dmg download,
+  `hdiutil attach`/`cp -R Docker.app`/`open -a Docker`, polled) returns a `ProvisionReport`
+  (done/skipped/manual_steps/reboot_required/docker_ready; `dry_run` = plan only) and the
+  installer's preflight turns a not-ready report into `DockerUnavailableError` with the manual
+  steps. **Unverified on a fresh machine** — the Windows/macOS paths were built from Docker's
+  documented installer switches and are exercised only by the seam tests; the first real run
+  on a clean VM is the open gate for 5.1. The user-facing honesty doc is `pylauncher/README.md`
+  (WSL2/VM hidden, not removed; what the app asks for; unsigned builds).
 - **Tooling:** the `integration` pytest marker is registered in `pyproject.toml`; CI's plain
   `pytest -q` runs the busybox live test on runners that have Docker and skips it elsewhere.

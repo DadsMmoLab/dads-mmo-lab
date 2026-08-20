@@ -124,15 +124,31 @@ def test_installer_fails_gracefully_without_docker(tmp_path: Path) -> None:
     script.parent.mkdir(parents=True)
     script.write_text("", encoding="utf-8")
     calls: list[dict[str, object]] = []
+    from yulon.platform import ProvisionReport
+
     installer = Installer(
         entry,
         repo_root=tmp_path,
         docker_check=lambda: False,
+        ensure_docker=lambda: ProvisionReport(
+            "linux", manual_steps=("Install Docker Engine by hand: https://docs.docker.com/",)
+        ),
         interact=_fake_interact(calls),  # type: ignore[arg-type]
     )
-    with pytest.raises(DockerUnavailableError, match="automatic setup lands in a future update"):
+    with pytest.raises(DockerUnavailableError, match="could not be set up automatically"):
         list(installer.run())
     assert calls == []  # the script never started
+
+    rebooter = Installer(
+        entry,
+        repo_root=tmp_path,
+        docker_check=lambda: False,
+        ensure_docker=lambda: ProvisionReport(
+            "windows", done=("wsl --install",), reboot_required=True, manual_steps=("Reboot.",)
+        ),
+    )
+    with pytest.raises(DockerUnavailableError, match="reboot is needed"):
+        rebooter.preflight(InstallOptions())
 
 
 def test_installer_requires_the_client_dir_when_the_script_asks_for_it(tmp_path: Path) -> None:

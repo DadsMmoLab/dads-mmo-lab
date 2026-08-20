@@ -151,10 +151,12 @@ pylauncher/
 │   ├── controller.py             # base Controller: ContainerSpec + server dir, start guarded by §12 (Phase 1.4)
 │   ├── runner.py                 # subprocess streaming (stream/run) + interact(): answer prompts of an interactive child (shared by all)
 │   ├── docker.py                 # shared Docker lifecycle + port-conflict check (shared)
-│   ├── platform.py               # OS detection, config_dir, provisioning stubs + §13 helpers: firewall detect/commands, LAN/public IP, WSL2 portproxy, CGNAT check
+│   ├── platform.py               # OS detection, config_dir, §13 helpers (firewall/IP/portproxy/CGNAT) + 5.1 provisioning: ensure_docker()/ensure_wsl2() → ProvisionReport (Docker Engine via pacman/apt/dnf/zypper, WSL2 + Docker Desktop on Windows, Docker Desktop on macOS; dry_run plans)
 │   ├── networking.py             # §13 orchestration: plan() (pure) + apply() for LAN/internet play, realmlist UPDATE, router-step prompts, client realmlist writer (Phase 3.4)
 │   ├── log.py                    # shared logging convention (get_logger/configure — Phase 0.6)
 │   ├── state.py                  # per-user app state (state.json under config_dir: remembered installs) (Phase 4)
+│   ├── resources.py              # bundle_root/manifests_dir/repo_root for source checkouts AND PyInstaller builds (Phase 5.2)
+│   ├── update.py                 # GitHub Releases version check → UpdateCheck; check + notify only (Phase 5.4)
 │   ├── manifest.py               # the manifest schema: pydantic models + repo allow-list (Phase 2.1)
 │   ├── manifest_store.py         # load manifests from a tree + refresh from GitHub with ETags (Phase 2.3)
 │   ├── apply.py                  # declarative apply engine: manifest → install/configure/remove steps (Phase 2.3)
@@ -194,11 +196,15 @@ pylauncher/
 │   ├── test_log_panel.py         # covers ui/widgets/log_panel.py (4.1)
 │   ├── test_catalog_view.py      # covers ui/catalog_view.py (4.2)
 │   ├── test_controller_view.py   # covers ui/controller_view.py (4.3)
+│   ├── test_resources.py         # covers yulon/resources.py (source + frozen layouts)
+│   ├── test_update.py            # covers yulon/update.py (5.4)
+│   ├── test_provision.py         # covers platform.ensure_docker/ensure_wsl2 plans per OS through seams (5.1)
 │   └── integration/              # live-Docker suite, marked `integration`, self-skipping without a daemon (Phase 1.5)
 │       ├── conftest.py           # docker gate + throwaway busybox compose project shaped like an install
 │       ├── test_docker_live.py   # real compose up/healthy/ready/status/conflict-guard/down
 │       └── test_wotlk_live.py    # WotlkController vs the AzerothCore fixture; opt-in via YULON_WOTLK_SERVER_DIR
-├── main.py                       # wires logging → config_dir, Catalog tab + one ControllerView tab per remembered install
+├── main.py                       # wires logging → config_dir, update banner (5.4), Catalog tab + one ControllerView tab per remembered install; YULON_SMOKE_TEST=1 builds the window and exits
+├── README.md                     # user-facing: what the app installs under the hood (WSL/VM hidden, not removed), unsigned builds, updates (5.1.2)
 ├── requirements.txt
 ├── requirements-dev.txt          # pytest, mypy, black, ruff — pinned dev tooling
 ├── pyproject.toml                # black/ruff/mypy/pytest config

@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 
+from yulon import resources
 from yulon.apply import Applier, ApplyReport, DbcCopier, DockerSql, Git, SqlRunner
 from yulon.controller_wow_wotlk import docker_ctl
 from yulon.manifest import Manifest, ManifestType
@@ -27,8 +28,8 @@ from yulon.manifest_store import (
 
 GAME = "wow-wotlk"
 
-# The bundled manifest tree that ships with the app (pylauncher/manifests/).
-BUNDLED_MANIFESTS_DIR = Path(__file__).resolve().parents[2] / "manifests"
+# The bundled manifest tree that ships with the app (source tree or PyInstaller bundle).
+BUNDLED_MANIFESTS_DIR = resources.manifests_dir()
 
 # Raw-GitHub prefix that `<game>/<family>.json` is joined onto when refreshing.
 MANIFEST_BASE_URL = (

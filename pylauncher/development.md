@@ -27,6 +27,17 @@ python -m yulon.catalog.installer wow-tbc --client-dir ~/Games/WoWTBC   # games 
 Needs a reachable Docker daemon (otherwise it stops with the Phase 3.3 message) and, because
 the wrapped scripts start with `sudo -v`, cached or passwordless sudo.
 
+## Building the desktop binary
+
+```bash
+pip install pyinstaller
+pyinstaller build/pylauncher.spec --noconfirm --distpath build/dist --workpath build/work
+YULON_SMOKE_TEST=1 QT_QPA_PLATFORM=offscreen build/dist/yulon/yulon   # builds the window and exits 0
+```
+
+The release workflow (`.github/workflows/release.yml`) runs the same spec on each OS runner and
+wraps the output (AppImage / zip / dmg). PyInstaller cannot cross-compile — never try locally.
+
 ## Running checks
 
 ```bash

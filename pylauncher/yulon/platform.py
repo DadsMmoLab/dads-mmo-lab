@@ -10,7 +10,9 @@ from __future__ import annotations
 import os
 import shutil
 import socket
+import subprocess
 import sys
+import time
 import urllib.request
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -87,18 +89,6 @@ def config_dir() -> Path:
     xdg_data_home = os.environ.get("XDG_DATA_HOME")
     base = Path(xdg_data_home) if xdg_data_home else Path.home() / ".local" / "share"
     return base / APP_DIR_NAME
-
-
-def ensure_docker() -> None:
-    """Install/verify Docker. Not implemented until Phase 5 (README §3b)."""
-    logger.debug("ensure_docker() called")
-    raise NotImplementedError("Docker provisioning is implemented in Phase 5")
-
-
-def ensure_wsl2() -> None:
-    """Ensure WSL2 + Docker Desktop on Windows. Not implemented until Phase 5."""
-    logger.debug("ensure_wsl2() called")
-    raise NotImplementedError("WSL2 provisioning is implemented in Phase 5")
 
 
 # ---------------------------------------------------------------- networking
@@ -298,3 +288,365 @@ def probe_tcp(host: str, port: int, timeout: float = 3.0) -> PortProbe:
             return PortProbe(host, port, "open", "connection accepted")
     except (TimeoutError, ConnectionRefusedError, OSError) as exc:
         return PortProbe(host, port, "unknown", f"{type(exc).__name__}: {exc}")
+
+
+# --------------------------------------------------------------- provisioning
+# Roadmap 5.1 / README §3b: "the app installs everything" — Docker Engine on
+# Linux (distro package manager; SteamOS unlocks/relocks the read-only root),
+# Docker Desktop + WSL2 on Windows, Docker Desktop on macOS. Everything that
+# reaches outside the process is a seam so the plans are unit-testable and a
+# `dry_run` shows the user exactly what will happen. Nothing here pretends:
+# every step that could not run is named in `ProvisionReport`, and a reboot
+# or re-login the platform genuinely needs is reported, not hidden.
+
+PackageManager = Literal["pacman", "apt", "dnf", "zypper"]
+
+DOCKER_DESKTOP_WINDOWS_URL = (
+    "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe"
+)
+DOCKER_DESKTOP_MAC_URLS: dict[str, str] = {
+    "arm64": "https://desktop.docker.com/mac/main/arm64/Docker.dmg",
+    "x86_64": "https://desktop.docker.com/mac/main/amd64/Docker.dmg",
+}
+_DOCKER_READY_TIMEOUT_SECONDS = 180.0
+_DOCKER_READY_POLL_SECONDS = 3.0
+_MANUAL_DOCKER_DESKTOP = (
+    "Download and install Docker Desktop by hand: "
+    "https://www.docker.com/products/docker-desktop/"
+)
+_MANUAL_WSL = (
+    "Open an Administrator PowerShell and run: wsl --install --no-distribution, then reboot."
+)
+
+
+class ProvisionError(RuntimeError):
+    """Provisioning hit something it cannot work around (message is user-readable)."""
+
+
+@dataclass(frozen=True)
+class ProvisionReport:
+    """What `ensure_docker()` / `ensure_wsl2()` did, and what is still needed."""
+
+    platform: PlatformId
+    done: tuple[str, ...] = ()
+    skipped: tuple[str, ...] = ()
+    manual_steps: tuple[str, ...] = ()
+    reboot_required: bool = False
+    docker_ready: bool = False
+
+    @property
+    def ok(self) -> bool:
+        """True when a daemon answers and nothing is left for the user to do first."""
+        return self.docker_ready and not self.reboot_required
+
+
+RunCmd = Callable[[list[str]], subprocess.CompletedProcess[str]]
+Downloader = Callable[[str, Path], Path]
+
+
+def docker_ready(run: RunCmd | None = None) -> bool:
+    """True if `docker info` succeeds (daemon reachable); False if binary/daemon is missing."""
+    do = run if run is not None else (lambda argv: runner.run(argv))
+    try:
+        return do(["docker", "info"]).returncode == 0
+    except OSError:
+        return False
+
+
+def linux_package_manager(
+    which: Callable[[str], str | None] | None = None,
+) -> PackageManager | None:
+    """Which package manager this Linux has (pacman → Arch/SteamOS, apt, dnf, zypper)."""
+    find = which if which is not None else _which
+    if find("pacman"):
+        return "pacman"
+    if find("apt-get"):
+        return "apt"
+    if find("dnf"):
+        return "dnf"
+    if find("zypper"):
+        return "zypper"
+    return None
+
+
+def docker_engine_commands(pm: PackageManager, *, steamos: bool, user: str) -> list[list[str]]:
+    """The (sudo-less) commands that install + enable Docker Engine via `pm` for `user`."""
+    install: list[list[str]]
+    if pm == "pacman":
+        install = [["pacman", "-Sy", "--noconfirm", "docker", "docker-compose"]]
+        if steamos:
+            install = [["steamos-readonly", "disable"], *install, ["steamos-readonly", "enable"]]
+    elif pm == "apt":
+        install = [
+            ["apt-get", "update"],
+            ["apt-get", "install", "-y", "docker.io", "docker-compose-v2"],
+        ]
+    elif pm == "dnf":
+        install = [["dnf", "-y", "install", "moby-engine", "docker-compose"]]
+    else:
+        install = [["zypper", "--non-interactive", "install", "docker", "docker-compose"]]
+    return [
+        *install,
+        ["systemctl", "enable", "--now", "docker"],
+        ["usermod", "-aG", "docker", user],
+    ]
+
+
+def _urllib_download(url: str, dest: Path) -> Path:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".part")
+    request = urllib.request.Request(url, headers={"User-Agent": "yulon"})
+    with urllib.request.urlopen(request, timeout=60.0) as resp, tmp.open("wb") as out:
+        shutil.copyfileobj(resp, out)
+    tmp.replace(dest)
+    return dest
+
+
+def _wait_docker_ready(run: RunCmd, timeout: float, poll: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if docker_ready(run):
+            return True
+        time.sleep(poll)
+    return docker_ready(run)
+
+
+def _run_steps(
+    do: RunCmd, commands: list[list[str]], *, sudo: bool, dry_run: bool
+) -> tuple[list[str], list[str]]:
+    done: list[str] = []
+    skipped: list[str] = []
+    for cmd in commands:
+        shown = " ".join(cmd)
+        if dry_run:
+            skipped.append(f"(dry run) {shown}")
+            continue
+        argv = ["sudo", "-n", *cmd] if sudo else cmd
+        try:
+            proc = do(argv)
+        except OSError as exc:
+            skipped.append(f"{shown}: {exc}")
+            continue
+        if proc.returncode == 0:
+            done.append(shown)
+        else:
+            skipped.append(f"{shown}: exit {proc.returncode} {proc.stderr.strip()}")
+    return done, skipped
+
+
+def ensure_docker(
+    *,
+    run: RunCmd | None = None,
+    which: Callable[[str], str | None] | None = None,
+    download: Downloader = _urllib_download,
+    dry_run: bool = False,
+    user: str | None = None,
+    wait_seconds: float = _DOCKER_READY_TIMEOUT_SECONDS,
+) -> ProvisionReport:
+    """Make sure a Docker daemon is reachable, installing what the OS needs (README §3b).
+
+    Linux: Docker Engine through the distro package manager (under `sudo -n`; a
+    password-needing sudo is a reported skip with the commands to paste). The
+    docker group change needs a re-login — reported, never hidden. Windows:
+    WSL2 (`ensure_wsl2()`) then Docker Desktop (download + silent install,
+    elevated). macOS: Docker Desktop (download .dmg, copy Docker.app, open it).
+    Returns a `ProvisionReport`; with `dry_run=True` nothing runs and the report
+    lists every step as skipped so the UI can show the plan.
+    """
+    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv))
+    current = detect()
+    if docker_ready(do):
+        logger.info("ensure_docker(): daemon already reachable")
+        return ProvisionReport(current, done=("docker already running",), docker_ready=True)
+    if current == "linux":
+        who = user or os.environ.get("USER") or os.environ.get("USERNAME") or "deck"
+        return _ensure_docker_linux(do, which, dry_run, who, wait_seconds)
+    if current == "windows":
+        return _ensure_docker_windows(do, which, download, dry_run, wait_seconds)
+    return _ensure_docker_macos(do, download, dry_run, wait_seconds)
+
+
+def _ensure_docker_linux(
+    do: RunCmd,
+    which: Callable[[str], str | None] | None,
+    dry_run: bool,
+    user: str,
+    wait_seconds: float,
+) -> ProvisionReport:
+    pm = linux_package_manager(which)
+    if pm is None:
+        return ProvisionReport(
+            "linux",
+            manual_steps=(
+                "No supported package manager (pacman/apt/dnf/zypper) found. Install Docker "
+                "Engine by hand: https://docs.docker.com/engine/install/",
+            ),
+        )
+    commands = docker_engine_commands(pm, steamos=is_steamos(), user=user)
+    done, skipped = _run_steps(do, commands, sudo=True, dry_run=dry_run)
+    ready = False if dry_run else _wait_docker_ready(do, min(wait_seconds, 30.0), 2.0)
+    manual = [
+        f"Log out and back in (or run `newgrp docker`) so {user} can use Docker without sudo."
+    ]
+    if skipped and not dry_run:
+        failed = "; ".join(s.split(":")[0] for s in skipped)
+        manual.insert(
+            0, f"Some steps needed a password; run them in a terminal with sudo: {failed}"
+        )
+    return ProvisionReport("linux", tuple(done), tuple(skipped), tuple(manual), False, ready)
+
+
+def ensure_wsl2(*, run: RunCmd | None = None, dry_run: bool = False) -> ProvisionReport:
+    """Ensure WSL2 exists on Windows (`wsl --status`; else `wsl --install --no-distribution`).
+
+    Installing WSL needs elevation and a reboot; that is reported as
+    `reboot_required`, and `docker_ready` stays False until the next run.
+    """
+    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv))
+    current = detect()
+    if current != "windows":
+        return ProvisionReport(
+            current, done=("WSL2 not needed on this OS",), docker_ready=docker_ready(do)
+        )
+    try:
+        status = do(["wsl.exe", "--status"])
+    except OSError:
+        status = None
+    if status is not None and status.returncode == 0:
+        return ProvisionReport("windows", done=("WSL2 present",), docker_ready=docker_ready(do))
+    cmd = [
+        "powershell.exe",
+        "-NoProfile",
+        "-Command",
+        "Start-Process wsl.exe -Verb RunAs -Wait -ArgumentList '--install','--no-distribution'",
+    ]
+    if dry_run:
+        return ProvisionReport(
+            "windows", skipped=(f"(dry run) {' '.join(cmd)}",), reboot_required=True
+        )
+    try:
+        proc = do(cmd)
+    except OSError as exc:
+        return ProvisionReport(
+            "windows", skipped=(f"wsl --install: {exc}",), manual_steps=(_MANUAL_WSL,)
+        )
+    if proc.returncode != 0:
+        return ProvisionReport(
+            "windows",
+            skipped=(f"wsl --install: exit {proc.returncode} {proc.stderr.strip()}",),
+            manual_steps=(_MANUAL_WSL,),
+        )
+    return ProvisionReport(
+        "windows",
+        done=("wsl --install --no-distribution",),
+        manual_steps=("Reboot Windows to finish enabling WSL2, then start Yu'lon again.",),
+        reboot_required=True,
+    )
+
+
+def _ensure_docker_windows(
+    do: RunCmd,
+    which: Callable[[str], str | None] | None,
+    download: Downloader,
+    dry_run: bool,
+    wait_seconds: float,
+) -> ProvisionReport:
+    wsl = ensure_wsl2(run=do, dry_run=dry_run)
+    if wsl.reboot_required or (wsl.skipped and not dry_run and not wsl.done):
+        return wsl
+    find = which if which is not None else _which
+    done = list(wsl.done)
+    skipped = list(wsl.skipped)
+    if not find("docker"):
+        installer = config_dir() / "downloads" / "Docker Desktop Installer.exe"
+        install_cmd = [
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            f"Start-Process '{installer}' -Verb RunAs -Wait -ArgumentList "
+            "'install','--quiet','--accept-license','--backend=wsl-2'",
+        ]
+        if dry_run:
+            skipped += [
+                f"(dry run) download {DOCKER_DESKTOP_WINDOWS_URL}",
+                f"(dry run) {' '.join(install_cmd)}",
+            ]
+            return ProvisionReport("windows", tuple(done), tuple(skipped))
+        try:
+            download(DOCKER_DESKTOP_WINDOWS_URL, installer)
+            done.append(f"downloaded Docker Desktop installer → {installer}")
+        except OSError as exc:
+            return ProvisionReport(
+                "windows",
+                tuple(done),
+                (f"download Docker Desktop: {exc}",),
+                (_MANUAL_DOCKER_DESKTOP,),
+            )
+        d2, s2 = _run_steps(do, [install_cmd], sudo=False, dry_run=False)
+        done += d2
+        skipped += s2
+        if s2:
+            return ProvisionReport(
+                "windows",
+                tuple(done),
+                tuple(skipped),
+                ("Docker Desktop's installer did not finish; run the downloaded installer.",),
+            )
+    start_cmd = ["powershell.exe", "-NoProfile", "-Command", "Start-Process 'Docker Desktop'"]
+    d3, s3 = _run_steps(do, [start_cmd], sudo=False, dry_run=dry_run)
+    done += d3
+    skipped += s3
+    ready = False if dry_run else _wait_docker_ready(do, wait_seconds, _DOCKER_READY_POLL_SECONDS)
+    manual: tuple[str, ...] = ()
+    if not ready and not dry_run:
+        manual = (
+            "Docker Desktop was installed but its engine has not answered yet — open Docker "
+            "Desktop, wait for 'Engine running', then try again.",
+        )
+    return ProvisionReport("windows", tuple(done), tuple(skipped), manual, False, ready)
+
+
+def _ensure_docker_macos(
+    do: RunCmd, download: Downloader, dry_run: bool, wait_seconds: float
+) -> ProvisionReport:
+    import platform as _py_platform
+
+    arch = "arm64" if _py_platform.machine().lower() in ("arm64", "aarch64") else "x86_64"
+    url = DOCKER_DESKTOP_MAC_URLS[arch]
+    dmg = config_dir() / "downloads" / "Docker.dmg"
+    mount = "/Volumes/YulonDocker"
+    commands = [
+        ["hdiutil", "attach", str(dmg), "-nobrowse", "-mountpoint", mount],
+        ["cp", "-R", f"{mount}/Docker.app", "/Applications/"],
+        ["hdiutil", "detach", mount],
+        ["open", "-a", "Docker"],
+    ]
+    done: list[str] = []
+    skipped: list[str] = []
+    if Path("/Applications/Docker.app").exists():
+        done.append("Docker.app already in /Applications")
+        commands = commands[-1:]
+    elif dry_run:
+        skipped.append(f"(dry run) download {url}")
+    else:
+        try:
+            download(url, dmg)
+            done.append(f"downloaded Docker Desktop → {dmg}")
+        except OSError as exc:
+            return ProvisionReport(
+                "macos",
+                tuple(done),
+                (f"download Docker Desktop: {exc}",),
+                (_MANUAL_DOCKER_DESKTOP,),
+            )
+    d, s = _run_steps(do, commands, sudo=False, dry_run=dry_run)
+    done += d
+    skipped += s
+    ready = False if dry_run else _wait_docker_ready(do, wait_seconds, _DOCKER_READY_POLL_SECONDS)
+    manual: tuple[str, ...] = ()
+    if not ready and not dry_run:
+        manual = (
+            "Docker Desktop is installed; open it once, accept its prompts, wait for the whale "
+            "icon, then try again.",
+        )
+    return ProvisionReport("macos", tuple(done), tuple(skipped), manual, False, ready)

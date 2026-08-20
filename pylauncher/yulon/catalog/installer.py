@@ -8,10 +8,11 @@ and streams the output up to whoever is listening (a CLI today, the
 client directory is *passed in* (README §3a) — and it never contains
 per-game logic: what differs per game is `catalog.json` data.
 
-Docker provisioning is wired in but deferred (roadmap 3.3): if no daemon
-answers, `platform.ensure_docker()` is asked to provide one, and until Phase
-5 lands that is a clean, logged, catchable `DockerUnavailableError`, never a
-crash or a silent hang.
+Docker provisioning is wired in (roadmap 3.3 → 5.1): if no daemon answers,
+`platform.ensure_docker()` is asked to provide one; when it cannot (needs a
+reboot, a password, a manual install) that is a clean, logged, catchable
+`DockerUnavailableError` carrying the report's manual steps — never a crash
+or a silent hang.
 """
 
 from __future__ import annotations
@@ -22,14 +23,14 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from yulon import platform, runner
+from yulon import platform, resources, runner
 from yulon.catalog.catalog import CatalogEntry
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
 
-# The repo root (where `archive/guides/...` lives), two levels above `yulon/`.
-DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[3]
+# Where `archive/guides/...` resolves from: the repo root, or the bundle when frozen.
+DEFAULT_REPO_ROOT = resources.repo_root()
 
 
 class InstallerError(RuntimeError):
@@ -125,7 +126,7 @@ class Installer:
         *,
         repo_root: Path = DEFAULT_REPO_ROOT,
         docker_check: Callable[[], bool] = docker_available,
-        ensure_docker: Callable[[], None] = platform.ensure_docker,
+        ensure_docker: Callable[[], platform.ProvisionReport] = platform.ensure_docker,
         interact: Callable[..., Iterator[str]] = runner.interact,
         env: Mapping[str, str] | None = None,
     ) -> None:
@@ -159,15 +160,18 @@ class Installer:
         if options.client_dir is not None and not options.client_dir.is_dir():
             raise InstallerError(f"client folder does not exist: {options.client_dir}")
         if not self._docker_check():
-            try:
-                self._ensure_docker()
-            except NotImplementedError as exc:
+            report = self._ensure_docker()
+            if report.reboot_required:
                 raise DockerUnavailableError(
-                    "Docker isn't available yet — automatic setup lands in a future update. "
-                    "Install Docker, start it, and try again."
-                ) from exc
-            if not self._docker_check():
-                raise DockerUnavailableError("Docker was provisioned but no daemon answers yet")
+                    "Docker's prerequisites were installed but a reboot is needed first. "
+                    + " ".join(report.manual_steps)
+                )
+            if not report.docker_ready and not self._docker_check():
+                details = " ".join(report.manual_steps) or "; ".join(report.skipped)
+                raise DockerUnavailableError(
+                    "Docker isn't available and could not be set up automatically. "
+                    + (details or "Install Docker, start it, and try again.")
+                )
 
     def run(self, options: InstallOptions | None = None) -> Iterator[str]:
         """Run the install, yielding output lines live; answers prompts itself.

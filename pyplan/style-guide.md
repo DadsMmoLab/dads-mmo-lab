@@ -94,6 +94,8 @@ scripts it replaces.
 | `platform.py` | OS detection, config dir paths, Docker/WSL provisioning, network auto-setup (LAN/internet-play firewall, IP detection, WSL2 portproxy — README §13) | Know anything about a specific game or module |
 | `networking.py` | README §13 orchestration: `plan()` computes firewall/portproxy commands, the realmlist UPDATE and the router steps the app cannot do; `apply()` executes the automatable part (`sudo -n`, never a blocking prompt) and reports every skip with the command to paste | Hardcode ports or DB/table names (catalog data); contain UI; restart the server itself |
 | `state.py` | The per-user `state.json` (remembered installs) under `config_dir()` — typed, atomic write | Hold server data or anything a manifest/catalog already says |
+| `resources.py` | Where bundled files live: `bundle_root()`/`manifests_dir()`/`repo_root()` for a checkout and for a PyInstaller build (`sys._MEIPASS`) | Know about any specific file's contents |
+| `update.py` | The GitHub Releases version check (`UpdateCheck`), check + notify only | Download or replace the running binary; block the UI |
 | `catalog/catalog.py` | Typed models for `catalog.json` (emulator sources, install script, containers, port table, DB names, client) + `load_catalog()` | Hardcode per-game values (they are `catalog.json` data); drive an install |
 | `catalog/installer.py` | Orchestrating an install (deps → clone → build → config) for *one* catalog entry | Contain UI code, or hardcode per-game logic that belongs in a manifest |
 | `controller_<acronym>/docker_ctl.py` | Holding *that one game's* `ContainerSpec` and re-exporting `docker.py`'s shared operations | Reimplement Docker lifecycle logic itself, reach into another game's controller, or contain UI code |
