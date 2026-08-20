@@ -102,3 +102,39 @@ def test_cancelling_the_folder_dialog_starts_nothing(qapp: object) -> None:
     view = CatalogView(CATALOG, factory, panel, pick_dir=lambda *_: None)
     assert view.start_install(CATALOG.get("wow-wotlk")) is False
     assert made == [] and panel.running is False
+
+
+def test_use_existing_registers_a_folder_that_holds_an_install(
+    qapp: object, tmp_path: Path, monkeypatch: object
+) -> None:
+    """Installs made by a script or the CLI harness get a controller through 'Use existing…'."""
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        pick_dir=lambda *_: tmp_path,
+        home=tmp_path,
+    )
+    assert view.existing_button_for("wow-wotlk").text() == "Use existing…"
+    got: list[tuple[str, object, object]] = []
+    view.installed.connect(lambda g, s, c: got.append((g, s, c)))
+    # No compose file → refused (the warning dialog is patched out) and nothing emitted.
+    from PySide6.QtWidgets import QMessageBox
+
+    warned: list[str] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))  # type: ignore[attr-defined]
+    assert view.attach_existing(CATALOG.get("wow-wotlk")) is False
+    assert got == [] and "docker-compose.yml" in warned[0]
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    assert view.attach_existing(CATALOG.get("wow-wotlk")) is True
+    assert got == [("wow-wotlk", tmp_path, None)]
+
+
+def test_use_existing_cancel_emits_nothing(qapp: object) -> None:
+    panel = LogPanel()
+    view = CatalogView(CATALOG, lambda e: _FakeInstaller(e, []), panel, pick_dir=lambda *_: None)
+    got: list[object] = []
+    view.installed.connect(lambda *a: got.append(a))
+    assert view.attach_existing(CATALOG.get("wow-tbc")) is False
+    assert got == []

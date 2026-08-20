@@ -66,6 +66,7 @@ class CatalogView(QWidget):
         self._pick_dir = pick_dir
         self._home = home if home is not None else Path.home()
         self._buttons: dict[str, QPushButton] = {}
+        self._existing_buttons: dict[str, QPushButton] = {}
         self._current: tuple[str, Path, Path | None] | None = None
 
         grid = QGridLayout()
@@ -96,11 +97,60 @@ class CatalogView(QWidget):
         button.clicked.connect(lambda _checked=False, e=entry: self.start_install(e))
         box.addWidget(button)
         self._buttons[entry.id] = button
+        existing = QPushButton("Use existing…", frame)
+        existing.setObjectName(f"existing-{entry.id}")
+        existing.setToolTip(
+            "Manage a server that is already installed (by a script, or before this app)."
+        )
+        existing.clicked.connect(lambda _checked=False, e=entry: self.attach_existing(e))
+        box.addWidget(existing)
+        self._existing_buttons[entry.id] = existing
         return frame
 
     def button_for(self, game_id: str) -> QPushButton:
         """The Install button of a tile (tests / accessibility)."""
         return self._buttons[game_id]
+
+    def existing_button_for(self, game_id: str) -> QPushButton:
+        """The "Use existing…" button of a tile (tests / accessibility)."""
+        return self._existing_buttons[game_id]
+
+    # -- attach an install made elsewhere -------------------------------
+
+    def attach_existing(self, entry: CatalogEntry) -> bool:
+        """Register a server dir that already holds an install; False if not attached.
+
+        Installs made by the shell scripts or the CLI harness (or before the app
+        was reinstalled) never pass through `start_install()`, so this is how
+        they get a controller tab. The only check is the one thing every install
+        has: a `docker-compose.yml` in the chosen folder.
+        """
+        server_dir = self._pick_dir(
+            self,
+            f"Select the folder where {entry.name} is installed",
+            self._home / entry.install.default_server_dir,
+        )
+        if server_dir is None:
+            return False
+        if not (server_dir / "docker-compose.yml").is_file():
+            QMessageBox.warning(
+                self,
+                "Not a server folder",
+                f"{server_dir} has no docker-compose.yml — pick the folder the installer created.",
+            )
+            return False
+        client_dir: Path | None = None
+        if entry.install.requires_client_dir:
+            client_dir = self._pick_dir(
+                self,
+                f"Select your {entry.client.version} client folder (the app never downloads one)",
+                self._home,
+            )
+            if client_dir is None:
+                return False
+        logger.info(f"attaching existing {entry.id} install at {server_dir}")
+        self.installed.emit(entry.id, server_dir, client_dir)
+        return True
 
     # -- install --------------------------------------------------------
 
@@ -151,5 +201,5 @@ class CatalogView(QWidget):
             self.installed.emit(game_id, server_dir, client_dir)
 
     def _set_buttons_enabled(self, enabled: bool) -> None:
-        for button in self._buttons.values():
+        for button in (*self._buttons.values(), *self._existing_buttons.values()):
             button.setEnabled(enabled)
