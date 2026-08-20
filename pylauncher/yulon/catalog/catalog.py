@@ -51,6 +51,19 @@ class Install(_Strict):
         default=False,
         description="The script asks for the user's client folder and loops until given one.",
     )
+    script_variants: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Per-package-manager overrides of `script` (keys: apt, dnf, pacman, zypper) for "
+            "distros the default script does not cover; `script` itself is the pacman/SteamOS one."
+        ),
+    )
+
+    def script_for(self, package_manager: str | None) -> str:
+        """The repo-relative script to run on a host with `package_manager` (None → default)."""
+        if package_manager is None:
+            return self.script
+        return self.script_variants.get(package_manager, self.script)
 
 
 class Containers(_Strict):

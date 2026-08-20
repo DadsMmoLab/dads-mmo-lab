@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -105,6 +106,13 @@ def make_responder(
     return respond
 
 
+def host_package_manager() -> str | None:
+    """The Linux package manager that picks the script variant; None off Linux."""
+    if not sys.platform.startswith("linux"):
+        return None
+    return platform.linux_package_manager()
+
+
 def docker_available() -> bool:
     """True if `docker info` succeeds; False if the binary or daemon is missing."""
     try:
@@ -129,6 +137,7 @@ class Installer:
         ensure_docker: Callable[[], platform.ProvisionReport] = platform.ensure_docker,
         interact: Callable[..., Iterator[str]] = runner.interact,
         env: Mapping[str, str] | None = None,
+        package_manager: Callable[[], str | None] = host_package_manager,
     ) -> None:
         self.entry = entry
         self.repo_root = repo_root
@@ -136,11 +145,17 @@ class Installer:
         self._ensure_docker = ensure_docker
         self._interact = interact
         self._env = env
+        self._package_manager = package_manager
 
     @property
     def script(self) -> Path:
-        """Absolute path of the entry's install script."""
-        return self.repo_root / self.entry.install.script
+        """Absolute path of the install script for this host.
+
+        The catalog's `script` is the pacman/SteamOS one; `script_variants`
+        names the Debian/Fedora ports (Phase 3 live-gate finding, 2026-08-20:
+        on Ubuntu the default script would call `pacman`).
+        """
+        return self.repo_root / self.entry.install.script_for(self._package_manager())
 
     def preflight(self, options: InstallOptions) -> None:
         """Everything that must be true before a single line of the script runs.

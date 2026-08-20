@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from yulon import runner
+from yulon.catalog import installer as installer_module
 from yulon.catalog.catalog import load_catalog
 from yulon.catalog.installer import (
     PROMPT_RULES,
@@ -110,11 +111,39 @@ def test_installer_runs_the_entry_script_through_interact(tmp_path: Path) -> Non
         repo_root=tmp_path,
         docker_check=lambda: True,
         interact=_fake_interact(calls),  # type: ignore[arg-type]
+        package_manager=lambda: None,
     )
     assert list(installer.run(InstallOptions(server_dir=Path("/srv")))) == ["hello", "done"]
     assert calls[0]["command"] == ["bash", str(script)]
     assert calls[0]["cwd"] == script.parent
     assert callable(calls[0]["respond"])
+
+
+@pytest.mark.parametrize(
+    ("package_manager", "expected"),
+    [
+        (None, "archive/guides/wow-wotlk/install-wow-wotlk.sh"),
+        ("pacman", "archive/guides/wow-wotlk/install-wow-wotlk.sh"),
+        ("apt", "archive/guides/wow-wotlk/install-wow-wotlk-ubuntu.sh"),
+        ("dnf", "archive/guides/wow-wotlk/install-wow-wotlk-fedora.sh"),
+        ("zypper", "archive/guides/wow-wotlk/install-wow-wotlk.sh"),
+    ],
+)
+def test_installer_picks_the_script_variant_for_the_host_package_manager(
+    tmp_path: Path, package_manager: str | None, expected: str
+) -> None:
+    """Ubuntu/Fedora hosts get the Debian/Fedora ports; everything else the default script."""
+    entry = load_catalog().get("wow-wotlk")
+    installer = Installer(entry, repo_root=tmp_path, package_manager=lambda: package_manager)
+    assert installer.script == tmp_path / expected
+
+
+def test_host_package_manager_is_none_off_linux(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(installer_module.sys, "platform", "win32")
+    assert installer_module.host_package_manager() is None
+    monkeypatch.setattr(installer_module.sys, "platform", "linux")
+    monkeypatch.setattr(installer_module.platform, "linux_package_manager", lambda: "apt")
+    assert installer_module.host_package_manager() == "apt"
 
 
 def test_installer_fails_gracefully_without_docker(tmp_path: Path) -> None:

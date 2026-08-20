@@ -39,6 +39,11 @@ def test_install_scripts_exist_in_the_repo() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     for game in load_catalog().games:
         assert (repo_root / game.install.script).is_file(), game.install.script
+        for pm, variant in game.install.script_variants.items():
+            assert (repo_root / variant).is_file(), f"{game.id} {pm}: {variant}"
+            assert game.install.script_for(pm) == variant
+        assert game.install.script_for(None) == game.install.script
+        assert game.install.script_for("zypper") == game.install.script
 
 
 def test_only_one_server_runs_at_a_time_is_visible_in_the_data() -> None:

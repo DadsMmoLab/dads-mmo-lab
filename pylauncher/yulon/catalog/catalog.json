@@ -15,6 +15,10 @@
       },
       "install": {
         "script": "archive/guides/wow-wotlk/install-wow-wotlk.sh",
+        "script_variants": {
+          "apt": "archive/guides/wow-wotlk/install-wow-wotlk-ubuntu.sh",
+          "dnf": "archive/guides/wow-wotlk/install-wow-wotlk-fedora.sh"
+        },
         "default_server_dir": "wow-server-playerbots",
         "db_root_password": "password"
       },
