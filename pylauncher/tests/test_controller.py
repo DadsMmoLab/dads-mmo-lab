@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from yulon import docker
+from yulon import docker, runner
 from yulon.controller import Controller, InstallStatus, PortConflictError
 from yulon.controller_wow_wotlk import docker_ctl
 from yulon.controller_wow_wotlk.controller import WotlkController
@@ -47,9 +47,9 @@ class _FakeRunner:
 
 @pytest.fixture
 def fake_runner(monkeypatch: pytest.MonkeyPatch) -> _FakeRunner:
-    runner = _FakeRunner()
-    monkeypatch.setattr(docker.runner, "run", runner)
-    return runner
+    fake = _FakeRunner()
+    monkeypatch.setattr(runner, "run", fake)
+    return fake
 
 
 def test_controller_exposes_spec_and_server_dir() -> None:

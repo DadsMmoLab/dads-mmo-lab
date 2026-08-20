@@ -25,7 +25,7 @@
 - [x] 1.2 `platform.py` — OS detection + `config_dir()` + provisioning stubs
 - [x] 1.3 `docker.py` — shared Docker lifecycle logic + port-conflict check
 - [x] 1.4 Base controller abstraction
-- [ ] 1.5 Tests (mocked unit tests + real-Docker integration suite)
+- [x] 1.5 Tests (mocked unit tests + real-Docker integration suite)
 - [ ] **Phase 1 exit criteria met**
 
 ---
@@ -72,3 +72,17 @@
 
 > Anything that doesn't cleanly belong to one phase — style-guide amendments, cross-document
 > corrections, tooling gotchas, etc.
+
+- **Phase 1 exit criteria — what is still open (2026-08-20):** 1.1–1.5 are implemented and
+  green (60 mocked tests; the live suite `tests/integration/test_docker_live.py` passed against a
+  real Docker daemon, exercising compose up/healthy/ready/status/port-conflict-guard/down through
+  `Controller`). The one unticked half is the literal "against a running AzerothCore compose
+  project" check: `tests/integration/test_wotlk_live.py` is written and opt-in
+  (`YULON_WOTLK_SERVER_DIR=<fixture dir> pytest -m integration tests/integration`) but has not
+  yet been run against a built `tests/fixture.md` install. Tick the exit-criteria box once it has.
+- **1.4 design note:** the base `Controller.port_conflicts()` filters this install's *own*
+  containers out of `docker.port_conflicts_for()`'s global scan, so a restart of the same install
+  is never reported as a README §12 conflict; only a foreign container binding the ports blocks
+  `start()` (`PortConflictError`, carrying the offending names for the UI to show).
+- **Tooling:** the `integration` pytest marker is registered in `pyproject.toml`; CI's plain
+  `pytest -q` runs the busybox live test on runners that have Docker and skips it elsewhere.

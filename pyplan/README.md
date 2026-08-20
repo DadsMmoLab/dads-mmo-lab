@@ -174,7 +174,11 @@ pylauncher/
 │   ├── test_runner.py            # covers yulon/runner.py (Phase 1.1)
 │   ├── test_platform.py          # covers yulon/platform.py (Phase 1.2)
 │   ├── test_docker.py            # covers yulon/docker.py + WotLK docker_ctl (Phase 1.3)
-│   └── test_controller.py        # covers yulon/controller.py + WotlkController (Phase 1.4)
+│   ├── test_controller.py        # covers yulon/controller.py + WotlkController (Phase 1.4)
+│   └── integration/              # live-Docker suite, marked `integration`, self-skipping without a daemon (Phase 1.5)
+│       ├── conftest.py           # docker gate + throwaway busybox compose project shaped like an install
+│       ├── test_docker_live.py   # real compose up/healthy/ready/status/conflict-guard/down
+│       └── test_wotlk_live.py    # WotlkController vs the AzerothCore fixture; opt-in via YULON_WOTLK_SERVER_DIR
 ├── main.py
 ├── requirements.txt
 ├── requirements-dev.txt          # pytest, mypy, black, ruff — pinned dev tooling

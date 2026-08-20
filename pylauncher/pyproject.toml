@@ -20,3 +20,6 @@ exclude = ["build/"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+markers = [
+    "integration: drives a real Docker daemon; skipped automatically when none is reachable",
+]
