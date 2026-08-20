@@ -140,7 +140,7 @@ pylauncher/
 │   │   ├── __init__.py
 │   │   ├── catalog.json          # the four v1 servers: emulator sources, install script, containers, ports, DBs, client (Phase 3.1)
 │   │   ├── catalog.py            # typed Catalog/CatalogEntry models + load_catalog(); entry.container_spec() feeds the controller
-│   │   └── installer.py          # orchestrates install (deps → clone → build → config)
+│   │   └── installer.py          # Phase 3a orchestrator: answers the install-*.sh prompts via runner.interact, streams output; graceful DockerUnavailableError (3.2/3.3)
 │   ├── controller_wow_wotlk/     # each server has its own controller package for siloing
 │   │   ├── __init__.py
 │   │   ├── controller.py         # WotlkController(Controller) — supplies SPEC, inherits the rest (Phase 1.4)
@@ -149,7 +149,7 @@ pylauncher/
 │   │   ├── maintenance.py        # cache clear, backups, SQL changes
 │   │   └── modules.py            # binds the shared store/fetcher/applier to WotLK (game id, bundled dir, DB container)
 │   ├── controller.py             # base Controller: ContainerSpec + server dir, start guarded by §12 (Phase 1.4)
-│   ├── runner.py                 # subprocess streaming (shared by all)
+│   ├── runner.py                 # subprocess streaming (stream/run) + interact(): answer prompts of an interactive child (shared by all)
 │   ├── docker.py                 # shared Docker lifecycle + port-conflict check (shared)
 │   ├── platform.py               # OS detection + silent Docker/WSL provisioning
 │   ├── log.py                    # shared logging convention (get_logger/configure — Phase 0.6)
@@ -184,6 +184,7 @@ pylauncher/
 │   ├── test_manifest_store.py    # covers yulon/manifest_store.py + the WotLK modules.py binding (Phase 2.3)
 │   ├── test_apply.py             # covers yulon/apply.py (Phase 2.3)
 │   ├── test_catalog.py           # covers yulon/catalog/catalog.py + catalog.json (Phase 3.1)
+│   ├── test_installer.py         # covers runner.interact (real bash) + catalog/installer.py seams (Phase 3.2/3.3)
 │   └── integration/              # live-Docker suite, marked `integration`, self-skipping without a daemon (Phase 1.5)
 │       ├── conftest.py           # docker gate + throwaway busybox compose project shaped like an install
 │       ├── test_docker_live.py   # real compose up/healthy/ready/status/conflict-guard/down

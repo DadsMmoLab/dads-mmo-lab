@@ -17,6 +17,16 @@ pip install -r requirements-dev.txt
 python main.py
 ```
 
+## Installing a server from the CLI (Phase 3a harness)
+
+```bash
+python -m yulon.catalog.installer wow-wotlk --server-dir ~/wow-server-playerbots
+python -m yulon.catalog.installer wow-tbc --client-dir ~/Games/WoWTBC   # games that need a client folder
+```
+
+Needs a reachable Docker daemon (otherwise it stops with the Phase 3.3 message) and, because
+the wrapped scripts start with `sudo -v`, cached or passwordless sudo.
+
 ## Running checks
 
 ```bash

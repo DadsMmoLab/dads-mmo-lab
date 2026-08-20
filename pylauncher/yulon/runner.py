@@ -11,9 +11,12 @@ docstring for the exact ordering.
 
 from __future__ import annotations
 
+import os
+import queue
+import re
 import subprocess
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 
 from yulon.log import get_logger
@@ -132,3 +135,131 @@ def run(command: list[str], cwd: Path | None = None) -> subprocess.CompletedProc
         errors="replace",
         check=False,
     )
+
+
+# A prompt-answering callback for `interact()`: gets each output line (and each
+# quiet partial line, i.e. a prompt with no trailing newline) with ANSI colour
+# codes stripped, returns the text to send to stdin (without newline) or None.
+Responder = Callable[[str], str | None]
+
+_ANSI = re.compile(r"\[[0-9;?]*[ -/]*[@-~]")
+
+# How long a partial line must sit unchanged before it is treated as a prompt.
+_PROMPT_QUIET_SECONDS = 0.3
+
+
+def strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences (the install scripts colour everything)."""
+    return _ANSI.sub("", text)
+
+
+def interact(
+    command: list[str],
+    cwd: Path | None = None,
+    *,
+    respond: Responder,
+    env: Mapping[str, str] | None = None,
+    quiet_seconds: float = _PROMPT_QUIET_SECONDS,
+) -> Iterator[str]:
+    """Run an interactive command, yielding its output live and answering its prompts.
+
+    Stdout and stderr are merged and read in chunks, so a prompt that does not
+    end in a newline (`read -p`, `echo -n ...; read`) still surfaces: once a
+    partial line has been quiet for `quiet_seconds`, `respond()` is asked about
+    it. `respond()` also sees every complete line. Whenever it returns a
+    string, that string plus a newline is written to the child's stdin. Lines
+    are yielded raw (with colour codes); `respond()` receives them stripped.
+
+    Raises `subprocess.CalledProcessError` on non-zero exit, like `stream()`.
+    If the generator is abandoned early the child is terminated (then killed)
+    and its reader thread joined, exactly like `stream()`.
+    """
+    logger.debug(f"interact() called: command={command} cwd={cwd}")
+    proc = subprocess.Popen(
+        command,
+        cwd=_cwd_arg(cwd),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=dict(env) if env is not None else None,
+        bufsize=0,
+    )
+    assert proc.stdout is not None and proc.stdin is not None
+    chunks: queue.Queue[bytes | None] = queue.Queue()
+    out_fd = proc.stdout.fileno()
+
+    def _pump() -> None:
+        try:
+            while True:
+                data = os.read(out_fd, 4096)
+                if not data:
+                    break
+                chunks.put(data)
+        except OSError:
+            pass
+        finally:
+            chunks.put(None)
+
+    reader = threading.Thread(target=_pump, daemon=True)
+    reader.start()
+    buffer = ""
+    answered_partial = False
+
+    def _answer(text: str) -> bool:
+        reply = respond(strip_ansi(text))
+        if reply is None:
+            return False
+        try:
+            assert proc.stdin is not None
+            proc.stdin.write((reply + "\n").encode("utf-8"))
+            proc.stdin.flush()
+        except (BrokenPipeError, OSError):
+            return False
+        return True
+
+    try:
+        eof = False
+        while not eof or buffer:
+            try:
+                data = chunks.get(timeout=quiet_seconds)
+            except queue.Empty:
+                # A quiet partial line is a prompt waiting for input.
+                if buffer and not answered_partial and _answer(buffer):
+                    yield buffer
+                    buffer = ""
+                    answered_partial = False
+                elif buffer:
+                    answered_partial = True  # asked once; do not spam the same prompt
+                continue
+            if data is None:
+                eof = True
+                if buffer:
+                    yield buffer
+                    buffer = ""
+                break
+            buffer += data.decode("utf-8", errors="replace")
+            answered_partial = False
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                line = line.rstrip("\r")
+                yield line
+                _answer(line)
+        reader.join()
+        proc.wait()
+        if proc.returncode:
+            raise subprocess.CalledProcessError(proc.returncode, command)
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        reader.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
+        for handle in (proc.stdin, proc.stdout):
+            if handle is not None:
+                try:
+                    handle.close()
+                except OSError:
+                    pass

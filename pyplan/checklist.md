@@ -42,8 +42,8 @@
 ## Phase 3 — Catalog (catalog + installer)
 
 - [x] 3.1 `catalog.json` — game list
-- [ ] 3.2 `installer.py` — orchestration (Phase 3a: shells out to existing scripts)
-- [ ] 3.3 Silent Docker/WSL provisioning stubs wired in (graceful failure until Phase 5)
+- [ ] 3.2 `installer.py` — orchestration (Phase 3a: shells out to existing scripts) — **code-complete + unit-tested (2026-08-20); the live Linux run of `python -m yulon.catalog.installer wow-wotlk` is outstanding**
+- [x] 3.3 Silent Docker/WSL provisioning stubs wired in (graceful failure until Phase 5)
 - [ ] 3.4 Networking auto-setup (LAN + internet play; firewall helpers, realmlist updater, router-step prompts) — README §13
 - [ ] **Phase 3 exit criteria met** (verified via CLI/test harness — no UI yet)
 
@@ -133,5 +133,19 @@
   `CatalogEntry.container_spec()` is how a future `controller_wow_tbc/` etc. gets its
   `ContainerSpec` without retyping the names. Tests pin that every referenced install script
   exists and that the WotLK entry equals `docker_ctl.SPEC`.
+- **3.2/3.3 record (2026-08-20):** the installers are interactive (`ask_yes_no`, `press_enter`,
+  `choose_install_dir`, `Enter path to your … client folder`, the Steam Deck keyring `yes`), so
+  Phase 3a needed an expect-lite: `runner.interact()` merges stdout/stderr, reads in chunks so a
+  prompt with no trailing newline surfaces after a quiet interval, and writes whatever the
+  `Responder` returns to stdin. `catalog/installer.py` answers from the typed `PROMPT_RULES`
+  table (first match wins; destructive/optional offers — reinstall, README, wow-manage
+  download, stop-server, 'continue anyway' — are declined; progress gates accepted; paths are
+  passed in POSIX form because the child is bash). Games whose script loops until given a
+  client folder carry `install.requires_client_dir` in `catalog.json` and are refused up front
+  without one — the app never fetches a client (§3a). **Known constraint:** the scripts open
+  with `sudo -v`; with no tty and no cached credentials that fails immediately, so Phase 3a
+  needs passwordless/cached sudo (Phase 4/5 must hand the UI a real password path, e.g.
+  `SUDO_ASKPASS` + `-A` or pkexec). 3.3's graceful error is `DockerUnavailableError` raised
+  from `preflight()` before the script starts, pinned by test.
 - **Tooling:** the `integration` pytest marker is registered in `pyproject.toml`; CI's plain
   `pytest -q` runs the busybox live test on runners that have Docker and skips it elsewhere.

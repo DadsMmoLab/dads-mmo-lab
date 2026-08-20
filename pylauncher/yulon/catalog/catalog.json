@@ -49,6 +49,7 @@
       "install": {
         "script": "archive/guides/wow-tbc/install-wow-tbc.sh",
         "default_server_dir": "wow-tbc-server",
+        "requires_client_dir": true,
         "db_root_password_file": ".db_password"
       },
       "containers": {"db": "tbc-db", "auth": "tbc-realmd", "world": "tbc-mangosd"},
@@ -81,6 +82,7 @@
       "install": {
         "script": "archive/guides/wow-vanilla/install-wow-vanilla.sh",
         "default_server_dir": "wow-vanilla-server",
+        "requires_client_dir": true,
         "db_root_password_file": ".db_password"
       },
       "containers": {"db": "vanilla-db", "auth": "vanilla-realmd", "world": "vanilla-mangosd"},
@@ -110,7 +112,8 @@
       },
       "install": {
         "script": "archive/guides/work-in-progress/install-tortoise-wow-WSL.sh",
-        "default_server_dir": "tortoise-wow-server"
+        "default_server_dir": "tortoise-wow-server",
+        "requires_client_dir": true
       },
       "containers": {"db": "tortoise-db", "auth": "tortoise-realmd", "world": "tortoise-mangosd"},
       "ports": {"auth": 3724, "world": 8090, "db": 3306},

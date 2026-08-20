@@ -47,6 +47,10 @@ class Install(_Strict):
     db_root_password_file: str | None = Field(
         default=None, description="File under the server dir holding a generated password."
     )
+    requires_client_dir: bool = Field(
+        default=False,
+        description="The script asks for the user's client folder and loops until given one.",
+    )
 
 
 class Containers(_Strict):

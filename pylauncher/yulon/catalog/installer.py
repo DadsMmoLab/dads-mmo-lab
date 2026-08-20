@@ -1,22 +1,232 @@
-"""Install orchestrator: dependencies -> clone -> build -> configure.
+"""Install orchestrator (Phase 3a): drive one catalog entry's existing `install-*.sh`.
 
-Phase 3 (see pyplan/README.md). Phase 3a shells out to the existing
-install-*.sh scripts; Phase 3b reimplements them natively in Python.
+Phase 3a wraps the scripts we already ship instead of reimplementing them
+(README §7/§9): the orchestrator resolves the entry's script, answers the
+script's prompts from a typed rule table so no shell interaction is needed,
+and streams the output up to whoever is listening (a CLI today, the
+`log_panel` in Phase 4). It never downloads client assets — the user's own
+client directory is *passed in* (README §3a) — and it never contains
+per-game logic: what differs per game is `catalog.json` data.
+
+Docker provisioning is wired in but deferred (roadmap 3.3): if no daemon
+answers, `platform.ensure_docker()` is asked to provide one, and until Phase
+5 lands that is a clean, logged, catchable `DockerUnavailableError`, never a
+crash or a silent hang.
 """
 
 from __future__ import annotations
 
-from typing import Any
+import re
+import subprocess
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass
+from pathlib import Path
+
+from yulon import platform, runner
+from yulon.catalog.catalog import CatalogEntry
+from yulon.log import get_logger
+
+logger = get_logger(__name__)
+
+# The repo root (where `archive/guides/...` lives), two levels above `yulon/`.
+DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+class InstallerError(RuntimeError):
+    """The install could not start or did not finish (message is user-readable)."""
+
+
+class DockerUnavailableError(InstallerError):
+    """No Docker daemon is reachable and automatic provisioning is not available yet."""
+
+
+@dataclass(frozen=True)
+class InstallOptions:
+    """What the user decided before clicking install."""
+
+    server_dir: Path | None = None
+    client_dir: Path | None = None
+    reinstall: bool = False
+
+
+@dataclass(frozen=True)
+class PromptRule:
+    """`pattern` (regex, searched in the ANSI-stripped prompt) → the stdin answer."""
+
+    pattern: str
+    answer: str | Callable[[InstallOptions], str]
+    note: str = ""
+
+
+# How the app answers the scripts' questions. First match wins. Optional and
+# destructive offers are declined; everything that merely gates progress is
+# accepted. The shared prompt helpers (`ask_yes_no`, `press_enter`,
+# `choose_install_dir`) are identical across the four installers, so one
+# table serves all of them.
+PROMPT_RULES: tuple[PromptRule, ...] = (
+    PromptRule(
+        r"Install path:",
+        lambda o: o.server_dir.as_posix() if o.server_dir else "",
+        "blank = the script's default dir; POSIX form — the scripts run under bash",
+    ),
+    PromptRule(
+        r"Enter path to your .*client folder",
+        lambda o: o.client_dir.as_posix() if o.client_dir else "",
+        "the user's own client (README §3a)",
+    ),
+    PromptRule(
+        r"Remove it and start fresh\?", lambda o: "y" if o.reinstall else "n", "existing server dir"
+    ),
+    PromptRule(r"Type yes to reset the keyring", "yes", "Steam Deck pacman keyring repair"),
+    PromptRule(r"Press ENTER", ""),
+    PromptRule(r"Continue anyway\?", "n", "the script found the wrong client"),
+    PromptRule(r"Open the GitHub README", "n"),
+    PromptRule(r"Download wow-manage\.sh", "n"),
+    PromptRule(r"stop the server now\?", "n"),
+    PromptRule(r"\(y/n\)", "y"),
+)
+
+
+def make_responder(
+    options: InstallOptions, rules: tuple[PromptRule, ...] = PROMPT_RULES
+) -> runner.Responder:
+    """Build the `runner.Responder` that answers prompts per `rules` for `options`."""
+    compiled = [(re.compile(r.pattern, re.IGNORECASE), r) for r in rules]
+
+    def respond(line: str) -> str | None:
+        for regex, rule in compiled:
+            if regex.search(line):
+                answer = rule.answer(options) if callable(rule.answer) else rule.answer
+                logger.debug(f"prompt {line.strip()!r} → {answer!r}")
+                return answer
+        return None
+
+    return respond
+
+
+def docker_available() -> bool:
+    """True if `docker info` succeeds; False if the binary or daemon is missing."""
+    try:
+        return runner.run(["docker", "info"]).returncode == 0
+    except OSError:
+        return False
 
 
 class Installer:
-    """Coordinate a full server install for a single catalog game."""
+    """Coordinate a full server install for a single catalog entry.
 
-    def __init__(self, entry: dict[str, Any]) -> None:
-        # `entry` is a raw dict at this JSON-parse boundary; Phase 2/3 replace
-        # this with a typed catalog-entry dataclass per style-guide.md §2.
+    Seams (`docker_check`, `ensure_docker`, `interact`) exist so the control
+    flow is testable without Docker, a network, or a two-hour build.
+    """
+
+    def __init__(
+        self,
+        entry: CatalogEntry,
+        *,
+        repo_root: Path = DEFAULT_REPO_ROOT,
+        docker_check: Callable[[], bool] = docker_available,
+        ensure_docker: Callable[[], None] = platform.ensure_docker,
+        interact: Callable[..., Iterator[str]] = runner.interact,
+        env: Mapping[str, str] | None = None,
+    ) -> None:
         self.entry = entry
+        self.repo_root = repo_root
+        self._docker_check = docker_check
+        self._ensure_docker = ensure_docker
+        self._interact = interact
+        self._env = env
 
-    def run(self) -> None:
-        """Begin the install. Placeholder — see Phase 3 in pyplan/README.md."""
-        raise NotImplementedError
+    @property
+    def script(self) -> Path:
+        """Absolute path of the entry's install script."""
+        return self.repo_root / self.entry.install.script
+
+    def preflight(self, options: InstallOptions) -> None:
+        """Everything that must be true before a single line of the script runs.
+
+        Raises `InstallerError` (script missing, client dir required but not
+        given) or `DockerUnavailableError` (no daemon and provisioning not yet
+        implemented — roadmap 3.3's graceful failure).
+        """
+        if not self.script.is_file():
+            raise InstallerError(f"install script not found: {self.script}")
+        if self.entry.install.requires_client_dir and options.client_dir is None:
+            raise InstallerError(
+                f"{self.entry.name} needs the folder of your {self.entry.client.version} "
+                f"client (build {self.entry.client.build}) — pick it first; the app never "
+                "downloads game clients"
+            )
+        if options.client_dir is not None and not options.client_dir.is_dir():
+            raise InstallerError(f"client folder does not exist: {options.client_dir}")
+        if not self._docker_check():
+            try:
+                self._ensure_docker()
+            except NotImplementedError as exc:
+                raise DockerUnavailableError(
+                    "Docker isn't available yet — automatic setup lands in a future update. "
+                    "Install Docker, start it, and try again."
+                ) from exc
+            if not self._docker_check():
+                raise DockerUnavailableError("Docker was provisioned but no daemon answers yet")
+
+    def run(self, options: InstallOptions | None = None) -> Iterator[str]:
+        """Run the install, yielding output lines live; answers prompts itself.
+
+        Raises `InstallerError` if the script exits non-zero (after yielding
+        everything it printed), or any `preflight()` error before it starts.
+        """
+        opts = options or InstallOptions()
+        self.preflight(opts)
+        logger.info(f"installing {self.entry.id} via {self.script}")
+        try:
+            yield from self._interact(
+                ["bash", str(self.script)],
+                cwd=self.script.parent,
+                respond=make_responder(opts),
+                env=self._env,
+            )
+        except subprocess.CalledProcessError as exc:
+            raise InstallerError(f"{self.script.name} exited with status {exc.returncode}") from exc
+        logger.info(f"install of {self.entry.id} finished")
+
+
+def _main(argv: list[str] | None = None) -> int:
+    """CLI entry point: `python -m yulon.catalog.installer <game-id> [options]`.
+
+    The roadmap 3.2 test harness — streams the script's output to stdout and
+    exits non-zero with the user-readable error on failure. Phase 4's
+    `catalog_view.py` calls `Installer.run()` the same way.
+    """
+    import argparse
+    import sys
+
+    from yulon.catalog.catalog import load_catalog
+
+    parser = argparse.ArgumentParser(prog="yulon.catalog.installer")
+    parser.add_argument("game", help="catalog id, e.g. wow-wotlk")
+    parser.add_argument("--server-dir", type=Path, default=None)
+    parser.add_argument("--client-dir", type=Path, default=None)
+    parser.add_argument("--reinstall", action="store_true")
+    parser.add_argument("--repo-root", type=Path, default=DEFAULT_REPO_ROOT)
+    args = parser.parse_args(argv)
+    try:
+        entry = load_catalog().get(args.game)
+    except KeyError:
+        sys.stderr.write(f"unknown game {args.game!r}\n")
+        return 2
+    installer = Installer(entry, repo_root=args.repo_root)
+    options = InstallOptions(
+        server_dir=args.server_dir, client_dir=args.client_dir, reinstall=args.reinstall
+    )
+    try:
+        for line in installer.run(options):
+            sys.stdout.write(line + "\n")
+            sys.stdout.flush()
+    except InstallerError as exc:
+        sys.stderr.write(f"install failed: {exc}\n")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())
