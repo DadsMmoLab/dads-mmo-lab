@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 import threading
 import time
@@ -11,9 +10,14 @@ from pathlib import Path
 import pytest
 
 from yulon import runner
+from yulon.catalog.installer import bash_available
 from yulon.runner import run, stream
 
-needs_bash = pytest.mark.skipif(shutil.which("bash") is None, reason="bash not on PATH")
+# Not just `which bash`: on Windows that finds the Store alias for WSL, which fails
+# with execvpe(/bin/bash) when no distro is installed (Windows test VM, 2026-08-21).
+needs_bash = pytest.mark.skipif(
+    not bash_available(), reason="no bash that can run a script on this machine"
+)
 
 
 def _python_cmd(script: str) -> list[str]:

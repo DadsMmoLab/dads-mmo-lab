@@ -10,6 +10,10 @@ on:
   push:
     tags:
       - "v*"
+  # So the matrix can be PROVEN without publishing anything: a manual run builds
+  # all three artifacts and uploads them to the run; only a v* tag attaches them
+  # to a GitHub Release (roadmap Phase 5 exit criteria).
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -111,6 +115,7 @@ jobs:
           path: pylauncher/release/*
 
       - name: Attach to the GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: pylauncher/release/*

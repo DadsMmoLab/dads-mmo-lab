@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -122,6 +123,32 @@ def host_package_manager() -> str | None:
     return platform.linux_package_manager()
 
 
+def bash_available(run: Callable[..., subprocess.CompletedProcess[str]] | None = None) -> bool:
+    """True if a `bash` that can actually run a script is on PATH.
+
+    Being on PATH is not enough on Windows: `bash.exe` there is usually the
+    Store alias for WSL, which fails with `execvpe(/bin/bash)` when no distro
+    is installed (found on the Windows test VM, 2026-08-21). Docker Desktop's
+    own WSL distros do not provide one.
+    """
+    if shutil.which("bash") is None:
+        return False
+    call = run if run is not None else runner.run
+    try:
+        return call(["bash", "-c", "exit 0"]).returncode == 0
+    except OSError:
+        return False
+
+
+NO_BASH_HELP = (
+    "The installers are shell scripts and this machine has no working `bash`. "
+    "On Windows that usually means WSL has no Linux distribution yet: install "
+    "one (`wsl --install -d Ubuntu`), reopen the app, and try again. Yu'lon "
+    "sets up WSL2 and Docker Desktop for you, but the install script itself "
+    "still needs a distro to run in."
+)
+
+
 def docker_available() -> bool:
     """True if `docker info` succeeds; False if the binary or daemon is missing."""
     try:
@@ -147,6 +174,7 @@ class Installer:
         interact: Callable[..., Iterator[str]] = runner.interact,
         env: Mapping[str, str] | None = None,
         package_manager: Callable[[], str | None] = host_package_manager,
+        bash_check: Callable[[], bool] = bash_available,
     ) -> None:
         self.entry = entry
         self.repo_root = repo_root
@@ -155,6 +183,7 @@ class Installer:
         self._interact = interact
         self._env = env
         self._package_manager = package_manager
+        self._bash_check = bash_check
 
     @property
     def script(self) -> Path:
@@ -190,6 +219,8 @@ class Installer:
         """
         if not self.script.is_file():
             raise InstallerError(f"install script not found: {self.script}")
+        if not self._bash_check():
+            raise InstallerError(NO_BASH_HELP)
         if self.entry.install.requires_client_dir and options.client_dir is None:
             raise InstallerError(
                 f"{self.entry.name} needs the folder of your {self.entry.client.version} "
