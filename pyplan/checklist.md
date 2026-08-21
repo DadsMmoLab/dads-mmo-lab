@@ -155,6 +155,31 @@
      daemon under `sudo -n docker info`, or re-probe under `sg docker`) and say "installed — restart the launcher"
      rather than reporting it as not ready. See 6.5's provisioning coverage.
 
+- **Windows Docker Desktop provisioning: three defects in `ensure_docker()`'s Windows path
+  (2026-08-22, measured on the clean Win11 VM)** — Docker Desktop does now install and run there, but
+  not on the launcher's own code alone:
+  1. **The download cannot verify Docker's TLS certificate on a brand-new Windows PC.** `_urllib_download`
+     fails on exactly the machine `ensure_docker()` exists to serve, because a fresh cert store has not yet
+     fetched the root. Needs a deliberate answer (ship a CA bundle via `certifi`, or hand the download to
+     `curl.exe`/BITS which use the OS store and auto-root-update), not a `verify=False`.
+  2. **The start command looks for an app Windows cannot find.** After a successful install, the launcher's
+     "start Docker Desktop" step fails to locate `Docker Desktop`; it had to be started by hand. Resolve the
+     real path from the install (`%ProgramFiles%\Docker\Docker\Docker Desktop.exe`) rather than by name.
+  3. **First launch is gated behind modal dialogs, so a headless start hangs forever.** The installer was
+     run with `--accept-license` and Docker Desktop *still* showed its license acceptance and an onboarding
+     walkthrough; a human had to click both before the engine would boot. The state lands in
+     `%APPDATA%\Docker\settings-store.json`, which after acceptance reads
+     `{"AutoStart": false, "DisplayedOnboarding": true, "LicenseTermsVersion": 2, "SettingsVersion": 45}`.
+
+     **Design decision needed, not just a code fix.** Pre-seeding that file would clear the dialogs, but
+     `LicenseTermsVersion` is Docker's *subscription service agreement* — accepting it silently on a user's
+     behalf is a legal act the launcher should not perform quietly. The honest shape is to show the terms
+     (with a link) in Yu'lon's own first-run flow, take the user's consent there, and only then write the
+     file. Note also that the value is a **version number**: a future Docker bumps it and the gate returns,
+     so the launcher must treat "engine never became ready" as a known, explainable state with a "finish
+     setup in Docker Desktop" message rather than an infinite wait. `AutoStart: false` is the related
+     reason the engine must be started explicitly on every run.
+
 - **Open follow-ups from the staged start/stop review (2026-08-22)** — found by a three-lens review whose
   findings were then adjudicated against a live daemon; the must-fix (parallel `docker stop`) and the
   latching config check are already fixed, these three are not:
