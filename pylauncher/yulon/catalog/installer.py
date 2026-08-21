@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import threading
+from collections import deque
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +36,8 @@ logger = get_logger(__name__)
 
 # Where `catalog.json`'s install scripts resolve from (roadmap 6.0).
 DEFAULT_INSTALLERS_ROOT = resources.installers_dir()
+# How many of the script's last output lines a failure message carries (roadmap 6.1).
+_ERROR_TAIL_LINES = 12
 # What the scripts see as their terminal when the app was not started from one.
 DEFAULT_TERM = "xterm-256color"
 
@@ -45,6 +48,10 @@ class InstallerError(RuntimeError):
 
 class DockerUnavailableError(InstallerError):
     """No Docker daemon is reachable and automatic provisioning is not available yet."""
+
+
+class UnsupportedPlatformError(InstallerError):
+    """This entry's installer does not run on this platform (roadmap 6.1)."""
 
 
 @dataclass(frozen=True)
@@ -116,6 +123,17 @@ def make_responder(
     return respond
 
 
+def unsupported_platform_message(entry: CatalogEntry, platform_id: str) -> str:
+    """Why this server cannot be installed here, in the user's words (roadmap 6.1)."""
+    supported = ", ".join(entry.install.platforms)
+    where = {"windows": "Windows", "macos": "macOS", "linux": "Linux"}.get(platform_id, platform_id)
+    return (
+        f"{entry.name} cannot be installed on {where} yet: its installer is a "
+        f"{supported} script. Nothing was started. Install it on {supported} for now — "
+        "a native path for this platform is planned."
+    )
+
+
 def host_package_manager() -> str | None:
     """The Linux package manager that picks the script variant; None off Linux."""
     if not sys.platform.startswith("linux"):
@@ -175,6 +193,7 @@ class Installer:
         env: Mapping[str, str] | None = None,
         package_manager: Callable[[], str | None] = host_package_manager,
         bash_check: Callable[[], bool] = bash_available,
+        platform_id: Callable[[], str] = platform.detect,
     ) -> None:
         self.entry = entry
         self.installers_root = installers_root
@@ -184,6 +203,7 @@ class Installer:
         self._env = env
         self._package_manager = package_manager
         self._bash_check = bash_check
+        self._platform_id = platform_id
 
     @property
     def script(self) -> Path:
@@ -219,6 +239,12 @@ class Installer:
         passed through to Docker provisioning so its ready-poll can be
         interrupted (a stop mid-provision must not leave a worker sleeping).
         """
+        here = self._platform_id()
+        if not self.entry.install.supports(here):
+            # Before ANY subprocess: the script would fast-fail on its own
+            # `[[ "$OSTYPE" == "linux-gnu"* ]]` gate and leave the user with a
+            # bare "exited with status 1" (roadmap 6.1).
+            raise UnsupportedPlatformError(unsupported_platform_message(self.entry, here))
         if not self.script.is_file():
             raise InstallerError(f"install script not found: {self.script}")
         if not self._bash_check():
@@ -260,16 +286,27 @@ class Installer:
         opts = options or InstallOptions()
         self.preflight(opts, cancel=cancel)
         logger.info(f"installing {self.entry.id} via {self.script}")
+        tail: deque[str] = deque(maxlen=_ERROR_TAIL_LINES)
         try:
-            yield from self._interact(
+            for line in self._interact(
                 ["bash", str(self.script)],
                 cwd=self.script.parent,
                 respond=make_responder(opts),
                 env=self.script_env(),
                 cancel=cancel,
-            )
+            ):
+                text = runner.strip_ansi(line).strip()
+                if text:
+                    tail.append(text)
+                yield line
         except subprocess.CalledProcessError as exc:
-            raise InstallerError(f"{self.script.name} exited with status {exc.returncode}") from exc
+            # Never just "exited with status N": the script's own last words are
+            # the only thing that tells the user what went wrong (roadmap 6.1).
+            said = "\n".join(tail)
+            detail = f"\n\nIt last said:\n{said}" if said else ""
+            raise InstallerError(
+                f"{self.script.name} exited with status {exc.returncode}.{detail}"
+            ) from exc
         logger.info(f"install of {self.entry.id} finished")
 
 

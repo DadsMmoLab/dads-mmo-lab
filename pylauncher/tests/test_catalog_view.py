@@ -72,7 +72,14 @@ def test_install_asks_for_folders_then_streams_the_installer(qapp: object, tmp_p
         return tmp_path / ("client" if "client" in title else "server")
 
     (tmp_path / "client").mkdir()
-    view = CatalogView(CATALOG, factory, panel, pick_dir=pick, home=tmp_path)
+    view = CatalogView(
+        CATALOG,
+        factory,
+        panel,
+        platform_id=lambda: "linux",  # this test is about the folder flow, not gating
+        pick_dir=pick,
+        home=tmp_path,
+    )
     events: list[tuple[str, ...]] = []
     view.install_started.connect(lambda g: events.append(("started", g)))
     view.install_finished.connect(lambda g, ok, m: events.append(("finished", g, str(ok), m)))
@@ -146,3 +153,43 @@ def test_use_existing_cancel_emits_nothing(qapp: object) -> None:
     view.installed.connect(lambda *a: got.append(a))
     assert view.attach_existing(CATALOG.get("wow-tbc")) is False
     assert got == []
+
+
+def test_unsupported_platform_is_said_on_the_tile_and_refused_before_any_prompt(
+    qapp: object, monkeypatch: object
+) -> None:
+    """Roadmap 6.1: no folder dialog, no subprocess — just an honest message."""
+    from PySide6.QtWidgets import QMessageBox
+
+    panel = LogPanel()
+    prompted: list[str] = []
+
+    def pick(_parent: object, title: str, _start: object) -> None:
+        prompted.append(title)
+        return None
+
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, ["x"]),
+        panel,
+        pick_dir=pick,  # type: ignore[arg-type]
+        platform_id=lambda: "macos",
+    )
+    shown: list[str] = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.append(a[2]))  # type: ignore[attr-defined]
+    finished: list[tuple[str, bool, str]] = []
+    view.install_finished.connect(lambda g, ok, m: finished.append((g, ok, m)))
+
+    assert view.button_for("wow-wotlk").isEnabled() is False  # said on the tile
+    assert view.start_install(CATALOG.get("wow-wotlk")) is False
+    assert prompted == []  # never asked where to install it
+    assert shown and "cannot be installed on macOS" in shown[0]
+    assert finished == [("wow-wotlk", False, shown[0])]
+    assert panel.running is False
+
+
+def test_supported_platform_keeps_the_install_button(qapp: object) -> None:
+    view = CatalogView(
+        CATALOG, lambda e: _FakeInstaller(e, []), LogPanel(), platform_id=lambda: "linux"
+    )
+    assert view.button_for("wow-wotlk").isEnabled() is True

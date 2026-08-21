@@ -27,8 +27,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from yulon import platform
 from yulon.catalog.catalog import Catalog, CatalogEntry
-from yulon.catalog.installer import Installer, InstallOptions
+from yulon.catalog.installer import (
+    Installer,
+    InstallOptions,
+    unsupported_platform_message,
+)
 from yulon.log import get_logger
 from yulon.ui.widgets.log_panel import LogPanel
 
@@ -58,9 +63,11 @@ class CatalogView(QWidget):
         *,
         pick_dir: DirPicker = _qt_dir_picker,
         home: Path | None = None,
+        platform_id: Callable[[], str] = platform.detect,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self._platform_id = platform_id
         self._catalog = catalog
         self._make_installer = installer_factory
         self._log = log_panel
@@ -98,6 +105,19 @@ class CatalogView(QWidget):
         button.clicked.connect(lambda _checked=False, e=entry: self.start_install(e))
         box.addWidget(button)
         self._buttons[entry.id] = button
+        if not entry.install.supports(self._platform_id()):
+            # Roadmap 6.1: say it on the tile, before the click — and leave
+            # "Use existing…" enabled, since managing a server installed
+            # elsewhere works on every platform.
+            note = QLabel(
+                f"<i>Installer needs {', '.join(entry.install.platforms)} — "
+                "not available on this platform yet.</i>",
+                frame,
+            )
+            note.setWordWrap(True)
+            box.addWidget(note)
+            button.setEnabled(False)
+            button.setToolTip(unsupported_platform_message(entry, self._platform_id()))
         existing = QPushButton("Use existing…", frame)
         existing.setObjectName(f"existing-{entry.id}")
         existing.setToolTip(
@@ -159,6 +179,14 @@ class CatalogView(QWidget):
         """Ask for folders, then run the installer into the log panel. False if not started."""
         if self._log.running:
             QMessageBox.information(self, "Busy", "Another job is still running.")
+            return False
+        if not entry.install.supports(self._platform_id()):
+            # Before the folder prompts, not after them (roadmap 6.1): asking
+            # where to install something that cannot be installed is the rudest
+            # possible order.
+            message = unsupported_platform_message(entry, self._platform_id())
+            QMessageBox.information(self, "Not available on this platform", message)
+            self.install_finished.emit(entry.id, False, message)
             return False
         server_dir = self._pick_dir(
             self,

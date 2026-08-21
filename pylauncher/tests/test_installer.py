@@ -24,6 +24,7 @@ from yulon.catalog.installer import (
     Installer,
     InstallerError,
     InstallOptions,
+    UnsupportedPlatformError,
     bash_available,
     make_responder,
 )
@@ -106,6 +107,21 @@ def test_prompt_rules_are_ordered_and_decline_optional_offers() -> None:
     assert len(PROMPT_RULES) >= 8
 
 
+def _installer(entry: object, **kwargs: object) -> Installer:
+    """An `Installer` with every host-dependent seam pinned.
+
+    These tests assert on control flow, not on the machine they run on: the
+    package manager decides which script variant is picked, `bash_check`
+    whether a shell exists, and `platform_id` whether the entry is installable
+    here at all (roadmap 6.1). Any test that cares overrides the one it cares
+    about.
+    """
+    kwargs.setdefault("package_manager", lambda: None)
+    kwargs.setdefault("bash_check", lambda: True)
+    kwargs.setdefault("platform_id", lambda: "linux")
+    return Installer(entry, **kwargs)  # type: ignore[arg-type]
+
+
 def _fake_interact(calls: list[dict[str, object]]) -> object:
     def interact(command: list[str], **kwargs: object) -> Iterator[str]:
         calls.append({"command": command, **kwargs})
@@ -122,13 +138,11 @@ def test_installer_runs_the_entry_script_through_interact(tmp_path: Path) -> Non
     script.parent.mkdir(parents=True)
     script.write_text("#!/bin/bash\n", encoding="utf-8")
     calls: list[dict[str, object]] = []
-    installer = Installer(
+    installer = _installer(
         entry,
         installers_root=tmp_path,
         docker_check=lambda: True,
         interact=_fake_interact(calls),  # type: ignore[arg-type]
-        package_manager=lambda: None,
-        bash_check=lambda: True,
     )
     assert list(installer.run(InstallOptions(server_dir=Path("/srv")))) == ["hello", "done"]
     assert calls[0]["command"] == ["bash", str(script)]
@@ -151,7 +165,7 @@ def test_installer_picks_the_script_variant_for_the_host_package_manager(
 ) -> None:
     """Ubuntu/Fedora hosts get the Debian/Fedora ports; everything else the default script."""
     entry = load_catalog().get("wow-wotlk")
-    installer = Installer(entry, installers_root=tmp_path, package_manager=lambda: package_manager)
+    installer = _installer(entry, installers_root=tmp_path, package_manager=lambda: package_manager)
     assert installer.script == tmp_path / expected
 
 
@@ -160,13 +174,13 @@ def test_script_env_inherits_ours_and_defaults_term(monkeypatch: pytest.MonkeyPa
     entry = load_catalog().get("wow-wotlk")
     monkeypatch.delenv("TERM", raising=False)
     monkeypatch.setenv("YULON_MARKER", "1")
-    env = Installer(entry, env={"EXIT_CODE": "3"}).script_env()
+    env = _installer(entry, env={"EXIT_CODE": "3"}).script_env()
     assert env["TERM"] == installer_module.DEFAULT_TERM
     assert env["YULON_MARKER"] == "1" and env["EXIT_CODE"] == "3"
     monkeypatch.setenv("TERM", "")
     assert Installer(entry).script_env()["TERM"] == installer_module.DEFAULT_TERM
     monkeypatch.setenv("TERM", "screen")
-    assert Installer(entry, env={"TERM": "dumb"}).script_env()["TERM"] == "dumb"
+    assert _installer(entry, env={"TERM": "dumb"}).script_env()["TERM"] == "dumb"
     assert Installer(entry).script_env()["TERM"] == "screen"
 
 
@@ -187,7 +201,7 @@ def test_installer_fails_gracefully_without_docker(tmp_path: Path) -> None:
     calls: list[dict[str, object]] = []
     from yulon.platform import ProvisionReport
 
-    installer = Installer(
+    installer = _installer(
         entry,
         installers_root=tmp_path,
         docker_check=lambda: False,
@@ -195,22 +209,18 @@ def test_installer_fails_gracefully_without_docker(tmp_path: Path) -> None:
             "linux", manual_steps=("Install Docker Engine by hand: https://docs.docker.com/",)
         ),
         interact=_fake_interact(calls),  # type: ignore[arg-type]
-        package_manager=lambda: None,  # the file below is the default script, not a variant
-        bash_check=lambda: True,  # this box's bash is irrelevant to what is asserted
     )
     with pytest.raises(DockerUnavailableError, match="could not be set up automatically"):
         list(installer.run())
     assert calls == []  # the script never started
 
-    rebooter = Installer(
+    rebooter = _installer(
         entry,
         installers_root=tmp_path,
         docker_check=lambda: False,
         ensure_docker=lambda **_: ProvisionReport(
             "windows", done=("wsl --install",), reboot_required=True, manual_steps=("Reboot.",)
         ),
-        package_manager=lambda: None,  # default script, not a distro variant
-        bash_check=lambda: True,  # this box's bash is irrelevant to what is asserted
     )
     with pytest.raises(DockerUnavailableError, match="reboot is needed"):
         rebooter.preflight(InstallOptions())
@@ -223,9 +233,7 @@ def test_installer_requires_the_client_dir_when_the_script_asks_for_it(tmp_path:
     script = tmp_path / entry.install.script
     script.parent.mkdir(parents=True)
     script.write_text("", encoding="utf-8")
-    installer = Installer(
-        entry, installers_root=tmp_path, docker_check=lambda: True, bash_check=lambda: True
-    )
+    installer = _installer(entry, installers_root=tmp_path, docker_check=lambda: True)
     with pytest.raises(InstallerError, match="never downloads game clients"):
         list(installer.run())
     with pytest.raises(InstallerError, match="does not exist"):
@@ -235,7 +243,7 @@ def test_installer_requires_the_client_dir_when_the_script_asks_for_it(tmp_path:
 def test_installer_reports_a_missing_script(tmp_path: Path) -> None:
     entry = load_catalog().get("wow-wotlk")
     with pytest.raises(InstallerError, match="not found"):
-        Installer(entry, installers_root=tmp_path, docker_check=lambda: True).preflight(
+        _installer(entry, installers_root=tmp_path, docker_check=lambda: True).preflight(
             InstallOptions()
         )
 
@@ -250,13 +258,11 @@ def test_installer_wraps_script_failure(tmp_path: Path) -> None:
         yield "step 1"
         raise subprocess.CalledProcessError(7, command)
 
-    installer = Installer(
+    installer = _installer(
         entry,
         installers_root=tmp_path,
         docker_check=lambda: True,
         interact=failing,  # type: ignore[arg-type]
-        package_manager=lambda: None,  # the file below is the default script, not a variant
-        bash_check=lambda: True,  # this box's bash is irrelevant to what is asserted
     )
     got: list[str] = []
     with pytest.raises(InstallerError, match="status 7"):
@@ -271,12 +277,8 @@ def test_preflight_refuses_when_bash_cannot_run(tmp_path: Path) -> None:
     script = tmp_path / entry.install.script
     script.parent.mkdir(parents=True)
     script.write_text("", encoding="utf-8")
-    installer = Installer(
-        entry,
-        installers_root=tmp_path,
-        docker_check=lambda: True,
-        package_manager=lambda: None,
-        bash_check=lambda: False,
+    installer = _installer(
+        entry, installers_root=tmp_path, docker_check=lambda: True, bash_check=lambda: False
     )
     with pytest.raises(InstallerError, match="no working `bash`"):
         list(installer.run())
@@ -302,3 +304,55 @@ def test_bash_available_probes_that_bash_actually_runs() -> None:
     assert bash_available(ok) is True
     assert calls[-1] == ["bash", "-c", "exit 0"]
     assert bash_available(broken) is False
+
+
+def test_installer_refuses_a_platform_its_script_cannot_run(tmp_path: Path) -> None:
+    """Roadmap 6.1: an off-Linux click is refused BEFORE any subprocess starts."""
+    entry = load_catalog().get("wow-wotlk")
+    assert entry.install.platforms == ("linux",)
+    assert entry.install.supports("linux") is True
+    assert entry.install.supports("macos") is False
+    calls: list[dict[str, object]] = []
+    installer = _installer(
+        entry,
+        installers_root=tmp_path,
+        docker_check=lambda: True,
+        interact=_fake_interact(calls),  # type: ignore[arg-type]
+        platform_id=lambda: "macos",
+    )
+    with pytest.raises(UnsupportedPlatformError, match="cannot be installed on macOS"):
+        list(installer.run())
+    assert calls == []  # nothing ran — not even a script-exists check reached bash
+    # It is an InstallerError too, so existing handlers keep working.
+    assert issubclass(UnsupportedPlatformError, InstallerError)
+
+
+def test_unsupported_message_names_the_platform_and_the_requirement() -> None:
+    entry = load_catalog().get("wow-tbc")
+    message = installer_module.unsupported_platform_message(entry, "windows")
+    assert "WoW TBC" in message and "Windows" in message and "linux" in message
+    assert "Nothing was started" in message
+
+
+@needs_bash
+def test_failure_message_carries_the_scripts_own_last_words(tmp_path: Path) -> None:
+    """Roadmap 6.1: a failed install must not be reported as a bare exit status."""
+    script = tmp_path / "wow-wotlk" / "install-wow-wotlk.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "#!/bin/bash\necho 'Checking system...'\necho 'ERROR: needs 20GB free, found 2GB' >&2\n"
+        "exit 4\n",
+        encoding="utf-8",
+    )
+    installer = _installer(
+        entry=load_catalog().get("wow-wotlk"), installers_root=tmp_path, docker_check=lambda: True
+    )
+    lines: list[str] = []
+    with pytest.raises(InstallerError) as caught:
+        for line in installer.run():
+            lines.append(runner.strip_ansi(line).strip())
+    message = str(caught.value)
+    assert "exited with status 4" in message
+    assert "It last said:" in message
+    assert "ERROR: needs 20GB free, found 2GB" in message  # the script's real error
+    assert "ERROR: needs 20GB free, found 2GB" in lines  # and it was streamed live too
