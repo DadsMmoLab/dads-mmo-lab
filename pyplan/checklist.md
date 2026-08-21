@@ -228,13 +228,15 @@
     both project `server`, and compose selects on that label alone, so from one, `docker compose ps` lists
     the *other's* containers. The stop path no longer asks compose, so it is unaffected — but this is why
     it must not go back to asking.
-  - **STILL OWED: the start side.** `start_staged()` is `compose up -d --no-deps <services>` in the
-    install directory, so on a *moved* install it fails with
-    `Conflict. The container name "/ac-database" is already in use` (measured, exit 1). A moved install
-    can be stopped but not started. The fix is to stop the project name moving: write
-    `COMPOSE_PROJECT_NAME` into the install's `.env` at install and at attach time — `wow-manage.sh:7553`
-    already does exactly this on its own move command, so the precedent is in this repo. Until then, a
-    user who reorganises their folders gets a raw daemon error.
+  - **The start side is now fixed too.** `docker.pin_project_name()` writes `COMPOSE_PROJECT_NAME` into
+    the install's own `.env` at install **and** attach time, so the project identity stops moving with the
+    folder. The value is *asked of compose* (`compose config --format json` → `name`) rather than
+    recomputed, because compose's own normalisation is not obvious — measured: `WoW_Server 2` becomes
+    `wow_server2`, `_leading` becomes `leading`, `Ünïcode` becomes `ncode` — and pinning a wrong value
+    would *rename* the project and orphan the containers it exists to protect. An existing pin is never
+    overwritten, since re-attaching a moved install must not repoint it at its new basename. Proven end
+    to end: pinned as `wow-server`, folder renamed, project still resolves to `wow-server`, stop works and
+    start works where it previously died with `Conflict. The container name is already in use`.
 
 - **Open follow-ups from the staged start/stop review (2026-08-22)** — found by a three-lens review whose
   findings were then adjudicated against a live daemon; the must-fix (parallel `docker stop`) and the

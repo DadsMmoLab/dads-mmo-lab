@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from yulon import platform
+from yulon import docker, platform
 from yulon.catalog.catalog import Catalog, CatalogEntry
 from yulon.catalog.installer import (
     Installer,
@@ -47,6 +47,19 @@ DirPicker = Callable[[QWidget, str, Path | None], Path | None]
 def _qt_dir_picker(parent: QWidget, title: str, start: Path | None) -> Path | None:
     chosen = QFileDialog.getExistingDirectory(parent, title, str(start) if start else "")
     return Path(chosen) if chosen else None
+
+
+def _pin_compose_project(server_dir: Path) -> None:
+    """Freeze the compose project name so the folder can be moved later.
+
+    Best-effort on purpose: a server that is otherwise fine must not fail to
+    attach because Docker happened to be down at that moment. The cost of
+    skipping it is the pre-existing behaviour, not a new failure.
+    """
+    try:
+        docker.pin_project_name(server_dir)
+    except OSError as exc:  # unwritable .env, vanished directory
+        logger.warning(f"could not pin the compose project name in {server_dir}: {exc}")
 
 
 class CatalogView(QWidget):
@@ -173,6 +186,7 @@ class CatalogView(QWidget):
             if client_dir is None:
                 return False
         logger.info(f"attaching existing {entry.id} install at {server_dir}")
+        _pin_compose_project(server_dir)
         self.installed.emit(entry.id, server_dir, client_dir)
         return True
 
@@ -238,6 +252,7 @@ class CatalogView(QWidget):
             QMessageBox.warning(self, "Install failed", message)
         self.install_finished.emit(game_id, ok, message)
         if ok:
+            _pin_compose_project(server_dir)
             self.installed.emit(game_id, server_dir, client_dir)
 
     def _set_buttons_enabled(self, enabled: bool) -> None:

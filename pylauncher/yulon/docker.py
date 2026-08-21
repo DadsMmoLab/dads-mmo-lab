@@ -16,6 +16,7 @@ logic, generalized and given explicit, overridable timeouts.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import time
 from collections.abc import Callable, Iterator
@@ -85,6 +86,74 @@ def start(server_dir: Path) -> None:
     """
     logger.debug(f"start() called: server_dir={server_dir}")
     _run(["compose", "up", "-d"], cwd=server_dir)
+
+
+PROJECT_NAME_VAR = "COMPOSE_PROJECT_NAME"
+
+
+def compose_project_name(server_dir: Path) -> str | None:
+    """What compose currently calls this project, or None if it cannot say.
+
+    Asked rather than computed. Compose derives the name from the directory
+    basename by lowercasing it, dropping every character outside `[a-z0-9_-]`
+    and then trimming leading punctuation — measured: `WoW_Server 2` becomes
+    `wow_server2`, `_leading` becomes `leading`, `Ünïcode` becomes `ncode`.
+    Reimplementing that here would be a second copy of somebody else's rule,
+    free to drift, and a wrong guess is worse than no guess: pinning the wrong
+    value *renames* the project and orphans the containers it was meant to keep.
+    """
+    proc = runner.run(["docker", "compose", "config", "--format", "json"], cwd=server_dir)
+    if proc.returncode != 0:
+        logger.debug(f"compose config failed in {server_dir}: {proc.stderr.strip()}")
+        return None
+    try:
+        parsed = json.loads(proc.stdout)
+    except ValueError:
+        logger.debug("compose config did not return JSON")
+        return None
+    name = parsed.get("name") if isinstance(parsed, dict) else None
+    return name if isinstance(name, str) and name else None
+
+
+def pin_project_name(server_dir: Path) -> str | None:
+    """Freeze this install's compose project name into its own `.env`.
+
+    Compose identifies a project by its directory basename unless told
+    otherwise, but AzerothCore pins its container names, which are global. Move
+    or rename the install folder and the two identities come apart: `compose`
+    commands in the new directory address a project that owns nothing, so
+    `compose stop` stops nothing and `compose up` collides with the containers
+    that are still there under the old project. Writing the name down once, in
+    the install itself, is what makes the folder movable.
+
+    `wow-manage.sh` does the same thing on its own move command, which is where
+    this behaviour comes from; doing it at install and attach time instead means
+    the folder can be moved by any means — a file manager, a backup restore —
+    and still work.
+
+    Returns the pinned name, or None if nothing was written (already pinned, or
+    compose could not be asked).
+    """
+    env_path = server_dir / ".env"
+    if env_path.is_file():
+        for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.strip().startswith(f"{PROJECT_NAME_VAR}="):
+                logger.debug(f"{PROJECT_NAME_VAR} already pinned in {env_path}")
+                return None
+    name = compose_project_name(server_dir)
+    if name is None:
+        logger.info(f"could not ask compose for the project name in {server_dir}; not pinning")
+        return None
+    existing = env_path.read_text(encoding="utf-8", errors="replace") if env_path.is_file() else ""
+    if existing and not existing.endswith("\n"):
+        existing += "\n"
+    addition = (
+        "# Pinned by Yu'lon so this install keeps working if the folder is moved.\n"
+        f"{PROJECT_NAME_VAR}={name}\n"
+    )
+    env_path.write_text(existing + addition, encoding="utf-8", newline="\n")
+    logger.info(f"pinned {PROJECT_NAME_VAR}={name} in {env_path}")
+    return name
 
 
 def container_exists(container: str) -> bool:

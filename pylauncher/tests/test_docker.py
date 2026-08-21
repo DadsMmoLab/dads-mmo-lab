@@ -446,3 +446,68 @@ def test_stop_staged_raises_when_the_containers_will_not_stop(
     monkeypatch.setattr(docker.runner, "run", fake_run)
     with pytest.raises(docker.DockerCommandError, match="still running after stop"):
         docker.stop_staged(SPEC, Path("/tmp/wow"))
+
+
+def test_pin_project_name_writes_what_compose_already_calls_the_project(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The pinned value must equal the current name, or pinning renames the project.
+
+    Compose derives the project from the directory basename by rules that are
+    its own (`WoW_Server 2` → `wow_server2`, `Ünïcode` → `ncode`), so the name
+    is asked for rather than recomputed here.
+    """
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        lambda cmd, cwd=None: _completed(stdout='{"name": "wow_server2", "services": {}}'),
+    )
+    assert docker.pin_project_name(tmp_path) == "wow_server2"
+    env = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "COMPOSE_PROJECT_NAME=wow_server2\n" in env
+    assert "\r\n" not in env, "a CRLF .env is read inside a Linux container"
+
+
+def test_pin_project_name_never_overwrites_an_existing_pin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Re-attaching an install must not repoint it at its current folder name.
+
+    The pin exists precisely because the folder may have moved; rewriting it
+    from the new basename would undo the thing it is for.
+    """
+    (tmp_path / ".env").write_text(
+        "AC_SOMETHING=1\nCOMPOSE_PROJECT_NAME=original-name\n", encoding="utf-8", newline="\n"
+    )
+    called: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner, "run", lambda cmd, cwd=None: (called.append(cmd), _completed())[1]
+    )
+    assert docker.pin_project_name(tmp_path) is None
+    assert called == [], "must not even ask compose when a pin is already there"
+    assert "original-name" in (tmp_path / ".env").read_text(encoding="utf-8")
+
+
+def test_pin_project_name_appends_without_clobbering_an_env_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The installer's own .env holds the database password; it must survive."""
+    (tmp_path / ".env").write_text("DB_ROOT_PASSWORD=hunter2", encoding="utf-8", newline="\n")
+    monkeypatch.setattr(
+        docker.runner, "run", lambda cmd, cwd=None: _completed(stdout='{"name": "srv"}')
+    )
+    docker.pin_project_name(tmp_path)
+    env = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "DB_ROOT_PASSWORD=hunter2\n" in env, "the existing .env was clobbered"
+    assert "COMPOSE_PROJECT_NAME=srv\n" in env
+
+
+def test_pin_project_name_declines_rather_than_guess_when_compose_cannot_answer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A wrong pin is worse than none: it renames the project and orphans containers."""
+    monkeypatch.setattr(
+        docker.runner, "run", lambda cmd, cwd=None: _completed(returncode=1, stderr="no such file")
+    )
+    assert docker.pin_project_name(tmp_path) is None
+    assert not (tmp_path / ".env").exists()
