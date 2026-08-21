@@ -102,7 +102,7 @@ class RunnerGit:
         _git(["git", "config", "core.sparseCheckout", "true"], cwd=dest)
         (dest / ".git" / "info").mkdir(parents=True, exist_ok=True)
         (dest / ".git" / "info" / "sparse-checkout").write_text(
-            sparse_path.rstrip("/") + "/\n", encoding="utf-8"
+            sparse_path.rstrip("/") + "/\n", encoding="utf-8", newline="\n"
         )
         _git(["git", "pull", "--depth=1", "origin", branch or "HEAD"], cwd=dest)
 
@@ -494,7 +494,7 @@ def _apply_patch(path: Path, patch: Patch, replacement: str) -> bool:
         new = text.replace(patch.find, replacement)
     if new == text:
         return False
-    path.write_text(new, encoding="utf-8")
+    path.write_text(new, encoding="utf-8", newline="\n")
     return True
 
 
@@ -507,10 +507,10 @@ def _set_conf_key(path: Path, key: str, value: str) -> _KeyMode:
     pattern = re.compile(rf"^[ \t]*{re.escape(key)}[ \t]*=.*$", re.MULTILINE)
     new, count = pattern.subn(f"{key} = {value}", text, count=1)
     if count:
-        path.write_text(new, encoding="utf-8")
+        path.write_text(new, encoding="utf-8", newline="\n")
         return "replace"
     sep = "" if text.endswith("\n") or not text else "\n"
-    path.write_text(f"{text}{sep}{key} = {value}\n", encoding="utf-8")
+    path.write_text(f"{text}{sep}{key} = {value}\n", encoding="utf-8", newline="\n")
     return "append"
 
 

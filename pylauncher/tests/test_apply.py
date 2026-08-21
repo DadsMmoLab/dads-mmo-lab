@@ -365,3 +365,26 @@ def test_remove_renamed_top_level_file_from_dir_deploy(tmp_path: Path) -> None:
     assert (tmp_path / LUA / "b.lua").exists()
     applier.remove(m)
     assert not (tmp_path / LUA / "b.lua").exists() and (tmp_path / LUA).is_dir()
+
+
+def test_generated_files_are_lf_even_on_windows(tmp_path: Path) -> None:
+    """A CRLF conf file inside a Linux container is a runtime failure, not a cosmetic one.
+
+    `Path.write_text()` without `newline=` translates to `os.linesep`, so a
+    Windows host would write CRLF into files the containers read (and, for the
+    modules' `.conf`, into files AzerothCore parses). Assert bytes, not text.
+    """
+    conf = tmp_path / "mod.conf"
+    conf.write_text("Existing.Key = 1\n", encoding="utf-8", newline="\n")
+    _set_conf_key(conf, "Existing.Key", "2")  # replace path
+    _set_conf_key(conf, "Brand.New.Key", "7")  # append path
+    raw = conf.read_bytes()
+    assert b"\r\n" not in raw
+    assert b"Existing.Key = 2" in raw and b"Brand.New.Key = 7" in raw
+
+    # `_set_conf_key` edits a conf the installer already wrote; an empty file is
+    # the closest thing to "brand new" it ever sees.
+    fresh = tmp_path / "fresh.conf"
+    fresh.write_text("", encoding="utf-8")
+    _set_conf_key(fresh, "First.Key", "1")
+    assert fresh.read_bytes() == b"First.Key = 1\n"

@@ -279,6 +279,8 @@ def write_client_realmlist(
     )
     kept = [ln for ln in lines if not ln.strip().lower().startswith("set realmlist")]
     target.write_text(
-        "\n".join([f"set realmlist {address}", *kept]).rstrip("\n") + "\n", encoding="utf-8"
+        "\n".join([f"set realmlist {address}", *kept]).rstrip("\n") + "\n",
+        encoding="utf-8",
+        newline="\n",
     )
     return target
