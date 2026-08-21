@@ -47,4 +47,4 @@ version exists. It never replaces itself; you download the new file.
 
 ## Developers
 
-See [`development.md`](development.md) and the design docs in [`../pyplan/`](../pyplan/).
+See [`contribution.md`](pyplan/contribution.md) and the design docs in [`../pyplan/`](../pyplan/).
