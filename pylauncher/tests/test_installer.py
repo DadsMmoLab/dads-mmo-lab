@@ -128,6 +128,7 @@ def test_installer_runs_the_entry_script_through_interact(tmp_path: Path) -> Non
         docker_check=lambda: True,
         interact=_fake_interact(calls),  # type: ignore[arg-type]
         package_manager=lambda: None,
+        bash_check=lambda: True,
     )
     assert list(installer.run(InstallOptions(server_dir=Path("/srv")))) == ["hello", "done"]
     assert calls[0]["command"] == ["bash", str(script)]
@@ -195,6 +196,7 @@ def test_installer_fails_gracefully_without_docker(tmp_path: Path) -> None:
         ),
         interact=_fake_interact(calls),  # type: ignore[arg-type]
         package_manager=lambda: None,  # the file below is the default script, not a variant
+        bash_check=lambda: True,  # this box's bash is irrelevant to what is asserted
     )
     with pytest.raises(DockerUnavailableError, match="could not be set up automatically"):
         list(installer.run())
@@ -220,7 +222,9 @@ def test_installer_requires_the_client_dir_when_the_script_asks_for_it(tmp_path:
     script = tmp_path / entry.install.script
     script.parent.mkdir(parents=True)
     script.write_text("", encoding="utf-8")
-    installer = Installer(entry, repo_root=tmp_path, docker_check=lambda: True)
+    installer = Installer(
+        entry, repo_root=tmp_path, docker_check=lambda: True, bash_check=lambda: True
+    )
     with pytest.raises(InstallerError, match="never downloads game clients"):
         list(installer.run())
     with pytest.raises(InstallerError, match="does not exist"):
@@ -249,6 +253,7 @@ def test_installer_wraps_script_failure(tmp_path: Path) -> None:
         docker_check=lambda: True,
         interact=failing,  # type: ignore[arg-type]
         package_manager=lambda: None,  # the file below is the default script, not a variant
+        bash_check=lambda: True,  # this box's bash is irrelevant to what is asserted
     )
     got: list[str] = []
     with pytest.raises(InstallerError, match="status 7"):
