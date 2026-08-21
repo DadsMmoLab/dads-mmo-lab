@@ -1,0 +1,117 @@
+name: release
+
+# pyplan/README.md §4 + roadmap 5.3: a `v*` tag builds all three artifacts on
+# their own runners (PyInstaller cannot cross-compile). Linux output is wrapped
+# in an AppImage (the "hero artifact"); Windows ships the one-dir build zipped;
+# macOS ships a .dmg of the .app. Artifacts are attached to the GitHub Release
+# for the tag, which is what `yulon.update` points users at.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    working-directory: pylauncher
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: AppImage
+          - os: windows-latest
+            artifact: exe
+          - os: macos-latest
+            artifact: dmg
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt pyinstaller
+
+      - name: Build with PyInstaller
+        run: pyinstaller build/pylauncher.spec --noconfirm --clean
+
+      # ---------------------------------------------------------- Linux
+      - name: Package AppImage
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq libfuse2
+          APPDIR=AppDir
+          rm -rf "$APPDIR" && mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" "$APPDIR/usr/share/icons/hicolor/256x256/apps"
+          cp -r dist/yulon/. "$APPDIR/usr/bin/"
+          cat > "$APPDIR/AppRun" <<'EOF'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "$0")")"
+          exec "$HERE/usr/bin/yulon" "$@"
+          EOF
+          chmod +x "$APPDIR/AppRun"
+          cat > "$APPDIR/yulon.desktop" <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=Yu'lon
+          Comment=Dad's MMO Lab launcher
+          Exec=yulon
+          Icon=yulon
+          Categories=Game;Utility;
+          Terminal=false
+          EOF
+          cp "$APPDIR/yulon.desktop" "$APPDIR/usr/share/applications/"
+          # Placeholder icon until the project has artwork (any 256x256 PNG works).
+          python3 - <<'EOF'
+          import struct, zlib
+          w = h = 256
+          raw = b"".join(b"\x00" + b"\x2b\x6c\xb5\xff" * w for _ in range(h))
+          def chunk(t, d): return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+          png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
+          open("AppDir/yulon.png", "wb").write(png)
+          EOF
+          cp "$APPDIR/yulon.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/yulon.png"
+          curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          ARCH=x86_64 ./appimagetool "$APPDIR" "Yulon-${GITHUB_REF_NAME}-x86_64.AppImage"
+          mkdir -p release && mv Yulon-*.AppImage release/
+
+      # -------------------------------------------------------- Windows
+      - name: Package Windows zip
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          Compress-Archive -Path dist/yulon/* -DestinationPath "release/Yulon-$env:GITHUB_REF_NAME-windows-x64.zip"
+
+      # ---------------------------------------------------------- macOS
+      - name: Package dmg
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release dmgroot
+          cp -R dist/Yulon.app dmgroot/
+          ln -s /Applications dmgroot/Applications
+          hdiutil create -volname "Yu'lon" -srcfolder dmgroot -ov -format UDZO "release/Yulon-${GITHUB_REF_NAME}-macos.dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yulon-${{ matrix.artifact }}
+          path: pylauncher/release/*
+
+      - name: Attach to the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: pylauncher/release/*
+          generate_release_notes: true

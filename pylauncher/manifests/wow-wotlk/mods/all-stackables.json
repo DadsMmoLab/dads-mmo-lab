@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "id": "all-stackables",
+  "name": "All Stackables to 200",
+  "type": "mod",
+  "game": "wow-wotlk",
+  "description": "Raise the stack size of every stackable item.",
+  "source": {
+    "repo": "AsgavinYT/azerothcore-all-stackables-200"
+  },
+  "sql": [
+    {
+      "db": "world",
+      "path": "All_Stackables_200_Up.sql",
+      "note": "wow-manage.sh seds stackable=/maxcount= to {stack_size} before applying"
+    },
+    {
+      "db": "world",
+      "path": "All_Stackables_200_Down.sql",
+      "when": "remove"
+    }
+  ],
+  "prompts": [
+    {
+      "key": "stack_size",
+      "question": "Max stack size",
+      "kind": "int",
+      "default": "200"
+    }
+  ],
+  "notes": [
+    "Takes effect after a restart."
+  ]
+}

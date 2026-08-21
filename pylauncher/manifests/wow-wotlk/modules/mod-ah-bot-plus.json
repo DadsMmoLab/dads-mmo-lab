@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "id": "mod-ah-bot-plus",
+  "name": "AH Bot Plus",
+  "type": "module",
+  "game": "wow-wotlk",
+  "description": "Drop-rate-aware, enhanced Auction House Bot (default 150 items per cycle).",
+  "source": {
+    "repo": "NathanHandley/mod-ah-bot-plus"
+  },
+  "build": {
+    "rebuild": true
+  },
+  "conflicts_with": [
+    "mod-ah-bot"
+  ],
+  "conf": [
+    {
+      "file": "env/dist/etc/modules/mod_ahbot.conf",
+      "keys": [
+        {
+          "key": "AuctionHouseBot.GUIDs",
+          "default": "{bot_guid}",
+          "note": "PLURAL key, unquoted integer; Plus has no Account/GUID keys"
+        },
+        {
+          "key": "AuctionHouseBot.EnableSeller",
+          "default": "true",
+          "note": "boolean word, not 1"
+        },
+        {
+          "key": "AuctionHouseBot.Buyer.Enabled"
+        },
+        {
+          "key": "AuctionHouseBot.ItemsPerCycle",
+          "note": "default 150"
+        },
+        {
+          "key": "AuctionHouseBot.MinutesBetweenSellCycle"
+        },
+        {
+          "key": "AuctionHouseBot.ListProportion.*"
+        },
+        {
+          "key": "AuctionHouseBot.AdvancedListingRules.UseDropRates.Enabled"
+        }
+      ],
+      "template": "conf/mod_ahbot.conf.dist"
+    }
+  ],
+  "prompts": [
+    {
+      "key": "bot_guid",
+      "question": "GUID of the AH bot character (create the AHBOT account + ONE character first, log it out)",
+      "kind": "int"
+    }
+  ],
+  "notes": [
+    "Same active conf filename as mod-ah-bot (mod_ahbot.conf); both modules define the same C++ classes, so installing one refuses while the other is present. wow-manage.sh 5969-5982, 2335-2340."
+  ]
+}

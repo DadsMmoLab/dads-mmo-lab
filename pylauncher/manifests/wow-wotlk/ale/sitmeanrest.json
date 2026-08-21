@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "sitmeanrest",
+  "name": "Sit Means Rest",
+  "type": "ale",
+  "game": "wow-wotlk",
+  "description": "Regen buff while sitting (/sit); stripped on movement.",
+  "source": {
+    "repo": "Brytenwally/SitMeansRest"
+  },
+  "requires": [
+    "mod-ale"
+  ],
+  "deploy": [
+    {
+      "src": "SitMeansRest.lua",
+      "dest": "env/dist/etc/modules/lua_scripts/"
+    }
+  ],
+  "conf": [
+    {
+      "file": "env/dist/etc/modules/lua_scripts/SitMeansRest.lua",
+      "keys": [
+        {
+          "key": "DURATION",
+          "default": "{duration}",
+          "note": "seconds"
+        },
+        {
+          "key": "REGEN_AURA",
+          "default": "{regen_aura}",
+          "note": "spell id"
+        }
+      ]
+    }
+  ],
+  "patches": [
+    {
+      "file": "env/dist/etc/modules/lua_scripts/SitMeansRest.lua",
+      "find": "(DURATION\\s*=\\s*)\\d+",
+      "replace": "\\g<1>{duration}",
+      "regex": true,
+      "when": "configure"
+    },
+    {
+      "file": "env/dist/etc/modules/lua_scripts/SitMeansRest.lua",
+      "find": "(REGEN_AURA\\s*=\\s*)\\d+",
+      "replace": "\\g<1>{regen_aura}",
+      "regex": true,
+      "when": "configure"
+    }
+  ],
+  "prompts": [
+    {
+      "key": "duration",
+      "question": "Rest duration in seconds",
+      "kind": "int",
+      "default": "20"
+    },
+    {
+      "key": "regen_aura",
+      "question": "Regen aura spell id",
+      "kind": "int",
+      "default": "25990"
+    }
+  ]
+}

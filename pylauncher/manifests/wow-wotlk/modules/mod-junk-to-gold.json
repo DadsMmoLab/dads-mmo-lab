@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "id": "mod-junk-to-gold",
+  "name": "Junk to Gold",
+  "type": "module",
+  "game": "wow-wotlk",
+  "description": "Automatically sells gray items for gold.",
+  "source": {
+    "repo": "noisiver/mod-junk-to-gold"
+  },
+  "build": {
+    "rebuild": true
+  },
+  "sql": [
+    {
+      "db": "world",
+      "path": "data/sql/db-world/*.sql",
+      "applied_by": "db-import"
+    }
+  ]
+}

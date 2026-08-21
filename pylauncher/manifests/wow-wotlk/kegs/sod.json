@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "id": "sod",
+  "name": "Season of Discovery Buffs",
+  "type": "keg",
+  "game": "wow-wotlk",
+  "description": "Phased leveling XP-rate bonus (+300% at 1-10 down to +50% at 71-79, none at 80) via custom spells 80865-80870.",
+  "source": {
+    "repo": "DadsMmoLab/dads-mmo-lab",
+    "sparse_path": "guides/wow-wotlk/ALE-Kegs/SeasonOfDiscovery"
+  },
+  "requires": [
+    "mod-ale"
+  ],
+  "deploy": [
+    {
+      "src": "guides/wow-wotlk/ALE-Kegs/SeasonOfDiscovery/SOD.lua",
+      "dest": "env/dist/etc/modules/lua_scripts/"
+    }
+  ],
+  "server_dbc": [
+    {
+      "src": "guides/wow-wotlk/ALE-Kegs/SeasonOfDiscovery/Server Files/dbc"
+    }
+  ],
+  "client": [
+    {
+      "src": "guides/wow-wotlk/ALE-Kegs/SeasonOfDiscovery/Client Files/data",
+      "dest": "data"
+    },
+    {
+      "src": "guides/wow-wotlk/ALE-Kegs/SeasonOfDiscovery/Client Files/Interface",
+      "dest": "interface"
+    }
+  ],
+  "notes": [
+    "Remove any stale lua_scripts/sod/SOD.lua (duplicate-load). Restart the worldserver after the DBC copy.",
+    "The ac-client-data volume is mounted :ro on the worldserver, so DBCs are copied through a throwaway rw helper container (wow-manage.sh 3029-3081)."
+  ]
+}

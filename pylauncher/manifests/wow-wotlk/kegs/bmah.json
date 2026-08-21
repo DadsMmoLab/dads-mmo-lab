@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "id": "bmah",
+  "name": "Black Market Auction House",
+  "type": "keg",
+  "game": "wow-wotlk",
+  "description": "MoP-style Black Market AH with a client addon (BlackMarketUI). GM: /bmah flush, /bmah fill; whisper bmah_diag to yourself to verify.",
+  "source": {
+    "repo": "DadsMmoLab/dads-mmo-lab",
+    "sparse_path": "guides/wow-wotlk/ALE-Kegs/BlackMarketAuctionHouse"
+  },
+  "requires": [
+    "mod-ale"
+  ],
+  "deploy": [
+    {
+      "src": "guides/wow-wotlk/ALE-Kegs/BlackMarketAuctionHouse/BMAH.lua",
+      "dest": "env/dist/etc/modules/lua_scripts/"
+    }
+  ],
+  "sql": [
+    {
+      "db": "world",
+      "path": "guides/wow-wotlk/ALE-Kegs/BlackMarketAuctionHouse/sql/BMAH_Up.sql",
+      "note": "creates creature_template 2069430 'Black Market Broker', model, npc_text; idempotent DELETE+INSERT; re-applied on configure; restart the worldserver after"
+    }
+  ],
+  "conf": [
+    {
+      "file": "env/dist/etc/modules/lua_scripts/BMAH.lua",
+      "keys": [
+        {
+          "key": "common/rare/ultraRare_*_price"
+        },
+        {
+          "key": "FillRateCommon / FillRateRare / FillRateUltra",
+          "note": "85/10/5 %"
+        },
+        {
+          "key": "MinBidIncrementG",
+          "note": "10g"
+        },
+        {
+          "key": "AutoFillChance",
+          "note": "0.50"
+        },
+        {
+          "key": "PotentialDurations",
+          "note": "720,1440 minutes"
+        }
+      ]
+    }
+  ],
+  "client": [
+    {
+      "src": "guides/wow-wotlk/ALE-Kegs/BlackMarketAuctionHouse/Client Files/AddOns/BlackMarketUI",
+      "dest": "addons",
+      "name": "BlackMarketUI"
+    }
+  ],
+  "npcs": [
+    {
+      "entry": 2069430,
+      "name": "Black Market Broker",
+      "note": "Spawn manually after a restart: .npc add 2069430"
+    }
+  ]
+}

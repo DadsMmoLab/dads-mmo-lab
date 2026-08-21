@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "id": "mod-quest-loot-party",
+  "name": "Quest Loot Party",
+  "type": "module",
+  "game": "wow-wotlk",
+  "description": "Quest items drop for the whole party.",
+  "source": {
+    "repo": "pangolp/mod-quest-loot-party"
+  },
+  "build": {
+    "rebuild": true
+  },
+  "sql": [
+    {
+      "db": "world",
+      "path": "data/sql/db-world/*.sql",
+      "applied_by": "db-import"
+    }
+  ],
+  "conf": [
+    {
+      "file": "env/dist/etc/modules/mod-quest-loot-party.conf",
+      "keys": [
+        {
+          "key": "QuestParty.Enable",
+          "note": "true/false, default true"
+        },
+        {
+          "key": "QuestParty.Message",
+          "note": "true/false, default true"
+        }
+      ],
+      "template": "conf/mod-quest-loot-party.conf.dist"
+    }
+  ],
+  "notes": [
+    "Hyphenated conf filename (mod-quest-loot-party.conf), unlike most modules."
+  ]
+}

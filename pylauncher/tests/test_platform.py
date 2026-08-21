@@ -91,15 +91,3 @@ def test_config_dir_macos_uses_application_support(
     monkeypatch.setattr(platform.sys, "platform", "darwin")
     monkeypatch.setattr(platform.Path, "home", lambda: Path("/Users/test"))
     assert platform.config_dir() == Path("/Users/test/Library/Application Support/yulon")
-
-
-def test_ensure_docker_not_implemented() -> None:
-    """`ensure_docker()` is stubbed until Phase 5."""
-    with pytest.raises(NotImplementedError):
-        platform.ensure_docker()
-
-
-def test_ensure_wsl2_not_implemented() -> None:
-    """`ensure_wsl2()` is stubbed until Phase 5."""
-    with pytest.raises(NotImplementedError):
-        platform.ensure_wsl2()

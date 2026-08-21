@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "id": "portals-capitals",
+  "name": "Portals in All Capitals",
+  "type": "mod",
+  "game": "wow-wotlk",
+  "description": "Adds portal gameobjects to every capital city.",
+  "source": {
+    "repo": "azerothcore/portals-in-all-capitals"
+  },
+  "sql": [
+    {
+      "db": "world",
+      "path": "portals-in-all-capitals.up.sql",
+      "note": "'SET @GO_TEMPLATE = N' / 'SET @GO_SPAWN = N' are replaced with {go_template}/{go_spawn} first"
+    },
+    {
+      "db": "world",
+      "path": "portals-in-all-capitals.down.sql",
+      "when": "remove",
+      "note": "same id substitution"
+    }
+  ],
+  "prompts": [
+    {
+      "key": "go_template",
+      "question": "gameobject_template base id",
+      "kind": "int",
+      "default": "500000"
+    },
+    {
+      "key": "go_spawn",
+      "question": "gameobject spawn base guid",
+      "kind": "int",
+      "default": "2000000"
+    }
+  ],
+  "notes": [
+    "Adjust the base ids if another mod adds gameobjects in the same range."
+  ]
+}

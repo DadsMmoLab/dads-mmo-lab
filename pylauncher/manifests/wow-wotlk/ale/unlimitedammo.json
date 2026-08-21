@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "id": "unlimitedammo",
+  "name": "Unlimited Ammo",
+  "type": "ale",
+  "game": "wow-wotlk",
+  "description": "Auto-refills Hunter arrows/bullets.",
+  "source": {
+    "repo": "Day36512/Acore_Lua_Unlimited_Ammo"
+  },
+  "requires": [
+    "mod-ale"
+  ],
+  "deploy": [
+    {
+      "src": "UnlimitedAmmo.lua",
+      "dest": "env/dist/etc/modules/lua_scripts/"
+    }
+  ],
+  "conf": [
+    {
+      "file": "env/dist/etc/modules/lua_scripts/UnlimitedAmmo.lua",
+      "keys": [
+        {
+          "key": "UnlimitedAmmoNamespace.ENABLED",
+          "default": "{enabled}",
+          "note": "ships false; .ua enables at runtime only (resets on restart)"
+        },
+        {
+          "key": "UnlimitedAmmoNamespace.MAX_AMMO",
+          "default": "{max_ammo}"
+        },
+        {
+          "key": "UnlimitedAmmoNamespace.MIN_AMMO_THRESHOLD",
+          "default": "{min_threshold}"
+        }
+      ]
+    }
+  ],
+  "patches": [
+    {
+      "file": "env/dist/etc/modules/lua_scripts/UnlimitedAmmo.lua",
+      "find": "(UnlimitedAmmoNamespace\\.ENABLED\\s*=\\s*)(true|false)",
+      "replace": "\\g<1>{enabled}",
+      "regex": true,
+      "when": "configure"
+    },
+    {
+      "file": "env/dist/etc/modules/lua_scripts/UnlimitedAmmo.lua",
+      "find": "(UnlimitedAmmoNamespace\\.MAX_AMMO\\s*=\\s*)\\d+",
+      "replace": "\\g<1>{max_ammo}",
+      "regex": true,
+      "when": "configure"
+    },
+    {
+      "file": "env/dist/etc/modules/lua_scripts/UnlimitedAmmo.lua",
+      "find": "(UnlimitedAmmoNamespace\\.MIN_AMMO_THRESHOLD\\s*=\\s*)\\d+",
+      "replace": "\\g<1>{min_threshold}",
+      "regex": true,
+      "when": "configure"
+    }
+  ],
+  "prompts": [
+    {
+      "key": "enabled",
+      "question": "Enable by default?",
+      "kind": "bool",
+      "default": "true"
+    },
+    {
+      "key": "max_ammo",
+      "question": "Maximum ammo",
+      "kind": "int",
+      "default": "1000"
+    },
+    {
+      "key": "min_threshold",
+      "question": "Refill threshold",
+      "kind": "int",
+      "default": "52"
+    }
+  ]
+}

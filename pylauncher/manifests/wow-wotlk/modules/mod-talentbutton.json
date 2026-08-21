@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "id": "mod-talentbutton",
+  "name": "Talent Button",
+  "type": "module",
+  "game": "wow-wotlk",
+  "description": "Dual-spec at level 10 and talent reset anywhere via a client-injected button.",
+  "source": {
+    "repo": "brian8544/mod-talentbutton"
+  },
+  "build": {
+    "rebuild": true
+  },
+  "conf": [
+    {
+      "file": "env/dist/etc/modules/mod_talentbutton.conf",
+      "keys": [
+        {
+          "key": "TalentButton.Enable",
+          "note": "set to 1 to activate"
+        }
+      ],
+      "template": "conf/mod_talentbutton.conf.dist"
+    }
+  ],
+  "notes": [
+    "Needs an UNPATCHED 3.3.5a client — RCEPatcher blocks the server-side script injection."
+  ]
+}

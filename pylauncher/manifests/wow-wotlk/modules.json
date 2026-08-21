@@ -1,5 +1,28 @@
 {
   "schema_version": 1,
   "game": "wow-wotlk",
-  "modules": []
+  "type": "module",
+  "items": [
+    "mod-1v1-arena",
+    "mod-aoe-loot",
+    "mod-ah-bot",
+    "mod-ah-bot-plus",
+    "mod-autobalance",
+    "mod-ale",
+    "mod-player-bot-level-brackets",
+    "mod-challenge-modes",
+    "mod-individual-progression",
+    "mod-junk-to-gold",
+    "mod-learn-spells",
+    "mod-npc-beastmaster",
+    "mod-quest-loot-party",
+    "mod-arac",
+    "mod-dungeon-master",
+    "mod-solocraft",
+    "mod-talentbutton",
+    "mod-transmog",
+    "mod-profession-progression",
+    "mod-mount-scaling",
+    "mod-custom-login"
+  ]
 }

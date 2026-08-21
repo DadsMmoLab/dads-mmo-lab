@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "id": "mod-solocraft",
+  "name": "Solocraft",
+  "type": "module",
+  "game": "wow-wotlk",
+  "description": "Scales players for solo dungeon/raid runs.",
+  "source": {
+    "repo": "azerothcore/mod-solocraft"
+  },
+  "build": {
+    "rebuild": true
+  },
+  "sql": [
+    {
+      "db": "world",
+      "path": "data/sql/db-world/*.sql",
+      "applied_by": "db-import"
+    }
+  ],
+  "conf": [
+    {
+      "file": "env/dist/etc/modules/Solocraft.conf",
+      "keys": [
+        {
+          "key": "Solocraft.Enable"
+        },
+        {
+          "key": "Solocraft.Announce"
+        },
+        {
+          "key": "SoloCraft.Debuff.Enable",
+          "note": "note the mixed case"
+        },
+        {
+          "key": "SoloCraft.Spellpower.Mult"
+        },
+        {
+          "key": "SoloCraft.Stats.Mult"
+        }
+      ],
+      "template": "conf/Solocraft.conf.dist"
+    }
+  ]
+}

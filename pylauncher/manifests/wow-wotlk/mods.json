@@ -1,5 +1,18 @@
 {
   "schema_version": 1,
   "game": "wow-wotlk",
-  "mods": []
+  "type": "mod",
+  "items": [
+    "all-stackables",
+    "baby-mobs",
+    "buff-mobs",
+    "xbuff-mobs",
+    "nerf-mobs",
+    "hearthstone-cd",
+    "lvl1-mounts",
+    "npc-teleporter",
+    "portals-capitals",
+    "rare-drops",
+    "xp-rates"
+  ]
 }

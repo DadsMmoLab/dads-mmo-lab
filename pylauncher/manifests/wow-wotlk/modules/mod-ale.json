@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "id": "mod-ale",
+  "name": "AzerothCore Lua Engine (ALE)",
+  "type": "module",
+  "game": "wow-wotlk",
+  "description": "Lua scripting engine (LuaJIT/5.2/5.3/5.4); required by every ALE mod and keg. ALE is not Eluna — scripts are not interchangeable.",
+  "source": {
+    "repo": "azerothcore/mod-ale"
+  },
+  "build": {
+    "rebuild": true
+  },
+  "conf": [
+    {
+      "file": "env/dist/etc/modules/mod_ale.conf",
+      "keys": [
+        {
+          "key": "ALE.ScriptPath",
+          "default": "\"/azerothcore/env/dist/etc/modules/lua_scripts\"",
+          "note": "container-visible path; quoted; always re-applied on configure"
+        },
+        {
+          "key": "ALE.EnableLuaEngine"
+        }
+      ],
+      "template": "conf/mod_ale.conf.dist"
+    }
+  ],
+  "patches": [
+    {
+      "file": "env/dist/etc/modules/mod_ale.conf",
+      "find": "^\\s*ALE\\.ScriptPath\\s*=.*$",
+      "replace": "ALE.ScriptPath = \"/azerothcore/env/dist/etc/modules/lua_scripts\"",
+      "regex": true,
+      "when": "configure",
+      "note": "wow-manage.sh 2386-2436; also mkdir env/dist/etc/modules/lua_scripts"
+    }
+  ],
+  "notes": [
+    "env/dist/etc is volume-mounted to /azerothcore/env/dist/etc, so no docker cp is needed. Reload scripts in-game with .reload ale."
+  ]
+}

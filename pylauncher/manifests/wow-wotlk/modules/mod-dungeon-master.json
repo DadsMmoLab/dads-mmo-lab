@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "id": "mod-dungeon-master",
+  "name": "Dungeon Master",
+  "type": "module",
+  "game": "wow-wotlk",
+  "description": "Roguelike dungeon challenge system.",
+  "source": {
+    "repo": "InstanceForge/mod-dungeon-master"
+  },
+  "build": {
+    "rebuild": true
+  },
+  "sql": [
+    {
+      "db": "world",
+      "path": "data/sql/db-world/*.sql",
+      "applied_by": "db-import",
+      "note": "dm_setup.sql"
+    },
+    {
+      "db": "characters",
+      "path": "data/sql/db-characters/*.sql",
+      "applied_by": "db-import",
+      "note": "dm_characters_setup.sql"
+    }
+  ],
+  "conf": [
+    {
+      "file": "env/dist/etc/modules/mod_dungeon_master.conf",
+      "keys": [
+        {
+          "key": "Scaling.LevelBand"
+        },
+        {
+          "key": "Rewards.BaseGold"
+        },
+        {
+          "key": "Roguelike.Enable"
+        }
+      ],
+      "template": "conf/mod_dungeon_master.conf.dist"
+    }
+  ],
+  "npcs": [
+    {
+      "entry": 500000,
+      "name": "Dungeon Master",
+      "auto_spawned": true,
+      "note": "auto-spawns in capitals on server start"
+    }
+  ]
+}

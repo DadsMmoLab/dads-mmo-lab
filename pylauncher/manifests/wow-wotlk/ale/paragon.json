@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "id": "paragon",
+  "name": "Paragon Anniversary",
+  "type": "ale",
+  "game": "wow-wotlk",
+  "description": "Endless post-80 stat progression with a client UI; adds the acore_ale database.",
+  "source": {
+    "repo": "Grim-Batol/Paragon-Anniversary"
+  },
+  "requires": [
+    "mod-ale"
+  ],
+  "deploy": [
+    {
+      "src": "serverside/paragon/",
+      "dest": "env/dist/etc/modules/lua_scripts/paragon/"
+    }
+  ],
+  "sql": [
+    {
+      "db": "world",
+      "path": "sql/01_create_database.sql",
+      "note": "CREATES the acore_ale database; run first"
+    },
+    {
+      "db": "ale",
+      "path": "sql/0[2-9]_*.sql",
+      "note": "sorted; excludes 01_create_database.sql and example/date-prefixed files; abort on first failure. Server crashes without these migrations."
+    }
+  ],
+  "conf": [
+    {
+      "file": "acore_ale.paragon_config (DB table)",
+      "keys": [
+        {
+          "key": "LEVEL_LINKED_TO_ACCOUNT",
+          "note": "0/1"
+        },
+        {
+          "key": "PARAGON_LEVEL_CAP"
+        },
+        {
+          "key": "BASE_MAX_EXPERIENCE"
+        },
+        {
+          "key": "POINTS_PER_LEVEL"
+        },
+        {
+          "key": "UNIVERSAL_CREATURE_EXPERIENCE",
+          "note": "default 50"
+        }
+      ]
+    }
+  ],
+  "client": [
+    {
+      "src": "clientside/Interface",
+      "dest": "interface"
+    }
+  ],
+  "notes": [
+    "Ships a full Interface/ subtree (merged into the client's Interface/), not a self-contained AddOn. The '.test' command has no GM guard. wow-manage.sh 3212-3321."
+  ]
+}

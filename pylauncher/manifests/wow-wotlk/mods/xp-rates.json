@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "id": "xp-rates",
+  "name": "XP Rate Customization",
+  "type": "mod",
+  "game": "wow-wotlk",
+  "description": "Kill / Quest / Explore XP multipliers in worldserver.conf.",
+  "conf": [
+    {
+      "file": "env/dist/etc/worldserver.conf",
+      "keys": [
+        {
+          "key": "Rate.XP.Kill",
+          "default": "{kill}"
+        },
+        {
+          "key": "Rate.XP.Quest",
+          "default": "{quest}"
+        },
+        {
+          "key": "Rate.XP.Explore",
+          "default": "{explore}"
+        }
+      ]
+    }
+  ],
+  "patches": [
+    {
+      "file": "env/dist/etc/worldserver.conf",
+      "find": "^Rate\\.XP\\.Kill\\s*=\\s*[0-9.]*",
+      "replace": "Rate.XP.Kill = {kill}",
+      "regex": true,
+      "when": "configure"
+    },
+    {
+      "file": "env/dist/etc/worldserver.conf",
+      "find": "^Rate\\.XP\\.Quest\\s*=\\s*[0-9.]*",
+      "replace": "Rate.XP.Quest = {quest}",
+      "regex": true,
+      "when": "configure"
+    },
+    {
+      "file": "env/dist/etc/worldserver.conf",
+      "find": "^Rate\\.XP\\.Explore\\s*=\\s*[0-9.]*",
+      "replace": "Rate.XP.Explore = {explore}",
+      "regex": true,
+      "when": "configure"
+    },
+    {
+      "file": "env/dist/etc/worldserver.conf",
+      "find": "^Rate\\.XP\\.(Kill|Quest|Explore)\\s*=\\s*[0-9.]*",
+      "replace": "Rate.XP.\\1 = 1",
+      "regex": true,
+      "when": "remove"
+    }
+  ],
+  "prompts": [
+    {
+      "key": "kill",
+      "question": "Kill XP multiplier",
+      "kind": "float",
+      "default": "1"
+    },
+    {
+      "key": "quest",
+      "question": "Quest XP multiplier",
+      "kind": "float",
+      "default": "1"
+    },
+    {
+      "key": "explore",
+      "question": "Explore XP multiplier",
+      "kind": "float",
+      "default": "1"
+    }
+  ],
+  "notes": [
+    "No DB change; .reload config or restart. wow-manage.sh 5115-5164."
+  ]
+}

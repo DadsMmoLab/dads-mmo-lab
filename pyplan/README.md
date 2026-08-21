@@ -138,38 +138,73 @@ pylauncher/
 │   ├── __init__.py
 │   ├── catalog/
 │   │   ├── __init__.py
-│   │   ├── catalog.json          # list of games + install metadata
-│   │   └── installer.py          # orchestrates install (deps → clone → build → config)
+│   │   ├── catalog.json          # the four v1 servers: emulator sources, install script, containers, ports, DBs, client (Phase 3.1)
+│   │   ├── catalog.py            # typed Catalog/CatalogEntry models + load_catalog(); entry.container_spec() feeds the controller
+│   │   └── installer.py          # Phase 3a orchestrator: answers the install-*.sh prompts via runner.interact, streams output; graceful DockerUnavailableError (3.2/3.3)
 │   ├── controller_wow_wotlk/     # each server has its own controller package for siloing
 │   │   ├── __init__.py
+│   │   ├── controller.py         # WotlkController(Controller) — supplies SPEC, inherits the rest (Phase 1.4)
 │   │   ├── docker_ctl.py         # start/stop/status/logs/health
 │   │   ├── console.py            # attach to worldserver console
 │   │   ├── maintenance.py        # cache clear, backups, SQL changes
-│   │   └── modules.py            # reads/writes module JSON manifests
-│   ├── runner.py                 # subprocess streaming (shared by all)
+│   │   └── modules.py            # binds the shared store/fetcher/applier to WotLK (game id, bundled dir, DB container)
+│   ├── controller.py             # base Controller: ContainerSpec + server dir, start guarded by §12 (Phase 1.4)
+│   ├── runner.py                 # subprocess streaming (stream/run) + interact(): answer prompts of an interactive child (shared by all)
 │   ├── docker.py                 # shared Docker lifecycle + port-conflict check (shared)
-│   ├── platform.py               # OS detection + silent Docker/WSL provisioning
+│   ├── platform.py               # OS detection, config_dir, §13 helpers (firewall/IP/portproxy/CGNAT) + 5.1 provisioning: ensure_docker()/ensure_wsl2() → ProvisionReport (Docker Engine via pacman/apt/dnf/zypper, WSL2 + Docker Desktop on Windows, Docker Desktop on macOS; dry_run plans)
+│   ├── networking.py             # §13 orchestration: plan() (pure) + apply() for LAN/internet play, realmlist UPDATE, router-step prompts, client realmlist writer (Phase 3.4)
 │   ├── log.py                    # shared logging convention (get_logger/configure — Phase 0.6)
+│   ├── state.py                  # per-user app state (state.json under config_dir: remembered installs) (Phase 4)
+│   ├── resources.py              # bundle_root/manifests_dir/repo_root for source checkouts AND PyInstaller builds (Phase 5.2)
+│   ├── update.py                 # GitHub Releases version check → UpdateCheck; check + notify only (Phase 5.4)
+│   ├── manifest.py               # the manifest schema: pydantic models + repo allow-list (Phase 2.1)
+│   ├── manifest_store.py         # load manifests from a tree + refresh from GitHub with ETags (Phase 2.3)
+│   ├── apply.py                  # declarative apply engine: manifest → install/configure/remove steps (Phase 2.3)
 │   └── ui/
 │       ├── __init__.py
-│       ├── catalog_view.py
-│       ├── controller_view.py
+│       ├── catalog_view.py       # tiles from catalog.json; Install → folder prompts → Installer streamed into the LogPanel (4.2)
+│       ├── controller_view.py    # per-install tabs Server/Console/Modules/Networking over ControllerServices seams (4.3)
 │       └── widgets/
 │           ├── __init__.py
-│           └── log_panel.py      # streaming log output widget
+│           └── log_panel.py      # streaming log output widget: QThread worker → line/finished signals (4.1)
 ├── manifests/                    # module/mod JSON (synced from GitHub)
+│   ├── schema/
+│   │   └── manifest.schema.json  # JSON Schema generated from yulon/manifest.py (Phase 2.1)
 │   └── wow-wotlk/
-│       ├── modules.json          # index; per-module files added here in Phase 2
-│       ├── ale.json              # index; per-ALE-mod files added here in Phase 2
-│       ├── mods.json             # index; per-mod files (ah-bot.json, solocraft.json, transmog.json, ...) added in Phase 2
-│       └── kegs/                 # Unique to WotLK for LUA mods with ALE
-│           └── account-wide.json
+│       ├── modules.json          # index (ids); per-module files in modules/<id>.json (Phase 2.2)
+│       ├── ale.json              # index; per-ALE-mod files in ale/<id>.json
+│       ├── mods.json             # index; per-SQL-mod files in mods/<id>.json
+│       └── kegs.json             # index; per-keg files in kegs/<id>.json — kegs are the in-repo ALE bundles (bmah, sod)
 ├── tests/                        # pytest suite (see pyplan/roadmap.md Phase 0/1)
 │   ├── __init__.py
 │   ├── fixture.md                # pinned AzerothCore compose fixture (Phase 0.4)
 │   ├── test_setup_sanity.py
-│   └── test_log.py               # covers yulon/log.py
-├── main.py
+│   ├── test_log.py               # covers yulon/log.py
+│   ├── test_runner.py            # covers yulon/runner.py (Phase 1.1)
+│   ├── test_platform.py          # covers yulon/platform.py (Phase 1.2)
+│   ├── test_docker.py            # covers yulon/docker.py + WotLK docker_ctl (Phase 1.3)
+│   ├── test_controller.py        # covers yulon/controller.py + WotlkController (Phase 1.4)
+│   ├── test_manifest.py          # covers yulon/manifest.py (Phase 2.1)
+│   ├── test_manifest_store.py    # covers yulon/manifest_store.py + the WotLK modules.py binding (Phase 2.3)
+│   ├── test_apply.py             # covers yulon/apply.py (Phase 2.3)
+│   ├── test_catalog.py           # covers yulon/catalog/catalog.py + catalog.json (Phase 3.1)
+│   ├── test_installer.py         # covers runner.interact (real bash) + catalog/installer.py seams (Phase 3.2/3.3)
+│   ├── test_networking.py        # covers yulon/networking.py + platform §13 helpers + docker.published_bindings (Phase 3.4)
+│   ├── conftest.py               # offscreen QApplication fixture (QT_QPA_PLATFORM=offscreen) for the UI tests
+│   ├── test_state.py             # covers yulon/state.py
+│   ├── test_console.py           # covers controller_wow_wotlk/console.py (docker attach transport, fake Popen)
+│   ├── test_log_panel.py         # covers ui/widgets/log_panel.py (4.1)
+│   ├── test_catalog_view.py      # covers ui/catalog_view.py (4.2)
+│   ├── test_controller_view.py   # covers ui/controller_view.py (4.3)
+│   ├── test_resources.py         # covers yulon/resources.py (source + frozen layouts)
+│   ├── test_update.py            # covers yulon/update.py (5.4)
+│   ├── test_provision.py         # covers platform.ensure_docker/ensure_wsl2 plans per OS through seams (5.1)
+│   └── integration/              # live-Docker suite, marked `integration`, self-skipping without a daemon (Phase 1.5)
+│       ├── conftest.py           # docker gate + throwaway busybox compose project shaped like an install
+│       ├── test_docker_live.py   # real compose up/healthy/ready/status/conflict-guard/down
+│       └── test_wotlk_live.py    # WotlkController vs the AzerothCore fixture; opt-in via YULON_WOTLK_SERVER_DIR
+├── main.py                       # wires logging → config_dir, update banner (5.4), Catalog tab + one ControllerView tab per remembered install; YULON_SMOKE_TEST=1 builds the window and exits
+├── README.md                     # user-facing: what the app installs under the hood (WSL/VM hidden, not removed), unsigned builds, updates (5.1.2)
 ├── requirements.txt
 ├── requirements-dev.txt          # pytest, mypy, black, ruff — pinned dev tooling
 ├── pyproject.toml                # black/ruff/mypy/pytest config
@@ -195,23 +230,50 @@ scope is considered (see style-guide §6 for acronym conventions).
 
 The entire project succeeds or fails on the module/mod manifest format. It must capture everything `wow-manage.sh` currently hardcodes as **data**, not code.
 
+**Finalized in Phase 2.1** as the pydantic models in `pylauncher/yulon/manifest.py`; the
+language-neutral JSON Schema is checked in at `pylauncher/manifests/schema/manifest.schema.json`
+(regenerate with `python -m yulon.manifest --dump-schema`; a test fails if it drifts). One schema
+serves all four families (`type`: `module` | `ale` | `mod` | `keg`) — the primitives are a closed
+set (`source`, `build`, `sql`, `conf`, `deploy`, `patches`, `client`, `server_dbc`, `npcs`,
+`prompts`, `notes`); unknown keys are rejected, ids/game are lowercase kebab slugs, and `source.repo`
+must be a GitHub `owner/name` slug or an `https://` URL on an allow-listed forge (§3a). Every
+field except `id`/`name`/`type`/`game` is optional, so a simple module stays short:
+
 ```json
 {
-  "id": "ah-bot",
+  "schema_version": 1,
+  "id": "mod-ah-bot",
   "name": "Auction House Bot",
   "type": "module",
   "game": "wow-wotlk",
-  "repo": "azerothcore/mod-ah-bot",
-  "branch": "master",
-  "sql": ["data/sql/db-world/*.sql"],
-  "conf": "conf/ahbot.conf",
-  "build_targets": ["MODULES=mod-ah-bot"],
-  "requires": [],
-  "description": "Populates the auction house with bot-posted items."
+  "description": "Populates the auction house with bot-posted items.",
+  "source": {"repo": "azerothcore/mod-ah-bot"},
+  "build": {"rebuild": true},
+  "conflicts_with": ["mod-ah-bot-plus"],
+  "sql": [{"db": "world", "path": "data/sql/db-world/*.sql", "applied_by": "db-import"}],
+  "conf": [{
+    "file": "env/dist/etc/modules/mod_ahbot.conf",
+    "template": "conf/mod_ahbot.conf.dist",
+    "keys": [
+      {"key": "AuctionHouseBot.Account", "default": "{bot_account}"},
+      {"key": "AuctionHouseBot.GUID", "default": "{bot_guid}"}
+    ]
+  }],
+  "prompts": [
+    {"key": "bot_guid", "question": "GUID of the bot character", "kind": "int"}
+  ]
 }
 ```
 
+Per-category index files (`modules.json`, `ale.json`, `mods.json`, `kegs.json`) are
+`{"schema_version": 1, "game": "wow-wotlk", "type": "module", "items": ["mod-ah-bot", ...]}` and
+the per-item files live in the matching subdirectory (`modules/mod-ah-bot.json`, ...).
+
 ### Tacit knowledge to port (from `wow-manage.sh`)
+
+> **Ported in Phase 2.2** — every item below now lives as data in `pylauncher/manifests/wow-wotlk/`
+> (41 manifests; see `pyplan/checklist.md` Cross-cutting for the port record). Kept here as the
+> statement of what the schema had to be able to say.
 
 `wow-manage.sh` is ~2,300 lines with heavy embedded knowledge that must become manifest fields:
 

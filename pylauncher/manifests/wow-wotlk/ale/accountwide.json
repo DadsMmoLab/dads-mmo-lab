@@ -1,0 +1,286 @@
+{
+  "schema_version": 1,
+  "id": "accountwide",
+  "name": "Accountwide Systems",
+  "type": "ale",
+  "game": "wow-wotlk",
+  "description": "Account-wide achievements, currency, gold, mounts, pets, playtime, PvP rank, reputation, flight paths and titles.",
+  "source": {
+    "repo": "Aldori15/azerothcore-eluna-accountwide"
+  },
+  "requires": [
+    "mod-ale"
+  ],
+  "deploy": [
+    {
+      "src": "lua_scripts/AccountWide/",
+      "dest": "env/dist/etc/modules/lua_scripts/accountwide/"
+    }
+  ],
+  "sql": [
+    {
+      "db": "characters",
+      "path": "sql/create_accountwide_tables.sql",
+      "note": "required before first start"
+    }
+  ],
+  "conf": [
+    {
+      "file": "env/dist/etc/modules/lua_scripts/accountwide/*.lua",
+      "keys": [
+        {
+          "key": "ENABLE_ACCOUNTWIDE_COMPLETED_ACHIEVEMENTS",
+          "default": "{achievements}",
+          "note": "in AccountAchievements.lua"
+        },
+        {
+          "key": "ENABLE_ACCOUNTWIDE_CRITERIA_PROGRESS",
+          "default": "{criteria}",
+          "note": "in AccountAchievements.lua"
+        },
+        {
+          "key": "ENABLE_ACCOUNTWIDE_CURRENCY",
+          "default": "{currency}",
+          "note": "in AccountCurrency.lua"
+        },
+        {
+          "key": "ENABLE_ACCOUNTWIDE_MONEY",
+          "default": "{money}",
+          "note": "in AccountMoney.lua"
+        },
+        {
+          "key": "ENABLE_REALTIME_TICK",
+          "default": "{money_realtime}",
+          "note": "in AccountMoney.lua"
+        },
+        {
+          "key": "ENABLE_ALTBOT_REALTIME_TICK",
+          "default": "{money_altbot}",
+          "note": "in AccountMoney.lua"
+        },
+        {
+          "key": "ENABLE_ACCOUNTWIDE_MOUNTS",
+          "default": "{mounts}",
+          "note": "in AccountMounts.lua"
+        },
+        {
+          "key": "ENABLE_ACCOUNTWIDE_PETS",
+          "default": "{pets}",
+          "note": "in AccountPets.lua"
+        },
+        {
+          "key": "ENABLE_ACCOUNTWIDE_PLAYTIME",
+          "default": "{playtime}",
+          "note": "in AccountPlaytime.lua"
+        },
+        {
+          "key": "ENABLE_ACCOUNTWIDE_PVP_RANK",
+          "default": "{pvp_rank}",
+          "note": "in AccountPvPRank.lua"
+        },
+        {
+          "key": "ENABLE_ACCOUNTWIDE_REPUTATION",
+          "default": "{reputation}",
+          "note": "in AccountReputation.lua"
+        },
+        {
+          "key": "ENABLE_ACCOUNTWIDE_TAXI_PATHS",
+          "default": "{taxi}",
+          "note": "in AccountTaxiPaths.lua"
+        },
+        {
+          "key": "ENABLE_ACCOUNTWIDE_TITLES",
+          "default": "{titles}",
+          "note": "in AccountTitles.lua"
+        }
+      ]
+    }
+  ],
+  "patches": [
+    {
+      "file": "env/dist/etc/modules/lua_scripts/accountwide/AccountAchievements.lua",
+      "find": "^(\\s*local\\s+ENABLE_ACCOUNTWIDE_COMPLETED_ACHIEVEMENTS\\s*=\\s*)(true|false)",
+      "replace": "\\g<1>{achievements}",
+      "regex": true,
+      "when": "configure"
+    },
+    {
+      "file": "env/dist/etc/modules/lua_scripts/accountwide/AccountAchievements.lua",
+      "find": "^(\\s*local\\s+ENABLE_ACCOUNTWIDE_CRITERIA_PROGRESS\\s*=\\s*)(true|false)",
+      "replace": "\\g<1>{criteria}",
+      "regex": true,
+      "when": "configure"
+    },
+    {
+      "file": "env/dist/etc/modules/lua_scripts/accountwide/AccountCurrency.lua",
+      "find": "^(\\s*local\\s+ENABLE_ACCOUNTWIDE_CURRENCY\\s*=\\s*)(true|false)",
+      "replace": "\\g<1>{currency}",
+      "regex": true,
+      "when": "configure"
+    },
+    {
+      "file": "env/dist/etc/modules/lua_scripts/accountwide/AccountMoney.lua",
+      "find": "^(\\s*local\\s+ENABLE_ACCOUNTWIDE_MONEY\\s*=\\s*)(true|false)",
+      "replace": "\\g<1>{money}",
+      "regex": true,
+      "when": "configure"
+    },
+    {
+      "file": "env/dist/etc/modules/lua_scripts/accountwide/AccountMoney.lua",
+      "find": "^(\\s*local\\s+ENABLE_REALTIME_TICK\\s*=\\s*)(true|false)",
+      "replace": "\\g<1>{money_realtime}",
+      "regex": true,
+      "when": "configure"
+    },
+    {
+      "file": "env/dist/etc/modules/lua_scripts/accountwide/AccountMoney.lua",
+      "find": "^(\\s*local\\s+ENABLE_ALTBOT_REALTIME_TICK\\s*=\\s*)(true|false)",
+      "replace": "\\g<1>{money_altbot}",
+      "regex": true,
+      "when": "configure"
+    },
+    {
+      "file": "env/dist/etc/modules/lua_scripts/accountwide/AccountMounts.lua",
+      "find": "^(\\s*local\\s+ENABLE_ACCOUNTWIDE_MOUNTS\\s*=\\s*)(true|false)",
+      "replace": "\\g<1>{mounts}",
+      "regex": true,
+      "when": "configure"
+    },
+    {
+      "file": "env/dist/etc/modules/lua_scripts/accountwide/AccountPets.lua",
+      "find": "^(\\s*local\\s+ENABLE_ACCOUNTWIDE_PETS\\s*=\\s*)(true|false)",
+      "replace": "\\g<1>{pets}",
+      "regex": true,
+      "when": "configure"
+    },
+    {
+      "file": "env/dist/etc/modules/lua_scripts/accountwide/AccountPlaytime.lua",
+      "find": "^(\\s*local\\s+ENABLE_ACCOUNTWIDE_PLAYTIME\\s*=\\s*)(true|false)",
+      "replace": "\\g<1>{playtime}",
+      "regex": true,
+      "when": "configure"
+    },
+    {
+      "file": "env/dist/etc/modules/lua_scripts/accountwide/AccountPvPRank.lua",
+      "find": "^(\\s*local\\s+ENABLE_ACCOUNTWIDE_PVP_RANK\\s*=\\s*)(true|false)",
+      "replace": "\\g<1>{pvp_rank}",
+      "regex": true,
+      "when": "configure"
+    },
+    {
+      "file": "env/dist/etc/modules/lua_scripts/accountwide/AccountReputation.lua",
+      "find": "^(\\s*local\\s+ENABLE_ACCOUNTWIDE_REPUTATION\\s*=\\s*)(true|false)",
+      "replace": "\\g<1>{reputation}",
+      "regex": true,
+      "when": "configure"
+    },
+    {
+      "file": "env/dist/etc/modules/lua_scripts/accountwide/AccountTaxiPaths.lua",
+      "find": "^(\\s*local\\s+ENABLE_ACCOUNTWIDE_TAXI_PATHS\\s*=\\s*)(true|false)",
+      "replace": "\\g<1>{taxi}",
+      "regex": true,
+      "when": "configure"
+    },
+    {
+      "file": "env/dist/etc/modules/lua_scripts/accountwide/AccountTitles.lua",
+      "find": "^(\\s*local\\s+ENABLE_ACCOUNTWIDE_TITLES\\s*=\\s*)(true|false)",
+      "replace": "\\g<1>{titles}",
+      "regex": true,
+      "when": "configure"
+    }
+  ],
+  "prompts": [
+    {
+      "key": "achievements",
+      "question": "Share completed achievements account-wide?",
+      "kind": "bool",
+      "default": "false"
+    },
+    {
+      "key": "criteria",
+      "question": "Share achievement criteria progress account-wide?",
+      "kind": "bool",
+      "default": "false"
+    },
+    {
+      "key": "currency",
+      "question": "Share currency account-wide?",
+      "kind": "bool",
+      "default": "false"
+    },
+    {
+      "key": "money",
+      "question": "Share gold account-wide?",
+      "kind": "bool",
+      "default": "false"
+    },
+    {
+      "key": "money_realtime",
+      "question": "Gold: real-time tick sync?",
+      "kind": "bool",
+      "default": "false"
+    },
+    {
+      "key": "money_altbot",
+      "question": "Gold: include alt-bots in the real-time tick?",
+      "kind": "bool",
+      "default": "false"
+    },
+    {
+      "key": "mounts",
+      "question": "Share mounts account-wide?",
+      "kind": "bool",
+      "default": "false"
+    },
+    {
+      "key": "pets",
+      "question": "Share pets account-wide?",
+      "kind": "bool",
+      "default": "false"
+    },
+    {
+      "key": "playtime",
+      "question": "Share playtime account-wide?",
+      "kind": "bool",
+      "default": "false"
+    },
+    {
+      "key": "pvp_rank",
+      "question": "Share PvP rank account-wide?",
+      "kind": "bool",
+      "default": "false"
+    },
+    {
+      "key": "reputation",
+      "question": "Share reputation account-wide?",
+      "kind": "bool",
+      "default": "false"
+    },
+    {
+      "key": "taxi",
+      "question": "Share flight paths account-wide? (needs Aldori15's mod-ale fork)",
+      "kind": "bool",
+      "default": "false"
+    },
+    {
+      "key": "titles",
+      "question": "Share titles account-wide?",
+      "kind": "bool",
+      "default": "false"
+    },
+    {
+      "key": "reputation_variant",
+      "question": "Reputation variant (1 = default AccountReputation.lua, 2 = the alternative file); the other file is deleted so only one loads",
+      "kind": "choice",
+      "choices": [
+        "1",
+        "2"
+      ],
+      "default": "1"
+    }
+  ],
+  "notes": [
+    "Fresh server recommended; 00_AccountWideUtils.lua is mandatory. All flags ship false upstream. wow-manage.sh 3563-3772.",
+    "Two reputation variants ship; configure deletes the non-chosen one. AccountPvPRank.lua's RUN_INIT_SEED_ON_STARTUP defaults true — set false after the first start."
+  ]
+}
