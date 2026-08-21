@@ -155,4 +155,28 @@
      daemon under `sudo -n docker info`, or re-probe under `sg docker`) and say "installed — restart the launcher"
      rather than reporting it as not ready. See 6.5's provisioning coverage.
 
+- **Clean Windows 11 baseline, 2026-08-22 (Win11 Pro 25H2, build 26200.8037, Hyper-V guest, 20 GB RAM,
+  15 vCPU, 75 GB free)** — measured on a genuinely pristine box: three installed programs total, no Docker
+  anything, no Python, no git, no bash.
+  1. **HARD BLOCKER for the Windows gate: nested virtualisation is not exposed to the guest.** CPUID leaf 1
+     ECX bit 5 (VMX) reads 0 while the hypervisor bit reads 1 and the vendor is `Microsoft Hv`;
+     `VirtualMachinePlatform`, `Microsoft-Windows-Subsystem-Linux` and all Hyper-V features are `Disabled`
+     and cannot be enabled without VMX. Docker Desktop needs the WSL2 or Hyper-V backend, so it cannot
+     install or run on this VM as configured, and **everything downstream of "install Docker Desktop" is
+     unmeasured, not passing**. Fix is on the Hyper-V host with the VM powered off:
+     `Set-VMProcessor -VMName yulon-win11 -ExposeVirtualizationExtensions $true` plus
+     `Set-VMMemory -VMName yulon-win11 -DynamicMemoryEnabled $false` (nested virt requires static RAM).
+  2. **The `bash.exe` claim in `phase6-decisions.md` had the right conclusion and the wrong mechanism.** On a
+     clean Win11 there is no `bash.exe` at all — `where.exe bash` exits 1, cmd returns ERRORLEVEL 9009, and
+     no execution alias exists. The Store-alias/`execvpe` state only appears once WSL has been enabled.
+     Both mechanisms are now recorded in the doc and in `bash_available()`'s docstring.
+  3. **`shutil.which()` is actively misleading on Windows.** `which("python")` returns a truthy path on a box
+     with no Python: a zero-byte Store alias at `WindowsApps\python.exe` that exits 9009. Any interpreter or
+     tool probe must run the binary and check the exit code, as `bash_available()` already does.
+  4. Smaller traps worth keeping: `wsl.exe` writes its output in **UTF-16LE** (a UTF-8 read gets mojibake) and
+     `wsl --status` exits **50**, not 1, when WSL is absent — `ensure_wsl2()` only checks `returncode == 0`,
+     so it is correct today, but any future parse of that text must decode UTF-16.
+     `(Get-ComputerInfo).WindowsProductName` still reports `Windows 10 Pro` on Windows 11; gate on
+     `OsBuildNumber`/`OsName` instead.
+
 - **`pyplan/rust-prior-art.md` (2026-08-21):** what the earlier Rust launcher (`rust-main`) already solved, distilled so nobody has to read Rust — the staged/resumable install machine, the compose three-file split and its build-file trap, preflight floors with the measurements behind them, Windows Docker Desktop specifics, and creating the first GM account via SRP6 (no console/pty needed, which is the open Windows console gap in 6.5 item 3). Sections 1-5 feed Phase 6; section 7 lists what is waiting for Phase 8's feature port.

@@ -39,8 +39,19 @@ rejected this independently. WotLK is already three near-identical ~1600-line sc
 install inside them is about six commands (a compose-images short-circuit, two clones, a 24-line
 override heredoc, `compose up -d --build`, and a wait). Variants would mean five copies now and
 twenty after Phase 7 — the style-guide §4 duplication Yu'lon exists to remove. Native Windows also
-has no usable bash at all: `bash.exe` there is the Store alias for WSL and fails with
-`execvpe(/bin/bash)` when no distro is installed (measured on a real Windows 11 box, 2026-08-21).
+has no usable bash at all — measured twice, on machines in different states, with the same conclusion
+and *different* mechanisms:
+
+- On a Windows that has had WSL enabled at some point, `bash.exe` is the Store alias for WSL and fails
+  with `execvpe(/bin/bash)` when no distro is installed (real Windows 11 box, 2026-08-21).
+- On a genuinely clean Windows 11 Pro 25H2 (build 26200.8037, 2026-08-22) there is **no `bash.exe` at
+  all**: not in System32, not as an execution alias, `where.exe bash` exits 1 and cmd returns
+  ERRORLEVEL 9009. The alias only comes into existence once WSL has been enabled.
+
+Quoting only the first mechanism reads as false to anyone who re-measures on a clean box, so both are
+recorded. A related trap found in the same pass: `shutil.which("python")` returns a **truthy** path on
+a clean Windows 11 (a zero-byte Store alias at `WindowsApps\python.exe` that exits 9009), so a
+`which()`-only probe reports Python present on a machine that has none. Probes must run the binary.
 
 **Running the existing script inside a container (docker-out-of-docker) — rejected.** Elegant in
 principle, and its author made the sharpest single argument in the set. It breaks on compose

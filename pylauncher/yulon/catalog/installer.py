@@ -155,10 +155,22 @@ def host_package_manager() -> str | None:
 def bash_available(run: Callable[..., subprocess.CompletedProcess[str]] | None = None) -> bool:
     """True if a `bash` that can actually run a script is on PATH.
 
-    Being on PATH is not enough on Windows: `bash.exe` there is usually the
-    Store alias for WSL, which fails with `execvpe(/bin/bash)` when no distro
-    is installed (found on the Windows test VM, 2026-08-21). Docker Desktop's
-    own WSL distros do not provide one.
+    Being on PATH is not enough on Windows, for two different reasons measured
+    on real machines:
+
+    - On a Windows that has had WSL enabled at some point, `bash.exe` is the
+      Store alias for WSL and fails with `execvpe(/bin/bash)` when no distro is
+      installed. Docker Desktop's own WSL distros do not provide one.
+    - On a genuinely clean Windows 11 (25H2, build 26200, measured 2026-08-22)
+      there is no `bash.exe` at all — not in System32, not as an execution
+      alias — so this returns False at the `which()` line and never runs
+      anything.
+
+    Both end at "no usable bash", which is why the probe runs the binary
+    instead of trusting PATH. Note that `which()` alone is actively misleading
+    on Windows for a different reason: `shutil.which("python")` returns a
+    truthy path to a zero-byte Store alias on a machine with no Python at all,
+    so any future interpreter probe needs this same shape.
     """
     if shutil.which("bash") is None:
         return False
