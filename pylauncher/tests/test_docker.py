@@ -9,6 +9,7 @@ real AzerothCore compose project gets exercised.
 from __future__ import annotations
 
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -305,3 +306,68 @@ def test_start_staged_starts_auth_and_world_even_if_the_db_never_reports_healthy
     monkeypatch.setattr(runner, "run", fake_run)
     assert docker.start_staged(SPEC, Path("/srv"), wait_healthy=lambda _c: False) is True
     assert len([c for c in calls if c[:2] == ["docker", "start"]]) == 3
+
+
+def test_start_staged_recreates_when_a_compose_file_changed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`docker start` reuses a container as created, so a changed setting would be ignored.
+
+    Republishing a port or setting an AC_* env var edits a compose file; if the
+    staged path ran anyway, the change would silently do nothing. Recreating
+    costs a re-run of the DB import, which is the lesser evil when the user has
+    just changed something on purpose.
+    """
+    calls: list[list[str]] = []
+    (tmp_path / "docker-compose.override.yml").write_text("services: {}\n", encoding="utf-8")
+
+    def fake_run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        if cmd[:2] == ["docker", "ps"]:
+            names = "ac-database\nac-authserver\nac-worldserver\n"
+            return subprocess.CompletedProcess(cmd, 0, names, "")
+        if cmd[:2] == ["docker", "inspect"]:  # created long before the file above
+            return subprocess.CompletedProcess(cmd, 0, "2020-01-01T00:00:00.000000000Z\n", "")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    assert docker.start_staged(SPEC, tmp_path, wait_healthy=lambda _c: True) is False
+    assert ["docker", "compose", "up", "-d"] in calls
+    assert not any(c[:2] == ["docker", "start"] for c in calls)
+
+
+def test_start_staged_keeps_the_staged_path_when_compose_is_older(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The common case: nothing changed since the containers were created."""
+    calls: list[list[str]] = []
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+
+    def fake_run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        if cmd[:2] == ["docker", "ps"]:
+            names = "ac-database\nac-authserver\nac-worldserver\n"
+            return subprocess.CompletedProcess(cmd, 0, names, "")
+        if cmd[:2] == ["docker", "inspect"]:  # created "now", after the file was written
+            now = datetime.now(tz=UTC) + timedelta(hours=1)
+            return subprocess.CompletedProcess(cmd, 0, now.isoformat() + "\n", "")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    assert docker.start_staged(SPEC, tmp_path, wait_healthy=lambda _c: True) is True
+    assert ["docker", "compose", "up", "-d"] not in calls
+
+
+def test_compose_changed_since_treats_an_unknown_creation_time_as_no(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unreadable answer must not trigger a needless import re-run."""
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        runner, "run", lambda cmd, cwd=None: subprocess.CompletedProcess(cmd, 1, "", "boom")
+    )
+    assert docker.compose_changed_since(SPEC.world, tmp_path) is False
+    monkeypatch.setattr(
+        runner, "run", lambda cmd, cwd=None: subprocess.CompletedProcess(cmd, 0, "not a date", "")
+    )
+    assert docker.compose_changed_since(SPEC.world, tmp_path) is False

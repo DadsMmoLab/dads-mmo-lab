@@ -20,6 +20,7 @@ import subprocess
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from yulon import runner
@@ -112,6 +113,10 @@ def start_staged(
         logger.info(f"start_staged(): {missing} do not exist yet — first `compose up -d`")
         start(server_dir)
         return False
+    if compose_changed_since(spec.world, server_dir):
+        logger.info("start_staged(): compose files changed since the containers — `compose up -d`")
+        start(server_dir)
+        return False
     logger.info("start_staged(): containers exist — `docker start` (never re-runs the DB import)")
     _run_docker_start(spec.db)
     wait = wait_healthy if wait_healthy is not None else wait_db_healthy
@@ -120,6 +125,50 @@ def start_staged(
     _run_docker_start(spec.auth)
     _run_docker_start(spec.world)
     return True
+
+
+COMPOSE_FILES = (
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    "docker-compose.override.yml",
+    "docker-compose.override.yaml",
+    "compose.yml",
+    "compose.yaml",
+    ".env",
+)
+
+
+def compose_changed_since(container: str, server_dir: Path) -> bool:
+    """True if a compose file is newer than `container` was created.
+
+    `docker start` reuses a container exactly as it was created, so a changed
+    port mapping or `AC_*` environment value would be silently ignored — the
+    setting appears to do nothing. `compose up -d` recreates the container in
+    that case, at the cost of re-running the one-shot import, which is the
+    lesser evil precisely because the user just changed something.
+
+    Unknown answers are "no": if the container has no readable creation time,
+    the staged path stays, because the failure mode of a needless recreate
+    (a re-run DB import) is worse than a stale setting.
+    """
+    proc = runner.run(["docker", "inspect", container, "--format", "{{.Created}}"])
+    created_text = proc.stdout.strip()
+    if proc.returncode != 0 or not created_text:
+        return False
+    try:
+        created = datetime.fromisoformat(created_text.replace("Z", "+00:00"))
+    except ValueError:
+        logger.debug(f"compose_changed_since(): unparseable creation time {created_text!r}")
+        return False
+    for name in COMPOSE_FILES:
+        path = server_dir / name
+        if not path.is_file():
+            continue
+        changed = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
+        if changed > created:
+            logger.debug(f"compose_changed_since(): {name} ({changed}) is newer than {created}")
+            return True
+    return False
 
 
 def _run_docker_start(container: str) -> None:
