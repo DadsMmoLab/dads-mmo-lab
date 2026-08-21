@@ -155,30 +155,55 @@
      daemon under `sudo -n docker info`, or re-probe under `sg docker`) and say "installed — restart the launcher"
      rather than reporting it as not ready. See 6.5's provisioning coverage.
 
-- **Windows Docker Desktop provisioning: three defects in `ensure_docker()`'s Windows path
-  (2026-08-22, measured on the clean Win11 VM)** — Docker Desktop does now install and run there, but
-  not on the launcher's own code alone:
-  1. **The download cannot verify Docker's TLS certificate on a brand-new Windows PC.** `_urllib_download`
-     fails on exactly the machine `ensure_docker()` exists to serve, because a fresh cert store has not yet
-     fetched the root. Needs a deliberate answer (ship a CA bundle via `certifi`, or hand the download to
-     `curl.exe`/BITS which use the OS store and auto-root-update), not a `verify=False`.
-  2. **The start command looks for an app Windows cannot find.** After a successful install, the launcher's
-     "start Docker Desktop" step fails to locate `Docker Desktop`; it had to be started by hand. Resolve the
-     real path from the install (`%ProgramFiles%\Docker\Docker\Docker Desktop.exe`) rather than by name.
-  3. **First launch is gated behind modal dialogs, so a headless start hangs forever.** The installer was
-     run with `--accept-license` and Docker Desktop *still* showed its license acceptance and an onboarding
-     walkthrough; a human had to click both before the engine would boot. The state lands in
-     `%APPDATA%\Docker\settings-store.json`, which after acceptance reads
-     `{"AutoStart": false, "DisplayedOnboarding": true, "LicenseTermsVersion": 2, "SettingsVersion": 45}`.
+- **`ensure_docker()` cannot provision Docker on Windows — three high-severity defects, each reproduced by
+  hand on the VM (2026-08-22).** Docker Desktop 4.87.0 now runs there, but only because every one of these
+  was worked around manually. The roadmap's claim that "the app already provisions WSL2 + Docker Desktop"
+  is true for the WSL half and **false for the Docker half**.
+  1. **The download fails TLS verification on a fresh Windows install** (`_urllib_download`,
+     `platform.py:399-406`, used at `:604`). The real run aborted after 0.4 s with
+     `[SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer certificate` and handed the user the exact
+     manual step the product exists to remove. Isolated on the same box: Python 3.12.10 / OpenSSL 3.0.16,
+     `ssl.get_default_verify_paths().cafile = None`, 18 CA certs — github.com, raw.githubusercontent.com and
+     pypi.org all verify fine while `desktop.docker.com` does not. Fix deliberately, e.g. ship `certifi` or
+     hand the download to `curl.exe`/BITS which use the OS store; **not** by disabling verification.
+  2. **The start step runs a command that resolves nowhere** (`platform.py:623`):
+     `Start-Process 'Docker Desktop'` exits 1 with "The system cannot find the file specified" on any
+     Windows machine. `Start-Process 'C:\Program Files\Docker\Docker\Docker Desktop.exe'` works
+     immediately. At least it is not silent — PowerShell exits 1, so `_run_steps` records the failure.
+  3. **The readiness poll cannot succeed in the same run, structurally.** `docker_ready()` resolves `docker`
+     from the *current process's* PATH, but the installer only adds its bin directory to the **machine**
+     PATH, which an already-running launcher never sees. Reproduced with the engine fully up: strip the
+     Docker bin dir from PATH and `shutil.which("docker")` is None and `docker_ready()` is False; restore it
+     and both succeed. So even with 1 and 2 fixed, the first run always ends in a manual step. Resolve
+     `docker` by absolute path after an install, or re-read the machine PATH before polling.
 
-     **Design decision needed, not just a code fix.** Pre-seeding that file would clear the dialogs, but
-     `LicenseTermsVersion` is Docker's *subscription service agreement* — accepting it silently on a user's
-     behalf is a legal act the launcher should not perform quietly. The honest shape is to show the terms
-     (with a link) in Yu'lon's own first-run flow, take the user's consent there, and only then write the
-     file. Note also that the value is a **version number**: a future Docker bumps it and the gate returns,
-     so the launcher must treat "engine never became ready" as a known, explainable state with a "finish
-     setup in Docker Desktop" message rather than an infinite wait. `AutoStart: false` is the related
-     reason the engine must be started explicitly on every run.
+  Smaller, same pass: the dry-run plan at `:602` omits the download step it will actually perform; a `U+2192`
+  arrow in log output crashes on the cp1252 console (`:605`, `:670`, and 13 sites in `apply.py`); and the
+  629 MB installer is re-downloaded unconditionally with no resume or cache.
+
+- **First launch of Docker Desktop is gated behind modal dialogs — a headless start waits forever.** The
+  installer was run with `--accept-license` and Docker Desktop *still* showed license acceptance and an
+  onboarding walkthrough; a human had to click both before the engine would boot. The state lands in
+  `%APPDATA%\Docker\settings-store.json`, which after acceptance reads
+  `{"AutoStart": false, "DisplayedOnboarding": true, "LicenseTermsVersion": 2, "SettingsVersion": 45}`.
+
+  **This is a design decision, not a code fix.** Pre-seeding that file clears the dialogs, but
+  `LicenseTermsVersion` is Docker's *subscription service agreement*, and accepting it silently on a user's
+  behalf is a legal act the launcher should not perform quietly. The honest shape is to show the terms (with
+  a link) in Yu'lon's own first-run, take consent there, and only then write the file. The value is a
+  **version number**, so a future Docker bumps it and the gate returns: "engine never became ready" must be
+  an explainable state with a "finish setup in Docker Desktop" message, never an infinite wait.
+  `AutoStart: false` is the related reason the engine must be started explicitly on every run.
+
+- **Two Windows results that must NOT be generalised from this VM.**
+  - **Silent elevation "works" here for the wrong reasons.** `Start-Process -Verb RunAs -Wait` installed
+    Docker Desktop unattended over SSH — but only because that session's token was **already elevated** and
+    this box has non-default UAC (`ConsentPromptBehaviorAdmin=0`, `PromptOnSecureDesktop=0`). The case that
+    matters — a non-elevated user double-clicking the launcher on a default-UAC machine — is **unmeasured**.
+  - **The Docker credential helper fails without a real logon session.** `docker run` exits 125 with
+    "error getting credentials … A specified logon session does not exist" over SSH, and even inside a
+    Task Scheduler task with LogonType Interactive. Whether a GUI launcher in the user's own session avoids
+    it is untested. Map that error to a comprehensible message before any headless `compose pull`.
 
 - **Open follow-ups from the staged start/stop review (2026-08-22)** — found by a three-lens review whose
   findings were then adjudicated against a live daemon; the must-fix (parallel `docker stop`) and the
@@ -200,16 +225,24 @@
      a `--timeout` value; do not guess a number.
 
 - **Clean Windows 11 baseline, 2026-08-22 (Win11 Pro 25H2, build 26200.8037, Hyper-V guest, 20 GB RAM,
-  15 vCPU, 75 GB free)** — measured on a genuinely pristine box: three installed programs total, no Docker
-  anything, no Python, no git, no bash.
-  1. **HARD BLOCKER for the Windows gate: nested virtualisation is not exposed to the guest.** CPUID leaf 1
-     ECX bit 5 (VMX) reads 0 while the hypervisor bit reads 1 and the vendor is `Microsoft Hv`;
-     `VirtualMachinePlatform`, `Microsoft-Windows-Subsystem-Linux` and all Hyper-V features are `Disabled`
-     and cannot be enabled without VMX. Docker Desktop needs the WSL2 or Hyper-V backend, so it cannot
-     install or run on this VM as configured, and **everything downstream of "install Docker Desktop" is
-     unmeasured, not passing**. Fix is on the Hyper-V host with the VM powered off:
-     `Set-VMProcessor -VMName yulon-win11 -ExposeVirtualizationExtensions $true` plus
-     `Set-VMMemory -VMName yulon-win11 -DynamicMemoryEnabled $false` (nested virt requires static RAM).
+  15 vCPU, 75 GB free)** — items 1-4 were measured on a genuinely pristine box: three installed programs
+  total, no Docker anything, no Python, no git, no bash. **That machine is no longer clean** (Docker
+  Desktop, WSL2, git, Python and a cloned repo are on it now), so the from-zero gate has to be re-run from
+  a fresh image or the `clean-ssh` checkpoint — see the provisioning defects below, none of which has ever
+  been run green unaided.
+  1. **Nested virtualisation must be enabled on the Hyper-V host — and the guest-side test for it is a
+     lie.** A Hyper-V guest cannot run WSL2 or Docker Desktop until the host sets
+     `Set-VMProcessor -VMName <vm> -ExposeVirtualizationExtensions $true` with static RAM
+     (`Set-VMMemory -DynamicMemoryEnabled $false`), the VM powered off. Applied to `yulon-win11` at
+     2026-08-22 00:10, after which Docker Desktop 4.87.0 installed and its engine served containers
+     (Engine 29.7.2, Compose v5.4.0, `docker run --rm hello-world` exit 0).
+
+     **Correction to an earlier version of this entry**, which called it a hard blocker and diagnosed it
+     from inside the guest: **CPUID leaf 1 ECX bit 5 (VMX) and WMI's `VMMonitorModeExtensions` are not
+     valid tests on Windows.** Both still read False *while WSL2 was running a live utility VM* — the
+     Windows hypervisor masks VMX from its own root partition. Anything that gates on them will report a
+     working machine as broken. The only trustworthy signal is host-side:
+     `Get-VMProcessor -VMName <vm> | Select ExposeVirtualizationExtensions`.
   2. **The `bash.exe` claim in `phase6-decisions.md` had the right conclusion and the wrong mechanism.** On a
      clean Win11 there is no `bash.exe` at all — `where.exe bash` exits 1, cmd returns ERRORLEVEL 9009, and
      no execution alias exists. The Store-alias/`execvpe` state only appears once WSL has been enabled.
