@@ -110,7 +110,7 @@ def test_stop_keeps_the_containers_so_the_next_start_is_staged(
     """
     fake_runner.ps_lines = f"{SPEC.db}\n{SPEC.auth}\n{SPEC.world}\n"
     Controller(SPEC, SERVER_DIR).stop()
-    assert ["docker", "stop", SPEC.world, SPEC.auth, SPEC.db] in fake_runner.calls
+    assert ["docker", "compose", "stop"] in fake_runner.calls
     assert ["docker", "compose", "down"] not in fake_runner.calls
 
 

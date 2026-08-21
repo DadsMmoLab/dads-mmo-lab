@@ -9,7 +9,7 @@ real AzerothCore compose project gets exercised.
 from __future__ import annotations
 
 import subprocess
-from datetime import UTC, datetime, timedelta
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -19,11 +19,51 @@ from yulon.controller_wow_wotlk import docker_ctl
 
 SPEC = docker_ctl.SPEC
 
+_MATCHING_HASHES = "db h1 auth h2 world h3"
+
 
 def _completed(
     returncode: int = 0, stdout: str = "", stderr: str = ""
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess([], returncode, stdout, stderr)
+
+
+def _pairs(spaced: str) -> str:
+    """`"db h1 auth h2"` as the two-column output `docker` prints, one pair per line."""
+    words = spaced.split()
+    return "".join(
+        f"{name} {digest}\n" for name, digest in zip(words[::2], words[1::2], strict=True)
+    )
+
+
+def _hash_aware_runner(
+    calls: list[list[str]],
+    *,
+    configured: str = _MATCHING_HASHES,
+    deployed: str | None = None,
+) -> Callable[..., subprocess.CompletedProcess[str]]:
+    """A `runner.run` double that answers compose's config-hash questions.
+
+    `configured` is what the compose files on disk hash to; `deployed` is what
+    the existing containers are labelled with (the same, unless a test says
+    otherwise). Everything else answers success with no output, and the three
+    install containers always exist, so a test can vary one thing at a time.
+    """
+    labelled = configured if deployed is None else deployed
+
+    def fake_run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        if cmd[:3] == ["docker", "compose", "config"]:
+            return _completed(stdout=_pairs(configured))
+        if cmd[:3] == ["docker", "compose", "ps"]:
+            return _completed(stdout="id-db\nid-auth\nid-world\n" if labelled else "")
+        if cmd[:2] == ["docker", "inspect"]:
+            return _completed(stdout=_pairs(labelled))
+        if cmd[:2] == ["docker", "ps"]:
+            return _completed(stdout=f"{SPEC.db}\n{SPEC.auth}\n{SPEC.world}\n")
+        return _completed()
+
+    return fake_run
 
 
 def test_container_spec_has_expected_wotlk_names_and_ports() -> None:
@@ -64,40 +104,92 @@ def test_stop_runs_compose_down(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls == [["docker", "compose", "down"]]
 
 
-def test_stop_staged_stops_the_containers_without_removing_them(
+def test_stop_staged_uses_compose_stop_so_the_containers_survive(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An installed server is stopped by name, so `start_staged()` can start it again."""
+    """`compose stop` keeps every container and honours the project's depends_on order."""
+    calls: list[list[str]] = []
+    cwds: list[Path | None] = []
+
+    def fake_run(cmd: list[str], cwd: Path | None = None):
+        calls.append(cmd)
+        cwds.append(cwd)
+        return _completed()
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    server_dir = Path("/tmp/wow")
+    assert docker.stop_staged(SPEC, server_dir) is True
+    assert calls == [["docker", "compose", "stop"]]
+    assert cwds == [server_dir]
+
+
+def test_stop_staged_falls_back_to_one_docker_stop_per_container_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a readable compose project, stop by name — one call each, world first.
+
+    One call per container is the whole point: `docker stop a b c` signals all
+    three at once, so a single multi-name call cannot express "let the world
+    server finish its saves before the database goes away".
+    """
     calls: list[list[str]] = []
 
     def fake_run(cmd: list[str], cwd: Path | None = None):
         calls.append(cmd)
+        if cmd[:3] == ["docker", "compose", "stop"]:
+            return _completed(returncode=1, stderr="no configuration file provided")
         if cmd[:3] == ["docker", "ps", "-a"]:
             return _completed(stdout=f"{SPEC.db}\n{SPEC.auth}\n{SPEC.world}\n")
         return _completed()
 
     monkeypatch.setattr(docker.runner, "run", fake_run)
     assert docker.stop_staged(SPEC, Path("/tmp/wow")) is True
-    assert ["docker", "stop", SPEC.world, SPEC.auth, SPEC.db] in calls
+    assert [cmd for cmd in calls if cmd[:2] == ["docker", "stop"]] == [
+        ["docker", "stop", SPEC.world],
+        ["docker", "stop", SPEC.auth],
+        ["docker", "stop", SPEC.db],
+    ]
     assert ["docker", "compose", "down"] not in calls
 
 
-def test_stop_staged_falls_back_to_compose_down_when_nothing_exists(
+def test_stop_staged_never_removes_containers_when_there_is_nothing_to_stop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With no containers of ours there is nothing to stop by name; clean the project up."""
+    """No compose project and none of our containers: report it, do not tear anything down."""
     calls: list[list[str]] = []
 
     def fake_run(cmd: list[str], cwd: Path | None = None):
         calls.append(cmd)
+        if cmd[:3] == ["docker", "compose", "stop"]:
+            return _completed(returncode=1, stderr="no configuration file provided")
         if cmd[:3] == ["docker", "ps", "-a"]:
             return _completed(stdout="somebody-elses-container\n")
         return _completed()
 
     monkeypatch.setattr(docker.runner, "run", fake_run)
     assert docker.stop_staged(SPEC, Path("/tmp/wow")) is False
-    assert ["docker", "compose", "down"] in calls
+    assert ["docker", "compose", "down"] not in calls
     assert not any(cmd[:2] == ["docker", "stop"] for cmd in calls)
+
+
+def test_docker_stop_treats_a_vanished_container_as_already_stopped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A container removed between listing and stopping is the goal state, not an error."""
+
+    def fake_run(cmd: list[str], cwd: Path | None = None):
+        if cmd[:3] == ["docker", "compose", "stop"]:
+            return _completed(returncode=1, stderr="no configuration file provided")
+        if cmd[:3] == ["docker", "ps", "-a"]:
+            return _completed(stdout=f"{SPEC.db}\n{SPEC.auth}\n{SPEC.world}\n")
+        if cmd[:2] == ["docker", "stop"]:
+            return _completed(
+                returncode=1, stderr=f"Error response from daemon: No such container: {cmd[2]}"
+            )
+        return _completed()
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    assert docker.stop_staged(SPEC, Path("/tmp/wow")) is True
 
 
 def test_start_raises_docker_command_error_on_failure(
@@ -355,55 +447,84 @@ def test_start_staged_recreates_when_a_compose_file_changed(
     just changed something on purpose.
     """
     calls: list[list[str]] = []
-    (tmp_path / "docker-compose.override.yml").write_text("services: {}\n", encoding="utf-8")
-
-    def fake_run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-        calls.append(cmd)
-        if cmd[:2] == ["docker", "ps"]:
-            names = "ac-database\nac-authserver\nac-worldserver\n"
-            return subprocess.CompletedProcess(cmd, 0, names, "")
-        if cmd[:2] == ["docker", "inspect"]:  # created long before the file above
-            return subprocess.CompletedProcess(cmd, 0, "2020-01-01T00:00:00.000000000Z\n", "")
-        return subprocess.CompletedProcess(cmd, 0, "", "")
-
-    monkeypatch.setattr(runner, "run", fake_run)
+    monkeypatch.setattr(
+        runner,
+        "run",
+        _hash_aware_runner(calls, configured="db h1 auth h2 world hZZZ", deployed=_MATCHING_HASHES),
+    )
     assert docker.start_staged(SPEC, tmp_path, wait_healthy=lambda _c: True) is False
     assert ["docker", "compose", "up", "-d"] in calls
     assert not any(c[:2] == ["docker", "start"] for c in calls)
 
 
-def test_start_staged_keeps_the_staged_path_when_compose_is_older(
+def test_start_staged_keeps_the_staged_path_when_the_config_still_matches(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The common case: nothing changed since the containers were created."""
+    """The common case: the deployed containers already match the compose files."""
     calls: list[list[str]] = []
-    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
-
-    def fake_run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-        calls.append(cmd)
-        if cmd[:2] == ["docker", "ps"]:
-            names = "ac-database\nac-authserver\nac-worldserver\n"
-            return subprocess.CompletedProcess(cmd, 0, names, "")
-        if cmd[:2] == ["docker", "inspect"]:  # created "now", after the file was written
-            now = datetime.now(tz=UTC) + timedelta(hours=1)
-            return subprocess.CompletedProcess(cmd, 0, now.isoformat() + "\n", "")
-        return subprocess.CompletedProcess(cmd, 0, "", "")
-
-    monkeypatch.setattr(runner, "run", fake_run)
+    monkeypatch.setattr(runner, "run", _hash_aware_runner(calls))
     assert docker.start_staged(SPEC, tmp_path, wait_healthy=lambda _c: True) is True
     assert ["docker", "compose", "up", "-d"] not in calls
 
 
-def test_compose_changed_since_treats_an_unknown_creation_time_as_no(
+def test_compose_config_changed_ignores_a_service_with_no_container(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A pruned one-shot import container must not drag the project into a recreate.
+
+    The import exits as soon as it succeeds; someone tidying up exited
+    containers removes it. That is not a configuration change, and treating it
+    as one would re-run the very import this whole path exists to avoid.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        runner,
+        "run",
+        _hash_aware_runner(
+            calls,
+            configured="db h1 auth h2 world h3 import h4",
+            deployed="db h1 auth h2 world h3",
+        ),
+    )
+    assert docker.compose_config_changed(tmp_path) is False
+
+
+def test_compose_config_changed_treats_an_unreadable_answer_as_no(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """An unreadable answer must not trigger a needless import re-run."""
-    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
     monkeypatch.setattr(
         runner, "run", lambda cmd, cwd=None: subprocess.CompletedProcess(cmd, 1, "", "boom")
     )
-    assert docker.compose_changed_since(SPEC.world, tmp_path) is False
-    monkeypatch.setattr(
-        runner, "run", lambda cmd, cwd=None: subprocess.CompletedProcess(cmd, 0, "not a date", "")
+    assert docker.compose_config_changed(tmp_path) is False
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(runner, "run", _hash_aware_runner(calls, deployed=""))
+    assert docker.compose_config_changed(tmp_path) is False
+
+
+def test_compose_config_changed_does_not_latch_after_a_partial_recreate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The regression that killed the mtime version: a db-only edit, then quiet again.
+
+    `compose up -d` recreates only the services whose own config changed, so the
+    world container keeps its original creation time. The old mtime comparison
+    stayed True from then on and sent every single start through
+    `compose up -d`, re-running the DB import each time. Hashes settle instead.
+    """
+    calls: list[list[str]] = []
+    edited = _hash_aware_runner(
+        calls, configured="db hNEW auth h2 world h3", deployed=_MATCHING_HASHES
     )
-    assert docker.compose_changed_since(SPEC.world, tmp_path) is False
+    monkeypatch.setattr(runner, "run", edited)
+    assert docker.compose_config_changed(tmp_path) is True
+
+    # `compose up -d` recreated the database only; world and auth are untouched.
+    settled = _hash_aware_runner(
+        calls,
+        configured="db hNEW auth h2 world h3",
+        deployed="db hNEW auth h2 world h3",
+    )
+    monkeypatch.setattr(runner, "run", settled)
+    assert docker.compose_config_changed(tmp_path) is False

@@ -155,6 +155,25 @@
      daemon under `sudo -n docker info`, or re-probe under `sg docker`) and say "installed — restart the launcher"
      rather than reporting it as not ready. See 6.5's provisioning coverage.
 
+- **Open follow-ups from the staged start/stop review (2026-08-22)** — found by a three-lens review whose
+  findings were then adjudicated against a live daemon; the must-fix (parallel `docker stop`) and the
+  latching config check are already fixed, these three are not:
+  1. **Nothing in the app can remove a container any more.** `docker.stop()` (`compose down`) has no
+     production caller now that Stop keeps containers. Container names are fixed per game in
+     `catalog.json`, so install to directory A, press Stop, install the same game to directory B, and
+     `compose up` dies with `Conflict. The container name "/ac-database" is already in use` — which worked
+     before, because Stop removed them. Same wall for repair: a container wedged in its creation-time
+     config survives every Stop/Start. **Needs a deliberate destructive action on the Server tab**
+     ("Stop and remove containers") wired to `docker.stop()`.
+  2. **`docker_ctl.py` re-exports `stop` as an equal peer of `stop_staged`.** The next contributor adding a
+     restart-after-module-apply reaches for the shorter, button-named one and silently reinstates the
+     import re-run. Rename it `teardown`, or make the compose primitives private, when (1) lands.
+  3. **The 10-second SIGTERM grace is probably too short for a real shutdown save.** AzerothCore with the
+     1600-2000 playerbots the installer configures does not finish its save queue in 10s and is SIGKILLed.
+     This is *not* a regression — `compose down` had the same default — but it is a real data-loss risk
+     that was noticed while fixing the ordering. Needs a measurement on a populated server before picking
+     a `--timeout` value; do not guess a number.
+
 - **Clean Windows 11 baseline, 2026-08-22 (Win11 Pro 25H2, build 26200.8037, Hyper-V guest, 20 GB RAM,
   15 vCPU, 75 GB free)** — measured on a genuinely pristine box: three installed programs total, no Docker
   anything, no Python, no git, no bash.

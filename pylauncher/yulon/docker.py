@@ -20,7 +20,6 @@ import subprocess
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 
 from yulon import runner
@@ -113,8 +112,8 @@ def start_staged(
         logger.info(f"start_staged(): {missing} do not exist yet — first `compose up -d`")
         start(server_dir)
         return False
-    if compose_changed_since(spec.world, server_dir):
-        logger.info("start_staged(): compose files changed since the containers — `compose up -d`")
+    if compose_config_changed(server_dir):
+        logger.info("start_staged(): compose config differs from the containers — `compose up -d`")
         start(server_dir)
         return False
     logger.info("start_staged(): containers exist — `docker start` (never re-runs the DB import)")
@@ -127,46 +126,83 @@ def start_staged(
     return True
 
 
-COMPOSE_FILES = (
-    "docker-compose.yml",
-    "docker-compose.yaml",
-    "docker-compose.override.yml",
-    "docker-compose.override.yaml",
-    "compose.yml",
-    "compose.yaml",
-    ".env",
-)
+_SERVICE_LABEL = "com.docker.compose.service"
+_CONFIG_HASH_LABEL = "com.docker.compose.config-hash"
 
 
-def compose_changed_since(container: str, server_dir: Path) -> bool:
-    """True if a compose file is newer than `container` was created.
+def _parse_pairs(text: str) -> dict[str, str]:
+    """`"name value"` lines into a dict, skipping anything that is not a pair."""
+    pairs = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            pairs[parts[0]] = parts[1]
+    return pairs
 
-    `docker start` reuses a container exactly as it was created, so a changed
-    port mapping or `AC_*` environment value would be silently ignored — the
-    setting appears to do nothing. `compose up -d` recreates the container in
-    that case, at the cost of re-running the one-shot import, which is the
-    lesser evil precisely because the user just changed something.
 
-    Unknown answers are "no": if the container has no readable creation time,
-    the staged path stays, because the failure mode of a needless recreate
-    (a re-run DB import) is worse than a stale setting.
+def _configured_service_hashes(server_dir: Path) -> dict[str, str]:
+    """Service to config hash for the compose files *as they are on disk now*."""
+    proc = runner.run(["docker", "compose", "config", "--hash=*"], cwd=server_dir)
+    if proc.returncode != 0:
+        logger.debug(f"compose config --hash failed: {proc.stderr.strip()}")
+        return {}
+    return _parse_pairs(proc.stdout)
+
+
+def _deployed_service_hashes(server_dir: Path) -> dict[str, str]:
+    """Service to config hash for the containers compose actually created."""
+    listed = runner.run(["docker", "compose", "ps", "-a", "-q"], cwd=server_dir)
+    ids = [line.strip() for line in listed.stdout.splitlines() if line.strip()]
+    if listed.returncode != 0 or not ids:
+        return {}
+    fmt = f'{{{{index .Config.Labels "{_SERVICE_LABEL}"}}}} '
+    fmt += f'{{{{index .Config.Labels "{_CONFIG_HASH_LABEL}"}}}}'
+    proc = runner.run(["docker", "inspect", "--format", fmt, *ids])
+    if proc.returncode != 0:
+        logger.debug(f"docker inspect for compose labels failed: {proc.stderr.strip()}")
+        return {}
+    return _parse_pairs(proc.stdout)
+
+
+def compose_config_changed(server_dir: Path) -> bool:
+    """True if the compose files now describe something other than what is deployed.
+
+    `docker start` replays a container exactly as it was created, so an edited
+    port mapping or `AC_*` value would be silently ignored — the setting appears
+    to do nothing. Compose already answers this question precisely: it stamps
+    every container with a `com.docker.compose.config-hash` label and recreates
+    a service when the hash of the current config differs. Comparing those
+    hashes is therefore exactly the condition under which `docker start` would
+    lie.
+
+    This replaces a version that compared compose-file mtimes against the
+    container's creation time, which **latched**: `compose up -d` recreates only
+    the services whose own config changed, so a database-only edit left the
+    world container's creation time frozen behind the file mtime *forever*, and
+    every later start took the `compose up -d` path — re-running the one-shot
+    import that the staged start exists to avoid. A hash cannot latch, because
+    compose updates the label of exactly the containers it recreates. It also
+    drops a dependence on two clocks agreeing, which on Docker Desktop they do
+    not: the mtime comes from the host and the creation time from the WSL2 VM.
+
+    A service with no container at all is *not* counted as changed. Whether the
+    three containers this install starts by name exist is `start_staged()`'s own
+    check; a one-shot import container that someone pruned after it succeeded
+    must not drag the whole project through a recreate.
+
+    Unknown answers are "no": if either side cannot be read, the staged path
+    stays, because a needless recreate re-runs the database import.
     """
-    proc = runner.run(["docker", "inspect", container, "--format", "{{.Created}}"])
-    created_text = proc.stdout.strip()
-    if proc.returncode != 0 or not created_text:
+    configured = _configured_service_hashes(server_dir)
+    if not configured:
         return False
-    try:
-        created = datetime.fromisoformat(created_text.replace("Z", "+00:00"))
-    except ValueError:
-        logger.debug(f"compose_changed_since(): unparseable creation time {created_text!r}")
+    deployed = _deployed_service_hashes(server_dir)
+    if not deployed:
         return False
-    for name in COMPOSE_FILES:
-        path = server_dir / name
-        if not path.is_file():
-            continue
-        changed = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
-        if changed > created:
-            logger.debug(f"compose_changed_since(): {name} ({changed}) is newer than {created}")
+    for service, digest in configured.items():
+        current = deployed.get(service)
+        if current is not None and current != digest:
+            logger.debug(f"compose_config_changed(): {service} {current} -> {digest}")
             return True
     return False
 
@@ -190,13 +226,26 @@ def stop(server_dir: Path) -> None:
     _run(["compose", "down"], cwd=server_dir)
 
 
-def _run_docker_stop(containers: list[str]) -> None:
-    """`docker stop <containers...>`, ignoring ones that are already stopped."""
-    proc = runner.run(["docker", "stop", *containers])
-    if proc.returncode != 0:
-        raise DockerCommandError(
-            f"docker stop {' '.join(containers)} failed: {proc.stderr.strip()}"
-        )
+def _run_docker_stop(container: str) -> None:
+    """`docker stop <container>`, blocking until that one container has exited.
+
+    One call per container on purpose. `docker stop a b c` looks ordered and is
+    not: the CLI fans a multi-name stop out one goroutine per name, so all three
+    receive SIGTERM in the same instant and the order in argv means nothing —
+    measured at 6.19s total for three containers where the *first* one traps
+    SIGTERM for 6s. A single-container stop blocks until that container is gone,
+    which is what makes "world before the database" real rather than decorative.
+
+    A container that has vanished since it was listed is not an error: the goal
+    state is "not running", and it is already there.
+    """
+    proc = runner.run(["docker", "stop", container])
+    if proc.returncode == 0:
+        return
+    if "No such container" in proc.stderr:
+        logger.debug(f"docker stop {container}: already gone")
+        return
+    raise DockerCommandError(f"docker stop {container} failed: {proc.stderr.strip()}")
 
 
 def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
@@ -210,24 +259,39 @@ def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
     why `dml-start.sh` pairs `docker stop` with `docker start` and never uses
     `compose down` on a restart.
 
-    Stops in reverse dependency order (world, then auth, then the database), so
-    the servers close their connections before the database goes away.
+    `docker compose stop` is the primary path: it keeps every container, and it
+    walks the project's own `depends_on` graph, so the world and auth servers
+    close their connections before the database goes away. That graph is
+    upstream AzerothCore's, not ours to restate — both servers declare
+    `ac-database: service_healthy` — and honouring it matters most exactly when
+    it is slowest, with a full playerbot population still writing saves.
+
+    The fallback stops this install's three containers by name, one call at a
+    time and in reverse order, for a project whose compose files cannot be read
+    (deleted, or a directory that is no longer the project root). Losing the
+    ability to stop a running server because a file is missing would be a worse
+    failure than losing the ordering guarantee.
 
     Returns:
-        True if the staged path was used, False if it fell back to
-        `compose down` because this install's containers do not exist.
+        True if the containers were stopped and kept, False if there was
+        nothing of this install to stop.
     """
     logger.debug(f"stop_staged() called: server_dir={server_dir}")
+    proc = runner.run(["docker", "compose", "stop"], cwd=server_dir)
+    if proc.returncode == 0:
+        logger.info("stop_staged(): `compose stop` (containers are kept for a fast restart)")
+        return True
+
+    logger.warning(f"compose stop failed ({proc.stderr.strip()}); stopping containers by name")
     existing = {
         line.strip() for line in _run(["ps", "-a", "--format", "{{.Names}}"]).stdout.splitlines()
     }
     ordered = [name for name in (spec.world, spec.auth, spec.db) if name in existing]
     if not ordered:
-        logger.info("stop_staged(): none of this install's containers exist — `compose down`")
-        stop(server_dir)
+        logger.info("stop_staged(): none of this install's containers exist — nothing to stop")
         return False
-    logger.info(f"stop_staged(): `docker stop` {ordered} (containers are kept for a fast restart)")
-    _run_docker_stop(ordered)
+    for name in ordered:
+        _run_docker_stop(name)
     return True
 
 
