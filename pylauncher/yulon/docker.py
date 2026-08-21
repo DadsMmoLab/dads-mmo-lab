@@ -179,9 +179,56 @@ def _run_docker_start(container: str) -> None:
 
 
 def stop(server_dir: Path) -> None:
-    """Take the compose project in `server_dir` down."""
+    """Take the compose project in `server_dir` down, REMOVING its containers.
+
+    This is the teardown path (uninstall, or recovering from a broken project).
+    For the stop half of a normal start/stop cycle use `stop_staged()`: removing
+    the containers here is what forces the next start back onto `compose up -d`,
+    and with it the one-shot database import.
+    """
     logger.debug(f"stop() called: server_dir={server_dir}")
     _run(["compose", "down"], cwd=server_dir)
+
+
+def _run_docker_stop(containers: list[str]) -> None:
+    """`docker stop <containers...>`, ignoring ones that are already stopped."""
+    proc = runner.run(["docker", "stop", *containers])
+    if proc.returncode != 0:
+        raise DockerCommandError(
+            f"docker stop {' '.join(containers)} failed: {proc.stderr.strip()}"
+        )
+
+
+def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
+    """Stop an ALREADY-INSTALLED server without destroying its containers.
+
+    The counterpart to `start_staged()`, and required for it to ever do
+    anything: `docker compose down` *removes* the containers, so a stop/start
+    cycle through `stop()` leaves the next `start_staged()` with nothing to
+    start by name — it falls back to `compose up -d`, which re-runs the one-shot
+    `ac-db-import`. The two halves only hold the invariant together, which is
+    why `dml-start.sh` pairs `docker stop` with `docker start` and never uses
+    `compose down` on a restart.
+
+    Stops in reverse dependency order (world, then auth, then the database), so
+    the servers close their connections before the database goes away.
+
+    Returns:
+        True if the staged path was used, False if it fell back to
+        `compose down` because this install's containers do not exist.
+    """
+    logger.debug(f"stop_staged() called: server_dir={server_dir}")
+    existing = {
+        line.strip() for line in _run(["ps", "-a", "--format", "{{.Names}}"]).stdout.splitlines()
+    }
+    ordered = [name for name in (spec.world, spec.auth, spec.db) if name in existing]
+    if not ordered:
+        logger.info("stop_staged(): none of this install's containers exist — `compose down`")
+        stop(server_dir)
+        return False
+    logger.info(f"stop_staged(): `docker stop` {ordered} (containers are kept for a fast restart)")
+    _run_docker_stop(ordered)
+    return True
 
 
 def status() -> list[str]:

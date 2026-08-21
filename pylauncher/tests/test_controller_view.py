@@ -116,7 +116,9 @@ def test_server_tab_status_start_and_port_conflict_message(
     assert ["docker", "compose", "up", "-d"] in ps.calls
     assert view.conflict_label.text() == ""
     view.stop_server()
-    assert ["docker", "compose", "down"] in ps.calls
+    # Stop keeps the containers (`docker stop`), so the next start stays staged.
+    assert any(call[:2] == ["docker", "stop"] for call in ps.calls)
+    assert ["docker", "compose", "down"] not in ps.calls
 
 
 def test_console_tab_sends_commands_and_creates_accounts(

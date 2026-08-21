@@ -104,3 +104,49 @@ def throwaway_project(tmp_path: Path, require_docker: None) -> Iterator[Path]:
         yield tmp_path
     finally:
         _compose_down(tmp_path)
+
+
+# AzerothCore's install runs one-shot containers (`ac-db-import`,
+# `ac-client-data-init`) that exit as soon as they succeed. `docker compose up`
+# starts every service without a *running* container, so it runs them again on
+# every restart — which `dml-start.sh` warns "was killing the database". This
+# service is that shape in miniature: it appends one line per run to a
+# bind-mounted file, so a test can simply count how many times it ran.
+IMPORT_CONTAINER = "yulon-it-import"
+IMPORT_MARKER_DIR = "marker"
+IMPORT_MARKER_FILE = "import.log"
+
+_ONE_SHOT_YML = f"""\
+  import:
+    image: busybox:1.36
+    container_name: {IMPORT_CONTAINER}
+    volumes:
+      - ./{IMPORT_MARKER_DIR}:/marker
+    command: ["sh", "-c", "echo ran >> /marker/{IMPORT_MARKER_FILE}"]
+"""
+
+
+def import_runs(project_dir: Path) -> int:
+    """How many times the one-shot import container has run in this project."""
+    marker = project_dir / IMPORT_MARKER_DIR / IMPORT_MARKER_FILE
+    if not marker.is_file():
+        return 0
+    return len([line for line in marker.read_text(encoding="utf-8").splitlines() if line.strip()])
+
+
+@pytest.fixture
+def staged_project(tmp_path: Path, require_docker: None) -> Iterator[Path]:
+    """`throwaway_project` plus a one-shot import container, torn down after.
+
+    Separate from `throwaway_project` so the lifecycle test keeps its exact
+    three-container shape; the extra service exists only for the restart tests,
+    which need something that must *not* run twice.
+    """
+    (tmp_path / "docker-compose.yml").write_text(_COMPOSE_YML + _ONE_SHOT_YML, encoding="utf-8")
+    (tmp_path / IMPORT_MARKER_DIR).mkdir()
+    _compose_down(tmp_path)
+    try:
+        yield tmp_path
+    finally:
+        _compose_down(tmp_path)
+        subprocess.run(["docker", "rm", "-f", IMPORT_CONTAINER], capture_output=True, check=False)

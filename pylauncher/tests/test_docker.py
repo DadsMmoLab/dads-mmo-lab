@@ -64,6 +64,42 @@ def test_stop_runs_compose_down(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls == [["docker", "compose", "down"]]
 
 
+def test_stop_staged_stops_the_containers_without_removing_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An installed server is stopped by name, so `start_staged()` can start it again."""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], cwd: Path | None = None):
+        calls.append(cmd)
+        if cmd[:3] == ["docker", "ps", "-a"]:
+            return _completed(stdout=f"{SPEC.db}\n{SPEC.auth}\n{SPEC.world}\n")
+        return _completed()
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    assert docker.stop_staged(SPEC, Path("/tmp/wow")) is True
+    assert ["docker", "stop", SPEC.world, SPEC.auth, SPEC.db] in calls
+    assert ["docker", "compose", "down"] not in calls
+
+
+def test_stop_staged_falls_back_to_compose_down_when_nothing_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no containers of ours there is nothing to stop by name; clean the project up."""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], cwd: Path | None = None):
+        calls.append(cmd)
+        if cmd[:3] == ["docker", "ps", "-a"]:
+            return _completed(stdout="somebody-elses-container\n")
+        return _completed()
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    assert docker.stop_staged(SPEC, Path("/tmp/wow")) is False
+    assert ["docker", "compose", "down"] in calls
+    assert not any(cmd[:2] == ["docker", "stop"] for cmd in calls)
+
+
 def test_start_raises_docker_command_error_on_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -97,11 +97,21 @@ def test_port_conflicts_filters_out_own_containers(fake_runner: _FakeRunner) -> 
     assert Controller(SPEC, SERVER_DIR).port_conflicts() == ["stranger"]
 
 
-def test_stop_runs_compose_down_in_server_dir(fake_runner: _FakeRunner) -> None:
-    """`stop()` delegates to `docker.stop()` in the server dir."""
+def test_stop_keeps_the_containers_so_the_next_start_is_staged(
+    fake_runner: _FakeRunner,
+) -> None:
+    """`stop()` delegates to `docker.stop_staged()`, which never removes containers.
+
+    The regression this guards is subtle and was found only on a real daemon:
+    `compose down` removes the containers, so the *next* `start()` finds nothing
+    to start by name and falls back to `compose up -d` — re-running the one-shot
+    database import that `start_staged()` exists to avoid. Start and stop only
+    hold that invariant as a pair.
+    """
+    fake_runner.ps_lines = f"{SPEC.db}\n{SPEC.auth}\n{SPEC.world}\n"
     Controller(SPEC, SERVER_DIR).stop()
-    assert fake_runner.calls == [["docker", "compose", "down"]]
-    assert fake_runner.cwds == [SERVER_DIR]
+    assert ["docker", "stop", SPEC.world, SPEC.auth, SPEC.db] in fake_runner.calls
+    assert ["docker", "compose", "down"] not in fake_runner.calls
 
 
 def test_status_reports_which_of_our_containers_are_running(fake_runner: _FakeRunner) -> None:

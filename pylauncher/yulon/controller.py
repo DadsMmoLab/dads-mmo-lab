@@ -129,8 +129,15 @@ class Controller:
         )
 
     def stop(self) -> None:
-        """Take the install down (`docker compose down` in the server dir)."""
-        docker.stop(self.server_dir)
+        """Stop the install, keeping its containers so the next start is staged.
+
+        Uses `docker.stop_staged()`. Stopping with `docker compose down` would
+        remove the containers, and `start()` would then have nothing to start by
+        name — putting the very next start back on `compose up -d` and re-running
+        the one-shot database import. Teardown that really should remove the
+        containers calls `docker.stop()` directly.
+        """
+        docker.stop_staged(self.spec, self.server_dir)
 
     # -- polling ---------------------------------------------------------
 
