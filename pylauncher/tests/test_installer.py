@@ -24,10 +24,15 @@ from yulon.catalog.installer import (
     Installer,
     InstallerError,
     InstallOptions,
+    bash_available,
     make_responder,
 )
 
-needs_bash = pytest.mark.skipif(shutil.which("bash") is None, reason="bash not on PATH")
+# Not just `which bash`: on Windows that finds the Store alias for WSL, which fails
+# with execvpe(/bin/bash) when no distro is installed (Windows test VM, 2026-08-21).
+needs_bash = pytest.mark.skipif(
+    not bash_available(), reason="no bash that can run a script on this machine"
+)
 
 FAKE_INSTALLER = r"""
 W='\033[1;37m'; NC='\033[0m'
@@ -250,3 +255,42 @@ def test_installer_wraps_script_failure(tmp_path: Path) -> None:
         for line in installer.run():
             got.append(line)
     assert got == ["step 1"]
+
+
+def test_preflight_refuses_when_bash_cannot_run(tmp_path: Path) -> None:
+    """A `bash` that is only the WSL alias must produce advice, not an execvpe error."""
+    entry = load_catalog().get("wow-wotlk")
+    script = tmp_path / entry.install.script
+    script.parent.mkdir(parents=True)
+    script.write_text("", encoding="utf-8")
+    installer = Installer(
+        entry,
+        repo_root=tmp_path,
+        docker_check=lambda: True,
+        package_manager=lambda: None,
+        bash_check=lambda: False,
+    )
+    with pytest.raises(InstallerError, match="no working `bash`"):
+        list(installer.run())
+
+
+def test_bash_available_probes_that_bash_actually_runs() -> None:
+    """`which bash` is not enough — the probe must execute something."""
+    import subprocess as sp
+
+    calls: list[list[str]] = []
+
+    def ok(argv: list[str], *a: object, **k: object) -> sp.CompletedProcess[str]:
+        calls.append(argv)
+        return sp.CompletedProcess(argv, 0, "", "")
+
+    def broken(argv: list[str], *a: object, **k: object) -> sp.CompletedProcess[str]:
+        calls.append(argv)
+        return sp.CompletedProcess(argv, 1, "", "execvpe(/bin/bash) failed")
+
+    if shutil.which("bash") is None:
+        assert bash_available(ok) is False  # nothing to probe
+        return
+    assert bash_available(ok) is True
+    assert calls[-1] == ["bash", "-c", "exit 0"]
+    assert bash_available(broken) is False
