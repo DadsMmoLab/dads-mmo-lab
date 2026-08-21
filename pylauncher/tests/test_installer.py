@@ -202,6 +202,7 @@ def test_installer_fails_gracefully_without_docker(tmp_path: Path) -> None:
         ensure_docker=lambda: ProvisionReport(
             "windows", done=("wsl --install",), reboot_required=True, manual_steps=("Reboot.",)
         ),
+        package_manager=lambda: None,  # default script, not a distro variant
     )
     with pytest.raises(DockerUnavailableError, match="reboot is needed"):
         rebooter.preflight(InstallOptions())

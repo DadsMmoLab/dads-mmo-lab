@@ -28,6 +28,10 @@ class _FakeProc:
         # master stays writable after send_command() closes its own copy. Dupe
         # here too, or os.write(master) fails with EIO once the slave is gone.
         stdin = kwargs.get("stdin")
+        # Record the tty-ness NOW, while the fd is still live: isatty() on a
+        # dup'd/teardown fd is not reliable across platforms (differs on Linux
+        # vs macOS once the master is closed).
+        self.stdin_was_tty = os.isatty(stdin) if isinstance(stdin, int) else False
         self.stdin = os.dup(stdin) if isinstance(stdin, int) else stdin
         self.stdout = io.BytesIO(b"AC> \r\nAccount created: dad\r\n")
         self._rc: int | None = None
@@ -62,9 +66,10 @@ def test_send_command_attaches_over_a_pty_and_collects_the_reply() -> None:
     )
     assert made[0].argv == ["docker", "attach", "--sig-proxy=false", "ac-worldserver"]
     # stdin is the pty's slave fd — a terminal, which is what docker demands.
-    # It's a dup of the original slave, so it stays a terminal even after
-    # send_command() closes its own copy (mirroring the child's fd).
-    assert isinstance(made[0].stdin, int) and os.isatty(made[0].stdin) is True
+    # It's a dup of the original slave, so it mirrors the child's fd; its
+    # tty-ness was captured while the slave was still live.
+    assert isinstance(made[0].stdin, int)
+    assert made[0].stdin_was_tty is True
     # The prompt and our own echo are not part of the answer.
     assert reply.lines == ("Account created: dad",)
     assert reply.command == "account create dad pw"
