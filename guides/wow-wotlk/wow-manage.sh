@@ -1104,7 +1104,7 @@ declare -a MODULE_REGISTRY=(
     "mod-transmog|Transmogrification|https://github.com/azerothcore/mod-transmog.git|world,characters"
     "mod-profession-progression|Profession Progression (unlock extra profession slots by leveling)|https://github.com/TopHatMan/mod-profession-progression.git|"
     "mod-mount-scaling|Mount Scaling (level-based progressive mount speed)|https://github.com/claudevandort/mod-mount-scaling.git|world"
-    "mod-city-bots|City Bots (fixed 400-bot city ambience cast — needs Playerbots)|https://github.com/pjerra/mod-city-bots.git|auth,characters,world"
+    "mod-city-bots|City Bots (400-bot city cast — needs Playerbots)|https://github.com/pjerra/mod-city-bots.git|auth,characters,world"
 )
 
 # ─────────────────────────────────────────────────────────────
@@ -2791,45 +2791,81 @@ configure_module_learn_spells() {
 #   update tracking: the core never sees that file, so nothing re-applies.
 # ─────────────────────────────────────────────────────────────
 CITY_BOTS_ROSTER_REL="data/sql/playerbots/updates/2026_07_15_00_citizen_roster.sql"
-CITY_BOTS_ROSTER_IMPORTED=0
+CITY_BOTS_ROSTER_IMPORTED=0     # set by city_bots_import_roster on a verified import
+CITY_BOTS_WORLD_RESTARTED=0     # set when the import stopped+started ac-worldserver itself
 
+# Resolve a compose service's RUNNING container for THIS install (not the
+# first name-match on the host — several AzerothCore stacks can coexist).
+_city_bots_service_container() {
+    local svc="$1" id=""
+    id=$(cd "$SERVER_DIR" 2>/dev/null && docker compose ps -q "$svc" 2>/dev/null | head -1)
+    [ -n "$id" ] && docker ps --format '{{.ID}}' 2>/dev/null | grep -q "^${id:0:12}" && echo "$id"
+}
+
+city_bots_db_query() {
+    docker exec "$DB_CONTAINER" mysql -uroot -p"$DB_ROOT_PASSWORD" -N -e "$1" 2>/dev/null | tail -1
+}
 city_bots_roster_count() {
-    docker exec "$DB_CONTAINER" mysql -uroot -p"$DB_ROOT_PASSWORD" -N \
-        -e "SELECT COUNT(*) FROM acore_playerbots.citizen_roster;" 2>/dev/null | tail -1
+    city_bots_db_query "SELECT COUNT(*) FROM acore_playerbots.citizen_roster;"
+}
+city_bots_account_type_count() {
+    city_bots_db_query "SELECT COUNT(*) FROM acore_playerbots.playerbots_account_type WHERE account_id BETWEEN 12001 AND 12400 AND account_type = 3;"
 }
 
 city_bots_import_roster() {
+    CITY_BOTS_ROSTER_IMPORTED=0
+    CITY_BOTS_WORLD_RESTARTED=0
     local roster="$SERVER_DIR/modules/mod-city-bots/$CITY_BOTS_ROSTER_REL"
     if [ ! -f "$roster" ]; then
         print_error "Roster SQL not found: $roster"
         return 1
     fi
+    if [ ! -d "$SERVER_DIR/modules/mod-playerbots" ]; then
+        print_error "mod-playerbots is not under modules/ — City Bots is a Playerbots extension; acore_playerbots would never be created."
+        return 1
+    fi
 
-    refresh_container_names
-    if ! container_running "$DB_CONTAINER"; then
+    # Database container: prefer this install's compose project, fall back to
+    # the host-wide name match the rest of this script uses.
+    local db_id; db_id=$(_city_bots_service_container ac-database)
+    if [ -n "$db_id" ]; then
+        DB_CONTAINER="$db_id"
+    else
+        refresh_container_names
+    fi
+    if [ -z "$db_id" ] && ! container_running "$DB_CONTAINER"; then
         print_info "Database container is not running — starting it..."
         (cd "$SERVER_DIR" && docker compose up -d ac-database 2>/dev/null) || true
         local w
         for w in $(seq 1 12); do
-            refresh_container_names
-            container_running "$DB_CONTAINER" && break
+            db_id=$(_city_bots_service_container ac-database)
+            [ -n "$db_id" ] && { DB_CONTAINER="$db_id"; break; }
             sleep 5
         done
-        if ! container_running "$DB_CONTAINER"; then
+        if [ -z "$db_id" ]; then
             print_error "Database container did not start."
             return 1
         fi
     fi
+    # "container running" is not "mysql ready"
+    local m
+    for m in $(seq 1 24); do
+        docker exec "$DB_CONTAINER" mysqladmin ping -uroot -p"$DB_ROOT_PASSWORD" --silent >/dev/null 2>&1 && break
+        [ "$m" -eq 1 ] && print_info "Waiting for MySQL to accept connections..."
+        sleep 5
+    done
 
     # acore_playerbots is created by worldserver on its first start with
-    # mod-playerbots. Right after a rebuild it can take a moment to appear.
-    local i have_db=""
-    for i in $(seq 1 "${CITY_BOTS_DB_WAIT:-24}"); do
-        have_db=$(docker exec "$DB_CONTAINER" mysql -uroot -p"$DB_ROOT_PASSWORD" -N \
-            -e "SHOW DATABASES LIKE 'acore_playerbots';" 2>/dev/null | tail -1)
+    # mod-playerbots. Only a running worldserver can make it appear, so only
+    # wait while one is running; otherwise probe once and say what to do.
+    local world_id; world_id=$(_city_bots_service_container ac-worldserver)
+    local i have_db="" wait_n=1
+    [ -n "$world_id" ] && wait_n="${CITY_BOTS_DB_WAIT:-60}"   # × 5 s
+    for i in $(seq 1 "$wait_n"); do
+        have_db=$(city_bots_db_query "SHOW DATABASES LIKE 'acore_playerbots';")
         [ -n "$have_db" ] && break
-        [ "$i" -eq 1 ] && print_info "Waiting for database acore_playerbots (created on the first worldserver start with Playerbots)..."
-        sleep 5
+        [ "$i" -eq 1 ] && [ "$wait_n" -gt 1 ] && print_info "Waiting for database acore_playerbots (created by the starting worldserver, up to $(( wait_n * 5 / 60 )) min)..."
+        [ "$wait_n" -gt 1 ] && sleep 5
     done
     if [ -z "$have_db" ]; then
         print_error "acore_playerbots does not exist yet."
@@ -2838,24 +2874,61 @@ city_bots_import_roster() {
         return 1
     fi
 
+    # Any existing rows = this is a (destructive) re-import: the roster file
+    # drops/recreates citizen_roster and rewrites account_type rows 12001-12400.
     local before; before=$(city_bots_roster_count)
-    if [ "${before:-0}" -ge 400 ] 2>/dev/null; then
-        print_info "citizen_roster already holds $before rows."
-        if ! ask_yes_no "Re-import the shipped roster anyway (resets roster rows to the shipped cast)?"; then
+    if [ "${before:-0}" -gt 0 ] 2>/dev/null; then
+        print_warning "citizen_roster already holds $before rows."
+        print_info "Re-importing resets the roster (and playerbots_account_type 12001-12400) to the shipped cast;"
+        print_info "hand-edited roster rows are lost."
+        if ! ask_yes_no "Re-import the shipped roster anyway?"; then
             return 0
         fi
     fi
 
+    # Do not rewrite the roster under a running worldserver: stop it for the
+    # import (the server needs a restart to pick the roster up anyway).
+    local stopped_world=0
+    world_id=$(_city_bots_service_container ac-worldserver)
+    if [ -n "$world_id" ]; then
+        print_info "worldserver is running. The roster is only read at startup, so a restart is needed either way."
+        if ask_yes_no "Stop the worldserver for the import and start it again afterwards? (recommended)"; then
+            (cd "$SERVER_DIR" && docker compose stop -t 60 ac-worldserver) || print_warning "Could not stop ac-worldserver — importing anyway."
+            stopped_world=1
+        else
+            print_warning "Importing while the worldserver runs; city bots pick it up after your next restart."
+        fi
+    fi
+
     print_info "Importing roster into acore_playerbots..."
-    local out; out=$(sqlmod_run_sql_file acore_playerbots "$roster")
-    local after; after=$(city_bots_roster_count)
-    if [ "${after:-0}" -ge 400 ] 2>/dev/null; then
-        print_success "City Bots roster imported ($after entries)."
+    local out rc
+    out=$(sqlmod_run_sql_file acore_playerbots "$roster"); rc=$?
+    local after_roster after_types
+    after_roster=$(city_bots_roster_count)
+    after_types=$(city_bots_account_type_count)
+
+    local ok=0
+    if [ "$rc" -eq 0 ] && [ "${after_roster:-0}" -eq 400 ] 2>/dev/null && [ "${after_types:-0}" -eq 400 ] 2>/dev/null; then
+        ok=1
+    fi
+
+    if [ "$stopped_world" -eq 1 ]; then
+        print_info "Starting the worldserver again..."
+        if (cd "$SERVER_DIR" && docker compose start ac-worldserver); then
+            CITY_BOTS_WORLD_RESTARTED=1
+        else
+            print_warning "Could not start ac-worldserver — use Server Controls → Start."
+        fi
+    fi
+
+    if [ "$ok" -eq 1 ]; then
+        print_success "City Bots roster imported and verified (400 roster rows, 400 citybot account types)."
         CITY_BOTS_ROSTER_IMPORTED=1
         return 0
     fi
-    print_error "Roster import failed (citizen_roster has ${after:-0} rows)."
-    [ -n "$out" ] && echo "$out" | grep -v "Using a password" | tail -5 | sed 's/^/  /'
+    print_error "Roster import failed (mysql rc=$rc; citizen_roster rows=${after_roster:-0}, account types=${after_types:-0}; both must be 400)."
+    [ -n "$out" ] && echo "$out" | grep -v "Using a password" | tail -8 | sed 's/^/  /'
+    print_info "Fix the error above and re-run Modules → c<num> (Configure) on City Bots."
     return 1
 }
 
@@ -2873,10 +2946,6 @@ configure_module_city_bots() {
         print_error "City Bots module not installed (expected at $module_dir)."
         return 1
     fi
-    if [ ! -d "$SERVER_DIR/modules/mod-playerbots" ]; then
-        print_warning "mod-playerbots not found under modules/ — City Bots is a Playerbots extension and will not work without it."
-    fi
-
     echo ""
     print_info "Step 1/2 — roster import into acore_playerbots (the one file AzerothCore never auto-applies)."
     city_bots_import_roster || true
@@ -2902,8 +2971,13 @@ configure_module_city_bots() {
         _open_text_file "$conf_dest"
     fi
     echo ""
-    print_info "Restart the worldserver so it loads the roster and conf (Server → Restart)."
-    print_info "Expected log line: 'mod-city-bots: stage cast loaded: 400 roster entries'."
+    if [ "$CITY_BOTS_WORLD_RESTARTED" = 1 ]; then
+        print_info "worldserver was restarted around the import; city bots log in after random-bot autologin."
+    else
+        print_info "Restart the worldserver so it loads the roster and conf (Server Controls → Restart)."
+    fi
+    print_info "Expected log line: 'mod-city-bots: stage cast loaded: 400/400 roster entries'."
+    print_info "Removing the module later: data/sql/uninstall/ in the module has the manual cleanup SQL."
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -5319,6 +5393,8 @@ _get_about_text() {
                 'Install: clone -> rebuild -> server starts once -> Configure' \
                 'imports the roster into acore_playerbots (the core updater' \
                 'never applies data/sql/playerbots) -> restart.' \
+                'Remove (r<num>) keeps the 400 accounts/characters and the roster;' \
+                'the module ships data/sql/uninstall/ for manual cleanup.' \
                 '' \
                 'Commands: (none — everything is driven by mod_city_bots.conf)'
             ;;
@@ -5971,8 +6047,10 @@ _module_post_install_hook() {
             print_info "Order: rebuild → server starts once (creates acore_playerbots) → import roster → restart."
             if ask_yes_no "Import the City Bots roster and set up its conf now?"; then
                 configure_module_city_bots
-                if [ "$CITY_BOTS_ROSTER_IMPORTED" = 1 ] && ask_yes_no "Restart the worldserver now so the city bots log in?"; then
-                    (cd "$SERVER_DIR" && docker compose restart ac-worldserver) || print_warning "Restart failed — use Server → Restart."
+                if [ "$CITY_BOTS_ROSTER_IMPORTED" = 1 ] && [ "$CITY_BOTS_WORLD_RESTARTED" != 1 ] \
+                   && [ -n "$(_city_bots_service_container ac-worldserver)" ] \
+                   && ask_yes_no "Restart the worldserver now so the city bots log in? (only useful once it was rebuilt with City Bots)"; then
+                    (cd "$SERVER_DIR" && docker compose restart -t 60 ac-worldserver) || print_warning "Restart failed — use Server Controls → Restart."
                 fi
             else
                 print_info "Later: Modules → c<num> (Configure) on City Bots does the import."
