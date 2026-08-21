@@ -109,11 +109,11 @@ def test_server_tab_status_start_and_port_conflict_message(
     view.start_server()
     assert "only one server can run at a time" in view.conflict_label.text()
     assert "tbc-realmd" in failures[0]
-    assert ["docker", "compose", "up", "-d"] not in ps.calls
+    assert not any(c[:4] == ["docker", "compose", "up", "-d"] for c in ps.calls)
 
     ps.ports = ""
     view.start_server()
-    assert ["docker", "compose", "up", "-d"] in ps.calls
+    assert any(c[:5] == ["docker", "compose", "up", "-d", "--no-deps"] for c in ps.calls)
     assert view.conflict_label.text() == ""
     view.stop_server()
     # Stop keeps the containers (`compose stop`), so the next start stays staged.

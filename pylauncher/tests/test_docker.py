@@ -9,61 +9,20 @@ real AzerothCore compose project gets exercised.
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
-from yulon import docker, runner
+from yulon import docker
 from yulon.controller_wow_wotlk import docker_ctl
 
 SPEC = docker_ctl.SPEC
-
-_MATCHING_HASHES = "db h1 auth h2 world h3"
 
 
 def _completed(
     returncode: int = 0, stdout: str = "", stderr: str = ""
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess([], returncode, stdout, stderr)
-
-
-def _pairs(spaced: str) -> str:
-    """`"db h1 auth h2"` as the two-column output `docker` prints, one pair per line."""
-    words = spaced.split()
-    return "".join(
-        f"{name} {digest}\n" for name, digest in zip(words[::2], words[1::2], strict=True)
-    )
-
-
-def _hash_aware_runner(
-    calls: list[list[str]],
-    *,
-    configured: str = _MATCHING_HASHES,
-    deployed: str | None = None,
-) -> Callable[..., subprocess.CompletedProcess[str]]:
-    """A `runner.run` double that answers compose's config-hash questions.
-
-    `configured` is what the compose files on disk hash to; `deployed` is what
-    the existing containers are labelled with (the same, unless a test says
-    otherwise). Everything else answers success with no output, and the three
-    install containers always exist, so a test can vary one thing at a time.
-    """
-    labelled = configured if deployed is None else deployed
-
-    def fake_run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-        calls.append(cmd)
-        if cmd[:3] == ["docker", "compose", "config"]:
-            return _completed(stdout=_pairs(configured))
-        if cmd[:3] == ["docker", "compose", "ps"]:
-            return _completed(stdout="id-db\nid-auth\nid-world\n" if labelled else "")
-        if cmd[:2] == ["docker", "inspect"]:
-            return _completed(stdout=_pairs(labelled))
-        if cmd[:2] == ["docker", "ps"]:
-            return _completed(stdout=f"{SPEC.db}\n{SPEC.auth}\n{SPEC.world}\n")
-        return _completed()
-
-    return fake_run
 
 
 def test_container_spec_has_expected_wotlk_names_and_ports() -> None:
@@ -119,8 +78,12 @@ def test_stop_staged_uses_compose_stop_so_the_containers_survive(
     monkeypatch.setattr(docker.runner, "run", fake_run)
     server_dir = Path("/tmp/wow")
     assert docker.stop_staged(SPEC, server_dir) is True
-    assert calls == [["docker", "compose", "stop"]]
-    assert cwds == [server_dir]
+    assert calls == [
+        ["docker", "compose", "stop"],
+        # ...then verify it actually stopped, rather than trusting the exit code.
+        ["docker", "compose", "ps", "--status", "running", "-q"],
+    ]
+    assert cwds == [server_dir, server_dir]
 
 
 def test_stop_staged_falls_back_to_one_docker_stop_per_container_in_order(
@@ -373,158 +336,83 @@ def test_docker_ctl_convenience_wrappers_delegate_to_spec(
     assert docker_ctl.port_conflicts_here() == ["ac-worldserver"]
 
 
-def test_start_staged_never_re_runs_the_one_shot_import(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`compose up -d` restarts ac-db-import; dml-start.sh warns that "was killing the database"."""
-    calls: list[list[str]] = []
-
-    def fake_run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-        calls.append(cmd)
-        if cmd[:2] == ["docker", "ps"]:
-            return subprocess.CompletedProcess(
-                cmd, 0, "ac-database\nac-authserver\nac-worldserver\n", ""
-            )
-        return subprocess.CompletedProcess(cmd, 0, "", "")
-
-    monkeypatch.setattr(runner, "run", fake_run)
-    used_staged = docker.start_staged(SPEC, Path("/srv"), wait_healthy=lambda _c: True)
-
-    assert used_staged is True
-    assert not any(c[:3] == ["docker", "compose", "up"] for c in calls)
-    assert [c for c in calls if c[:2] == ["docker", "start"]] == [
-        ["docker", "start", SPEC.db],
-        ["docker", "start", SPEC.auth],
-        ["docker", "start", SPEC.world],
-    ]
-
-
-def test_start_staged_falls_back_to_compose_up_when_a_container_is_missing(
+def test_start_staged_names_the_services_so_compose_cannot_pick_the_import(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A server that was never brought up MUST go through compose — that is what creates it."""
-    calls: list[list[str]] = []
+    """The whole fix in one assertion: only the three long-running services are asked for.
 
-    def fake_run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-        calls.append(cmd)
-        if cmd[:2] == ["docker", "ps"]:
-            return subprocess.CompletedProcess(cmd, 0, "ac-database\n", "")  # world/auth missing
-        return subprocess.CompletedProcess(cmd, 0, "", "")
-
-    monkeypatch.setattr(runner, "run", fake_run)
-    used_staged = docker.start_staged(SPEC, Path("/srv"), wait_healthy=lambda _c: True)
-
-    assert used_staged is False
-    assert ["docker", "compose", "up", "-d"] in calls
-    assert not any(c[:2] == ["docker", "start"] for c in calls)
-
-
-def test_start_staged_starts_auth_and_world_even_if_the_db_never_reports_healthy(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An unhealthy DB is worth a warning, not a refusal to start the rest."""
-    calls: list[list[str]] = []
-
-    def fake_run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-        calls.append(cmd)
-        if cmd[:2] == ["docker", "ps"]:
-            return subprocess.CompletedProcess(
-                cmd, 0, "ac-database\nac-authserver\nac-worldserver\n", ""
-            )
-        return subprocess.CompletedProcess(cmd, 0, "", "")
-
-    monkeypatch.setattr(runner, "run", fake_run)
-    assert docker.start_staged(SPEC, Path("/srv"), wait_healthy=lambda _c: False) is True
-    assert len([c for c in calls if c[:2] == ["docker", "start"]]) == 3
-
-
-def test_start_staged_recreates_when_a_compose_file_changed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """`docker start` reuses a container as created, so a changed setting would be ignored.
-
-    Republishing a port or setting an AC_* env var edits a compose file; if the
-    staged path ran anyway, the change would silently do nothing. Recreating
-    costs a re-run of the DB import, which is the lesser evil when the user has
-    just changed something on purpose.
+    A bare `compose up -d` starts every service without a running container,
+    which on an installed server means AzerothCore's one-shot `ac-db-import`
+    runs again and takes the database with it. Compose cannot select a service
+    nobody named, and `--no-deps` stops it being pulled back in as a dependency.
     """
     calls: list[list[str]] = []
-    monkeypatch.setattr(
-        runner,
-        "run",
-        _hash_aware_runner(calls, configured="db h1 auth h2 world hZZZ", deployed=_MATCHING_HASHES),
-    )
-    assert docker.start_staged(SPEC, tmp_path, wait_healthy=lambda _c: True) is False
-    assert ["docker", "compose", "up", "-d"] in calls
-    assert not any(c[:2] == ["docker", "start"] for c in calls)
+    cwds: list[Path | None] = []
 
+    def fake_run(cmd: list[str], cwd: Path | None = None):
+        calls.append(cmd)
+        cwds.append(cwd)
+        return _completed()
 
-def test_start_staged_keeps_the_staged_path_when_the_config_still_matches(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """The common case: the deployed containers already match the compose files."""
-    calls: list[list[str]] = []
-    monkeypatch.setattr(runner, "run", _hash_aware_runner(calls))
-    assert docker.start_staged(SPEC, tmp_path, wait_healthy=lambda _c: True) is True
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    server_dir = Path("/tmp/wow")
+    assert docker.start_staged(SPEC, server_dir) is True
+    assert calls == [["docker", "compose", "up", "-d", "--no-deps", SPEC.db, SPEC.auth, SPEC.world]]
+    assert cwds == [server_dir], "must address the project by directory, not by global name"
     assert ["docker", "compose", "up", "-d"] not in calls
 
 
-def test_compose_config_changed_ignores_a_service_with_no_container(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_start_staged_never_starts_a_container_by_global_name(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A pruned one-shot import container must not drag the project into a recreate.
+    """Two installs of one game share container names; only the directory tells them apart.
 
-    The import exits as soon as it succeeds; someone tidying up exited
-    containers removes it. That is not a configuration change, and treating it
-    as one would re-run the very import this whole path exists to avoid.
+    The previous implementation listed containers with a global `docker ps -a`
+    and started them by name, so pressing Start on install B could start
+    install A's server while showing B's tab.
     """
     calls: list[list[str]] = []
     monkeypatch.setattr(
-        runner,
-        "run",
-        _hash_aware_runner(
-            calls,
-            configured="db h1 auth h2 world h3 import h4",
-            deployed="db h1 auth h2 world h3",
-        ),
+        docker.runner, "run", lambda cmd, cwd=None: (calls.append(cmd), _completed())[1]
     )
-    assert docker.compose_config_changed(tmp_path) is False
+    docker.start_staged(SPEC, Path("/tmp/install-b"))
+    assert not any(cmd[:2] == ["docker", "start"] for cmd in calls)
+    assert not any(cmd[:3] == ["docker", "ps", "-a"] for cmd in calls)
 
 
-def test_compose_config_changed_treats_an_unreadable_answer_as_no(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """An unreadable answer must not trigger a needless import re-run."""
+def test_compose_services_defaults_to_the_container_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AzerothCore names its services and containers alike; other games may not."""
+    assert SPEC.compose_services() == (SPEC.db, SPEC.auth, SPEC.world)
+
+    renamed = docker.ContainerSpec(
+        db="c-db",
+        auth="c-auth",
+        world="c-world",
+        ports=(1,),
+        services=("s-db", "s-auth", "s-world"),
+    )
+    calls: list[list[str]] = []
     monkeypatch.setattr(
-        runner, "run", lambda cmd, cwd=None: subprocess.CompletedProcess(cmd, 1, "", "boom")
+        docker.runner, "run", lambda cmd, cwd=None: (calls.append(cmd), _completed())[1]
     )
-    assert docker.compose_config_changed(tmp_path) is False
-
-    calls: list[list[str]] = []
-    monkeypatch.setattr(runner, "run", _hash_aware_runner(calls, deployed=""))
-    assert docker.compose_config_changed(tmp_path) is False
+    docker.start_staged(renamed, Path("/tmp/x"))
+    assert calls[0][-3:] == ["s-db", "s-auth", "s-world"]
 
 
-def test_compose_config_changed_does_not_latch_after_a_partial_recreate(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_stop_staged_raises_when_the_install_is_still_running(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The regression that killed the mtime version: a db-only edit, then quiet again.
+    """A clean exit from `compose stop` is not proof that anything stopped.
 
-    `compose up -d` recreates only the services whose own config changed, so the
-    world container keeps its original creation time. The old mtime comparison
-    stayed True from then on and sent every single start through
-    `compose up -d`, re-running the DB import each time. Hashes settle instead.
+    Telling the user their server is down while players are still connected is
+    the worst available outcome, so the postcondition is checked, not assumed.
     """
-    calls: list[list[str]] = []
-    edited = _hash_aware_runner(
-        calls, configured="db hNEW auth h2 world h3", deployed=_MATCHING_HASHES
-    )
-    monkeypatch.setattr(runner, "run", edited)
-    assert docker.compose_config_changed(tmp_path) is True
 
-    # `compose up -d` recreated the database only; world and auth are untouched.
-    settled = _hash_aware_runner(
-        calls,
-        configured="db hNEW auth h2 world h3",
-        deployed="db hNEW auth h2 world h3",
-    )
-    monkeypatch.setattr(runner, "run", settled)
-    assert docker.compose_config_changed(tmp_path) is False
+    def fake_run(cmd: list[str], cwd: Path | None = None):
+        if cmd[:4] == ["docker", "compose", "ps", "--status"]:
+            return _completed(stdout="deadbeef1234\n")
+        return _completed()
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    with pytest.raises(docker.DockerCommandError, match="still.*running"):
+        docker.stop_staged(SPEC, Path("/tmp/wow"))

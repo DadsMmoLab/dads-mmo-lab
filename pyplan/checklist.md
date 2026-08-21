@@ -205,6 +205,16 @@
     Task Scheduler task with LogonType Interactive. Whether a GUI launcher in the user's own session avoids
     it is untested. Map that error to a comprehensible message before any headless `compose pull`.
 
+- **Start no longer bootstraps an un-imported project — a repair action is now owed (2026-08-22).**
+  `start_staged()` names the three long-running services, so `compose` can never select
+  `ac-db-import`. That is the point, and it holds in every case the old code got wrong. The honest
+  consequence: if an install was interrupted *after* the containers were created but *before* the import
+  finished, pressing Start brings the servers up against an unimported database and they fail. The old
+  code would have re-run the import there — by accident, via the same fallback that destroyed working
+  databases everywhere else. **Needed: an explicit "repair / re-import" action**, deliberately chosen by
+  the user with a warning about what it overwrites, rather than a silent side effect of Start. The
+  installer remains the only thing that runs the import on a healthy path.
+
 - **Open follow-ups from the staged start/stop review (2026-08-22)** — found by a three-lens review whose
   findings were then adjudicated against a live daemon; the must-fix (parallel `docker stop`) and the
   latching config check are already fixed, these three are not:

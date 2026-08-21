@@ -65,7 +65,7 @@ def test_controller_exposes_spec_and_server_dir() -> None:
 def test_start_runs_compose_up_in_server_dir(fake_runner: _FakeRunner) -> None:
     """With no conflicting containers, `start()` delegates to `docker.start()`."""
     Controller(SPEC, SERVER_DIR).start()
-    up = ["docker", "compose", "up", "-d"]
+    up = ["docker", "compose", "up", "-d", "--no-deps", SPEC.db, SPEC.auth, SPEC.world]
     assert up in fake_runner.calls
     assert fake_runner.cwds[fake_runner.calls.index(up)] == SERVER_DIR
 
@@ -84,7 +84,9 @@ def test_start_is_not_blocked_by_our_own_containers(fake_runner: _FakeRunner) ->
     """Our own containers already binding the ports (a restart) are not a conflict."""
     fake_runner.ps_lines = "t-world\t0.0.0.0:2222->2222/tcp\nt-auth\t0.0.0.0:1111->1111/tcp\n"
     Controller(SPEC, SERVER_DIR).start()
-    assert ["docker", "compose", "up", "-d"] in fake_runner.calls
+    assert any(
+        cmd[:5] == ["docker", "compose", "up", "-d", "--no-deps"] for cmd in fake_runner.calls
+    )
 
 
 def test_port_conflicts_filters_out_own_containers(fake_runner: _FakeRunner) -> None:
@@ -175,13 +177,16 @@ def test_wotlk_controller_inherits_everything_with_its_own_spec(
     fake_runner.ps_lines = "ac-database\nac-authserver\nac-worldserver\n"
     assert ctl.status().all_running is True
     ctl.start()  # own containers bind the ports → allowed
-    # The containers already exist, so they are started BY NAME: `compose up -d`
-    # would re-run ac-db-import, which dml-start.sh warns "was killing the
-    # database". The database goes first, then auth and world.
+    # Only the three long-running services are named, so compose cannot select
+    # ac-db-import — which dml-start.sh warns "was killing the database".
     assert ["docker", "compose", "up", "-d"] not in fake_runner.calls
-    started = [c for c in fake_runner.calls if c[:2] == ["docker", "start"]]
-    assert started == [
-        ["docker", "start", "ac-database"],
-        ["docker", "start", "ac-authserver"],
-        ["docker", "start", "ac-worldserver"],
-    ]
+    assert [
+        "docker",
+        "compose",
+        "up",
+        "-d",
+        "--no-deps",
+        "ac-database",
+        "ac-authserver",
+        "ac-worldserver",
+    ] in fake_runner.calls

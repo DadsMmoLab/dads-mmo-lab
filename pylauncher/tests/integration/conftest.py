@@ -28,11 +28,16 @@ from yulon import docker, runner
 # Unusual, fixed ports so the throwaway project never collides with a real
 # install (3724/8085) and so `port_conflicts()` has something to find.
 THROWAWAY_PORTS: tuple[int, ...] = (47321, 47322)
+# The compose services here are `db`/`auth`/`world` while the containers are
+# `yulon-it-*`, so this fixture also exercises the case `services` exists for:
+# a project whose service names differ from its container names. AzerothCore's
+# happen to match, which is exactly why it is worth testing the other way.
 THROWAWAY_SPEC = docker.ContainerSpec(
     db="yulon-it-db",
     auth="yulon-it-auth",
     world="yulon-it-world",
     ports=THROWAWAY_PORTS,
+    services=("db", "auth", "world"),
 )
 THROWAWAY_REALM_HOST = "127.0.0.1"
 THROWAWAY_REALM_PORT = THROWAWAY_PORTS[1]

@@ -9,6 +9,7 @@ bringing the project up/down once per assertion would be slow for no gain.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -117,7 +118,11 @@ def test_launcher_restart_never_reruns_the_one_shot_import(staged_project: Path)
     """
     ctl = Controller(THROWAWAY_SPEC, staged_project)
 
-    ctl.start()
+    # The INSTALLER brings the project up the first time (the bash script runs
+    # `compose up -d --build`), and that is when the one-shot import runs. The
+    # launcher's Start button is for an already-installed server and never
+    # imports — so the install is simulated here rather than pressed.
+    docker.start(staged_project)
     assert ctl.wait_db_healthy(timeout=_DB_TIMEOUT, interval=_INTERVAL) is True
     assert import_runs(staged_project) == 1
 
@@ -129,12 +134,17 @@ def test_launcher_restart_never_reruns_the_one_shot_import(staged_project: Path)
     assert import_runs(staged_project) == 1, "the restart re-ran the one-shot import"
 
 
-def test_changed_compose_file_is_applied_on_the_next_start(staged_project: Path) -> None:
-    """A changed compose file must reach the containers, not be skipped.
+def test_a_changed_compose_file_is_applied_without_re_running_the_import(
+    staged_project: Path,
+) -> None:
+    """The case that used to force the destructive path, now proven harmless.
 
-    `docker start` replays a container exactly as created, so the staged path
-    has to stand aside when the user has edited the compose file — otherwise a
-    changed port or setting silently does nothing.
+    Editing a compose file must actually take effect — `docker start` would
+    replay the container as created and the setting would silently do nothing.
+    The old implementation achieved that by falling back to a bare
+    `compose up -d`, which re-ran the one-shot import: the user changed a port
+    and lost their characters. Naming the services means compose recreates the
+    one that changed and never selects the import at all.
     """
     compose = staged_project / "docker-compose.yml"
     docker.start(staged_project)
@@ -146,12 +156,28 @@ def test_changed_compose_file_is_applied_on_the_next_start(staged_project: Path)
         ),
         encoding="utf-8",
     )
-    staged = docker.start_staged(
-        THROWAWAY_SPEC,
-        staged_project,
-        wait_healthy=lambda name: docker.wait_db_healthy(
-            name, timeout=_DB_TIMEOUT, interval=_INTERVAL
-        ),
-    )
-    assert staged is False, "an edited compose file must fall back to `compose up -d`"
-    assert import_runs(staged_project) == 2
+    assert docker.start_staged(THROWAWAY_SPEC, staged_project) is True
+
+    assert import_runs(staged_project) == 1, "the edit re-ran the one-shot import"
+    world = docker.follow_logs(THROWAWAY_SPEC.world, tail=20)
+    assert any("(edited)" in line for line in world), "the edit never reached the container"
+
+
+def test_a_missing_container_is_recreated_without_re_running_the_import(
+    staged_project: Path,
+) -> None:
+    """A container removed by hand is not evidence that the server was never installed.
+
+    The old implementation equated "one of the three is missing" with "first
+    install" and ran `compose up -d`, taking the database with it — while the
+    persistent volume was sitting there intact.
+    """
+    docker.start(staged_project)
+    assert import_runs(staged_project) == 1
+
+    subprocess.run(["docker", "rm", "-f", THROWAWAY_SPEC.world], capture_output=True, check=False)
+    assert docker.container_exists(THROWAWAY_SPEC.world) is False
+
+    assert docker.start_staged(THROWAWAY_SPEC, staged_project) is True
+    assert docker.container_exists(THROWAWAY_SPEC.world) is True
+    assert import_runs(staged_project) == 1, "recreating a container re-ran the import"
