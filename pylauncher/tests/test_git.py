@@ -27,7 +27,9 @@ def seen(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     """Record every argv `yulon.runner.run` is asked for; answer success."""
     calls: list[list[str]] = []
 
-    def fake_run(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    def fake_run(
+        argv: list[str], cwd: Path | None = None, env: object = None
+    ) -> subprocess.CompletedProcess[str]:
         calls.append(argv)
         return _completed()
 
@@ -49,7 +51,14 @@ def test_clone_pins_line_endings_so_a_windows_checkout_is_not_crlf(
     """
     git.RunnerGit().clone(git.CloneSpec(url="https://example/repo.git", dest=tmp_path / "core"))
     argv = seen[0]
+    # The wrapper form covers this invocation ...
     assert argv[:5] == ["git", "-c", "core.autocrlf=false", "-c", "core.eol=lf"]
+    # ... and `clone --config` is what WRITES it into the new repository, which
+    # is the half that survives to the next fetch. Measured: after a clone with
+    # only `git -c`, the new .git/config carries no core.* keys at all.
+    assert "--config" in argv
+    assert argv[argv.index("--config") + 1] == "core.autocrlf=false"
+    assert "core.eol=lf" in argv
     assert "clone" in argv
 
 
@@ -79,9 +88,30 @@ def test_update_of_an_existing_clone_fetches_and_resets(
     (dest / ".git").mkdir(parents=True)
     git.RunnerGit().clone(git.CloneSpec(url="https://example/mod.git", dest=dest, branch="master"))
     assert seen == [
-        ["git", "fetch", "--depth=1", "origin", "master"],
-        ["git", "reset", "--hard", "FETCH_HEAD"],
+        ["git", "-c", "core.autocrlf=false", "-c", "core.eol=lf", "fetch", "origin", "master"],
+        ["git", "-c", "core.autocrlf=false", "-c", "core.eol=lf", "reset", "--hard", "FETCH_HEAD"],
     ]
+
+
+def test_update_never_changes_the_depth_of_an_existing_clone(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """`git fetch --depth=1` TRUNCATES a full clone; the update path must not do that.
+
+    Measured: a repository with five commits, fetched once with `--depth=1` and
+    reset, becomes shallow with one — history destroyed in place. The reverse is
+    just as bad: a shallow clone never becomes full without `--unshallow`, which
+    was never issued. Either way the spec's `depth` would be decided by whatever
+    the last update happened to do, and for AzerothCore a shallow clone makes
+    CMake bake the wrong revision into a three-hour build.
+    """
+    for depth in (1, None, 50):
+        seen.clear()
+        dest = tmp_path / f"clone{depth}"
+        (dest / ".git").mkdir(parents=True)
+        git.RunnerGit().clone(git.CloneSpec(url="https://example/m.git", dest=dest, depth=depth))
+        assert not any("--depth" in arg for argv in seen for arg in argv), depth
+        assert not any("--unshallow" in arg for argv in seen for arg in argv), depth
 
 
 # -- failures ---------------------------------------------------------------
@@ -94,7 +124,9 @@ def test_a_failed_git_carries_gits_own_last_words(
     monkeypatch.setattr(
         runner,
         "run",
-        lambda argv, cwd=None: _completed(returncode=128, stderr="fatal: repository not found"),
+        lambda argv, cwd=None, env=None: _completed(
+            returncode=128, stderr="fatal: repository not found"
+        ),
     )
     with pytest.raises(git.GitError, match="repository not found"):
         git.RunnerGit().clone(git.CloneSpec(url="https://example/nope.git", dest=tmp_path / "x"))
@@ -148,16 +180,62 @@ def test_container_git_mounts_the_destination_and_clones_into_it(
     argv = seen[0]
     assert argv[:4] == ["docker", "run", "--rm", "-v"]
     assert argv[4] == f"{dest}:/git"
+    assert argv[5:7] == ["-w", "/git"], "the workdir must be stated, not inherited from the image"
     assert "core.autocrlf=false" in argv, "the CRLF trap applies inside the container too"
     assert argv[-2:] == ["https://example/core.git", "."]
     assert "--depth" not in argv
+    assert "@sha256:" in " ".join(argv), "the image must be pinned by digest, not by a moving tag"
+
+
+def test_both_git_implementations_check_out_the_same_sparse_tree(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """One Protocol, two implementations — they must not disagree about the result.
+
+    `git clone --sparse` turns cone mode ON, and cone mode materializes every
+    file at the repo root and in each parent directory of the requested path.
+    Measured on a repo with ROOT.md, entrypoint.sh, guides/GUIDE.md and
+    guides/x/a.txt with sparse_path="guides/x": RunnerGit yields exactly
+    guides/x/a.txt, cone mode yields all four. Downstream `clone.glob(...)` in
+    apply.py would then match different files depending on which back-end ran —
+    a bug that reproduces on one OS only.
+    """
+    spec = git.CloneSpec(url="https://example/r.git", dest=tmp_path / "keg", sparse_path="guides/x")
+    git.ContainerGit().clone(spec)
+    sparse = [argv for argv in seen if "sparse-checkout" in argv]
+    assert sparse, "expected a sparse-checkout call"
+    assert "--no-cone" in sparse[0]
+
+
+def test_git_is_never_left_waiting_on_an_invisible_password_prompt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A private or renamed repo answers 401, and git then asks for a username.
+
+    On Windows that request reaches Git Credential Manager, which opens a
+    graphical dialog — from a launcher with no console that is an invisible
+    modal and an install that hangs forever with no output.
+    """
+    envs: list[dict[str, str] | None] = []
+
+    def fake_run(argv: list[str], cwd: Path | None = None, env=None):
+        envs.append(env)
+        return _completed()
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    git.RunnerGit().clone(git.CloneSpec(url="https://example/private.git", dest=tmp_path / "p"))
+    assert envs and envs[0] is not None
+    assert envs[0]["GIT_TERMINAL_PROMPT"] == "0"
+    assert envs[0]["GIT_ASKPASS"] == ""
 
 
 def test_container_git_reports_a_failure_as_a_git_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(
-        runner, "run", lambda argv, cwd=None: _completed(returncode=1, stderr="could not resolve")
+        runner,
+        "run",
+        lambda argv, cwd=None, env=None: _completed(returncode=1, stderr="could not resolve"),
     )
     with pytest.raises(git.GitError, match="could not resolve"):
         git.ContainerGit().clone(

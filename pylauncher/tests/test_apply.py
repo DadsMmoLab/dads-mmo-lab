@@ -293,7 +293,9 @@ def test_runner_git_sparse_clone_sequence(monkeypatch: pytest.MonkeyPatch, tmp_p
 
     seen: list[list[str]] = []
 
-    def fake_run(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    def fake_run(
+        argv: list[str], cwd: Path | None = None, env: object = None
+    ) -> subprocess.CompletedProcess[str]:
         seen.append(argv)
         return subprocess.CompletedProcess(argv, 0, "", "")
 

@@ -44,10 +44,34 @@ logger = get_logger(__name__)
 
 RunCmd = Callable[[list[str]], subprocess.CompletedProcess[str]]
 
-# Pinned on every clone/update; see the module docstring.
+# Applied to a running git process. `git -c k=v` is the *wrapper* form: it
+# affects that invocation and writes nothing into the repository, so it must be
+# repeated on every later command against the same clone.
 _LINE_ENDING_ARGS = ["-c", "core.autocrlf=false", "-c", "core.eol=lf"]
 
-_CONTAINER_GIT_IMAGE = "alpine/git:latest"
+# Written INTO the new repository, so later fetch/reset/checkout inherit it even
+# when nobody remembers to pass the flags. `git clone --config` is the form that
+# persists; `git -c` is not. Measured: after `git -c core.autocrlf=false clone`,
+# the new .git/config contains no core.* keys at all, and the next
+# `git reset --hard` re-checks-out the files it rewrites with CRLF on Windows —
+# reintroducing the `/bin/sh^M: bad interpreter` failure this module exists to
+# prevent, on the update path rather than the clone path.
+_LINE_ENDING_CONFIG = [
+    "--config",
+    "core.autocrlf=false",
+    "--config",
+    "core.eol=lf",
+]
+
+# Pinned by digest, not by tag. This image is handed a writable bind mount of
+# the destination directory, so "whatever :latest resolves to today" is a
+# third party with write access to a user's install. The tag is kept alongside
+# for readability; the digest is what docker actually resolves.
+# Resolved 2026-08-22 by pulling alpine/git:2.49.1 (git version 2.49.1) and
+# reading back its RepoDigest; re-resolve the same way when bumping.
+_CONTAINER_GIT_IMAGE = (
+    "alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26"
+)
 
 MISSING_GIT_HELP = {
     "linux": "Install git with your package manager (e.g. `sudo apt install git`) and try again.",
@@ -121,8 +145,26 @@ def git_available(run: RunCmd | None = None) -> bool:
         return False
 
 
+def _no_prompt_env() -> dict[str, str]:
+    """The environment git runs in: never interactive, whatever the host thinks.
+
+    A repository that answers 401 — renamed, deleted, or made private — makes
+    git ask for a username. On Windows that request goes to Git Credential
+    Manager, which opens a *graphical* dialog; from a launcher with no console
+    that is an invisible modal and an install that hangs forever with no output.
+    `GIT_TERMINAL_PROMPT=0` and an empty `GIT_ASKPASS`/`SSH_ASKPASS` turn it into
+    an immediate, readable failure instead.
+    """
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_ASKPASS"] = ""
+    env["SSH_ASKPASS"] = ""
+    env["GCM_INTERACTIVE"] = "never"
+    return env
+
+
 def _run_git(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-    proc = runner.run(argv, cwd=cwd)
+    proc = runner.run(argv, cwd=cwd, env=_no_prompt_env())
     if proc.returncode != 0:
         raise GitError(f"{' '.join(argv)} exited {proc.returncode}: {proc.stderr.strip()}")
     return proc
@@ -139,7 +181,13 @@ class RunnerGit:
             shutil.rmtree(spec.dest)  # a non-git leftover; wow-manage.sh does the same
         spec.dest.parent.mkdir(parents=True, exist_ok=True)
         if spec.sparse_path is None:
-            argv = ["git", *_LINE_ENDING_ARGS, "clone", *_depth_args(spec.depth)]
+            argv = [
+                "git",
+                *_LINE_ENDING_ARGS,
+                "clone",
+                *_LINE_ENDING_CONFIG,
+                *_depth_args(spec.depth),
+            ]
             if spec.branch:
                 argv += ["--branch", spec.branch]
             _run_git([*argv, spec.url, str(spec.dest)])
@@ -163,9 +211,23 @@ class RunnerGit:
         _run_git(pull, cwd=dest)
 
     def _update(self, spec: CloneSpec) -> None:
-        fetch = ["git", "fetch", *_pull_depth_args(spec.depth), "origin", spec.branch or "HEAD"]
-        _run_git(fetch, cwd=spec.dest)
-        _run_git(["git", "reset", "--hard", "FETCH_HEAD"], cwd=spec.dest)
+        """Fetch and reset an existing clone, without changing its depth.
+
+        Depth is deliberately NOT passed here. `git fetch --depth=1` against a
+        full clone *truncates* it in place — measured: a repository with five
+        commits becomes shallow with one — and a shallow clone fetched without
+        `--unshallow` stays shallow forever. Either way the depth the caller
+        asked for on the spec would be silently overridden by whatever the last
+        update happened to do, and for AzerothCore that means CMake reading the
+        wrong revision into a three-hour build. Leaving depth alone keeps each
+        clone the shape it was created with.
+
+        The line-ending flags are repeated because `git -c` did not persist into
+        this repository if it was cloned by an older build of this launcher.
+        """
+        ref = spec.branch or "HEAD"
+        _run_git(["git", *_LINE_ENDING_ARGS, "fetch", "origin", ref], cwd=spec.dest)
+        _run_git(["git", *_LINE_ENDING_ARGS, "reset", "--hard", "FETCH_HEAD"], cwd=spec.dest)
 
 
 def _pull_depth_args(depth: int | None) -> list[str]:
@@ -201,7 +263,7 @@ class ContainerGit:
         if spec.dest.exists():
             shutil.rmtree(spec.dest)
         spec.dest.mkdir(parents=True, exist_ok=True)
-        argv = ["clone", *_depth_args(spec.depth)]
+        argv = ["clone", *_LINE_ENDING_CONFIG, *_depth_args(spec.depth)]
         if spec.branch:
             argv += ["--branch", spec.branch]
         if spec.sparse_path is not None:
@@ -209,7 +271,15 @@ class ContainerGit:
         # The clone target is `.` because the mount point *is* the destination.
         self._run(spec, [*argv, spec.url, "."])
         if spec.sparse_path is not None:
-            self._run(spec, ["sparse-checkout", "set", spec.sparse_path.rstrip("/")])
+            # --no-cone, or this checks out a DIFFERENT tree than RunnerGit.
+            # `clone --sparse` turns cone mode on, and cone mode materializes
+            # every file at the repo root and directly inside each parent
+            # directory of the requested path. Measured on a repo with
+            # ROOT.md, entrypoint.sh, guides/GUIDE.md and guides/x/a.txt,
+            # sparse_path="guides/x": RunnerGit yields exactly guides/x/a.txt,
+            # cone mode yields all four. Two implementations of one Protocol
+            # must not disagree about what they produce.
+            self._run(spec, ["sparse-checkout", "set", "--no-cone", spec.sparse_path.rstrip("/")])
 
     def _run(self, spec: CloneSpec, git_args: list[str]) -> None:
         argv = [
@@ -218,12 +288,18 @@ class ContainerGit:
             "--rm",
             "-v",
             f"{spec.dest}:/git",
+            # State the working directory rather than inheriting the image's.
+            # `image` is a public field, so an override would otherwise clone
+            # into the wrong place — silently, since `.` would resolve
+            # somewhere inside the container instead of the bind mount.
+            "-w",
+            "/git",
             *self._user_args(),
             self.image,
             *_LINE_ENDING_ARGS,
             *git_args,
         ]
-        proc = runner.run(argv)
+        proc = runner.run(argv, env=_no_prompt_env())
         if proc.returncode != 0:
             raise GitError(f"containerized git {' '.join(git_args)} failed: {proc.stderr.strip()}")
 

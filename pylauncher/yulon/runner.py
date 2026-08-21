@@ -111,7 +111,11 @@ def stream(command: list[str], cwd: Path | None = None) -> Iterator[str]:
             proc.stderr.close()
 
 
-def run(command: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+def run(
+    command: list[str],
+    cwd: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     """Run a command to completion and return the completed process.
 
     Captures output (text mode, UTF-8) rather than streaming it. Use `stream()`
@@ -120,6 +124,13 @@ def run(command: list[str], cwd: Path | None = None) -> subprocess.CompletedProc
     Args:
         command: The argv list to execute (no shell interpolation).
         cwd: Optional working directory for the child process.
+        env: Complete environment for the child, or None to inherit this
+            process's. Callers that only want to *add* a variable should copy
+            `os.environ` and extend it — this replaces the environment wholesale,
+            exactly like `subprocess.run`. It exists so a secret can be handed
+            over the environment instead of argv (`/proc/<pid>/cmdline` is
+            world-readable on Linux; `environ` is not), and so a child can be
+            told not to prompt.
 
     Returns:
         The completed process (stdout/stderr available as strings). Does not
@@ -129,6 +140,7 @@ def run(command: list[str], cwd: Path | None = None) -> subprocess.CompletedProc
     return subprocess.run(
         command,
         cwd=_cwd_arg(cwd),
+        env=dict(env) if env is not None else None,
         capture_output=True,
         text=True,
         encoding="utf-8",
