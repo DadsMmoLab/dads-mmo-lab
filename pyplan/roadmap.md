@@ -1,11 +1,11 @@
 # Yu'lon Roadmap
 
-> **Audience:** humans and LLM coding agents. This file is the *execution* companion to
+> **Audience:** humans and LLM coding agents. This file is the _execution_ companion to
 > `pyplan/README.md` (the design doc) and `pyplan/style-guide.md` (the code rules). It breaks the
 > README's five phases into concrete, ordered, checkable steps.
 >
-> **Precedence:** `README.md` wins on *what* to build and *why*; `style-guide.md` wins on *how* to
-> write it; this file wins on *what order to do it in*. If they conflict, flag it — don't silently
+> **Precedence:** `README.md` wins on _what_ to build and _why_; `style-guide.md` wins on _how_ to
+> write it; this file wins on _what order to do it in_. If they conflict, flag it — don't silently
 > pick one.
 >
 > **Conventions used throughout:** games are referred to by acronym only (WoW, RS, MS, MU — see
@@ -37,31 +37,31 @@
 1. **Pin the toolchain.** Add `requirements-dev.txt` with `pytest`, `mypy` (or `pyright`), `black`,
    and `ruff`, pinned to exact versions. **[style]** — style-guide §2 requires a static type
    checker in CI from Phase 1 onward.
-   - *Definition of done:* `pip install -r requirements-dev.txt` succeeds on a clean venv.
+   - _Definition of done:_ `pip install -r requirements-dev.txt` succeeds on a clean venv.
 2. **Add a CI lint/type/test job** (separate from the release matrix in `release.yml`). It runs
    `ruff`, `mypy`/`pyright`, and `pytest` on every push/PR.
-   - *Definition of done:* a deliberately broken commit fails CI on type/lint, not just tests.
+   - _Definition of done:_ a deliberately broken commit fails CI on type/lint, not just tests.
 3. **Resolve remaining naming debt.** Confirm no uppercase filenames remain under `pylauncher/`,
    and that every importable package directory uses `snake_case` (never hyphens), per
    style-guide §6a. **[style]**
-   - *Definition of done:* `find pylauncher -name '*[A-Z]*'` returns nothing unexpected, and
+   - _Definition of done:_ `find pylauncher -name '*[A-Z]*'` returns nothing unexpected, and
      every directory containing `__init__.py` has a valid, importable, `snake_case` name.
 4. **Pin an AzerothCore compose fixture for integration tests.** Choose and document a specific
    AzerothCore version/tag and compose file used by Phase 1.5's integration suite and by CI, so
    "a real running AzerothCore compose project" is a reproducible fixture, not an ambient
    assumption.
-   - *Definition of done:* a documented fixture (version pin + compose file location) that any
+   - _Definition of done:_ a documented fixture (version pin + compose file location) that any
      contributor or CI runner can bring up identically.
 5. **Write a minimal contributor/dev-setup doc for `pylauncher/`.** Cover venv creation,
    installing `requirements.txt` + `requirements-dev.txt`, running `main.py`, and running
    `pytest`/`mypy`/`ruff` locally.
-   - *Definition of done:* a new contributor can go from clone to a passing local `pytest` run
+   - _Definition of done:_ a new contributor can go from clone to a passing local `pytest` run
      using only this doc.
 6. **Establish a shared logging convention.** Decide the `logging` setup (logger naming,
    format, where logs are written per-OS — likely alongside `config_dir()` from §11) that
    `runner.py`, `docker.py`, and every later module will use. **[style]** — style-guide §2
    mandates `logging`, not `print`, everywhere except throwaway local debugging.
-   - *Definition of done:* a `logging.getLogger(__name__)`-based helper exists and is used by at
+   - _Definition of done:_ a `logging.getLogger(__name__)`-based helper exists and is used by at
      least one Phase 1 module as a working example for the rest of the codebase to follow.
 
 ---
@@ -76,7 +76,7 @@
    `run(command, cwd)` returning a `CompletedProcess`. **[style]** — fully typed signatures,
    `pathlib.Path` for `cwd`, context-managed `Popen`, no bare `except`.
 2. Handle both stdout and stderr without deadlock (read both streams; merge or tag them).
-3. *Definition of done:* unit tests mock `subprocess.Popen` and assert line-by-line streaming
+3. _Definition of done:_ unit tests mock `subprocess.Popen` and assert line-by-line streaming
    order and exit-code propagation.
 
 ### 1.2 `platform.py` — OS detection + config dir
@@ -87,7 +87,7 @@
    **[style]** — `pathlib.Path`, no string path munging.
 3. Stub `ensure_docker()` / `ensure_wsl2()` (raise `NotImplementedError` with a clear message;
    real logic lands in Phase 5). **[style]** — keep provisioning out of this phase's scope.
-4. *Definition of done:* `config_dir()` returns the correct path on each OS (tested via
+4. _Definition of done:_ `config_dir()` returns the correct path on each OS (tested via
    monkeypatched `sys.platform`/env).
 
 ### 1.3 `docker.py` — shared Docker lifecycle logic
@@ -95,7 +95,7 @@
 Each per-game `controller_<acronym>/docker_ctl.py` file stays per-game (matching README §5 and
 the scaffold on disk), but its `start`/`stop`/`status`/port-conflict logic is implemented **once**
 in a shared `yulon/docker.py` module that each per-game `docker_ctl.py` re-exports — the
-*behavior* is shared and DRY (README §12); the *file* stays per-game (README §5, style-guide §3).
+_behavior_ is shared and DRY (README §12); the _file_ stays per-game (README §5, style-guide §3).
 
 1. Implement the shared `start(server_dir)`, `stop(server_dir)`, `status()`, `health(container)`
    behavior (used by every per-game `docker_ctl.py`) by shelling out to the `docker` CLI via
@@ -105,7 +105,7 @@ in a shared `yulon/docker.py` module that each per-game `docker_ctl.py` re-expor
 3. Implement the **single-instance / port-conflict check** once, in this shared module
    (README §12). **[style]** — DRY: this must be used by every per-game controller, never
    reimplemented.
-4. *Definition of done:* `start()`/`stop()`/`status()` work against a real running AzerothCore
+4. _Definition of done:_ `start()`/`stop()`/`status()` work against a real running AzerothCore
    compose project (per the Phase 0.4 fixture); the port-conflict check correctly blocks a second
    start.
 
@@ -115,10 +115,10 @@ in a shared `yulon/docker.py` module that each per-game `docker_ctl.py` re-expor
    (`controller_<acronym>/`) subclass, holding the shared `yulon.docker` behavior and the
    port-conflict check from 1.3. **[style]** — composition over inheritance except where "is-a"
    is genuine (style-guide §2); call-down/signal-up (§5).
-2. **Out of scope for this step:** manifest-driven behavior. The base `Controller` does *not* read
+2. **Out of scope for this step:** manifest-driven behavior. The base `Controller` does _not_ read
    or know about module/mod manifests yet — that's Phase 2.3's `modules.py`, layered on top later.
    Don't stub manifest reads here prematurely.
-3. *Definition of done:* `controller_wow_wotlk/` can subclass it and inherit start/stop/status
+3. _Definition of done:_ `controller_wow_wotlk/` can subclass it and inherit start/stop/status
    with zero reimplementation.
 
 ### 1.5 Tests
@@ -126,7 +126,7 @@ in a shared `yulon/docker.py` module that each per-game `docker_ctl.py` re-expor
 1. `pytest` unit tests (mocked `subprocess`) for `runner.py` and `docker.py` control flow.
 2. A small integration suite (marked/skipped when Docker is absent) exercising `docker.py`
    against a real compose project.
-3. *Definition of done:* mocked suite passes in CI without Docker; integration suite passes on a
+3. _Definition of done:_ mocked suite passes in CI without Docker; integration suite passes on a
    machine with Docker.
 
 **Phase 1 exit criteria (README §7):** `docker.start()`/`stop()`/`status()` (via the WotLK
@@ -146,7 +146,7 @@ in a shared `yulon/docker.py` module that each per-game `docker_ctl.py` re-expor
    (`wow-wotlk`, never "Wrath of the Lich King").
 2. Add a `repo` allow-list rule: reject any manifest whose `repo` isn't a legitimate open-source
    source (README §3a). **[style]** — this is a data-validation concern, not UI.
-3. *Definition of done:* a schema document (or Pydantic model) exists and validates a sample
+3. _Definition of done:_ a schema document (or Pydantic model) exists and validates a sample
    manifest.
 
 ### 2.2 Port WotLK modules from `wow-manage.sh`
@@ -157,7 +157,7 @@ in a shared `yulon/docker.py` module that each per-game `docker_ctl.py` re-expor
 2. Capture the tacit knowledge explicitly: config-key differences (e.g. `AuctionHouseBot.GUIDs`
    plural vs `GUID` singular + `Account`), SQL apply ordering/globs, build targets, and
    dependencies (README §6 "Tacit knowledge to port").
-3. *Definition of done:* the full module list and their config nuances are expressed as JSON; no
+3. _Definition of done:_ the full module list and their config nuances are expressed as JSON; no
    Python change is needed to add a module.
 
 ### 2.3 `modules.py` — load/validate/fetch
@@ -166,7 +166,7 @@ in a shared `yulon/docker.py` module that each per-game `docker_ctl.py` re-expor
    **[style]** — convert JSON to a dataclass/Pydantic model at the parse boundary; no bare `Any`
    beyond `json.load()` (style-guide §2).
 2. Implement manifest fetch-from-GitHub with a cache + ETag/timestamp (README §11).
-3. *Definition of done:* loading a valid manifest yields a typed model; an invalid `repo` is
+3. _Definition of done:_ loading a valid manifest yields a typed model; an invalid `repo` is
    rejected.
 
 **Phase 2 exit criteria (README §7):** module list and config nuances fully expressed as JSON; no
@@ -183,7 +183,7 @@ code changes needed to add a module.
 1. Populate `catalog.json` with install metadata per game (repo, script, ports, client steps),
    using acronyms for `game` ids. **[style]** — acronyms only (§6). **v1 scope is exactly four
    servers:** WoW (Vanilla 1.12), WoW TBC, WoW WotLK, and WoW Tortoise.
-2. *Definition of done:* the four v1 servers are described in the catalog (WotLK fully first;
+2. _Definition of done:_ the four v1 servers are described in the catalog (WotLK fully first;
    the other three follow the same `game`-id + metadata shape).
 
 ### 3.2 `installer.py` — orchestration (Phase 3a)
@@ -195,7 +195,7 @@ code changes needed to add a module.
    (README §3a).
 3. Provisions Docker + the virtualization layer and installs modules/mods as part of the install
    path (README §1 goal 5, §3b) — no dependency is left for the user to install by hand.
-4. *Definition of done:* `installer.run()` completes a working server install with zero shell
+4. _Definition of done:_ `installer.run()` completes a working server install with zero shell
    interaction, **invoked directly via a CLI entry point or test harness (no GUI exists yet —
    Phase 4 hasn't built the "install" button)**. Verified on a platform where Docker is already
    manually installed (realistically Linux with Docker Engine present) — automatic Windows/macOS
@@ -206,7 +206,7 @@ code changes needed to add a module.
 1. Wire the `platform.ensure_docker()` / `ensure_wsl2()` stubs into the install path so they fail
    gracefully (a clean, logged, catchable error — not a crash) until Phase 5 lands.
    **[blocked]** — real provisioning logic is Phase 5.
-2. *Definition of done:* on a machine without Docker present, `installer.run()` reports a clear
+2. _Definition of done:_ on a machine without Docker present, `installer.run()` reports a clear
    "Docker isn't available yet — automatic setup lands in a future update" error rather than an
    unhandled exception or silent hang.
 
@@ -223,11 +223,11 @@ code changes needed to add a module.
    SQL and the `0.0.0.0` vs `127.0.0.1` port-binding check.
 3. Detect and **prompt** (not silently fail) for the steps the app can't automate: DHCP
    reservation + TCP port forwarding on the router, and CGNAT/public-IP-change/DuckDNS guidance.
-4. *Definition of done:* LAN mode completes end-to-end with no shell; internet mode detects a
+4. _Definition of done:_ LAN mode completes end-to-end with no shell; internet mode detects a
    missing forward/CGNAT block and reports a clear, actionable message.
 
 **Phase 3 exit criteria (README §7, with the caveat above):** one-game install completes with
-zero shell interaction *at the orchestration layer*, verified on at least one platform that
+zero shell interaction _at the orchestration layer_, verified on at least one platform that
 already has Docker installed. The literal "click install" end-user experience is only exercisable
 once Phase 4's `catalog_view.py` exists.
 
@@ -242,14 +242,14 @@ once Phase 4's `catalog_view.py` exists.
 1. Implement a reusable widget that consumes `runner.stream()` output without blocking the UI
    thread (Qt thread/worker + signal). **[style]** — call-down/signal-up (§5): the worker emits
    signals; the panel doesn't reach into the runner's internals.
-2. *Definition of done:* a long-running subprocess streams into the panel live, UI stays
+2. _Definition of done:_ a long-running subprocess streams into the panel live, UI stays
    responsive.
 
 ### 4.2 `catalog_view.py` — browsable catalog
 
 1. Render the catalog from `catalog.json`; each game tile triggers `installer.run()`.
    **[style]** — the view delegates to the installer; no Docker/business logic in the view (§3).
-2. *Definition of done:* selecting a game and clicking install drives the Phase 3 installer.
+2. _Definition of done:_ selecting a game and clicking install drives the Phase 3 installer.
 
 ### 4.3 `controller_view.py` — per-install management
 
@@ -261,7 +261,7 @@ once Phase 4's `catalog_view.py` exists.
 3. Surface the LAN / internet-play networking auto-setup (§3.4) as a selectable control, showing
    progress and the router-step prompts the app can't automate. **[style]** — the view delegates
    to §3.4's helpers via the controller; no `netsh`/`ufw` shelling in the view (§3/§5).
-4. *Definition of done:* full start/stop/logs/accounts/module-toggle workflow via GUI only.
+4. _Definition of done:_ full start/stop/logs/accounts/module-toggle workflow via GUI only.
 
 **Phase 4 exit criteria (README §7):** full start/stop/logs/accounts/module-toggle workflow via
 GUI only.
@@ -279,10 +279,10 @@ GUI only.
    fallback dialog (README §8). **[style]** — keep this in `platform.py`; the rest of the app
    stays 100% shared (README §3).
 2. Update user-facing docs to honestly communicate that the underlying virtualization (WSL2 on
-   Windows, a Linux VM via Docker Desktop on macOS) is *hidden*, not *removed* — per the README §8
+   Windows, a Linux VM via Docker Desktop on macOS) is _hidden_, not _removed_ — per the README §8
    mitigation for the "no WSL expectation vs reality" risk. This is a doc deliverable, not just
    code.
-3. *Definition of done:* a fresh Windows/macOS machine reaches a working Docker environment with
+3. _Definition of done:_ a fresh Windows/macOS machine reaches a working Docker environment with
    no user shell interaction, and the shipped user docs accurately describe what's happening under
    the hood for anyone who goes looking.
 
@@ -291,21 +291,21 @@ GUI only.
 1. Finalize `build/pylauncher.spec` to bundle `manifests/` and `yulon/` correctly for each target.
    **Bundles a self-contained Python interpreter + all deps (PySide6, etc.) so end users never
    install Python themselves** (README §3b).
-2. *Definition of done:* `pyinstaller build/pylauncher.spec` produces a runnable binary locally.
+2. _Definition of done:_ `pyinstaller build/pylauncher.spec` produces a runnable binary locally.
 
 ### 5.3 GitHub Actions release matrix
 
 1. Complete `.github/workflows/release.yml`: `ubuntu-latest` → `.AppImage` (via `appimagetool`),
    `windows-latest` → `.exe`, `macos-latest` → `.dmg`. **[style]** — never attempt local
    cross-builds (README §8).
-2. *Definition of done:* `git push` of a `v*` tag produces all three artifacts automatically.
+2. _Definition of done:_ `git push` of a `v*` tag produces all three artifacts automatically.
 
 ### 5.4 Application self-update check (README §10)
 
 1. Implement the GitHub Releases version check (compare running `__version__` against the latest
    tag) and a non-blocking notify banner/dialog with a download link, per README §10 and §14
    Next Action 6. **v1 scope is check + notify only** — no auto-download/auto-replace.
-2. *Definition of done:* running an old build against a newer published release shows the notify
+2. _Definition of done:_ running an old build against a newer published release shows the notify
    banner; running the latest build shows nothing.
 
 **Phase 5 exit criteria (README §7):** `git push` produces all three platform artifacts
@@ -319,11 +319,27 @@ automatically.
 > reimplementation of installers). Raised to its own phase because the macOS pre-alpha run made
 > the gap concrete: **all four v1 installers are Linux-only bash scripts** gated on
 > `[[ "$OSTYPE" == "linux-gnu"* ]]` and hard-coupled to `pacman`/`systemctl`/`sudo`, so on macOS
-> (`darwin*`) and native Windows they fail fast with "Requires Linux (SteamOS)" — *before* the
+> (`darwin*`) and native Windows they fail fast with "Requires Linux (SteamOS)" — _before_ the
 > Docker provisioning the app already does can help. This is the "install start but console shows
 > nothing" failure: the script streams a few banner lines, exits 1, and the Catalog surfaces a
 > bare "install failed". The app must either run these servers cross-platform or refuse to offer
 > them off Linux.
+>
+> **Runtime strategy (decided):** use **Docker Desktop** as the container runtime on _both_
+> Windows and macOS. It is materially easier than managing the VMs directly — Docker Desktop
+> already owns the Linux VM (macOS) and the WSL2 backend (Windows), so the app just provisions
+> Docker Desktop (which 5.1 already does) and drives `docker compose` against it. We do **not**
+> build a bespoke VM/WSL2 manager, and we do **not** reimplement installers natively just to
+> avoid Docker Desktop — the Linux kernel constraint is satisfied by Docker Desktop itself.
+>
+> **Scope gate (decided): WotLK first, exclusively.** Phase 6 targets **WoW WotLK only** — it is
+> the one v1 server with a full controller (`controller_wow_wotlk/`), so it is the one place
+> "100% working coverage" is achievable and checkable end-to-end right now. 6.0's script rehome
+> may touch all four games mechanically (it is a path move, not a feature), but 6.1–6.5's actual
+> gating/installer/feature work targets WotLK only. **TBC, Vanilla, and Tortoise's own
+> cross-platform install paths and controllers are explicitly out of scope for Phase 6 — they are
+> Phase 7.** Phase 7 must not start until Phase 6's WotLK exit criteria (6.5) are fully met on
+> Linux, macOS, and native Windows.
 
 ### 6.0 Rehome the install scripts (prerequisite refactor)
 
@@ -344,7 +360,7 @@ automatically.
    needed) so the frozen bundle still finds the scripts under `catalog/installers/**`.
 4. Update tests that pin the old `archive/guides/...` paths (`test_catalog.py`'s script-existence
    pins; `test_installer.py`'s `script_for` table).
-5. *Definition of done:* all four installers resolve, run, and bundle from the new home; `pytest`
+5. _Definition of done:_ all four installers resolve, run, and bundle from the new home; `pytest`
    green; no `archive/guides/**/install-*.sh` reference remains in `catalog.json`, the spec, or
    tests. 6.2/6.3 then add their macOS/Windows variants into this same directory.
 
@@ -356,34 +372,35 @@ automatically.
 2. Have `catalog/installer.py` (or `catalog_view.py`) refuse to start an install whose script does
    not support the current `platform.detect()`, with a clear, honest message naming the gap
    ("this server's installer needs Linux/WSL") instead of streaming a script that exits 1.
-3. Surface the install script's *actual* output (not just "exited with status N") in the failed
+3. Surface the install script's _actual_ output (not just "exited with status N") in the failed
    dialog, so a script's own error is never swallowed.
-4. *Definition of done:* clicking Install for WotLK on macOS shows the honest unsupported message
+4. _Definition of done:_ clicking Install for WotLK on macOS shows the honest unsupported message
    before any subprocess runs; the failed-dialog path shows the script's real error text.
 
 ### 6.2 macOS install path (the macOS pre-alpha blocker)
 
-1. Provide a macOS-installable path for each of the four v1 servers. Since the current scripts are
-   SteamOS/`pacman`-bound and Docker Desktop already supplies the Linux kernel on macOS, the
-   natural approach is a **macOS variant** of each installer (or a shared reimplementation, per
-   README §9 "Phase 3b") that assumes Docker Desktop is present (the app already provisions it via
-   `ensure_docker()`) and drives `docker compose` directly — no `pacman`, `systemctl`, or `sudo`
-   package installs. **[style]** — keep per-game specifics in `catalog.json`/manifests; one shared
-   implementation (§4).
+1. Provide a macOS-installable path for each of the four v1 servers. **Runtime is Docker Desktop**
+   (per the Phase 6 strategy above): the macOS installer variant assumes Docker Desktop is
+   present — the app already provisions it via `ensure_docker()` — and drives `docker compose`
+   directly against it, no `pacman`, `systemctl`, or `sudo` package installs, and no manual VM
+   management (Docker Desktop owns its Linux VM). This is a **macOS variant** of each installer
+   (or a shared reimplementation, per README §9 "Phase 3b"). **[style]** — keep per-game specifics
+   in `catalog.json`/manifests; one shared implementation (§4).
 2. Wire the new script(s) into `catalog.json` (`install.script_variants` or an equivalent
    platform→script map) so `Installer.script` resolves the macOS path the same way it already
    picks `apt`/`dnf` variants on Linux (Phase 3 live-gate finding).
-3. *Definition of done:* `installer.run()` for WotLK completes a working server on a real macOS
+3. _Definition of done:_ `installer.run()` for WotLK completes a working server on a real macOS
    machine with Docker Desktop, with zero shell interaction, streaming output to the console.
 
 ### 6.3 Native Windows install path
 
-1. Provide a native-Windows install path for each of the four v1 servers. The current scripts run
-   under WSL2 (Docker Desktop's WSL backend), not native Windows; the app must either run the
-   Linux script inside a provisioned WSL2 distro or ship a Windows-native equivalent that drives
-   `docker compose` against Docker Desktop's WSL2 backend. **[blocked]** — 6.2 establishes the
-   shared non-Linux install shape first.
-2. *Definition of done:* `installer.run()` for WotLK completes a working server on a real Windows
+1. Provide a native-Windows install path for each of the four v1 servers. **Runtime is Docker
+   Desktop** (per the Phase 6 strategy above): the Windows installer variant drives
+   `docker compose` against Docker Desktop's **WSL2 backend** — the app already provisions WSL2 +
+   Docker Desktop via `ensure_wsl2()`/`ensure_docker()` — rather than managing WSL2 or a VM
+   directly, and rather than shipping a Linux distro the app would have to administer.
+   **[blocked]** — 6.2 establishes the shared non-Linux install shape first.
+2. _Definition of done:_ `installer.run()` for WotLK completes a working server on a real Windows
    11 machine (no Linux distro pre-installed), with zero shell interaction.
 
 ### 6.4 Tests & gates
@@ -392,11 +409,174 @@ automatically.
    script resolution (6.2/6.3) through `catalog.json` — no real macOS/Windows machine needed for
    the mocked suite.
 2. Live-gate 6.2 on a real macOS machine and 6.3 on a real Windows 11 machine (both currently
-   unverified — the whole point of this phase).
+   unverified — the whole point of this phase), **WotLK only** (per the scope gate above).
 
-**Phase 6 exit criteria:** all four v1 servers install end-to-end on Linux, macOS, and native
-Windows with zero shell interaction, and off-Linux clicks never silently fast-fail — they either
-install or explain exactly why not.
+### 6.5 Full WotLK feature coverage on Linux, macOS, and native Windows (Phase 6 exit gate)
+
+> This is the actual "100% working coverage" bar for Phase 6. Every feature the app has already
+> built for WotLK (Phases 1–5) must be **live-gated and passing on all three platforms**, not just
+> "installs." A feature that only works on the Ubuntu VM that originally proved it is not done —
+> it is a Linux-only regression waiting to be found on macOS/Windows the way 6's own bug was.
+
+1. **Install.** `installer.run()` completes WotLK end-to-end with zero shell interaction — Linux
+   (already proven), macOS (6.2), native Windows (6.3).
+2. **Server lifecycle (README §12).** Start/stop/status/health polling, and the single-instance
+   port-conflict guard, all correct on each platform's `docker compose` (native Linux Engine,
+   Docker Desktop's macOS VM, Docker Desktop's WSL2 backend on Windows).
+3. **Console.** `controller_wow_wotlk/console.py`'s `docker attach --sig-proxy=false` pty
+   transport is POSIX-only by design (README/style-guide note this Windows gap explicitly) — this
+   step must either (a) confirm the documented Windows fallback message is correct and land the
+   SOAP-based account-creation follow-up already flagged in Cross-cutting as the Windows path, or
+   (b) explicitly re-scope the Windows console gap into its own tracked item. Either way, Windows
+   console support is not left silently broken. This item covers the full `CONTROLS-2.md` GM
+   console surface: attach/detach safely (Ctrl+P/Ctrl+Q, never Ctrl+C), and GM commands.
+4. **Account creation (`CREATE-ACCOUNTS.md` / `CONTROLS-1.md`).** `account create` + `account set
+   gmlevel … -1` through the console transport (item 3), and the Console tab's Create-account form,
+   work on all three platforms — passwords never echoed, "account already exists" handled. This is
+   the one page the WotLK README calls out as "bookmark and share with family," so it is a
+   first-class coverage item, not a subset of "console works."
+5. **Maintenance (`CONTROLS-1.md`).** Cache clear, database backup and restore, and any SQL
+   changes. **This is the known hole:** `controller_wow_wotlk/maintenance.py` is still a
+   placeholder (Phase 4 record), and the rebuild/restart wiring is a follow-up — these must be
+   implemented (not stubbed) and live-gated on all three platforms before Phase 6 exits.
+6. **Modules/mods (Phase 2/4.3).** Install/remove through the shared applier, and the manifest
+   store's GitHub refresh with the bundled-copy fallback, work identically on all three platforms
+   (path handling via `pathlib.Path` should make this "just work," but it must be _verified_, not
+   assumed). Includes the rebuild (`docker compose up -d --build`) and restart the applier reports
+   as needed.
+7. **Networking auto-setup (README §13, full `WoW-Wotlk-NETWORKING.md` scope).** LAN *and*
+   internet-play, item-for-item against the guide, on all three platforms:
+   - firewall open (`ufw` / `firewalld` on Linux; `netsh` + Windows "Private" network check on
+     Windows; **macOS's firewall path must actually be designed and implemented** — currently
+     unverified/undesigned, see Cross-cutting gap);
+   - WSL2 `netsh interface portproxy` when compose ports are `127.0.0.1`-bound;
+   - local IP (LAN) and public IP (internet) detection, incl. WSL2 reading the Windows host
+     address, never the `172.x` guest;
+   - realmlist updater (`address`/`localAddress`) + `write_client_realmlist()` for the user's own
+     client;
+   - the `0.0.0.0` vs `127.0.0.1` binding check;
+   - CGNAT detection, dynamic-IP/DuckDNS guidance, and the router DHCP-reservation/TCP-forwarding
+     steps the app must detect-and-prompt for (not silently fail on).
+8. **Self-update check (README §10).** The GitHub Releases check and banner behave identically
+   (this is pure Python/HTTP, but confirm no platform-specific path/permission issue in
+   `config_dir()` usage).
+9. **Packaging (Phase 5).** The `.dmg` (macOS) and `.exe`/zip (Windows) artifacts from `5.3`'s
+   release matrix are the actual tested vehicle — WotLK live-gating for this step happens against
+   the **packaged app**, not just `python main.py` from source, so PyInstaller bundling gaps
+   (Phase 5.2's own history of surprises) are caught here too.
+10. **User-facing README topics (`pylauncher/README.md` + `archive/guides/wow-wotlk/README.md`).**
+    Every topic the WotLK README covers — install & first-time setup (HOWTO), daily-use controls
+    (CONTROLS-1/-2), account creation, networking, Windows WSL2 usage, unsupported-platform
+    honesty — is accurately reflected in the shipped docs for the platform a user is actually on.
+    This is a doc deliverable, not just code: the app must not ship a "click Install" that the
+    docs claim works on macOS while 6.2 is unfinished.
+11. _Definition of done:_ every item above passes on a real Linux machine, a real macOS machine,
+    and a real Windows 11 machine, run against the packaged (`.AppImage`/`.dmg`/`.exe`) artifact
+    where applicable — not just a from-source dev run.
+
+**Phase 6 exit criteria:** WoW WotLK — and only WotLK — has **100% working feature coverage**
+(6.5's full list) on Linux, macOS, and native Windows, with zero shell interaction for user, and off-Linux
+install clicks never silently fast-fail. **Phase 7 must not begin until every item in 6.5 is
+verified on all three platforms.**
+
+---
+
+## Phase 7 — Full coverage for the remaining WoW servers (TBC, Vanilla, Tortoise)
+
+> **[blocked]** on Phase 6's exit criteria. Extends WotLK's now-proven cross-platform pattern
+> (6.0–6.5) to the other three v1 servers, one at a time, each held to the **same** "100% working
+> coverage on Linux, macOS, and native Windows" bar Phase 6 set for WotLK — not a lesser bar.
+> **v1 scope is these four servers only** (README §1); no server outside this list is considered
+> until Phase 7 is done.
+
+### 7.1 `controller_wow_tbc/` — full controller + cross-platform coverage
+
+1. Build the WoW TBC controller package (`controller.py`, `docker_ctl.py`, `console.py`,
+   `maintenance.py`, `modules.py`), mirroring `controller_wow_wotlk/`'s shape exactly
+   (style-guide §4 DRY — reuse `yulon.docker`/base `Controller`, do not reimplement).
+2. Manifest port: TBC's own modules/mods (if any exist beyond the base install), following Phase
+   2's process for WotLK.
+3. Repeat 6.1–6.5 for TBC: honest platform gating, macOS install path, native Windows install
+   path, and the full 6.5 feature-coverage gate (install, lifecycle, console, modules, networking,
+   self-update, packaging) on Linux, macOS, and native Windows.
+4. _Definition of done:_ TBC has 100% working feature coverage on all three platforms, matching
+   6.5's bar item-for-item.
+
+### 7.2 `controller_wow_vanilla/` — full controller + cross-platform coverage
+
+1. Same shape as 7.1, for WoW Vanilla.
+2. _Definition of done:_ Vanilla has 100% working feature coverage on all three platforms.
+
+### 7.3 `controller_wow_tortoise/` — full controller + cross-platform coverage
+
+1. Same shape as 7.1, for WoW Tortoise. Tortoise's installer is currently `status: wip` and
+   unverified with a real client (`catalog.json`/checklist 3.1 record) — this step must resolve
+   that before claiming coverage, not carry the caveat forward silently.
+2. _Definition of done:_ Tortoise has 100% working feature coverage on all three platforms, and
+   its `catalog.json` `status` is promoted from `wip` once verified.
+
+### 7.4 Cross-server regression pass
+
+1. Re-run Phase 6's WotLK 6.5 coverage gate once more after 7.1–7.3 land, to confirm the shared
+   layers (`docker.py`, base `Controller`, `runner.py`, `platform.py`, `networking.py`) were
+   extended for the new servers without regressing WotLK (style-guide §4 DRY makes this the main
+   risk: a change made "for TBC" that quietly breaks WotLK).
+2. _Definition of done:_ all four v1 servers pass their full feature-coverage gate on Linux,
+   macOS, and native Windows in the same pass — no server's coverage regresses another's.
+
+**Phase 7 exit criteria:** all four v1 servers (WotLK, TBC, Vanilla, Tortoise) have 100% working
+feature coverage on Linux, macOS, and native Windows. **Phase 8 must not begin until Phase 7 is
+fully met.**
+
+---
+
+## Phase 8 — Feature parity with The Lab + Hypeer Launcher (TBD)
+
+> **[blocked]** on Phase 7.
+> (Phase 4/6); Phase 8 is a *feature* phase: folding the capabilities of two existing companion
+> tools into Yu'lon so users don't need three apps.
+>
+> **Scope (still TBD — placeholder):**
+> - **The Lab** ([github.com/0xVe1L/the-lab](https://github.com/0xVe1L/the-lab)) — the graphical
+>   server manager the WotLK guides already recommend. Its known feature set (from
+>   `archive/guides/wow-wotlk/README.md` + `WoW-WotLK-HOWTO.md`):
+>   - **My Party** — build a 5-man bot group (pick role, class, spec, level); The Lab spawns and
+>     gears them. (README §9 currently lists this as out of v1 scope / "separate later project".)
+>   - **Item database + in-game mail** — search any item and mail it to a character.
+>   - **Teleport** — to any location / map coordinates.
+>   - **Module management** — toggle modules and tune settings in-app (Yu'lon already has this via
+>     manifests/applier in Phase 2/4.3; this is parity, not greenfield).
+>   - **Steam integration** — add the server + WoW client to the user's Steam library automatically.
+>   - **Auto-shutdown on WoW close** — stop the server when the game client exits.
+> - **Hypeer Launcher** — NOT referenced anywhere in this repo (no file, doc, or prior note). Its
+>   scope is genuinely **unknown/TBD**: identify what it is, which of its features are in demand,
+>   and whether they belong in Yu'lon, before any planning. Do not invent a feature list for it.
+>
+> **Ordering rule:** Phase 8 must not begin until Phase 7 exits (all four v1 servers at full
+> coverage). When Phase 8 is scoped it must be broken down with the same numbered-step /
+> Definition-of-done structure as every other phase in this document — not left as free-form
+> prose. The in-game/DB-touching features (My Party, item mail, teleport) are the heavy end and
+> were previously scoped out of v1 (README §9); folding them into Yu'lon is a deliberate v1-scope
+> *expansion*, so each must earn its own step + DoD rather than ride along on Phase 7's servers.
+
+**Phase 8 exit criteria:** TBD — to be defined when this phase is scoped, after Phase 7 exits and
+after "Hypeer Launcher" has been identified and its in-scope features enumerated.
+
+---
+
+## Phase 9 — UI/UX pass for the v1 Alpha (TBD)
+
+> **[blocked]** on Phase 8. This IS the UI/UX pass (Phase 8 was feature parity, not UI). Its goal
+> is to take the feature-complete app from Phases 6–8 and polish the interface into a coherent,
+> dad-friendly **v1 Alpha** — the first build that is meant to be shown to non-developers as
+> "this is what it will look and feel like," not just "this is what it can do." Scope is **TBD**;
+> it must be broken down with the same numbered-step / Definition-of-done structure as every other
+> phase once Phase 8 exits, and must honor the project's core promise (README §1 goal 1): no
+> user-facing shell, buttons instead of terminals, clear/actionable messages.
+
+**Phase 9 exit criteria:** TBD — to be defined when this phase is scoped, after Phase 8 exits. The
+end state is a shippable **v1 Alpha**: all four v1 servers feature-complete (Phases 6–8) with a
+polished, consistent UI/UX across Linux, macOS, and native Windows.
 
 ---
 

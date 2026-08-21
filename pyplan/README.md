@@ -49,6 +49,13 @@ There is **no native-Windows or native-macOS way** to run these containers. Ther
 **Promise to users:** "Click install." — the app hides Docker/WSL/virtualization entirely.
 **Reality to engineers:** the virtualization layer cannot be removed on Windows/macOS; it is only *hidden*.
 
+**Runtime strategy (decided):** use **Docker Desktop** as the container runtime on **both**
+Windows and macOS. It is materially easier than managing the VMs directly — Docker Desktop
+already owns the Linux VM (macOS) and the WSL2 backend (Windows), so the app only has to
+provision Docker Desktop (and WSL2 on Windows) and drive `docker compose` against it. We do not
+build a bespoke VM/WSL2 manager, and we do not reimplement installers natively just to avoid
+Docker Desktop — the kernel constraint above is satisfied by Docker Desktop itself.
+
 This means each installer carries platform-specific "ensure a Linux container environment exists" logic, but the **application code remains 100% shared**.
 
 ---
@@ -95,7 +102,7 @@ platform dependency stack are provisioned automatically, never by the user:
 - **The Python-install burden is shifted to the build machine, not the user.** Only the CI build
   runner (GitHub Actions, §4) needs a real Python toolchain; the shipped artifact carries what it
   needs.
-- **This supersedes the developer-facing setup path** — `pylauncher/development.md`'s
+- **This supersedes the developer-facing setup path** — `CONTRIBUTING.md`'s
   "`python3 -m venv .venv`" instructions exist *only* for contributors running from source; they
   are never part of the end-user experience.
 - **If a platform can't bundle Python** (e.g. a future distribution format forbidding
@@ -287,51 +294,7 @@ the per-item files live in the matching subdirectory (`modules/mod-ah-bot.json`,
 
 ## 7. Execution Phases (ordered)
 
-> Recommended order: **2 → 1 → 3 → 4 → 5**. Build the testable core first, then data, then UI, then orchestration, then packaging.
-
-### Phase 1 — Foundation (testable Python core, no UI)
-
-- `runner.py` — subprocess wrapper with live line-by-line stdout/stderr streaming.
-- `docker_ctl.py` — start/stop/status/logs/health, mirroring `dml-start.sh` (`_wait_db_healthy`, `_wait_ready` polling logic).
-- `platform.py` — OS detection; stubs for Docker/WSL provisioning.
-- Unit tests using **`pytest`**: mock `subprocess` calls in `runner.py` (no real Docker required to test control flow), then a smaller set of integration tests that exercise `docker_ctl.py` against a real running AzerothCore compose project.
-
-**Exit criteria:** `docker_ctl.start()` / `stop()` / `status()` work against a running AzerothCore
-compose project, and the mocked `pytest` suite passes in CI without Docker present.
-
-### Phase 2 — Manifest schema & data port
-
-- Define `modules.json` + per-mod JSON schema.
-- Port the WotLK modules out of `wow-manage.sh` into the JSON manifests.
-- `modules.py` — load/validate/fetch manifests from GitHub.
-
-**Exit criteria:** the module list and their config nuances are fully expressed as JSON, no code changes
-needed to add a module.
-
-### Phase 3 — Catalog (catalog + installer)
-
-- `catalog.json` — game list with install metadata (repo, script, ports, client steps).
-- `installer.py` — orchestrates install. **Phase 3a:** shells out to existing `install-*.sh`. **Phase 3b (later):** reimplements install natively in Python.
-- Silent Docker/WSL provisioning on Windows/macOS.
-
-**Exit criteria:** clicking "install" for one game completes a working server with zero shell
-interaction, verified on at least one platform.
-
-### Phase 4 — Controller UI (PySide6)
-
-- `catalog_view.py` — browsable catalog of games.
-- `controller_view.py` — one tab per install: docker lifecycle, live console, maintenance (cache clear, backups, SQL), module/mod management (driven by manifests).
-- `log_panel.py` — reusable streaming output widget.
-
-**Exit criteria:** full start/stop/logs/accounts/module-toggle workflow via GUI only.
-
-### Phase 5 — Windows/macOS provisioning + packaging
-
-- Complete the silent Docker Desktop / WSL2 provisioning paths.
-- PyInstaller specs for `.AppImage` / `.dmg` / `.exe`.
-- GitHub Actions `release.yml` build matrix.
-
-**Exit criteria:** `git push` produces all three platform artifacts automatically.
+See Roadmap.md for the full Phasing plan. The README only summarizes the high-level goals of each phase.
 
 ---
 
@@ -431,13 +394,3 @@ both modes, surfacing only clear prompts/status rather than terminal commands.
   it depends on both the shared port-conflict check (§12) and the UI's controller surface.
 
 ---
-
-## 14. Next Actions
-
-1. ~~Scaffold `pylauncher/` project structure (folders + stub files + `requirements.txt`).~~ — **done**.
-2. Implement `runner.py` + `docker_ctl.py` + `platform.py` for real (Phase 1), including the single-instance/port-conflict check (§12) and `config_dir()` helper (§11).
-3. Add `pytest` unit tests (mocked `subprocess`) and a small integration suite against a real Docker/AzerothCore install.
-4. ~~Flesh out `.github/workflows/release.yml` build matrix and `build/pylauncher.spec`.~~ — **done**: the full AppImage/zip/dmg build matrix is written and located at the repo root `.github/workflows/`; end-to-end verification (push a `v*` tag, confirm all three artifacts build and attach) is the remaining external gate.
-5. Begin Phase 2: manifest schema finalization, WotLK module port from `wow-manage.sh`, and manifest `repo` allow-list validation (§3a).
-6. Design the self-update check (§10) as part of Phase 1's `platform.py`/`main.py` wiring, even though the UI hook lands later.
-7. Implement networking auto-setup (§13) — LAN fully automated; internet play with router-step detection/prompting — as part of the Phase 3 installer and Phase 4 controller surface.

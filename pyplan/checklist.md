@@ -68,15 +68,63 @@
 
 ---
 
-## Phase 6 — Cross-platform install paths (macOS + native Windows)
+## Phase 6 — Cross-platform install paths (macOS + native Windows) — **WotLK only**
+
+> **Scope gate:** Phase 6 targets WoW WotLK exclusively (6.0's script rehome may touch all four
+> games mechanically, but 6.1–6.5's gating/installer/feature work is WotLK-only). TBC, Vanilla,
+> and Tortoise are Phase 7 — not started until Phase 6's exit criteria are fully met.
 
 - [ ] 6.0 Rehome the install scripts (move `archive/guides/<game>/install-*.sh` + `dml-start.sh`/`wow-manage.sh` into `catalog/installers/<game>/`; update `catalog.json`, `pylauncher.spec` `script_globs`, and the path-pinning tests)
-    - Update scripts and manifests to use proper.
+    - Update scripts and manifests to use proper systems and features.
 - [ ] 6.1 Honest platform gating (`catalog.json` per-entry platform support; refuse off-Linux installs with a clear message; surface the script's real output in the failed dialog)
-- [ ] 6.2 macOS install path (macOS variant / shared reimplementation driving `docker compose` against Docker Desktop; wire into `catalog.json` script resolution)
-- [ ] 6.3 Native Windows install path (run inside a provisioned WSL2 distro or a Windows-native equivalent; `[blocked]` on 6.2)
-- [ ] 6.4 Tests & gates (mocked platform-gating + script-resolution tests; live-gate on real macOS and Windows 11)
-- [ ] **Phase 6 exit criteria met** — all four v1 servers install end-to-end on Linux, macOS, and native Windows; off-Linux clicks never silently fast-fail
+- [ ] 6.2 macOS install path — **runtime is Docker Desktop** (macOS variant drives `docker compose` against the Docker Desktop the app provisions; no `pacman`/`systemctl`/`sudo`, no manual VM management)
+- [ ] 6.3 Native Windows install path — **runtime is Docker Desktop** (drives `docker compose` against Docker Desktop's WSL2 backend; no bespoke WSL2/VM manager; `[blocked]` on 6.2)
+- [ ] 6.4 Tests & gates (mocked platform-gating + script-resolution tests; live-gate on real macOS and Windows 11 — WotLK only)
+- [ ] 6.5 Full WotLK feature coverage on Linux, macOS, and native Windows (the Phase 6 exit gate):
+  - [ ] Install (zero shell interaction, all three platforms)
+  - [ ] Server lifecycle: start/stop/status/health polling + README §12 port-conflict guard
+  - [ ] Console: `docker attach` pty transport + full `CONTROLS-2.md` GM console (safe attach/detach, GM commands); Windows gap resolved or explicitly re-scoped (SOAP follow-up)
+  - [ ] Account creation (`CREATE-ACCOUNTS.md`/`CONTROLS-1.md`): `account create` + `account set gmlevel`, no password echo, "already exists" handled, all three platforms
+  - [ ] Maintenance (`CONTROLS-1.md`): cache clear, DB backup/restore, SQL changes — `maintenance.py` implemented (currently placeholder), rebuild/restart wiring done, all three platforms
+  - [ ] Modules/mods: install/remove via the applier + rebuild/restart; manifest store GitHub refresh + bundled fallback
+  - [ ] Networking auto-setup (README §13, full `WoW-Wotlk-NETWORKING.md` scope): firewall (ufw/firewalld/netsh + **macOS firewall designed/implemented**), WSL2 portproxy, LAN/public IP detection, realmlist updater + client writer, 0.0.0.0 binding check, CGNAT/DuckDNS/router-step prompts
+  - [ ] Self-update check (README §10) — no platform-specific `config_dir()` issues
+  - [ ] Packaging: live-gated against the packaged `.AppImage`/`.dmg`/`.exe`, not just `python main.py` from source
+  - [ ] User-facing README topics (`pylauncher/README.md` + `archive/guides/wow-wotlk/README.md`) accurately reflect each platform's real state — no "works on macOS" claim before 6.2 is done
+- [ ] **Phase 6 exit criteria met** — WoW WotLK has 100% working feature coverage (6.5) on Linux, macOS, and native Windows, zero shell interaction, no silent off-Linux fast-fail. **Phase 7 does not start until this is fully met.**
+
+---
+
+## Phase 7 — Full coverage for the remaining WoW servers (TBC, Vanilla, Tortoise)
+
+> **[blocked]** on Phase 6's exit criteria. Same "100% working coverage on Linux, macOS, and
+> native Windows" bar as Phase 6 — not a lesser bar. v1 scope remains these four servers only.
+
+- [ ] 7.1 `controller_wow_tbc/` — full controller package + manifest port + 6.1–6.5 repeated for TBC on all three platforms
+- [ ] 7.2 `controller_wow_vanilla/` — full controller package + 6.1–6.5 repeated for Vanilla on all three platforms
+- [ ] 7.3 `controller_wow_tortoise/` — full controller package + 6.1–6.5 repeated for Tortoise on all three platforms; resolve the `status: wip`/unverified-client caveat, promote `catalog.json` status once verified
+- [ ] 7.4 Cross-server regression pass — re-run WotLK's 6.5 coverage gate after 7.1–7.3 land to confirm shared layers (`docker.py`, base `Controller`, `runner.py`, `platform.py`, `networking.py`) weren't regressed
+- [ ] **Phase 7 exit criteria met** — all four v1 servers (WotLK, TBC, Vanilla, Tortoise) have 100% working feature coverage on Linux, macOS, and native Windows. **Phase 8 does not start until this is fully met.**
+
+---
+
+## Phase 8 — Feature parity with The Lab + Hypeer Launcher (TBD)
+
+> **[blocked]** on Phase 7. **NOT a UI/UX pass** (that is Phase 9) — this is a *feature* phase
+> folding two existing companion tools into Yu'lon. Scope still TBD.
+
+- [ ] **Identify "Hypeer Launcher"** — it is not referenced anywhere in this repo; determine what it is and which of its features (if any) belong in Yu'lon before planning
+- [ ] **The Lab feature parity** (candidate list, to be confirmed when scoped): My Party (5-man bot group), item database + in-game mail, teleport, module management (parity with Yu'lon's existing applier), Steam integration, auto-shutdown on WoW close
+- [ ] **Phase 8 exit criteria met** — TBD, to be defined after Phase 7 exits and Hypeer Launcher is identified/scoped
+
+---
+
+## Phase 9 — UI/UX pass for the v1 Alpha (TBD)
+
+> **[blocked]** on Phase 8. **This IS the UI/UX pass** — polish the feature-complete app into a
+> dad-friendly v1 Alpha. Scope TBD.
+
+- [ ] **Phase 9 exit criteria met** — TBD; end state is a shippable v1 Alpha (all four v1 servers feature-complete + polished, consistent UI/UX on Linux, macOS, and native Windows)
 
 ---
 
