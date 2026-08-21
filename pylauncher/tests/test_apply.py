@@ -244,32 +244,44 @@ def test_set_conf_key_replaces_or_appends(tmp_path: Path) -> None:
     assert f.read_text(encoding="utf-8") == "A = 1\nB = 3\nC = 4\n"
 
 
-def test_docker_sql_argv_targets_the_right_schema(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`DockerSql` shells `docker exec -i <db> mysql -uroot -p<pw> <schema>` (wow-manage.sh)."""
+def test_docker_sql_keeps_the_password_and_the_sql_out_of_argv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`docker exec -i -e MYSQL_PWD <db> mysql -uroot <schema>`, statement over stdin.
+
+    argv is world-readable (`ps`, Task Manager, /proc/<pid>/cmdline), so neither
+    the root password nor a statement (which can carry one) may appear there.
+    """
     import subprocess
 
     seen: list[list[str]] = []
+    kwargs_seen: list[dict[str, object]] = []
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         seen.append(argv)
+        kwargs_seen.append(kwargs)
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    DockerSql("ac-database", "pw").run_statement("characters", "SELECT 1")
+    DockerSql("ac-database", "hunter2").run_statement("characters", "SET PASSWORD = 'secret'")
     assert seen == [
         [
             "docker",
             "exec",
             "-i",
+            "-e",
+            "MYSQL_PWD",
             "ac-database",
             "mysql",
             "-uroot",
-            "-ppw",
             "acore_characters",
-            "-e",
-            "SELECT 1",
         ]
     ]
+    flat = " ".join(seen[0])
+    assert "hunter2" not in flat and "secret" not in flat  # the whole point
+    assert kwargs_seen[0]["input"] == "SET PASSWORD = 'secret'"  # SQL over stdin
+    env = kwargs_seen[0]["env"]
+    assert isinstance(env, dict) and env["MYSQL_PWD"] == "hunter2"  # value only in the env
 
 
 def test_runner_git_sparse_clone_sequence(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

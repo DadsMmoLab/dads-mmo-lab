@@ -36,12 +36,15 @@ class _FakeRunner:
         self.calls: list[list[str]] = []
         self.cwds: list[Path | None] = []
         self.ps_lines = ps_lines
+        self.health = "healthy\n"
 
     def __call__(self, cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
         self.calls.append(cmd)
         self.cwds.append(cwd)
         if cmd[:2] == ["docker", "ps"]:
             return _completed(0, self.ps_lines)
+        if cmd[:2] == ["docker", "inspect"]:
+            return _completed(0, self.health)  # so start()'s health wait never polls for real
         return _completed()
 
 
@@ -162,4 +165,13 @@ def test_wotlk_controller_inherits_everything_with_its_own_spec(
     fake_runner.ps_lines = "ac-database\nac-authserver\nac-worldserver\n"
     assert ctl.status().all_running is True
     ctl.start()  # own containers bind the ports → allowed
-    assert ["docker", "compose", "up", "-d"] in fake_runner.calls
+    # The containers already exist, so they are started BY NAME: `compose up -d`
+    # would re-run ac-db-import, which dml-start.sh warns "was killing the
+    # database". The database goes first, then auth and world.
+    assert ["docker", "compose", "up", "-d"] not in fake_runner.calls
+    started = [c for c in fake_runner.calls if c[:2] == ["docker", "start"]]
+    assert started == [
+        ["docker", "start", "ac-database"],
+        ["docker", "start", "ac-authserver"],
+        ["docker", "start", "ac-worldserver"],
+    ]

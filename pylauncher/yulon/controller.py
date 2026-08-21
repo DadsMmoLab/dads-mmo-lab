@@ -25,6 +25,11 @@ from yulon.log import get_logger
 
 logger = get_logger(__name__)
 
+# How long `start()` waits for the database between starting it and starting
+# auth/world. Shorter than a first-boot import (that path goes through
+# `compose up` instead): this is a restart of containers that already exist.
+_START_DB_HEALTH_TIMEOUT = 120.0
+
 
 class PortConflictError(RuntimeError):
     """Raised by `Controller.start()` when another container already binds our ports.
@@ -103,6 +108,9 @@ class Controller:
     def start(self) -> None:
         """Bring the install up, refusing if another install holds our ports.
 
+        Uses `docker.start_staged()`, so restarting an installed server never
+        re-runs its one-shot database import (see that function).
+
         Raises:
             PortConflictError: A container that is not part of this install
                 already binds one of `spec.ports`. Nothing is started.
@@ -112,7 +120,13 @@ class Controller:
         if conflicts:
             logger.warning(f"start() refused: ports {self.spec.ports} bound by {conflicts}")
             raise PortConflictError(conflicts, self.spec.ports)
-        docker.start(self.server_dir)
+        docker.start_staged(
+            self.spec,
+            self.server_dir,
+            wait_healthy=lambda container: docker.wait_db_healthy(
+                container, timeout=_START_DB_HEALTH_TIMEOUT
+            ),
+        )
 
     def stop(self) -> None:
         """Take the install down (`docker compose down` in the server dir)."""

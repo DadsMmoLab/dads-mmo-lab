@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import subprocess
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -57,9 +57,76 @@ def _run(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedProces
 
 
 def start(server_dir: Path) -> None:
-    """Bring the compose project in `server_dir` up in the background."""
+    """Bring the compose project in `server_dir` up in the background.
+
+    Creates whatever does not exist yet, which on an installed server also
+    re-runs the one-shot containers. Prefer `start_staged()` for a server that
+    has already been installed — see the warning there.
+    """
     logger.debug(f"start() called: server_dir={server_dir}")
     _run(["compose", "up", "-d"], cwd=server_dir)
+
+
+def container_exists(container: str) -> bool:
+    """True if a container by that name exists at all, running or exited."""
+    proc = _run(["ps", "-a", "--format", "{{.Names}}"])
+    return any(line.strip() == container for line in proc.stdout.splitlines())
+
+
+def start_staged(
+    spec: ContainerSpec,
+    server_dir: Path,
+    *,
+    wait_healthy: Callable[[str], bool] | None = None,
+) -> bool:
+    """Start an ALREADY-INSTALLED server without re-running its one-shot containers.
+
+    `docker compose up -d` starts every service that has no running container —
+    including AzerothCore's one-shot `ac-db-import` and `ac-client-data-init`,
+    which have already exited successfully. Re-running the import on every
+    restart is what `dml-start.sh` warns about in as many words:
+
+        # Use docker start (not compose up) so we do NOT re-trigger ac-db-import
+        # or ac-client-data-init on every restart — that was killing the database.
+
+    So when this install's three containers already exist, start them by name
+    and in order (database first, healthy, then auth and world), exactly as the
+    shell script does. When any of them is missing the install has not been
+    brought up yet, and `compose up -d` is both correct and necessary — that is
+    the path that creates the containers and runs the import once.
+
+    The database must be healthy before auth and world start, or they race it
+    and die; `wait_healthy` is that wait, injectable so tests do not sit through
+    a real timeout.
+
+    Returns:
+        True if the staged path was used, False if it fell back to `compose up`.
+    """
+    logger.debug(f"start_staged() called: server_dir={server_dir}")
+    existing = {
+        line.strip() for line in _run(["ps", "-a", "--format", "{{.Names}}"]).stdout.splitlines()
+    }
+    wanted = (spec.db, spec.auth, spec.world)
+    if not all(name in existing for name in wanted):
+        missing = [name for name in wanted if name not in existing]
+        logger.info(f"start_staged(): {missing} do not exist yet — first `compose up -d`")
+        start(server_dir)
+        return False
+    logger.info("start_staged(): containers exist — `docker start` (never re-runs the DB import)")
+    _run_docker_start(spec.db)
+    wait = wait_healthy if wait_healthy is not None else wait_db_healthy
+    if not wait(spec.db):
+        logger.warning(f"{spec.db} did not become healthy; starting auth/world anyway")
+    _run_docker_start(spec.auth)
+    _run_docker_start(spec.world)
+    return True
+
+
+def _run_docker_start(container: str) -> None:
+    """`docker start <container>` (a no-op on one that is already running)."""
+    proc = runner.run(["docker", "start", container])
+    if proc.returncode != 0:
+        raise DockerCommandError(f"docker start {container} failed: {proc.stderr.strip()}")
 
 
 def stop(server_dir: Path) -> None:

@@ -13,8 +13,10 @@ from pathlib import Path
 
 import pytest
 
-from yulon import docker
+from yulon import docker, runner
 from yulon.controller_wow_wotlk import docker_ctl
+
+SPEC = docker_ctl.SPEC
 
 
 def _completed(
@@ -240,3 +242,66 @@ def test_docker_ctl_convenience_wrappers_delegate_to_spec(
         lambda cmd, cwd=None: _completed(0, "ac-worldserver\t0.0.0.0:8085->8085/tcp\n", ""),
     )
     assert docker_ctl.port_conflicts_here() == ["ac-worldserver"]
+
+
+def test_start_staged_never_re_runs_the_one_shot_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`compose up -d` restarts ac-db-import; dml-start.sh warns that "was killing the database"."""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        if cmd[:2] == ["docker", "ps"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, "ac-database\nac-authserver\nac-worldserver\n", ""
+            )
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    used_staged = docker.start_staged(SPEC, Path("/srv"), wait_healthy=lambda _c: True)
+
+    assert used_staged is True
+    assert not any(c[:3] == ["docker", "compose", "up"] for c in calls)
+    assert [c for c in calls if c[:2] == ["docker", "start"]] == [
+        ["docker", "start", SPEC.db],
+        ["docker", "start", SPEC.auth],
+        ["docker", "start", SPEC.world],
+    ]
+
+
+def test_start_staged_falls_back_to_compose_up_when_a_container_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server that was never brought up MUST go through compose — that is what creates it."""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        if cmd[:2] == ["docker", "ps"]:
+            return subprocess.CompletedProcess(cmd, 0, "ac-database\n", "")  # world/auth missing
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    used_staged = docker.start_staged(SPEC, Path("/srv"), wait_healthy=lambda _c: True)
+
+    assert used_staged is False
+    assert ["docker", "compose", "up", "-d"] in calls
+    assert not any(c[:2] == ["docker", "start"] for c in calls)
+
+
+def test_start_staged_starts_auth_and_world_even_if_the_db_never_reports_healthy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unhealthy DB is worth a warning, not a refusal to start the rest."""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        if cmd[:2] == ["docker", "ps"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, "ac-database\nac-authserver\nac-worldserver\n", ""
+            )
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    assert docker.start_staged(SPEC, Path("/srv"), wait_healthy=lambda _c: False) is True
+    assert len([c for c in calls if c[:2] == ["docker", "start"]]) == 3

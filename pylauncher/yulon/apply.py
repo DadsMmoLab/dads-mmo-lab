@@ -18,6 +18,7 @@ that is the controller's call (call down / signal up, §5).
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -132,24 +133,44 @@ class DockerSql:
                 capture_output=True,
                 text=True,
                 check=False,
+                env=self._env(),
             )
         _check_sql(proc, f"{path.name} → {DB_NAMES[db]}")
 
     def run_statement(self, db: Db, statement: str) -> None:
+        # Over stdin, never `-e <sql>`: argv is world-readable (`ps`, Task
+        # Manager, /proc/<pid>/cmdline) and a statement can carry a password.
         proc = subprocess.run(
-            [*self._argv(db), "-e", statement], capture_output=True, text=True, check=False
+            self._argv(db),
+            input=statement,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=self._env(),
         )
         _check_sql(proc, f"inline → {DB_NAMES[db]}")
+
+    def _env(self) -> dict[str, str]:
+        """Our environment plus `MYSQL_PWD`, so the password never enters argv.
+
+        `docker exec` passes `-e MYSQL_PWD` through to the client inside the
+        container; `mysql` reads it instead of prompting. `-p<password>` would
+        put the secret in a command line every local process can read.
+        """
+        env = dict(os.environ)
+        env["MYSQL_PWD"] = self.root_password
+        return env
 
     def _argv(self, db: Db) -> list[str]:
         return [
             "docker",
             "exec",
             "-i",
+            "-e",
+            "MYSQL_PWD",  # value taken from OUR env by `docker exec`, not written here
             self.db_container,
             "mysql",
             "-uroot",
-            f"-p{self.root_password}",
             DB_NAMES[db],
         ]
 
