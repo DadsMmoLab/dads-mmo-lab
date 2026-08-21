@@ -209,11 +209,12 @@ pylauncher/
 ├── requirements-dev.txt          # pytest, mypy, black, ruff — pinned dev tooling
 ├── pyproject.toml                # black/ruff/mypy/pytest config
 ├── development.md                # contributor setup doc
-├── build/                        # PyInstaller specs
-│   └── pylauncher.spec
-└── .github/workflows/
-    ├── ci.yml                    # lint + type-check + test on every push/PR
-    └── release.yml               # build matrix → AppImage/dmg/exe
+└── build/                        # PyInstaller specs
+    └── pylauncher.spec
+
+<repo root>/.github/workflows/    # NOT under pylauncher/: GitHub only runs workflows from the repo root
+├── ci.yml                        # lint + type-check + test on every push/PR (working-directory: pylauncher)
+└── release.yml                   # build matrix → AppImage/dmg/exe
 ```
 
 **Status as of this writing:** only `controller_wow_wotlk/` exists. The other three v1 servers

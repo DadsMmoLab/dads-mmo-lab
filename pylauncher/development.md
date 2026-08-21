@@ -70,3 +70,25 @@ YULON_WOTLK_SERVER_DIR=~/wow-server-playerbots pytest -m integration tests/integ
 - All four checks above (`pytest`, `mypy`, `ruff`, `black --check`) are expected to run in CI —
   see `pyplan/roadmap.md` Phase 0.2.
 - See `pyplan/style-guide.md` before writing any code — it is a hard constraint, not a preference.
+
+
+## Building the UI in Qt Designer
+
+The views are hand-written widgets today, but nothing in `yulon/` depends on that: every view is
+handed its dependencies as a seam (`ControllerServices`, `JobRunner`, `LogPanel`) and talks back
+with signals, so the widget layer can be replaced by Designer-built forms without touching the
+core.
+
+```bash
+pyside6-designer                  # ships with PySide6; save forms as yulon/ui/forms/<name>.ui
+pyside6-uic yulon/ui/forms/x.ui -o yulon/ui/forms/ui_x.py   # or load the .ui at runtime
+```
+
+Two rules keep a Designer form working with the rest of the app:
+
+1. **Long calls stay off the GUI thread.** Route every service call through `self._run(...)`
+   (`yulon/ui/widgets/job.py`), never straight from a slot — `docker compose up`, a module
+   install and a networking plan all take seconds to minutes.
+2. **Callbacks must be bound methods of the view** (`@Slot(object)` on the widget class). A plain
+   function or lambda connected to a worker's signal is delivered ON THE WORKER THREAD in PySide6,
+   even with an explicit `QueuedConnection`.

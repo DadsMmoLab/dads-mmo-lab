@@ -60,11 +60,11 @@
 
 ## Phase 5 — Windows/macOS provisioning + packaging
 
-- [x] 5.1 Silent Docker Desktop / WSL2 provisioning + doc update — **Linux path verified for real on a fresh Ubuntu 24.04 VM (2026-08-20, see Cross-cutting); Windows/macOS fresh-machine runs NOT yet verified**
+- [x] 5.1 Silent Docker Desktop / WSL2 provisioning + doc update — Linux path verified for real on a fresh Ubuntu 24.04 VM (2026-08-20); the Windows detection/short-circuit/plan paths verified on a real Windows 11 box (2026-08-21). The silent Docker Desktop **install** itself is still unverified (both test machines already had Docker), and macOS has no machine at all — see Cross-cutting.
 - [x] 5.2 PyInstaller specs finalized (local `pyinstaller build/pylauncher.spec` builds `build/dist/yulon/`; bundles manifests/, catalog.json and the install scripts; `YULON_SMOKE_TEST=1` runs the frozen exe headless)
-- [ ] 5.3 GitHub Actions release matrix complete — **workflow written (AppImage/zip/dmg, attaches to the Release) but unverified: it lives at `pylauncher/.github/workflows/`, and GitHub only runs workflows from the repo root `.github/workflows/` — moving/merging it there is an upstream decision**
+- [x] 5.3 GitHub Actions release matrix complete — `ci.yml` + `release.yml` now live at the repo root `.github/workflows/` (2026-08-21), which is the only path GitHub reads; both run with `working-directory: pylauncher`. Neither upstream branch had a root `.github/`, so nothing was overwritten. The release job still only proves itself on a `v*` tag.
 - [x] 5.4 Application self-update check (README §10)
-- [ ] **Phase 5 exit criteria met**
+- [ ] **Phase 5 exit criteria met** — `ci.yml` is green on GitHub for the first time (2026-08-21, run 32432706579); `release.yml` has never run: `workflow_dispatch` only works from a repository's default branch (the fork's is `rust-main`, which does not carry the file), and the only other trigger is a `v*` tag, which publishes a Release. One tag push proves the three artifacts.
 
 ---
 
@@ -212,6 +212,32 @@
   the `docker` group — the running process keeps its old groups, so it reports "Docker not
   reachable" until relaunched. The report already says "log out and back in"; the UI should say it
   where the status is shown (follow-up).
+- **5.1 on real Windows (2026-08-21, `test-env-win11`, Windows 11 + Docker Desktop + WSL2,
+  with a live WoW server on it that was never touched):** `config_dir()` resolved to
+  `%APPDATA%\yulon` (README §11's claim), `detect()` to `windows`, `docker_ready()` True,
+  `in_wsl()` False. `ensure_wsl2()` reported `WSL2 present` and installed nothing;
+  `ensure_docker()` short-circuited with `docker already running` and executed only
+  `docker info` — the safety property that matters most, since a wrong answer would have
+  started an unattended Docker Desktop install on a machine hosting a live server. The dry
+  run of the Docker-missing path planned exactly `powershell.exe -NoProfile -Command
+  Start-Process wsl.exe -Verb RunAs -Wait -ArgumentList '--install','--no-distribution'`
+  with `reboot_required=True` and stopped there (Docker Desktop comes after the reboot),
+  executing nothing. Full battery on that machine: ruff/black/mypy clean, 188 passed,
+  5 skipped; `YULON_SMOKE_TEST=1 python main.py` built the window and exited 0.
+  **Still unverified:** the silent Docker Desktop download+install (needs a Windows box
+  WITHOUT Docker) and everything macOS (no machine).
+- **Windows finding — `bash` on PATH is not necessarily a usable bash (2026-08-21):** on that
+  machine `bash.exe` was the Store alias for WSL and failed with
+  `execvpe(/bin/bash) failed: No such file or directory`, because no distro is installed
+  (Docker Desktop's own WSL distros do not provide one). Three tests failed there purely
+  because `needs_bash` checked `shutil.which("bash")`, and a real install would have shown
+  the user that raw WSL error. `installer.bash_available()` now probes `bash -c 'exit 0'`,
+  `preflight()` refuses with instructions (install a distro, reopen the app), and the test
+  markers use the same probe. **This also means Phase 3a installs are Linux-only in
+  practice**: a Windows user needs a WSL distro, and later either path translation for the
+  shell script or the PowerShell installer the repo already ships
+  (`archive/guides/wow-wotlk/Install-WoW-WotLK.ps1`). `install.script_variants` is the
+  natural place to hang a `windows` entry when that is done.
 - **3.4 record (2026-08-20):** mirrors `WoW-Wotlk-NETWORKING.md` exactly — ufw/firewalld/netsh
   command blocks (SteamOS wraps ufw in `steamos-readonly disable/enable`), `ip route`-equivalent
   LAN detection (inside WSL it asks Windows via `powershell.exe`, never the 172.x guest IP),
