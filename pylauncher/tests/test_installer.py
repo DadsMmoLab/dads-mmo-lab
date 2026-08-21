@@ -116,7 +116,7 @@ def _fake_interact(calls: list[dict[str, object]]) -> object:
 
 
 def test_installer_runs_the_entry_script_through_interact(tmp_path: Path) -> None:
-    """`run()` resolves `<repo_root>/<install.script>`, streams lines, answers via rules."""
+    """`run()` resolves `<installers_root>/<install.script>`, streams lines, answers via rules."""
     entry = load_catalog().get("wow-wotlk")
     script = tmp_path / entry.install.script
     script.parent.mkdir(parents=True)
@@ -124,7 +124,7 @@ def test_installer_runs_the_entry_script_through_interact(tmp_path: Path) -> Non
     calls: list[dict[str, object]] = []
     installer = Installer(
         entry,
-        repo_root=tmp_path,
+        installers_root=tmp_path,
         docker_check=lambda: True,
         interact=_fake_interact(calls),  # type: ignore[arg-type]
         package_manager=lambda: None,
@@ -139,11 +139,11 @@ def test_installer_runs_the_entry_script_through_interact(tmp_path: Path) -> Non
 @pytest.mark.parametrize(
     ("package_manager", "expected"),
     [
-        (None, "archive/guides/wow-wotlk/install-wow-wotlk.sh"),
-        ("pacman", "archive/guides/wow-wotlk/install-wow-wotlk.sh"),
-        ("apt", "archive/guides/wow-wotlk/install-wow-wotlk-ubuntu.sh"),
-        ("dnf", "archive/guides/wow-wotlk/install-wow-wotlk-fedora.sh"),
-        ("zypper", "archive/guides/wow-wotlk/install-wow-wotlk.sh"),
+        (None, "wow-wotlk/install-wow-wotlk.sh"),
+        ("pacman", "wow-wotlk/install-wow-wotlk.sh"),
+        ("apt", "wow-wotlk/install-wow-wotlk-ubuntu.sh"),
+        ("dnf", "wow-wotlk/install-wow-wotlk-fedora.sh"),
+        ("zypper", "wow-wotlk/install-wow-wotlk.sh"),
     ],
 )
 def test_installer_picks_the_script_variant_for_the_host_package_manager(
@@ -151,7 +151,7 @@ def test_installer_picks_the_script_variant_for_the_host_package_manager(
 ) -> None:
     """Ubuntu/Fedora hosts get the Debian/Fedora ports; everything else the default script."""
     entry = load_catalog().get("wow-wotlk")
-    installer = Installer(entry, repo_root=tmp_path, package_manager=lambda: package_manager)
+    installer = Installer(entry, installers_root=tmp_path, package_manager=lambda: package_manager)
     assert installer.script == tmp_path / expected
 
 
@@ -189,7 +189,7 @@ def test_installer_fails_gracefully_without_docker(tmp_path: Path) -> None:
 
     installer = Installer(
         entry,
-        repo_root=tmp_path,
+        installers_root=tmp_path,
         docker_check=lambda: False,
         ensure_docker=lambda **_: ProvisionReport(
             "linux", manual_steps=("Install Docker Engine by hand: https://docs.docker.com/",)
@@ -204,7 +204,7 @@ def test_installer_fails_gracefully_without_docker(tmp_path: Path) -> None:
 
     rebooter = Installer(
         entry,
-        repo_root=tmp_path,
+        installers_root=tmp_path,
         docker_check=lambda: False,
         ensure_docker=lambda **_: ProvisionReport(
             "windows", done=("wsl --install",), reboot_required=True, manual_steps=("Reboot.",)
@@ -224,7 +224,7 @@ def test_installer_requires_the_client_dir_when_the_script_asks_for_it(tmp_path:
     script.parent.mkdir(parents=True)
     script.write_text("", encoding="utf-8")
     installer = Installer(
-        entry, repo_root=tmp_path, docker_check=lambda: True, bash_check=lambda: True
+        entry, installers_root=tmp_path, docker_check=lambda: True, bash_check=lambda: True
     )
     with pytest.raises(InstallerError, match="never downloads game clients"):
         list(installer.run())
@@ -235,7 +235,9 @@ def test_installer_requires_the_client_dir_when_the_script_asks_for_it(tmp_path:
 def test_installer_reports_a_missing_script(tmp_path: Path) -> None:
     entry = load_catalog().get("wow-wotlk")
     with pytest.raises(InstallerError, match="not found"):
-        Installer(entry, repo_root=tmp_path, docker_check=lambda: True).preflight(InstallOptions())
+        Installer(entry, installers_root=tmp_path, docker_check=lambda: True).preflight(
+            InstallOptions()
+        )
 
 
 def test_installer_wraps_script_failure(tmp_path: Path) -> None:
@@ -250,7 +252,7 @@ def test_installer_wraps_script_failure(tmp_path: Path) -> None:
 
     installer = Installer(
         entry,
-        repo_root=tmp_path,
+        installers_root=tmp_path,
         docker_check=lambda: True,
         interact=failing,  # type: ignore[arg-type]
         package_manager=lambda: None,  # the file below is the default script, not a variant
@@ -271,7 +273,7 @@ def test_preflight_refuses_when_bash_cannot_run(tmp_path: Path) -> None:
     script.write_text("", encoding="utf-8")
     installer = Installer(
         entry,
-        repo_root=tmp_path,
+        installers_root=tmp_path,
         docker_check=lambda: True,
         package_manager=lambda: None,
         bash_check=lambda: False,

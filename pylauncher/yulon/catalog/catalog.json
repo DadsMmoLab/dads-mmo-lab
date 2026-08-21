@@ -14,10 +14,10 @@
         ]
       },
       "install": {
-        "script": "archive/guides/wow-wotlk/install-wow-wotlk.sh",
+        "script": "wow-wotlk/install-wow-wotlk.sh",
         "script_variants": {
-          "apt": "archive/guides/wow-wotlk/install-wow-wotlk-ubuntu.sh",
-          "dnf": "archive/guides/wow-wotlk/install-wow-wotlk-fedora.sh"
+          "apt": "wow-wotlk/install-wow-wotlk-ubuntu.sh",
+          "dnf": "wow-wotlk/install-wow-wotlk-fedora.sh"
         },
         "default_server_dir": "wow-server-playerbots",
         "db_root_password": "password"
@@ -51,7 +51,7 @@
         ]
       },
       "install": {
-        "script": "archive/guides/wow-tbc/install-wow-tbc.sh",
+        "script": "wow-tbc/install-wow-tbc.sh",
         "default_server_dir": "wow-tbc-server",
         "requires_client_dir": true,
         "db_root_password_file": ".db_password"
@@ -84,7 +84,7 @@
         ]
       },
       "install": {
-        "script": "archive/guides/wow-vanilla/install-wow-vanilla.sh",
+        "script": "wow-vanilla/install-wow-vanilla.sh",
         "default_server_dir": "wow-vanilla-server",
         "requires_client_dir": true,
         "db_root_password_file": ".db_password"
@@ -115,7 +115,7 @@
         ]
       },
       "install": {
-        "script": "archive/guides/work-in-progress/install-tortoise-wow-WSL.sh",
+        "script": "wow-tortoise/install-tortoise-wow-wsl.sh",
         "default_server_dir": "tortoise-wow-server",
         "requires_client_dir": true
       },

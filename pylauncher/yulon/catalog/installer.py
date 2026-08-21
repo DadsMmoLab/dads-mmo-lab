@@ -33,8 +33,8 @@ from yulon.log import get_logger
 
 logger = get_logger(__name__)
 
-# Where `archive/guides/...` resolves from: the repo root, or the bundle when frozen.
-DEFAULT_REPO_ROOT = resources.repo_root()
+# Where `catalog.json`'s install scripts resolve from (roadmap 6.0).
+DEFAULT_INSTALLERS_ROOT = resources.installers_dir()
 # What the scripts see as their terminal when the app was not started from one.
 DEFAULT_TERM = "xterm-256color"
 
@@ -168,7 +168,7 @@ class Installer:
         self,
         entry: CatalogEntry,
         *,
-        repo_root: Path = DEFAULT_REPO_ROOT,
+        installers_root: Path = DEFAULT_INSTALLERS_ROOT,
         docker_check: Callable[[], bool] = docker_available,
         ensure_docker: Callable[..., platform.ProvisionReport] = platform.ensure_docker,
         interact: Callable[..., Iterator[str]] = runner.interact,
@@ -177,7 +177,7 @@ class Installer:
         bash_check: Callable[[], bool] = bash_available,
     ) -> None:
         self.entry = entry
-        self.repo_root = repo_root
+        self.installers_root = installers_root
         self._docker_check = docker_check
         self._ensure_docker = ensure_docker
         self._interact = interact
@@ -193,7 +193,7 @@ class Installer:
         names the Debian/Fedora ports (Phase 3 live-gate finding, 2026-08-20:
         on Ubuntu the default script would call `pacman`).
         """
-        return self.repo_root / self.entry.install.script_for(self._package_manager())
+        return self.installers_root / self.entry.install.script_for(self._package_manager())
 
     def script_env(self) -> dict[str, str]:
         """The environment the script runs in: ours, plus `env` overrides, plus a `TERM`.
@@ -290,14 +290,14 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument("--server-dir", type=Path, default=None)
     parser.add_argument("--client-dir", type=Path, default=None)
     parser.add_argument("--reinstall", action="store_true")
-    parser.add_argument("--repo-root", type=Path, default=DEFAULT_REPO_ROOT)
+    parser.add_argument("--installers-root", type=Path, default=DEFAULT_INSTALLERS_ROOT)
     args = parser.parse_args(argv)
     try:
         entry = load_catalog().get(args.game)
     except KeyError:
         sys.stderr.write(f"unknown game {args.game!r}\n")
         return 2
-    installer = Installer(entry, repo_root=args.repo_root)
+    installer = Installer(entry, installers_root=args.installers_root)
     options = InstallOptions(
         server_dir=args.server_dir, client_dir=args.client_dir, reinstall=args.reinstall
     )

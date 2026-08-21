@@ -74,7 +74,7 @@
 > games mechanically, but 6.1–6.5's gating/installer/feature work is WotLK-only). TBC, Vanilla,
 > and Tortoise are Phase 7 — not started until Phase 6's exit criteria are fully met.
 
-- [ ] 6.0 Rehome the install scripts (move `archive/guides/<game>/install-*.sh` + `dml-start.sh`/`wow-manage.sh` into `catalog/installers/<game>/`; update `catalog.json`, `pylauncher.spec` `script_globs`, and the path-pinning tests)
+- [x] 6.0 Rehome the install scripts — the eight executable files now live in `pylauncher/catalog/installers/<game>/` (parallel to `manifests/`), `catalog.json` paths are relative to that directory, `resources.installers_dir()` replaces `repo_root()`, `Installer(installers_root=…)` resolves them, and the spec ships the whole tree instead of globbing `archive/guides/**` — so the bundle no longer carries `archive/guides` at all (README §3a bonus). The Tortoise script was renamed to lowercase on the way (`install-tortoise-wow-wsl.sh`, style-guide §6a). Verified: 191 passed, and a frozen PyInstaller build contains all eight scripts under `catalog/installers/` and passes `YULON_SMOKE_TEST`. `archive/guides/` keeps the human-facing guides plus the four non-catalog installers (Maplestory, Mu Online, RuneScape, the Unbound addon), which no catalog entry references.
     - Update scripts and manifests to use proper systems and features.
 - [ ] 6.1 Honest platform gating (`catalog.json` per-entry platform support; refuse off-Linux installs with a clear message; surface the script's real output in the failed dialog)
 - [ ] 6.2 macOS install path — **runtime is Docker Desktop** (macOS variant drives `docker compose` against the Docker Desktop the app provisions; no `pacman`/`systemctl`/`sudo`, no manual VM management)
