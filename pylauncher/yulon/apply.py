@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Protocol
 
-from yulon import runner
+from yulon.git import CloneSpec, Git, GitError, RunnerGit
 from yulon.log import get_logger
 from yulon.manifest import Db, Deploy, Manifest, ManifestType, Patch, SqlStep, When
 
@@ -60,12 +60,6 @@ class ApplyError(RuntimeError):
 # ------------------------------------------------------------------- seams
 
 
-class Git(Protocol):
-    """Clone/update seam. Implementations raise `ApplyError` on failure."""
-
-    def clone(self, url: str, dest: Path, branch: str | None, sparse_path: str | None) -> None: ...
-
-
 class SqlRunner(Protocol):
     """Run SQL against one of the server's databases."""
 
@@ -78,44 +72,6 @@ class DbcCopier(Protocol):
     """Copy DBC files from a host directory into the server's `data/dbc/` volume."""
 
     def copy_dbc_dir(self, src: Path) -> None: ...
-
-
-class RunnerGit:
-    """`Git` over the real `git` CLI via `yulon.runner` (depth-1; sparse for kegs)."""
-
-    def clone(self, url: str, dest: Path, branch: str | None, sparse_path: str | None) -> None:
-        if (dest / ".git").is_dir():
-            self._update(dest, branch)
-            return
-        if dest.exists():
-            shutil.rmtree(dest)  # a non-git leftover; wow-manage.sh does the same
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if sparse_path is None:
-            argv = ["git", "clone", "--depth", "1"]
-            if branch:
-                argv += ["--branch", branch]
-            _git(argv + [url, str(dest)])
-            return
-        dest.mkdir(parents=True, exist_ok=True)
-        _git(["git", "init", "-q"], cwd=dest)
-        _git(["git", "remote", "add", "origin", url], cwd=dest)
-        _git(["git", "config", "core.sparseCheckout", "true"], cwd=dest)
-        (dest / ".git" / "info").mkdir(parents=True, exist_ok=True)
-        (dest / ".git" / "info" / "sparse-checkout").write_text(
-            sparse_path.rstrip("/") + "/\n", encoding="utf-8", newline="\n"
-        )
-        _git(["git", "pull", "--depth=1", "origin", branch or "HEAD"], cwd=dest)
-
-    def _update(self, dest: Path, branch: str | None) -> None:
-        _git(["git", "fetch", "--depth=1", "origin", branch or "HEAD"], cwd=dest)
-        _git(["git", "reset", "--hard", "FETCH_HEAD"], cwd=dest)
-
-
-def _git(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-    proc = runner.run(argv, cwd=cwd)
-    if proc.returncode != 0:
-        raise ApplyError(f"{' '.join(argv)} exited {proc.returncode}: {proc.stderr.strip()}")
-    return proc
 
 
 @dataclass(frozen=True)
@@ -239,9 +195,17 @@ class Applier:
         log = _Log()
         clone = self.clone_dir(manifest)
         if manifest.source is not None:
-            self.git.clone(
-                manifest.source.url, clone, manifest.source.branch, manifest.source.sparse_path
-            )
+            try:
+                self.git.clone(
+                    CloneSpec(
+                        url=manifest.source.url,
+                        dest=clone,
+                        branch=manifest.source.branch,
+                        sparse_path=manifest.source.sparse_path,
+                    )
+                )
+            except GitError as exc:  # one failure vocabulary for the whole applier
+                raise ApplyError(str(exc)) from exc
             log.done.append(f"clone {manifest.source.url} → {_rel(self.server_dir, clone)}")
             if manifest.type == "module":
                 # CMake's CollectSourceFiles() silently skips a module without include.sh.

@@ -14,8 +14,9 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from yulon import resources
-from yulon.apply import Applier, ApplyReport, DbcCopier, DockerSql, Git, SqlRunner
+from yulon.apply import Applier, ApplyReport, DbcCopier, DockerSql, SqlRunner
 from yulon.controller_wow_wotlk import docker_ctl
+from yulon.git import Git
 from yulon.manifest import Manifest, ManifestType
 from yulon.manifest_store import (
     HttpGet,

@@ -15,7 +15,8 @@ from typing import Any
 
 import pytest
 
-from yulon.apply import Applier, ApplyError, DockerSql, RunnerGit, _set_conf_key
+from yulon.apply import Applier, ApplyError, DockerSql, _set_conf_key
+from yulon.git import CloneSpec, RunnerGit
 from yulon.manifest import parse_manifest
 
 LUA = "env/dist/etc/modules/lua_scripts"
@@ -26,15 +27,15 @@ class _FakeGit:
 
     def __init__(self, files: dict[str, str]) -> None:
         self.files = files
-        self.calls: list[tuple[str, Path, str | None, str | None]] = []
+        self.calls: list[CloneSpec] = []
 
-    def clone(self, url: str, dest: Path, branch: str | None, sparse_path: str | None) -> None:
-        self.calls.append((url, dest, branch, sparse_path))
+    def clone(self, spec: CloneSpec) -> None:
+        self.calls.append(spec)
         for rel, text in self.files.items():
-            p = dest / rel
+            p = spec.dest / rel
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(text, encoding="utf-8")
-        (dest / ".git").mkdir(exist_ok=True)
+        (spec.dest / ".git").mkdir(exist_ok=True)
 
 
 class _FakeSql:
@@ -108,8 +109,8 @@ def test_ale_install_deploys_patches_on_configure_and_removes(tmp_path: Path) ->
     m = parse_manifest(ALE)
 
     report = applier.install(m)
-    assert git.calls[0][0] == "https://github.com/Brytenwally/SitMeansRest.git"
-    assert git.calls[0][1] == tmp_path / "ale_scripts" / "sitmeanrest"
+    assert git.calls[0].url == "https://github.com/Brytenwally/SitMeansRest.git"
+    assert git.calls[0].dest == tmp_path / "ale_scripts" / "sitmeanrest"
     deployed = tmp_path / LUA / "SitMeansRest.lua"
     assert deployed.read_text(encoding="utf-8") == "local DURATION = 5\n"  # configure-time patch
     assert sql.files == [("characters", "tables.sql")]
@@ -177,7 +178,7 @@ def test_steps_without_a_seam_are_reported_skipped_never_silent(tmp_path: Path) 
         }
     )
     report = Applier(tmp_path, git=git).install(m)  # no sql, no client dir, no dbc
-    assert git.calls[0][3] == "kegs/sod"  # sparse path forwarded
+    assert git.calls[0].sparse_path == "kegs/sod"  # sparse path forwarded
     assert (tmp_path / LUA / "SOD.lua").exists()
     assert sorted(report.skipped) == [
         "client kegs/sod/Client Files/data: no client dir configured",
@@ -298,11 +299,19 @@ def test_runner_git_sparse_clone_sequence(monkeypatch: pytest.MonkeyPatch, tmp_p
 
     monkeypatch.setattr(runner, "run", fake_run)
     dest = tmp_path / "ale_scripts" / "bmah"
-    RunnerGit().clone("https://github.com/DadsMmoLab/dads-mmo-lab.git", dest, None, "guides/x")
+    RunnerGit().clone(
+        CloneSpec(
+            url="https://github.com/DadsMmoLab/dads-mmo-lab.git",
+            dest=dest,
+            sparse_path="guides/x",
+        )
+    )
     assert [a[:2] for a in seen] == [
         ["git", "init"],
         ["git", "remote"],
-        ["git", "config"],
+        ["git", "config"],  # core.sparseCheckout
+        ["git", "config"],  # core.autocrlf=false — or the checkout gets CRLF on Windows
+        ["git", "config"],  # core.eol=lf
         ["git", "pull"],
     ]
     assert (dest / ".git" / "info" / "sparse-checkout").read_text(encoding="utf-8") == "guides/x/\n"
