@@ -134,4 +134,25 @@
 > Anything that doesn't cleanly belong to one phase — style-guide amendments, cross-document corrections, tooling gotchas, etc.
 
 - **`pyplan/phase6-decisions.md` (2026-08-21):** why 6.2/6.3 is one shared Python install engine rather than per-platform scripts or a container wrapper, what was rejected and on what evidence, and the finding that **SOAP cannot create the first account** — so 6.5 item 3's option (a) rests on a false premise and SRP6-over-`DockerSql` becomes the primary account path on every platform.
+- **Live-machine findings, 2026-08-21 (clean Ubuntu 24.04 VM, Docker 29.1.3)** — three things that only a real
+  daemon could show, all now covered by tests that run against one:
+  1. **`Controller.stop()` removed the containers.** It ran `docker compose down`, so the next `start()` found nothing
+     to start by name and fell back to `compose up -d` — re-running the one-shot `ac-db-import` that `start_staged()`
+     exists to prevent. The staged start had therefore *never* run in the launcher's own stop/start cycle. Fixed by
+     `docker.stop_staged()` (stop world, auth, db by name); `docker.stop()` stays as the teardown path. The failing
+     assertion before the fix was literally `stop() removed the containers`.
+  2. **The live fixture that caught it now lives in the suite.** `tests/integration/` gained a one-shot container that
+     appends a line per run to a bind-mounted file, so a test counts how many times the "import" ran: `compose up`
+     re-runs it (the documented bug), a launcher stop/start cycle does not (the fix), an edited compose file is still
+     applied. 5 passed / 1 skipped live. This is the plan's "alpine integration fixture" step, landed early because the
+     bug hunt needed it.
+  3. **`ensure_docker()` reports failure after a completely successful install.** On a clean Ubuntu it ran all four
+     steps (`apt-get update`, `apt-get install docker.io docker-compose-v2 docker-buildx`, `systemctl enable --now
+     docker`, `usermod -aG docker pk`) with zero skips, then returned `docker_ready=False`, because the calling
+     process's group set predates `usermod` — the daemon was fine, and a fresh login used it immediately. The only
+     remedy offered is "log out and back in". A user who provisions Docker from the launcher and is then told "Docker
+     not reachable" has no way to tell that apart from a real failure. **Open:** distinguish the two states (probe the
+     daemon under `sudo -n docker info`, or re-probe under `sg docker`) and say "installed — restart the launcher"
+     rather than reporting it as not ready. See 6.5's provisioning coverage.
+
 - **`pyplan/rust-prior-art.md` (2026-08-21):** what the earlier Rust launcher (`rust-main`) already solved, distilled so nobody has to read Rust — the staged/resumable install machine, the compose three-file split and its build-file trap, preflight floors with the measurements behind them, Windows Docker Desktop specifics, and creating the first GM account via SRP6 (no console/pty needed, which is the open Windows console gap in 6.5 item 3). Sections 1-5 feed Phase 6; section 7 lists what is waiting for Phase 8's feature port.

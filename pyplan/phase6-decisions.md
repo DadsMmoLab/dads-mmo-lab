@@ -159,6 +159,18 @@ Two live bugs the review found in existing code, neither of them Phase 6 regress
 - `docker.start()` ran a bare `compose up -d`, which re-runs AzerothCore's one-shot
   `ac-db-import`/`ac-client-data-init` on every restart — the thing this project's own
   `dml-start.sh` warns "was killing the database". Now `docker.start_staged()`.
+- **…and that fix did nothing until the stop half was fixed too.** `Controller.stop()` ran
+  `docker compose down`, which *removes* the containers, so the next `start_staged()` found nothing to
+  start by name and fell straight back to `compose up -d`. Only a run against a real daemon showed it;
+  every unit test passed throughout, because each half is correct in isolation and the invariant lives
+  in the pair. Now `docker.stop_staged()`, mirroring `dml-start.sh`'s `docker stop`/`docker start`
+  pairing, with `docker.stop()` kept as the explicit teardown path.
+
+  The general lesson, worth carrying into 6.2: **a defect can live in the seam between two functions
+  that are each individually right.** Mocked tests cannot see that seam; they assert the argv each half
+  emits, which is exactly what was wrong. The live fixture that found it — a one-shot container that
+  appends one line per run to a bind-mounted file, so a test counts the runs — is now part of the
+  integration suite, and is the same shape the native install engine will need.
 - `DockerSql` put the MySQL root password in argv (`-p<pw>`) and inline SQL in `-e`, both readable
   by any local process. Now `MYSQL_PWD` in the environment and the statement over stdin.
 
