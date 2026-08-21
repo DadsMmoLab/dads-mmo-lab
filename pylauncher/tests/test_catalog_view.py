@@ -193,3 +193,39 @@ def test_supported_platform_keeps_the_install_button(qapp: object) -> None:
         CATALOG, lambda e: _FakeInstaller(e, []), LogPanel(), platform_id=lambda: "linux"
     )
     assert view.button_for("wow-wotlk").isEnabled() is True
+
+
+def test_unlocking_after_a_job_never_re_enables_a_gated_tile(qapp: object, tmp_path: Path) -> None:
+    """The 6.1 gate must survive `_set_buttons_enabled(True)` (review finding 1.1).
+
+    Latent while every entry is Linux-only; armed the moment 6.2 widens WotLK
+    and leaves TBC/Vanilla/Tortoise behind — a mixed catalog, which is exactly
+    what this builds.
+    """
+    from yulon.catalog.catalog import Catalog
+
+    wotlk = CATALOG.get("wow-wotlk")
+    widened = wotlk.model_copy(
+        update={"install": wotlk.install.model_copy(update={"platforms": ("linux", "macos")})}
+    )
+    mixed = Catalog(games=(widened, CATALOG.get("wow-tbc")))
+
+    panel = LogPanel()
+    view = CatalogView(
+        mixed,
+        lambda e: _FakeInstaller(e, ["line"]),
+        panel,
+        pick_dir=lambda *_: tmp_path,
+        home=tmp_path,
+        platform_id=lambda: "macos",
+    )
+    assert view.button_for("wow-wotlk").isEnabled() is True  # widened
+    assert view.button_for("wow-tbc").isEnabled() is False  # still Linux-only
+
+    assert view.start_install(widened) is True
+    _wait(panel)
+    process_events(50)
+
+    assert view.button_for("wow-wotlk").isEnabled() is True  # unlocked after the job
+    assert view.button_for("wow-tbc").isEnabled() is False  # STILL gated
+    assert view.existing_button_for("wow-tbc").isEnabled() is True  # never gated

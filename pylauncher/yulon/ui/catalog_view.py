@@ -32,6 +32,7 @@ from yulon.catalog.catalog import Catalog, CatalogEntry
 from yulon.catalog.installer import (
     Installer,
     InstallOptions,
+    platform_names,
     unsupported_platform_message,
 )
 from yulon.log import get_logger
@@ -74,6 +75,7 @@ class CatalogView(QWidget):
         self._pick_dir = pick_dir
         self._home = home if home is not None else Path.home()
         self._buttons: dict[str, QPushButton] = {}
+        self._gated: set[str] = set()  # ids the platform gate disabled (roadmap 6.1)
         self._existing_buttons: dict[str, QPushButton] = {}
         self._current: tuple[str, Path, Path | None] | None = None
 
@@ -110,7 +112,7 @@ class CatalogView(QWidget):
             # "Use existing…" enabled, since managing a server installed
             # elsewhere works on every platform.
             note = QLabel(
-                f"<i>Installer needs {', '.join(entry.install.platforms)} — "
+                f"<i>Installer needs {platform_names(entry.install.platforms)} — "
                 "not available on this platform yet.</i>",
                 frame,
             )
@@ -118,6 +120,7 @@ class CatalogView(QWidget):
             box.addWidget(note)
             button.setEnabled(False)
             button.setToolTip(unsupported_platform_message(entry, self._platform_id()))
+            self._gated.add(entry.id)
         existing = QPushButton("Use existing…", frame)
         existing.setObjectName(f"existing-{entry.id}")
         existing.setToolTip(
@@ -238,5 +241,16 @@ class CatalogView(QWidget):
             self.installed.emit(game_id, server_dir, client_dir)
 
     def _set_buttons_enabled(self, enabled: bool) -> None:
-        for button in (*self._buttons.values(), *self._existing_buttons.values()):
+        """Lock the tiles while a job runs, and unlock them when it ends.
+
+        Unlocking must never re-enable an Install button the platform gate
+        disabled (roadmap 6.1) — the tile's own note says it cannot be installed
+        here. Latent while every catalog entry is Linux-only; armed the moment
+        6.2 widens WotLK and leaves the other three. "Use existing…" is
+        deliberately platform-independent: managing a server someone else
+        installed works everywhere.
+        """
+        for game_id, button in self._buttons.items():
+            button.setEnabled(enabled and game_id not in self._gated)
+        for button in self._existing_buttons.values():
             button.setEnabled(enabled)

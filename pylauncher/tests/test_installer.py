@@ -330,8 +330,19 @@ def test_installer_refuses_a_platform_its_script_cannot_run(tmp_path: Path) -> N
 def test_unsupported_message_names_the_platform_and_the_requirement() -> None:
     entry = load_catalog().get("wow-tbc")
     message = installer_module.unsupported_platform_message(entry, "windows")
-    assert "WoW TBC" in message and "Windows" in message and "linux" in message
+    assert "WoW TBC" in message and "Windows" in message and "Linux" in message
     assert "Nothing was started" in message
+
+
+def test_platform_names_reads_as_english() -> None:
+    """6.2 widens `platforms` to two entries — the copy must not become "linux, macos"."""
+    assert installer_module.platform_names(["linux"]) == "Linux"
+    assert installer_module.platform_names(["linux", "macos"]) == "Linux or macOS"
+    assert (
+        installer_module.platform_names(["linux", "macos", "windows"]) == "Linux, macOS or Windows"
+    )
+    assert installer_module.platform_names([]) == "another platform"
+    assert installer_module.platform_names(["haiku"]) == "haiku"  # unknown id passes through
 
 
 @needs_bash

@@ -1329,7 +1329,7 @@ post_install_resources() {
     echo -e "  ${GREEN}bash ~/wow-manage.sh${NC}"
     echo ""
     if ask_yes_no "Download wow-manage.sh to your home folder now?"; then
-        local manage_url="https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/guides/wow-wotlk/wow-manage.sh"
+        local manage_url="https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/pylauncher/catalog/installers/wow-wotlk/wow-manage.sh"
         if curl -fsSL "$manage_url" -o "$HOME/wow-manage.sh"; then
             chmod +x "$HOME/wow-manage.sh"
             print_success "Downloaded to ~/wow-manage.sh"

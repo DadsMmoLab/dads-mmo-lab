@@ -24,7 +24,7 @@ import subprocess
 import sys
 import threading
 from collections import deque
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -123,13 +123,24 @@ def make_responder(
     return respond
 
 
+_PLATFORM_NAMES: dict[str, str] = {"windows": "Windows", "macos": "macOS", "linux": "Linux"}
+
+
+def platform_names(platforms: Iterable[str]) -> str:
+    """Platform ids as user-facing copy: `("linux", "macos")` → `"Linux or macOS"`."""
+    names = [_PLATFORM_NAMES.get(p, p) for p in platforms]
+    if len(names) < 2:
+        return names[0] if names else "another platform"
+    return f"{', '.join(names[:-1])} or {names[-1]}"
+
+
 def unsupported_platform_message(entry: CatalogEntry, platform_id: str) -> str:
     """Why this server cannot be installed here, in the user's words (roadmap 6.1)."""
-    supported = ", ".join(entry.install.platforms)
-    where = {"windows": "Windows", "macos": "macOS", "linux": "Linux"}.get(platform_id, platform_id)
+    supported = platform_names(entry.install.platforms)
+    where = platform_names([platform_id])
     return (
-        f"{entry.name} cannot be installed on {where} yet: its installer is a "
-        f"{supported} script. Nothing was started. Install it on {supported} for now — "
+        f"{entry.name} cannot be installed on {where} yet: its installer needs "
+        f"{supported}. Nothing was started. Install it on {supported} for now — "
         "a native path for this platform is planned."
     )
 
@@ -160,11 +171,12 @@ def bash_available(run: Callable[..., subprocess.CompletedProcess[str]] | None =
 
 NO_BASH_HELP = (
     "The installers are shell scripts and this machine has no working `bash`. "
-    "On Windows that usually means WSL has no Linux distribution yet: install "
-    "one (`wsl --install -d Ubuntu`), reopen the app, and try again. Yu'lon "
-    "sets up WSL2 and Docker Desktop for you, but the install script itself "
-    "still needs a distro to run in."
+    "Install one (or repair the existing install), reopen the app, and try again."
 )
+# Deliberately platform-neutral: `preflight()` refuses on the platform gate
+# BEFORE this check, so the old Windows/WSL advice was unreachable — and by
+# roadmap 6.3 it is also wrong, since native Windows drives Docker Desktop's
+# WSL2 backend rather than running the bash script in a distro.
 
 
 def docker_available() -> bool:

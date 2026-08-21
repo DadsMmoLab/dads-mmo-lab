@@ -42,7 +42,10 @@ class Emulator(_Strict):
 class Install(_Strict):
     """How the Phase 3a installer drives the existing script for this game."""
 
-    script: str = Field(min_length=1, description="Repo-relative path to the install-*.sh")
+    script: str = Field(
+        min_length=1,
+        description="Path to the install-*.sh, relative to catalog/installers/",
+    )
     default_server_dir: str = Field(min_length=1, description="Default dir name under $HOME")
     db_root_password: str | None = Field(
         default=None, description="Fixed root password the installer uses, if any."
@@ -68,7 +71,8 @@ class Install(_Strict):
         default_factory=dict,
         description=(
             "Per-package-manager overrides of `script` (keys: apt, dnf, pacman, zypper) for "
-            "distros the default script does not cover; `script` itself is the pacman/SteamOS one."
+            "distros the default script does not cover, same base directory; `script` "
+            "itself is the pacman/SteamOS one."
         ),
     )
 
@@ -77,7 +81,8 @@ class Install(_Strict):
         return platform_id in self.platforms
 
     def script_for(self, package_manager: str | None) -> str:
-        """The repo-relative script to run on a host with `package_manager` (None → default)."""
+        """The script for a host with `package_manager` (None → default), relative to
+        `catalog/installers/`."""
         for pm, script in self.script_variants.items():
             if pm == package_manager:
                 return script

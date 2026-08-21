@@ -1016,7 +1016,7 @@ install_dml_start_hook() {
     if [ -f "$src" ]; then
         cp "$src" "$dest"
     elif curl -fsSL \
-        "https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/guides/wow-wotlk/dml-start.sh" \
+        "https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/pylauncher/catalog/installers/wow-wotlk/dml-start.sh" \
         -o "$dest"; then
         :
     else
@@ -1457,8 +1457,17 @@ post_install_resources() {
     echo -e "  ${GREEN}bash ~/wow-manage.sh${NC}"
     echo ""
     if ask_yes_no "Download wow-manage.sh to your home folder now?"; then
-        local manage_url="https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/guides/wow-wotlk/wow-manage.sh"
-        if curl -fsSL "$manage_url" -o "$HOME/wow-manage.sh"; then
+        # Prefer the copy shipped next to this script (same treatment
+        # install_dml_start_hook gives dml-start.sh) and fall back to the raw
+        # URL only when this script was run on its own.
+        local manage_src manage_url
+        manage_src="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/wow-manage.sh"
+        manage_url="https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/pylauncher/catalog/installers/wow-wotlk/wow-manage.sh"
+        if [ -f "$manage_src" ] && cp "$manage_src" "$HOME/wow-manage.sh"; then
+            chmod +x "$HOME/wow-manage.sh"
+            print_success "Copied to ~/wow-manage.sh"
+            print_info "Run it any time with: bash ~/wow-manage.sh"
+        elif curl -fsSL "$manage_url" -o "$HOME/wow-manage.sh"; then
             chmod +x "$HOME/wow-manage.sh"
             print_success "Downloaded to ~/wow-manage.sh"
             print_info "Run it any time with: bash ~/wow-manage.sh"
