@@ -24,7 +24,11 @@ needs_pty = pytest.mark.skipif(not console.pty_supported(), reason="no pty on th
 class _FakeProc:
     def __init__(self, argv: list[str], **kwargs: Any) -> None:
         self.argv = argv
-        self.stdin = kwargs.get("stdin")
+        # A real subprocess.Popen dups the slave fd into the child, so the
+        # master stays writable after send_command() closes its own copy. Dupe
+        # here too, or os.write(master) fails with EIO once the slave is gone.
+        stdin = kwargs.get("stdin")
+        self.stdin = os.dup(stdin) if isinstance(stdin, int) else stdin
         self.stdout = io.BytesIO(b"AC> \r\nAccount created: dad\r\n")
         self._rc: int | None = None
 
@@ -58,7 +62,9 @@ def test_send_command_attaches_over_a_pty_and_collects_the_reply() -> None:
     )
     assert made[0].argv == ["docker", "attach", "--sig-proxy=false", "ac-worldserver"]
     # stdin is the pty's slave fd — a terminal, which is what docker demands.
-    assert isinstance(made[0].stdin, int) and os.isatty(made[0].stdin) is False  # closed by now
+    # It's a dup of the original slave, so it stays a terminal even after
+    # send_command() closes its own copy (mirroring the child's fd).
+    assert isinstance(made[0].stdin, int) and os.isatty(made[0].stdin) is True
     # The prompt and our own echo are not part of the answer.
     assert reply.lines == ("Account created: dad",)
     assert reply.command == "account create dad pw"
