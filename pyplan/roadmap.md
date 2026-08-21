@@ -313,6 +313,93 @@ automatically.
 
 ---
 
+## Phase 6 — Cross-platform install paths (macOS + native Windows)
+
+> **Not in README §7's phase list** (it is README §9's deferred "Phase 3b": the native
+> reimplementation of installers). Raised to its own phase because the macOS pre-alpha run made
+> the gap concrete: **all four v1 installers are Linux-only bash scripts** gated on
+> `[[ "$OSTYPE" == "linux-gnu"* ]]` and hard-coupled to `pacman`/`systemctl`/`sudo`, so on macOS
+> (`darwin*`) and native Windows they fail fast with "Requires Linux (SteamOS)" — *before* the
+> Docker provisioning the app already does can help. This is the "install start but console shows
+> nothing" failure: the script streams a few banner lines, exits 1, and the Catalog surfaces a
+> bare "install failed". The app must either run these servers cross-platform or refuse to offer
+> them off Linux.
+
+### 6.0 Rehome the install scripts (prerequisite refactor)
+
+> Before any macOS/Windows installer is added, the installers need a real home: today the
+> executable `install-*.sh` scripts (and their sourced helpers) live mixed in with the
+> human-facing guides under `archive/guides/<game>/`. Move them into a dedicated
+> `catalog/installers/` area so `catalog.json` and the packaging spec point at one clean,
+> data-only location that 6.2/6.3 will grow with per-platform variants.
+
+1. Move the executable install scripts (plus the sourced helpers `dml-start.sh`, `wow-manage.sh`)
+   out of `archive/guides/<game>/` into `pylauncher/catalog/installers/<game>/`, parallel to
+   `pylauncher/manifests/`. `archive/guides/` keeps only the human-facing guides/HOWTOs.
+   **[style]** — data (scripts) separate from docs; lowercase filenames (§6a); one source of
+   truth (§4).
+2. Update `catalog.json` `install.script` / `install.script_variants` for all four games (and the
+   `apt`/`dnf` WotLK variants) to the new paths.
+3. Update `build/pylauncher.spec`'s `script_globs` (and `resources.repo_root()` resolution if
+   needed) so the frozen bundle still finds the scripts under `catalog/installers/**`.
+4. Update tests that pin the old `archive/guides/...` paths (`test_catalog.py`'s script-existence
+   pins; `test_installer.py`'s `script_for` table).
+5. *Definition of done:* all four installers resolve, run, and bundle from the new home; `pytest`
+   green; no `archive/guides/**/install-*.sh` reference remains in `catalog.json`, the spec, or
+   tests. 6.2/6.3 then add their macOS/Windows variants into this same directory.
+
+### 6.1 Honest platform gating (block the fast-fail)
+
+1. Record, per catalog entry, which platforms its install script actually supports (initially
+   `linux` for all four), as data in `catalog.json` — not a Python conditional. **[style]** — data
+   in manifests (§3/§4); acronyms only (§6).
+2. Have `catalog/installer.py` (or `catalog_view.py`) refuse to start an install whose script does
+   not support the current `platform.detect()`, with a clear, honest message naming the gap
+   ("this server's installer needs Linux/WSL") instead of streaming a script that exits 1.
+3. Surface the install script's *actual* output (not just "exited with status N") in the failed
+   dialog, so a script's own error is never swallowed.
+4. *Definition of done:* clicking Install for WotLK on macOS shows the honest unsupported message
+   before any subprocess runs; the failed-dialog path shows the script's real error text.
+
+### 6.2 macOS install path (the macOS pre-alpha blocker)
+
+1. Provide a macOS-installable path for each of the four v1 servers. Since the current scripts are
+   SteamOS/`pacman`-bound and Docker Desktop already supplies the Linux kernel on macOS, the
+   natural approach is a **macOS variant** of each installer (or a shared reimplementation, per
+   README §9 "Phase 3b") that assumes Docker Desktop is present (the app already provisions it via
+   `ensure_docker()`) and drives `docker compose` directly — no `pacman`, `systemctl`, or `sudo`
+   package installs. **[style]** — keep per-game specifics in `catalog.json`/manifests; one shared
+   implementation (§4).
+2. Wire the new script(s) into `catalog.json` (`install.script_variants` or an equivalent
+   platform→script map) so `Installer.script` resolves the macOS path the same way it already
+   picks `apt`/`dnf` variants on Linux (Phase 3 live-gate finding).
+3. *Definition of done:* `installer.run()` for WotLK completes a working server on a real macOS
+   machine with Docker Desktop, with zero shell interaction, streaming output to the console.
+
+### 6.3 Native Windows install path
+
+1. Provide a native-Windows install path for each of the four v1 servers. The current scripts run
+   under WSL2 (Docker Desktop's WSL backend), not native Windows; the app must either run the
+   Linux script inside a provisioned WSL2 distro or ship a Windows-native equivalent that drives
+   `docker compose` against Docker Desktop's WSL2 backend. **[blocked]** — 6.2 establishes the
+   shared non-Linux install shape first.
+2. *Definition of done:* `installer.run()` for WotLK completes a working server on a real Windows
+   11 machine (no Linux distro pre-installed), with zero shell interaction.
+
+### 6.4 Tests & gates
+
+1. Unit-test the platform gating (6.1) through the `platform.detect()` seam, and the macOS/Windows
+   script resolution (6.2/6.3) through `catalog.json` — no real macOS/Windows machine needed for
+   the mocked suite.
+2. Live-gate 6.2 on a real macOS machine and 6.3 on a real Windows 11 machine (both currently
+   unverified — the whole point of this phase).
+
+**Phase 6 exit criteria:** all four v1 servers install end-to-end on Linux, macOS, and native
+Windows with zero shell interaction, and off-Linux clicks never silently fast-fail — they either
+install or explain exactly why not.
+
+---
+
 ## Cross-cutting obligations (apply to every phase)
 
 - **[style]** Typed Python: no unannotated signatures, no `Any` escape hatches (style-guide §2).
