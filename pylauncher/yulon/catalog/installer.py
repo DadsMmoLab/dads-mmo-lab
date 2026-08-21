@@ -170,7 +170,7 @@ class Installer:
         *,
         repo_root: Path = DEFAULT_REPO_ROOT,
         docker_check: Callable[[], bool] = docker_available,
-        ensure_docker: Callable[[], platform.ProvisionReport] = platform.ensure_docker,
+        ensure_docker: Callable[..., platform.ProvisionReport] = platform.ensure_docker,
         interact: Callable[..., Iterator[str]] = runner.interact,
         env: Mapping[str, str] | None = None,
         package_manager: Callable[[], str | None] = host_package_manager,
@@ -210,12 +210,14 @@ class Installer:
             env.update(self._env)
         return env
 
-    def preflight(self, options: InstallOptions) -> None:
+    def preflight(self, options: InstallOptions, cancel: threading.Event | None = None) -> None:
         """Everything that must be true before a single line of the script runs.
 
         Raises `InstallerError` (script missing, client dir required but not
         given) or `DockerUnavailableError` (no daemon and provisioning not yet
-        implemented — roadmap 3.3's graceful failure).
+        implemented — roadmap 3.3's graceful failure). `cancel`, when set, is
+        passed through to Docker provisioning so its ready-poll can be
+        interrupted (a stop mid-provision must not leave a worker sleeping).
         """
         if not self.script.is_file():
             raise InstallerError(f"install script not found: {self.script}")
@@ -230,7 +232,7 @@ class Installer:
         if options.client_dir is not None and not options.client_dir.is_dir():
             raise InstallerError(f"client folder does not exist: {options.client_dir}")
         if not self._docker_check():
-            report = self._ensure_docker()
+            report = self._ensure_docker(cancel=cancel)
             if report.reboot_required:
                 raise DockerUnavailableError(
                     "Docker's prerequisites were installed but a reboot is needed first. "
@@ -256,7 +258,7 @@ class Installer:
         Setting `cancel` interrupts the script (see `runner.interact()`).
         """
         opts = options or InstallOptions()
-        self.preflight(opts)
+        self.preflight(opts, cancel=cancel)
         logger.info(f"installing {self.entry.id} via {self.script}")
         try:
             yield from self._interact(

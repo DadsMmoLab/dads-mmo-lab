@@ -191,7 +191,7 @@ def test_installer_fails_gracefully_without_docker(tmp_path: Path) -> None:
         entry,
         repo_root=tmp_path,
         docker_check=lambda: False,
-        ensure_docker=lambda: ProvisionReport(
+        ensure_docker=lambda **_: ProvisionReport(
             "linux", manual_steps=("Install Docker Engine by hand: https://docs.docker.com/",)
         ),
         interact=_fake_interact(calls),  # type: ignore[arg-type]
@@ -206,7 +206,7 @@ def test_installer_fails_gracefully_without_docker(tmp_path: Path) -> None:
         entry,
         repo_root=tmp_path,
         docker_check=lambda: False,
-        ensure_docker=lambda: ProvisionReport(
+        ensure_docker=lambda **_: ProvisionReport(
             "windows", done=("wsl --install",), reboot_required=True, manual_steps=("Reboot.",)
         ),
         package_manager=lambda: None,  # default script, not a distro variant

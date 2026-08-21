@@ -12,6 +12,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from collections.abc import Callable, Iterable
@@ -405,11 +406,23 @@ def _urllib_download(url: str, dest: Path) -> Path:
     return dest
 
 
-def _wait_docker_ready(run: RunCmd, timeout: float, poll: float) -> bool:
+def _wait_docker_ready(
+    run: RunCmd, timeout: float, poll: float, cancel: threading.Event | None = None
+) -> bool:
+    """Poll `docker_ready(run)` until it answers, the timeout passes, or `cancel` is set.
+
+    `cancel` lets a caller interrupt the up-to-`timeout` poll (the installer
+    passes its stop event through), so a UI "Stop" during Docker provisioning
+    does not leave a worker thread sleeping for minutes while the window tears
+    down (review finding, 2026-08-20: a QThread destroyed while its worker is
+    still in this poll aborts the process).
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if docker_ready(run):
             return True
+        if cancel is not None and cancel.is_set():
+            return False
         time.sleep(poll)
     return docker_ready(run)
 
@@ -445,6 +458,7 @@ def ensure_docker(
     dry_run: bool = False,
     user: str | None = None,
     wait_seconds: float = _DOCKER_READY_TIMEOUT_SECONDS,
+    cancel: threading.Event | None = None,
 ) -> ProvisionReport:
     """Make sure a Docker daemon is reachable, installing what the OS needs (README §3b).
 
@@ -454,7 +468,8 @@ def ensure_docker(
     WSL2 (`ensure_wsl2()`) then Docker Desktop (download + silent install,
     elevated). macOS: Docker Desktop (download .dmg, copy Docker.app, open it).
     Returns a `ProvisionReport`; with `dry_run=True` nothing runs and the report
-    lists every step as skipped so the UI can show the plan.
+    lists every step as skipped so the UI can show the plan. `cancel`, when set,
+    interrupts the ready-poll early (the poll still returns the latest check).
     """
     do: RunCmd = run if run is not None else (lambda argv: runner.run(argv))
     current = detect()
@@ -463,10 +478,10 @@ def ensure_docker(
         return ProvisionReport(current, done=("docker already running",), docker_ready=True)
     if current == "linux":
         who = user or os.environ.get("USER") or os.environ.get("USERNAME") or "deck"
-        return _ensure_docker_linux(do, which, dry_run, who, wait_seconds)
+        return _ensure_docker_linux(do, which, dry_run, who, wait_seconds, cancel)
     if current == "windows":
-        return _ensure_docker_windows(do, which, download, dry_run, wait_seconds)
-    return _ensure_docker_macos(do, download, dry_run, wait_seconds)
+        return _ensure_docker_windows(do, which, download, dry_run, wait_seconds, cancel)
+    return _ensure_docker_macos(do, download, dry_run, wait_seconds, cancel)
 
 
 def _ensure_docker_linux(
@@ -475,6 +490,7 @@ def _ensure_docker_linux(
     dry_run: bool,
     user: str,
     wait_seconds: float,
+    cancel: threading.Event | None = None,
 ) -> ProvisionReport:
     pm = linux_package_manager(which)
     if pm is None:
@@ -487,7 +503,7 @@ def _ensure_docker_linux(
         )
     commands = docker_engine_commands(pm, steamos=is_steamos(), user=user)
     done, skipped = _run_steps(do, commands, sudo=True, dry_run=dry_run)
-    ready = False if dry_run else _wait_docker_ready(do, min(wait_seconds, 30.0), 2.0)
+    ready = False if dry_run else _wait_docker_ready(do, min(wait_seconds, 30.0), 2.0, cancel)
     manual = [
         f"Log out and back in (or run `newgrp docker`) so {user} can use Docker without sudo."
     ]
@@ -558,6 +574,7 @@ def _ensure_docker_windows(
     download: Downloader,
     dry_run: bool,
     wait_seconds: float,
+    cancel: threading.Event | None = None,
 ) -> ProvisionReport:
     wsl = ensure_wsl2(run=do, dry_run=dry_run)
     if wsl.reboot_required or (wsl.skipped and not dry_run and not wsl.done):
@@ -607,7 +624,11 @@ def _ensure_docker_windows(
     d3, s3 = _run_steps(do, [start_cmd], sudo=False, dry_run=dry_run)
     done += d3
     skipped += s3
-    ready = False if dry_run else _wait_docker_ready(do, wait_seconds, _DOCKER_READY_POLL_SECONDS)
+    ready = (
+        False
+        if dry_run
+        else _wait_docker_ready(do, wait_seconds, _DOCKER_READY_POLL_SECONDS, cancel)
+    )
     manual: tuple[str, ...] = ()
     if not ready and not dry_run:
         manual = (
@@ -618,7 +639,11 @@ def _ensure_docker_windows(
 
 
 def _ensure_docker_macos(
-    do: RunCmd, download: Downloader, dry_run: bool, wait_seconds: float
+    do: RunCmd,
+    download: Downloader,
+    dry_run: bool,
+    wait_seconds: float,
+    cancel: threading.Event | None = None,
 ) -> ProvisionReport:
     import platform as _py_platform
 
@@ -653,7 +678,11 @@ def _ensure_docker_macos(
     d, s = _run_steps(do, commands, sudo=False, dry_run=dry_run)
     done += d
     skipped += s
-    ready = False if dry_run else _wait_docker_ready(do, wait_seconds, _DOCKER_READY_POLL_SECONDS)
+    ready = (
+        False
+        if dry_run
+        else _wait_docker_ready(do, wait_seconds, _DOCKER_READY_POLL_SECONDS, cancel)
+    )
     manual: tuple[str, ...] = ()
     if not ready and not dry_run:
         manual = (
