@@ -210,6 +210,7 @@ def test_installer_fails_gracefully_without_docker(tmp_path: Path) -> None:
             "windows", done=("wsl --install",), reboot_required=True, manual_steps=("Reboot.",)
         ),
         package_manager=lambda: None,  # default script, not a distro variant
+        bash_check=lambda: True,  # this box's bash is irrelevant to what is asserted
     )
     with pytest.raises(DockerUnavailableError, match="reboot is needed"):
         rebooter.preflight(InstallOptions())
