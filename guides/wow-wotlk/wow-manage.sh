@@ -1104,6 +1104,7 @@ declare -a MODULE_REGISTRY=(
     "mod-transmog|Transmogrification|https://github.com/azerothcore/mod-transmog.git|world,characters"
     "mod-profession-progression|Profession Progression (unlock extra profession slots by leveling)|https://github.com/TopHatMan/mod-profession-progression.git|"
     "mod-mount-scaling|Mount Scaling (level-based progressive mount speed)|https://github.com/claudevandort/mod-mount-scaling.git|world"
+    "mod-city-bots|City Bots (fixed 400-bot city ambience cast — needs Playerbots)|https://github.com/pjerra/mod-city-bots.git|auth,characters,world"
 )
 
 # ─────────────────────────────────────────────────────────────
@@ -1676,6 +1677,9 @@ declare -a MODULE_UPDATE_FILES=(
     "mod-individual-progression|acore_world|"
     "mod-autobalance|acore_world|"
     "mod-ale|acore_world|"
+    "mod-city-bots|acore_auth|2026_07_16_03_stage_cast_one_account_per_bot.sql"
+    "mod-city-bots|acore_characters|2026_08_22_00_stage_cast_characters.sql 2026_08_22_01_stage_cast_outfits.sql"
+    "mod-city-bots|acore_world|2026_07_13_01_city_bot_poi.sql 2026_07_13_02_city_bot_ambiance.sql 2026_07_15_05_playercreateinfo_human_undead_hunter.sql"
 )
 
 # ALE Lua Script registry.
@@ -2133,6 +2137,11 @@ module_install() {
     if [ -n "$sql_dirs" ]; then
         print_info "Module SQL will be auto-applied on next server start"
         print_info "(AzerothCore's update system handles this — no manual import needed.)"
+    fi
+    if [ "$key" = "mod-city-bots" ]; then
+        print_warning "Exception: data/sql/playerbots (the 400-bot roster) is NEVER auto-applied —"
+        print_info    "mod-playerbots updates acore_playerbots with its own loader. The post-install"
+        print_info    "step / Configure imports it for you after the first server start."
     fi
     return 0
 }
@@ -2769,6 +2778,132 @@ configure_module_learn_spells() {
     fi
     echo ""
     print_info "Restart the worldserver for the new conf to take effect."
+}
+
+# ─────────────────────────────────────────────────────────────
+# CITY BOTS (mod-city-bots) — roster import + conf
+#   AzerothCore's updater auto-applies the module's db-auth / db-characters /
+#   db-world SQL, but NEVER data/sql/playerbots: mod-playerbots updates
+#   acore_playerbots with its own DatabaseLoader, which does not scan other
+#   modules. The 400-bot roster therefore has to be imported once, by hand,
+#   after acore_playerbots exists (= after the first worldserver start with
+#   Playerbots). This is the ONE manual import that does not break AC's
+#   update tracking: the core never sees that file, so nothing re-applies.
+# ─────────────────────────────────────────────────────────────
+CITY_BOTS_ROSTER_REL="data/sql/playerbots/updates/2026_07_15_00_citizen_roster.sql"
+CITY_BOTS_ROSTER_IMPORTED=0
+
+city_bots_roster_count() {
+    docker exec "$DB_CONTAINER" mysql -uroot -p"$DB_ROOT_PASSWORD" -N \
+        -e "SELECT COUNT(*) FROM acore_playerbots.citizen_roster;" 2>/dev/null | tail -1
+}
+
+city_bots_import_roster() {
+    local roster="$SERVER_DIR/modules/mod-city-bots/$CITY_BOTS_ROSTER_REL"
+    if [ ! -f "$roster" ]; then
+        print_error "Roster SQL not found: $roster"
+        return 1
+    fi
+
+    refresh_container_names
+    if ! container_running "$DB_CONTAINER"; then
+        print_info "Database container is not running — starting it..."
+        (cd "$SERVER_DIR" && docker compose up -d ac-database 2>/dev/null) || true
+        local w
+        for w in $(seq 1 12); do
+            refresh_container_names
+            container_running "$DB_CONTAINER" && break
+            sleep 5
+        done
+        if ! container_running "$DB_CONTAINER"; then
+            print_error "Database container did not start."
+            return 1
+        fi
+    fi
+
+    # acore_playerbots is created by worldserver on its first start with
+    # mod-playerbots. Right after a rebuild it can take a moment to appear.
+    local i have_db=""
+    for i in $(seq 1 "${CITY_BOTS_DB_WAIT:-24}"); do
+        have_db=$(docker exec "$DB_CONTAINER" mysql -uroot -p"$DB_ROOT_PASSWORD" -N \
+            -e "SHOW DATABASES LIKE 'acore_playerbots';" 2>/dev/null | tail -1)
+        [ -n "$have_db" ] && break
+        [ "$i" -eq 1 ] && print_info "Waiting for database acore_playerbots (created on the first worldserver start with Playerbots)..."
+        sleep 5
+    done
+    if [ -z "$have_db" ]; then
+        print_error "acore_playerbots does not exist yet."
+        print_info "Start the server once (mod-playerbots creates the database), then run"
+        print_info "Modules → c<num> (Configure) on City Bots to import the roster."
+        return 1
+    fi
+
+    local before; before=$(city_bots_roster_count)
+    if [ "${before:-0}" -ge 400 ] 2>/dev/null; then
+        print_info "citizen_roster already holds $before rows."
+        if ! ask_yes_no "Re-import the shipped roster anyway (resets roster rows to the shipped cast)?"; then
+            return 0
+        fi
+    fi
+
+    print_info "Importing roster into acore_playerbots..."
+    local out; out=$(sqlmod_run_sql_file acore_playerbots "$roster")
+    local after; after=$(city_bots_roster_count)
+    if [ "${after:-0}" -ge 400 ] 2>/dev/null; then
+        print_success "City Bots roster imported ($after entries)."
+        CITY_BOTS_ROSTER_IMPORTED=1
+        return 0
+    fi
+    print_error "Roster import failed (citizen_roster has ${after:-0} rows)."
+    [ -n "$out" ] && echo "$out" | grep -v "Using a password" | tail -5 | sed 's/^/  /'
+    return 1
+}
+
+# ─────────────────────────────────────────────────────────────
+# configure_module_city_bots
+#   1) imports the roster into acore_playerbots (see above)
+#   2) copies mod_city_bots.conf.dist → mod_city_bots.conf and offers to
+#      open it. Shipped defaults are the maintainer's live-server values.
+# ─────────────────────────────────────────────────────────────
+configure_module_city_bots() {
+    print_step "Configuring City Bots"
+
+    local module_dir="$SERVER_DIR/modules/mod-city-bots"
+    if [ ! -d "$module_dir" ]; then
+        print_error "City Bots module not installed (expected at $module_dir)."
+        return 1
+    fi
+    if [ ! -d "$SERVER_DIR/modules/mod-playerbots" ]; then
+        print_warning "mod-playerbots not found under modules/ — City Bots is a Playerbots extension and will not work without it."
+    fi
+
+    echo ""
+    print_info "Step 1/2 — roster import into acore_playerbots (the one file AzerothCore never auto-applies)."
+    city_bots_import_roster || true
+
+    echo ""
+    print_info "Step 2/2 — conf file."
+    local conf_dist="$module_dir/conf/mod_city_bots.conf.dist"
+    local conf_dest="$SERVER_DIR/env/dist/etc/modules/mod_city_bots.conf"
+    mkdir -p "$SERVER_DIR/env/dist/etc/modules"
+    if [ ! -f "$conf_dest" ]; then
+        if [ -f "$conf_dist" ]; then
+            cp "$conf_dist" "$conf_dest"
+            print_success "Created $conf_dest"
+        else
+            print_warning "conf.dist not found at $conf_dist"
+        fi
+    else
+        print_info "Using existing $conf_dest"
+    fi
+    print_info "Reserved ranges: accounts 12001-12400, character GUIDs 9000001-9000400."
+    print_info "worldserver.conf PlayerLimit must cover MaxRandomBots + 400 city bots."
+    if [ -f "$conf_dest" ] && ask_yes_no "Open mod_city_bots.conf in the editor?"; then
+        _open_text_file "$conf_dest"
+    fi
+    echo ""
+    print_info "Restart the worldserver so it loads the roster and conf (Server → Restart)."
+    print_info "Expected log line: 'mod-city-bots: stage cast loaded: 400 roster entries'."
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -5170,6 +5305,23 @@ configure_sqlmod_xprates() {
 _get_about_text() {
     local key="$1"
     case "$key" in
+        mod-city-bots)
+            printf '%s\n' \
+                'A fixed cast of 400 playerbots that populate capitals and' \
+                'social hubs: ambience crowds, gate duel hubs, fishers, inn' \
+                'dancers, bank/AH crowds. Created by deadtrickz; maintained' \
+                'fork by pjerra. Requires mod-playerbots.' \
+                '' \
+                'Reserved: auth accounts 12001-12400 (citybot12001.., password' \
+                'citybot_stage) and character GUIDs 9000001-9000400. Set' \
+                'worldserver PlayerLimit >= MaxRandomBots + 400.' \
+                '' \
+                'Install: clone -> rebuild -> server starts once -> Configure' \
+                'imports the roster into acore_playerbots (the core updater' \
+                'never applies data/sql/playerbots) -> restart.' \
+                '' \
+                'Commands: (none — everything is driven by mod_city_bots.conf)'
+            ;;
         mod-ah-bot)
             printf '%s\n' \
                 'An Auction House bot that populates faction AH listings' \
@@ -5811,6 +5963,21 @@ _module_post_install_hook() {
             print_info "Learn Spells requires a conf file — create/activate it now to avoid config spam on every bot login."
             if ask_yes_no "Configure Learn Spells (create conf with defaults) now?"; then configure_module_learn_spells; fi
             ;;
+        mod-city-bots)
+            echo ""
+            print_info "City Bots needs ONE step the AzerothCore updater cannot do: the 400-bot roster"
+            print_info "lives in data/sql/playerbots, which is never auto-applied (mod-playerbots updates"
+            print_info "acore_playerbots with its own loader). Accounts, characters and world SQL auto-apply."
+            print_info "Order: rebuild → server starts once (creates acore_playerbots) → import roster → restart."
+            if ask_yes_no "Import the City Bots roster and set up its conf now?"; then
+                configure_module_city_bots
+                if [ "$CITY_BOTS_ROSTER_IMPORTED" = 1 ] && ask_yes_no "Restart the worldserver now so the city bots log in?"; then
+                    (cd "$SERVER_DIR" && docker compose restart ac-worldserver) || print_warning "Restart failed — use Server → Restart."
+                fi
+            else
+                print_info "Later: Modules → c<num> (Configure) on City Bots does the import."
+            fi
+            ;;
     esac
 }
 
@@ -6056,6 +6223,7 @@ menu_modules() {
                     mod-learn-spells)            configure_module_learn_spells ;;
                     mod-profession-progression)  configure_module_profession_progression ;;
                     mod-mount-scaling)           configure_module_mount_scaling ;;
+                    mod-city-bots)               configure_module_city_bots ;;
                     *)
                         print_info "$name has no dedicated configure option."
                         print_info "Edit its .conf file in $SERVER_DIR/env/dist/etc/modules/ directly."
