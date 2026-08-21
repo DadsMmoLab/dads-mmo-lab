@@ -80,10 +80,12 @@ def test_stop_staged_uses_compose_stop_so_the_containers_survive(
     assert docker.stop_staged(SPEC, server_dir) is True
     assert calls == [
         ["docker", "compose", "stop"],
-        # ...then verify it actually stopped, rather than trusting the exit code.
-        ["docker", "compose", "ps", "--status", "running", "-q"],
+        # ...then verify by CONTAINER NAME. Asking compose again would repeat
+        # the same project-scoped question that can already be wrong about
+        # which containers belong to this install.
+        ["docker", "ps", "--format", "{{.Names}}"],
     ]
-    assert cwds == [server_dir, server_dir]
+    assert cwds[0] == server_dir
 
 
 def test_stop_staged_falls_back_to_one_docker_stop_per_container_in_order(
@@ -399,20 +401,48 @@ def test_compose_services_defaults_to_the_container_names(monkeypatch: pytest.Mo
     assert calls[0][-3:] == ["s-db", "s-auth", "s-world"]
 
 
-def test_stop_staged_raises_when_the_install_is_still_running(
+def test_stop_staged_finishes_the_job_when_compose_stopped_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A clean exit from `compose stop` is not proof that anything stopped.
+    """The moved-install case: `compose stop` succeeds and stops nothing.
 
-    Telling the user their server is down while players are still connected is
-    the worst available outcome, so the postcondition is checked, not assumed.
+    Compose identifies a project by its directory basename, but the container
+    names are pinned and global. Rename the install folder and `compose stop`
+    exits 0 having matched no container — so a stop that verifies itself by
+    asking compose again gets the same wrong answer, and reports success while
+    the server is still up and players are still connected.
     """
+    calls: list[list[str]] = []
+    running = {SPEC.db, SPEC.auth, SPEC.world}
 
     def fake_run(cmd: list[str], cwd: Path | None = None):
-        if cmd[:4] == ["docker", "compose", "ps", "--status"]:
-            return _completed(stdout="deadbeef1234\n")
+        calls.append(cmd)
+        if cmd[:2] == ["docker", "ps"]:
+            return _completed(stdout="".join(f"{n}\n" for n in sorted(running)))
+        if cmd[:2] == ["docker", "stop"]:
+            running.discard(cmd[2])
         return _completed()
 
     monkeypatch.setattr(docker.runner, "run", fake_run)
-    with pytest.raises(docker.DockerCommandError, match="still.*running"):
+    assert docker.stop_staged(SPEC, Path("/tmp/moved-install")) is True
+    assert [cmd for cmd in calls if cmd[:2] == ["docker", "stop"]] == [
+        ["docker", "stop", SPEC.world],
+        ["docker", "stop", SPEC.auth],
+        ["docker", "stop", SPEC.db],
+    ]
+    assert running == set()
+
+
+def test_stop_staged_raises_when_the_containers_will_not_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Still up after being told twice: say so rather than claiming success."""
+
+    def fake_run(cmd: list[str], cwd: Path | None = None):
+        if cmd[:2] == ["docker", "ps"]:
+            return _completed(stdout=f"{SPEC.world}\n")
+        return _completed()
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    with pytest.raises(docker.DockerCommandError, match="still running after stop"):
         docker.stop_staged(SPEC, Path("/tmp/wow"))

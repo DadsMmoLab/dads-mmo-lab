@@ -110,7 +110,7 @@ def test_stop_keeps_the_containers_so_the_next_start_is_staged(
     database import that `start_staged()` exists to avoid. Start and stop only
     hold that invariant as a pair.
     """
-    fake_runner.ps_lines = f"{SPEC.db}\n{SPEC.auth}\n{SPEC.world}\n"
+    # `docker ps` is empty afterwards, i.e. compose really did stop them.
     Controller(SPEC, SERVER_DIR).stop()
     assert ["docker", "compose", "stop"] in fake_runner.calls
     assert ["docker", "compose", "down"] not in fake_runner.calls

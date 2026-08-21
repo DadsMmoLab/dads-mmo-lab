@@ -215,6 +215,27 @@
   the user with a warning about what it overwrites, rather than a silent side effect of Start. The
   installer remains the only thing that runs the import on a healthy path.
 
+- **Compose project identity does not survive a moved folder — half fixed, half owed (2026-08-22).**
+  Upstream AzerothCore's compose declares no top-level `name:`, and nothing sets
+  `COMPOSE_PROJECT_NAME`, so the project is identified by the install directory's **basename** — while the
+  containers are pinned by `container_name` and are therefore global. The two identities come apart in
+  both directions, and both were measured on a real daemon:
+  - **Rename or move the install folder.** `docker compose stop` there exits 0, prints nothing, and stops
+    nothing. **Fixed**: `stop_staged()` now verifies by container name (which does not move with the
+    folder) and finishes the job by name when compose stopped nothing. Reproduced before and after —
+    `bare compose stop exit=0, still running: ['mv-db', 'mv-world']` then `still running: []`.
+  - **A neighbour whose folder shares a basename.** Two installs at `…/pa/server` and `…/pb/server` are
+    both project `server`, and compose selects on that label alone, so from one, `docker compose ps` lists
+    the *other's* containers. The stop path no longer asks compose, so it is unaffected — but this is why
+    it must not go back to asking.
+  - **STILL OWED: the start side.** `start_staged()` is `compose up -d --no-deps <services>` in the
+    install directory, so on a *moved* install it fails with
+    `Conflict. The container name "/ac-database" is already in use` (measured, exit 1). A moved install
+    can be stopped but not started. The fix is to stop the project name moving: write
+    `COMPOSE_PROJECT_NAME` into the install's `.env` at install and at attach time — `wow-manage.sh:7553`
+    already does exactly this on its own move command, so the precedent is in this repo. Until then, a
+    user who reorganises their folders gets a raw daemon error.
+
 - **Open follow-ups from the staged start/stop review (2026-08-22)** — found by a three-lens review whose
   findings were then adjudicated against a live daemon; the must-fix (parallel `docker stop`) and the
   latching config check are already fixed, these three are not:

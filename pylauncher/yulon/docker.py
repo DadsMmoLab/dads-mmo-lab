@@ -190,12 +190,31 @@ def _run_docker_stop(container: str) -> None:
     raise DockerCommandError(f"docker stop {container} failed: {proc.stderr.strip()}")
 
 
-def _project_running(server_dir: Path) -> list[str]:
-    """Container ids of this compose project that are still running, or []."""
-    proc = runner.run(["docker", "compose", "ps", "--status", "running", "-q"], cwd=server_dir)
-    if proc.returncode != 0:
-        return []
-    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+def _still_running(spec: ContainerSpec) -> list[str]:
+    """Which of this install's containers are still running, by NAME.
+
+    Deliberately not `docker compose ps`. Compose identifies a project by its
+    directory *basename* unless someone sets `COMPOSE_PROJECT_NAME`, and
+    upstream AzerothCore's compose sets no `name:` — while the container names
+    are pinned (`container_name: ac-database`) and therefore global. Those two
+    identities come apart in both directions, and both were measured:
+
+    - **Rename or move the install folder.** `docker compose stop` there exits
+      0, prints nothing, and stops nothing, because no container carries the new
+      project label. Asking `docker compose ps` whether anything is still
+      running gets the same empty answer from the same wrong question — so a
+      check built on it confirms a stop that never happened.
+    - **A neighbour whose folder shares a basename.** Two installs at
+      `…/pa/server` and `…/pb/server` are both project `server`, and compose
+      selects purely on that label: from one, `docker compose ps` lists the
+      *other's* containers. A check built on it then reports a foreign
+      container as ours and fails a stop that actually worked.
+
+    The container names are the identity `start_staged()` and
+    `Controller.status()` already use, and they do not move with the folder.
+    """
+    running = {line.strip() for line in _status_safe() or []}
+    return [name for name in (spec.world, spec.auth, spec.db) if name in running]
 
 
 def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
@@ -248,11 +267,20 @@ def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
             _run_docker_stop(name)
         stopped_something = True
 
-    still_running = _project_running(server_dir)
-    if still_running:
+    lingering = _still_running(spec)
+    if lingering:
+        # `compose stop` reported success without stopping our containers — the
+        # moved-install case. Finish the job by name rather than believing it.
+        logger.warning(f"compose stop left {lingering} running; stopping by name")
+        for name in lingering:
+            _run_docker_stop(name)
+        stopped_something = True
+        lingering = _still_running(spec)
+
+    if lingering:
         raise DockerCommandError(
-            f"{len(still_running)} container(s) of the install in {server_dir} are still "
-            "running after stop"
+            f"still running after stop: {', '.join(lingering)}. "
+            "Another install may be using these container names."
         )
     logger.info("stop_staged(): stopped; containers kept for a fast restart")
     return stopped_something
