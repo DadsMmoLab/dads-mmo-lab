@@ -436,7 +436,7 @@ both modes, surfacing only clear prompts/status rather than terminal commands.
 1. ~~Scaffold `pylauncher/` project structure (folders + stub files + `requirements.txt`).~~ — **done**.
 2. Implement `runner.py` + `docker_ctl.py` + `platform.py` for real (Phase 1), including the single-instance/port-conflict check (§12) and `config_dir()` helper (§11).
 3. Add `pytest` unit tests (mocked `subprocess`) and a small integration suite against a real Docker/AzerothCore install.
-4. Flesh out `.github/workflows/release.yml` build matrix (currently a placeholder AppImage packaging step) and `build/pylauncher.spec`.
+4. ~~Flesh out `.github/workflows/release.yml` build matrix and `build/pylauncher.spec`.~~ — **done**: the full AppImage/zip/dmg build matrix is written and located at the repo root `.github/workflows/`; end-to-end verification (push a `v*` tag, confirm all three artifacts build and attach) is the remaining external gate.
 5. Begin Phase 2: manifest schema finalization, WotLK module port from `wow-manage.sh`, and manifest `repo` allow-list validation (§3a).
 6. Design the self-update check (§10) as part of Phase 1's `platform.py`/`main.py` wiring, even though the UI hook lands later.
 7. Implement networking auto-setup (§13) — LAN fully automated; internet play with router-step detection/prompting — as part of the Phase 3 installer and Phase 4 controller surface.
