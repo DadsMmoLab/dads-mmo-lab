@@ -2,7 +2,8 @@
 
 > **What this is.** Dad's MMO Lab has an earlier launcher written in Rust (branch `rust-main` of the
 > same project): a Tauri app over a `dml-core`/`dml-wow` workspace that installs and drives the same
-> AzerothCore + playerbots stack. It solved several problems Yu'lon is about to meet — and, more
+> AzerothCore + playerbots stack. **This is the "Hypeer Launcher" named in roadmap Phase 8** — same
+> author, same repository, so porting from it raises no licensing or attribution question. It solved several problems Yu'lon is about to meet — and, more
 > valuably, it records the incidents that produced each decision. This page is the distillation, so
 > nobody has to read Rust to benefit from it.
 >
