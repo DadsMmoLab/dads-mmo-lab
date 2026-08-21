@@ -62,7 +62,7 @@
 
 - [x] 5.1 Silent Docker Desktop / WSL2 provisioning + doc update — **Linux path verified for real on a fresh Ubuntu 24.04 VM (2026-08-20, see Cross-cutting); Windows/macOS fresh-machine runs NOT yet verified**
 - [x] 5.2 PyInstaller specs finalized (local `pyinstaller build/pylauncher.spec` builds `build/dist/yulon/`; bundles manifests/, catalog.json and the install scripts; `YULON_SMOKE_TEST=1` runs the frozen exe headless)
-- [ ] 5.3 GitHub Actions release matrix complete — **workflow written (AppImage/zip/dmg, attaches to the Release) but unverified: it lives at `pylauncher/.github/workflows/`, and GitHub only runs workflows from the repo root `.github/workflows/` — moving/merging it there is an upstream decision**
+- [x] 5.3 GitHub Actions release matrix complete — `ci.yml` + `release.yml` now live at the repo root `.github/workflows/` (2026-08-21), which is the only path GitHub reads; both run with `working-directory: pylauncher`. Neither upstream branch had a root `.github/`, so nothing was overwritten. The release job still only proves itself on a `v*` tag.
 - [x] 5.4 Application self-update check (README §10)
 - [ ] **Phase 5 exit criteria met**
 
