@@ -174,6 +174,30 @@ def pin_project_name(server_dir: Path) -> str | None:
     return name
 
 
+def pinned_project_name(server_dir: Path) -> str | None:
+    """The project name this install pinned into its own `.env`, if any.
+
+    Read directly, without asking compose. `compose_project_name()` needs to
+    parse the compose files, which is exactly what is unavailable in the case
+    the by-name stop path exists for — so ownership would be unprovable at the
+    one moment it is needed most, and a running server would be left up while
+    the user is told it stopped.
+    """
+    env_path = server_dir / ".env"
+    if not env_path.is_file():
+        return None
+    try:
+        text = env_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(f"{PROJECT_NAME_VAR}="):
+            value = stripped.split("=", 1)[1].strip().strip("\"'")
+            return value or None
+    return None
+
+
 PROJECT_LABEL = "com.docker.compose.project"
 
 
@@ -348,7 +372,7 @@ def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
             user is told the server is down while players are still connected.
     """
     logger.debug(f"stop_staged() called: server_dir={server_dir}")
-    project = compose_project_name(server_dir)
+    project = compose_project_name(server_dir) or pinned_project_name(server_dir)
     proc = runner.run(["docker", "compose", "stop"], cwd=server_dir)
     stopped_something = proc.returncode == 0
 
@@ -356,10 +380,19 @@ def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
         logger.warning(f"compose stop failed ({proc.stderr.strip()}); stopping containers by name")
         ordered = _ours(spec, project)
         if not ordered:
-            # Either nothing of ours is running, or we cannot prove which
-            # containers are ours. Both mean: touch nothing. Stopping by bare
-            # name here would stop a *different* install of the same game, whose
-            # containers carry exactly the same names.
+            # Nothing of ours is running — unless we could not work out who
+            # "ours" is, in which case saying "stopped" would be a lie about a
+            # server that may still be up. Distinguish the two.
+            named = {line.strip() for line in _status_safe() or []}
+            unknown = project is None and any(
+                name in named for name in (spec.world, spec.auth, spec.db)
+            )
+            if unknown:
+                raise DockerCommandError(
+                    f"cannot tell which containers belong to the install in {server_dir}: "
+                    "its compose files are unreadable and no COMPOSE_PROJECT_NAME is pinned, "
+                    "while containers with these names are running. Nothing was stopped."
+                )
             logger.info("stop_staged(): nothing running that this install can prove it owns")
             return False
         for name in ordered:

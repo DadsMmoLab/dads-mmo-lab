@@ -636,3 +636,74 @@ def test_pin_project_name_leaves_non_utf8_bytes_alone(
     docker.pin_project_name(tmp_path)
     assert env.read_bytes().startswith(odd), "the original bytes were altered"
     assert b"COMPOSE_PROJECT_NAME=srv" in env.read_bytes()
+
+
+def test_stop_staged_reads_the_pin_when_compose_cannot_be_parsed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Ownership must still be provable in the exact case the fallback exists for.
+
+    The by-name path exists for a project whose compose files cannot be read —
+    but `compose_project_name()` needs those same files, so ownership became
+    unprovable at the one moment it mattered, and a running server was left up
+    while the user was told it stopped. The pinned `.env` value needs no compose.
+    """
+    (tmp_path / ".env").write_text(
+        "COMPOSE_PROJECT_NAME=wow-server\n", encoding="utf-8", newline="\n"
+    )
+    calls: list[list[str]] = []
+    live = {SPEC.db, SPEC.auth, SPEC.world}
+
+    def fake_run(cmd: list[str], cwd=None):
+        calls.append(cmd)
+        if cmd[:4] == ["docker", "compose", "config", "--format"]:
+            return _completed(returncode=1, stderr="no configuration file provided")
+        if cmd[:3] == ["docker", "compose", "stop"]:
+            return _completed(returncode=1, stderr="no configuration file provided")
+        if cmd[:2] == ["docker", "inspect"]:
+            return _completed(stdout="wow-server\n")
+        if cmd[:2] == ["docker", "ps"]:
+            return _completed(stdout="".join(n + "\n" for n in sorted(live)))
+        if cmd[:2] == ["docker", "stop"]:
+            live.discard(cmd[2])
+            return _completed()
+        return _completed()
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    assert docker.stop_staged(SPEC, tmp_path) is True
+    assert [cmd for cmd in calls if cmd[:2] == ["docker", "stop"]] == [
+        ["docker", "stop", SPEC.world],
+        ["docker", "stop", SPEC.auth],
+        ["docker", "stop", SPEC.db],
+    ]
+
+
+def test_stop_staged_says_so_rather_than_claiming_a_stop_it_cannot_verify(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Unprovable ownership with our names running is an error, not a quiet False.
+
+    `Controller.stop()` discards the return value, so returning False here would
+    leave the UI reporting a stopped server while it is still up.
+    """
+
+    def fake_run(cmd: list[str], cwd=None):
+        if cmd[:4] == ["docker", "compose", "config", "--format"]:
+            return _completed(returncode=1, stderr="no configuration file provided")
+        if cmd[:3] == ["docker", "compose", "stop"]:
+            return _completed(returncode=1, stderr="no configuration file provided")
+        if cmd[:2] == ["docker", "ps"]:
+            return _completed(stdout=SPEC.world + "\n")
+        return _completed()
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    with pytest.raises(docker.DockerCommandError, match="cannot tell which containers"):
+        docker.stop_staged(SPEC, tmp_path)
+
+
+def test_pinned_project_name_reads_the_env_without_compose(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text(
+        "DB_ROOT_PASSWORD=x\nCOMPOSE_PROJECT_NAME=my-server\n", encoding="utf-8", newline="\n"
+    )
+    assert docker.pinned_project_name(tmp_path) == "my-server"
+    assert docker.pinned_project_name(tmp_path / "nope") is None
