@@ -15,7 +15,8 @@ from typing import Any
 
 import pytest
 
-from yulon.apply import Applier, ApplyError, DockerSql, RunnerGit, _set_conf_key
+from yulon.apply import Applier, ApplyError, DockerSql, _set_conf_key
+from yulon.git import CloneSpec, RunnerGit
 from yulon.manifest import parse_manifest
 
 LUA = "env/dist/etc/modules/lua_scripts"
@@ -26,15 +27,15 @@ class _FakeGit:
 
     def __init__(self, files: dict[str, str]) -> None:
         self.files = files
-        self.calls: list[tuple[str, Path, str | None, str | None]] = []
+        self.calls: list[CloneSpec] = []
 
-    def clone(self, url: str, dest: Path, branch: str | None, sparse_path: str | None) -> None:
-        self.calls.append((url, dest, branch, sparse_path))
+    def clone(self, spec: CloneSpec) -> None:
+        self.calls.append(spec)
         for rel, text in self.files.items():
-            p = dest / rel
+            p = spec.dest / rel
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(text, encoding="utf-8")
-        (dest / ".git").mkdir(exist_ok=True)
+        (spec.dest / ".git").mkdir(exist_ok=True)
 
 
 class _FakeSql:
@@ -108,8 +109,8 @@ def test_ale_install_deploys_patches_on_configure_and_removes(tmp_path: Path) ->
     m = parse_manifest(ALE)
 
     report = applier.install(m)
-    assert git.calls[0][0] == "https://github.com/Brytenwally/SitMeansRest.git"
-    assert git.calls[0][1] == tmp_path / "ale_scripts" / "sitmeanrest"
+    assert git.calls[0].url == "https://github.com/Brytenwally/SitMeansRest.git"
+    assert git.calls[0].dest == tmp_path / "ale_scripts" / "sitmeanrest"
     deployed = tmp_path / LUA / "SitMeansRest.lua"
     assert deployed.read_text(encoding="utf-8") == "local DURATION = 5\n"  # configure-time patch
     assert sql.files == [("characters", "tables.sql")]
@@ -177,7 +178,7 @@ def test_steps_without_a_seam_are_reported_skipped_never_silent(tmp_path: Path) 
         }
     )
     report = Applier(tmp_path, git=git).install(m)  # no sql, no client dir, no dbc
-    assert git.calls[0][3] == "kegs/sod"  # sparse path forwarded
+    assert git.calls[0].sparse_path == "kegs/sod"  # sparse path forwarded
     assert (tmp_path / LUA / "SOD.lua").exists()
     assert sorted(report.skipped) == [
         "client kegs/sod/Client Files/data: no client dir configured",
@@ -244,32 +245,44 @@ def test_set_conf_key_replaces_or_appends(tmp_path: Path) -> None:
     assert f.read_text(encoding="utf-8") == "A = 1\nB = 3\nC = 4\n"
 
 
-def test_docker_sql_argv_targets_the_right_schema(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`DockerSql` shells `docker exec -i <db> mysql -uroot -p<pw> <schema>` (wow-manage.sh)."""
+def test_docker_sql_keeps_the_password_and_the_sql_out_of_argv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`docker exec -i -e MYSQL_PWD <db> mysql -uroot <schema>`, statement over stdin.
+
+    argv is world-readable (`ps`, Task Manager, /proc/<pid>/cmdline), so neither
+    the root password nor a statement (which can carry one) may appear there.
+    """
     import subprocess
 
     seen: list[list[str]] = []
+    kwargs_seen: list[dict[str, object]] = []
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         seen.append(argv)
+        kwargs_seen.append(kwargs)
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    DockerSql("ac-database", "pw").run_statement("characters", "SELECT 1")
+    DockerSql("ac-database", "hunter2").run_statement("characters", "SET PASSWORD = 'secret'")
     assert seen == [
         [
             "docker",
             "exec",
             "-i",
+            "-e",
+            "MYSQL_PWD",
             "ac-database",
             "mysql",
             "-uroot",
-            "-ppw",
             "acore_characters",
-            "-e",
-            "SELECT 1",
         ]
     ]
+    flat = " ".join(seen[0])
+    assert "hunter2" not in flat and "secret" not in flat  # the whole point
+    assert kwargs_seen[0]["input"] == "SET PASSWORD = 'secret'"  # SQL over stdin
+    env = kwargs_seen[0]["env"]
+    assert isinstance(env, dict) and env["MYSQL_PWD"] == "hunter2"  # value only in the env
 
 
 def test_runner_git_sparse_clone_sequence(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -280,17 +293,27 @@ def test_runner_git_sparse_clone_sequence(monkeypatch: pytest.MonkeyPatch, tmp_p
 
     seen: list[list[str]] = []
 
-    def fake_run(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    def fake_run(
+        argv: list[str], cwd: Path | None = None, env: object = None
+    ) -> subprocess.CompletedProcess[str]:
         seen.append(argv)
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(runner, "run", fake_run)
     dest = tmp_path / "ale_scripts" / "bmah"
-    RunnerGit().clone("https://github.com/DadsMmoLab/dads-mmo-lab.git", dest, None, "guides/x")
+    RunnerGit().clone(
+        CloneSpec(
+            url="https://github.com/DadsMmoLab/dads-mmo-lab.git",
+            dest=dest,
+            sparse_path="guides/x",
+        )
+    )
     assert [a[:2] for a in seen] == [
         ["git", "init"],
         ["git", "remote"],
-        ["git", "config"],
+        ["git", "config"],  # core.sparseCheckout
+        ["git", "config"],  # core.autocrlf=false — or the checkout gets CRLF on Windows
+        ["git", "config"],  # core.eol=lf
         ["git", "pull"],
     ]
     assert (dest / ".git" / "info" / "sparse-checkout").read_text(encoding="utf-8") == "guides/x/\n"
@@ -353,3 +376,26 @@ def test_remove_renamed_top_level_file_from_dir_deploy(tmp_path: Path) -> None:
     assert (tmp_path / LUA / "b.lua").exists()
     applier.remove(m)
     assert not (tmp_path / LUA / "b.lua").exists() and (tmp_path / LUA).is_dir()
+
+
+def test_generated_files_are_lf_even_on_windows(tmp_path: Path) -> None:
+    """A CRLF conf file inside a Linux container is a runtime failure, not a cosmetic one.
+
+    `Path.write_text()` without `newline=` translates to `os.linesep`, so a
+    Windows host would write CRLF into files the containers read (and, for the
+    modules' `.conf`, into files AzerothCore parses). Assert bytes, not text.
+    """
+    conf = tmp_path / "mod.conf"
+    conf.write_text("Existing.Key = 1\n", encoding="utf-8", newline="\n")
+    _set_conf_key(conf, "Existing.Key", "2")  # replace path
+    _set_conf_key(conf, "Brand.New.Key", "7")  # append path
+    raw = conf.read_bytes()
+    assert b"\r\n" not in raw
+    assert b"Existing.Key = 2" in raw and b"Brand.New.Key = 7" in raw
+
+    # `_set_conf_key` edits a conf the installer already wrote; an empty file is
+    # the closest thing to "brand new" it ever sees.
+    fresh = tmp_path / "fresh.conf"
+    fresh.write_text("", encoding="utf-8")
+    _set_conf_key(fresh, "First.Key", "1")
+    assert fresh.read_bytes() == b"First.Key = 1\n"

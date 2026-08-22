@@ -18,6 +18,7 @@ that is the controller's call (call down / signal up, §5).
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -26,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Protocol
 
-from yulon import runner
+from yulon.git import CloneSpec, Git, GitError, RunnerGit
 from yulon.log import get_logger
 from yulon.manifest import Db, Deploy, Manifest, ManifestType, Patch, SqlStep, When
 
@@ -59,12 +60,6 @@ class ApplyError(RuntimeError):
 # ------------------------------------------------------------------- seams
 
 
-class Git(Protocol):
-    """Clone/update seam. Implementations raise `ApplyError` on failure."""
-
-    def clone(self, url: str, dest: Path, branch: str | None, sparse_path: str | None) -> None: ...
-
-
 class SqlRunner(Protocol):
     """Run SQL against one of the server's databases."""
 
@@ -77,44 +72,6 @@ class DbcCopier(Protocol):
     """Copy DBC files from a host directory into the server's `data/dbc/` volume."""
 
     def copy_dbc_dir(self, src: Path) -> None: ...
-
-
-class RunnerGit:
-    """`Git` over the real `git` CLI via `yulon.runner` (depth-1; sparse for kegs)."""
-
-    def clone(self, url: str, dest: Path, branch: str | None, sparse_path: str | None) -> None:
-        if (dest / ".git").is_dir():
-            self._update(dest, branch)
-            return
-        if dest.exists():
-            shutil.rmtree(dest)  # a non-git leftover; wow-manage.sh does the same
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if sparse_path is None:
-            argv = ["git", "clone", "--depth", "1"]
-            if branch:
-                argv += ["--branch", branch]
-            _git(argv + [url, str(dest)])
-            return
-        dest.mkdir(parents=True, exist_ok=True)
-        _git(["git", "init", "-q"], cwd=dest)
-        _git(["git", "remote", "add", "origin", url], cwd=dest)
-        _git(["git", "config", "core.sparseCheckout", "true"], cwd=dest)
-        (dest / ".git" / "info").mkdir(parents=True, exist_ok=True)
-        (dest / ".git" / "info" / "sparse-checkout").write_text(
-            sparse_path.rstrip("/") + "/\n", encoding="utf-8"
-        )
-        _git(["git", "pull", "--depth=1", "origin", branch or "HEAD"], cwd=dest)
-
-    def _update(self, dest: Path, branch: str | None) -> None:
-        _git(["git", "fetch", "--depth=1", "origin", branch or "HEAD"], cwd=dest)
-        _git(["git", "reset", "--hard", "FETCH_HEAD"], cwd=dest)
-
-
-def _git(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-    proc = runner.run(argv, cwd=cwd)
-    if proc.returncode != 0:
-        raise ApplyError(f"{' '.join(argv)} exited {proc.returncode}: {proc.stderr.strip()}")
-    return proc
 
 
 @dataclass(frozen=True)
@@ -132,24 +89,44 @@ class DockerSql:
                 capture_output=True,
                 text=True,
                 check=False,
+                env=self._env(),
             )
         _check_sql(proc, f"{path.name} → {DB_NAMES[db]}")
 
     def run_statement(self, db: Db, statement: str) -> None:
+        # Over stdin, never `-e <sql>`: argv is world-readable (`ps`, Task
+        # Manager, /proc/<pid>/cmdline) and a statement can carry a password.
         proc = subprocess.run(
-            [*self._argv(db), "-e", statement], capture_output=True, text=True, check=False
+            self._argv(db),
+            input=statement,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=self._env(),
         )
         _check_sql(proc, f"inline → {DB_NAMES[db]}")
+
+    def _env(self) -> dict[str, str]:
+        """Our environment plus `MYSQL_PWD`, so the password never enters argv.
+
+        `docker exec` passes `-e MYSQL_PWD` through to the client inside the
+        container; `mysql` reads it instead of prompting. `-p<password>` would
+        put the secret in a command line every local process can read.
+        """
+        env = dict(os.environ)
+        env["MYSQL_PWD"] = self.root_password
+        return env
 
     def _argv(self, db: Db) -> list[str]:
         return [
             "docker",
             "exec",
             "-i",
+            "-e",
+            "MYSQL_PWD",  # value taken from OUR env by `docker exec`, not written here
             self.db_container,
             "mysql",
             "-uroot",
-            f"-p{self.root_password}",
             DB_NAMES[db],
         ]
 
@@ -218,9 +195,17 @@ class Applier:
         log = _Log()
         clone = self.clone_dir(manifest)
         if manifest.source is not None:
-            self.git.clone(
-                manifest.source.url, clone, manifest.source.branch, manifest.source.sparse_path
-            )
+            try:
+                self.git.clone(
+                    CloneSpec(
+                        url=manifest.source.url,
+                        dest=clone,
+                        branch=manifest.source.branch,
+                        sparse_path=manifest.source.sparse_path,
+                    )
+                )
+            except GitError as exc:  # one failure vocabulary for the whole applier
+                raise ApplyError(str(exc)) from exc
             log.done.append(f"clone {manifest.source.url} → {_rel(self.server_dir, clone)}")
             if manifest.type == "module":
                 # CMake's CollectSourceFiles() silently skips a module without include.sh.
@@ -473,7 +458,7 @@ def _apply_patch(path: Path, patch: Patch, replacement: str) -> bool:
         new = text.replace(patch.find, replacement)
     if new == text:
         return False
-    path.write_text(new, encoding="utf-8")
+    path.write_text(new, encoding="utf-8", newline="\n")
     return True
 
 
@@ -486,10 +471,10 @@ def _set_conf_key(path: Path, key: str, value: str) -> _KeyMode:
     pattern = re.compile(rf"^[ \t]*{re.escape(key)}[ \t]*=.*$", re.MULTILINE)
     new, count = pattern.subn(f"{key} = {value}", text, count=1)
     if count:
-        path.write_text(new, encoding="utf-8")
+        path.write_text(new, encoding="utf-8", newline="\n")
         return "replace"
     sep = "" if text.endswith("\n") or not text else "\n"
-    path.write_text(f"{text}{sep}{key} = {value}\n", encoding="utf-8")
+    path.write_text(f"{text}{sep}{key} = {value}\n", encoding="utf-8", newline="\n")
     return "append"
 
 

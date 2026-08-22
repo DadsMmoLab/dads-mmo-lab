@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 from pydantic import ValidationError
 
+from yulon import resources
 from yulon.catalog.catalog import CATALOG_FILE, load_catalog, parse_catalog
 from yulon.controller_wow_wotlk import docker_ctl
 
@@ -36,11 +35,11 @@ def test_wotlk_entry_matches_the_controller_spec() -> None:
 
 def test_install_scripts_exist_in_the_repo() -> None:
     """Phase 3a wraps the existing scripts — every referenced path must be real."""
-    repo_root = Path(__file__).resolve().parents[2]
+    installers = resources.installers_dir()
     for game in load_catalog().games:
-        assert (repo_root / game.install.script).is_file(), game.install.script
+        assert (installers / game.install.script).is_file(), game.install.script
         for pm, variant in game.install.script_variants.items():
-            assert (repo_root / variant).is_file(), f"{game.id} {pm}: {variant}"
+            assert (installers / variant).is_file(), f"{game.id} {pm}: {variant}"
             assert game.install.script_for(pm) == variant
         assert game.install.script_for(None) == game.install.script
         assert game.install.script_for("zypper") == game.install.script

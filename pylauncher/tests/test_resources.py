@@ -12,13 +12,14 @@ from yulon.catalog import installer
 from yulon.controller_wow_wotlk import modules
 
 
-def test_source_layout_points_at_pylauncher_and_repo_root() -> None:
+def test_source_layout_points_at_pylauncher() -> None:
     assert resources.frozen() is False
     assert resources.bundle_root() == Path(__file__).resolve().parents[1]
     assert (resources.manifests_dir() / "wow-wotlk" / "modules.json").is_file()
-    assert (resources.repo_root() / "archive" / "guides").is_dir()
+    # Roadmap 6.0: install scripts are data under pylauncher/, not repo guides.
+    assert (resources.installers_dir() / "wow-wotlk" / "install-wow-wotlk.sh").is_file()
     assert modules.BUNDLED_MANIFESTS_DIR == resources.manifests_dir()
-    assert installer.DEFAULT_REPO_ROOT == resources.repo_root()
+    assert installer.DEFAULT_INSTALLERS_ROOT == resources.installers_dir()
 
 
 def test_frozen_layout_uses_meipass(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -27,4 +28,5 @@ def test_frozen_layout_uses_meipass(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     assert resources.frozen() is True
     assert resources.bundle_root() == tmp_path
     assert resources.manifests_dir() == tmp_path / "manifests"
-    assert resources.repo_root() == tmp_path  # the spec copies archive/guides/ into the bundle
+    # The spec copies catalog/installers/ into the bundle under the same name.
+    assert resources.installers_dir() == tmp_path / "catalog" / "installers"

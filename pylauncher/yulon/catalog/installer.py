@@ -23,7 +23,8 @@ import shutil
 import subprocess
 import sys
 import threading
-from collections.abc import Callable, Iterator, Mapping
+from collections import deque
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,8 +34,10 @@ from yulon.log import get_logger
 
 logger = get_logger(__name__)
 
-# Where `archive/guides/...` resolves from: the repo root, or the bundle when frozen.
-DEFAULT_REPO_ROOT = resources.repo_root()
+# Where `catalog.json`'s install scripts resolve from (roadmap 6.0).
+DEFAULT_INSTALLERS_ROOT = resources.installers_dir()
+# How many of the script's last output lines a failure message carries (roadmap 6.1).
+_ERROR_TAIL_LINES = 12
 # What the scripts see as their terminal when the app was not started from one.
 DEFAULT_TERM = "xterm-256color"
 
@@ -45,6 +48,10 @@ class InstallerError(RuntimeError):
 
 class DockerUnavailableError(InstallerError):
     """No Docker daemon is reachable and automatic provisioning is not available yet."""
+
+
+class UnsupportedPlatformError(InstallerError):
+    """This entry's installer does not run on this platform (roadmap 6.1)."""
 
 
 @dataclass(frozen=True)
@@ -116,6 +123,28 @@ def make_responder(
     return respond
 
 
+_PLATFORM_NAMES: dict[str, str] = {"windows": "Windows", "macos": "macOS", "linux": "Linux"}
+
+
+def platform_names(platforms: Iterable[str]) -> str:
+    """Platform ids as user-facing copy: `("linux", "macos")` → `"Linux or macOS"`."""
+    names = [_PLATFORM_NAMES.get(p, p) for p in platforms]
+    if len(names) < 2:
+        return names[0] if names else "another platform"
+    return f"{', '.join(names[:-1])} or {names[-1]}"
+
+
+def unsupported_platform_message(entry: CatalogEntry, platform_id: str) -> str:
+    """Why this server cannot be installed here, in the user's words (roadmap 6.1)."""
+    supported = platform_names(entry.install.platforms)
+    where = platform_names([platform_id])
+    return (
+        f"{entry.name} cannot be installed on {where} yet: its installer needs "
+        f"{supported}. Nothing was started. Install it on {supported} for now — "
+        "a native path for this platform is planned."
+    )
+
+
 def host_package_manager() -> str | None:
     """The Linux package manager that picks the script variant; None off Linux."""
     if not sys.platform.startswith("linux"):
@@ -126,10 +155,22 @@ def host_package_manager() -> str | None:
 def bash_available(run: Callable[..., subprocess.CompletedProcess[str]] | None = None) -> bool:
     """True if a `bash` that can actually run a script is on PATH.
 
-    Being on PATH is not enough on Windows: `bash.exe` there is usually the
-    Store alias for WSL, which fails with `execvpe(/bin/bash)` when no distro
-    is installed (found on the Windows test VM, 2026-08-21). Docker Desktop's
-    own WSL distros do not provide one.
+    Being on PATH is not enough on Windows, for two different reasons measured
+    on real machines:
+
+    - On a Windows that has had WSL enabled at some point, `bash.exe` is the
+      Store alias for WSL and fails with `execvpe(/bin/bash)` when no distro is
+      installed. Docker Desktop's own WSL distros do not provide one.
+    - On a genuinely clean Windows 11 (25H2, build 26200, measured 2026-08-22)
+      there is no `bash.exe` at all — not in System32, not as an execution
+      alias — so this returns False at the `which()` line and never runs
+      anything.
+
+    Both end at "no usable bash", which is why the probe runs the binary
+    instead of trusting PATH. Note that `which()` alone is actively misleading
+    on Windows for a different reason: `shutil.which("python")` returns a
+    truthy path to a zero-byte Store alias on a machine with no Python at all,
+    so any future interpreter probe needs this same shape.
     """
     if shutil.which("bash") is None:
         return False
@@ -142,11 +183,12 @@ def bash_available(run: Callable[..., subprocess.CompletedProcess[str]] | None =
 
 NO_BASH_HELP = (
     "The installers are shell scripts and this machine has no working `bash`. "
-    "On Windows that usually means WSL has no Linux distribution yet: install "
-    "one (`wsl --install -d Ubuntu`), reopen the app, and try again. Yu'lon "
-    "sets up WSL2 and Docker Desktop for you, but the install script itself "
-    "still needs a distro to run in."
+    "Install one (or repair the existing install), reopen the app, and try again."
 )
+# Deliberately platform-neutral: `preflight()` refuses on the platform gate
+# BEFORE this check, so the old Windows/WSL advice was unreachable — and by
+# roadmap 6.3 it is also wrong, since native Windows drives Docker Desktop's
+# WSL2 backend rather than running the bash script in a distro.
 
 
 def docker_available() -> bool:
@@ -168,22 +210,24 @@ class Installer:
         self,
         entry: CatalogEntry,
         *,
-        repo_root: Path = DEFAULT_REPO_ROOT,
+        installers_root: Path = DEFAULT_INSTALLERS_ROOT,
         docker_check: Callable[[], bool] = docker_available,
         ensure_docker: Callable[..., platform.ProvisionReport] = platform.ensure_docker,
         interact: Callable[..., Iterator[str]] = runner.interact,
         env: Mapping[str, str] | None = None,
         package_manager: Callable[[], str | None] = host_package_manager,
         bash_check: Callable[[], bool] = bash_available,
+        platform_id: Callable[[], str] = platform.detect,
     ) -> None:
         self.entry = entry
-        self.repo_root = repo_root
+        self.installers_root = installers_root
         self._docker_check = docker_check
         self._ensure_docker = ensure_docker
         self._interact = interact
         self._env = env
         self._package_manager = package_manager
         self._bash_check = bash_check
+        self._platform_id = platform_id
 
     @property
     def script(self) -> Path:
@@ -193,7 +237,7 @@ class Installer:
         names the Debian/Fedora ports (Phase 3 live-gate finding, 2026-08-20:
         on Ubuntu the default script would call `pacman`).
         """
-        return self.repo_root / self.entry.install.script_for(self._package_manager())
+        return self.installers_root / self.entry.install.script_for(self._package_manager())
 
     def script_env(self) -> dict[str, str]:
         """The environment the script runs in: ours, plus `env` overrides, plus a `TERM`.
@@ -219,6 +263,12 @@ class Installer:
         passed through to Docker provisioning so its ready-poll can be
         interrupted (a stop mid-provision must not leave a worker sleeping).
         """
+        here = self._platform_id()
+        if not self.entry.install.supports(here):
+            # Before ANY subprocess: the script would fast-fail on its own
+            # `[[ "$OSTYPE" == "linux-gnu"* ]]` gate and leave the user with a
+            # bare "exited with status 1" (roadmap 6.1).
+            raise UnsupportedPlatformError(unsupported_platform_message(self.entry, here))
         if not self.script.is_file():
             raise InstallerError(f"install script not found: {self.script}")
         if not self._bash_check():
@@ -260,16 +310,27 @@ class Installer:
         opts = options or InstallOptions()
         self.preflight(opts, cancel=cancel)
         logger.info(f"installing {self.entry.id} via {self.script}")
+        tail: deque[str] = deque(maxlen=_ERROR_TAIL_LINES)
         try:
-            yield from self._interact(
+            for line in self._interact(
                 ["bash", str(self.script)],
                 cwd=self.script.parent,
                 respond=make_responder(opts),
                 env=self.script_env(),
                 cancel=cancel,
-            )
+            ):
+                text = runner.strip_ansi(line).strip()
+                if text:
+                    tail.append(text)
+                yield line
         except subprocess.CalledProcessError as exc:
-            raise InstallerError(f"{self.script.name} exited with status {exc.returncode}") from exc
+            # Never just "exited with status N": the script's own last words are
+            # the only thing that tells the user what went wrong (roadmap 6.1).
+            said = "\n".join(tail)
+            detail = f"\n\nIt last said:\n{said}" if said else ""
+            raise InstallerError(
+                f"{self.script.name} exited with status {exc.returncode}.{detail}"
+            ) from exc
         logger.info(f"install of {self.entry.id} finished")
 
 
@@ -290,14 +351,14 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument("--server-dir", type=Path, default=None)
     parser.add_argument("--client-dir", type=Path, default=None)
     parser.add_argument("--reinstall", action="store_true")
-    parser.add_argument("--repo-root", type=Path, default=DEFAULT_REPO_ROOT)
+    parser.add_argument("--installers-root", type=Path, default=DEFAULT_INSTALLERS_ROOT)
     args = parser.parse_args(argv)
     try:
         entry = load_catalog().get(args.game)
     except KeyError:
         sys.stderr.write(f"unknown game {args.game!r}\n")
         return 2
-    installer = Installer(entry, repo_root=args.repo_root)
+    installer = Installer(entry, installers_root=args.installers_root)
     options = InstallOptions(
         server_dir=args.server_dir, client_dir=args.client_dir, reinstall=args.reinstall
     )

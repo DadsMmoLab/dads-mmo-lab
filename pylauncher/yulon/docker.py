@@ -16,9 +16,10 @@ logic, generalized and given explicit, overridable timeouts.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,12 +39,32 @@ class DockerCommandError(RuntimeError):
 
 @dataclass(frozen=True)
 class ContainerSpec:
-    """The container names and published ports for a single server install."""
+    """How one server install is addressed: its containers, services and ports.
+
+    Two different names for the same three things, because Docker uses two:
+    `docker ps`/`docker inspect` answer to **container** names, while
+    `docker compose` addresses **services**. For every AzerothCore-derived game
+    they happen to be identical (`ac-database`, `ac-authserver`,
+    `ac-worldserver`), which is why `services` may be left empty and defaults to
+    the container names — but the distinction is real, and a game whose compose
+    file names its services differently must say so rather than get silently
+    wrong behaviour.
+    """
 
     db: str
     auth: str
     world: str
     ports: tuple[int, ...]
+    services: tuple[str, ...] = ()
+
+    def compose_services(self) -> tuple[str, ...]:
+        """The long-running compose services, in dependency order (db first).
+
+        Deliberately excludes one-shot services such as `ac-db-import`: naming
+        the services explicitly is what keeps `compose up` from ever selecting
+        the import job. See `start_staged()`.
+        """
+        return self.services or (self.db, self.auth, self.world)
 
 
 def _run(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -57,15 +78,281 @@ def _run(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedProces
 
 
 def start(server_dir: Path) -> None:
-    """Bring the compose project in `server_dir` up in the background."""
+    """Bring the compose project in `server_dir` up in the background.
+
+    Creates whatever does not exist yet, which on an installed server also
+    re-runs the one-shot containers. Prefer `start_staged()` for a server that
+    has already been installed — see the warning there.
+    """
     logger.debug(f"start() called: server_dir={server_dir}")
     _run(["compose", "up", "-d"], cwd=server_dir)
 
 
+PROJECT_NAME_VAR = "COMPOSE_PROJECT_NAME"
+
+
+def compose_project_name(server_dir: Path) -> str | None:
+    """What compose currently calls this project, or None if it cannot say.
+
+    Asked rather than computed. Compose derives the name from the directory
+    basename by lowercasing it, dropping every character outside `[a-z0-9_-]`
+    and then trimming leading punctuation — measured: `WoW_Server 2` becomes
+    `wow_server2`, `_leading` becomes `leading`, `Ünïcode` becomes `ncode`.
+    Reimplementing that here would be a second copy of somebody else's rule,
+    free to drift, and a wrong guess is worse than no guess: pinning the wrong
+    value *renames* the project and orphans the containers it was meant to keep.
+    """
+    proc = runner.run(["docker", "compose", "config", "--format", "json"], cwd=server_dir)
+    if proc.returncode != 0:
+        logger.debug(f"compose config failed in {server_dir}: {proc.stderr.strip()}")
+        return None
+    try:
+        parsed = json.loads(proc.stdout)
+    except ValueError:
+        logger.debug("compose config did not return JSON")
+        return None
+    name = parsed.get("name") if isinstance(parsed, dict) else None
+    return name if isinstance(name, str) and name else None
+
+
+def pin_project_name(server_dir: Path) -> str | None:
+    """Freeze this install's compose project name into its own `.env`.
+
+    Compose identifies a project by its directory basename unless told
+    otherwise, but AzerothCore pins its container names, which are global. Move
+    or rename the install folder and the two identities come apart: `compose`
+    commands in the new directory address a project that owns nothing, so
+    `compose stop` stops nothing and `compose up` collides with the containers
+    that are still there under the old project. Writing the name down once, in
+    the install itself, is what makes the folder movable.
+
+    `wow-manage.sh` does the same thing on its own move command, which is where
+    this behaviour comes from; doing it at install and attach time instead means
+    the folder can be moved by any means — a file manager, a backup restore —
+    and still work.
+
+    Returns the pinned name, or None if nothing was written (already pinned, or
+    compose could not be asked).
+    """
+    env_path = server_dir / ".env"
+    if env_path.is_file():
+        for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.strip().startswith(f"{PROJECT_NAME_VAR}="):
+                logger.debug(f"{PROJECT_NAME_VAR} already pinned in {env_path}")
+                return None
+    name = compose_project_name(server_dir)
+    if name is None:
+        logger.info(f"could not ask compose for the project name in {server_dir}; not pinning")
+        return None
+    existing = env_path.read_text(encoding="utf-8", errors="replace") if env_path.is_file() else ""
+    if existing and not existing.endswith("\n"):
+        existing += "\n"
+    addition = (
+        "# Pinned by Yu'lon so this install keeps working if the folder is moved.\n"
+        f"{PROJECT_NAME_VAR}={name}\n"
+    )
+    env_path.write_text(existing + addition, encoding="utf-8", newline="\n")
+    logger.info(f"pinned {PROJECT_NAME_VAR}={name} in {env_path}")
+    return name
+
+
+def container_exists(container: str) -> bool:
+    """True if a container by that name exists at all, running or exited."""
+    proc = _run(["ps", "-a", "--format", "{{.Names}}"])
+    return any(line.strip() == container for line in proc.stdout.splitlines())
+
+
+def start_staged(
+    spec: ContainerSpec,
+    server_dir: Path,
+    *,
+    wait_healthy: Callable[[str], bool] | None = None,
+) -> bool:
+    """Start this install's long-running services, and only those.
+
+    `docker compose up -d` with no arguments starts every service that has no
+    running container — including AzerothCore's one-shot `ac-db-import` and
+    `ac-client-data-init`, which have already exited successfully. Re-running
+    the import is what `dml-start.sh` warns about in as many words:
+
+        # Use docker start (not compose up) so we do NOT re-trigger ac-db-import
+        # or ac-client-data-init on every restart — that was killing the database.
+
+    Naming the three services explicitly is the whole fix: compose cannot select
+    a service that was not asked for, and `--no-deps` stops it pulling the
+    import back in as a dependency of the servers. Measured against Docker
+    29.1.3, this single command:
+
+    - never runs the one-shot import — not on a plain restart, not when a
+      compose file changed, and not when a container is missing;
+    - recreates a service whose configuration changed, so an edited port or
+      `AC_*` value actually takes effect;
+    - recreates a container that no longer exists, without treating "missing
+      container" as "never installed";
+    - waits for `ac-database` to report healthy before starting the servers,
+      because upstream's compose declares `condition: service_healthy` — and
+      **fails closed** if it never does, rather than starting a worldserver
+      against a dead database.
+
+    That last point is why there is no health-polling here any more. `compose`
+    owns the dependency graph; restating it in Python was how the ordering came
+    to be documented but not delivered.
+
+    An earlier version of this function tried to be clever: it checked whether
+    the containers existed, compared compose config hashes, and started
+    containers by name with `docker start`, falling back to a bare
+    `compose up -d` whenever it was unsure. Every one of those fallbacks ran the
+    destructive command, so the feature defeated itself exactly when it mattered
+    — on a missing container or a changed setting. It also looked up containers
+    by *global* name, so with two installs of the same game it could start the
+    other one, silently. Addressing the project by its directory fixes that by
+    construction.
+
+    Args:
+        wait_healthy: Retained for callers that still pass it; unused, because
+            compose now performs the wait. Accepting and ignoring it keeps the
+            signature stable for one release rather than breaking every caller.
+
+    Returns:
+        True — the servers were started without touching the one-shot jobs.
+        The bool is kept so callers need not change; there is no longer a
+        destructive path for it to warn about.
+    """
+    del wait_healthy  # compose does the health wait now; see the docstring
+    services = spec.compose_services()
+    logger.info(f"start_staged(): `compose up -d --no-deps {' '.join(services)}` in {server_dir}")
+    _run(["compose", "up", "-d", "--no-deps", *services], cwd=server_dir)
+    return True
+
+
 def stop(server_dir: Path) -> None:
-    """Take the compose project in `server_dir` down."""
+    """Take the compose project in `server_dir` down, REMOVING its containers.
+
+    This is the teardown path (uninstall, or recovering from a broken project).
+    For the stop half of a normal start/stop cycle use `stop_staged()`: removing
+    the containers here is what forces the next start back onto `compose up -d`,
+    and with it the one-shot database import.
+    """
     logger.debug(f"stop() called: server_dir={server_dir}")
     _run(["compose", "down"], cwd=server_dir)
+
+
+def _run_docker_stop(container: str) -> None:
+    """`docker stop <container>`, blocking until that one container has exited.
+
+    One call per container on purpose. `docker stop a b c` looks ordered and is
+    not: the CLI fans a multi-name stop out one goroutine per name, so all three
+    receive SIGTERM in the same instant and the order in argv means nothing —
+    measured at 6.19s total for three containers where the *first* one traps
+    SIGTERM for 6s. A single-container stop blocks until that container is gone,
+    which is what makes "world before the database" real rather than decorative.
+
+    A container that has vanished since it was listed is not an error: the goal
+    state is "not running", and it is already there.
+    """
+    proc = runner.run(["docker", "stop", container])
+    if proc.returncode == 0:
+        return
+    if "No such container" in proc.stderr:
+        logger.debug(f"docker stop {container}: already gone")
+        return
+    raise DockerCommandError(f"docker stop {container} failed: {proc.stderr.strip()}")
+
+
+def _still_running(spec: ContainerSpec) -> list[str]:
+    """Which of this install's containers are still running, by NAME.
+
+    Deliberately not `docker compose ps`. Compose identifies a project by its
+    directory *basename* unless someone sets `COMPOSE_PROJECT_NAME`, and
+    upstream AzerothCore's compose sets no `name:` — while the container names
+    are pinned (`container_name: ac-database`) and therefore global. Those two
+    identities come apart in both directions, and both were measured:
+
+    - **Rename or move the install folder.** `docker compose stop` there exits
+      0, prints nothing, and stops nothing, because no container carries the new
+      project label. Asking `docker compose ps` whether anything is still
+      running gets the same empty answer from the same wrong question — so a
+      check built on it confirms a stop that never happened.
+    - **A neighbour whose folder shares a basename.** Two installs at
+      `…/pa/server` and `…/pb/server` are both project `server`, and compose
+      selects purely on that label: from one, `docker compose ps` lists the
+      *other's* containers. A check built on it then reports a foreign
+      container as ours and fails a stop that actually worked.
+
+    The container names are the identity `start_staged()` and
+    `Controller.status()` already use, and they do not move with the folder.
+    """
+    running = {line.strip() for line in _status_safe() or []}
+    return [name for name in (spec.world, spec.auth, spec.db) if name in running]
+
+
+def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
+    """Stop this install without destroying its containers.
+
+    The counterpart to `start_staged()`. `docker compose down` *removes* the
+    containers, which is why it is not used here: a stop that removes leaves the
+    next start with nothing to reuse. `compose stop` keeps them and walks the
+    project's own `depends_on` graph, so the servers close their connections
+    before the database goes away — upstream AzerothCore declares that graph and
+    it is not ours to restate.
+
+    The fallback stops this install's containers by name, one call at a time and
+    in reverse order, for a project whose compose files cannot be read. Losing
+    the ability to stop a running server because a file is missing would be a
+    worse failure than losing the ordering guarantee. One call per container is
+    not decorative: `docker stop a b c` signals all three at once (measured at
+    6.19s for three containers where the *first* traps SIGTERM for 6s), so a
+    multi-name call cannot express "world before the database".
+
+    Either way the result is verified rather than assumed. A zero exit from
+    `compose stop` only means compose had nothing to complain about — it says
+    so even for a project where nothing was running, and even where the
+    containers holding these names belong to a different install.
+
+    Returns:
+        True if this install is now stopped, False if there was nothing of it
+        to stop.
+
+    Raises:
+        DockerCommandError: Something of this install is still running after
+            the stop. Reporting success there would be the worst outcome: the
+            user is told the server is down while players are still connected.
+    """
+    logger.debug(f"stop_staged() called: server_dir={server_dir}")
+    proc = runner.run(["docker", "compose", "stop"], cwd=server_dir)
+    stopped_something = proc.returncode == 0
+
+    if not stopped_something:
+        logger.warning(f"compose stop failed ({proc.stderr.strip()}); stopping containers by name")
+        existing = {
+            line.strip()
+            for line in _run(["ps", "-a", "--format", "{{.Names}}"]).stdout.splitlines()
+        }
+        ordered = [name for name in (spec.world, spec.auth, spec.db) if name in existing]
+        if not ordered:
+            logger.info("stop_staged(): none of this install's containers exist")
+            return False
+        for name in ordered:
+            _run_docker_stop(name)
+        stopped_something = True
+
+    lingering = _still_running(spec)
+    if lingering:
+        # `compose stop` reported success without stopping our containers — the
+        # moved-install case. Finish the job by name rather than believing it.
+        logger.warning(f"compose stop left {lingering} running; stopping by name")
+        for name in lingering:
+            _run_docker_stop(name)
+        stopped_something = True
+        lingering = _still_running(spec)
+
+    if lingering:
+        raise DockerCommandError(
+            f"still running after stop: {', '.join(lingering)}. "
+            "Another install may be using these container names."
+        )
+    logger.info("stop_staged(): stopped; containers kept for a fast restart")
+    return stopped_something
 
 
 def status() -> list[str]:

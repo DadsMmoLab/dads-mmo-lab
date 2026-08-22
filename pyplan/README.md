@@ -162,7 +162,7 @@ pylauncher/
 │   ├── networking.py             # §13 orchestration: plan() (pure) + apply() for LAN/internet play, realmlist UPDATE, router-step prompts, client realmlist writer (Phase 3.4)
 │   ├── log.py                    # shared logging convention (get_logger/configure — Phase 0.6)
 │   ├── state.py                  # per-user app state (state.json under config_dir: remembered installs) (Phase 4)
-│   ├── resources.py              # bundle_root/manifests_dir/repo_root for source checkouts AND PyInstaller builds (Phase 5.2)
+│   ├── resources.py              # bundle_root/manifests_dir/installers_dir for source checkouts AND PyInstaller builds (5.2, 6.0)
 │   ├── update.py                 # GitHub Releases version check → UpdateCheck; check + notify only (Phase 5.4)
 │   ├── manifest.py               # the manifest schema: pydantic models + repo allow-list (Phase 2.1)
 │   ├── manifest_store.py         # load manifests from a tree + refresh from GitHub with ETags (Phase 2.3)
@@ -174,6 +174,12 @@ pylauncher/
 │       └── widgets/
 │           ├── __init__.py
 │           └── log_panel.py      # streaming log output widget: QThread worker → line/finished signals (4.1)
+├── catalog/                      # data the app EXECUTES (roadmap 6.0; archive/guides is for humans)
+│   └── installers/               # install-*.sh per game + the helpers they ship (dml-start.sh, wow-manage.sh)
+│       ├── wow-wotlk/            # install-wow-wotlk{,-ubuntu,-fedora}.sh, dml-start.sh, wow-manage.sh
+│       ├── wow-tbc/
+│       ├── wow-vanilla/
+│       └── wow-tortoise/
 ├── manifests/                    # module/mod JSON (synced from GitHub)
 │   ├── schema/
 │   │   └── manifest.schema.json  # JSON Schema generated from yulon/manifest.py (Phase 2.1)

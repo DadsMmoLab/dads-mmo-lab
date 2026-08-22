@@ -5,7 +5,7 @@
 #
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 #
-#  Version: 1.3.9 - Fedora
+#  Version: 1.4.4 - Debian
 #
 #  Usage:
 #    chmod +x install-wow.sh
@@ -20,84 +20,28 @@
 #    6. Sets up the Gaming Mode launcher
 #
 #  Changelog:
-#    1.3.7 — Custom server files install location
+#    1.4.2 — Custom server files install location
 #      - Added choose_install_dir(): prompts user for a custom SERVER_DIR
 #        before the install begins (blank = keep default ~/wow-server-playerbots)
 #      - Useful for installing server files to an external drive or SD card;
 #        Docker containers still live on the main disk
 #      - Validates the chosen path: creates parent dir, checks write access,
 #        and verifies at least 15 GB free at the target location
-#    1.3.6 — Preflight dependency check
+#    1.4.1 — Preflight dependency check
 #      - Added preflight_check(): inspects docker daemon, docker compose,
 #        docker buildx, git, and curl before the install begins
 #      - Prints a visual status table (✅/❌) for each dependency
-#      - Auto-installs missing deps via dnf (standard Fedora) or
-#        rpm-ostree (immutable/Bazzite); respects FEDORA_IMMUTABLE
+#      - Auto-installs any missing deps via apt-get / Docker CE repo
 #      - Re-verifies all deps after install; exits with clear error if any fail
-#    1.3.5 — docker.socket failed-state recovery (Bazzite)
-#      - Root cause: on Bazzite, docker.socket can be left in a failed state
-#        from a prior run; docker.service then fails with "dependency failed"
-#        even after restart because the socket unit is still stuck.
-#      - Fix: call `systemctl reset-failed containerd docker docker.socket`
-#        before the enable attempts so stale failed state is cleared first.
-#      - Start docker.socket explicitly (enable --now docker.socket) before
-#        docker.service — the socket unit must be active for the service to start.
-#      - Improved diagnostics in the failure path: show docker.socket status,
-#        containerd status, and combined journal for all three units.
-#      - Updated recommended fix commands to the correct 3-step sequence
-#        (reset-failed → containerd → socket → service) instead of restart.
-#    1.3.4 — containerd dependency + service failure diagnosis
-#      - Start containerd.service before docker.service — docker CE's unit file
-#        has Requires=containerd.service; starting docker without containerd
-#        caused silent startup failure (|| true swallowed the error).
-#      - When docker binary exists and packages are layered but daemon won't
-#        start, the script was falling through to rpm-ostree install which
-#        failed with "No packages in transaction" (already layered). Now:
-#        show `systemctl status docker` + `journalctl -u docker` and exit
-#        with a clear actionable error message instead.
-#      - Added --idempotent to the first-time rpm-ostree CE install.
-#      - Separated docker-ps check from compose check in the immutable block.
-#      - Extended readiness polling from 10 to 15 iterations (30 seconds).
-#    1.3.3 — Session permissions + first-install fixes (from Bazzite doc review)
-#      - CRITICAL: After the Bazzite early-return path, all docker compose calls
-#        in the rest of the script failed with permission denied because the
-#        sudoers entry and function wrapper were never set up. Fixed by moving
-#        the same sudoers+wrapper block (used in the plain Fedora path) into
-#        the immutable early-return block before return 0.
-#      - Replace sleep 3 with a polling loop using `sudo docker info` — the
-#        canonical daemon readiness probe (tests the API, not just the socket).
-#      - Add podman-docker shim detection: if /usr/bin/docker is a symlink to
-#        podman, exit with a clear error rather than silently failing later.
-#      - Fix rpm-ostree first-time install fallback: add Docker CE repo first,
-#        use correct package names (docker-ce, docker-ce-cli, containerd.io,
-#        docker-buildx-plugin, docker-compose-plugin) instead of the generic
-#        `docker docker-compose` which resolves to moby-engine and conflicts.
-#      - Add sudo fallback to the secondary docker ps check so immutable systems
-#        with a running daemon don't fall through to the install path just
-#        because the user isn't in the docker group yet.
-#      - Fix misleading comment: docker-ce in @System is a layered package from
-#        a prior run, not a Bazzite base image package.
-#    1.3.2 — Bazzite docker group / sudo fix
-#      - Bazzite ships docker-ce (not moby-engine) in @System. After
-#        systemctl enable --now docker, the daemon is running but the user
-#        is not in the docker group yet, so unprivileged `docker ps` returns
-#        permission denied. Script fell through to rpm-ostree install which
-#        conflicted with @System packages. Fix: use `sudo docker ps` and
-#        `sudo docker compose version` for the immutable early-out check.
-#        If both pass, add user to docker group and return 0 — no
-#        rpm-ostree install attempted.
-#    1.3.1 — Bazzite pre-bundled Docker fix
-#      - On immutable systems, Docker is part of the Bazzite base image and
-#        is not a layered package. The daemon just isn't started yet. The
-#        previous check (docker ps) required the daemon to be running, so it
-#        fell through to rpm-ostree install, which fatally conflicted with
-#        @System. Fix: on immutable systems, try systemctl enable --now docker
-#        first if the binary exists, then re-check before attempting any
-#        rpm-ostree install.
-#      - Added --idempotent flag to rpm-ostree install calls to avoid
-#        conflicts when packages are already provided by the base image.
-#      - Compose plugin missing fallback now correctly uses rpm-ostree on
-#        immutable systems instead of dnf.
+#    1.4.0 — Debian / Ubuntu port
+#      - Replaced Fedora/dnf/rpm-ostree with apt + Docker CE (Debian)
+#      - Distro detection now targets Ubuntu, Debian, Mint, Pop!_OS
+#      - Removed immutable/rpm-ostree split — not applicable on Debian family
+#      - Docker CE installed via official apt repo with GPG keyring
+#      - Detects ubuntu vs debian Docker repo automatically
+#      - install_git() uses apt-get
+#      - Removed SELinux :Z volume label — not applicable on Debian family
+#      - Updated confirmation box to show apt as package manager
 #    1.3.0 — Fedora / Bazzite port
 #      - Replaced pacman/Arch package management with dnf (Fedora)
 #      - Removed check_pacman_keyring() — not applicable on Fedora
@@ -121,9 +65,9 @@
 #      - Heredoc launcher synced with standalone launcher scripts
 # ============================================================
 
-WIZARD_VERSION="1.3.8 - Fedora"
+WIZARD_VERSION="1.4.3 - Debian"
 
-set -o pipefail
+set -euo pipefail
 
 # ─────────────────────────────────────────
 # COLORS
@@ -218,7 +162,7 @@ choose_install_dir() {
     echo -e "  ${YELLOW}Only the source code, configs, and data files go here.${NC}"
     echo ""
     echo -e "  ${DIM}Leave blank and press ENTER to use the default location.${NC}"
-    echo -e "  ${DIM}Example custom path: /run/media/user/mysd/wow-server${NC}"
+    echo -e "  ${DIM}Example custom path: /media/user/external/wow-server${NC}"
     echo ""
     echo -ne "  ${WHITE}Install path: ${NC}"
     read -r user_input
@@ -318,30 +262,34 @@ check_system() {
     print_step "Checking System Requirements"
 
     if [[ "$OSTYPE" != "linux-gnu"* ]]; then
-        print_error "This script supports Fedora-based Linux only (Fedora, Bazzite)."
+        print_error "This script supports Debian-based Linux only (Ubuntu, Mint, Pop!_OS, Debian)."
         exit 1
     fi
     print_success "Linux detected"
 
-    # Verify this is a Fedora-family distro
+    # Verify this is a supported Debian-family distro
     if [[ -f /etc/os-release ]]; then
         source /etc/os-release
-        if [[ "$ID" != "fedora" && "$ID_LIKE" != *"fedora"* && "$ID" != "bazzite" ]]; then
-            print_error "Unsupported distro: $PRETTY_NAME"
-            print_info "This script is for Fedora or Fedora-based distros (e.g., Bazzite)."
+        case "$ID" in
+            ubuntu|debian|linuxmint|pop) ;;
+            *)
+                print_error "Unsupported distro: ${PRETTY_NAME:-$ID}"
+                print_info "This script supports: Ubuntu, Debian, Linux Mint, Pop!_OS."
+                print_info "If you're on a derivative, try adapting the script manually."
+                exit 1
+                ;;
+        esac
+        print_success "Supported distro detected: ${PRETTY_NAME:-$ID}"
+
+        # Mint uses its own VERSION_CODENAME — Docker needs the upstream Ubuntu one
+        if [[ "$ID" == "linuxmint" ]] && [[ -z "$UBUNTU_CODENAME" ]]; then
+            print_error "Linux Mint detected but UBUNTU_CODENAME is not set in /etc/os-release."
+            print_info "Cannot safely resolve the Ubuntu codename needed for Docker's apt repo."
+            print_info "Make sure your /etc/os-release includes UBUNTU_CODENAME (standard on Mint 21+)."
             exit 1
         fi
-        print_success "Fedora-family distro detected: ${PRETTY_NAME:-$ID}"
     else
         print_warning "Could not read /etc/os-release — proceeding at your own risk."
-    fi
-
-    # Detect immutable/Bazzite (rpm-ostree)
-    if command -v rpm-ostree &>/dev/null; then
-        FEDORA_IMMUTABLE=true
-        print_info "Immutable Fedora (Bazzite / rpm-ostree) detected."
-    else
-        FEDORA_IMMUTABLE=false
     fi
 
     # ── Confirm detected package manager path with user ───────────────
@@ -350,15 +298,9 @@ check_system() {
     echo -e "${WHITE}${BOLD} Detected System Type${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
-    if [[ "$FEDORA_IMMUTABLE" == "true" ]]; then
-        echo -e "  ${GREEN}✅ Bazzite / Immutable Fedora${NC}"
-        echo -e "  ${WHITE}Package manager: ${CYAN}rpm-ostree${NC}"
-        echo -e "  ${DIM}Docker will be started if already present, or layered via rpm-ostree${NC}"
-    else
-        echo -e "  ${GREEN}✅ Standard Fedora${NC}"
-        echo -e "  ${WHITE}Package manager: ${CYAN}dnf${NC}"
-        echo -e "  ${DIM}Docker will be installed via dnf + Docker CE repo${NC}"
-    fi
+    echo -e "  ${GREEN}✅ Debian-family Linux (${PRETTY_NAME:-$ID})${NC}"
+    echo -e "  ${WHITE}Package manager: ${CYAN}apt${NC}"
+    echo -e "  ${DIM}Docker will be installed via apt + Docker CE repo${NC}"
     echo ""
     echo -e "  ${YELLOW}Is this correct?${NC}"
     echo -e "  ${DIM}(If wrong, press Ctrl+C to exit and check your distro)${NC}"
@@ -366,7 +308,7 @@ check_system() {
     if ! ask_yes_no "Continue with the detected system type?"; then
         echo ""
         print_error "Aborted. Re-run once you've confirmed your distro."
-        print_info "Expected: Fedora (dnf) or Bazzite/Immutable Fedora (rpm-ostree)"
+        print_info "Expected: Ubuntu, Debian, Linux Mint, or Pop!_OS"
         exit 1
     fi
 
@@ -399,8 +341,7 @@ diagnose_dep_failure() {
     echo ""
     echo -e "${WHITE}── System environment ─────────────────────────────${NC}"
     echo -e "  HOME=${HOME}   USER=${USER}"
-    echo -e "  OS: $(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d= -f2 || echo 'unknown')"
-    echo -e "  Immutable: ${FEDORA_IMMUTABLE:-false}"
+    echo -e "  OS: $(lsb_release -ds 2>/dev/null || grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d= -f2 || echo 'unknown')"
     echo -e "  DOCKER_CONFIG=${DOCKER_CONFIG:-'(not set, defaults to ~/.docker)'}"
     echo -e "  DOCKER_CLI_PLUGIN_HOME=${DOCKER_CLI_PLUGIN_HOME:-'(not set)'}"
     echo -e "  XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-'(not set)'}"
@@ -415,10 +356,11 @@ diagnose_dep_failure() {
             echo -e "  ${WHITE}Binary:${NC}"
             command -v docker 2>/dev/null && ls -la "$(command -v docker)" 2>/dev/null \
                 || echo "  docker binary not found in PATH"
-            echo -e "  ${WHITE}rpm package status:${NC}"
-            rpm -q docker-ce 2>/dev/null || echo "  docker-ce not installed via rpm"
-            echo -e "  ${WHITE}dnf list installed docker*:${NC}"
-            sudo dnf list installed 'docker*' 2>/dev/null | head -10 || echo "  (dnf unavailable)"
+            echo -e "  ${WHITE}dpkg status (docker-ce / docker.io):${NC}"
+            dpkg -l docker-ce docker.io 2>/dev/null | grep -E "^[uihr]" \
+                || echo "  (neither docker-ce nor docker.io installed)"
+            echo -e "  ${WHITE}apt-cache policy docker-ce:${NC}"
+            apt-cache policy docker-ce 2>/dev/null | head -6 || echo "  (apt-cache unavailable)"
             echo -e "  ${WHITE}Docker daemon status:${NC}"
             sudo systemctl status docker 2>/dev/null | head -8 || echo "  (systemctl unavailable)"
             echo -e "  ${WHITE}Docker socket:${NC}"
@@ -435,8 +377,9 @@ diagnose_dep_failure() {
                     && echo -e "  ${GREEN}FOUND:${NC} $(ls -la "$_dir/docker-compose" 2>/dev/null)" \
                     || echo -e "  ${DIM}ABSENT: $_dir/docker-compose${NC}"
             done
-            echo -e "  ${WHITE}rpm package:${NC}"
-            rpm -q docker-compose-plugin 2>/dev/null || echo "  docker-compose-plugin not installed via rpm"
+            echo -e "  ${WHITE}dpkg package:${NC}"
+            dpkg -l docker-compose-plugin 2>/dev/null | grep -E "^[uihr]" \
+                || echo "  (docker-compose-plugin not installed)"
             ;;
         "docker buildx")
             echo -e "  ${WHITE}Raw command output:${NC}"
@@ -449,24 +392,29 @@ diagnose_dep_failure() {
                     && echo -e "  ${GREEN}FOUND:${NC} $(ls -la "$_dir/docker-buildx" 2>/dev/null)" \
                     || echo -e "  ${DIM}ABSENT: $_dir/docker-buildx${NC}"
             done
-            echo -e "  ${WHITE}rpm package:${NC}"
-            rpm -q docker-buildx-plugin 2>/dev/null || echo "  docker-buildx-plugin not installed via rpm"
-            echo -e "  ${WHITE}rpm file integrity:${NC}"
-            rpm -V docker-buildx-plugin 2>/dev/null && echo "  OK" \
-                || echo "  Files missing or altered"
-            if [[ "${FEDORA_IMMUTABLE:-false}" == "true" ]]; then
-                echo -e "  ${WHITE}rpm-ostree layered packages:${NC}"
-                rpm-ostree status --json 2>/dev/null | grep -i "docker\|buildx" \
-                    || echo "  (rpm-ostree status unavailable)"
+            echo -e "  ${WHITE}dpkg package:${NC}"
+            dpkg -l docker-buildx-plugin 2>/dev/null | grep -E "^[uihr]" \
+                || echo "  (docker-buildx-plugin not installed)"
+            echo -e "  ${WHITE}dpkg file integrity:${NC}"
+            local _dpkg_verify
+            _dpkg_verify=$(dpkg --verify docker-buildx-plugin 2>/dev/null)
+            local _dpkg_rc=$?
+            if [[ $_dpkg_rc -ne 0 ]]; then
+                echo "  Package missing or dpkg verify unavailable"
+            elif [[ -z "$_dpkg_verify" ]]; then
+                echo "  OK (all files intact)"
+            else
+                echo "  Altered files detected:"
+                echo "  $_dpkg_verify"
             fi
             ;;
         "git")
             command -v git 2>/dev/null || echo "  git not found in PATH"
-            rpm -q git 2>/dev/null || echo "  git not installed via rpm"
+            dpkg -l git 2>/dev/null | grep -E "^[uihr]" || echo "  git not in dpkg database"
             ;;
         "curl")
             command -v curl 2>/dev/null || echo "  curl not found in PATH"
-            rpm -q curl 2>/dev/null || echo "  curl not installed via rpm"
+            dpkg -l curl 2>/dev/null | grep -E "^[uihr]" || echo "  curl not in dpkg database"
             ;;
         *)
             command -v "$_dep" 2>/dev/null || echo "  '$_dep' not found in PATH"
@@ -493,254 +441,157 @@ install_buildx() {
         return 0
     fi
     print_info "Installing docker-buildx-plugin..."
-    if [[ "${FEDORA_IMMUTABLE:-false}" == "true" ]]; then
-        # Immutable system — layer via rpm-ostree; returns 2 to signal reboot needed
-        if sudo rpm-ostree install -y --idempotent docker-buildx-plugin 2>/dev/null; then
-            print_success "docker-buildx-plugin layered. A reboot is required to activate it."
-            return 2
-        else
-            print_warning "rpm-ostree install of docker-buildx-plugin failed — trying CLI plugin fallback..."
-            _install_buildx_binary_fallback
-        fi
+    sudo apt-get update -qq 2>/dev/null || true
+    if sudo apt-get install -y docker-buildx-plugin 2>/dev/null; then
+        print_success "docker-buildx-plugin installed!"
     else
-        # Regular Fedora — dnf
-        if sudo dnf -y install docker-buildx-plugin 2>/dev/null; then
-            print_success "docker-buildx-plugin installed!"
+        print_warning "apt install of docker-buildx-plugin failed — trying Docker CLI plugin fallback..."
+        local arch
+        arch=$(uname -m)
+        [[ "$arch" == "x86_64" ]] && arch="amd64"
+        [[ "$arch" == "aarch64" ]] && arch="arm64"
+        local plugin_dir="$HOME/.docker/cli-plugins"
+        mkdir -p "$plugin_dir"
+        if curl -fsSL "https://github.com/docker/buildx/releases/download/v0.23.0/buildx-v0.23.0.linux-${arch}" \
+                -o "$plugin_dir/docker-buildx" 2>/dev/null; then
+            chmod +x "$plugin_dir/docker-buildx"
+            print_success "docker-buildx plugin installed to ~/.docker/cli-plugins/"
         else
-            print_warning "dnf install of docker-buildx-plugin failed — trying CLI plugin fallback..."
-            _install_buildx_binary_fallback
+            print_warning "Could not auto-install docker-buildx — the installer cannot continue without it."
+            print_info "Install manually with: sudo apt-get install docker-buildx-plugin  then re-run this script."
         fi
-    fi
-}
-
-_install_buildx_binary_fallback() {
-    local arch
-    arch=$(uname -m)
-    [[ "$arch" == "x86_64" ]] && arch="amd64"
-    [[ "$arch" == "aarch64" ]] && arch="arm64"
-    local plugin_dir="$HOME/.docker/cli-plugins"
-    mkdir -p "$plugin_dir"
-    if curl -fsSL "https://github.com/docker/buildx/releases/download/v0.23.0/buildx-v0.23.0.linux-${arch}" \
-            -o "$plugin_dir/docker-buildx" 2>/dev/null; then
-        chmod +x "$plugin_dir/docker-buildx"
-        print_success "docker-buildx plugin installed to ~/.docker/cli-plugins/"
-    else
-        print_warning "Could not auto-install docker-buildx — the installer cannot continue without it."
-        print_info "Install manually with: sudo dnf install docker-buildx-plugin  then re-run this script."
     fi
 }
 
 install_docker() {
-    # ── On immutable systems (Bazzite), Docker may already be present as a
-    #    layered package from a prior install attempt. If the binary exists,
-    #    try to start the daemon before attempting any rpm-ostree install —
-    #    reinstalling packages that are already in @System will fail.
-    if [[ "${FEDORA_IMMUTABLE:-false}" == "true" ]] && command -v docker &>/dev/null; then
-        # Guard against the podman-docker shim
-        if [[ -L /usr/bin/docker ]] && readlink /usr/bin/docker 2>/dev/null | grep -q podman; then
-            print_error "podman-docker shim detected at /usr/bin/docker. This script requires real Docker CE."
-            print_info "Remove podman-docker and install Docker CE first, then re-run."
-            exit 1
-        fi
-
-        print_info "Docker binary found on immutable system — enabling and starting service..."
-        # Reset any stale failed state — a failed docker.socket will block a fresh
-        # start even after the root cause is resolved (shows as "dependency failed").
-        sudo systemctl reset-failed containerd docker docker.socket 2>/dev/null || true
-        # containerd must start first — docker.service Requires=containerd.service
-        sudo systemctl enable --now containerd 2>/dev/null || true
-        sleep 2
-        # Verify containerd is actually active before attempting docker
-        if ! sudo systemctl is-active --quiet containerd 2>/dev/null; then
-            print_warning "containerd did not start — will diagnose below if docker also fails."
-        fi
-        # Start docker.socket explicitly before docker.service — on Bazzite the
-        # socket unit can be stuck in a failed state, which cascades to the service.
-        sudo systemctl enable --now docker.socket 2>/dev/null || true
-        sleep 1
-        sudo systemctl enable --now docker 2>/dev/null || true
-
-        # Poll for daemon readiness — docker info tests the API, not just the socket
-        for i in {1..15}; do sudo docker info &>/dev/null && break; sleep 2; done
-
-        if sudo docker ps &>/dev/null 2>&1; then
-            # Daemon is up — check compose separately so we can handle each case
-            if sudo docker compose version &>/dev/null 2>&1; then
-                print_success "Docker is running on this immutable system."
-                sudo usermod -aG docker "$USER" 2>/dev/null || true
-
-                # ── Session fix: group change won't take effect until next login.
-                #    Set up passwordless sudo for docker so the rest of this install
-                #    session works transparently. User can remove the file after
-                #    their first logout:  sudo rm /etc/sudoers.d/docker-nopasswd
-                print_info "Setting up Docker permissions for this session..."
-                if [[ -n "$USER" ]]; then
-                    echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/docker" | \
-                        sudo tee /etc/sudoers.d/docker-nopasswd > /dev/null 2>&1 || true
-                    sudo chmod 0440 /etc/sudoers.d/docker-nopasswd 2>/dev/null || true
-                else
-                    print_warning "Could not determine current user — skipping sudoers entry. Docker may require a logout to work without sudo."
-                fi
-                if ! docker ps &>/dev/null 2>&1; then
-                    enable_docker_sudo_wrapper
-                fi
-
-                print_success "Docker permissions configured!"
-                # Ensure buildx is present before returning
+    # Check for working Docker CE with Compose plugin
+    if command -v docker &>/dev/null; then
+        if docker ps &>/dev/null 2>&1; then
+            if docker compose version &>/dev/null 2>&1; then
                 install_buildx
+                print_success "Docker (with Compose plugin) already installed and running"
                 return 0
-            else
-                # Daemon runs but compose plugin is missing — layer it and reboot
-                print_warning "Docker is running but the Compose plugin is missing."
-                print_info "Layering docker-compose-plugin via rpm-ostree..."
-                sudo rpm-ostree install -y --idempotent docker-compose-plugin 2>/dev/null || \
-                sudo rpm-ostree install -y --idempotent docker-compose 2>/dev/null || {
-                    print_error "Could not install docker-compose-plugin via rpm-ostree."
-                    exit 1
-                }
-                print_success "docker-compose-plugin layered. Rebooting in 10 seconds — re-run this script after reboot."
-                sleep 10
-                sudo systemctl reboot
-                exit 0
             fi
-        else
-            # Docker binary and packages are present but daemon won't start.
-            # Show the actual error — do NOT fall through to reinstall, it will
-            # fail with "No packages in transaction" since everything is already layered.
-            print_error "Docker is installed but the service failed to start."
-            echo ""
-            echo -e "${YELLOW}  Docker service status:${NC}"
-            sudo systemctl status docker --no-pager -l 2>&1 | head -20
-            echo ""
-            echo -e "${YELLOW}  docker.socket status:${NC}"
-            sudo systemctl status docker.socket --no-pager -l 2>&1 | head -10
-            echo ""
-            echo -e "${YELLOW}  containerd status:${NC}"
-            sudo systemctl status containerd --no-pager -l 2>&1 | head -10
-            echo ""
-            echo -e "${YELLOW}  Recent Docker logs:${NC}"
-            sudo journalctl -u docker -u docker.socket -u containerd --no-pager -n 30 2>&1
-            echo ""
-            print_info "Common fixes:"
-            print_info "  Step 1 — reset stale failed-unit state:"
-            print_info "    sudo systemctl reset-failed containerd docker docker.socket"
-            print_info "  Step 2 — start in order (containerd → socket → service):"
-            print_info "    sudo systemctl enable --now containerd"
-            print_info "    sudo systemctl enable --now docker.socket"
-            print_info "    sudo systemctl start docker"
-            print_info "  If SELinux is blocking: sudo setenforce 0 (temporary) or check audit log"
-            print_info "  Then re-run this script."
-            print_error "Fix the Docker service issue above, then re-run this script."
-            exit 1
-        fi
-    fi
-
-    # ── Check for a Docker + Compose setup that is already running ────────
-    # On immutable systems also try sudo in case user isn't in docker group yet.
-    if command -v docker &>/dev/null && \
-       (docker ps &>/dev/null 2>&1 || sudo docker ps &>/dev/null 2>&1); then
-        if ! docker ps &>/dev/null 2>&1; then
-            enable_docker_sudo_wrapper
-        fi
-        if docker compose version &>/dev/null 2>&1; then
-            print_success "Docker (with Compose plugin) already installed and running"
-            return 0
-        else
             print_warning "Docker is running but the Compose plugin is missing."
             print_info "Attempting to install docker-compose-plugin..."
-            if [[ "${FEDORA_IMMUTABLE:-false}" == "true" ]]; then
-                if sudo rpm-ostree install -y --idempotent docker-compose-plugin 2>/dev/null || \
-                   sudo rpm-ostree install -y --idempotent docker-compose 2>/dev/null; then
-                    print_success "docker-compose-plugin layered. Rebooting in 10 seconds — re-run this script after reboot."
-                    sleep 10
-                    sudo systemctl reboot
-                    exit 0
-                else
-                    print_error "Could not install docker-compose-plugin via rpm-ostree."
-                    exit 1
-                fi
+            sudo apt-get update -qq 2>/dev/null || true
+            if sudo apt-get install -y docker-compose-plugin; then
+                print_success "docker-compose-plugin installed!"
+                return 0
             else
-                if sudo dnf -y install docker-compose-plugin; then
-                    print_success "docker-compose-plugin installed!"
-                    return 0
-                else
-                    print_error "Could not install docker-compose-plugin. Check your Docker CE repo setup."
-                    exit 1
-                fi
+                print_error "Could not install docker-compose-plugin. Check your Docker CE repo setup."
+                exit 1
+            fi
+        elif sudo docker ps &>/dev/null 2>&1; then
+            if sudo docker compose version &>/dev/null 2>&1; then
+                install_buildx
+                enable_docker_sudo_wrapper
+                print_success "Docker (with Compose plugin) already installed and running"
+                return 0
+            fi
+            print_warning "Docker is running but the Compose plugin is missing."
+            print_info "Attempting to install docker-compose-plugin..."
+            sudo apt-get update -qq 2>/dev/null || true
+            if sudo apt-get install -y docker-compose-plugin; then
+                enable_docker_sudo_wrapper
+                print_success "docker-compose-plugin installed!"
+                return 0
+            else
+                print_error "Could not install docker-compose-plugin. Check your Docker CE repo setup."
+                exit 1
             fi
         fi
     fi
 
-    # ── First-time install (no docker binary found) ───────────────────────
-    print_info "Installing Docker..."
-
-    if [[ "${FEDORA_IMMUTABLE:-false}" == "true" ]]; then
-        # ── Bazzite / immutable Fedora path (rpm-ostree) ─────────────────
-        # Only reached if docker binary was not found at all (truly first install).
-        # Must add the Docker CE repo first, then layer the correct packages.
-        print_info "Immutable system detected — installing Docker CE via rpm-ostree..."
-        print_warning "This will require a REBOOT to take effect."
+    # Detect snap-installed Docker and warn — snap Docker is not compatible with this script
+    if snap list docker &>/dev/null 2>&1; then
         echo ""
-        echo -e "${YELLOW}  rpm-ostree will layer Docker onto your system image.${NC}"
-        echo -e "${YELLOW}  After installation you MUST reboot, then re-run this script.${NC}"
+        print_warning "snap-installed Docker detected."
+        echo -e "${YELLOW}  Snap Docker is not compatible with this installer.${NC}"
+        echo -e "${YELLOW}  It must be removed before Docker CE can be installed.${NC}"
         echo ""
-        if ! ask_yes_no "Install Docker via rpm-ostree and reboot now?"; then
-            print_info "Skipped. Re-run after manually installing Docker."
-            exit 0
-        fi
-
-        print_info "Adding Docker CE repository..."
-        if ! sudo bash -c 'curl -fsSL https://download.docker.com/linux/fedora/docker-ce.repo \
-                -o /etc/yum.repos.d/docker-ce.repo'; then
-            print_error "Failed to download Docker CE repo. Check your internet connection."
+        if ask_yes_no "Remove snap Docker and install Docker CE instead?"; then
+            sudo snap remove docker
+            sleep 2
+        else
+            print_error "Cannot continue with snap Docker. Remove it manually and re-run."
             exit 1
         fi
+    fi
 
-        # --idempotent: succeeds cleanly if packages are already layered
-        if ! sudo rpm-ostree install -y --idempotent \
-                docker-ce docker-ce-cli containerd.io \
-                docker-buildx-plugin docker-compose-plugin; then
-            print_error "rpm-ostree Docker install failed. Check your connection and try again."
-            exit 1
-        fi
+    print_info "Installing Docker CE..."
 
-        print_success "Docker layered. Rebooting in 10 seconds — re-run this script after reboot."
-        sleep 10
-        sudo systemctl reboot
-        exit 0
+    # Remove conflicting distro-packaged Docker before installing CE
+    print_info "Removing any conflicting Docker packages..."
+    for pkg in docker.io docker-compose docker-compose-v2 docker-doc podman-docker containerd runc; do
+        sudo apt-get remove -y "$pkg" 2>/dev/null || true
+    done
+
+    # Install prerequisites
+    print_info "Installing prerequisites..."
+    if ! sudo apt-get update -qq; then
+        print_warning "apt-get update failed — attempting to continue."
+    fi
+    if ! sudo apt-get install -y ca-certificates curl; then
+        print_error "Failed to install prerequisites (ca-certificates, curl)."
+        exit 1
+    fi
+
+    # Add Docker's official GPG key
+    print_info "Adding Docker GPG key..."
+    sudo install -m 0755 -d /etc/apt/keyrings
+
+    # Determine correct Docker repo: ubuntu or debian
+    # Mint and Pop!_OS are Ubuntu-based; pure Debian uses its own repo
+    local DOCKER_REPO_DISTRO="ubuntu"
+    if [[ "$ID" == "debian" ]]; then
+        DOCKER_REPO_DISTRO="debian"
+    fi
+
+    if ! sudo curl -fsSL \
+            "https://download.docker.com/linux/${DOCKER_REPO_DISTRO}/gpg" \
+            -o /etc/apt/keyrings/docker.asc; then
+        print_error "Failed to download Docker GPG key."
+        exit 1
+    fi
+    sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+    # Resolve the correct codename:
+    # Mint sets UBUNTU_CODENAME (validated above); Ubuntu/Pop set VERSION_CODENAME
+    local CODENAME
+    if [[ "$ID" == "linuxmint" ]]; then
+        CODENAME="$UBUNTU_CODENAME"
     else
-        # ── Plain Fedora path (dnf) ───────────────────────────────────────
-        # Remove conflicting packages (e.g. podman-docker, moby-engine) before installing CE
-        print_info "Removing any conflicting Docker packages..."
-        for pkg in docker docker-client docker-client-latest docker-common \
-                   docker-latest docker-latest-logrotate docker-logrotate \
-                   docker-selinux docker-engine-selinux docker-engine moby-engine; do
-            sudo dnf -y remove "$pkg" 2>/dev/null || true
-        done
+        CODENAME="${VERSION_CODENAME}"
+    fi
+    if [[ -z "$CODENAME" ]]; then
+        CODENAME=$(lsb_release -cs 2>/dev/null || true)
+    fi
+    if [[ -z "$CODENAME" ]]; then
+        print_error "Could not determine OS codename. Cannot add Docker repo."
+        exit 1
+    fi
 
-        print_info "Installing dnf-plugins-core..."
-        if ! sudo dnf -y install dnf-plugins-core; then
-            print_error "Failed to install dnf-plugins-core."
-            exit 1
-        fi
+    print_info "Adding Docker CE repository (${DOCKER_REPO_DISTRO} / ${CODENAME})..."
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+https://download.docker.com/linux/${DOCKER_REPO_DISTRO} ${CODENAME} stable" | \
+        sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 
-        # Add Docker CE repo — use direct curl download so it works on both
-        # dnf4 (Fedora ≤40) and dnf5 (Fedora 41+, where config-manager syntax changed)
-        print_info "Adding Docker CE repository..."
-        if ! sudo curl -fsSL \
-                https://download.docker.com/linux/fedora/docker-ce.repo \
-                -o /etc/yum.repos.d/docker-ce.repo; then
-            print_error "Failed to download Docker CE repo file. Check your internet connection."
-            exit 1
-        fi
+    print_info "Updating package index with Docker CE repo..."
+    if ! sudo apt-get update -qq; then
+        print_error "apt-get update failed after adding Docker repo."
+        print_info "  Repo:     ${DOCKER_REPO_DISTRO}"
+        print_info "  Codename: ${CODENAME}"
+        print_info "Check that this distro/codename is supported at: https://download.docker.com/linux/${DOCKER_REPO_DISTRO}/dists/"
+        exit 1
+    fi
 
-        print_info "Installing Docker CE..."
-        if ! sudo dnf -y install \
-                docker-ce docker-ce-cli containerd.io \
-                docker-buildx-plugin docker-compose-plugin; then
-            print_error "Failed to install Docker. Check your internet connection."
-            exit 1
-        fi
+    print_info "Installing Docker CE packages..."
+    if ! sudo apt-get install -y \
+            docker-ce docker-ce-cli containerd.io \
+            docker-buildx-plugin docker-compose-plugin; then
+        print_error "Failed to install Docker. Check your internet connection and repo setup."
+        exit 1
     fi
 
     sudo usermod -aG docker "$USER"
@@ -824,20 +675,11 @@ install_git() {
     fi
     print_info "Installing Git..."
 
-    if [[ "${FEDORA_IMMUTABLE:-false}" == "true" ]]; then
-        if sudo rpm-ostree install -y git; then
-            print_success "Git layered via rpm-ostree — reboot required before first use."
-        else
-            print_warning "Git installation failed — some features may not work."
-            print_info "Try manually: sudo rpm-ostree install git"
-        fi
+    if sudo apt-get install -y git; then
+        print_success "Git installed!"
     else
-        if sudo dnf -y install git; then
-            print_success "Git installed!"
-        else
-            print_warning "Git installation failed — some features may not work."
-            print_info "Try manually: sudo dnf install -y git"
-        fi
+        print_warning "Git installation failed — some features may not work."
+        print_info "Try manually: sudo apt-get install -y git"
     fi
 }
 
@@ -848,7 +690,7 @@ preflight_check() {
     print_step "Preflight Check — System Dependencies"
 
     local docker_ok=false docker_compose_ok=false docker_buildx_ok=false
-    local git_ok=false curl_ok=false all_ok=true _pf_reboot_needed=false docker_via_sudo=false
+    local git_ok=false curl_ok=false all_ok=true docker_via_sudo=false
 
     # ── docker daemon ────────────────────────────────────────────────
     # Require unprivileged access — install_docker handles permission setup
@@ -939,68 +781,21 @@ preflight_check() {
     # ── Install Git if needed ────────────────────────────────────────
     if [[ "$git_ok" == "false" ]]; then
         install_git
-        # On immutable systems, rpm-ostree layers the package into the next
-        # deployment — git won't be on $PATH until after a reboot.
-        if [[ "${FEDORA_IMMUTABLE:-false}" == "true" ]] && \
-           ! command -v git &>/dev/null 2>&1; then
-            _pf_reboot_needed=true
-        fi
     fi
 
-    # ── Install curl if needed (dnf / rpm-ostree) ────────────────────
+    # ── Install curl if needed (apt-get) ─────────────────────────────
     if [[ "$curl_ok" == "false" ]]; then
         print_info "Installing curl..."
-        if [[ "${FEDORA_IMMUTABLE:-false}" == "true" ]]; then
-            if ! sudo rpm-ostree install -y --idempotent curl; then
-                print_error "Failed to install curl. Run manually: sudo rpm-ostree install curl"
-                exit 1
-            fi
-            _pf_reboot_needed=true
-            print_success "curl layered via rpm-ostree."
-        else
-            if ! sudo dnf -y install curl; then
-                print_error "Failed to install curl. Run manually: sudo dnf install -y curl"
-                exit 1
-            fi
-            print_success "curl installed!"
+        if ! sudo apt-get install -y curl; then
+            print_error "Failed to install curl. Run manually: sudo apt-get install -y curl"
+            exit 1
         fi
-    fi
-
-    # ── Reboot if rpm-ostree changes are pending ─────────────────────
-    # rpm-ostree layers packages into the next deployment; they are not
-    # available on $PATH until after a reboot. Trigger one now — consistent
-    # with how install_docker handles the compose plugin on immutable systems.
-    if [[ "$_pf_reboot_needed" == "true" ]]; then
-        echo ""
-        print_warning "New packages were layered via rpm-ostree and require a reboot."
-        print_info "Re-run this script after rebooting to continue the install."
-        print_info "Rebooting in 10 seconds — Ctrl+C to cancel."
-        sleep 10
-        sudo systemctl reboot
-        exit 0
+        print_success "curl installed!"
     fi
 
     # ── Re-verify after install ──────────────────────────────────────
-    # If buildx is still missing, attempt a direct targeted install.
-    # On immutable systems install_buildx returns 2 when a reboot is needed.
     if ! command docker buildx version &>/dev/null 2>&1; then
         install_buildx
-        local _buildx_rc=$?
-        if [[ $_buildx_rc -eq 2 ]]; then
-            _pf_reboot_needed=true
-        fi
-    fi
-
-    # Second reboot check — covers the case where the buildx retry above
-    # layered a package via rpm-ostree (the earlier check only handled git/curl).
-    if [[ "$_pf_reboot_needed" == "true" ]]; then
-        echo ""
-        print_warning "New packages were layered via rpm-ostree and require a reboot."
-        print_info "Re-run this script after rebooting to continue the install."
-        print_info "Rebooting in 10 seconds — Ctrl+C to cancel."
-        sleep 10
-        sudo systemctl reboot
-        exit 0
     fi
 
     print_info "Verifying all dependencies are now available..."
@@ -1016,7 +811,12 @@ preflight_check() {
     fi
 
     local _compose_ver
-    if _compose_ver=$(docker compose version 2>&1); then
+    if [[ "$docker_via_sudo" == "true" ]]; then
+        _compose_ver=$(sudo docker compose version 2>&1) && _compose_ok=true || _compose_ok=false
+    else
+        _compose_ver=$(docker compose version 2>&1) && _compose_ok=true || _compose_ok=false
+    fi
+    if [[ "${_compose_ok}" == "true" ]]; then
         print_success "docker compose:   $(echo "$_compose_ver" | head -1)"
     else
         print_error  "docker compose:   NOT AVAILABLE"
@@ -1113,7 +913,7 @@ install_server() {
         print_success "Compiled images already found in $SERVER_DIR"
         print_info "Skipping compile — reusing your existing build."
         print_info "To force a fresh compile, remove the server folder:"
-        print_info "  sudo rm -rf $SERVER_DIR"
+        print_info "  sudo rm -rf \"$SERVER_DIR\""
         cd "$SERVER_DIR" || exit 1
         docker compose up -d 2>&1 | tail -5
         return 0
@@ -1167,7 +967,7 @@ services:
       context: .
       target: worldserver
     volumes:
-      - ./modules:/azerothcore/modules:Z
+      - ./modules:/azerothcore/modules
     environment:
       AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES: "1"
       AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN: "1"
@@ -1222,7 +1022,7 @@ wait_for_server() {
             2>/dev/null | grep -i "worldserver" | head -1)
 
         if [ -n "$WORLD_CONTAINER" ]; then
-            if docker logs "$WORLD_CONTAINER" \
+            if docker logs --tail 100 "$WORLD_CONTAINER" \
                 2>/dev/null | grep -q "ready\.\.\."; then
                 READY=1
                 break
@@ -1241,7 +1041,7 @@ wait_for_server() {
         print_success "Server is READY! ⚔️"
     else
         print_warning "Server is taking longer than expected."
-        print_info "Check progress: docker logs -f $WORLD_CONTAINER"
+        print_info "Check progress: docker logs -f \"$WORLD_CONTAINER\""
         print_info "Wait for 'ready...' then create accounts manually."
     fi
 }
@@ -1290,12 +1090,12 @@ setup_gaming_mode() {
     # Detect available terminal emulator (global — also used by show_completion)
     TERM_BIN=""
     TERM_ARGS=""
-    if command -v konsole &>/dev/null; then
-        TERM_BIN="/usr/bin/konsole"
-        TERM_ARGS="--hold -e bash ~/wow-playerbots-launcher.sh"
-    elif command -v gnome-terminal &>/dev/null; then
+    if command -v gnome-terminal &>/dev/null; then
         TERM_BIN="/usr/bin/gnome-terminal"
         TERM_ARGS="-- bash -c 'bash ~/wow-playerbots-launcher.sh; read -r'"
+    elif command -v konsole &>/dev/null; then
+        TERM_BIN="/usr/bin/konsole"
+        TERM_ARGS="--hold -e bash ~/wow-playerbots-launcher.sh"
     elif command -v xterm &>/dev/null; then
         TERM_BIN="/usr/bin/xterm"
         TERM_ARGS="-hold -e bash ~/wow-playerbots-launcher.sh"
@@ -1363,7 +1163,7 @@ WORLD_CONTAINER=""
 while [ \$ELAPSED -lt \$TIMEOUT ]; do
     WORLD_CONTAINER=\$(docker ps --format '{{.Names}}' 2>/dev/null | grep -i "worldserver" | head -1)
     if [ -n "\$WORLD_CONTAINER" ]; then
-        if docker logs "\$WORLD_CONTAINER" 2>/dev/null | grep -q "ready\.\.\."; then
+        if docker logs --tail 100 "\$WORLD_CONTAINER" 2>/dev/null | grep -q "ready\.\.\."; then
             READY=1
             break
         fi
@@ -1529,7 +1329,7 @@ post_install_resources() {
     echo -e "  ${GREEN}bash ~/wow-manage.sh${NC}"
     echo ""
     if ask_yes_no "Download wow-manage.sh to your home folder now?"; then
-        local manage_url="https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/guides/wow-wotlk/wow-manage.sh"
+        local manage_url="https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/pylauncher/catalog/installers/wow-wotlk/wow-manage.sh"
         if curl -fsSL "$manage_url" -o "$HOME/wow-manage.sh"; then
             chmod +x "$HOME/wow-manage.sh"
             print_success "Downloaded to ~/wow-manage.sh"

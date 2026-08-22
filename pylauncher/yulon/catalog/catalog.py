@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from yulon.docker import ContainerSpec
 from yulon.manifest import Source
+from yulon.platform import PlatformId
 
 CATALOG_FILE = Path(__file__).resolve().with_name("catalog.json")
 
@@ -41,7 +42,10 @@ class Emulator(_Strict):
 class Install(_Strict):
     """How the Phase 3a installer drives the existing script for this game."""
 
-    script: str = Field(min_length=1, description="Repo-relative path to the install-*.sh")
+    script: str = Field(
+        min_length=1,
+        description="Path to the install-*.sh, relative to catalog/installers/",
+    )
     default_server_dir: str = Field(min_length=1, description="Default dir name under $HOME")
     db_root_password: str | None = Field(
         default=None, description="Fixed root password the installer uses, if any."
@@ -53,16 +57,32 @@ class Install(_Strict):
         default=False,
         description="The script asks for the user's client folder and loops until given one.",
     )
+    platforms: tuple[PlatformId, ...] = Field(
+        default=("linux",),
+        min_length=1,
+        description=(
+            "Which platforms this entry's install script can actually run on. Data, not a Python "
+            "conditional (roadmap 6.1): every v1 installer is a Linux-only bash script today, so "
+            "off-Linux clicks must be refused with an honest message instead of streaming a "
+            "script that exits 1. 6.2/6.3 add macOS/Windows variants and widen this list."
+        ),
+    )
     script_variants: dict[PackageManager, str] = Field(
         default_factory=dict,
         description=(
             "Per-package-manager overrides of `script` (keys: apt, dnf, pacman, zypper) for "
-            "distros the default script does not cover; `script` itself is the pacman/SteamOS one."
+            "distros the default script does not cover, same base directory; `script` "
+            "itself is the pacman/SteamOS one."
         ),
     )
 
+    def supports(self, platform_id: str) -> bool:
+        """True if this entry's installer runs on `platform_id` (`platform.detect()`)."""
+        return platform_id in self.platforms
+
     def script_for(self, package_manager: str | None) -> str:
-        """The repo-relative script to run on a host with `package_manager` (None → default)."""
+        """The script for a host with `package_manager` (None → default), relative to
+        `catalog/installers/`."""
         for pm, script in self.script_variants.items():
             if pm == package_manager:
                 return script

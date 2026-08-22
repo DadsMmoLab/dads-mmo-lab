@@ -27,8 +27,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from yulon import docker, platform
 from yulon.catalog.catalog import Catalog, CatalogEntry
-from yulon.catalog.installer import Installer, InstallOptions
+from yulon.catalog.installer import (
+    Installer,
+    InstallOptions,
+    platform_names,
+    unsupported_platform_message,
+)
 from yulon.log import get_logger
 from yulon.ui.widgets.log_panel import LogPanel
 
@@ -41,6 +47,19 @@ DirPicker = Callable[[QWidget, str, Path | None], Path | None]
 def _qt_dir_picker(parent: QWidget, title: str, start: Path | None) -> Path | None:
     chosen = QFileDialog.getExistingDirectory(parent, title, str(start) if start else "")
     return Path(chosen) if chosen else None
+
+
+def _pin_compose_project(server_dir: Path) -> None:
+    """Freeze the compose project name so the folder can be moved later.
+
+    Best-effort on purpose: a server that is otherwise fine must not fail to
+    attach because Docker happened to be down at that moment. The cost of
+    skipping it is the pre-existing behaviour, not a new failure.
+    """
+    try:
+        docker.pin_project_name(server_dir)
+    except OSError as exc:  # unwritable .env, vanished directory
+        logger.warning(f"could not pin the compose project name in {server_dir}: {exc}")
 
 
 class CatalogView(QWidget):
@@ -58,15 +77,18 @@ class CatalogView(QWidget):
         *,
         pick_dir: DirPicker = _qt_dir_picker,
         home: Path | None = None,
+        platform_id: Callable[[], str] = platform.detect,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self._platform_id = platform_id
         self._catalog = catalog
         self._make_installer = installer_factory
         self._log = log_panel
         self._pick_dir = pick_dir
         self._home = home if home is not None else Path.home()
         self._buttons: dict[str, QPushButton] = {}
+        self._gated: set[str] = set()  # ids the platform gate disabled (roadmap 6.1)
         self._existing_buttons: dict[str, QPushButton] = {}
         self._current: tuple[str, Path, Path | None] | None = None
 
@@ -98,6 +120,20 @@ class CatalogView(QWidget):
         button.clicked.connect(lambda _checked=False, e=entry: self.start_install(e))
         box.addWidget(button)
         self._buttons[entry.id] = button
+        if not entry.install.supports(self._platform_id()):
+            # Roadmap 6.1: say it on the tile, before the click — and leave
+            # "Use existing…" enabled, since managing a server installed
+            # elsewhere works on every platform.
+            note = QLabel(
+                f"<i>Installer needs {platform_names(entry.install.platforms)} — "
+                "not available on this platform yet.</i>",
+                frame,
+            )
+            note.setWordWrap(True)
+            box.addWidget(note)
+            button.setEnabled(False)
+            button.setToolTip(unsupported_platform_message(entry, self._platform_id()))
+            self._gated.add(entry.id)
         existing = QPushButton("Use existing…", frame)
         existing.setObjectName(f"existing-{entry.id}")
         existing.setToolTip(
@@ -150,6 +186,7 @@ class CatalogView(QWidget):
             if client_dir is None:
                 return False
         logger.info(f"attaching existing {entry.id} install at {server_dir}")
+        _pin_compose_project(server_dir)
         self.installed.emit(entry.id, server_dir, client_dir)
         return True
 
@@ -159,6 +196,14 @@ class CatalogView(QWidget):
         """Ask for folders, then run the installer into the log panel. False if not started."""
         if self._log.running:
             QMessageBox.information(self, "Busy", "Another job is still running.")
+            return False
+        if not entry.install.supports(self._platform_id()):
+            # Before the folder prompts, not after them (roadmap 6.1): asking
+            # where to install something that cannot be installed is the rudest
+            # possible order.
+            message = unsupported_platform_message(entry, self._platform_id())
+            QMessageBox.information(self, "Not available on this platform", message)
+            self.install_finished.emit(entry.id, False, message)
             return False
         server_dir = self._pick_dir(
             self,
@@ -207,8 +252,20 @@ class CatalogView(QWidget):
             QMessageBox.warning(self, "Install failed", message)
         self.install_finished.emit(game_id, ok, message)
         if ok:
+            _pin_compose_project(server_dir)
             self.installed.emit(game_id, server_dir, client_dir)
 
     def _set_buttons_enabled(self, enabled: bool) -> None:
-        for button in (*self._buttons.values(), *self._existing_buttons.values()):
+        """Lock the tiles while a job runs, and unlock them when it ends.
+
+        Unlocking must never re-enable an Install button the platform gate
+        disabled (roadmap 6.1) — the tile's own note says it cannot be installed
+        here. Latent while every catalog entry is Linux-only; armed the moment
+        6.2 widens WotLK and leaves the other three. "Use existing…" is
+        deliberately platform-independent: managing a server someone else
+        installed works everywhere.
+        """
+        for game_id, button in self._buttons.items():
+            button.setEnabled(enabled and game_id not in self._gated)
+        for button in self._existing_buttons.values():
             button.setEnabled(enabled)

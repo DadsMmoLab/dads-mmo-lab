@@ -72,7 +72,14 @@ def test_install_asks_for_folders_then_streams_the_installer(qapp: object, tmp_p
         return tmp_path / ("client" if "client" in title else "server")
 
     (tmp_path / "client").mkdir()
-    view = CatalogView(CATALOG, factory, panel, pick_dir=pick, home=tmp_path)
+    view = CatalogView(
+        CATALOG,
+        factory,
+        panel,
+        platform_id=lambda: "linux",  # this test is about the folder flow, not gating
+        pick_dir=pick,
+        home=tmp_path,
+    )
     events: list[tuple[str, ...]] = []
     view.install_started.connect(lambda g: events.append(("started", g)))
     view.install_finished.connect(lambda g, ok, m: events.append(("finished", g, str(ok), m)))
@@ -146,3 +153,79 @@ def test_use_existing_cancel_emits_nothing(qapp: object) -> None:
     view.installed.connect(lambda *a: got.append(a))
     assert view.attach_existing(CATALOG.get("wow-tbc")) is False
     assert got == []
+
+
+def test_unsupported_platform_is_said_on_the_tile_and_refused_before_any_prompt(
+    qapp: object, monkeypatch: object
+) -> None:
+    """Roadmap 6.1: no folder dialog, no subprocess — just an honest message."""
+    from PySide6.QtWidgets import QMessageBox
+
+    panel = LogPanel()
+    prompted: list[str] = []
+
+    def pick(_parent: object, title: str, _start: object) -> None:
+        prompted.append(title)
+        return None
+
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, ["x"]),
+        panel,
+        pick_dir=pick,  # type: ignore[arg-type]
+        platform_id=lambda: "macos",
+    )
+    shown: list[str] = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.append(a[2]))  # type: ignore[attr-defined]
+    finished: list[tuple[str, bool, str]] = []
+    view.install_finished.connect(lambda g, ok, m: finished.append((g, ok, m)))
+
+    assert view.button_for("wow-wotlk").isEnabled() is False  # said on the tile
+    assert view.start_install(CATALOG.get("wow-wotlk")) is False
+    assert prompted == []  # never asked where to install it
+    assert shown and "cannot be installed on macOS" in shown[0]
+    assert finished == [("wow-wotlk", False, shown[0])]
+    assert panel.running is False
+
+
+def test_supported_platform_keeps_the_install_button(qapp: object) -> None:
+    view = CatalogView(
+        CATALOG, lambda e: _FakeInstaller(e, []), LogPanel(), platform_id=lambda: "linux"
+    )
+    assert view.button_for("wow-wotlk").isEnabled() is True
+
+
+def test_unlocking_after_a_job_never_re_enables_a_gated_tile(qapp: object, tmp_path: Path) -> None:
+    """The 6.1 gate must survive `_set_buttons_enabled(True)` (review finding 1.1).
+
+    Latent while every entry is Linux-only; armed the moment 6.2 widens WotLK
+    and leaves TBC/Vanilla/Tortoise behind — a mixed catalog, which is exactly
+    what this builds.
+    """
+    from yulon.catalog.catalog import Catalog
+
+    wotlk = CATALOG.get("wow-wotlk")
+    widened = wotlk.model_copy(
+        update={"install": wotlk.install.model_copy(update={"platforms": ("linux", "macos")})}
+    )
+    mixed = Catalog(games=(widened, CATALOG.get("wow-tbc")))
+
+    panel = LogPanel()
+    view = CatalogView(
+        mixed,
+        lambda e: _FakeInstaller(e, ["line"]),
+        panel,
+        pick_dir=lambda *_: tmp_path,
+        home=tmp_path,
+        platform_id=lambda: "macos",
+    )
+    assert view.button_for("wow-wotlk").isEnabled() is True  # widened
+    assert view.button_for("wow-tbc").isEnabled() is False  # still Linux-only
+
+    assert view.start_install(widened) is True
+    _wait(panel)
+    process_events(50)
+
+    assert view.button_for("wow-wotlk").isEnabled() is True  # unlocked after the job
+    assert view.button_for("wow-tbc").isEnabled() is False  # STILL gated
+    assert view.existing_button_for("wow-tbc").isEnabled() is True  # never gated

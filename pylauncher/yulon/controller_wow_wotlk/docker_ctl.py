@@ -22,7 +22,9 @@ SPEC = docker.ContainerSpec(
 # Re-export the shared operations so callers import from here, not from
 # yulon.docker directly — this package stays the single entry point for WotLK.
 start = docker.start
+start_staged = docker.start_staged
 stop = docker.stop
+stop_staged = docker.stop_staged
 status = docker.status
 health = docker.health
 wait_db_healthy = docker.wait_db_healthy

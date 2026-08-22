@@ -36,12 +36,15 @@ class _FakeRunner:
         self.calls: list[list[str]] = []
         self.cwds: list[Path | None] = []
         self.ps_lines = ps_lines
+        self.health = "healthy\n"
 
     def __call__(self, cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
         self.calls.append(cmd)
         self.cwds.append(cwd)
         if cmd[:2] == ["docker", "ps"]:
             return _completed(0, self.ps_lines)
+        if cmd[:2] == ["docker", "inspect"]:
+            return _completed(0, self.health)  # so start()'s health wait never polls for real
         return _completed()
 
 
@@ -62,7 +65,7 @@ def test_controller_exposes_spec_and_server_dir() -> None:
 def test_start_runs_compose_up_in_server_dir(fake_runner: _FakeRunner) -> None:
     """With no conflicting containers, `start()` delegates to `docker.start()`."""
     Controller(SPEC, SERVER_DIR).start()
-    up = ["docker", "compose", "up", "-d"]
+    up = ["docker", "compose", "up", "-d", "--no-deps", SPEC.db, SPEC.auth, SPEC.world]
     assert up in fake_runner.calls
     assert fake_runner.cwds[fake_runner.calls.index(up)] == SERVER_DIR
 
@@ -81,7 +84,9 @@ def test_start_is_not_blocked_by_our_own_containers(fake_runner: _FakeRunner) ->
     """Our own containers already binding the ports (a restart) are not a conflict."""
     fake_runner.ps_lines = "t-world\t0.0.0.0:2222->2222/tcp\nt-auth\t0.0.0.0:1111->1111/tcp\n"
     Controller(SPEC, SERVER_DIR).start()
-    assert ["docker", "compose", "up", "-d"] in fake_runner.calls
+    assert any(
+        cmd[:5] == ["docker", "compose", "up", "-d", "--no-deps"] for cmd in fake_runner.calls
+    )
 
 
 def test_port_conflicts_filters_out_own_containers(fake_runner: _FakeRunner) -> None:
@@ -94,11 +99,21 @@ def test_port_conflicts_filters_out_own_containers(fake_runner: _FakeRunner) -> 
     assert Controller(SPEC, SERVER_DIR).port_conflicts() == ["stranger"]
 
 
-def test_stop_runs_compose_down_in_server_dir(fake_runner: _FakeRunner) -> None:
-    """`stop()` delegates to `docker.stop()` in the server dir."""
+def test_stop_keeps_the_containers_so_the_next_start_is_staged(
+    fake_runner: _FakeRunner,
+) -> None:
+    """`stop()` delegates to `docker.stop_staged()`, which never removes containers.
+
+    The regression this guards is subtle and was found only on a real daemon:
+    `compose down` removes the containers, so the *next* `start()` finds nothing
+    to start by name and falls back to `compose up -d` — re-running the one-shot
+    database import that `start_staged()` exists to avoid. Start and stop only
+    hold that invariant as a pair.
+    """
+    # `docker ps` is empty afterwards, i.e. compose really did stop them.
     Controller(SPEC, SERVER_DIR).stop()
-    assert fake_runner.calls == [["docker", "compose", "down"]]
-    assert fake_runner.cwds == [SERVER_DIR]
+    assert ["docker", "compose", "stop"] in fake_runner.calls
+    assert ["docker", "compose", "down"] not in fake_runner.calls
 
 
 def test_status_reports_which_of_our_containers_are_running(fake_runner: _FakeRunner) -> None:
@@ -162,4 +177,16 @@ def test_wotlk_controller_inherits_everything_with_its_own_spec(
     fake_runner.ps_lines = "ac-database\nac-authserver\nac-worldserver\n"
     assert ctl.status().all_running is True
     ctl.start()  # own containers bind the ports → allowed
-    assert ["docker", "compose", "up", "-d"] in fake_runner.calls
+    # Only the three long-running services are named, so compose cannot select
+    # ac-db-import — which dml-start.sh warns "was killing the database".
+    assert ["docker", "compose", "up", "-d"] not in fake_runner.calls
+    assert [
+        "docker",
+        "compose",
+        "up",
+        "-d",
+        "--no-deps",
+        "ac-database",
+        "ac-authserver",
+        "ac-worldserver",
+    ] in fake_runner.calls
