@@ -376,32 +376,86 @@ automatically.
    dialog, so a script's own error is never swallowed.
 4. _Definition of done:_ clicking Install for WotLK on macOS shows the honest unsupported message
    before any subprocess runs; the failed-dialog path shows the script's real error text.
+5. **Interactive input handling (the terminal must be able to pause and prompt).** The install
+   scripts invoke things that block on stdin — the canonical case is the Linux installer's
+   `sudo` prompt during `pacman`/`systemctl` steps, but also `pacman` mirror/country selection
+   and `y/N` confirmations. The in-app terminal must **pause** on that prompt, surface it, and
+   let the user type an answer (a modal dialog for secret/structured input, not an invisible
+   hang), then forward it to the subprocess's stdin and resume streaming. **[style]** — the
+   stdin write lives in `runner.py` (core), driven by the view via call-down/signal-up; the view
+   never shells out and never touches the subprocess handle directly (§3/§5). This is distinct
+   from 6.2/6.3 moving off `sudo`: the Linux path (and any script that prompts) still needs it,
+   and 6.2/6.3 (Docker Desktop, no `sudo`) must still handle any non-`sudo` prompts they emit
+   through the same shared input path.
+   - _Definition of done:_ a script that reads a line from stdin (or a real `sudo` step) causes
+     the log panel to stop on that line, present a prompt dialog, and forward the typed value
+     back to the process; the stream then advances on the next line instead of deadlocking,
+     EOF-ing the prompt, or erroring "no tty". Verified once on Linux (real `sudo`) and once
+     against the macOS/Windows installer variants' own prompts via the shared path.
 
-### 6.2 macOS install path (the macOS pre-alpha blocker)
+### 6.2 macOS install path — the shared native install engine
 
-1. Provide a macOS-installable path for each of the four v1 servers. **Runtime is Docker Desktop**
-   (per the Phase 6 strategy above): the macOS installer variant assumes Docker Desktop is
-   present — the app already provisions it via `ensure_docker()` — and drives `docker compose`
-   directly against it, no `pacman`, `systemctl`, or `sudo` package installs, and no manual VM
-   management (Docker Desktop owns its Linux VM). This is a **macOS variant** of each installer
-   (or a shared reimplementation, per README §9 "Phase 3b"). **[style]** — keep per-game specifics
-   in `catalog.json`/manifests; one shared implementation (§4).
-2. Wire the new script(s) into `catalog.json` (`install.script_variants` or an equivalent
-   platform→script map) so `Installer.script` resolves the macOS path the same way it already
-   picks `apt`/`dnf` variants on Linux (Phase 3 live-gate finding).
-3. _Definition of done:_ `installer.run()` for WotLK completes a working server on a real macOS
-   machine with Docker Desktop, with zero shell interaction, streaming output to the console.
+> Per `pyplan/phase6-decisions.md`, macOS (and 6.3's Windows) install is **one shared, typed
+> Python install engine**, not per-platform script variants — dispatched by `catalog.json` data:
+> `install.platforms` = where the entry is installable at all (drives the 6.1 refusal),
+> `install.script_platforms` = where the *bash script* is the mechanism; anything in `platforms`
+> but not `script_platforms` runs the native engine. WotLK lands `platforms: ["linux","macos",
+> "windows"]`, `script_platforms: ["linux"]`, so **Linux takes zero new code paths**. Runtime is
+> Docker Desktop on both non-Linux platforms (already provisioned by 5.1); no `pacman`/
+> `systemctl`/`sudo`, no manual VM management.
+
+1. Implement `NativeInstaller` (in `catalog/installer.py` or a sibling) with the **exact contract
+   of today's `Installer.run(options, cancel) -> Iterator[str]`**, so the catalog view, log panel,
+   and job runner need no changes. **[style]** — one shared implementation (§4); per-game specifics
+   stay in `catalog.json`/manifests (§3); typed, dataclass-led (§2).
+2. **Compose generation** (`rust-prior-art.md` §2): the three-file split — base
+   `docker-compose.yml` (services/names/images/ports/binds/`name:`), a runtime-only override
+   (`AC_*` env + `./modules` mount; auto-loaded and rewritten, so nothing structural may live
+   here), and a never-auto-loaded `docker-compose.build.yml` — plus a merged `.env` holding only
+   non-default keys. Build calls pass `-f base -f override -f build` (a bare `docker compose
+   build` in that directory builds *nothing* and exits 0); `up` stays bare. Reuse
+   `docker.pin_project_name()` and `docker.start_staged()`/`stop_staged()`; MySQL/loopback pinning
+   and worldserver `stdin_open`/`tty`/`stop_grace_period` per prior-art §2.
+3. **Preflight — refuse, don't warn** (`rust-prior-art.md` §3): RAM 2 GB/job (refuse < 6 GB, warn
+   < 8 GB), Docker data-root refuse < 40 GB, games-dir refuse < 8 GB, CPU-vs-RAM advisory, the
+   5-second bind-mount probe, `server_dir_problem()` (OneDrive/iCloud/UNC/mapped-drive), and the
+   port-conflict check *before* the build. macOS specifics are **unwritten in the Rust prior
+   art** — resolve Docker Desktop's data root from its settings JSON (`DataFolder`/`diskPath`,
+   absent = default) and write the macOS firewall/driver facts fresh.
+4. **Staged, resumable install** (`rust-prior-art.md` §1): stage order recorded by NAME, a state
+   file re-checked against disk evidence, `preflight`/`guard` never recorded complete, honest
+   cancel copy (BuildKit keeps finishing its current step — desirable layer cache), and a
+   resumable client-data download (`curl --retry 30 --continue-at -`).
+5. **`keep_awake()`** — a dad closing the lid mid-compile must not suspend the Docker Desktop VM;
+   `caffeinate` on macOS (shared interface also covering 6.3's `SetThreadExecutionState`).
+6. **Readiness** — poll `docker inspect … StartedAt` + `docker logs --since <StartedAt>` (never
+   `--tail`); bounded probes drain their pipes.
+7. _Definition of done:_ the native engine completes a working WotLK server on a real macOS
+   machine (Docker Desktop, no other Linux), zero shell interaction, streaming output to the
+   console — with a clean resume after a mid-build cancel and a clean second install to a
+   different directory.
 
 ### 6.3 Native Windows install path
 
-1. Provide a native-Windows install path for each of the four v1 servers. **Runtime is Docker
-   Desktop** (per the Phase 6 strategy above): the Windows installer variant drives
-   `docker compose` against Docker Desktop's **WSL2 backend** — the app already provisions WSL2 +
-   Docker Desktop via `ensure_wsl2()`/`ensure_docker()` — rather than managing WSL2 or a VM
-   directly, and rather than shipping a Linux distro the app would have to administer.
-   **[blocked]** — 6.2 establishes the shared non-Linux install shape first.
-2. _Definition of done:_ `installer.run()` for WotLK completes a working server on a real Windows
-   11 machine (no Linux distro pre-installed), with zero shell interaction.
+1. Drive the **same native engine** from 6.2 against Docker Desktop's **WSL2 backend** (the app
+   already provisions WSL2 + Docker Desktop via `ensure_wsl2()`/`ensure_docker()`), rather than
+   managing WSL2/VM directly or shipping a Linux distro. **[blocked]** — 6.2 establishes the shared
+   engine first.
+2. **Windows-specific hardening** (`rust-prior-art.md` §4), each item verified not assumed:
+   `docker.exe` discovery (override → per-user install path → `%ProgramFiles%` → bare `docker`;
+   Docker Desktop.exe with **no** bare-name fallback); absolute-path `git` discovery; `core.
+   autocrlf=input` *and* `http.version=HTTP/1.1` on the clone; path canonicalization (`C:\Users\x`
+   == `C:/Users/x` == `/mnt/c/…`); strip `\r` from anything crossing `wsl.exe`; container names
+   global per engine (ownership = project-name *or* working-dir match); port probe refuses only on
+   `AddrInUse`; spawn with `CREATE_NO_WINDOW`.
+3. **Fix *before* 6.3 can pass** — the three Windows provisioning defects recorded in
+   Cross-cutting (installer-download TLS cert failure; `Start-Process 'Docker Desktop'` resolving
+   nowhere; PATH not re-read so `docker_ready()` can never succeed on the first run), plus the
+   nested-virtualization gate and the `which()`/`wsl.exe` UTF-16 traps. A clean-box run is the only
+   evidence that counts — the baseline VM is no longer clean.
+4. _Definition of done:_ the native engine completes a working WotLK server on a real, clean
+   Windows 11 machine (no Linux distro, no pre-existing Docker/WSL), zero shell interaction, with
+   the same resume and second-install checks as 6.2.
 
 ### 6.4 Tests & gates
 
@@ -419,22 +473,47 @@ automatically.
 > it is a Linux-only regression waiting to be found on macOS/Windows the way 6's own bug was.
 
 1. **Install.** `installer.run()` completes WotLK end-to-end with zero shell interaction — Linux
-   (already proven), macOS (6.2), native Windows (6.3).
+   (already proven), macOS (6.2), native Windows (6.3). Includes the install-time robustness the
+   native engine must ship: staged/resumable install (a mid-build cancel resumes, never re-runs the
+   import), preflight floors that refuse-not-warn (RAM/disk/data-root + bind-mount probe +
+   `server_dir_problem()`), `keep_awake()` across the compile, and honest cancel copy — each
+   live-gated, not just unit-tested, on all three platforms.
 2. **Server lifecycle (README §12).** Start/stop/status/health polling, and the single-instance
    port-conflict guard, all correct on each platform's `docker compose` (native Linux Engine,
-   Docker Desktop's macOS VM, Docker Desktop's WSL2 backend on Windows).
-3. **Console.** `controller_wow_wotlk/console.py`'s `docker attach --sig-proxy=false` pty
-   transport is POSIX-only by design (README/style-guide note this Windows gap explicitly) — this
-   step must either (a) confirm the documented Windows fallback message is correct and land the
-   SOAP-based account-creation follow-up already flagged in Cross-cutting as the Windows path, or
-   (b) explicitly re-scope the Windows console gap into its own tracked item. Either way, Windows
-   console support is not left silently broken. This item covers the full `CONTROLS-2.md` GM
-   console surface: attach/detach safely (Ctrl+P/Ctrl+Q, never Ctrl+C), and GM commands.
-4. **Account creation (`CREATE-ACCOUNTS.md` / `CONTROLS-1.md`).** `account create` + `account set
-   gmlevel … -1` through the console transport (item 3), and the Console tab's Create-account form,
-   work on all three platforms — passwords never echoed, "account already exists" handled. This is
-   the one page the WotLK README calls out as "bookmark and share with family," so it is a
-   first-class coverage item, not a subset of "console works."
+   Docker Desktop's macOS VM, Docker Desktop's WSL2 backend on Windows). This item also closes the
+   four lifecycle follow-ups from the staged start/stop review (Cross-cutting), each a real
+   coverage gap, not polish:
+   - **A deliberate "Stop and remove containers" action** on the Server tab, wired to
+     `docker.stop()` — nothing can remove a container today, so a second install of the same game
+     to a new directory dies with `Conflict. The container name is already in use`, and a wedge
+     container survives every Stop/Start.
+   - **Rename `docker_ctl.py`'s `stop` export** (to `teardown`, or make the compose primitives
+     private) so the next contributor adding restart-after-module-apply doesn't silently reinstate
+     the import re-run by reaching for the shorter, button-named one.
+   - **A deliberate "repair / re-import" action** — an install interrupted *after* containers were
+     created but *before* the import finished now comes up against an unimported DB on Start, with
+     a warning about what it overwrites; the installer stays the only healthy-path importer.
+   - **Measure the `stop_grace_period`** against a populated server (1600–2000 playerbots) before
+     picking a value — the 10-second SIGTERM grace is likely too short and SIGKILLs a live save;
+     do not guess a number.
+3. **Console (live GM).** `controller_wow_wotlk/console.py`'s `docker attach --sig-proxy=false`
+   pty transport is POSIX-only by design. **Account creation no longer depends on it** — the
+   SOAP-based path was shown to rest on a false premise (SOAP cannot create the account SOAP needs;
+   `phase6-decisions.md` + Cross-cutting), so account creation is the SRP6-over-`DockerSql` path in
+   item 4 on every platform. What remains for the console itself is *live GM commands*:
+   attach/detach safely (Ctrl+P/Ctrl+Q, never Ctrl+C) and the `CONTROLS-2.md` GM surface, on
+   Linux/macOS where a pty exists. The Windows "no interactive GM console" gap is a smaller,
+   separately tracked item — either land an argued exception to style-guide §7 (attach over the
+   engine API instead of the `docker attach` client) or explicitly re-scope it; it is never left
+   silently broken.
+4. **Account creation (`CREATE-ACCOUNTS.md` / `CONTROLS-1.md`).** Compute AzerothCore's SRP6
+   registration values (`x = SHA1(salt || SHA1(UPPER(user) ":" UPPER(pass)))`, `verifier = 7^x mod
+   N`, little-endian, zero-padded to 32 bytes) and insert through the existing `DockerSql` seam —
+   the *primary* account path on all three platforms, because SOAP cannot bootstrap the first
+   account and `docker attach` refuses piped stdin against a TTY container. Do not echo passwords,
+   handle "account already exists," and prove byte-exactness against a verifier the server itself
+   wrote. This is the one page the WotLK README calls out as "bookmark and share with family," so
+   it is a first-class coverage item.
 5. **Maintenance (`CONTROLS-1.md`).** Cache clear, database backup and restore, and any SQL
    changes. **This is the known hole:** `controller_wow_wotlk/maintenance.py` is still a
    placeholder (Phase 4 record), and the rebuild/restart wiring is a follow-up — these must be
