@@ -30,7 +30,10 @@ datas = [
     (os.path.join(ROOT, "yulon", "catalog", "catalog.json"), os.path.join("yulon", "catalog")),
 ]
 
-hiddenimports = collect_submodules("yulon") + ["pydantic", "pydantic_core"]
+# certifi is imported lazily inside `yulon.platform._verify_context()`; naming it
+# here (PyInstaller's own hook then collects `cacert.pem` as data) is what keeps
+# the verified-download fallback working in a frozen build.
+hiddenimports = collect_submodules("yulon") + ["pydantic", "pydantic_core", "certifi"]
 
 a = Analysis(
     [os.path.join(ROOT, "main.py")],

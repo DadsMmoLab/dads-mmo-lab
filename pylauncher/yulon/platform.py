@@ -11,16 +11,18 @@ import importlib
 import os
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import threading
 import time
 import urllib.request
 from collections.abc import Callable, Iterable
+from contextlib import closing
 from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
 from yulon import runner
 from yulon.log import get_logger
@@ -324,6 +326,11 @@ _MANUAL_DOCKER_DESKTOP = (
     "Download and install Docker Desktop by hand: "
     "https://www.docker.com/products/docker-desktop/"
 )
+_MANUAL_ROOT_CERTS = (
+    "This machine could not verify the download server's certificate, usually because it is "
+    "missing a root certificate. On Windows, run Windows Update (it installs the current roots) "
+    "and try again. Yu'lon will not install software it could not verify."
+)
 _MANUAL_WSL = (
     "Open an Administrator PowerShell and run: wsl --install --no-distribution, then reboot."
 )
@@ -556,14 +563,308 @@ def docker_engine_commands(pm: PackageManager, *, steamos: bool, user: str) -> l
     ]
 
 
-def _urllib_download(url: str, dest: Path) -> Path:
+# ------------------------------------------------------------------ downloads
+# The Windows/macOS provisioning paths fetch a Docker Desktop installer — 629 MB
+# (659,189,680 bytes, measured 2026-08-23) — and then run it ELEVATED. So the
+# transfer has to be certificate-verified, and on the box this was measured on
+# the obvious way to do that does not work.
+#
+# Measured by hand on a fresh Windows 11 install (2026-08-22, Python 3.12.10 /
+# OpenSSL 3.0.16): `urllib.request.urlopen` aborted after 0.4 s with
+# `[SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer certificate`, and
+# the user was handed the "go download Docker Desktop yourself" step this product
+# exists to remove. On the same box github.com, raw.githubusercontent.com and
+# pypi.org all verified fine; only desktop.docker.com did not, and
+# `ssl.get_default_verify_paths().cafile` was None with 18 CA certs in the store.
+#
+# Why one host and not the others: Windows ships a small root set and pulls the
+# rest ON DEMAND, through the CryptoAPI automatic root update, while schannel is
+# building a chain. OpenSSL — which Python's `ssl` uses — reads a SNAPSHOT of the
+# same store and never triggers that fetch, so it only ever sees roots that
+# already happen to be materialized. desktop.docker.com chains to Amazon RSA
+# 2048 M01 -> Amazon Root CA 1, which was not among the 18; github.com chains to
+# Sectigo/USERTrust, which was. (Chains re-checked from a healthy Windows box,
+# 2026-08-23: 58 CA certs there, and both hosts verify.)
+#
+# So the fix is to give the transfer a root set that is actually complete, in
+# this order:
+#   1. The OS-shipped `curl` (System32 on Windows 10 1803+, /usr/bin/curl on
+#      macOS/Linux), pinned by absolute path. It is built against schannel /
+#      Secure Transport, i.e. the OS trust engine WITH the on-demand root fetch,
+#      so it sees the roots OpenSSL cannot — and it sees an enterprise root
+#      installed by a TLS-intercepting proxy, which a bundled CA file
+#      structurally cannot. It also brings resume and retry for the 629 MB.
+#   2. `urllib` against certifi's Mozilla bundle when certifi is importable
+#      (`requirements.txt` ships it), else the OS default. In-process, portable,
+#      and the backstop for a box with no curl (Windows before 1803) or a curl
+#      that will not run.
+#
+# There is no third step. Verification is never turned off here: an unverified
+# download of an executable that is about to be run with elevation is a
+# supply-chain hole, not a fallback. If both transports fail, the caller gets
+# both errors and a manual step (`_MANUAL_ROOT_CERTS`).
+
+_DOWNLOAD_CHUNK_BYTES = 1 << 20
+
+# curl exit codes worth telling apart. 33 = "HTTP server doesn't seem to support
+# byte ranges", i.e. a resume that can never finish; 60/77 are peer-certificate
+# and CA-store failures, the ones that mean "could not verify" rather than "the
+# network is down" — a distinction the user's next step depends on.
+_CURL_NO_RANGE_EXIT = 33
+_CURL_VERIFY_EXITS = frozenset({60, 77})
+
+_CURL_ARGS: tuple[str, ...] = (
+    "--fail",
+    "--location",
+    "--silent",
+    "--show-error",
+    # A redirect must not be able to downgrade an executable download to plain
+    # HTTP; that is an unverified fetch wearing a different hat.
+    "--proto",
+    "=https",
+    "--proto-redir",
+    "=https",
+    "--connect-timeout",
+    "30",
+    # Give up on a STALLED transfer (under 1 KB/s for a minute), not on a merely
+    # slow one: 629 MB over a bad link is not a failure, and a wall-clock
+    # `--max-time` would call it one.
+    "--speed-limit",
+    "1024",
+    "--speed-time",
+    "60",
+    "--retry",
+    "3",
+    "--retry-delay",
+    "2",
+    "--retry-connrefused",
+    # Continue where the last attempt stopped. Measured against the real
+    # installer (2026-08-23): an attempt cut off at 104,574,603 bytes resumed and
+    # asked the CDN for the remaining 554,615,077 of 659,189,680. A missing or
+    # empty output file resumes from 0, and an already-complete one exits 0
+    # having transferred nothing.
+    "--continue-at",
+    "-",
+)
+
+
+class DownloadError(OSError):
+    """A download failed and was NOT retried over an unverified connection.
+
+    An `OSError` so the provisioning paths that already turn a failed download
+    into a reported manual step keep working unchanged. `verification` is True
+    when the failure was the certificate rather than the network, because the
+    user's next step differs: a missing root is theirs to fix (Windows Update),
+    a dead link is not.
+    """
+
+    def __init__(self, message: str, *, verification: bool = False) -> None:
+        super().__init__(message)
+        self.verification = verification
+
+
+class HttpResponse(Protocol):
+    """The slice of an `urlopen` result the downloader touches.
+
+    A Protocol, not the concrete `http.client.HTTPResponse`, so tests can hand
+    `_download_urllib` a fake with no socket behind it — and so the `Any` that
+    typeshed gives `urlopen` is narrowed right at that boundary (style-guide §2).
+    """
+
+    def geturl(self) -> str: ...
+
+    def getheader(self, name: str, default: str | None = None) -> str | None: ...
+
+    def read(self, amt: int = ...) -> bytes: ...
+
+    def close(self) -> None: ...
+
+
+UrlOpener = Callable[[urllib.request.Request], HttpResponse]
+
+
+def _os_curl() -> Path | None:
+    """The OS-shipped curl, by absolute path — never whatever `curl` PATH answers with.
+
+    Windows 10 1803+ ships `%SystemRoot%\\System32\\curl.exe` built against
+    schannel; macOS ships `/usr/bin/curl` against the system trust store. Both
+    use the OS trust engine, which is the whole point (see the block above).
+    Resolving through PATH instead would let any curl earlier in it decide how an
+    about-to-be-elevated installer gets verified, and would happily pick a build
+    against a stale vendored CA file — on the dev box this was written on, PATH
+    answers with Git's mingw curl before System32's.
+    """
+    if detect() == "windows":
+        system_root = os.environ.get("SystemRoot") or "C:\\Windows"
+        candidate = Path(system_root) / "System32" / "curl.exe"
+    else:
+        candidate = Path("/usr/bin/curl")
+    return candidate if candidate.exists() else None
+
+
+def _verify_context() -> ssl.SSLContext:
+    """A verifying TLS context with the widest root set we can honestly assemble.
+
+    `ssl.create_default_context()` already means verify + check hostname; what it
+    does not come with on a fresh Windows install is a COMPLETE root set. certifi
+    ships Mozilla's, which is where the missing Amazon Root CA 1 actually lives,
+    so it is used whenever it is importable. When it is not — a dev checkout that
+    skipped `pip install -r requirements.txt` — the OS default is used unchanged:
+    fewer roots, still fully verified. Nothing here relaxes verification, and
+    there is no branch that can.
+    """
+    try:
+        import certifi
+    except ImportError:
+        logger.debug("certifi is not importable; using the OS default root store")
+        return ssl.create_default_context()
+    return ssl.create_default_context(cafile=certifi.where())
+
+
+def _open_url(request: urllib.request.Request) -> HttpResponse:
+    """`urlopen` with the verifying context from `_verify_context()`."""
+    resp: HttpResponse = urllib.request.urlopen(request, timeout=60.0, context=_verify_context())
+    return resp
+
+
+def _expected_total(resp: HttpResponse) -> int | None:
+    """How many bytes the finished file should have, or None if the server won't say.
+
+    On a resumed request `Content-Length` counts only the remaining range, so the
+    authoritative total is the tail of `Content-Range: bytes 1-2/TOTAL`.
+    """
+    content_range = resp.getheader("Content-Range")
+    if content_range:
+        total = content_range.rsplit("/", 1)[-1].strip()
+        return int(total) if total.isdigit() else None
+    length = resp.getheader("Content-Length")
+    return int(length) if length and length.strip().isdigit() else None
+
+
+def _download_curl(url: str, part: Path, curl: Path, do: RunCmd) -> None:
+    """Fetch `url` into `part` with the OS curl, resuming whatever is already there."""
+    argv = [str(curl), *_CURL_ARGS, "--output", str(part), url]
+    try:
+        proc = do(argv)
+        if proc.returncode == _CURL_NO_RANGE_EXIT and part.exists():
+            # The CDN answered the resume request with "no ranges here". Keeping
+            # the partial would make every future attempt fail the same way, so
+            # drop it and take the whole file again.
+            logger.info(f"{url}: server refuses byte ranges; restarting the download")
+            part.unlink()
+            proc = do(argv)
+    except OSError as exc:
+        raise DownloadError(f"{curl.name} could not run: {exc}") from exc
+    if proc.returncode != 0:
+        raise DownloadError(
+            f"{curl.name} exited {proc.returncode}: {proc.stderr.strip() or url}",
+            verification=proc.returncode in _CURL_VERIFY_EXITS,
+        )
+
+
+def _download_urllib(url: str, part: Path, open_url: UrlOpener) -> None:
+    """Fetch `url` into `part` in-process, resuming with a `Range` request if it can.
+
+    A server that ignores the `Range` header answers 200 with the whole body and
+    no `Content-Range`; that restarts the file rather than appending a second
+    copy of it onto the first. The finished size is checked against what the
+    server said, so a connection cut mid-body leaves a `.part` to resume from and
+    never a short file that gets renamed into place and run.
+    """
+    start = part.stat().st_size if part.exists() else 0
+    headers = {"User-Agent": "yulon"}
+    if start:
+        headers["Range"] = f"bytes={start}-"
+    with closing(open_url(urllib.request.Request(url, headers=headers))) as resp:
+        final = resp.geturl()
+        if not final.startswith("https://"):
+            raise DownloadError(f"{url} redirected to {final}, which is not HTTPS")
+        resumed = resp.getheader("Content-Range") is not None
+        expected = _expected_total(resp)
+        written = start if resumed else 0
+        with part.open("ab" if resumed else "wb") as out:
+            while chunk := resp.read(_DOWNLOAD_CHUNK_BYTES):
+                out.write(chunk)
+                written += len(chunk)
+    if expected is not None and written != expected:
+        raise DownloadError(f"{url}: transfer ended at {written} of {expected} bytes")
+
+
+def _is_verification_failure(exc: OSError) -> bool:
+    """True when `exc` means 'could not verify the certificate', not 'could not connect'."""
+    if isinstance(exc, ssl.SSLCertVerificationError):
+        return True
+    return isinstance(exc, DownloadError) and exc.verification
+
+
+def download_verified(
+    url: str,
+    dest: Path,
+    *,
+    run: RunCmd | None = None,
+    find_curl: Callable[[], Path | None] | None = None,
+    open_url: UrlOpener | None = None,
+) -> Path:
+    """Download `url` to `dest` over a verified connection, or fail loudly.
+
+    Tries the OS-shipped curl first and `urllib` (certifi bundle) second; the
+    long comment above this function says why that order, and why there is no
+    third attempt. Raises `DownloadError` — an `OSError`, so existing callers
+    keep reporting it as a skipped step — with both transports' messages and
+    `verification` set when the certificate, not the network, was the problem.
+
+    Re-downloading is avoided at two granularities, because the file in question
+    is 629 MB and the old code fetched all of it again on every attempt:
+    a completed `dest` is reused as-is, and an interrupted attempt leaves a
+    `<dest>.part` that the next run resumes from. The trade-off of the first is
+    staleness — the installer URL is "latest", so a cached file can be an older
+    Docker Desktop than the one currently published. That is the cheap side of
+    the trade: Docker Desktop updates itself on first run, and deleting the file
+    forces a fresh download. The alternative, revalidating the size against the
+    server on every run, costs a request over the very TLS path that is broken on
+    the box this was written for.
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_name(dest.name + ".part")
-    request = urllib.request.Request(url, headers={"User-Agent": "yulon"})
-    with urllib.request.urlopen(request, timeout=60.0) as resp, tmp.open("wb") as out:
-        shutil.copyfileobj(resp, out)
-    tmp.replace(dest)
-    return dest
+    if dest.exists() and dest.stat().st_size > 0:
+        logger.info(f"reusing the file already downloaded at {dest}")
+        return dest
+    part = dest.with_name(dest.name + ".part")
+    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv))
+    failures: list[str] = []
+    verification: list[bool] = []
+
+    curl = (find_curl if find_curl is not None else _os_curl)()
+    if curl is not None:
+        try:
+            _download_curl(url, part, curl, do)
+            part.replace(dest)
+            return dest
+        except OSError as exc:
+            logger.warning(f"{curl.name} could not fetch {url}: {exc}")
+            failures.append(f"{curl.name}: {exc}")
+            verification.append(_is_verification_failure(exc))
+
+    try:
+        _download_urllib(url, part, open_url if open_url is not None else _open_url)
+        part.replace(dest)
+        return dest
+    except OSError as exc:
+        logger.warning(f"urllib could not fetch {url}: {exc}")
+        failures.append(f"urllib: {exc}")
+        verification.append(_is_verification_failure(exc))
+
+    raise DownloadError(
+        f"{url} could not be downloaded over a verified connection "
+        f"({'; '.join(failures)}). Nothing was fetched unverified.",
+        verification=any(verification),
+    )
+
+
+def _download_manual_steps(exc: OSError) -> tuple[str, ...]:
+    """What to tell the user after a failed installer download."""
+    if _is_verification_failure(exc):
+        return (_MANUAL_ROOT_CERTS, _MANUAL_DOCKER_DESKTOP)
+    return (_MANUAL_DOCKER_DESKTOP,)
 
 
 def _wait_docker_ready(
@@ -614,7 +915,7 @@ def ensure_docker(
     *,
     run: RunCmd | None = None,
     which: Callable[[str], str | None] | None = None,
-    download: Downloader = _urllib_download,
+    download: Downloader = download_verified,
     dry_run: bool = False,
     user: str | None = None,
     wait_seconds: float = _DOCKER_READY_TIMEOUT_SECONDS,
@@ -767,8 +1068,8 @@ def _ensure_docker_windows(
             return ProvisionReport(
                 "windows",
                 tuple(done),
-                (f"download Docker Desktop: {exc}",),
-                (_MANUAL_DOCKER_DESKTOP,),
+                (*skipped, f"download Docker Desktop: {exc}"),
+                _download_manual_steps(exc),
             )
         d2, s2 = _run_steps(do, [install_cmd], sudo=False, dry_run=False)
         done += d2
@@ -833,7 +1134,7 @@ def _ensure_docker_macos(
                 "macos",
                 tuple(done),
                 (f"download Docker Desktop: {exc}",),
-                (_MANUAL_DOCKER_DESKTOP,),
+                _download_manual_steps(exc),
             )
     d, s = _run_steps(do, commands, sudo=False, dry_run=dry_run)
     done += d
