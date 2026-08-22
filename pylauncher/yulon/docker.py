@@ -201,12 +201,29 @@ def pinned_project_name(server_dir: Path) -> str | None:
 PROJECT_LABEL = "com.docker.compose.project"
 
 
+UNREADABLE = "\x00unreadable"
+"""Docker would not say who owns a container — not the same as "nobody owns it".
+
+Two failures used to collapse into `None` here: `docker inspect` erroring out,
+and a container that genuinely carries no compose label. They need different
+answers — the first is "ask again later", the second is "this is not ours" — so
+the unreadable case gets a value no project name can collide with (review,
+2026-08-22).
+"""
+
+
 def container_project(container: str) -> str | None:
-    """Which compose project owns this container, or None if it cannot be read."""
+    """Which compose project owns this container.
+
+    Returns the project name, `None` for a container carrying no compose label
+    (something started outside compose), or `UNREADABLE` when Docker could not
+    be asked at all.
+    """
     fmt = '{{index .Config.Labels "' + PROJECT_LABEL + '"}}'
     proc = runner.run(["docker", "inspect", container, "--format", fmt])
     if proc.returncode != 0:
-        return None
+        logger.warning(f"could not read the compose project of {container}: {proc.stderr.strip()}")
+        return UNREADABLE
     return proc.stdout.strip() or None
 
 
@@ -218,8 +235,8 @@ def install_project(spec: ContainerSpec, server_dir: Path) -> str | None:
     no existing container carries — and an install created before pinning
     existed (which is every install in the wild) has no `.env` value to correct
     it. Comparing the directory's answer against the containers' labels then
-    never matches, `_ours()` finds nothing, and a stop that stopped nothing
-    reports success while players are still connected.
+    never matches, `_running()` finds nothing of ours, and a stop that stopped
+    nothing reports success while players are still connected.
 
     It is tempting to read the identity off a container's own
     `com.docker.compose.project` label instead — that is what compose actually
@@ -229,52 +246,69 @@ def install_project(spec: ContainerSpec, server_dir: Path) -> str | None:
     project as its own and then stop it. Without a pin the two situations are
     genuinely indistinguishable from here, so the unresolved case is reported
     rather than guessed — see `stop_staged()`.
+
+    The pin is therefore written at the one moment it is provably right: after
+    this app's own installer finished, when the directory IS what compose just
+    named the containers after. Attaching an existing install does not pin, an
+    already-moved folder being exactly what that path exists to adopt.
     """
     return pinned_project_name(server_dir) or compose_project_name(server_dir)
 
 
-def _named_but_not_ours(spec: ContainerSpec, project: str | None) -> list[str]:
-    """Running containers wearing this install's names but another project's label."""
-    listed = _status_safe()
-    if listed is None:
-        return []
-    running = {line.strip() for line in listed}
-    return [
-        name
-        for name in (spec.world, spec.auth, spec.db)
-        if name in running and container_project(name) != project
-    ]
+@dataclass(frozen=True)
+class Running:
+    """Containers wearing this install's names, split by who actually owns them.
+
+    A container name proves existence, never ownership. Two installs of one game
+    carry identical container names — AzerothCore pins them globally — so a
+    check that goes by name alone reports the *other* install's running server
+    as this one's, and then acts on it.
+
+    Every list is in stop order: world, then auth, then the database.
+    """
+
+    ours: tuple[str, ...] = ()
+    """Running and carrying our project's label. Safe to act on."""
+
+    strangers: tuple[tuple[str, str | None], ...] = ()
+    """(container, the project that owns it) — `None` for "no compose label"."""
+
+    unreadable: tuple[str, ...] = ()
+    """Running, but Docker would not say who owns them. Not proof of anything."""
 
 
-def _ours(spec: ContainerSpec, project: str | None) -> list[str]:
-    """This install's containers that are running AND belong to `project`.
-
-    A container name proves existence, never ownership. Two installs of the same
-    game carry identical container names — AzerothCore pins them — so a check
-    that goes by name alone will report the *other* install's running server as
-    this one's, and then act on it: the previous version of this would stop a
-    stranger's server while its owner was playing on it.
+def _running(spec: ContainerSpec, project: str) -> Running:
+    """Classify what is running under this install's names by compose project label.
 
     Compose stamps every container it creates with the project it belongs to,
-    and that label is the ownership proof. Where ownership cannot be
-    established this returns nothing, on purpose — the caller must fail closed
-    and say so rather than fall back to a name.
+    and that label is the only ownership proof available. Anything that is not
+    provably ours ends up in `strangers` or `unreadable`, never in `ours` — the
+    caller must fail closed on those and say so rather than fall back to a name.
 
-    Returned in stop order: world, then auth, then the database.
+    Raises:
+        DockerCommandError: Docker could not be asked what is running at all,
+            so no claim about this install can be made.
     """
-    if project is None:
-        return []
     listed = _status_safe()
     if listed is None:
         raise DockerCommandError(
             "could not ask Docker what is running, so the stop cannot be confirmed"
         )
     running = {line.strip() for line in listed}
-    return [
-        name
-        for name in (spec.world, spec.auth, spec.db)
-        if name in running and container_project(name) == project
-    ]
+    ours: list[str] = []
+    strangers: list[tuple[str, str | None]] = []
+    unreadable: list[str] = []
+    for name in (spec.world, spec.auth, spec.db):
+        if name not in running:
+            continue
+        owner = container_project(name)
+        if owner == UNREADABLE:
+            unreadable.append(name)
+        elif owner == project:
+            ours.append(name)
+        else:
+            strangers.append((name, owner))
+    return Running(tuple(ours), tuple(strangers), tuple(unreadable))
 
 
 def container_exists(container: str) -> bool:
@@ -380,6 +414,62 @@ def _run_docker_stop(container: str) -> None:
     raise DockerCommandError(f"docker stop {container} failed: {proc.stderr.strip()}")
 
 
+def _refuse_without_an_identity(spec: ContainerSpec, server_dir: Path) -> None:
+    """Raise if anything is running under our names while we cannot name our project.
+
+    Returns quietly when nothing of the sort is up: there is simply nothing to
+    stop, which is not an error.
+    """
+    named = {line.strip() for line in _status_safe() or []}
+    up = [name for name in (spec.world, spec.auth, spec.db) if name in named]
+    if not up:
+        logger.info("stop_staged(): no project name, and nothing running under our names")
+        return
+    raise DockerCommandError(
+        f"cannot tell which containers belong to the install in {server_dir}: its compose files "
+        "are unreadable and no COMPOSE_PROJECT_NAME is pinned, while "
+        f"{', '.join(up)} are running. Nothing was stopped."
+    )
+
+
+def _stranger_message(
+    strangers: tuple[tuple[str, str | None], ...], project: str, server_dir: Path
+) -> str:
+    """Explain a name/label mismatch, and name the remedy that actually works.
+
+    This used to end with "re-attach this install", which is worse than useless:
+    attaching no longer pins at all, and the version that did would have written
+    the *current* basename — the very value that produces this mismatch — after
+    which the `.env` outranks the directory forever and the recoverable state
+    becomes permanent. The two remedies that do work are naming the containers'
+    own project in `.env`, or putting the folder back under the name compose
+    created them with (review, 2026-08-22).
+    """
+    owners = sorted({owner for _name, owner in strangers if owner})
+    unlabelled = [name for name, owner in strangers if not owner]
+    names = ", ".join(name for name, _owner in strangers)
+    lines = [
+        f"{names} are running, but they do not belong to the install in {server_dir}, which "
+        f"is compose project '{project}'. Nothing was stopped: this could equally be another "
+        "install of the same game, or this one after its folder was moved, and stopping the "
+        "wrong one would take down a server somebody is playing on."
+    ]
+    if unlabelled:
+        lines.append(
+            f"{', '.join(unlabelled)} carry no compose project at all, so they were started "
+            "outside compose — Yu'lon will not touch them."
+        )
+    if owners:
+        which = " and ".join(f"'{owner}'" for owner in owners)
+        lines.append(
+            f"They belong to compose project {which}. If that is really this install, make the "
+            f"two agree: set {PROJECT_NAME_VAR}={owners[0]} in {server_dir / '.env'}, or move "
+            f"the folder back to a directory named {owners[0]}. If it is not this install, stop "
+            "that server from its own folder."
+        )
+    return " ".join(lines)
+
+
 def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
     """Stop this install without destroying its containers.
 
@@ -401,67 +491,63 @@ def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
     Either way the result is verified rather than assumed. A zero exit from
     `compose stop` only means compose had nothing to complain about — it says
     so even for a project where nothing was running, and even where the
-    containers holding these names belong to a different install.
+    containers holding these names belong to a different install. So the census
+    is taken from `docker ps` plus the compose project label, once before the
+    stop and again after it, and the exit code is never the answer.
 
     Returns:
-        True if this install is now stopped, False if there was nothing of it
-        to stop.
+        True if something of this install was running and is now down; False if
+        there was nothing of it to stop. The old version returned `compose
+        stop`'s exit code, which is 0 for an empty project — it said "stopped"
+        having stopped nothing (review, 2026-08-22).
 
     Raises:
-        DockerCommandError: Something of this install is still running after
-            the stop. Reporting success there would be the worst outcome: the
-            user is told the server is down while players are still connected.
+        DockerCommandError: Ownership could not be established, or something of
+            this install is still running after the stop. Reporting success in
+            either case would be the worst outcome: the user is told the server
+            is down while players are still connected.
     """
     logger.debug(f"stop_staged() called: server_dir={server_dir}")
     project = install_project(spec, server_dir)
-    proc = runner.run(["docker", "compose", "stop"], cwd=server_dir)
-    stopped_something = proc.returncode == 0
+    if project is None:
+        _refuse_without_an_identity(spec, server_dir)
+        return False
 
-    if not stopped_something:
-        logger.warning(f"compose stop failed ({proc.stderr.strip()}); stopping containers by name")
-        ordered = _ours(spec, project)
-        if not ordered:
-            # Nothing of ours is running — unless we could not work out who
-            # "ours" is, in which case saying "stopped" would be a lie about a
-            # server that may still be up. Distinguish the two.
-            named = {line.strip() for line in _status_safe() or []}
-            unknown = project is None and any(
-                name in named for name in (spec.world, spec.auth, spec.db)
-            )
-            if unknown:
-                raise DockerCommandError(
-                    f"cannot tell which containers belong to the install in {server_dir}: "
-                    "its compose files are unreadable and no COMPOSE_PROJECT_NAME is pinned, "
-                    "while containers with these names are running. Nothing was stopped."
-                )
-            logger.info("stop_staged(): nothing running that this install can prove it owns")
-            return False
-        for name in ordered:
-            _run_docker_stop(name)
-        stopped_something = True
-
-    strangers = _named_but_not_ours(spec, project)
-    if strangers:
+    # Look before touching anything. Taking the census first is what lets the
+    # refusals below happen before a `compose stop`, and what makes the return
+    # value mean "there was something of ours and it is now down" rather than
+    # "compose had nothing to complain about" (review, 2026-08-22).
+    before = _running(spec, project)
+    if before.unreadable:
         raise DockerCommandError(
-            f"containers named {', '.join(strangers)} are running under a different compose "
-            f"project than the install in {server_dir}. Nothing was stopped: this could equally "
-            "be another install of the same game, or this one after its folder was moved, and "
-            "stopping the wrong one would take down a server somebody is playing on. "
-            "Re-attach this install so it records which project is its own."
+            f"Docker would not say which project owns {', '.join(before.unreadable)}, so this "
+            f"install in {server_dir} cannot prove those containers are its own. Nothing was "
+            "stopped. This is usually Docker being unwell rather than a second install — try "
+            "again in a moment."
         )
+    if before.strangers:
+        raise DockerCommandError(_stranger_message(before.strangers, project, server_dir))
+    if not before.ours:
+        logger.info("stop_staged(): nothing of this install is running")
+        return False
 
-    lingering = _ours(spec, project)
+    proc = runner.run(["docker", "compose", "stop"], cwd=server_dir)
+    if proc.returncode != 0:
+        logger.warning(f"compose stop failed ({proc.stderr.strip()}); stopping containers by name")
+
+    lingering = _running(spec, project).ours
     if lingering:
-        # `compose stop` reported success without stopping our containers — the
-        # moved-install case. Finish the job by name rather than believing it.
-        logger.warning(f"compose stop left {lingering} running; stopping by name")
+        # Either `compose stop` failed, or it succeeded having matched nothing —
+        # the moved-folder case, where compose names the project after the
+        # directory. Finish the job by name rather than believing the exit code.
+        logger.warning(f"compose stop left {list(lingering)} running; stopping by name")
         for name in lingering:
             _run_docker_stop(name)
-        stopped_something = True
-        lingering = _ours(spec, project)
+        lingering = _running(spec, project).ours
 
     if lingering:
         raise DockerCommandError(f"still running after stop: {', '.join(lingering)}")
+    stopped_something = True
     logger.info("stop_staged(): stopped; containers kept for a fast restart")
     return stopped_something
 

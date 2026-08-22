@@ -32,6 +32,8 @@ def _completed(
 class _FakeRunner:
     """Records every `runner.run` argv and answers `docker ps` from a canned table."""
 
+    project = "t-project"
+
     def __init__(self, ps_lines: str = "") -> None:
         self.calls: list[list[str]] = []
         self.cwds: list[Path | None] = []
@@ -43,7 +45,17 @@ class _FakeRunner:
         self.cwds.append(cwd)
         if cmd[:2] == ["docker", "ps"]:
             return _completed(0, self.ps_lines)
+        if cmd[:4] == ["docker", "compose", "config", "--format"]:
+            return _completed(0, '{"name": "' + self.project + '"}')
+        if cmd[:3] == ["docker", "compose", "stop"]:
+            self.ps_lines = ""  # compose really stopped them
+            return _completed()
         if cmd[:2] == ["docker", "inspect"]:
+            # One verb, two questions: ownership asks for the compose project
+            # label, the start path asks for health. Answering both with
+            # "healthy" would make every container look like a stranger.
+            if any(docker.PROJECT_LABEL in arg for arg in cmd):
+                return _completed(0, self.project + "\n")
             return _completed(0, self.health)  # so start()'s health wait never polls for real
         return _completed()
 
@@ -110,7 +122,8 @@ def test_stop_keeps_the_containers_so_the_next_start_is_staged(
     database import that `start_staged()` exists to avoid. Start and stop only
     hold that invariant as a pair.
     """
-    # `docker ps` is empty afterwards, i.e. compose really did stop them.
+    # Something of ours has to be up, or there is correctly nothing to stop.
+    fake_runner.ps_lines = "t-db\nt-auth\nt-world\n"
     Controller(SPEC, SERVER_DIR).stop()
     assert ["docker", "compose", "stop"] in fake_runner.calls
     assert ["docker", "compose", "down"] not in fake_runner.calls

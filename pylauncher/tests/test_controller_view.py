@@ -36,6 +36,8 @@ def _inline_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
 class _Ps:
     """Fakes `runner.run` for `docker ps`/compose so `Controller` works without Docker."""
 
+    project = "t-project"
+
     def __init__(self) -> None:
         self.names = ""
         self.ports = ""
@@ -46,6 +48,13 @@ class _Ps:
         if cmd[:2] == ["docker", "ps"]:
             out = self.ports if "{{.Ports}}" in cmd[-1] else self.names
             return subprocess.CompletedProcess(cmd, 0, out, "")
+        if cmd[:4] == ["docker", "compose", "config", "--format"]:
+            return subprocess.CompletedProcess(cmd, 0, '{"name": "' + self.project + '"}', "")
+        if cmd[:3] == ["docker", "compose", "stop"]:
+            self.names = ""  # compose really stopped them
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if cmd[:2] == ["docker", "inspect"] and any(docker.PROJECT_LABEL in a for a in cmd):
+            return subprocess.CompletedProcess(cmd, 0, self.project + "\n", "")
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
 

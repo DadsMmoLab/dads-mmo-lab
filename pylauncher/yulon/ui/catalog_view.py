@@ -187,7 +187,16 @@ class CatalogView(QWidget):
             if client_dir is None:
                 return False
         logger.info(f"attaching existing {entry.id} install at {server_dir}")
-        _pin_compose_project(server_dir)
+        # Deliberately NOT pinned here. `pin_project_name()` writes whatever
+        # compose calls the project *now*, which is the folder's current
+        # basename — and an already-moved install is precisely what this path
+        # exists to adopt. Pinning `azerothcore` onto containers compose created
+        # under `wow-server` makes the mismatch permanent (a pin outranks the
+        # basename, and it is never revised), so the server could never be
+        # stopped from here again and a later start would build a fresh, empty
+        # database volume beside the real one. Only `_on_run_finished()` may
+        # pin: there the basename provably is what the containers were just
+        # created under (review, 2026-08-22).
         self.installed.emit(entry.id, server_dir, client_dir)
         return True
 

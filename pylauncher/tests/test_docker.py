@@ -456,7 +456,9 @@ def _stop_runner(
     *,
     running: set[str] | None = None,
     owner: str | None = PROJECT,
+    inspect_fails: bool = False,
     compose_stop_fails: bool = False,
+    compose_stop_matches: bool = True,
     stop_really_works: bool = True,
 ):
     """A `runner.run` double for the stop path.
@@ -464,6 +466,15 @@ def _stop_runner(
     `running` is what `docker ps` reports; `owner` is the compose project label
     every container claims. A container name proves nothing about ownership, so
     a test can make those two disagree.
+
+    The three ways ownership can read differently are kept apart on purpose:
+    `owner="x"` is a label naming project x, `owner=None` is a container with no
+    compose label at all (started outside compose), and `inspect_fails=True` is
+    Docker refusing to answer. The first two are "not ours"; the third is "ask
+    again later", and collapsing them is the bug this distinction fixes.
+
+    `compose_stop_matches=False` models the moved folder: compose exits 0 having
+    matched no container, so nothing actually stops.
     """
     live = set() if running is None else set(running)
 
@@ -474,8 +485,12 @@ def _stop_runner(
         if cmd[:3] == ["docker", "compose", "stop"]:
             if compose_stop_fails:
                 return _completed(returncode=1, stderr="no configuration file provided")
+            if compose_stop_matches:
+                live.clear()
             return _completed()
         if cmd[:2] == ["docker", "inspect"]:
+            if inspect_fails:
+                return _completed(returncode=1, stderr="Cannot connect to the Docker daemon")
             return _completed(stdout="" if owner is None else owner + "\n")
         if cmd[:2] == ["docker", "ps"]:
             return _completed(stdout="".join(n + "\n" for n in sorted(live)))
@@ -493,10 +508,28 @@ def test_stop_staged_uses_compose_stop_so_the_containers_survive(
 ) -> None:
     """`compose stop` keeps every container and honours the project's depends_on order."""
     calls: list[list[str]] = []
-    monkeypatch.setattr(docker.runner, "run", _stop_runner(calls))
+    monkeypatch.setattr(
+        docker.runner, "run", _stop_runner(calls, running={SPEC.db, SPEC.auth, SPEC.world})
+    )
     assert docker.stop_staged(SPEC, Path("/tmp/wow")) is True
     assert ["docker", "compose", "stop"] in calls
     assert ["docker", "compose", "down"] not in calls
+    assert not any(cmd[:2] == ["docker", "stop"] for cmd in calls), "did not trust compose stop"
+
+
+def test_stop_staged_says_false_when_there_was_nothing_of_ours_to_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The return value used to be `compose stop`'s exit code, which is 0 for an empty project.
+
+    So a Stop pressed on a server that was never running reported "stopped" —
+    indistinguishable, from the caller's side, from a stop that really happened.
+    Nothing of ours running means False, and there is nothing to ask compose.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _stop_runner(calls))
+    assert docker.stop_staged(SPEC, Path("/tmp/wow")) is False
+    assert not any(cmd[:3] == ["docker", "compose", "stop"] for cmd in calls)
 
 
 def test_stop_staged_will_not_stop_a_container_it_cannot_prove_is_its_own(
@@ -520,15 +553,32 @@ def test_stop_staged_will_not_stop_a_container_it_cannot_prove_is_its_own(
             owner="somebody-elses-install",
         ),
     )
-    with pytest.raises(docker.DockerCommandError, match="different compose project"):
+    with pytest.raises(docker.DockerCommandError, match="do not belong to the install") as caught:
         docker.stop_staged(SPEC, Path("/tmp/install-b"))
     assert not any(cmd[:2] == ["docker", "stop"] for cmd in calls), "stopped a foreign server"
+    assert not any(
+        cmd[:3] == ["docker", "compose", "stop"] for cmd in calls
+    ), "asked compose to stop a project it had already been shown is not ours"
+
+    # The remedy has to be one that works. "Re-attach this install" did not:
+    # attach no longer pins, and the version that did would have written the
+    # current basename — the exact value that produces this mismatch.
+    message = str(caught.value)
+    assert "somebody-elses-install" in message, "did not say who does own them"
+    assert "COMPOSE_PROJECT_NAME=somebody-elses-install" in message
+    assert "re-attach" not in message.lower()
 
 
 def test_stop_staged_gives_up_rather_than_guessing_when_ownership_is_unreadable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An unreadable label is not permission to fall back to matching by name."""
+    """An unreadable label is not permission to fall back to matching by name.
+
+    Nor is it evidence of a second install: `docker inspect` failing means Docker
+    would not answer, which is a different situation from a container that
+    answers with somebody else's project. Reporting the first as the second sent
+    the user chasing an install that does not exist.
+    """
     calls: list[list[str]] = []
     monkeypatch.setattr(
         docker.runner,
@@ -536,13 +586,30 @@ def test_stop_staged_gives_up_rather_than_guessing_when_ownership_is_unreadable(
         _stop_runner(
             calls,
             running={SPEC.db, SPEC.auth, SPEC.world},
-            owner=None,
-            compose_stop_fails=True,
+            inspect_fails=True,
         ),
     )
-    assert docker.stop_staged(SPEC, Path("/tmp/wow")) is False
+    with pytest.raises(docker.DockerCommandError, match="would not say which project owns") as e:
+        docker.stop_staged(SPEC, Path("/tmp/wow"))
     assert not any(cmd[:2] == ["docker", "stop"] for cmd in calls)
     assert ["docker", "compose", "down"] not in calls
+    assert "another install" not in str(e.value) or "rather than" in str(e.value)
+
+
+def test_a_container_with_no_compose_label_at_all_is_a_stranger_not_ours(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Someone ran `docker run --name ac-database` by hand. That is not this install."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        _stop_runner(calls, running={SPEC.db}, owner=None),
+    )
+    with pytest.raises(docker.DockerCommandError, match="no compose project at all") as caught:
+        docker.stop_staged(SPEC, Path("/tmp/wow"))
+    assert SPEC.db in str(caught.value)
+    assert not any(cmd[:2] == ["docker", "stop"] for cmd in calls)
 
 
 def test_stop_staged_finishes_the_job_when_compose_stopped_nothing(
@@ -558,7 +625,7 @@ def test_stop_staged_finishes_the_job_when_compose_stopped_nothing(
     monkeypatch.setattr(
         docker.runner,
         "run",
-        _stop_runner(calls, running={SPEC.db, SPEC.auth, SPEC.world}),
+        _stop_runner(calls, running={SPEC.db, SPEC.auth, SPEC.world}, compose_stop_matches=False),
     )
     assert docker.stop_staged(SPEC, Path("/tmp/moved-install")) is True
     assert [cmd for cmd in calls if cmd[:2] == ["docker", "stop"]] == [
@@ -576,7 +643,9 @@ def test_stop_staged_raises_when_the_containers_will_not_stop(
     monkeypatch.setattr(
         docker.runner,
         "run",
-        _stop_runner(calls, running={SPEC.world}, stop_really_works=False),
+        _stop_runner(
+            calls, running={SPEC.world}, compose_stop_matches=False, stop_really_works=False
+        ),
     )
     with pytest.raises(docker.DockerCommandError, match="still running after stop"):
         docker.stop_staged(SPEC, Path("/tmp/wow"))
@@ -742,10 +811,14 @@ def test_stop_staged_reports_rather_than_guesses_when_a_moved_install_was_never_
         return _completed()
 
     monkeypatch.setattr(docker.runner, "run", fake_run)
-    with pytest.raises(docker.DockerCommandError, match="different compose project"):
+    with pytest.raises(docker.DockerCommandError, match="do not belong to the install") as caught:
         docker.stop_staged(SPEC, tmp_path)
     assert live == {SPEC.db, SPEC.auth, SPEC.world}, "stopped what it could not prove was its own"
     assert not any(cmd[:2] == ["docker", "stop"] for cmd in calls)
+    # It has to name the way out, and the way out is the containers' own project.
+    message = str(caught.value)
+    assert "COMPOSE_PROJECT_NAME=original-name" in message
+    assert str(tmp_path / ".env") in message
 
 
 def test_stop_staged_stops_a_moved_install_that_WAS_pinned(
