@@ -154,6 +154,24 @@ def run(
 # codes stripped, returns the text to send to stdin (without newline) or None.
 Responder = Callable[[str], str | None]
 
+# What a line that is genuinely waiting for typed input looks like. `sudo`,
+# `read -p` and `ssh` all end their prompt with one of these, usually followed
+# by a space. Compile and download progress does not: it ends mid-word, in a
+# percentage, or in a carriage return. Without this guard, ANY output that
+# happened to pause for a moment — a slow build line, a stalled download —
+# would open a dialog at the user, or park an unattended install on a question
+# nobody asked (adversarial review finding, 2026-08-22).
+_LOOKS_LIKE_A_PROMPT = re.compile(r"[:?>\]]\s*$|\((?:y(?:es)?/no?|[yn]/[yn])\)\s*$", re.IGNORECASE)
+
+
+def looks_like_a_prompt(text: str) -> bool:
+    """True if this partial line is plausibly asking a person to type something."""
+    stripped = strip_ansi(text).rstrip("\r")
+    if not stripped.strip():
+        return False
+    return bool(_LOOKS_LIKE_A_PROMPT.search(stripped))
+
+
 # Asked only when a prompt is genuinely blocking and no rule answered it: the
 # child has printed something with no trailing newline and then gone quiet,
 # which is what "waiting for you to type" looks like from outside. Returning
@@ -242,7 +260,7 @@ def interact(
     def _answer(text: str, *, may_ask: bool = False) -> bool:
         clean = strip_ansi(text)
         reply = respond(clean)
-        if reply is None and may_ask and ask is not None:
+        if reply is None and may_ask and ask is not None and looks_like_a_prompt(clean):
             reply = ask(clean)
         if reply is None:
             return False

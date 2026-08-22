@@ -17,6 +17,7 @@ logic, generalized and given explicit, overridable timeouts.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
 from collections.abc import Callable, Iterator
@@ -144,16 +145,71 @@ def pin_project_name(server_dir: Path) -> str | None:
     if name is None:
         logger.info(f"could not ask compose for the project name in {server_dir}; not pinning")
         return None
-    existing = env_path.read_text(encoding="utf-8", errors="replace") if env_path.is_file() else ""
-    if existing and not existing.endswith("\n"):
-        existing += "\n"
+    # Byte-preserving and atomic, because this file holds the database root
+    # password. `write_text` truncates before it writes, so a crash or a full
+    # disk in between would leave the user with an empty `.env` and a database
+    # they can no longer reach. Reading as BYTES also means a non-UTF-8 value
+    # survives untouched instead of being silently rewritten through
+    # `errors="replace"` (adversarial review finding, 2026-08-22).
+    try:
+        existing = env_path.read_bytes() if env_path.is_file() else b""
+    except OSError as exc:
+        logger.warning(f"could not read {env_path}; not pinning: {exc}")
+        return None
+    if existing and not existing.endswith(b"\n"):
+        existing += b"\n"
     addition = (
         "# Pinned by Yu'lon so this install keeps working if the folder is moved.\n"
         f"{PROJECT_NAME_VAR}={name}\n"
-    )
-    env_path.write_text(existing + addition, encoding="utf-8", newline="\n")
+    ).encode()
+    tmp = env_path.with_name(env_path.name + ".yulon-new")
+    try:
+        tmp.write_bytes(existing + addition)
+        os.replace(tmp, env_path)  # atomic on POSIX and on Windows
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        logger.warning(f"could not write {env_path}; not pinning: {exc}")
+        return None
     logger.info(f"pinned {PROJECT_NAME_VAR}={name} in {env_path}")
     return name
+
+
+PROJECT_LABEL = "com.docker.compose.project"
+
+
+def container_project(container: str) -> str | None:
+    """Which compose project owns this container, or None if it cannot be read."""
+    fmt = '{{index .Config.Labels "' + PROJECT_LABEL + '"}}'
+    proc = runner.run(["docker", "inspect", container, "--format", fmt])
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
+
+def _ours(spec: ContainerSpec, project: str | None) -> list[str]:
+    """This install's containers that are running AND belong to `project`.
+
+    A container name proves existence, never ownership. Two installs of the same
+    game carry identical container names — AzerothCore pins them — so a check
+    that goes by name alone will report the *other* install's running server as
+    this one's, and then act on it: the previous version of this would stop a
+    stranger's server while its owner was playing on it.
+
+    Compose stamps every container it creates with the project it belongs to,
+    and that label is the ownership proof. Where ownership cannot be
+    established this returns nothing, on purpose — the caller must fail closed
+    and say so rather than fall back to a name.
+
+    Returned in stop order: world, then auth, then the database.
+    """
+    if project is None:
+        return []
+    running = {line.strip() for line in _status_safe() or []}
+    return [
+        name
+        for name in (spec.world, spec.auth, spec.db)
+        if name in running and container_project(name) == project
+    ]
 
 
 def container_exists(container: str) -> bool:
@@ -259,33 +315,6 @@ def _run_docker_stop(container: str) -> None:
     raise DockerCommandError(f"docker stop {container} failed: {proc.stderr.strip()}")
 
 
-def _still_running(spec: ContainerSpec) -> list[str]:
-    """Which of this install's containers are still running, by NAME.
-
-    Deliberately not `docker compose ps`. Compose identifies a project by its
-    directory *basename* unless someone sets `COMPOSE_PROJECT_NAME`, and
-    upstream AzerothCore's compose sets no `name:` — while the container names
-    are pinned (`container_name: ac-database`) and therefore global. Those two
-    identities come apart in both directions, and both were measured:
-
-    - **Rename or move the install folder.** `docker compose stop` there exits
-      0, prints nothing, and stops nothing, because no container carries the new
-      project label. Asking `docker compose ps` whether anything is still
-      running gets the same empty answer from the same wrong question — so a
-      check built on it confirms a stop that never happened.
-    - **A neighbour whose folder shares a basename.** Two installs at
-      `…/pa/server` and `…/pb/server` are both project `server`, and compose
-      selects purely on that label: from one, `docker compose ps` lists the
-      *other's* containers. A check built on it then reports a foreign
-      container as ours and fails a stop that actually worked.
-
-    The container names are the identity `start_staged()` and
-    `Controller.status()` already use, and they do not move with the folder.
-    """
-    running = {line.strip() for line in _status_safe() or []}
-    return [name for name in (spec.world, spec.auth, spec.db) if name in running]
-
-
 def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
     """Stop this install without destroying its containers.
 
@@ -319,24 +348,25 @@ def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
             user is told the server is down while players are still connected.
     """
     logger.debug(f"stop_staged() called: server_dir={server_dir}")
+    project = compose_project_name(server_dir)
     proc = runner.run(["docker", "compose", "stop"], cwd=server_dir)
     stopped_something = proc.returncode == 0
 
     if not stopped_something:
         logger.warning(f"compose stop failed ({proc.stderr.strip()}); stopping containers by name")
-        existing = {
-            line.strip()
-            for line in _run(["ps", "-a", "--format", "{{.Names}}"]).stdout.splitlines()
-        }
-        ordered = [name for name in (spec.world, spec.auth, spec.db) if name in existing]
+        ordered = _ours(spec, project)
         if not ordered:
-            logger.info("stop_staged(): none of this install's containers exist")
+            # Either nothing of ours is running, or we cannot prove which
+            # containers are ours. Both mean: touch nothing. Stopping by bare
+            # name here would stop a *different* install of the same game, whose
+            # containers carry exactly the same names.
+            logger.info("stop_staged(): nothing running that this install can prove it owns")
             return False
         for name in ordered:
             _run_docker_stop(name)
         stopped_something = True
 
-    lingering = _still_running(spec)
+    lingering = _ours(spec, project)
     if lingering:
         # `compose stop` reported success without stopping our containers — the
         # moved-install case. Finish the job by name rather than believing it.
@@ -344,13 +374,10 @@ def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
         for name in lingering:
             _run_docker_stop(name)
         stopped_something = True
-        lingering = _still_running(spec)
+        lingering = _ours(spec, project)
 
     if lingering:
-        raise DockerCommandError(
-            f"still running after stop: {', '.join(lingering)}. "
-            "Another install may be using these container names."
-        )
+        raise DockerCommandError(f"still running after stop: {', '.join(lingering)}")
     logger.info("stop_staged(): stopped; containers kept for a fast restart")
     return stopped_something
 

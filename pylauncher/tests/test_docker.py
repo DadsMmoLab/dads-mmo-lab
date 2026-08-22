@@ -63,100 +63,6 @@ def test_stop_runs_compose_down(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls == [["docker", "compose", "down"]]
 
 
-def test_stop_staged_uses_compose_stop_so_the_containers_survive(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """`compose stop` keeps every container and honours the project's depends_on order."""
-    calls: list[list[str]] = []
-    cwds: list[Path | None] = []
-
-    def fake_run(cmd: list[str], cwd: Path | None = None):
-        calls.append(cmd)
-        cwds.append(cwd)
-        return _completed()
-
-    monkeypatch.setattr(docker.runner, "run", fake_run)
-    server_dir = Path("/tmp/wow")
-    assert docker.stop_staged(SPEC, server_dir) is True
-    assert calls == [
-        ["docker", "compose", "stop"],
-        # ...then verify by CONTAINER NAME. Asking compose again would repeat
-        # the same project-scoped question that can already be wrong about
-        # which containers belong to this install.
-        ["docker", "ps", "--format", "{{.Names}}"],
-    ]
-    assert cwds[0] == server_dir
-
-
-def test_stop_staged_falls_back_to_one_docker_stop_per_container_in_order(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Without a readable compose project, stop by name — one call each, world first.
-
-    One call per container is the whole point: `docker stop a b c` signals all
-    three at once, so a single multi-name call cannot express "let the world
-    server finish its saves before the database goes away".
-    """
-    calls: list[list[str]] = []
-
-    def fake_run(cmd: list[str], cwd: Path | None = None):
-        calls.append(cmd)
-        if cmd[:3] == ["docker", "compose", "stop"]:
-            return _completed(returncode=1, stderr="no configuration file provided")
-        if cmd[:3] == ["docker", "ps", "-a"]:
-            return _completed(stdout=f"{SPEC.db}\n{SPEC.auth}\n{SPEC.world}\n")
-        return _completed()
-
-    monkeypatch.setattr(docker.runner, "run", fake_run)
-    assert docker.stop_staged(SPEC, Path("/tmp/wow")) is True
-    assert [cmd for cmd in calls if cmd[:2] == ["docker", "stop"]] == [
-        ["docker", "stop", SPEC.world],
-        ["docker", "stop", SPEC.auth],
-        ["docker", "stop", SPEC.db],
-    ]
-    assert ["docker", "compose", "down"] not in calls
-
-
-def test_stop_staged_never_removes_containers_when_there_is_nothing_to_stop(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """No compose project and none of our containers: report it, do not tear anything down."""
-    calls: list[list[str]] = []
-
-    def fake_run(cmd: list[str], cwd: Path | None = None):
-        calls.append(cmd)
-        if cmd[:3] == ["docker", "compose", "stop"]:
-            return _completed(returncode=1, stderr="no configuration file provided")
-        if cmd[:3] == ["docker", "ps", "-a"]:
-            return _completed(stdout="somebody-elses-container\n")
-        return _completed()
-
-    monkeypatch.setattr(docker.runner, "run", fake_run)
-    assert docker.stop_staged(SPEC, Path("/tmp/wow")) is False
-    assert ["docker", "compose", "down"] not in calls
-    assert not any(cmd[:2] == ["docker", "stop"] for cmd in calls)
-
-
-def test_docker_stop_treats_a_vanished_container_as_already_stopped(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A container removed between listing and stopping is the goal state, not an error."""
-
-    def fake_run(cmd: list[str], cwd: Path | None = None):
-        if cmd[:3] == ["docker", "compose", "stop"]:
-            return _completed(returncode=1, stderr="no configuration file provided")
-        if cmd[:3] == ["docker", "ps", "-a"]:
-            return _completed(stdout=f"{SPEC.db}\n{SPEC.auth}\n{SPEC.world}\n")
-        if cmd[:2] == ["docker", "stop"]:
-            return _completed(
-                returncode=1, stderr=f"Error response from daemon: No such container: {cmd[2]}"
-            )
-        return _completed()
-
-    monkeypatch.setattr(docker.runner, "run", fake_run)
-    assert docker.stop_staged(SPEC, Path("/tmp/wow")) is True
-
-
 def test_start_raises_docker_command_error_on_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -401,53 +307,6 @@ def test_compose_services_defaults_to_the_container_names(monkeypatch: pytest.Mo
     assert calls[0][-3:] == ["s-db", "s-auth", "s-world"]
 
 
-def test_stop_staged_finishes_the_job_when_compose_stopped_nothing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The moved-install case: `compose stop` succeeds and stops nothing.
-
-    Compose identifies a project by its directory basename, but the container
-    names are pinned and global. Rename the install folder and `compose stop`
-    exits 0 having matched no container — so a stop that verifies itself by
-    asking compose again gets the same wrong answer, and reports success while
-    the server is still up and players are still connected.
-    """
-    calls: list[list[str]] = []
-    running = {SPEC.db, SPEC.auth, SPEC.world}
-
-    def fake_run(cmd: list[str], cwd: Path | None = None):
-        calls.append(cmd)
-        if cmd[:2] == ["docker", "ps"]:
-            return _completed(stdout="".join(f"{n}\n" for n in sorted(running)))
-        if cmd[:2] == ["docker", "stop"]:
-            running.discard(cmd[2])
-        return _completed()
-
-    monkeypatch.setattr(docker.runner, "run", fake_run)
-    assert docker.stop_staged(SPEC, Path("/tmp/moved-install")) is True
-    assert [cmd for cmd in calls if cmd[:2] == ["docker", "stop"]] == [
-        ["docker", "stop", SPEC.world],
-        ["docker", "stop", SPEC.auth],
-        ["docker", "stop", SPEC.db],
-    ]
-    assert running == set()
-
-
-def test_stop_staged_raises_when_the_containers_will_not_stop(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Still up after being told twice: say so rather than claiming success."""
-
-    def fake_run(cmd: list[str], cwd: Path | None = None):
-        if cmd[:2] == ["docker", "ps"]:
-            return _completed(stdout=f"{SPEC.world}\n")
-        return _completed()
-
-    monkeypatch.setattr(docker.runner, "run", fake_run)
-    with pytest.raises(docker.DockerCommandError, match="still running after stop"):
-        docker.stop_staged(SPEC, Path("/tmp/wow"))
-
-
 def test_pin_project_name_writes_what_compose_already_calls_the_project(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -587,3 +446,193 @@ def test_logs_without_a_readable_start_time_falls_back_to_everything(
 
     monkeypatch.setattr(docker.runner, "run", fake_run)
     assert docker.started_at("gone") == ""
+
+
+PROJECT = "wow-server"
+
+
+def _stop_runner(
+    calls: list[list[str]],
+    *,
+    running: set[str] | None = None,
+    owner: str | None = PROJECT,
+    compose_stop_fails: bool = False,
+    stop_really_works: bool = True,
+):
+    """A `runner.run` double for the stop path.
+
+    `running` is what `docker ps` reports; `owner` is the compose project label
+    every container claims. A container name proves nothing about ownership, so
+    a test can make those two disagree.
+    """
+    live = set() if running is None else set(running)
+
+    def fake_run(cmd: list[str], cwd=None):
+        calls.append(cmd)
+        if cmd[:4] == ["docker", "compose", "config", "--format"]:
+            return _completed(stdout='{"name": "' + PROJECT + '"}')
+        if cmd[:3] == ["docker", "compose", "stop"]:
+            if compose_stop_fails:
+                return _completed(returncode=1, stderr="no configuration file provided")
+            return _completed()
+        if cmd[:2] == ["docker", "inspect"]:
+            return _completed(stdout="" if owner is None else owner + "\n")
+        if cmd[:2] == ["docker", "ps"]:
+            return _completed(stdout="".join(n + "\n" for n in sorted(live)))
+        if cmd[:2] == ["docker", "stop"]:
+            if stop_really_works:
+                live.discard(cmd[2])
+            return _completed()
+        return _completed()
+
+    return fake_run
+
+
+def test_stop_staged_uses_compose_stop_so_the_containers_survive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`compose stop` keeps every container and honours the project's depends_on order."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _stop_runner(calls))
+    assert docker.stop_staged(SPEC, Path("/tmp/wow")) is True
+    assert ["docker", "compose", "stop"] in calls
+    assert ["docker", "compose", "down"] not in calls
+
+
+def test_stop_staged_will_not_stop_a_container_it_cannot_prove_is_its_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The container names are global; two installs of one game share them exactly.
+
+    Install A is running. The user presses Stop on install B, whose own
+    containers are already down. Going by name, B's postcondition sees A's
+    running containers, concludes its own stop failed, and stops them — killing
+    a server somebody else is playing on. The compose project label is the only
+    ownership proof, so a foreign owner means: touch nothing.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        _stop_runner(
+            calls,
+            running={SPEC.db, SPEC.auth, SPEC.world},
+            owner="somebody-elses-install",
+        ),
+    )
+    assert docker.stop_staged(SPEC, Path("/tmp/install-b")) is True
+    assert not any(cmd[:2] == ["docker", "stop"] for cmd in calls), "stopped a foreign server"
+
+
+def test_stop_staged_gives_up_rather_than_guessing_when_ownership_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable label is not permission to fall back to matching by name."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        _stop_runner(
+            calls,
+            running={SPEC.db, SPEC.auth, SPEC.world},
+            owner=None,
+            compose_stop_fails=True,
+        ),
+    )
+    assert docker.stop_staged(SPEC, Path("/tmp/wow")) is False
+    assert not any(cmd[:2] == ["docker", "stop"] for cmd in calls)
+    assert ["docker", "compose", "down"] not in calls
+
+
+def test_stop_staged_finishes_the_job_when_compose_stopped_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The moved-install case: `compose stop` succeeds and stops nothing.
+
+    Compose identifies a project by its directory basename, so a renamed folder
+    makes `compose stop` exit 0 having matched no container. These containers
+    ARE ours — the label agrees — so the job is finished by name, world first.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        _stop_runner(calls, running={SPEC.db, SPEC.auth, SPEC.world}),
+    )
+    assert docker.stop_staged(SPEC, Path("/tmp/moved-install")) is True
+    assert [cmd for cmd in calls if cmd[:2] == ["docker", "stop"]] == [
+        ["docker", "stop", SPEC.world],
+        ["docker", "stop", SPEC.auth],
+        ["docker", "stop", SPEC.db],
+    ]
+
+
+def test_stop_staged_raises_when_the_containers_will_not_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Still up after being told twice: say so rather than claiming success."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        _stop_runner(calls, running={SPEC.world}, stop_really_works=False),
+    )
+    with pytest.raises(docker.DockerCommandError, match="still running after stop"):
+        docker.stop_staged(SPEC, Path("/tmp/wow"))
+
+
+def test_docker_stop_treats_a_vanished_container_as_already_stopped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A container removed between listing and stopping is the goal state, not an error."""
+    live = {SPEC.world}
+
+    def fake_run(cmd: list[str], cwd=None):
+        if cmd[:4] == ["docker", "compose", "config", "--format"]:
+            return _completed(stdout='{"name": "' + PROJECT + '"}')
+        if cmd[:2] == ["docker", "inspect"]:
+            return _completed(stdout=PROJECT + "\n")
+        if cmd[:2] == ["docker", "ps"]:
+            return _completed(stdout="".join(n + "\n" for n in sorted(live)))
+        if cmd[:2] == ["docker", "stop"]:
+            live.discard(cmd[2])
+            return _completed(
+                returncode=1, stderr="Error response from daemon: No such container: " + cmd[2]
+            )
+        return _completed()
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    assert docker.stop_staged(SPEC, Path("/tmp/wow")) is True
+
+
+def test_pin_project_name_never_truncates_the_env_on_a_write_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The .env holds the database root password; a failed pin must not empty it."""
+    env = tmp_path / ".env"
+    env.write_text("DB_ROOT_PASSWORD=hunter2\n", encoding="utf-8", newline="\n")
+    monkeypatch.setattr(
+        docker.runner, "run", lambda cmd, cwd=None: _completed(stdout='{"name": "srv"}')
+    )
+
+    def boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "write_bytes", boom)
+    assert docker.pin_project_name(tmp_path) is None
+    assert env.read_text(encoding="utf-8") == "DB_ROOT_PASSWORD=hunter2\n"
+
+
+def test_pin_project_name_leaves_non_utf8_bytes_alone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A password with odd bytes must survive being appended to, not be rewritten."""
+    env = tmp_path / ".env"
+    odd = b"DB_ROOT_PASSWORD=caf\xe9\n"
+    env.write_bytes(odd)
+    monkeypatch.setattr(
+        docker.runner, "run", lambda cmd, cwd=None: _completed(stdout='{"name": "srv"}')
+    )
+    docker.pin_project_name(tmp_path)
+    assert env.read_bytes().startswith(odd), "the original bytes were altered"
+    assert b"COMPOSE_PROJECT_NAME=srv" in env.read_bytes()
