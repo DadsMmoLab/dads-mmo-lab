@@ -235,13 +235,28 @@ class ControllerView(QWidget):
 
     @Slot()
     def stop_server(self) -> None:
+        self.problem_label.setText("")
         self._set_busy(True)
         self.status_label.setText("status: stopping…")
-        self._run(self.services.controller.stop, self._server_action_done, self._stop_failed)
+        self._run(self.services.controller.stop, self._stop_done, self._stop_failed)
 
     @Slot(object)
     def _server_action_done(self, _result: object) -> None:
         self._set_busy(False)
+        self.refresh_status()
+
+    @Slot(object)
+    def _stop_done(self, result: object) -> None:
+        """Say so when the Stop found nothing to stop.
+
+        `stop_staged()` distinguishes "this was running and is now down" from
+        "there was nothing of it running"; the caller discarded that, so the
+        button did the same thing either way and the tab could not tell the user
+        which had happened (review, 2026-08-22).
+        """
+        self._set_busy(False)
+        if result is False:
+            self.problem_label.setText("Nothing of this install was running — nothing to stop.")
         self.refresh_status()
 
     @Slot(object)

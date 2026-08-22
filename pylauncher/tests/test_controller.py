@@ -30,7 +30,12 @@ def _completed(
 
 
 class _FakeRunner:
-    """Records every `runner.run` argv and answers `docker ps` from a canned table."""
+    """Records every `runner.run` argv and answers `docker ps` from a canned table.
+
+    `ps_lines` answers BOTH `docker ps` formats, which is how the existing tests
+    use it: a test that cares about ports puts `name<TAB>ports` lines in it, and
+    the name column is then also what the ownership check reads.
+    """
 
     project = "t-project"
 
@@ -44,14 +49,25 @@ class _FakeRunner:
         self.calls.append(cmd)
         self.cwds.append(cwd)
         if cmd[:2] == ["docker", "ps"]:
-            return _completed(0, self.ps_lines)
+            if "{{.Ports}}" in cmd[-1]:
+                return _completed(0, self.ps_lines)
+            # The name-only format: drop the ports column so an ownership check
+            # sees names, not "t-world\t0.0.0.0:2222->2222/tcp".
+            names = [line.split("\t")[0] for line in self.ps_lines.splitlines() if line.strip()]
+            return _completed(0, "".join(name + "\n" for name in names))
         if cmd[:4] == ["docker", "compose", "config", "--format"]:
             return _completed(0, '{"name": "' + self.project + '"}')
         if cmd[:3] == ["docker", "compose", "stop"]:
             self.ps_lines = ""  # compose really stopped them
             return _completed()
+        if cmd[:5] == ["docker", "compose", "up", "-d", "--no-deps"]:
+            # `start_staged()` confirms with `docker ps` that they really came
+            # up; a double that stayed silent would mean "nothing started".
+            # Whatever compose was asked to start is what comes up.
+            self.ps_lines = "".join(f"{name}\n" for name in cmd[5:])
+            return _completed()
         if cmd[:2] == ["docker", "inspect"]:
-            # One verb, two questions: ownership asks for the compose project
+            # One verb, several questions: ownership asks for the compose project
             # label, the start path asks for health. Answering both with
             # "healthy" would make every container look like a stranger.
             if any(docker.PROJECT_LABEL in arg for arg in cmd):

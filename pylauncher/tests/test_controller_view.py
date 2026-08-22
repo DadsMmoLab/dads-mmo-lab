@@ -57,6 +57,11 @@ class _Ps:
         if cmd[:3] == ["docker", "compose", "stop"]:
             self.names = ""  # compose really stopped them
             return subprocess.CompletedProcess(cmd, 0, "", "")
+        if cmd[:5] == ["docker", "compose", "up", "-d", "--no-deps"]:
+            # `start_staged()` confirms with `docker ps` that the services it
+            # named really came up; whatever it asked for is what appears.
+            self.names = "".join(f"{name}\n" for name in cmd[5:])
+            return subprocess.CompletedProcess(cmd, 0, "", "")
         if cmd[:2] == ["docker", "inspect"] and any(docker.PROJECT_LABEL in a for a in cmd):
             owner = self.label if self.label is not None else self.project
             return subprocess.CompletedProcess(cmd, 0, owner + "\n", "")
@@ -234,3 +239,11 @@ def test_for_wotlk_builds_real_services_without_touching_docker(tmp_path: Path) 
     # NetworkPlan/docker are only touched when the callables run.
     assert isinstance(NetworkPlan, type) and docker.ContainerSpec is not None
     assert console.attach_argv("ac-worldserver")[:2] == ["docker", "attach"]
+
+
+def test_a_stop_with_nothing_running_says_so(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """Stop on an already-stopped install used to look identical to a real stop."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    ps.names = ""  # nothing of ours is up
+    view.stop_server()
+    assert "Nothing of this install was running" in view.problem_label.text()

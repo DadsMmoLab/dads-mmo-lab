@@ -84,8 +84,15 @@ class Controller:
     # -- queries ---------------------------------------------------------
 
     def status(self) -> InstallStatus:
-        """Report which of this install's containers are running (`docker ps`)."""
-        running = set(docker.status())
+        """Report which of THIS install's containers are running.
+
+        Ownership, not just names. AzerothCore pins its container names
+        globally, so a plain `docker ps` name match reports the neighbouring
+        install's running server as this one's — and the tab then offered a Stop
+        that `stop_staged()` categorically refuses, the two halves of one tab
+        disagreeing about who owns what (review, 2026-08-22).
+        """
+        running = docker.ours_running(self.spec, self.server_dir)
         return InstallStatus(
             db=self.spec.db in running,
             auth=self.spec.auth in running,
@@ -99,8 +106,15 @@ class Controller:
         this install's own containers (e.g. mid-restart). Those are not a
         conflict — only something that is not ours counts — so they are
         filtered out here, once, for every game.
+
+        Filtered by ownership rather than by name: subtracting the three names
+        excused the OTHER install's containers too, which is the only situation
+        in which two installs of one game can collide — so the guard could never
+        fire in the single case it exists for, and the user got the daemon's raw
+        `Conflict. The container name "/ac-database" is already in use` instead
+        (review, 2026-08-22).
         """
-        own = {self.spec.db, self.spec.auth, self.spec.world}
+        own = docker.ours_running(self.spec, self.server_dir)
         return [name for name in docker.port_conflicts_for(self.spec) if name not in own]
 
     # -- lifecycle -------------------------------------------------------
@@ -120,15 +134,13 @@ class Controller:
         if conflicts:
             logger.warning(f"start() refused: ports {self.spec.ports} bound by {conflicts}")
             raise PortConflictError(conflicts, self.spec.ports)
-        docker.start_staged(
-            self.spec,
-            self.server_dir,
-            wait_healthy=lambda container: docker.wait_db_healthy(
-                container, timeout=_START_DB_HEALTH_TIMEOUT
-            ),
-        )
+        # No `wait_healthy` closure: `start_staged()` deleted the argument on
+        # entry, so the lambda that used to be built here was dead code reading
+        # like a health wait that no longer happens. Compose does the waiting
+        # now, through the project's own `service_healthy` conditions.
+        docker.start_staged(self.spec, self.server_dir)
 
-    def stop(self) -> None:
+    def stop(self) -> bool:
         """Stop the install, keeping its containers so the next start is staged.
 
         Uses `docker.stop_staged()`. Stopping with `docker compose down` would
@@ -136,8 +148,13 @@ class Controller:
         name — putting the very next start back on `compose up -d` and re-running
         the one-shot database import. Teardown that really should remove the
         containers calls `docker.stop()` directly.
+
+        Returns:
+            True if something of this install was running and is now down, False
+            if there was nothing to stop. This used to be discarded, so the tab
+            said the same thing either way (review, 2026-08-22).
         """
-        docker.stop_staged(self.spec, self.server_dir)
+        return docker.stop_staged(self.spec, self.server_dir)
 
     # -- polling ---------------------------------------------------------
 

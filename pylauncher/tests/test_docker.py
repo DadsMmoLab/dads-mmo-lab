@@ -149,6 +149,8 @@ def test_wait_ready_returns_true_once_markers_present(monkeypatch: pytest.Monkey
     def fake_run(cmd: list[str], cwd: Path | None = None):
         if cmd[:2] == ["docker", "ps"]:
             return _completed(0, "ac-authserver\nac-worldserver\n", "")
+        if cmd[:2] == ["docker", "inspect"] and "{{.State.Status}}" in cmd:
+            return _completed(0, "running" + chr(10), "")
         if cmd[:2] == ["docker", "logs"] and cmd[2] == "ac-authserver":
             return _completed(0, "listening on 127.0.0.1:3724", "")
         if cmd[:2] == ["docker", "logs"] and cmd[2] == "ac-worldserver":
@@ -182,6 +184,8 @@ def test_wait_ready_tolerates_transient_docker_ps_failure(
             if calls["ps"] == 1:
                 return _completed(1, "", "the docker daemon is restarting")
             return _completed(0, "ac-authserver\nac-worldserver\n", "")
+        if cmd[:2] == ["docker", "inspect"] and "{{.State.Status}}" in cmd:
+            return _completed(0, "running" + chr(10), "")
         if cmd[:2] == ["docker", "logs"] and cmd[2] == "ac-authserver":
             return _completed(0, "listening on 127.0.0.1:3724", "")
         if cmd[:2] == ["docker", "logs"] and cmd[2] == "ac-worldserver":
@@ -244,6 +248,24 @@ def test_docker_ctl_convenience_wrappers_delegate_to_spec(
     assert docker_ctl.port_conflicts_here() == ["ac-worldserver"]
 
 
+def _start_runner(calls: list[list[str]], up: tuple[str, ...] | None = None):
+    """A `runner.run` double for the start path.
+
+    `start_staged()` confirms with `docker ps` that the services it named are
+    actually running, because `compose up` exits 0 for a container that started
+    and died — so a double that answers nothing now means "nothing came up".
+    """
+    names = up if up is not None else (SPEC.db, SPEC.auth, SPEC.world)
+
+    def fake_run(cmd: list[str], cwd=None):
+        calls.append(cmd)
+        if cmd[:2] == ["docker", "ps"]:
+            return _completed(stdout="".join(n + chr(10) for n in names))
+        return _completed()
+
+    return fake_run
+
+
 def test_start_staged_names_the_services_so_compose_cannot_pick_the_import(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -260,13 +282,17 @@ def test_start_staged_names_the_services_so_compose_cannot_pick_the_import(
     def fake_run(cmd: list[str], cwd: Path | None = None):
         calls.append(cmd)
         cwds.append(cwd)
+        if cmd[:2] == ["docker", "ps"]:  # the post-start confirmation
+            names = (SPEC.db, SPEC.auth, SPEC.world)
+            return _completed(stdout="".join(n + chr(10) for n in names))
         return _completed()
 
     monkeypatch.setattr(docker.runner, "run", fake_run)
     server_dir = Path("/tmp/wow")
     assert docker.start_staged(SPEC, server_dir) is True
-    assert calls == [["docker", "compose", "up", "-d", "--no-deps", SPEC.db, SPEC.auth, SPEC.world]]
-    assert cwds == [server_dir], "must address the project by directory, not by global name"
+    up = ["docker", "compose", "up", "-d", "--no-deps", SPEC.db, SPEC.auth, SPEC.world]
+    assert calls[0] == up
+    assert cwds[0] == server_dir, "must address the project by directory, not by global name"
     assert ["docker", "compose", "up", "-d"] not in calls
 
 
@@ -280,9 +306,7 @@ def test_start_staged_never_starts_a_container_by_global_name(
     install A's server while showing B's tab.
     """
     calls: list[list[str]] = []
-    monkeypatch.setattr(
-        docker.runner, "run", lambda cmd, cwd=None: (calls.append(cmd), _completed())[1]
-    )
+    monkeypatch.setattr(docker.runner, "run", _start_runner(calls))
     docker.start_staged(SPEC, Path("/tmp/install-b"))
     assert not any(cmd[:2] == ["docker", "start"] for cmd in calls)
     assert not any(cmd[:3] == ["docker", "ps", "-a"] for cmd in calls)
@@ -301,7 +325,7 @@ def test_compose_services_defaults_to_the_container_names(monkeypatch: pytest.Mo
     )
     calls: list[list[str]] = []
     monkeypatch.setattr(
-        docker.runner, "run", lambda cmd, cwd=None: (calls.append(cmd), _completed())[1]
+        docker.runner, "run", _start_runner(calls, up=("c-db", "c-auth", "c-world"))
     )
     docker.start_staged(renamed, Path("/tmp/x"))
     assert calls[0][-3:] == ["s-db", "s-auth", "s-world"]
@@ -395,7 +419,9 @@ def test_wait_ready_ignores_the_previous_runs_ready_marker(
         if cmd[:2] == ["docker", "ps"]:
             return _completed(stdout=f"{SPEC.auth}\n{SPEC.world}\n")
         if cmd[:2] == ["docker", "inspect"]:
-            return _completed(stdout="2026-08-22T01:24:53.575296627Z\n")
+            if "{{.State.Status}}" in cmd:
+                return _completed(stdout="running" + chr(10))
+            return _completed(stdout="2026-08-22T01:24:53.575296627Z" + chr(10))
         if cmd[:2] == ["docker", "logs"]:
             scoped = "--since" in cmd
             if cmd[-1] == SPEC.auth:
@@ -420,7 +446,9 @@ def test_wait_ready_still_succeeds_when_this_run_is_actually_ready(
         if cmd[:2] == ["docker", "ps"]:
             return _completed(stdout=f"{SPEC.auth}\n{SPEC.world}\n")
         if cmd[:2] == ["docker", "inspect"]:
-            return _completed(stdout="2026-08-22T01:24:53.575296627Z\n")
+            if "{{.State.Status}}" in cmd:
+                return _completed(stdout="running" + chr(10))
+            return _completed(stdout="2026-08-22T01:24:53.575296627Z" + chr(10))
         if cmd[:2] == ["docker", "logs"]:
             if cmd[-1] == SPEC.auth:
                 return _completed(stdout="Added realm at 127.0.0.1:8085\n")
@@ -456,7 +484,9 @@ def _stop_runner(
     *,
     running: set[str] | None = None,
     owner: str | None = PROJECT,
+    owners: dict[str, str | None] | None = None,
     inspect_fails: bool = False,
+    inspect_fails_after_stop: bool = False,
     compose_stop_fails: bool = False,
     compose_stop_matches: bool = True,
     stop_really_works: bool = True,
@@ -477,21 +507,27 @@ def _stop_runner(
     matched no container, so nothing actually stops.
     """
     live = set() if running is None else set(running)
+    state = {"stopped": False}
 
     def fake_run(cmd: list[str], cwd=None):
         calls.append(cmd)
         if cmd[:4] == ["docker", "compose", "config", "--format"]:
             return _completed(stdout='{"name": "' + PROJECT + '"}')
         if cmd[:3] == ["docker", "compose", "stop"]:
+            state["stopped"] = True  # set even when it fails: the moment has passed
             if compose_stop_fails:
                 return _completed(returncode=1, stderr="no configuration file provided")
             if compose_stop_matches:
                 live.clear()
             return _completed()
         if cmd[:2] == ["docker", "inspect"]:
-            if inspect_fails:
+            if inspect_fails or (inspect_fails_after_stop and state["stopped"]):
                 return _completed(returncode=1, stderr="Cannot connect to the Docker daemon")
-            return _completed(stdout="" if owner is None else owner + "\n")
+            # Per-container when `owners` is given, so one container can be
+            # ours while another belongs to a neighbour -- the state two
+            # installs of one game can genuinely reach.
+            who = owners.get(cmd[2], owner) if owners is not None else owner
+            return _completed(stdout="" if who is None else who + chr(10))
         if cmd[:2] == ["docker", "ps"]:
             return _completed(stdout="".join(n + "\n" for n in sorted(live)))
         if cmd[:2] == ["docker", "stop"]:
@@ -529,7 +565,11 @@ def test_stop_staged_says_false_when_there_was_nothing_of_ours_to_stop(
     calls: list[list[str]] = []
     monkeypatch.setattr(docker.runner, "run", _stop_runner(calls))
     assert docker.stop_staged(SPEC, Path("/tmp/wow")) is False
-    assert not any(cmd[:3] == ["docker", "compose", "stop"] for cmd in calls)
+    # `compose stop` still runs: the project also holds ac-db-import and
+    # ac-client-data-init, and an interrupted install leaves one of those
+    # downloading. What must NOT happen is a container stopped by name.
+    assert ["docker", "compose", "stop"] in calls
+    assert not any(cmd[:2] == ["docker", "stop"] for cmd in calls)
 
 
 def test_stop_staged_will_not_stop_a_container_it_cannot_prove_is_its_own(
@@ -885,3 +925,179 @@ def test_a_stop_cannot_be_confirmed_when_docker_will_not_answer(
     monkeypatch.setattr(docker.runner, "run", fake_run)
     with pytest.raises(docker.DockerCommandError, match="cannot be confirmed"):
         docker.stop_staged(SPEC, tmp_path)
+
+
+def test_stop_staged_will_not_claim_success_when_ownership_goes_dark_mid_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Still up after the stop, and Docker has stopped answering: that is not "stopped".
+
+    The post-stop census used to read only `.ours`. A container that is plainly
+    still in `docker ps` but whose `docker inspect` now fails lands in
+    `unreadable`, so `.ours` was empty and the function reported a clean stop —
+    the exact outcome its own docstring calls the worst possible one. The same
+    condition is a hard refusal *before* the stop; it was silently discarded
+    after it (review, 2026-08-22).
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        _stop_runner(
+            calls,
+            running={SPEC.db, SPEC.auth, SPEC.world},
+            compose_stop_fails=True,
+            compose_stop_matches=False,
+            inspect_fails_after_stop=True,
+        ),
+    )
+    with pytest.raises(docker.DockerCommandError, match="cannot be confirmed"):
+        docker.stop_staged(SPEC, Path("/tmp/wow"))
+
+
+def test_stop_staged_refuses_a_half_and_half_project(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One container ours, one a neighbour's — the state shared container names allow.
+
+    Install A holds `ac-database`; install B later created `ac-authserver` and
+    `ac-worldserver` because those names happened to be free. Stopping either
+    would take down half of somebody else's server, so neither is touched.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        _stop_runner(
+            calls,
+            running={SPEC.db, SPEC.auth, SPEC.world},
+            owners={SPEC.db: PROJECT, SPEC.auth: "install-b", SPEC.world: "install-b"},
+        ),
+    )
+    with pytest.raises(docker.DockerCommandError, match="do not belong to the install") as caught:
+        docker.stop_staged(SPEC, Path("/tmp/wow"))
+    assert not any(cmd[:2] == ["docker", "stop"] for cmd in calls)
+    message = str(caught.value)
+    named_as_strangers = message.split(" are running", 1)[0]
+    assert SPEC.db not in named_as_strangers, "listed our own container among the strangers"
+    assert "install-b" in message
+
+
+def test_the_message_for_two_owners_offers_no_single_name_to_pin() -> None:
+    """`owners[0]` is only the alphabetically first; pinning it reconciles nothing.
+
+    It used to say "set COMPOSE_PROJECT_NAME=install-a", which is a permanent,
+    irreversible write that leaves half the containers still foreign — and the
+    next Stop still refuses (review, 2026-08-22).
+    """
+    message = docker._stranger_message(
+        ((SPEC.auth, "install-a"), (SPEC.world, "zzz-other")), PROJECT, Path("/tmp/wow")
+    )
+    assert f"{docker.PROJECT_NAME_VAR}=install-a" not in message
+    assert "More than one project" in message
+    assert "docker compose ls" in message
+
+
+def test_the_remedy_names_the_pin_when_a_pin_is_what_disagrees(tmp_path: Path) -> None:
+    """Renaming the folder is inert once `.env` holds a name: the pin outranks it."""
+    (tmp_path / ".env").write_text(
+        "COMPOSE_PROJECT_NAME=stale-pin\n", encoding="utf-8", newline="\n"
+    )
+    message = docker._stranger_message(((SPEC.world, "real-project"),), "stale-pin", tmp_path)
+    assert "change COMPOSE_PROJECT_NAME from 'stale-pin' to 'real-project'" in message
+    assert "rename this folder" not in message
+
+
+def test_a_stop_that_proves_ownership_writes_the_pin_down(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The one other moment the basename is provably right.
+
+    Attach deliberately does not pin, so an install this app did not create had
+    no pin at all — and `pinned_project_name()` exists precisely for the case
+    where the compose files later cannot be read. A stop that just confirmed our
+    own containers by label has proved the directory and the containers agree
+    (review, 2026-08-22).
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner, "run", _stop_runner(calls, running={SPEC.db, SPEC.auth, SPEC.world})
+    )
+    assert docker.stop_staged(SPEC, tmp_path) is True
+    assert docker.pinned_project_name(tmp_path) == PROJECT
+
+
+def test_pinned_project_name_takes_the_last_assignment_and_accepts_export(
+    tmp_path: Path,
+) -> None:
+    """Appending is how the app's own advice gets followed; the last line is what counts."""
+    (tmp_path / ".env").write_text(
+        "COMPOSE_PROJECT_NAME=old-wrong-name\nexport COMPOSE_PROJECT_NAME=real-project\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    assert docker.pinned_project_name(tmp_path) == "real-project"
+
+
+def test_refusing_without_an_identity_does_not_read_a_failed_ps_as_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_status_safe() or []` turned "Docker would not answer" into "nothing is running".
+
+    The user was then told the server had stopped while it was still serving.
+    Socket permissions, a wrong DOCKER_HOST and an API timeout all land here.
+    """
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        lambda cmd, cwd=None: _completed(
+            returncode=1, stderr="permission denied while trying to connect"
+        ),
+    )
+    with pytest.raises(docker.DockerCommandError, match="nothing about it can be established"):
+        docker.stop_staged(SPEC, Path("/tmp/unpinned"))
+
+
+def test_start_staged_will_not_report_success_for_a_container_that_died(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`compose up` exits 0 for a container that started and immediately exited.
+
+    Reported as started, the caller then sat out `wait_ready()`'s 480 seconds
+    before hearing anything at all (review, 2026-08-22).
+    """
+    calls: list[list[str]] = []
+    # Only the database came up; auth and world died on start.
+    monkeypatch.setattr(docker.runner, "run", _start_runner(calls, up=(SPEC.db,)))
+    with pytest.raises(docker.DockerCommandError, match="compose reported success"):
+        docker.start_staged(SPEC, Path("/tmp/wow"))
+
+
+def test_wait_ready_is_not_fooled_by_a_container_in_restart_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`docker ps` lists a crash-looping container, and its StartedAt is the last run's.
+
+    So both of the other checks pass while the worldserver restarts on a loop —
+    the same false "ready" the `--since` scoping was added to remove, arriving
+    by a different route. Every service here carries `restart: unless-stopped`
+    (review, 2026-08-22).
+    """
+    monkeypatch.setattr(docker.time, "sleep", lambda _seconds: None)
+
+    def fake_run(cmd: list[str], cwd: Path | None = None):
+        if cmd[:2] == ["docker", "ps"]:
+            return _completed(stdout=f"{SPEC.auth}\n{SPEC.world}\n")
+        if cmd[:2] == ["docker", "inspect"]:
+            if "{{.State.Status}}" in cmd:
+                return _completed(stdout="restarting" + chr(10))
+            return _completed(stdout="2026-08-22T01:24:53.575296627Z" + chr(10))
+        if cmd[:2] == ["docker", "logs"]:
+            if cmd[-1] == SPEC.auth:
+                return _completed(stdout="Added realm at 127.0.0.1:8085" + chr(10))
+            return _completed(stdout="World initialized, ready..." + chr(10))
+        return _completed()
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    assert (
+        docker.wait_ready(SPEC.auth, SPEC.world, "127.0.0.1", 8085, timeout=0.3, interval=0.1)
+        is False
+    )

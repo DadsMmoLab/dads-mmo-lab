@@ -20,7 +20,7 @@ import json
 import os
 import subprocess
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -128,19 +128,23 @@ def pin_project_name(server_dir: Path) -> str | None:
     the install itself, is what makes the folder movable.
 
     `wow-manage.sh` does the same thing on its own move command, which is where
-    this behaviour comes from; doing it at install and attach time instead means
-    the folder can be moved by any means — a file manager, a backup restore —
-    and still work.
+    this behaviour comes from; writing it down whenever the name is provably
+    right means the folder can then be moved by any means — a file manager, a
+    backup restore — and still work.
+
+    Only two callers may use this, and both are moments where the directory
+    basename provably IS what compose named the containers: straight after this
+    app's own installer finished, and after a stop that confirmed our own
+    containers by label. Attaching an existing install is NOT such a moment —
+    see `install_project()`.
 
     Returns the pinned name, or None if nothing was written (already pinned, or
     compose could not be asked).
     """
     env_path = server_dir / ".env"
-    if env_path.is_file():
-        for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
-            if line.strip().startswith(f"{PROJECT_NAME_VAR}="):
-                logger.debug(f"{PROJECT_NAME_VAR} already pinned in {env_path}")
-                return None
+    if pinned_project_name(server_dir) is not None:
+        logger.debug(f"{PROJECT_NAME_VAR} already pinned in {env_path}")
+        return None
     name = compose_project_name(server_dir)
     if name is None:
         logger.info(f"could not ask compose for the project name in {server_dir}; not pinning")
@@ -182,6 +186,12 @@ def pinned_project_name(server_dir: Path) -> str | None:
     the by-name stop path exists for — so ownership would be unprovable at the
     one moment it is needed most, and a running server would be left up while
     the user is told it stopped.
+
+    The LAST assignment wins, and `export ` is accepted, because that is how the
+    file is actually read. Taking the first meant a user who followed the app's
+    own advice — "set COMPOSE_PROJECT_NAME=X in .env" — by appending to a file
+    that already had one got a silent, permanent disagreement between what
+    Yu'lon thought the project was and what compose did (review, 2026-08-22).
     """
     env_path = server_dir / ".env"
     if not env_path.is_file():
@@ -190,12 +200,15 @@ def pinned_project_name(server_dir: Path) -> str | None:
         text = env_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
+    found: str | None = None
     for line in text.splitlines():
         stripped = line.strip()
+        if stripped.startswith("export "):
+            stripped = stripped[len("export ") :].lstrip()
         if stripped.startswith(f"{PROJECT_NAME_VAR}="):
             value = stripped.split("=", 1)[1].strip().strip("\"'")
-            return value or None
-    return None
+            found = value or found
+    return found
 
 
 PROJECT_LABEL = "com.docker.compose.project"
@@ -311,18 +324,46 @@ def _running(spec: ContainerSpec, project: str) -> Running:
     return Running(tuple(ours), tuple(strangers), tuple(unreadable))
 
 
+def running_under(project: str) -> list[str] | None:
+    """Names of running containers carrying `project`'s compose label, or None if unreadable.
+
+    One `docker ps` with a label filter, cheap enough for the status poll — the
+    alternative, inspecting each container, is three round trips every five
+    seconds.
+    """
+    proc = _run(["ps", "--filter", f"label={PROJECT_LABEL}={project}", "--format", "{{.Names}}"])
+    if proc.returncode != 0:  # pragma: no cover - _run raises on failure today
+        return None
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def ours_running(spec: ContainerSpec, server_dir: Path) -> set[str]:
+    """Which of this install's containers are running AND provably belong to it.
+
+    Falls back to matching by name when no project is pinned. That fallback is
+    the old, wrong-for-two-installs behaviour, kept deliberately: the only way
+    to do better would be `docker compose config`, which takes about half a
+    second and cannot run on a five-second poll. An install this app created,
+    or one whose Stop has succeeded once, carries a pin and takes the exact
+    path (review, 2026-08-22).
+    """
+    names = {spec.db, spec.auth, spec.world}
+    project = pinned_project_name(server_dir)
+    if project is None:
+        return names & {line.strip() for line in _status_safe() or []}
+    listed = running_under(project)
+    if listed is None:  # pragma: no cover - see running_under()
+        return set()
+    return names & set(listed)
+
+
 def container_exists(container: str) -> bool:
     """True if a container by that name exists at all, running or exited."""
     proc = _run(["ps", "-a", "--format", "{{.Names}}"])
     return any(line.strip() == container for line in proc.stdout.splitlines())
 
 
-def start_staged(
-    spec: ContainerSpec,
-    server_dir: Path,
-    *,
-    wait_healthy: Callable[[str], bool] | None = None,
-) -> bool:
+def start_staged(spec: ContainerSpec, server_dir: Path) -> bool:
     """Start this install's long-running services, and only those.
 
     `docker compose up -d` with no arguments starts every service that has no
@@ -360,23 +401,44 @@ def start_staged(
     destructive command, so the feature defeated itself exactly when it mattered
     — on a missing container or a changed setting. It also looked up containers
     by *global* name, so with two installs of the same game it could start the
-    other one, silently. Addressing the project by its directory fixes that by
-    construction.
+    other one, silently. Addressing the project by its directory means the
+    command never names a container, though `port_conflicts()` still does.
 
-    Args:
-        wait_healthy: Retained for callers that still pass it; unused, because
-            compose now performs the wait. Accepting and ignoring it keeps the
-            signature stable for one release rather than breaking every caller.
+    What `--no-deps` costs, stated plainly: it prunes every `depends_on` edge
+    whose target is outside the selected set, which drops `ac-db-import` (the
+    point) and ALSO `ac-client-data-init`'s
+    `condition: service_completed_successfully`. So an install interrupted
+    part-way through the multi-GB client-data download leaves an incomplete
+    volume that upstream would have finished and this will not. That is a
+    narrow case with a loud symptom (the worldserver complains about missing
+    DBC/map data), and the alternative — putting the init back in the service
+    list — is only safe if its entrypoint is idempotent, which is unverified
+    (review, 2026-08-22).
 
     Returns:
-        True — the servers were started without touching the one-shot jobs.
-        The bool is kept so callers need not change; there is no longer a
-        destructive path for it to warn about.
+        True once every named service is actually running. `compose up` exiting
+        0 is not on its own evidence of that: it is happy to report success for
+        a container that started and died, and the caller would then sit out
+        `wait_ready()`'s full timeout before hearing about it.
+
+    Raises:
+        DockerCommandError: compose failed, or a named service is not running
+            once it returned.
     """
-    del wait_healthy  # compose does the health wait now; see the docstring
     services = spec.compose_services()
     logger.info(f"start_staged(): `compose up -d --no-deps {' '.join(services)}` in {server_dir}")
     _run(["compose", "up", "-d", "--no-deps", *services], cwd=server_dir)
+    listed = _status_safe()
+    if listed is None:
+        logger.warning("start_staged(): could not confirm what is running; taking compose's word")
+        return True
+    running = {line.strip() for line in listed}
+    missing = [name for name in (spec.db, spec.auth, spec.world) if name not in running]
+    if missing:
+        raise DockerCommandError(
+            f"compose reported success but {', '.join(missing)} are not running. "
+            f"`docker compose logs {missing[0]}` in {server_dir} will say why."
+        )
     return True
 
 
@@ -420,7 +482,19 @@ def _refuse_without_an_identity(spec: ContainerSpec, server_dir: Path) -> None:
     Returns quietly when nothing of the sort is up: there is simply nothing to
     stop, which is not an error.
     """
-    named = {line.strip() for line in _status_safe() or []}
+    listed = _status_safe()
+    if listed is None:
+        # `or []` used to live here, which turned "Docker would not answer" into
+        # "nothing is running" and returned False — the caller then told the user
+        # the server had stopped while it was still serving. Socket permissions,
+        # a wrong DOCKER_HOST and an API timeout under load all land here
+        # (review, 2026-08-22).
+        raise DockerCommandError(
+            f"could not ask Docker what is running, and the install in {server_dir} has no "
+            f"{PROJECT_NAME_VAR} pinned either, so nothing about it can be established. "
+            "Nothing was stopped."
+        )
+    named = {line.strip() for line in listed}
     up = [name for name in (spec.world, spec.auth, spec.db) if name in named]
     if not up:
         logger.info("stop_staged(): no project name, and nothing running under our names")
@@ -435,22 +509,28 @@ def _refuse_without_an_identity(spec: ContainerSpec, server_dir: Path) -> None:
 def _stranger_message(
     strangers: tuple[tuple[str, str | None], ...], project: str, server_dir: Path
 ) -> str:
-    """Explain a name/label mismatch, and name the remedy that actually works.
+    """Explain a name/label mismatch, and put the diagnosis before any remedy.
 
-    This used to end with "re-attach this install", which is worse than useless:
-    attaching no longer pins at all, and the version that did would have written
-    the *current* basename — the very value that produces this mismatch — after
-    which the `.env` outranks the directory forever and the recoverable state
-    becomes permanent. The two remedies that do work are naming the containers'
-    own project in `.env`, or putting the folder back under the name compose
-    created them with (review, 2026-08-22).
+    Two rewrites, both from review. It first ended with "re-attach this
+    install", which is worse than useless: attaching no longer pins at all, and
+    the version that did would have written the *current* basename — the very
+    value that produces this mismatch — after which `.env` outranks the
+    directory forever and a recoverable state becomes permanent.
+
+    It then led with "set COMPOSE_PROJECT_NAME=<their project>", which was
+    measured doing real damage: a user who followed it literally on a genuine
+    second install had Yu'lon adopt and stop the OTHER server, on Yu'lon's own
+    instructions. So the first thing offered is now the command that tells the
+    two cases apart, and the pin is offered only after it, only when there is
+    exactly one candidate, and only as the branch that begins "if it is".
     """
     owners = sorted({owner for _name, owner in strangers if owner})
     unlabelled = [name for name, owner in strangers if not owner]
+    labelled = [name for name, owner in strangers if owner]
     names = ", ".join(name for name, _owner in strangers)
     lines = [
-        f"{names} are running, but they do not belong to the install in {server_dir}, which "
-        f"is compose project '{project}'. Nothing was stopped: this could equally be another "
+        f"{names} are running, but they do not belong to the install in {server_dir}, which is "
+        f"compose project '{project}'. Nothing was stopped: this could equally be another "
         "install of the same game, or this one after its folder was moved, and stopping the "
         "wrong one would take down a server somebody is playing on."
     ]
@@ -462,10 +542,30 @@ def _stranger_message(
     if owners:
         which = " and ".join(f"'{owner}'" for owner in owners)
         lines.append(
-            f"They belong to compose project {which}. If that is really this install, make the "
-            f"two agree: set {PROJECT_NAME_VAR}={owners[0]} in {server_dir / '.env'}, or move "
-            f"the folder back to a directory named {owners[0]}. If it is not this install, stop "
-            "that server from its own folder."
+            f"{', '.join(labelled)} belong to compose project {which}. Find out which folder "
+            "that is before changing anything: `docker compose ls` prints each running "
+            "project's own compose file. If it is a different install, stop that server from "
+            "its own folder and leave this one alone."
+        )
+    if len(owners) == 1:
+        pinned = pinned_project_name(server_dir)
+        fix = (
+            f"change {PROJECT_NAME_VAR} from '{pinned}' to '{owners[0]}' in "
+            f"{server_dir / '.env'}"
+            if pinned is not None
+            # With no pin the directory basename is what compose is going by, so
+            # either writing the name down or renaming the folder works. With a
+            # pin, renaming the folder is inert — the pin outranks it.
+            else (
+                f"add {PROJECT_NAME_VAR}={owners[0]} to {server_dir / '.env'}, or rename this "
+                f"folder to {owners[0]}"
+            )
+        )
+        lines.append(f"If it IS this install and the folder was moved, {fix}.")
+    elif len(owners) > 1:
+        lines.append(
+            "More than one project is involved, so no single name can reconcile them: sort the "
+            "installs out from their own folders first."
         )
     return " ".join(lines)
 
@@ -527,29 +627,52 @@ def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
         )
     if before.strangers:
         raise DockerCommandError(_stranger_message(before.strangers, project, server_dir))
-    if not before.ours:
-        logger.info("stop_staged(): nothing of this install is running")
-        return False
 
+    if before.ours:
+        # The census just proved the containers carry the label this directory
+        # resolves to, so the basename IS what compose named them — the one
+        # condition under which writing it down is safe. An install created by a
+        # script or adopted through "Use existing…" gets its pin here, which is
+        # what keeps it stoppable if its compose files later become unreadable
+        # (review, 2026-08-22).
+        pin_project_name(server_dir)
+
+    # Run this even with nothing of ours in `docker ps`. The project holds more
+    # than the three named containers — `ac-db-import` and `ac-client-data-init`
+    # are services too — and an install interrupted during the multi-GB client
+    # data download leaves one of those running. Skipping the command told the
+    # user "nothing was running" while the download carried on (review).
     proc = runner.run(["docker", "compose", "stop"], cwd=server_dir)
     if proc.returncode != 0:
         logger.warning(f"compose stop failed ({proc.stderr.strip()}); stopping containers by name")
+    if not before.ours:
+        logger.info("stop_staged(): nothing of this install was running")
+        return False
 
-    lingering = _running(spec, project).ours
-    if lingering:
+    after = _running(spec, project)
+    if after.ours:
         # Either `compose stop` failed, or it succeeded having matched nothing —
         # the moved-folder case, where compose names the project after the
         # directory. Finish the job by name rather than believing the exit code.
-        logger.warning(f"compose stop left {list(lingering)} running; stopping by name")
-        for name in lingering:
+        logger.warning(f"compose stop left {list(after.ours)} running; stopping by name")
+        for name in after.ours:
             _run_docker_stop(name)
-        lingering = _running(spec, project).ours
+        after = _running(spec, project)
 
-    if lingering:
-        raise DockerCommandError(f"still running after stop: {', '.join(lingering)}")
-    stopped_something = True
+    if after.ours:
+        raise DockerCommandError(f"still running after stop: {', '.join(after.ours)}")
+    if after.unreadable:
+        # Reading only `.ours` here let a container that is plainly still up be
+        # reported as stopped, because `docker inspect` had started failing and
+        # dropped it into `unreadable` — the same condition that is a hard
+        # refusal three lines above, silently discarded (review, 2026-08-22).
+        raise DockerCommandError(
+            f"{', '.join(after.unreadable)} are still running and Docker will no longer say "
+            "which project owns them, so this stop cannot be confirmed. Check with "
+            "`docker ps` before assuming the server is down."
+        )
     logger.info("stop_staged(): stopped; containers kept for a fast restart")
-    return stopped_something
+    return True
 
 
 def status() -> list[str]:
@@ -606,6 +729,23 @@ def started_at(container: str) -> str:
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
+def settled(container: str) -> bool:
+    """True if the container is running right now, rather than between restarts.
+
+    Every compose service here carries `restart: unless-stopped`, and a
+    container in restart backoff still appears in a plain `docker ps` while
+    `.State.StartedAt` holds the previous run's timestamp. A crash-looping
+    worldserver therefore satisfies both of `wait_ready()`'s other checks and
+    is reported ready — the same false pass the `--since` scoping was added to
+    remove, arriving by a different route (review, 2026-08-22).
+    """
+    proc = runner.run(["docker", "inspect", container, "--format", "{{.State.Status}}"])
+    if proc.returncode != 0:
+        logger.warning(f"could not read the state of {container}: {proc.stderr.strip()}")
+        return False
+    return proc.stdout.strip() == "running"
+
+
 def _logs(container: str, *, this_run_only: bool = False) -> str:
     """Return a container's logs, or `""` if they can't be read.
 
@@ -630,7 +770,14 @@ def _logs(container: str, *, this_run_only: bool = False) -> str:
         if since:
             argv += ["--since", since]
     proc = runner.run([*argv, container])
-    return proc.stdout if proc.returncode == 0 else ""
+    if proc.returncode != 0:
+        # Silently returning "" turned a rejected --since, a container removed
+        # mid-wait, or an unreadable log driver into eight minutes of "starting"
+        # followed by a generic failure with nothing naming the cause
+        # (review, 2026-08-22). `_status_safe()` already logs its equivalent.
+        logger.warning(f"could not read the logs of {container}: {proc.stderr.strip()}")
+        return ""
+    return proc.stdout
 
 
 def wait_db_healthy(
@@ -701,7 +848,10 @@ def wait_ready(
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         running = _status_safe()
-        if running is not None and auth_container in running and world_container in running:
+        listed = running is not None and auth_container in running and world_container in running
+        # `docker ps` lists a container that is in restart backoff, so being
+        # listed is not the same as being up; ask for the state as well.
+        if listed and settled(auth_container) and settled(world_container):
             if target in _logs(auth_container, this_run_only=True) and "ready..." in _logs(
                 world_container, this_run_only=True
             ):
