@@ -334,6 +334,12 @@ _MANUAL_ROOT_CERTS = (
 _MANUAL_WSL = (
     "Open an Administrator PowerShell and run: wsl --install --no-distribution, then reboot."
 )
+_MANUAL_START_DOCKER_DESKTOP = (
+    "Yu'lon could not find Docker Desktop on this PC. Open the Start menu, type "
+    "\"Docker Desktop\", start it, and wait until it says 'Engine running' — then try again. "
+    "If it is not in the Start menu it is not installed: get it from "
+    "https://www.docker.com/products/docker-desktop/"
+)
 
 
 class ProvisionError(RuntimeError):
@@ -927,7 +933,8 @@ def ensure_docker(
     password-needing sudo is a reported skip with the commands to paste). The
     docker group change needs a re-login — reported, never hidden. Windows:
     WSL2 (`ensure_wsl2()`) then Docker Desktop (download + silent install,
-    elevated). macOS: Docker Desktop (download .dmg, copy Docker.app, open it).
+    elevated), then start it at wherever `find_docker_desktop()` says it is.
+    macOS: Docker Desktop (download .dmg, copy Docker.app, open it).
     Returns a `ProvisionReport`; with `dry_run=True` nothing runs and the report
     lists every step as skipped so the UI can show the plan. `cancel`, when set,
     interrupts the ready-poll early (the poll still returns the latest check).
@@ -979,6 +986,193 @@ def _ensure_docker_linux(
 def _ps_quote(value: object) -> str:
     """`value` as a PowerShell single-quoted literal (inner quotes doubled)."""
     return SINGLE_QUOTE + str(value).replace(SINGLE_QUOTE, SINGLE_QUOTE * 2) + SINGLE_QUOTE
+
+
+# ------------------------------------------------------- finding Docker Desktop
+
+DOCKER_DESKTOP_EXE = "Docker Desktop.exe"
+_DOCKER_DESKTOP_SHORTCUT = "Docker Desktop.lnk"
+
+# The install layouts to fall back on when the probe below cannot run at all —
+# the same role, and the same standing, as `_windows_docker_bins()`: a guess
+# kept for a box whose PowerShell is locked down, not evidence.
+#
+# Both `ProgramW6432` and `ProgramFiles` are listed because they disagree inside
+# a 32-bit process: there `%ProgramFiles%` is the x86 folder, where a
+# 64-bit-only app never is, while `%ProgramW6432%` is always the real one.
+_DOCKER_DESKTOP_ROOT_VARS = ("ProgramW6432", "ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA")
+
+# `<root>\Docker\Docker\Docker Desktop.exe` is the machine-wide layout that
+# every "where is Docker Desktop" answer names. `Programs\DockerDesktop` is the
+# per-user one, and is the one that was actually there: a Windows 11 PC running
+# Docker Desktop 4.83.0 had the app at
+# `%LOCALAPPDATA%\Programs\DockerDesktop\Docker Desktop.exe` and nothing under
+# Program Files at all (2026-08-23) — the same box, and the same lesson, as
+# `_windows_docker_bins()`. Every shape is tried under every root; a dozen
+# `is_file()` calls cost nothing next to the process spawn they follow.
+_DOCKER_DESKTOP_SUBDIRS = (("Docker", "Docker"), ("Programs", "DockerDesktop"), ("Docker",))
+
+# Registry paths worth reading, under BOTH hives. The first two are Docker
+# Desktop's own (`AppPath` under `1.0` is the install folder); `App Paths` is
+# the Windows mechanism that makes `Start-Process <bare name>` work for the apps
+# that DO register one, and is the only thing that could ever have rescued the
+# old command; `Uninstall` carries `InstallLocation`.
+#
+# Both hives, because on the 4.83.0 machine above a per-user install had written
+# NOTHING to HKLM — no `Docker Inc.` key, no `App Paths` entry, nothing on
+# PATH — and the single registry value naming the install was
+# `HKCU:\...\Uninstall\Docker Desktop`'s `InstallLocation`. Reading only HKLM,
+# the obvious hive for an installed program, would have found nothing at all.
+_DOCKER_DESKTOP_REGISTRY_PATHS = (
+    r"SOFTWARE\Docker Inc.\Docker",
+    r"SOFTWARE\Docker Inc.\Docker\1.0",
+    r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\Docker Desktop.exe",
+    r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Docker Desktop",
+)
+_REGISTRY_HIVES = ("HKLM", "HKCU")
+
+# All-users and per-user Start menus. Expanded by PowerShell, not by us: this
+# process's `%APPDATA%` is the right one, but writing the expansion here would
+# hard-code a folder Windows is free to redirect.
+_START_MENU_DIRS = (
+    r"$env:ProgramData\Microsoft\Windows\Start Menu\Programs",
+    r"$env:APPDATA\Microsoft\Windows\Start Menu\Programs",
+)
+
+
+def _docker_desktop_known_paths() -> list[Path]:
+    """Every place a known install layout could have put the exe, best first."""
+    paths: list[Path] = []
+    for var in _DOCKER_DESKTOP_ROOT_VARS:
+        root = os.environ.get(var)
+        if not root:
+            continue
+        for subdir in _DOCKER_DESKTOP_SUBDIRS:
+            candidate = Path(root, *subdir, DOCKER_DESKTOP_EXE)
+            if candidate not in paths:
+                paths.append(candidate)
+    return paths
+
+
+def _docker_desktop_probe_command() -> list[str]:
+    """PowerShell that prints every path Windows itself associates with Docker Desktop.
+
+    It prints candidates, not an answer: every string value under the registry
+    keys above, whatever `Get-Command` resolves, and the target of the Start
+    menu shortcut. `find_docker_desktop()` keeps the first line that turns out
+    to be a real file, so this never has to be RIGHT about which value means
+    what — only complete. That is deliberate: pinning `AppPath` by name is the
+    same brittleness as pinning an install path, one level up.
+
+    Read-only by construction (`Get-ItemProperty`, `Get-Command`,
+    `Get-ChildItem`, `CreateShortcut`), and `SilentlyContinue` keeps a key that
+    does not exist on this machine from taking the rest of the probe with it.
+    """
+    keys = ", ".join(
+        _ps_quote(f"{hive}:\\{path}")
+        for hive in _REGISTRY_HIVES
+        for path in _DOCKER_DESKTOP_REGISTRY_PATHS
+    )
+    menus = ", ".join(f'"{folder}"' for folder in _START_MENU_DIRS)
+    script = "; ".join(
+        (
+            "$ErrorActionPreference = 'SilentlyContinue'",
+            "foreach ($key in @(" + keys + ")) { $item = Get-ItemProperty -Path $key; "
+            "if ($item) { $item.PSObject.Properties | ForEach-Object "
+            "{ if ($_.Value -is [string]) { $_.Value } } } }",
+            "(Get-Command " + _ps_quote(DOCKER_DESKTOP_EXE) + ").Source",
+            "Get-ChildItem -Path "
+            + menus
+            + " -Filter "
+            + _ps_quote(_DOCKER_DESKTOP_SHORTCUT)
+            + " -Recurse | ForEach-Object { (New-Object -ComObject WScript.Shell)"
+            ".CreateShortcut($_.FullName).TargetPath }",
+        )
+    )
+    return ["powershell.exe", "-NoProfile", "-Command", script]
+
+
+def _docker_desktop_exe_at(text: str) -> Path | None:
+    """One probe line as a real exe — the exe itself or the folder holding it — or None.
+
+    The probe prints whatever the registry holds, which is sometimes the install
+    FOLDER (`AppPath`), sometimes the exe (`App Paths`, the shortcut target),
+    and often neither (`PSPath`, a version string, an uninstall command line).
+    Both shapes are accepted and only a path that is genuinely a file on disk
+    survives, so a value name changing between Docker Desktop releases costs
+    nothing.
+    """
+    cleaned = text.strip().strip('"')
+    if not cleaned:
+        return None
+    candidate = Path(cleaned)
+    if candidate.name.casefold() == DOCKER_DESKTOP_EXE.casefold():
+        return candidate if candidate.is_file() else None
+    exe = candidate / DOCKER_DESKTOP_EXE
+    return exe if exe.is_file() else None
+
+
+def find_docker_desktop(run: RunCmd | None = None) -> Path | None:
+    r"""Where Docker Desktop actually is on this PC, or None if it is not installed.
+
+    The start step used to be `Start-Process 'Docker Desktop'`. That string is
+    neither a path nor a command: ShellExecute resolves a bare name through PATH
+    and the App Paths registry, and Docker Desktop's installer registers
+    neither — it only adds `...\Docker\resources\bin`, which holds the `docker`
+    CLI, not the app. Measured by hand on a clean Windows 11 VM (2026-08-22):
+    the step exits 1 with "The system cannot find the file specified" on ANY
+    machine, installed or not. So provisioning downloaded Docker Desktop,
+    installed it silently, and then never started it — the user watched a
+    3-minute poll and was told "the engine has not answered yet" with a
+    perfectly good install sitting on disk, and the one thing that would have
+    fixed it (open Docker Desktop) was the thing the app claimed to have done.
+
+    Hard-coding `C:\Program Files\Docker\Docker\Docker Desktop.exe` in its place
+    fixes one machine. It would not have fixed the machine this was written on:
+    Docker Desktop 4.83.0 there is a per-user install under
+    `%LOCALAPPDATA%\Programs\DockerDesktop`, with nothing under Program Files,
+    no `HKLM:\SOFTWARE\Docker Inc.` key, no `App Paths` entry in either hive and
+    nothing named `Docker Desktop.exe` on PATH. The single source that answered
+    was the Start menu shortcut (2026-08-23).
+
+    So Windows is asked first and the known layouts are only the fallback —
+    the same order, for the same measured reason, as `docker_programs()`: what
+    the machine reports is right for a custom `--installation-dir` and right for
+    whatever layout the next release ships, while a hardcoded list is a guess
+    that was already wrong once here. Measured cost of asking: 0.60 s, once per
+    provisioning run, immediately before starting a program that then takes
+    tens of seconds to bring its engine up. The list survives underneath, for
+    the box whose PowerShell is locked down or missing.
+
+    `winreg` — used a few functions up by `_registry_search_path()` — would read
+    the registry in-process and is deliberately not used: the answer that
+    actually worked came from a Start menu `.lnk`, which needs a `WScript.Shell`
+    COM call, and PATH, which needs `Get-Command`. One PowerShell probe answers
+    all three in one spawn and goes through the `run` seam every test here
+    already fakes; `winreg` would answer the one source that was empty.
+    """
+    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv))
+    try:
+        proc = do(_docker_desktop_probe_command())
+    except OSError as exc:
+        logger.debug(f"could not ask Windows where Docker Desktop is: {exc}")
+    else:
+        for line in proc.stdout.splitlines():
+            exe = _docker_desktop_exe_at(line)
+            if exe is not None:
+                logger.info(f"Docker Desktop found by asking Windows: {exe}")
+                return exe
+    for candidate in _docker_desktop_known_paths():
+        if candidate.is_file():
+            logger.info(f"Docker Desktop found at a known install location: {candidate}")
+            return candidate
+    logger.info("Docker Desktop is not installed anywhere this machine knows about")
+    return None
+
+
+def _start_docker_desktop_command(exe: Path) -> list[str]:
+    """`Start-Process <exe>`, with the path quoted (Program Files has a space in it)."""
+    return ["powershell.exe", "-NoProfile", "-Command", f"Start-Process {_ps_quote(exe)}"]
 
 
 def ensure_wsl2(*, run: RunCmd | None = None, dry_run: bool = False) -> ProvisionReport:
@@ -1081,20 +1275,38 @@ def _ensure_docker_windows(
                 tuple(skipped),
                 ("Docker Desktop's installer did not finish; run the downloaded installer.",),
             )
-    start_cmd = ["powershell.exe", "-NoProfile", "-Command", "Start-Process 'Docker Desktop'"]
-    d3, s3 = _run_steps(do, [start_cmd], sudo=False, dry_run=dry_run)
+    if dry_run:
+        # The probe is read-only, but `dry_run` means "no child processes", and
+        # the exe cannot be named here without running it.
+        skipped.append(f"(dry run) find {DOCKER_DESKTOP_EXE} and start it")
+        return ProvisionReport("windows", tuple(done), tuple(skipped))
+    exe = find_docker_desktop(do)
+    if exe is None:
+        skipped.append(
+            f"start Docker Desktop: no {DOCKER_DESKTOP_EXE} in Program Files, the registry, "
+            "the Start menu or PATH"
+        )
+        return ProvisionReport(
+            "windows",
+            tuple(done),
+            tuple(skipped),
+            (_MANUAL_START_DOCKER_DESKTOP,),
+            False,
+            # Nothing was started, so nothing is about to start answering. Ask
+            # once (a daemon could have come up while the installer ran) instead
+            # of holding the user on a poll that cannot succeed — the old code
+            # spent the full 180 s here on every failed start.
+            _wait_docker_ready(do, 0.0, _DOCKER_READY_POLL_SECONDS, cancel),
+        )
+    d3, s3 = _run_steps(do, [_start_docker_desktop_command(exe)], sudo=False, dry_run=False)
     done += d3
     skipped += s3
-    ready = (
-        False
-        if dry_run
-        else _wait_docker_ready(do, wait_seconds, _DOCKER_READY_POLL_SECONDS, cancel)
-    )
+    ready = _wait_docker_ready(do, wait_seconds, _DOCKER_READY_POLL_SECONDS, cancel)
     manual: tuple[str, ...] = ()
-    if not ready and not dry_run:
+    if not ready:
         manual = (
-            "Docker Desktop was installed but its engine has not answered yet — open Docker "
-            "Desktop, wait for 'Engine running', then try again.",
+            f"Docker Desktop is installed ({exe}) but its engine has not answered yet — open "
+            "Docker Desktop, wait for 'Engine running', then try again.",
         )
     return ProvisionReport("windows", tuple(done), tuple(skipped), manual, False, ready)
 
