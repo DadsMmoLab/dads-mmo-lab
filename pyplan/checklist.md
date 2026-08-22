@@ -183,8 +183,16 @@
   arrow in log output crashes on the cp1252 console (`:605`, `:670`, and 13 sites in `apply.py`); and the
   629 MB installer is re-downloaded unconditionally with no resume or cache.
 
-  **Defects 1 and 3 are fixed and merged (2026-08-23); 2 is in flight.** Caching and resume landed with 1.
-  Two corrections worth keeping, because both invalidate what the brief assumed:
+  **All three are fixed and merged (2026-08-23).** Caching and resume landed with 1. 344 passed, exit 0.
+  Three corrections worth keeping, because each invalidates what the brief assumed:
+  - Defect 2's start step could not be fixed by hardcoding `C:\Program Files\Docker\Docker\Docker
+    Desktop.exe` either, which is what the brief suggested. Measured on the VM: Docker Desktop 4.83.0 is a
+    **per-user** install under `%LOCALAPPDATA%\Programs\DockerDesktop`, with nothing under Program Files, no
+    `HKLM:\SOFTWARE\Docker Inc.` key, no `App Paths` entry in either hive and nothing on PATH — the Start
+    menu shortcut was the only source that answered. So the probe asks Windows several ways and keeps the
+    first candidate that resolves to a real file; hardcoded layouts are the fallback, not the answer.
+    Reverting it costs 603 seconds in the test suite, because the old code polls out the full `wait_seconds`
+    after a start that resolved nowhere — the wall clock *is* the defect.
   - The TLS failure is **not** Docker's CDN. Windows ships a small root set and fetches the rest on demand
     through CryptoAPI while schannel builds a chain; OpenSSL reads a *snapshot* of that store and never
     triggers the fetch. `desktop.docker.com` chains to Amazon Root CA 1 (absent), github.com to
