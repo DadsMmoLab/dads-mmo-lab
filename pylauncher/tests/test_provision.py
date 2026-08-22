@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -68,6 +69,32 @@ def _no_off_path_docker(monkeypatch: pytest.MonkeyPatch) -> None:
     than by luck.
     """
     monkeypatch.setattr(platform, "_windows_docker_programs", lambda: ())
+
+
+def _no_default_install(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset every Program Files/AppData root so no REAL Docker Desktop is found.
+
+    Without this these tests pass or fail depending on whether the machine
+    running them happens to have Docker Desktop installed, which is exactly the
+    machine-specific behaviour the code under test exists to remove.
+    """
+    for var in platform._DOCKER_DESKTOP_ROOT_VARS:
+        monkeypatch.delenv(var, raising=False)
+
+
+def _default_install(monkeypatch: pytest.MonkeyPatch, root: Path) -> Path:
+    """Pretend a stock Docker Desktop lives under `root` as Program Files."""
+    _no_default_install(monkeypatch)
+    monkeypatch.setenv("ProgramFiles", str(root))
+    exe = root / "Docker" / "Docker" / platform.DOCKER_DESKTOP_EXE
+    exe.parent.mkdir(parents=True, exist_ok=True)
+    exe.write_text("not really an executable", encoding="utf-8")
+    return exe
+
+
+def _started(calls: list[list[str]]) -> list[str]:
+    """The `Start-Process` commands that were run (installer excluded)."""
+    return [c[-1] for c in calls if "Start-Process" in c[-1] and "--accept-license" not in c[-1]]
 
 
 def test_already_running_docker_short_circuits(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -167,8 +194,9 @@ def test_windows_downloads_and_silently_installs_docker_desktop(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(platform.sys, "platform", "win32")
-    monkeypatch.setattr(platform, "config_dir", lambda: tmp_path)
+    monkeypatch.setattr(platform, "config_dir", lambda: tmp_path / "appdata")
     _no_off_path_docker(monkeypatch)
+    exe = _default_install(monkeypatch, tmp_path / "pf")
     downloads: list[tuple[str, Path]] = []
 
     def download(url: str, dest: Path) -> Path:
@@ -186,7 +214,7 @@ def test_windows_downloads_and_silently_installs_docker_desktop(
                 return subprocess.CompletedProcess(
                     argv, 0 if self.docker_after_start else 1, "", ""
                 )
-            if "Start-Process 'Docker Desktop'" in " ".join(argv):
+            if f"Start-Process {platform._ps_quote(exe)}" in " ".join(argv):
                 self.docker_after_start = True
             return subprocess.CompletedProcess(argv, 0, "", "")
 
@@ -195,7 +223,7 @@ def test_windows_downloads_and_silently_installs_docker_desktop(
         run=run, which=lambda n: None, download=download, wait_seconds=1.0
     )
     assert downloads[0][0] == platform.DOCKER_DESKTOP_WINDOWS_URL
-    assert downloads[0][1] == tmp_path / "downloads" / "Docker Desktop Installer.exe"
+    assert downloads[0][1] == tmp_path / "appdata" / "downloads" / "Docker Desktop Installer.exe"
     install = [c for c in run.calls if "--accept-license" in " ".join(c)]
     assert (
         install
@@ -234,6 +262,7 @@ def test_powershell_quoting_survives_an_apostrophe_in_the_path(
     monkeypatch.setattr(platform.sys, "platform", "win32")
     monkeypatch.setattr(platform, "config_dir", lambda: home)
     _no_off_path_docker(monkeypatch)
+    _no_default_install(monkeypatch)  # never consult the real machine's Program Files
 
     class _WinRun(_Run):
         def __call__(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
@@ -296,6 +325,10 @@ def test_windows_provisioning_finishes_without_a_manual_step(
     """
     monkeypatch.setattr(platform.sys, "platform", "win32")
     monkeypatch.setattr(platform, "config_dir", lambda: tmp_path)
+    # Where the silent install puts the app. Pinned because the start step now
+    # resolves a real path instead of the bare name `Start-Process 'Docker
+    # Desktop'`, which resolved nowhere on any machine.
+    desktop_exe = _default_install(monkeypatch, tmp_path / "pf")
     which = _OffPathWhich(installed=False)
     monkeypatch.setattr(platform, "_which", which)
     monkeypatch.setattr(platform, "_registry_search_path", lambda: DOCKER_BIN_DIR)
@@ -310,7 +343,7 @@ def test_windows_provisioning_finishes_without_a_manual_step(
             shown = " ".join(argv)
             if "--accept-license" in shown:
                 which.installed = True  # the installer wrote a PATH we cannot see
-            if "Start-Process 'Docker Desktop'" in shown:
+            if f"Start-Process {platform._ps_quote(desktop_exe)}" in shown:
                 self.engine_up = True
             if argv[1:] == ["info"]:
                 ready = self.engine_up and argv[0] == DOCKER_EXE
@@ -443,3 +476,142 @@ def test_the_registry_path_reads_back_expanded_and_usable() -> None:
     assert found, "neither the machine nor the user PATH could be read"
     assert "%" not in found
     assert any(Path(entry).is_dir() for entry in found.split(";") if entry)
+
+
+# ------------------------------------------------- starting Docker Desktop
+# `Start-Process 'Docker Desktop'` was the whole start step until 2026-08-22.
+# It resolves nothing — ShellExecute looks a bare name up on PATH and in the
+# App Paths registry, and Docker Desktop registers neither — so it exited 1
+# with "The system cannot find the file specified" on every Windows machine,
+# including one where the app had just been installed successfully.
+
+
+def test_windows_starts_the_docker_desktop_that_is_actually_installed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(platform.sys, "platform", "win32")
+    _no_off_path_docker(monkeypatch)
+    exe = _default_install(monkeypatch, tmp_path)
+    run = _Run()
+
+    platform.ensure_docker(run=run, which=lambda n: "C:/docker.exe", wait_seconds=0.0)
+
+    started = _started(run.calls)
+    assert started == [f"Start-Process {platform._ps_quote(exe)}"]
+    assert str(exe) in started[0]
+    assert "Start-Process 'Docker Desktop'" not in started[0]  # the bare name resolves nowhere
+
+
+def test_windows_finds_docker_desktop_installed_somewhere_else(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A PC that used the installer's --installation-dir, or a future layout.
+
+    Nothing on disk matches a known layout, so only what Windows itself reports
+    can find this one — which is why the probe is asked before the list.
+    """
+    monkeypatch.setattr(platform.sys, "platform", "win32")
+    _no_off_path_docker(monkeypatch)
+    _no_default_install(monkeypatch)
+    elsewhere = tmp_path / "games" / "DockerDesktop"
+    exe = elsewhere / platform.DOCKER_DESKTOP_EXE
+    exe.parent.mkdir(parents=True)
+    exe.write_text("not really an executable", encoding="utf-8")
+
+    class _WinRun(_Run):
+        def __call__(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
+            if "Docker Inc." in argv[-1]:  # the registry/Start-menu/PATH probe
+                self.calls.append(argv)
+                # Shaped like the real reply measured on Windows 11 (4.83.0):
+                # version strings and an uninstall command line as noise, the
+                # install FOLDER (`InstallLocation`) among them.
+                out = (
+                    "4.83.0\n"
+                    f'"{elsewhere}\\Docker Desktop Installer.exe" "uninstall"\n'
+                    f"{elsewhere}\n"
+                )
+                return subprocess.CompletedProcess(argv, 0, out, "")
+            return super().__call__(argv)
+
+    run = _WinRun()
+    report = platform.ensure_docker(run=run, which=lambda n: "C:/docker.exe", wait_seconds=0.0)
+
+    assert _started(run.calls) == [f"Start-Process {platform._ps_quote(exe)}"]
+    assert not any("could not find Docker Desktop" in m for m in report.manual_steps)
+
+
+def test_windows_says_what_to_do_when_docker_desktop_is_nowhere(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(platform.sys, "platform", "win32")
+    _no_off_path_docker(monkeypatch)
+    _no_default_install(monkeypatch)
+    run = _Run()  # the probe answers with nothing, like a PC without Docker Desktop
+
+    began = time.monotonic()
+    report = platform.ensure_docker(run=run, which=lambda n: "C:/docker.exe", wait_seconds=600.0)
+    elapsed = time.monotonic() - began
+
+    assert _started(run.calls) == [], "nothing was found, so nothing may be launched"
+    assert report.ok is False and report.docker_ready is False
+    assert any("Start menu" in m and "Docker Desktop" in m for m in report.manual_steps)
+    assert any(m.startswith("start Docker Desktop: no ") for m in report.skipped)
+    assert elapsed < 30.0, "a poll that cannot succeed must not hold the user for 10 minutes"
+
+
+def test_the_probe_asks_windows_rather_than_guessing_one_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hardcoded layouts are the fallback; these sources are the answer."""
+    monkeypatch.setattr(platform.sys, "platform", "win32")
+    _no_default_install(monkeypatch)
+    run = _Run()
+    platform.find_docker_desktop(run)
+
+    script = run.calls[0][-1]
+    assert run.calls[0][:3] == ["powershell.exe", "-NoProfile", "-Command"]
+    assert r"HKLM:\SOFTWARE\Docker Inc.\Docker" in script  # Docker's own key
+    assert r"CurrentVersion\App Paths\Docker Desktop.exe" in script  # what Start-Process reads
+    assert "$env:ProgramData\\Microsoft\\Windows\\Start Menu" in script  # the all-users shortcut
+    assert "$env:APPDATA\\Microsoft\\Windows\\Start Menu" in script  # the per-user one
+    assert "Get-Command 'Docker Desktop.exe'" in script  # PATH
+    assert "SilentlyContinue" in script  # a key this PC lacks must not kill the probe
+    # Measured on a Windows 11 PC with Docker Desktop 4.83.0 (2026-08-23): a
+    # per-user install writes nothing to HKLM, and the only registry value that
+    # named it was HKCU's InstallLocation. HKLM alone finds such a PC nothing.
+    assert r"HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Docker Desktop" in script
+
+
+def test_a_known_layout_still_answers_when_the_probe_cannot_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No PowerShell (locked down, or missing) must not mean "not installed".
+
+    The layout used here is the one measured on Windows 11 with Docker Desktop
+    4.83.0: `%LOCALAPPDATA%\\Programs\\DockerDesktop`, not Program Files.
+    """
+    _no_default_install(monkeypatch)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    exe = tmp_path / "Programs" / "DockerDesktop" / platform.DOCKER_DESKTOP_EXE
+    exe.parent.mkdir(parents=True)
+    exe.write_text("not really an executable", encoding="utf-8")
+
+    def no_powershell(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        raise OSError(2, "The system cannot find the file specified")
+
+    assert platform.find_docker_desktop(no_powershell) == exe
+
+
+def test_starting_docker_desktop_survives_an_apostrophe_in_the_install_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(platform.sys, "platform", "win32")
+    _no_off_path_docker(monkeypatch)
+    exe = _default_install(monkeypatch, tmp_path / "O'Brien Games")
+    run = _Run()
+    platform.ensure_docker(run=run, which=lambda n: "C:/docker.exe", wait_seconds=0.0)
+
+    command = _started(run.calls)[0]
+    assert "O''Brien Games" in command  # doubled, i.e. it cannot end the string early
+    assert command.endswith(f"{platform.DOCKER_DESKTOP_EXE}'")
+    assert str(exe) in command.replace("''", "'")
