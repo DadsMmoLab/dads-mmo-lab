@@ -102,6 +102,12 @@ def _docker(
     uninstalled while the launcher is open, leaving `docker_program()`'s pinned
     path aimed at a file that is gone. The user hears "Docker could not be
     found", which is true.
+
+    The two branches log at different levels on purpose. "No CLI at all" is
+    already in the `stderr` this returns, and every caller here logs that — a
+    warning would print the same sentence twice for every command, and
+    `wait_ready()` issues five per poll. The `OSError` carries what the sentence
+    does not: which path was tried, and the errno.
     """
     program = platform.docker_program()
     if program is not None:
@@ -110,7 +116,7 @@ def _docker(
         except OSError as exc:
             logger.warning(f"{program} could not be started: {exc}")
     else:
-        logger.warning(f"no docker CLI on this host; refusing to run: docker {' '.join(argv)}")
+        logger.debug(f"no docker CLI on this host; not running: docker {' '.join(argv)}")
     return subprocess.CompletedProcess(
         ["docker", *argv], _CLI_MISSING_RETURNCODE, "", platform.DOCKER_CLI_MISSING_HELP
     )
