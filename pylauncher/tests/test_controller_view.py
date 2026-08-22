@@ -47,7 +47,9 @@ class _Ps:
         # install of the same game, whose container names are identical.
         self.label: str | None = None
 
-    def __call__(self, cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    def __call__(
+        self, cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         self.calls.append(cmd)
         if cmd[:2] == ["docker", "ps"]:
             out = self.ports if "{{.Ports}}" in cmd[-1] else self.names

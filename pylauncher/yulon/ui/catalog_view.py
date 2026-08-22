@@ -92,6 +92,7 @@ class CatalogView(QWidget):
         self._gated: set[str] = set()  # ids the platform gate disabled (roadmap 6.1)
         self._existing_buttons: dict[str, QPushButton] = {}
         self._current: tuple[str, Path, Path | None] | None = None
+        self._prompter: InputPrompter | None = None
 
         grid = QGridLayout()
         for index, entry in enumerate(catalog.games):
@@ -240,13 +241,19 @@ class CatalogView(QWidget):
         cancel = threading.Event()
         self._current = (entry.id, server_dir, client_dir)
         self._set_buttons_enabled(False)
-        # Held on self, not in a local: PySide6 keeps bound-method slots by weak
-        # reference, so a prompter owned only by this frame would be collected
-        # and its dialog would never appear.
-        self._prompter = InputPrompter(self)
-        self._prompter.bind_cancel(cancel)
+        # One prompter for this view, reused. It has to be held on `self` at all
+        # — PySide6 keeps bound-method slots by weak reference, so a prompter
+        # owned only by this frame would be collected and its dialog would never
+        # appear — but building a NEW one per install parented to the view left
+        # every previous one alive for the session, each still holding the
+        # password it last carried. `ask()` clears the answer on the way out;
+        # this stops the objects accumulating (review, 2026-08-22).
+        if self._prompter is None:
+            self._prompter = InputPrompter(self)
+        prompter = self._prompter
+        prompter.bind_cancel(cancel)
         started = self._log.run(
-            lambda: installer.run(options, cancel=cancel, ask=self._prompter.ask),
+            lambda: installer.run(options, cancel=cancel, ask=prompter.ask),
             title=f"Installing {entry.name}",
             cancel=cancel,
         )

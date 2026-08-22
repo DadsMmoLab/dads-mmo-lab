@@ -28,16 +28,27 @@ from yulon.log import get_logger
 
 logger = get_logger(__name__)
 
-# Prompts whose answer must never be echoed, logged, or kept.
-_SECRET = re.compile(r"password|passphrase|secret|\bpin\b", re.IGNORECASE)
+# Prompts that are plainly NOT asking for a secret. Everything else is masked.
+#
+# This used to be the other way round — an allowlist of English secret words
+# (`password|passphrase|secret|pin`) — and a miss meant EchoMode.Normal. The two
+# failure directions are not symmetric: masking a folder path is a small
+# annoyance, echoing a password onto a screen is not undoable. And the miss was
+# guaranteed for anyone not running an English locale, where sudo prints
+# "[sudo] adgangskode for pk:", "Passwort für", "Mot de passe de",
+# "contraseña para", "wachtwoord voor" (review, 2026-08-22).
+_NOT_SECRET = re.compile(
+    r"\bpath\b|\bfolder\b|\bdirectory\b|\(y(?:es)?/no?\)|\([yn]/[yn]\)|press enter",
+    re.IGNORECASE,
+)
 
 # How often the worker wakes to re-check `cancel` while waiting for an answer.
 _POLL_SECONDS = 0.1
 
 
 def is_secret(prompt: str) -> bool:
-    """True if this prompt is asking for something that must not be shown."""
-    return bool(_SECRET.search(prompt))
+    """True unless this prompt is recognisably asking for something harmless."""
+    return not _NOT_SECRET.search(prompt)
 
 
 def tidy(prompt: str) -> str:
@@ -90,12 +101,33 @@ class InputPrompter(QObject):
         while not self._answered.wait(_POLL_SECONDS):
             if self._cancel is not None and self._cancel.is_set():
                 logger.info("input prompt abandoned: the job was cancelled")
+                self._answer = None
                 return None
-        return self._answer
+        # Handed over, not shared. The module docstring promises the answer is
+        # never kept, and this object outlives the install: leaving the password
+        # on `self._answer` left a live plaintext copy on a widget's child for
+        # the rest of the session (review, 2026-08-22).
+        answer, self._answer = self._answer, None
+        return answer
 
     @Slot(str, bool)
     def _show(self, prompt: str, secret: bool) -> None:
-        """Runs on the GUI thread; puts the question to the user."""
+        """Runs on the GUI thread; puts the question to the user.
+
+        The cancel check is not redundant with `ask()`'s. This slot is queued,
+        so a job cancelled between the emit and the GUI thread dequeuing it
+        would otherwise open a modal dialog for an install that no longer
+        exists, with nothing left waiting for the answer (review, 2026-08-22).
+
+        The dialog stays application-modal on purpose: it is only ever opened
+        for a prompt a child process is genuinely blocked on, so there is
+        nothing else useful to do in the window until it is answered or
+        dismissed. What made modality harmful before was opening it over
+        ordinary build output, which the marker gate ended.
+        """
+        if self._cancel is not None and self._cancel.is_set():
+            self._answered.set()
+            return
         parent = self.parent()
         text, ok = QInputDialog.getText(
             parent if isinstance(parent, QWidget) else None,

@@ -172,7 +172,7 @@ def test_use_existing_does_not_pin_the_compose_project(
     """
     ran: list[list[str]] = []
     monkeypatch.setattr(
-        runner, "run", lambda cmd, cwd=None: ran.append(cmd) or _completed()  # type: ignore[func-returns-value]
+        runner, "run", lambda cmd, cwd=None, timeout=None: ran.append(cmd) or _completed()  # type: ignore[func-returns-value]
     )
     panel = LogPanel()
     view = CatalogView(

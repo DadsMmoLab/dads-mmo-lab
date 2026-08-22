@@ -24,11 +24,13 @@ from __future__ import annotations
 import subprocess
 import sys
 import threading
+from pathlib import Path
 
 import pytest
 
 from tests.conftest import process_events
 from yulon import runner
+from yulon.catalog.installer import Installer
 from yulon.ui.widgets.prompt import InputPrompter, is_secret, tidy
 
 MARKER = "[yulon-sudo-deadbeef] password:"
@@ -419,3 +421,122 @@ def _first_installable_entry():  # type: ignore[no-untyped-def]
     from yulon.catalog.catalog import load_catalog
 
     return load_catalog().get("wow-wotlk")
+
+
+# -- hygiene ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "localised",
+    [
+        "[sudo] adgangskode for pk:",
+        "[sudo] Passwort für pk:",
+        "[sudo] Mot de passe de pk :",
+        "[sudo] contraseña para pk:",
+        "[sudo] wachtwoord voor pk:",
+    ],
+)
+def test_a_sudo_prompt_in_any_language_is_masked(localised: str) -> None:
+    """Masking is the default now, because the two failure directions differ.
+
+    The old rule was an allowlist of English words, and a miss meant
+    EchoMode.Normal — so every non-English box echoed the password onto the
+    screen. Masking a folder path is an annoyance; echoing a password is not
+    undoable (review, 2026-08-22).
+    """
+    assert is_secret(localised) is True
+
+
+def test_the_prompter_does_not_keep_the_answer_after_handing_it_over(
+    qapp: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The module docstring promises the answer is never kept. It was.
+
+    The prompter outlives the install — it is a child of the catalog view — so
+    a retained `_answer` left a plaintext password on a live widget's child for
+    the rest of the session.
+    """
+    from yulon.ui.widgets import prompt as prompt_module
+
+    monkeypatch.setattr(
+        prompt_module.QInputDialog, "getText", staticmethod(lambda *a, **k: ("hunter2", True))
+    )
+    prompter = InputPrompter()
+    answer: list[str | None] = []
+
+    worker = threading.Thread(target=lambda: answer.append(prompter.ask("[sudo] password:")))
+    worker.start()
+    for _ in range(50):
+        process_events(20)
+        if not worker.is_alive():
+            break
+    worker.join(timeout=5)
+
+    assert answer == ["hunter2"]
+    assert prompter._answer is None, "the password is still on the prompter"
+
+
+def test_no_dialog_opens_for_a_job_that_was_already_cancelled(
+    qapp: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_show` is a QUEUED slot, so a cancel can land between emit and dequeue.
+
+    Without this check the user gets a modal dialog belonging to an install that
+    no longer exists, with nothing waiting for the answer (review, 2026-08-22).
+    """
+    from yulon.ui.widgets import prompt as prompt_module
+
+    opened: list[str] = []
+    monkeypatch.setattr(
+        prompt_module.QInputDialog,
+        "getText",
+        staticmethod(lambda *a, **k: (opened.append(a[2] if len(a) > 2 else ""), ("", False))[1]),
+    )
+    cancel = threading.Event()
+    cancel.set()  # already cancelled before anything is asked
+    prompter = InputPrompter()
+    prompter.bind_cancel(cancel)
+
+    prompter.requested.emit("[sudo] password:", True)
+    process_events(50)
+
+    assert opened == [], "opened a dialog for a cancelled job"
+
+
+def test_the_view_reuses_one_prompter_instead_of_leaving_one_per_install(
+    qapp: object, tmp_path: Path
+) -> None:
+    """Each install used to build a new prompter parented to the view, and keep it."""
+    from yulon.catalog.catalog import load_catalog
+    from yulon.ui.catalog_view import CatalogView
+    from yulon.ui.widgets.log_panel import LogPanel
+
+    catalog = load_catalog()
+    view = CatalogView(
+        catalog,
+        lambda e: _NoopInstaller(e),
+        LogPanel(),
+        platform_id=lambda: "linux",
+        pick_dir=lambda *_: tmp_path,
+        home=tmp_path,
+    )
+    view.start_install(catalog.get("wow-wotlk"))
+    first = view._prompter
+    view._log.wait(2000)
+    process_events(50)
+    view.start_install(catalog.get("wow-wotlk"))
+    assert view._prompter is first, "a second install built a second prompter"
+    assert len(view.findChildren(InputPrompter)) == 1
+
+
+class _NoopInstaller(Installer):
+    """An installer whose run() yields nothing, so start_install() returns at once."""
+
+    def __init__(self, entry: object) -> None:
+        super().__init__(entry, docker_check=lambda: True)  # type: ignore[arg-type]
+
+    def preflight(self, options: object, cancel: object = None) -> None:  # type: ignore[override]
+        return None
+
+    def run(self, options: object = None, *, cancel: object = None, ask: object = None):  # type: ignore[override]
+        yield "done"

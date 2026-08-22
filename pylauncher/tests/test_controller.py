@@ -45,7 +45,9 @@ class _FakeRunner:
         self.ps_lines = ps_lines
         self.health = "healthy\n"
 
-    def __call__(self, cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    def __call__(
+        self, cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         self.calls.append(cmd)
         self.cwds.append(cwd)
         if cmd[:2] == ["docker", "ps"]:

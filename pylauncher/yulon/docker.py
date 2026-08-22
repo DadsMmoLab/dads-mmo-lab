@@ -32,6 +32,8 @@ logger = get_logger(__name__)
 _DB_HEALTHY_TIMEOUT_SECONDS = 180.0
 _READY_TIMEOUT_SECONDS = 480.0
 _POLL_INTERVAL_SECONDS = 2.0
+# `docker compose config` on the GUI thread; see compose_project_name().
+_COMPOSE_CONFIG_TIMEOUT_SECONDS = 10.0
 
 
 class DockerCommandError(RuntimeError):
@@ -103,7 +105,17 @@ def compose_project_name(server_dir: Path) -> str | None:
     free to drift, and a wrong guess is worse than no guess: pinning the wrong
     value *renames* the project and orphans the containers it was meant to keep.
     """
-    proc = runner.run(["docker", "compose", "config", "--format", "json"], cwd=server_dir)
+    # Bounded, because two callers run on the GUI thread — pinning after an
+    # install, and the ownership lookup behind a Stop. Measured floor is about
+    # 0.6s even with the daemon down, and it is unbounded on a picked folder
+    # that lives on a sleeping NAS or behind a stalled docker CLI. Failing to
+    # name the project is already a handled outcome; freezing the window is not
+    # (review, 2026-08-22).
+    proc = runner.run(
+        ["docker", "compose", "config", "--format", "json"],
+        cwd=server_dir,
+        timeout=_COMPOSE_CONFIG_TIMEOUT_SECONDS,
+    )
     if proc.returncode != 0:
         logger.debug(f"compose config failed in {server_dir}: {proc.stderr.strip()}")
         return None

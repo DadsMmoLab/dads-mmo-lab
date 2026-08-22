@@ -115,6 +115,7 @@ def run(
     command: list[str],
     cwd: Path | None = None,
     env: Mapping[str, str] | None = None,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a command to completion and return the completed process.
 
@@ -131,22 +132,42 @@ def run(
             over the environment instead of argv (`/proc/<pid>/cmdline` is
             world-readable on Linux; `environ` is not), and so a child can be
             told not to prompt.
+        timeout: Seconds to wait before giving up, or None for no bound. A
+            timeout is reported as a non-zero `returncode` with the reason in
+            `stderr`, not raised, so every existing caller keeps its shape.
+            There is nothing sound to default this to — a `compose up` may take
+            minutes — so it is per-call, and the callers that need one are the
+            ones running on the GUI thread.
 
     Returns:
         The completed process (stdout/stderr available as strings). Does not
         raise on non-zero exit — inspect `returncode`.
     """
     logger.debug(f"run() called: command={command} cwd={cwd}")
-    return subprocess.run(
-        command,
-        cwd=_cwd_arg(cwd),
-        env=dict(env) if env is not None else None,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
+    try:
+        return subprocess.run(
+            command,
+            cwd=_cwd_arg(cwd),
+            env=dict(env) if env is not None else None,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        logger.warning(f"{command[0]} did not answer within {timeout}s; giving up")
+        return subprocess.CompletedProcess(
+            command, 124, _as_text(exc.stdout), f"timed out after {timeout}s"
+        )
+
+
+def _as_text(captured: object) -> str:
+    """`TimeoutExpired.stdout` is bytes even in text mode, and may be None."""
+    if isinstance(captured, bytes):
+        return captured.decode("utf-8", errors="replace")
+    return captured if isinstance(captured, str) else ""
 
 
 # A prompt-answering callback for `interact()`: gets each output line (and each

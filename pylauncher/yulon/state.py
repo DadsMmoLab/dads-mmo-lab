@@ -79,7 +79,14 @@ def load_state(path: Path | None = None) -> AppState:
     if not target.is_file():
         return AppState()
     try:
-        with target.open(encoding="utf-8") as fh:
+        # `utf-8-sig`, not `utf-8`: a byte-order mark is legal in a UTF-8 file
+        # and every Windows tool that writes one puts it there — PowerShell 5.1's
+        # `Set-Content -Encoding utf8` and Notepad both do. Read as plain UTF-8
+        # it raises "Unexpected UTF-8 BOM", so a hand-edited state file was
+        # declared corrupt and moved aside, silently forgetting every remembered
+        # install. Measured on the Win11 test VM, 2026-08-22. `utf-8-sig` reads
+        # a file without a BOM identically, so nothing else changes.
+        with target.open(encoding="utf-8-sig") as fh:
             return AppState.model_validate(json.load(fh))
     except (OSError, ValueError, ValidationError) as exc:
         backup = target.with_name(target.name + ".broken")

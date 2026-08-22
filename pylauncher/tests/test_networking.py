@@ -105,7 +105,9 @@ def test_is_cgnat(ip: str, cgnat: bool) -> None:
 def test_published_bindings_parses_docker_ps_ports(monkeypatch: pytest.MonkeyPatch) -> None:
     out = "0.0.0.0:3724->3724/tcp, [::]:3724->3724/tcp\n" "127.0.0.1:8085->8085/tcp\n" "3306/tcp\n"
     monkeypatch.setattr(
-        runner, "run", lambda cmd, cwd=None: subprocess.CompletedProcess(cmd, 0, out, "")
+        runner,
+        "run",
+        lambda cmd, cwd=None, timeout=None: subprocess.CompletedProcess(cmd, 0, out, ""),
     )
     assert docker.published_bindings() == {3724: "0.0.0.0", 8085: "127.0.0.1"}
 

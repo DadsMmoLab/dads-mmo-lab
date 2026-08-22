@@ -38,7 +38,7 @@ def test_start_runs_compose_up(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
     cwds: list[Path | None] = []
 
-    def fake_run(cmd: list[str], cwd: Path | None = None):
+    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
         calls.append(cmd)
         cwds.append(cwd)
         return _completed()
@@ -54,7 +54,7 @@ def test_stop_runs_compose_down(monkeypatch: pytest.MonkeyPatch) -> None:
     """`stop()` shells out to `docker compose down` in the server dir."""
     calls: list[list[str]] = []
 
-    def fake_run(cmd: list[str], cwd: Path | None = None):
+    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
         calls.append(cmd)
         return _completed()
 
@@ -67,7 +67,9 @@ def test_start_raises_docker_command_error_on_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A non-zero `docker` exit surfaces as `DockerCommandError`."""
-    monkeypatch.setattr(docker.runner, "run", lambda cmd, cwd=None: _completed(1, "", "boom"))
+    monkeypatch.setattr(
+        docker.runner, "run", lambda cmd, cwd=None, timeout=None: _completed(1, "", "boom")
+    )
     with pytest.raises(docker.DockerCommandError):
         docker.start(Path("/tmp/wow"))
 
@@ -77,17 +79,21 @@ def test_status_returns_running_container_names(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(
         docker.runner,
         "run",
-        lambda cmd, cwd=None: _completed(0, "ac-database\nac-worldserver\n", ""),
+        lambda cmd, cwd=None, timeout=None: _completed(0, "ac-database\nac-worldserver\n", ""),
     )
     assert docker.status() == ["ac-database", "ac-worldserver"]
 
 
 def test_health_returns_status_or_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
     """`health()` returns the inspect status, or `unknown` on failure/empty."""
-    monkeypatch.setattr(docker.runner, "run", lambda cmd, cwd=None: _completed(0, "healthy", ""))
+    monkeypatch.setattr(
+        docker.runner, "run", lambda cmd, cwd=None, timeout=None: _completed(0, "healthy", "")
+    )
     assert docker.health("ac-database") == "healthy"
 
-    monkeypatch.setattr(docker.runner, "run", lambda cmd, cwd=None: _completed(1, "", ""))
+    monkeypatch.setattr(
+        docker.runner, "run", lambda cmd, cwd=None, timeout=None: _completed(1, "", "")
+    )
     assert docker.health("missing") == "unknown"
 
 
@@ -97,7 +103,7 @@ def test_port_conflicts_detects_binding_container(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(
         docker.runner,
         "run",
-        lambda cmd, cwd=None: _completed(
+        lambda cmd, cwd=None, timeout=None: _completed(
             0, "ac-worldserver\t0.0.0.0:8085->8085/tcp\nac-database\t3306/tcp\n", ""
         ),
     )
@@ -111,7 +117,7 @@ def test_port_conflicts_returns_none_when_no_binding(
     monkeypatch.setattr(
         docker.runner,
         "run",
-        lambda cmd, cwd=None: _completed(0, "ac-database\t3306/tcp\n", ""),
+        lambda cmd, cwd=None, timeout=None: _completed(0, "ac-database\t3306/tcp\n", ""),
     )
     assert docker.port_conflicts((3724, 8085)) == []
 
@@ -119,7 +125,9 @@ def test_port_conflicts_returns_none_when_no_binding(
 def test_wait_db_healthy_returns_true_once_healthy(monkeypatch: pytest.MonkeyPatch) -> None:
     """`wait_db_healthy()` returns True as soon as health() reports healthy."""
     monkeypatch.setattr(docker.time, "sleep", lambda _seconds: None)
-    monkeypatch.setattr(docker.runner, "run", lambda cmd, cwd=None: _completed(0, "healthy", ""))
+    monkeypatch.setattr(
+        docker.runner, "run", lambda cmd, cwd=None, timeout=None: _completed(0, "healthy", "")
+    )
     assert docker.wait_db_healthy("ac-database", timeout=10, interval=0.01) is True
 
 
@@ -130,7 +138,9 @@ def test_wait_db_healthy_times_out_if_never_healthy(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(
         docker.time, "sleep", lambda seconds: fake_time.__setitem__(0, fake_time[0] + seconds)
     )
-    monkeypatch.setattr(docker.runner, "run", lambda cmd, cwd=None: _completed(0, "starting", ""))
+    monkeypatch.setattr(
+        docker.runner, "run", lambda cmd, cwd=None, timeout=None: _completed(0, "starting", "")
+    )
     assert docker.wait_db_healthy("ac-database", timeout=5, interval=1) is False
 
 
@@ -146,7 +156,7 @@ def test_wait_ready_returns_true_once_markers_present(monkeypatch: pytest.Monkey
     """`wait_ready()` returns True once both containers are up with ready markers."""
     monkeypatch.setattr(docker.time, "sleep", lambda _seconds: None)
 
-    def fake_run(cmd: list[str], cwd: Path | None = None):
+    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
         if cmd[:2] == ["docker", "ps"]:
             return _completed(0, "ac-authserver\nac-worldserver\n", "")
         if cmd[:2] == ["docker", "inspect"] and "{{.State.Status}}" in cmd:
@@ -178,7 +188,7 @@ def test_wait_ready_tolerates_transient_docker_ps_failure(
     monkeypatch.setattr(docker.time, "sleep", lambda _seconds: None)
     calls = {"ps": 0}
 
-    def fake_run(cmd: list[str], cwd: Path | None = None):
+    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
         if cmd[:2] == ["docker", "ps"]:
             calls["ps"] += 1
             if calls["ps"] == 1:
@@ -213,7 +223,7 @@ def test_wait_db_healthy_for_uses_spec_db_container(monkeypatch: pytest.MonkeyPa
     """`wait_db_healthy_for()` reads the container name from the spec."""
     seen: list[str] = []
 
-    def fake_run(cmd: list[str], cwd: Path | None = None):
+    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
         if cmd[:2] == ["docker", "inspect"]:
             seen.append(cmd[2])
             return _completed(0, "healthy", "")
@@ -230,7 +240,7 @@ def test_port_conflicts_for_uses_spec_ports(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(
         docker.runner,
         "run",
-        lambda cmd, cwd=None: _completed(0, "other\t0.0.0.0:9999->9999/tcp\n", ""),
+        lambda cmd, cwd=None, timeout=None: _completed(0, "other\t0.0.0.0:9999->9999/tcp\n", ""),
     )
     spec = docker.ContainerSpec(db="d", auth="a", world="w", ports=(9999,))
     assert docker.port_conflicts_for(spec) == ["other"]
@@ -243,7 +253,9 @@ def test_docker_ctl_convenience_wrappers_delegate_to_spec(
     monkeypatch.setattr(
         docker.runner,
         "run",
-        lambda cmd, cwd=None: _completed(0, "ac-worldserver\t0.0.0.0:8085->8085/tcp\n", ""),
+        lambda cmd, cwd=None, timeout=None: _completed(
+            0, "ac-worldserver\t0.0.0.0:8085->8085/tcp\n", ""
+        ),
     )
     assert docker_ctl.port_conflicts_here() == ["ac-worldserver"]
 
@@ -257,7 +269,7 @@ def _start_runner(calls: list[list[str]], up: tuple[str, ...] | None = None):
     """
     names = up if up is not None else (SPEC.db, SPEC.auth, SPEC.world)
 
-    def fake_run(cmd: list[str], cwd=None):
+    def fake_run(cmd: list[str], cwd=None, timeout: float | None = None):
         calls.append(cmd)
         if cmd[:2] == ["docker", "ps"]:
             return _completed(stdout="".join(n + chr(10) for n in names))
@@ -279,7 +291,7 @@ def test_start_staged_names_the_services_so_compose_cannot_pick_the_import(
     calls: list[list[str]] = []
     cwds: list[Path | None] = []
 
-    def fake_run(cmd: list[str], cwd: Path | None = None):
+    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
         calls.append(cmd)
         cwds.append(cwd)
         if cmd[:2] == ["docker", "ps"]:  # the post-start confirmation
@@ -343,7 +355,9 @@ def test_pin_project_name_writes_what_compose_already_calls_the_project(
     monkeypatch.setattr(
         docker.runner,
         "run",
-        lambda cmd, cwd=None: _completed(stdout='{"name": "wow_server2", "services": {}}'),
+        lambda cmd, cwd=None, timeout=None: _completed(
+            stdout='{"name": "wow_server2", "services": {}}'
+        ),
     )
     assert docker.pin_project_name(tmp_path) == "wow_server2"
     env = (tmp_path / ".env").read_text(encoding="utf-8")
@@ -364,7 +378,9 @@ def test_pin_project_name_never_overwrites_an_existing_pin(
     )
     called: list[list[str]] = []
     monkeypatch.setattr(
-        docker.runner, "run", lambda cmd, cwd=None: (called.append(cmd), _completed())[1]
+        docker.runner,
+        "run",
+        lambda cmd, cwd=None, timeout=None: (called.append(cmd), _completed())[1],
     )
     assert docker.pin_project_name(tmp_path) is None
     assert called == [], "must not even ask compose when a pin is already there"
@@ -377,7 +393,9 @@ def test_pin_project_name_appends_without_clobbering_an_env_file(
     """The installer's own .env holds the database password; it must survive."""
     (tmp_path / ".env").write_text("DB_ROOT_PASSWORD=hunter2", encoding="utf-8", newline="\n")
     monkeypatch.setattr(
-        docker.runner, "run", lambda cmd, cwd=None: _completed(stdout='{"name": "srv"}')
+        docker.runner,
+        "run",
+        lambda cmd, cwd=None, timeout=None: _completed(stdout='{"name": "srv"}'),
     )
     docker.pin_project_name(tmp_path)
     env = (tmp_path / ".env").read_text(encoding="utf-8")
@@ -390,7 +408,9 @@ def test_pin_project_name_declines_rather_than_guess_when_compose_cannot_answer(
 ) -> None:
     """A wrong pin is worse than none: it renames the project and orphans containers."""
     monkeypatch.setattr(
-        docker.runner, "run", lambda cmd, cwd=None: _completed(returncode=1, stderr="no such file")
+        docker.runner,
+        "run",
+        lambda cmd, cwd=None, timeout=None: _completed(returncode=1, stderr="no such file"),
     )
     assert docker.pin_project_name(tmp_path) is None
     assert not (tmp_path / ".env").exists()
@@ -414,7 +434,7 @@ def test_wait_ready_ignores_the_previous_runs_ready_marker(
     # What it returns for THIS run only: still loading.
     this_run = "starting up again\n>> Loaded 13567 Quest Offer Reward Locale Strings\n"
 
-    def fake_run(cmd: list[str], cwd: Path | None = None):
+    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
         seen.append(cmd)
         if cmd[:2] == ["docker", "ps"]:
             return _completed(stdout=f"{SPEC.auth}\n{SPEC.world}\n")
@@ -442,7 +462,7 @@ def test_wait_ready_still_succeeds_when_this_run_is_actually_ready(
 ) -> None:
     """The scoping must not break the case it exists to make honest."""
 
-    def fake_run(cmd: list[str], cwd: Path | None = None):
+    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
         if cmd[:2] == ["docker", "ps"]:
             return _completed(stdout=f"{SPEC.auth}\n{SPEC.world}\n")
         if cmd[:2] == ["docker", "inspect"]:
@@ -467,7 +487,7 @@ def test_logs_without_a_readable_start_time_falls_back_to_everything(
 ) -> None:
     """An unreadable start time must degrade to the old behaviour, not to silence."""
 
-    def fake_run(cmd: list[str], cwd: Path | None = None):
+    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
         if cmd[:2] == ["docker", "inspect"]:
             return _completed(returncode=1, stderr="no such container")
         return _completed(stdout="everything\n")
@@ -509,7 +529,7 @@ def _stop_runner(
     live = set() if running is None else set(running)
     state = {"stopped": False}
 
-    def fake_run(cmd: list[str], cwd=None):
+    def fake_run(cmd: list[str], cwd=None, timeout: float | None = None):
         calls.append(cmd)
         if cmd[:4] == ["docker", "compose", "config", "--format"]:
             return _completed(stdout='{"name": "' + PROJECT + '"}')
@@ -697,7 +717,7 @@ def test_docker_stop_treats_a_vanished_container_as_already_stopped(
     """A container removed between listing and stopping is the goal state, not an error."""
     live = {SPEC.world}
 
-    def fake_run(cmd: list[str], cwd=None):
+    def fake_run(cmd: list[str], cwd=None, timeout: float | None = None):
         if cmd[:4] == ["docker", "compose", "config", "--format"]:
             return _completed(stdout='{"name": "' + PROJECT + '"}')
         if cmd[:2] == ["docker", "inspect"]:
@@ -722,7 +742,9 @@ def test_pin_project_name_never_truncates_the_env_on_a_write_failure(
     env = tmp_path / ".env"
     env.write_text("DB_ROOT_PASSWORD=hunter2\n", encoding="utf-8", newline="\n")
     monkeypatch.setattr(
-        docker.runner, "run", lambda cmd, cwd=None: _completed(stdout='{"name": "srv"}')
+        docker.runner,
+        "run",
+        lambda cmd, cwd=None, timeout=None: _completed(stdout='{"name": "srv"}'),
     )
 
     def boom(*_args, **_kwargs):
@@ -741,7 +763,9 @@ def test_pin_project_name_leaves_non_utf8_bytes_alone(
     odd = b"DB_ROOT_PASSWORD=caf\xe9\n"
     env.write_bytes(odd)
     monkeypatch.setattr(
-        docker.runner, "run", lambda cmd, cwd=None: _completed(stdout='{"name": "srv"}')
+        docker.runner,
+        "run",
+        lambda cmd, cwd=None, timeout=None: _completed(stdout='{"name": "srv"}'),
     )
     docker.pin_project_name(tmp_path)
     assert env.read_bytes().startswith(odd), "the original bytes were altered"
@@ -764,7 +788,7 @@ def test_stop_staged_reads_the_pin_when_compose_cannot_be_parsed(
     calls: list[list[str]] = []
     live = {SPEC.db, SPEC.auth, SPEC.world}
 
-    def fake_run(cmd: list[str], cwd=None):
+    def fake_run(cmd: list[str], cwd=None, timeout: float | None = None):
         calls.append(cmd)
         if cmd[:4] == ["docker", "compose", "config", "--format"]:
             return _completed(returncode=1, stderr="no configuration file provided")
@@ -797,7 +821,7 @@ def test_stop_staged_says_so_rather_than_claiming_a_stop_it_cannot_verify(
     leave the UI reporting a stopped server while it is still up.
     """
 
-    def fake_run(cmd: list[str], cwd=None):
+    def fake_run(cmd: list[str], cwd=None, timeout: float | None = None):
         if cmd[:4] == ["docker", "compose", "config", "--format"]:
             return _completed(returncode=1, stderr="no configuration file provided")
         if cmd[:3] == ["docker", "compose", "stop"]:
@@ -837,7 +861,7 @@ def test_stop_staged_reports_rather_than_guesses_when_a_moved_install_was_never_
     calls: list[list[str]] = []
     live = {SPEC.db, SPEC.auth, SPEC.world}
 
-    def fake_run(cmd: list[str], cwd=None):
+    def fake_run(cmd: list[str], cwd=None, timeout: float | None = None):
         calls.append(cmd)
         if cmd[:4] == ["docker", "compose", "config", "--format"]:
             return _completed(stdout='{"name": "renamed-by-the-user"}')
@@ -871,7 +895,7 @@ def test_stop_staged_stops_a_moved_install_that_WAS_pinned(
     calls: list[list[str]] = []
     live = {SPEC.db, SPEC.auth, SPEC.world}
 
-    def fake_run(cmd: list[str], cwd=None):
+    def fake_run(cmd: list[str], cwd=None, timeout: float | None = None):
         calls.append(cmd)
         if cmd[:4] == ["docker", "compose", "config", "--format"]:
             return _completed(stdout='{"name": "renamed-by-the-user"}')
@@ -904,7 +928,7 @@ def test_install_project_prefers_the_pin_over_the_directory(
     monkeypatch.setattr(
         docker.runner,
         "run",
-        lambda cmd, cwd=None: _completed(stdout='{"name": "just-the-folder-name"}'),
+        lambda cmd, cwd=None, timeout=None: _completed(stdout='{"name": "just-the-folder-name"}'),
     )
     assert docker.install_project(SPEC, tmp_path) == "pinned-name"
 
@@ -915,7 +939,7 @@ def test_a_stop_cannot_be_confirmed_when_docker_will_not_answer(
     """An unanswerable verification is not a pass — the premise is verify, don't believe."""
     (tmp_path / ".env").write_text("COMPOSE_PROJECT_NAME=proj\n", encoding="utf-8", newline="\n")
 
-    def fake_run(cmd: list[str], cwd=None):
+    def fake_run(cmd: list[str], cwd=None, timeout: float | None = None):
         if cmd[:2] == ["docker", "ps"]:
             return _completed(returncode=1, stderr="Cannot connect to the Docker daemon")
         if cmd[:2] == ["docker", "inspect"]:
@@ -1048,7 +1072,7 @@ def test_refusing_without_an_identity_does_not_read_a_failed_ps_as_empty(
     monkeypatch.setattr(
         docker.runner,
         "run",
-        lambda cmd, cwd=None: _completed(
+        lambda cmd, cwd=None, timeout=None: _completed(
             returncode=1, stderr="permission denied while trying to connect"
         ),
     )
@@ -1083,7 +1107,7 @@ def test_wait_ready_is_not_fooled_by_a_container_in_restart_backoff(
     """
     monkeypatch.setattr(docker.time, "sleep", lambda _seconds: None)
 
-    def fake_run(cmd: list[str], cwd: Path | None = None):
+    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
         if cmd[:2] == ["docker", "ps"]:
             return _completed(stdout=f"{SPEC.auth}\n{SPEC.world}\n")
         if cmd[:2] == ["docker", "inspect"]:
