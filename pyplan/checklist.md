@@ -78,6 +78,7 @@
 - [x] 6.1 Honest platform gating — `install.platforms` is data in `catalog.json` (all four entries `["linux"]`), `Installer.preflight()` raises `UnsupportedPlatformError` with a user-readable message BEFORE any subprocess, the catalog tile disables Install with the reason on the tile ("Use existing…" stays enabled — managing a server works everywhere), `start_install()` refuses before the folder prompts, and a failed script's dialog now carries the script's own last 12 output lines ("It last said: …") instead of a bare exit status. Mocked through the `platform_id` seam per roadmap 6.4; 196 tests green.
 - [ ] Rewrite the installer scripts off `pacman`/`systemctl`/`sudo` — the orphaned "update scripts and manifests to use proper systems and features" step, re-homed as a checkbox: it is subsumed by 6.2/6.3's native engine, and closes when WotLK installs without a shell script on macOS and Windows.
 - [ ] 6.1.5 Interactive input handling — the in-app terminal pauses on a subprocess that blocks on stdin (the canonical case is the Linux installer's `sudo` prompt during `pacman`/`systemctl`) and shows a prompt dialog, forwarding the typed value back to stdin and resuming the stream instead of deadlocking or failing "no tty"; `runner.py` owns the stdin write, the view only drives it via call-down/signal-up; verified on Linux (real `sudo`) and against the macOS/Windows variants' own prompts through the shared path.
+- [ ] **Privilege transparency (binding across every install path)** — no silent host privilege escalation, carried from the first-generation `install-*.sh` finding into the native engine: never write a `sudoers.d`/`NOPASSWD` docker rule (redundant beside the group, pure attack surface), never `chmod 666` the docker socket, and never `usermod -aG docker` without an explicit opt-in that states the group is root-equivalent (the `-v /:/mnt` container-mount example). Applies to `ensure_docker()` provisioning, the Linux bash scripts (bugfix-only), and the 6.2/6.3 native engine; tested structurally via the argv-parse seam and surfaced in the 6.5 install gate.
 - [ ] 6.2 macOS install path — the shared **native install engine** (`NativeInstaller`, per `phase6-decisions.md`): `install.platforms`/`install.script_platforms` dispatch, compose three-file generation + `.env` merge, preflight (refuse-don't-warn floors, bind-mount probe, `server_dir_problem()`, port-conflict before build), staged/resumable install, `keep_awake()`, readiness poll — all against Docker Desktop, no `pacman`/`systemctl`/`sudo`, no manual VM management (macOS has no Rust prior art; written fresh)
 - [ ] 6.3 Native Windows install path — same native engine against Docker Desktop's **WSL2 backend** (no bespoke WSL2/VM manager; `[blocked]` on 6.2); requires the three Windows provisioning defects in Cross-cutting fixed first (TLS cert, `Start-Process` path, PATH not re-read), plus `docker.exe`/`git` discovery, `autocrlf`+`HTTP/1.1`, path canonicalization, CR-strip across `wsl.exe`, and the nested-virtualization gate — proven on a clean box
 - [ ] 6.4 Tests & gates (mocked platform-gating + script-resolution tests; live-gate on real macOS and Windows 11 — WotLK only)
@@ -182,6 +183,19 @@
   Smaller, same pass: the dry-run plan at `:602` omits the download step it will actually perform; a `U+2192`
   arrow in log output crashes on the cp1252 console (`:605`, `:670`, and 13 sites in `apply.py`); and the
   629 MB installer is re-downloaded unconditionally with no resume or cache.
+
+- **No silent `sudo`/docker-group escalation — the principle the native engine inherits (2026-08-22).**
+  The original `install-*.sh` installers had `enable_docker_sudo_wrapper()` doing two unheralded
+  host changes: `usermod -aG docker "$USER"` and a write of `/etc/sudoers.d/docker-nopasswd`
+  (`NOPASSWD: /usr/bin/docker`, chmod 0440), the latter behind `|| true` so it could fail silently.
+  Two facts are now binding on all install paths: (1) docker-group membership **is** root —
+  `docker run -v /:/mnt --rm -it alpine chroot /mnt sh` edits any host file, no boundary; (2) the
+  `NOPASSWD` rule is therefore redundant attack surface and is **removed**, not worked around.
+  MapleStory and Mu Online additionally ran `chmod 666 /var/run/docker.sock` (socket open to every
+  local user) — also removed. Rule going forward: join the group only with explicit consent plus a
+  root-equivalence warning; never write `sudoers.d`/`NOPASSWD` docker rules; never `chmod 666` the
+  socket. Enforced structurally via the argv-parse seam so the native engine and `ensure_docker()`
+  cannot reintroduce it.
 
 - **First launch of Docker Desktop is gated behind modal dialogs — a headless start waits forever.** The
   installer was run with `--accept-license` and Docker Desktop *still* showed license acceptance and an
