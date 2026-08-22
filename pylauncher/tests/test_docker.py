@@ -1158,3 +1158,48 @@ def test_wait_ready_is_not_fooled_by_a_container_in_restart_backoff(
         docker.wait_ready(SPEC.auth, SPEC.world, "127.0.0.1", 8085, timeout=0.3, interval=0.1)
         is False
     )
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("alpha", "alpha"),
+        # An inline comment is not part of the value. Measured against the real
+        # CLI: `COMPOSE_PROJECT_NAME=alpha # my realm` is project `alpha`, and
+        # reading it as `alpha # my realm` made Yu'lon believe in a project no
+        # container carries — a live server reported down and unstoppable. The
+        # app's own refusal text invites exactly this, by telling the user to
+        # add a line to `.env` (review, 2026-08-22).
+        ("alpha # my realm", "alpha"),
+        # No space before the `#`. Implementations differ here, and it cannot
+        # matter: compose project names are `[a-z0-9][a-z0-9_-]*`, so either
+        # reading of `alpha#x` is an impossible name. Stripping is the reading
+        # that still finds the containers.
+        ("alpha#no-space", "alpha"),
+        ("'eps' # hi", "eps"),
+        ('"a#b" # c', "a#b"),  # a `#` inside quotes is part of the value
+        ('"has space"', "has space"),
+        ("  spaced  ", "spaced"),
+        ('"unterminated', "unterminated"),
+        ("", ""),
+        ("#", ""),
+    ],
+)
+def test_env_values_are_read_the_way_compose_reads_them(raw: str, expected: str) -> None:
+    """This parsing decides which containers the app believes are its own."""
+    assert docker._env_value(raw) == expected
+
+
+def test_an_empty_last_assignment_unsets_the_pin(tmp_path: Path) -> None:
+    """Compose falls back to the basename; leaving the earlier value standing would not.
+
+    `found = value or found` kept the first line's value alive, so the app and
+    compose disagreed about the project with nothing on screen to say so
+    (review, 2026-08-22).
+    """
+    (tmp_path / ".env").write_text(
+        "COMPOSE_PROJECT_NAME=alpha" + chr(10) + "COMPOSE_PROJECT_NAME=" + chr(10),
+        encoding="utf-8",
+        newline=chr(10),
+    )
+    assert docker.pinned_project_name(tmp_path) is None
