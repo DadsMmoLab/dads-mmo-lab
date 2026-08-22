@@ -26,6 +26,7 @@ class _FakeInstaller(Installer):
         self.lines = lines
         self.ran_with: list[InstallOptions] = []
         self.cancels: list[threading.Event | None] = []
+        self.asks: list[object] = []
 
     def preflight(self, options: InstallOptions) -> None:
         if self.entry.install.requires_client_dir and options.client_dir is None:
@@ -36,9 +37,11 @@ class _FakeInstaller(Installer):
         options: InstallOptions | None = None,
         *,
         cancel: threading.Event | None = None,
+        ask: object = None,
     ) -> Iterator[str]:
         self.ran_with.append(options or InstallOptions())
         self.cancels.append(cancel)
+        self.asks.append(ask)
         yield from self.lines
 
 

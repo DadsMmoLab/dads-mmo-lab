@@ -154,6 +154,12 @@ def run(
 # codes stripped, returns the text to send to stdin (without newline) or None.
 Responder = Callable[[str], str | None]
 
+# Asked only when a prompt is genuinely blocking and no rule answered it: the
+# child has printed something with no trailing newline and then gone quiet,
+# which is what "waiting for you to type" looks like from outside. Returning
+# None means "I cannot answer this either", and the caller is left to cancel.
+Prompter = Callable[[str], str | None]
+
 _ANSI = re.compile(r"\[[0-9;?]*[ -/]*[@-~]")
 
 # How long a partial line must sit unchanged before it is treated as a prompt.
@@ -170,6 +176,7 @@ def interact(
     cwd: Path | None = None,
     *,
     respond: Responder,
+    ask: Prompter | None = None,
     env: Mapping[str, str] | None = None,
     quiet_seconds: float = _PROMPT_QUIET_SECONDS,
     cancel: threading.Event | None = None,
@@ -186,6 +193,16 @@ def interact(
     it. `respond()` also sees every complete line. Whenever it returns a
     string, that string plus a newline is written to the child's stdin. Lines
     are yielded raw (with colour codes); `respond()` receives them stripped.
+
+    `ask` is the escape hatch for a prompt no rule can answer, and the reason
+    installs on Linux used to die: the scripts run `sudo`, whose password prompt
+    is a partial line no `respond()` rule can possibly know the answer to. With
+    no `ask`, that prompt is asked about once and then abandoned — the child sits
+    on it until something cancels, which reads to the user as a freeze. With one,
+    the caller (in practice the UI) can put the question to the person sitting
+    there and hand the answer back. It is called ONLY for a quiet partial line,
+    i.e. only when the child is genuinely blocked on input, never for ordinary
+    output that happens to look like a question.
 
     Raises `subprocess.CalledProcessError` on non-zero exit, like `stream()`.
     If the generator is abandoned early the child is terminated (then killed)
@@ -222,8 +239,11 @@ def interact(
     buffer = ""
     answered_partial = False
 
-    def _answer(text: str) -> bool:
-        reply = respond(strip_ansi(text))
+    def _answer(text: str, *, may_ask: bool = False) -> bool:
+        clean = strip_ansi(text)
+        reply = respond(clean)
+        if reply is None and may_ask and ask is not None:
+            reply = ask(clean)
         if reply is None:
             return False
         try:
@@ -245,7 +265,7 @@ def interact(
                 data = chunks.get(timeout=quiet_seconds)
             except queue.Empty:
                 # A quiet partial line is a prompt waiting for input.
-                if buffer and not answered_partial and _answer(buffer):
+                if buffer and not answered_partial and _answer(buffer, may_ask=True):
                     yield buffer
                     buffer = ""
                     answered_partial = False

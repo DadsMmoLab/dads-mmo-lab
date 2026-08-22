@@ -300,8 +300,16 @@ class Installer:
         options: InstallOptions | None = None,
         *,
         cancel: threading.Event | None = None,
+        ask: runner.Prompter | None = None,
     ) -> Iterator[str]:
         """Run the install, yielding output lines live; answers prompts itself.
+
+        `ask` is consulted only for a prompt that has gone quiet and that no
+        rule in `PROMPT_RULES` can answer. In practice that means one thing:
+        `sudo` asking for a password during the distro package steps. No rule
+        can ever know it, so without `ask` the script stops there and the app
+        looks frozen — which is exactly what installing on Linux did. Passing a
+        prompter lets the UI put the question to the person at the keyboard.
 
         Raises `InstallerError` if the script exits non-zero (after yielding
         everything it printed), or any `preflight()` error before it starts.
@@ -316,6 +324,7 @@ class Installer:
                 ["bash", str(self.script)],
                 cwd=self.script.parent,
                 respond=make_responder(opts),
+                ask=ask,
                 env=self.script_env(),
                 cancel=cancel,
             ):

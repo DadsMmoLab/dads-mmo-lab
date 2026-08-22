@@ -37,6 +37,7 @@ from yulon.catalog.installer import (
 )
 from yulon.log import get_logger
 from yulon.ui.widgets.log_panel import LogPanel
+from yulon.ui.widgets.prompt import InputPrompter
 
 logger = get_logger(__name__)
 
@@ -230,8 +231,13 @@ class CatalogView(QWidget):
         cancel = threading.Event()
         self._current = (entry.id, server_dir, client_dir)
         self._set_buttons_enabled(False)
+        # Held on self, not in a local: PySide6 keeps bound-method slots by weak
+        # reference, so a prompter owned only by this frame would be collected
+        # and its dialog would never appear.
+        self._prompter = InputPrompter(self)
+        self._prompter.bind_cancel(cancel)
         started = self._log.run(
-            lambda: installer.run(options, cancel=cancel),
+            lambda: installer.run(options, cancel=cancel, ask=self._prompter.ask),
             title=f"Installing {entry.name}",
             cancel=cancel,
         )
