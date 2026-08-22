@@ -95,6 +95,8 @@ chmod +x ~/Downloads/install-wow-wotlk-ubuntu.sh
 
 The script will ask you a few setup questions in the terminal — read each one, type your answer, and press **Enter**. After that, it runs unattended for 2-4 hours while it compiles everything.
 
+> 🔐 **Heads-up about `sudo` and the docker group** — the installer asks for your password so it can install Docker and add your user account to the `docker` group. Membership in the `docker` group is a big deal: it is **effectively the same as full root (administrator) access** on your machine, because a docker user can mount your whole disk into a container and change any file. The installer now **asks for your permission before making this change** and does **not** create any passwordless `sudo` rules on its own. For a personal, offline game server on your own device this is the standard, documented approach — but it's a real privilege change, so you should know it's happening. If you prefer to keep your machine locked down, decline the prompt and you can still run every `docker` command by typing `sudo docker` instead.
+
 ---
 
 ## What Happens During Install

@@ -237,6 +237,8 @@ Every WoW installer:
 - ✅ Populates the world with bots
 - ✅ Builds a Gaming Mode launcher
 
+> 🔐 **About `sudo` and the docker group** — the installers need root once to install Docker and add your user to the `docker` group so you can run `docker` without typing `sudo` every time. This is a **root-equivalent privilege change** (a docker group member can mount the host filesystem into a container), so the installers **ask for your consent first** and deliberately do **not** drop any passwordless `sudo` rules into `/etc/sudoers.d`. Decline if you want to keep the machine locked down — you can still run every command with `sudo docker`.
+
 **New to Linux?** Read the HOWTO guide for your game first — every step explained in plain English, zero assumed knowledge.
 
 ---

@@ -121,7 +121,7 @@
 #      - Heredoc launcher synced with standalone launcher scripts
 # ============================================================
 
-WIZARD_VERSION="1.3.8 - Fedora"
+WIZARD_VERSION="1.3.9 - Fedora"
 
 set -o pipefail
 
@@ -176,12 +176,60 @@ press_enter() {
     read -r
 }
 
+# ─────────────────────────────────────────
+# DOCKER GROUP CONSENT
+# ─────────────────────────────────────────
+# Membership in the docker group is effectively root-equivalent: a member can
+# mount the host filesystem into a container and modify any file. We never
+# make this change silently — warn the user and ask once before joining.
+DOCKER_GROUP_CONSENT_DONE=0
+
+docker_group_consent() {
+    # Ask at most once per run.
+    if [[ "$DOCKER_GROUP_CONSENT_DONE" == "1" ]]; then
+        return 0
+    fi
+
+    # Already an active member of the docker group — nothing to change.
+    if id -nG "$USER" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+        DOCKER_GROUP_CONSENT_DONE=1
+        return 0
+    fi
+
+    echo ""
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${WHITE}${BOLD} ⚠️  Docker Group Membership — Please Read${NC}"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "  To let you run ${CYAN}docker${NC} without typing ${CYAN}sudo${NC} each time,"
+    echo -e "  the installer can add your user to the ${WHITE}docker${NC} group."
+    echo ""
+    echo -e "  ${RED}${BOLD}Heads up:${NC} membership in the docker group is effectively"
+    echo -e "  equivalent to full root access on this machine. A docker"
+    echo -e "  user can, for example, mount your entire disk inside a"
+    echo -e "  container and modify any file."
+    echo ""
+    echo -e "  For a personal, offline game server on your own device this"
+    echo -e "  is the standard, documented approach — but if you keep this"
+    echo -e "  machine locked down, you can skip it and run docker with"
+    echo -e "  ${CYAN}sudo${NC} instead."
+    echo ""
+    echo -e "  ${WHITE}This installer does NOT create any passwordless sudo rules.${NC}"
+    echo ""
+    if ! ask_yes_no "Add '$USER' to the docker group (grants root-equivalent access)?"; then
+        echo ""
+        print_warning "Skipped docker group membership."
+        print_info "You'll need to prefix docker commands with 'sudo'."
+        DOCKER_GROUP_CONSENT_DONE=1
+        return 1
+    fi
+    DOCKER_GROUP_CONSENT_DONE=1
+    return 0
+}
+
 enable_docker_sudo_wrapper() {
     if [[ -n "${USER:-}" ]]; then
-        sudo usermod -aG docker "$USER" 2>/dev/null || true
-        echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/docker" | \
-            sudo tee /etc/sudoers.d/docker-nopasswd > /dev/null 2>&1 || true
-        sudo chmod 0440 /etc/sudoers.d/docker-nopasswd 2>/dev/null || true
+        docker_group_consent && sudo usermod -aG docker "$USER" 2>/dev/null || true
     fi
     function docker() { sudo docker "$@"; }
     export -f docker 2>/dev/null || true
@@ -567,20 +615,12 @@ install_docker() {
             # Daemon is up — check compose separately so we can handle each case
             if sudo docker compose version &>/dev/null 2>&1; then
                 print_success "Docker is running on this immutable system."
-                sudo usermod -aG docker "$USER" 2>/dev/null || true
+                docker_group_consent && sudo usermod -aG docker "$USER" 2>/dev/null || true
 
                 # ── Session fix: group change won't take effect until next login.
-                #    Set up passwordless sudo for docker so the rest of this install
-                #    session works transparently. User can remove the file after
-                #    their first logout:  sudo rm /etc/sudoers.d/docker-nopasswd
-                print_info "Setting up Docker permissions for this session..."
-                if [[ -n "$USER" ]]; then
-                    echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/docker" | \
-                        sudo tee /etc/sudoers.d/docker-nopasswd > /dev/null 2>&1 || true
-                    sudo chmod 0440 /etc/sudoers.d/docker-nopasswd 2>/dev/null || true
-                else
-                    print_warning "Could not determine current user — skipping sudoers entry. Docker may require a logout to work without sudo."
-                fi
+                #    No sudoers rule is written. This session runs via the sudo
+                #    wrapper below; after the first logout the docker group
+                #    membership alone provides passwordless `docker`.
                 if ! docker ps &>/dev/null 2>&1; then
                     enable_docker_sudo_wrapper
                 fi
@@ -743,7 +783,7 @@ install_docker() {
         fi
     fi
 
-    sudo usermod -aG docker "$USER"
+    docker_group_consent && sudo usermod -aG docker "$USER" 2>/dev/null || true
     sleep 2
 
     sudo systemctl daemon-reload 2>/dev/null || \
@@ -758,16 +798,11 @@ install_docker() {
 
     sleep 3
 
-    # Add passwordless sudo for docker so it works immediately
-    # without requiring logout — fixes "permission denied" on docker socket
-    print_info "Setting up Docker permissions..."
-    if [[ -n "$USER" ]]; then
-        echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/docker" | \
-            sudo tee /etc/sudoers.d/docker-nopasswd > /dev/null 2>&1 || true
-        sudo chmod 0440 /etc/sudoers.d/docker-nopasswd 2>/dev/null || true
-    else
-        print_warning "Could not determine current user — skipping sudoers entry. Docker may require a logout to work without sudo."
-    fi
+    # docker group membership is enough for a passwordless 'docker' once the
+    # group activates at next login. We intentionally do NOT write any
+    # /etc/sudoers.d NOPASSWD rule — the docker group already grants
+    # root-equivalent access, so a sudoers rule only adds attack surface.
+    print_info "Docker permissions configured (docker group membership only)."
 
     # If docker still not accessible without sudo — wrap it
     if ! docker ps &>/dev/null 2>&1; then
