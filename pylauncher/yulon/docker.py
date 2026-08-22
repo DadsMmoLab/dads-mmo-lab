@@ -24,7 +24,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from yulon import runner
+from yulon import platform, runner
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -70,9 +70,55 @@ class ContainerSpec:
         return self.services or (self.db, self.auth, self.world)
 
 
+_CLI_MISSING_RETURNCODE = 127
+"""What a shell reports for "command not found", and what `_docker()` returns.
+
+Borrowed rather than invented so the value means something to anyone reading a
+log: no docker command can exit 127 itself, and every caller here already
+branches on `returncode != 0`.
+"""
+
+
+def _docker(
+    argv: list[str], cwd: Path | None = None, timeout: float | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run `docker <argv...>` under whatever name this host can actually start it.
+
+    The single place this module names the CLI. `platform.docker_program()`
+    exists because a Windows process cannot see the PATH entry Docker Desktop's
+    installer just wrote, so the run that provisions Docker is exactly the run
+    that must not spell the command `docker` and hope (see there).
+
+    A host with no docker CLI at all comes back as a non-zero
+    `CompletedProcess` carrying `DOCKER_CLI_MISSING_HELP` in `stderr`, not as an
+    exception — the same shape `runner.run()` gives a timeout, and for the same
+    reason: `health()` answers `"unknown"`, `container_state()` answers empty
+    and `_status_safe()` swallows-and-retries, and every one of those degraded
+    answers is right for "docker is missing" too. Raising instead would take a
+    polling loop off the GUI thread's rails to say something its caller already
+    knows how to report.
+
+    `OSError` is caught for the one case resolution cannot cover: Docker
+    uninstalled while the launcher is open, leaving `docker_program()`'s pinned
+    path aimed at a file that is gone. The user hears "Docker could not be
+    found", which is true.
+    """
+    program = platform.docker_program()
+    if program is not None:
+        try:
+            return runner.run([program, *argv], cwd=cwd, timeout=timeout)
+        except OSError as exc:
+            logger.warning(f"{program} could not be started: {exc}")
+    else:
+        logger.warning(f"no docker CLI on this host; refusing to run: docker {' '.join(argv)}")
+    return subprocess.CompletedProcess(
+        ["docker", *argv], _CLI_MISSING_RETURNCODE, "", platform.DOCKER_CLI_MISSING_HELP
+    )
+
+
 def _run(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     """Run `docker <argv...>`; raise `DockerCommandError` on non-zero exit."""
-    proc = runner.run(["docker", *argv], cwd=cwd)
+    proc = _docker(argv, cwd=cwd)
     if proc.returncode != 0:
         raise DockerCommandError(
             f"docker {' '.join(argv)} exited {proc.returncode}: {proc.stderr.strip()}"
@@ -111,8 +157,8 @@ def compose_project_name(server_dir: Path) -> str | None:
     # that lives on a sleeping NAS or behind a stalled docker CLI. Failing to
     # name the project is already a handled outcome; freezing the window is not
     # (review, 2026-08-22).
-    proc = runner.run(
-        ["docker", "compose", "config", "--format", "json"],
+    proc = _docker(
+        ["compose", "config", "--format", "json"],
         cwd=server_dir,
         timeout=_COMPOSE_CONFIG_TIMEOUT_SECONDS,
     )
@@ -280,7 +326,7 @@ def container_project(container: str) -> str | None:
     be asked at all.
     """
     fmt = '{{index .Config.Labels "' + PROJECT_LABEL + '"}}'
-    proc = runner.run(["docker", "inspect", container, "--format", fmt])
+    proc = _docker(["inspect", container, "--format", fmt])
     if proc.returncode != 0:
         logger.warning(f"could not read the compose project of {container}: {proc.stderr.strip()}")
         return UNREADABLE
@@ -481,7 +527,7 @@ def _run_docker_stop(container: str) -> None:
     A container that has vanished since it was listed is not an error: the goal
     state is "not running", and it is already there.
     """
-    proc = runner.run(["docker", "stop", container])
+    proc = _docker(["stop", container])
     if proc.returncode == 0:
         return
     if "No such container" in proc.stderr:
@@ -689,7 +735,7 @@ def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
     # are services too — and an install interrupted during the multi-GB client
     # data download leaves one of those running. Skipping the command told the
     # user "nothing was running" while the download carried on (review).
-    proc = runner.run(["docker", "compose", "stop"], cwd=server_dir)
+    proc = _docker(["compose", "stop"], cwd=server_dir)
     if proc.returncode != 0:
         logger.warning(f"compose stop failed ({proc.stderr.strip()}); stopping containers by name")
     if not before.ours:
@@ -768,7 +814,7 @@ def health(container: str) -> str:
     Mirrors `dml-start.sh`'s `... || echo unknown`.
     """
     logger.debug(f"health() called: container={container}")
-    proc = runner.run(["docker", "inspect", container, "--format", "{{.State.Health.Status}}"])
+    proc = _docker(["inspect", container, "--format", "{{.State.Health.Status}}"])
     if proc.returncode != 0 or not proc.stdout.strip():
         return "unknown"
     return proc.stdout.strip()
@@ -805,7 +851,7 @@ def container_state(container: str) -> ContainerState:
     names (review, 2026-08-22).
     """
     fmt = "{{.State.Status}}\t{{.State.StartedAt}}"
-    proc = runner.run(["docker", "inspect", container, "--format", fmt])
+    proc = _docker(["inspect", container, "--format", fmt])
     if proc.returncode != 0:
         logger.warning(f"could not read the state of {container}: {proc.stderr.strip()}")
         return ContainerState()
@@ -836,14 +882,14 @@ def _logs(container: str, *, this_run_only: bool = False, since: str = "") -> st
     started. `--tail` is not an alternative: the marker is printed once, so a
     tail window either misses it or slides past it.
     """
-    argv = ["docker", "logs"]
+    argv = ["logs"]
     if this_run_only:
         # The caller may already have the start time from the state read it
         # had to do anyway; asking again is a second `docker inspect`.
         since = since or started_at(container)
         if since:
             argv += ["--since", since]
-    proc = runner.run([*argv, container])
+    proc = _docker([*argv, container])
     if proc.returncode != 0:
         # Silently returning "" turned a rejected --since, a container removed
         # mid-wait, or an unreadable log driver into eight minutes of "starting"
@@ -1012,6 +1058,16 @@ def follow_logs(container: str, tail: int = 200) -> Iterator[str]:
 
     Lives here so no `ui/` module ever builds a docker argv itself
     (style-guide §3; review finding, 2026-08-21).
+
+    The one site in this module that raises rather than returning a failed
+    `CompletedProcess`: `runner.stream()` yields lines, so there is no exit
+    status to hand back. `LogPanel`'s worker catches everything the source
+    raises and shows it as `"<type>: <message>"`, so a missing CLI reads as
+    "DockerCommandError: Docker could not be found on this machine..." in the
+    panel — where the unresolved name used to surface a bare WinError 2.
     """
     logger.debug(f"follow_logs() called: container={container} tail={tail}")
-    yield from runner.stream(["docker", "logs", "-f", "--tail", str(tail), container])
+    program = platform.docker_program()
+    if program is None:
+        raise DockerCommandError(platform.DOCKER_CLI_MISSING_HELP)
+    yield from runner.stream([program, "logs", "-f", "--tail", str(tail), container])

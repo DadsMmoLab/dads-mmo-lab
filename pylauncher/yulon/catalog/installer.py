@@ -243,12 +243,13 @@ NO_BASH_HELP = (
 # WSL2 backend rather than running the bash script in a distro.
 
 
-def docker_available() -> bool:
-    """True if `docker info` succeeds; False if the binary or daemon is missing."""
-    try:
-        return runner.run(["docker", "info"]).returncode == 0
-    except OSError:
-        return False
+# `docker_available()` used to live here as `runner.run(["docker", "info"])`,
+# which is `platform.docker_ready()` written a second time (style-guide §4) —
+# and the copy that never learned about `docker_programs()`. Deleting it rather
+# than fixing it is what stops the pair drifting again: the preflight gate and
+# the provisioning probe now agree by construction, so an install can no longer
+# be refused with "Docker is not running" on a Windows box where
+# `ensure_docker()` had just proved that it is.
 
 
 class Installer:
@@ -263,7 +264,7 @@ class Installer:
         entry: CatalogEntry,
         *,
         installers_root: Path = DEFAULT_INSTALLERS_ROOT,
-        docker_check: Callable[[], bool] = docker_available,
+        docker_check: Callable[[], bool] = platform.docker_ready,
         ensure_docker: Callable[..., platform.ProvisionReport] = platform.ensure_docker,
         interact: Callable[..., Iterator[str]] = runner.interact,
         env: Mapping[str, str] | None = None,

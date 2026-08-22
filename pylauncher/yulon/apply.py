@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Protocol
 
+from yulon import platform
 from yulon.git import CloneSpec, Git, GitError, RunnerGit
 from yulon.log import get_logger
 from yulon.manifest import Db, Deploy, Manifest, ManifestType, Patch, SqlStep, When
@@ -118,8 +119,19 @@ class DockerSql:
         return env
 
     def _argv(self, db: Db) -> list[str]:
+        """`docker exec ... mysql <db>`, with the CLI name this host can start.
+
+        Raises:
+            ApplyError: no docker CLI here. A manifest apply runs straight
+                after an install, on the same process that may still be blind
+                to the PATH Docker Desktop's installer wrote — see
+                `platform.docker_program()`.
+        """
+        program = platform.docker_program()
+        if program is None:
+            raise ApplyError(platform.DOCKER_CLI_MISSING_HELP)
         return [
-            "docker",
+            program,
             "exec",
             "-i",
             "-e",

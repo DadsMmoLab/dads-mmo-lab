@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from yulon import apply as apply_module
 from yulon.apply import Applier, ApplyError, DockerSql, _set_conf_key
 from yulon.git import CloneSpec, RunnerGit
 from yulon.manifest import parse_manifest
@@ -399,3 +400,41 @@ def test_generated_files_are_lf_even_on_windows(tmp_path: Path) -> None:
     fresh.write_text("", encoding="utf-8")
     _set_conf_key(fresh, "First.Key", "1")
     assert fresh.read_bytes() == b"First.Key = 1\n"
+
+
+# --------------------------------------------------------- naming the docker CLI
+# A manifest apply runs straight after an install, in the same process that may
+# still be blind to the PATH Docker Desktop's installer wrote (see
+# `platform.docker_program()`). `docker exec` here had the same hardcoded name
+# as everything else.
+
+OFF_PATH_EXE = r"C:\Users\pk\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
+
+
+def test_docker_sql_execs_through_the_cli_this_host_can_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess
+
+    monkeypatch.setattr(apply_module.platform, "_resolved_docker_cli", OFF_PATH_EXE)
+    seen: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    DockerSql("ac-database", "hunter2").run_statement("characters", "SELECT 1")
+    assert seen[0][0] == OFF_PATH_EXE
+    assert seen[0][1:3] == ["exec", "-i"], "only argv[0] moved"
+
+
+def test_docker_sql_without_any_docker_raises_apply_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An `ApplyError` naming Docker, not a `FileNotFoundError` from `subprocess.run`."""
+    monkeypatch.setattr(apply_module.platform, "_resolved_docker_cli", None)
+    monkeypatch.setattr(apply_module.platform, "docker_programs", lambda: ("docker",))
+    monkeypatch.setattr(apply_module.platform, "_which", lambda name, path=None: None)
+    with pytest.raises(ApplyError, match="Docker could not be found"):
+        DockerSql("ac-database", "hunter2").run_statement("characters", "SELECT 1")

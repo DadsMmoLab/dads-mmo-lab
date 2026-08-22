@@ -241,3 +241,36 @@ def test_container_git_reports_a_failure_as_a_git_error(
         git.ContainerGit().clone(
             git.CloneSpec(url="https://example/core.git", dest=tmp_path / "core")
         )
+
+
+# --------------------------------------------------------- naming the docker CLI
+# `ContainerGit` exists precisely because Windows and macOS already have Docker
+# Desktop, which makes it the git that runs on the machine whose PATH does not
+# yet mention docker: the first clone of a first install, minutes after
+# `ensure_docker()` put Docker there. Hardcoding `docker` here made that clone
+# the very next thing to fail after provisioning was fixed.
+
+OFF_PATH_EXE = r"C:\Users\pk\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
+
+
+def test_container_git_runs_the_docker_this_host_can_start(
+    seen: list[list[str]], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(git.platform, "_resolved_docker_cli", OFF_PATH_EXE)
+    git.ContainerGit().clone(git.CloneSpec(url="https://example/core.git", dest=tmp_path / "core"))
+    assert seen, "nothing ran"
+    assert seen[0][0] == OFF_PATH_EXE
+    assert seen[0][1:3] == ["run", "--rm"], "only argv[0] moved"
+
+
+def test_container_git_without_any_docker_explains_itself(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A `GitError` naming Docker, not a `FileNotFoundError` from `subprocess`."""
+    monkeypatch.setattr(git.platform, "_resolved_docker_cli", None)
+    monkeypatch.setattr(git.platform, "docker_programs", lambda: ("docker",))
+    monkeypatch.setattr(git.platform, "_which", lambda name, path=None: None)
+    with pytest.raises(git.GitError, match="Docker could not be found"):
+        git.ContainerGit().clone(
+            git.CloneSpec(url="https://example/core.git", dest=tmp_path / "core")
+        )

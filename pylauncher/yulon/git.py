@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from yulon import runner
+from yulon import platform, runner
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -282,8 +282,19 @@ class ContainerGit:
             self._run(spec, ["sparse-checkout", "set", "--no-cone", spec.sparse_path.rstrip("/")])
 
     def _run(self, spec: CloneSpec, git_args: list[str]) -> None:
+        """One containerized `git` invocation, or `GitError` if it fails.
+
+        argv[0] comes from `platform.docker_program()` for the reason spelled
+        out there: this class exists *because* Windows and macOS already have
+        Docker Desktop, so it is by definition the git that runs on the machine
+        whose PATH does not yet mention docker — the first clone of a first
+        install, minutes after `ensure_docker()` put it there.
+        """
+        program = platform.docker_program()
+        if program is None:
+            raise GitError(platform.DOCKER_CLI_MISSING_HELP)
         argv = [
-            "docker",
+            program,
             "run",
             "--rm",
             "-v",
