@@ -210,6 +210,42 @@ def container_project(container: str) -> str | None:
     return proc.stdout.strip() or None
 
 
+def install_project(spec: ContainerSpec, server_dir: Path) -> str | None:
+    """This install's compose project, asked of the containers themselves first.
+
+    The directory is the WRONG source of truth here. Compose derives a project
+    from the directory basename, so a folder that has been moved reports a name
+    no existing container carries — and an install created before pinning
+    existed (which is every install in the wild) has no `.env` value to correct
+    it. Comparing the directory's answer against the containers' labels then
+    never matches, `_ours()` finds nothing, and a stop that stopped nothing
+    reports success while players are still connected.
+
+    It is tempting to read the identity off a container's own
+    `com.docker.compose.project` label instead — that is what compose actually
+    stamped, and it would fix the moved install outright. It also breaks the
+    case this whole ownership check exists for: two installs of one game share
+    container NAMES, so a stopped install would adopt the *running* install's
+    project as its own and then stop it. Without a pin the two situations are
+    genuinely indistinguishable from here, so the unresolved case is reported
+    rather than guessed — see `stop_staged()`.
+    """
+    return pinned_project_name(server_dir) or compose_project_name(server_dir)
+
+
+def _named_but_not_ours(spec: ContainerSpec, project: str | None) -> list[str]:
+    """Running containers wearing this install's names but another project's label."""
+    listed = _status_safe()
+    if listed is None:
+        return []
+    running = {line.strip() for line in listed}
+    return [
+        name
+        for name in (spec.world, spec.auth, spec.db)
+        if name in running and container_project(name) != project
+    ]
+
+
 def _ours(spec: ContainerSpec, project: str | None) -> list[str]:
     """This install's containers that are running AND belong to `project`.
 
@@ -228,7 +264,12 @@ def _ours(spec: ContainerSpec, project: str | None) -> list[str]:
     """
     if project is None:
         return []
-    running = {line.strip() for line in _status_safe() or []}
+    listed = _status_safe()
+    if listed is None:
+        raise DockerCommandError(
+            "could not ask Docker what is running, so the stop cannot be confirmed"
+        )
+    running = {line.strip() for line in listed}
     return [
         name
         for name in (spec.world, spec.auth, spec.db)
@@ -372,7 +413,7 @@ def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
             user is told the server is down while players are still connected.
     """
     logger.debug(f"stop_staged() called: server_dir={server_dir}")
-    project = compose_project_name(server_dir) or pinned_project_name(server_dir)
+    project = install_project(spec, server_dir)
     proc = runner.run(["docker", "compose", "stop"], cwd=server_dir)
     stopped_something = proc.returncode == 0
 
@@ -398,6 +439,16 @@ def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
         for name in ordered:
             _run_docker_stop(name)
         stopped_something = True
+
+    strangers = _named_but_not_ours(spec, project)
+    if strangers:
+        raise DockerCommandError(
+            f"containers named {', '.join(strangers)} are running under a different compose "
+            f"project than the install in {server_dir}. Nothing was stopped: this could equally "
+            "be another install of the same game, or this one after its folder was moved, and "
+            "stopping the wrong one would take down a server somebody is playing on. "
+            "Re-attach this install so it records which project is its own."
+        )
 
     lingering = _ours(spec, project)
     if lingering:

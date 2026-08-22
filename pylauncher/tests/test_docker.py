@@ -520,7 +520,8 @@ def test_stop_staged_will_not_stop_a_container_it_cannot_prove_is_its_own(
             owner="somebody-elses-install",
         ),
     )
-    assert docker.stop_staged(SPEC, Path("/tmp/install-b")) is True
+    with pytest.raises(docker.DockerCommandError, match="different compose project"):
+        docker.stop_staged(SPEC, Path("/tmp/install-b"))
     assert not any(cmd[:2] == ["docker", "stop"] for cmd in calls), "stopped a foreign server"
 
 
@@ -707,3 +708,107 @@ def test_pinned_project_name_reads_the_env_without_compose(tmp_path: Path) -> No
     )
     assert docker.pinned_project_name(tmp_path) == "my-server"
     assert docker.pinned_project_name(tmp_path / "nope") is None
+
+
+def test_stop_staged_reports_rather_than_guesses_when_a_moved_install_was_never_pinned(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No pin plus a moved folder is indistinguishable from somebody else's install.
+
+    Compose names a project after the directory basename, so a moved install
+    reports a name none of its containers carry — and an install created before
+    pinning existed has no `.env` value to correct it. From here that looks
+    exactly like a *second* install of the same game whose containers belong to
+    someone else, because the container names are shared.
+
+    Guessing either way is unacceptable: adopt the containers and a stopped
+    install kills a running one; ignore them and the user is told a running
+    server stopped. So it says so, and points at the fix.
+    """
+    calls: list[list[str]] = []
+    live = {SPEC.db, SPEC.auth, SPEC.world}
+
+    def fake_run(cmd: list[str], cwd=None):
+        calls.append(cmd)
+        if cmd[:4] == ["docker", "compose", "config", "--format"]:
+            return _completed(stdout='{"name": "renamed-by-the-user"}')
+        if cmd[:2] == ["docker", "inspect"]:
+            return _completed(stdout="original-name\n")
+        if cmd[:2] == ["docker", "ps"]:
+            return _completed(stdout="".join(n + "\n" for n in sorted(live)))
+        if cmd[:2] == ["docker", "stop"]:
+            live.discard(cmd[2])
+            return _completed()
+        return _completed()
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    with pytest.raises(docker.DockerCommandError, match="different compose project"):
+        docker.stop_staged(SPEC, tmp_path)
+    assert live == {SPEC.db, SPEC.auth, SPEC.world}, "stopped what it could not prove was its own"
+    assert not any(cmd[:2] == ["docker", "stop"] for cmd in calls)
+
+
+def test_stop_staged_stops_a_moved_install_that_WAS_pinned(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The pin is what makes a moved folder unambiguous, and therefore stoppable."""
+    (tmp_path / ".env").write_text(
+        "COMPOSE_PROJECT_NAME=original-name\n", encoding="utf-8", newline="\n"
+    )
+    calls: list[list[str]] = []
+    live = {SPEC.db, SPEC.auth, SPEC.world}
+
+    def fake_run(cmd: list[str], cwd=None):
+        calls.append(cmd)
+        if cmd[:4] == ["docker", "compose", "config", "--format"]:
+            return _completed(stdout='{"name": "renamed-by-the-user"}')
+        if cmd[:2] == ["docker", "inspect"]:
+            return _completed(stdout="original-name\n")
+        if cmd[:2] == ["docker", "ps"]:
+            return _completed(stdout="".join(n + "\n" for n in sorted(live)))
+        if cmd[:2] == ["docker", "stop"]:
+            live.discard(cmd[2])
+            return _completed()
+        return _completed()
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    assert docker.stop_staged(SPEC, tmp_path) is True
+    assert [cmd for cmd in calls if cmd[:2] == ["docker", "stop"]] == [
+        ["docker", "stop", SPEC.world],
+        ["docker", "stop", SPEC.auth],
+        ["docker", "stop", SPEC.db],
+    ]
+    assert live == set()
+
+
+def test_install_project_prefers_the_pin_over_the_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The pin survives the folder moving; the directory basename does not."""
+    (tmp_path / ".env").write_text(
+        "COMPOSE_PROJECT_NAME=pinned-name\n", encoding="utf-8", newline="\n"
+    )
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        lambda cmd, cwd=None: _completed(stdout='{"name": "just-the-folder-name"}'),
+    )
+    assert docker.install_project(SPEC, tmp_path) == "pinned-name"
+
+
+def test_a_stop_cannot_be_confirmed_when_docker_will_not_answer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unanswerable verification is not a pass — the premise is verify, don't believe."""
+    (tmp_path / ".env").write_text("COMPOSE_PROJECT_NAME=proj\n", encoding="utf-8", newline="\n")
+
+    def fake_run(cmd: list[str], cwd=None):
+        if cmd[:2] == ["docker", "ps"]:
+            return _completed(returncode=1, stderr="Cannot connect to the Docker daemon")
+        if cmd[:2] == ["docker", "inspect"]:
+            return _completed(stdout="proj\n")
+        return _completed()
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    with pytest.raises(docker.DockerCommandError, match="cannot be confirmed"):
+        docker.stop_staged(SPEC, tmp_path)
