@@ -183,6 +183,34 @@
   arrow in log output crashes on the cp1252 console (`:605`, `:670`, and 13 sites in `apply.py`); and the
   629 MB installer is re-downloaded unconditionally with no resume or cache.
 
+  **Defects 1 and 3 are fixed and merged (2026-08-23); 2 is in flight.** Caching and resume landed with 1.
+  Two corrections worth keeping, because both invalidate what the brief assumed:
+  - The TLS failure is **not** Docker's CDN. Windows ships a small root set and fetches the rest on demand
+    through CryptoAPI while schannel builds a chain; OpenSSL reads a *snapshot* of that store and never
+    triggers the fetch. `desktop.docker.com` chains to Amazon Root CA 1 (absent), github.com to
+    Sectigo/USERTrust (present) — which is exactly why three hosts verified and one did not. Fixed with two
+    transports, System32 `curl.exe` by absolute path (schannel, so it sees the on-demand roots *and*
+    enterprise MITM roots) and `certifi` as the in-process backstop. Verification is never weakened.
+  - The stale-PATH fix must read **both** registry hives, not `HKLM`. Measured: Docker Desktop had installed
+    to `%LOCALAPPDATA%\Programs\DockerDesktop\resources\bin` and written the **user** PATH; `HKLM` named no
+    docker directory at all, and `C:\Program Files\Docker\Docker\resources\bin` did not exist. Registry
+    before hardcoded paths, since the registry is what the installer actually wrote.
+
+- **The same two blindnesses exist outside `ensure_docker()` — found independently by both fixes, not yet
+  addressed.** This is the honest limit of what the two merged fixes deliver:
+  1. **PATH:** `docker.py` resolves a bare `docker` at 8 call sites (`_run`, `compose_project_name`,
+     `container_project`, `_run_docker_stop`, the `compose stop`, `health`, `container_state`, `_logs`,
+     `follow_logs`), plus `installer.docker_available()` and `console.py`'s `docker attach` argv. So
+     `ensure_docker()` can now *succeed* and the very next `compose up` still fails to find the binary on a
+     fresh Windows box. `installer.py` self-heals (preflight checks `report.docker_ready` first); the
+     controller's start/stop does not, and the console's failure is user-visible as a broken GM console.
+     Route them through the new `docker_programs()`. Note `installer.docker_available()` duplicates
+     `platform.docker_ready()` outright — style-guide §4 — so collapsing them fixes one site for free.
+  2. **TLS:** `platform._http_get_text` (`:261`), `manifest_store.urllib_get` (`:135`) and
+     `update._urllib_get_text` (`:63`) all call `urlopen` with no verified context. `detect_public_ip()` is
+     the worst of the three because it fails *silently* — it returns `None` and the networking report simply
+     tells the user they are offline.
+
 - **First launch of Docker Desktop is gated behind modal dialogs — a headless start waits forever.** The
   installer was run with `--accept-license` and Docker Desktop *still* showed license acceptance and an
   onboarding walkthrough; a human had to click both before the engine would boot. The state lands in
