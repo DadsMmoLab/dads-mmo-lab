@@ -66,6 +66,12 @@ def build_window() -> object:
         entry = catalog.get(game)
         services = ControllerServices.for_wotlk(entry, server_dir, client_dir)
         view = ControllerView(entry, services)
+        # Every failure this view reports also lands in the app log. Each one is
+        # already shown on its own tab, but the log is what a user pastes into a
+        # bug report, and until now none of them reached it (review, 2026-08-22).
+        view.action_failed.connect(
+            lambda message, name=entry.name: logger.warning(f"{name}: {message}")
+        )
         controllers[key] = view
         controller_views.append(view)
         panels.append(view.console_log)

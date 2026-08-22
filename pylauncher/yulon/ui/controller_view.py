@@ -17,7 +17,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, Signal, Slot
+from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFormLayout,
@@ -141,8 +141,17 @@ class ControllerView(QWidget):
         tab = QWidget(self)
         box = QVBoxLayout(tab)
         self.status_label = QLabel("status: unknown", tab)
-        self.conflict_label = QLabel("", tab)
-        self.conflict_label.setWordWrap(True)
+        # Why a whole label and not a dialog: the stop path's refusals are
+        # paragraphs naming containers, projects and the file to edit, and they
+        # arrive from a worker thread. It was called `conflict_label` while only
+        # `_start_failed` wrote to it; a stop that refused wrote nowhere at all,
+        # so a refusal was indistinguishable from the silent bug the refusal
+        # exists to prevent (review, 2026-08-22).
+        self.problem_label = QLabel("", tab)
+        self.problem_label.setWordWrap(True)
+        self.problem_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse  # so the remedy can be copied
+        )
         self.start_button = QPushButton("Start", tab)
         self.stop_button = QPushButton("Stop", tab)
         self.refresh_button = QPushButton("Refresh", tab)
@@ -155,7 +164,7 @@ class ControllerView(QWidget):
         box.addWidget(QLabel(f"<b>{self.entry.name}</b> — {self.services.controller.server_dir}"))
         box.addWidget(self.status_label)
         box.addLayout(row)
-        box.addWidget(self.conflict_label)
+        box.addWidget(self.problem_label)
         box.addStretch(1)
         self._tabs.addTab(tab, "Server")
 
@@ -219,7 +228,7 @@ class ControllerView(QWidget):
     @Slot()
     def start_server(self) -> None:
         """Start the install; a README §12 conflict is shown, never a raw Docker error."""
-        self.conflict_label.setText("")
+        self.problem_label.setText("")
         self._set_busy(True)
         self.status_label.setText("status: starting…")
         self._run(self.services.controller.start, self._server_action_done, self._start_failed)
@@ -245,14 +254,24 @@ class ControllerView(QWidget):
             )
         else:
             msg = str(exc)
-        self.conflict_label.setText(msg)
+        self.problem_label.setText(msg)
         self.action_failed.emit(msg)
         self.refresh_status()
 
     @Slot(object)
     def _stop_failed(self, exc: object) -> None:
+        """Show why the stop refused. This used to emit into a signal nothing read.
+
+        `stop_staged()` refuses rather than guess when it cannot prove it owns
+        the containers, and says which project does own them and how to make the
+        two agree. All of that was discarded: the status went "stopping…" and
+        then straight back to "db up, auth up, world up", which is exactly what
+        the silent bug it replaced looked like (review, 2026-08-22).
+        """
         self._set_busy(False)
-        self.action_failed.emit(str(exc))
+        msg = str(exc)
+        self.problem_label.setText(msg)
+        self.action_failed.emit(msg)
         self.refresh_status()
 
     # ----------------------------------------------------------- console tab
@@ -338,6 +357,9 @@ class ControllerView(QWidget):
         name = self.account_name.text().strip()
         password = self.account_password.text()
         if not name or not password:
+            # The Console tab is what the user is looking at; the signal alone
+            # left the button doing nothing at all (review, 2026-08-22).
+            self.console_log.append("!! username and password are required")
             self.action_failed.emit("username and password are required")
             return
         gm_level = self.account_gm.value()

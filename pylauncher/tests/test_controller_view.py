@@ -36,12 +36,16 @@ def _inline_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
 class _Ps:
     """Fakes `runner.run` for `docker ps`/compose so `Controller` works without Docker."""
 
-    project = "t-project"
-
     def __init__(self) -> None:
         self.names = ""
         self.ports = ""
         self.calls: list[list[str]] = []
+        # What `docker compose config` says this folder's project is called...
+        self.project = "t-project"
+        # ...and what the running containers are actually labelled with. Equal
+        # in the ordinary case; a test makes them disagree to model a second
+        # install of the same game, whose container names are identical.
+        self.label: str | None = None
 
     def __call__(self, cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
         self.calls.append(cmd)
@@ -54,7 +58,8 @@ class _Ps:
             self.names = ""  # compose really stopped them
             return subprocess.CompletedProcess(cmd, 0, "", "")
         if cmd[:2] == ["docker", "inspect"] and any(docker.PROJECT_LABEL in a for a in cmd):
-            return subprocess.CompletedProcess(cmd, 0, self.project + "\n", "")
+            owner = self.label if self.label is not None else self.project
+            return subprocess.CompletedProcess(cmd, 0, owner + "\n", "")
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
 
@@ -116,18 +121,60 @@ def test_server_tab_status_start_and_port_conflict_message(
     failures: list[str] = []
     view.action_failed.connect(failures.append)
     view.start_server()
-    assert "only one server can run at a time" in view.conflict_label.text()
+    assert "only one server can run at a time" in view.problem_label.text()
     assert "tbc-realmd" in failures[0]
     assert not any(c[:4] == ["docker", "compose", "up", "-d"] for c in ps.calls)
 
     ps.ports = ""
     view.start_server()
     assert any(c[:5] == ["docker", "compose", "up", "-d", "--no-deps"] for c in ps.calls)
-    assert view.conflict_label.text() == ""
+    assert view.problem_label.text() == ""
     view.stop_server()
     # Stop keeps the containers (`compose stop`), so the next start stays staged.
     assert ["docker", "compose", "stop"] in ps.calls
     assert ["docker", "compose", "down"] not in ps.calls
+
+
+def test_a_refused_stop_is_readable_on_screen_not_just_emitted(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A stop that refuses must say so where the user is looking.
+
+    `stop_staged()` refuses rather than guess when the running containers carry
+    another compose project's label — two installs of one game share container
+    names exactly, so stopping the wrong one takes down somebody's server. That
+    refusal used to be emitted into `action_failed` and read by nobody: the
+    label went "stopping…" then back to "db up", which is indistinguishable
+    from the silent bug the refusal exists to prevent (review, 2026-08-22).
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    ps.names = "ac-database\nac-authserver\nac-worldserver\n"
+    ps.label = "somebody-elses-install"  # the containers disagree with our own project
+
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    view.stop_server()
+
+    shown = view.problem_label.text()
+    assert "do not belong to the install" in shown, f"the refusal was not shown: {shown!r}"
+    assert "somebody-elses-install" in shown, "did not name the project that does own them"
+    assert "COMPOSE_PROJECT_NAME=somebody-elses-install" in shown, "did not name the remedy"
+    assert failures and failures[0] == shown
+    assert ["docker", "compose", "stop"] not in ps.calls
+    assert not any(c[:2] == ["docker", "stop"] for c in ps.calls), "stopped a foreign server"
+
+
+def test_missing_account_fields_say_so_in_the_console(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Pressing Create with an empty form used to do nothing visible at all."""
+    sent: list[str] = []
+    view = ControllerView(WOTLK, _services(ps, tmp_path, sent), status_poll_ms=0)
+    view.account_name.setText("")
+    view.account_password.setText("")
+    view.create_account()
+    assert "username and password are required" in view.console_log.text()
+    assert sent == []
 
 
 def test_console_tab_sends_commands_and_creates_accounts(
