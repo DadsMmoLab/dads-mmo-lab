@@ -24,6 +24,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,7 @@ import pytest
 from tests.conftest import process_events
 from yulon import runner
 from yulon.catalog.installer import Installer
+from yulon.ui.widgets.log_panel import LogPanel
 from yulon.ui.widgets.prompt import InputPrompter, is_secret, tidy
 
 MARKER = "[yulon-sudo-deadbeef] password:"
@@ -509,24 +511,43 @@ def test_the_view_reuses_one_prompter_instead_of_leaving_one_per_install(
     """Each install used to build a new prompter parented to the view, and keep it."""
     from yulon.catalog.catalog import load_catalog
     from yulon.ui.catalog_view import CatalogView
-    from yulon.ui.widgets.log_panel import LogPanel
 
     catalog = load_catalog()
+    panel = LogPanel()
     view = CatalogView(
         catalog,
         lambda e: _NoopInstaller(e),
-        LogPanel(),
+        panel,
         platform_id=lambda: "linux",
         pick_dir=lambda *_: tmp_path,
         home=tmp_path,
     )
-    view.start_install(catalog.get("wow-wotlk"))
-    first = view._prompter
-    view._log.wait(2000)
+    try:
+        view.start_install(catalog.get("wow-wotlk"))
+        first = view._prompter
+        _drain(panel)
+        view.start_install(catalog.get("wow-wotlk"))
+        _drain(panel)
+        assert view._prompter is first, "a second install built a second prompter"
+        assert len(view.findChildren(InputPrompter)) == 1
+    finally:
+        # Both jobs joined before the panel goes out of scope. A LogPanel left
+        # holding a live QThread does not fail this test — it aborts the whole
+        # interpreter at exit with "QThread: Destroyed while thread is still
+        # running", so every other test passes and the run still exits 134.
+        # That is what it did on CI (2026-08-23).
+        panel.stop()
+        panel.wait(5000)
+        process_events(50)
+
+
+def _drain(panel: LogPanel, timeout: float = 5.0) -> None:
+    """Pump the event loop until the panel's job has finished, then join it."""
+    deadline = time.monotonic() + timeout
+    while panel.running and time.monotonic() < deadline:
+        process_events(20)
+    panel.wait(2000)
     process_events(50)
-    view.start_install(catalog.get("wow-wotlk"))
-    assert view._prompter is first, "a second install built a second prompter"
-    assert len(view.findChildren(InputPrompter)) == 1
 
 
 class _NoopInstaller(Installer):
