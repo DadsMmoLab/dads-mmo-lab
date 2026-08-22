@@ -7,6 +7,7 @@ here while keeping the rest of the app 100% shared. See pyplan/README.md §3
 
 from __future__ import annotations
 
+import functools
 import importlib
 import os
 import shutil
@@ -747,6 +748,7 @@ def _os_curl() -> Path | None:
     return candidate if candidate.exists() else None
 
 
+@functools.lru_cache(maxsize=1)
 def verify_context() -> ssl.SSLContext:
     """A verifying TLS context with the widest root set we can honestly assemble.
 
@@ -765,6 +767,14 @@ def verify_context() -> ssl.SSLContext:
     imports only `runner` and `log`), so there is no cycle to create; giving the
     context its own module would only move the measurements above away from the
     `download_verified()` code they were taken for.
+
+    Cached because parsing certifi's 121 roots is not free: measured on this dev
+    box, `create_default_context(cafile=certifi.where())` costs 198 ms against
+    15 ms for the OS default. One `urlopen` per manifest file means a full
+    refresh of the WotLK tree is 45 GETs, so building a context per call would
+    have added ~8.9 s to it. Sharing one context across connections is the
+    normal way to use `ssl` — a context holds no per-connection state — and the
+    root set it reads cannot change inside one run of the app.
     """
     try:
         import certifi

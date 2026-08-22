@@ -21,6 +21,7 @@ import subprocess
 import sys
 import types
 import urllib.request
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,18 @@ MEASURED_TLS_FAILURE = (
     "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get "
     "local issuer certificate (_ssl.c:1000)"
 )
+
+
+@pytest.fixture(autouse=True)
+def _fresh_tls_context() -> Iterator[None]:
+    """`verify_context()` is memoized; these tests swap certifi out from under it.
+
+    Without this, whichever test ran first would decide the context every later
+    test sees — including the one asserting certifi's root count.
+    """
+    platform.verify_context.cache_clear()
+    yield
+    platform.verify_context.cache_clear()
 
 
 class _FakeResponse:
@@ -379,6 +392,17 @@ def test_the_real_certifi_bundle_has_the_roots_the_os_store_was_missing() -> Non
     context = platform.verify_context()
     assert Path(certifi.where()).exists()
     assert context.cert_store_stats()["x509_ca"] > 100
+
+
+def test_the_context_is_built_once_and_shared() -> None:
+    """Not a micro-optimization: a refresh GETs 45 manifest files, one `urlopen` each.
+
+    Loading certifi's roots was measured at 198 ms per context on this dev box
+    (15 ms for the bare OS default), so building one per call would put ~8.9 s
+    of certificate parsing into a manifest refresh. An `ssl.SSLContext` holds no
+    per-connection state, so one is shared.
+    """
+    assert platform.verify_context() is platform.verify_context()
 
 
 PACKAGE_ROOT = Path(platform.__file__).parent
