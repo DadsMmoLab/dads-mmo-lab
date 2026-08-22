@@ -7,6 +7,7 @@ here while keeping the rest of the app 100% shared. See pyplan/README.md §3
 
 from __future__ import annotations
 
+import importlib
 import os
 import shutil
 import socket
@@ -138,8 +139,15 @@ def detect_firewall(which: Callable[[str], str | None] | None = None) -> Firewal
     return "none"
 
 
-def _which(name: str) -> str | None:
-    return shutil.which(name)
+def _which(name: str, path: str | None = None) -> str | None:
+    """`shutil.which`, as one seam.
+
+    `path` searches a search-path this process is not running with, which is the
+    whole of `docker_programs()`'s Windows case. `None` means "the PATH we
+    started with", exactly as `shutil.which` already defines it, so every
+    existing caller keeps its shape and its `Callable[[str], str | None]` type.
+    """
+    return shutil.which(name, path=path)
 
 
 def firewall_commands(
@@ -346,13 +354,165 @@ RunCmd = Callable[[list[str]], subprocess.CompletedProcess[str]]
 Downloader = Callable[[str, Path], Path]
 
 
-def docker_ready(run: RunCmd | None = None) -> bool:
-    """True if `docker info` succeeds (daemon reachable); False if binary/daemon is missing."""
-    do = run if run is not None else (lambda argv: runner.run(argv))
+# ------------------------------------------------------ finding the docker CLI
+# Windows hands a process its environment once, when it is created, and never
+# revises it. Docker Desktop's installer adds its own `resources\bin` to the
+# PATH held in the REGISTRY — so the launcher that just ran that installer is
+# the one process on the machine guaranteed not to see it. These two keys are
+# where that PATH actually lives.
+_MACHINE_ENVIRONMENT_KEY = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
+_USER_ENVIRONMENT_KEY = "Environment"
+
+
+def _registry_search_path() -> str:
+    """The machine + user PATH as they stand on disk right now (Windows only).
+
+    Both are read, in that order, because the user half is not optional:
+    measured on Windows 11 Pro 26200 (2026-08-23), Docker Desktop had installed
+    itself to `%LOCALAPPDATA%\\Programs\\DockerDesktop\\resources\\bin` and written
+    that directory to the **user** PATH, while the machine PATH named no docker
+    directory at all. A fix that read only
+    `HKLM\\...\\Session Manager\\Environment` — the key everyone reaches for —
+    would have found nothing on the very machine the defect was reproduced on.
+
+    The values are `REG_EXPAND_SZ` (type 2), which means the stored string keeps
+    `%USERPROFILE%` and friends literal; the same box had four such entries
+    (`%USERPROFILE%\\AppData\\Local\\Microsoft\\WindowsApps`,
+    `%USERPROFILE%\\.dotnet\\tools`, `%NVM_HOME%`, `%NVM_SYMLINK%`). Handing those
+    to `which` unexpanded searches directories that do not exist, so they are
+    expanded here — against this process's environment, which is what Windows
+    does with them too. An unset variable stays literal and simply matches no
+    directory, which is harmless.
+
+    `winreg` is imported dynamically for the reason `runner.open_pty` fetches
+    `os.openpty` dynamically: the module does not exist off Windows, and mypy
+    type-checks this file for those platforms too.
+
+    Raises:
+        ImportError: not running on Windows (no `winreg`). Callers guard on
+            `detect()`; this is the belt to that braces.
+    """
+    winreg = importlib.import_module("winreg")
+    parts: list[str] = []
+    for hive, subkey in (
+        (winreg.HKEY_LOCAL_MACHINE, _MACHINE_ENVIRONMENT_KEY),
+        (winreg.HKEY_CURRENT_USER, _USER_ENVIRONMENT_KEY),
+    ):
+        try:
+            with winreg.OpenKey(hive, subkey) as key:
+                value = winreg.QueryValueEx(key, "Path")[0]
+        except OSError as exc:
+            # A user with no `Path` value of their own is normal, not a fault.
+            logger.debug(f"no readable PATH under {subkey}: {exc}")
+            continue
+        if isinstance(value, str) and value:
+            parts.append(value)
+    return os.path.expandvars(os.pathsep.join(parts))
+
+
+def _windows_docker_bins() -> tuple[Path, ...]:
+    """The `resources\\bin` layouts Docker Desktop is known to use, best first.
+
+    A last resort, for a box whose registry cannot be read at all. The first
+    entry is the one actually observed (see `_registry_search_path()`); the
+    second is the historical per-machine layout that every "add Docker to your
+    PATH" answer still names, and which was measured ABSENT on that same box —
+    so it is a guess kept for older installs, not evidence.
+    """
+    roots: tuple[tuple[str | None, tuple[str, ...]], ...] = (
+        (os.environ.get("LOCALAPPDATA"), ("Programs", "DockerDesktop")),
+        (os.environ.get("ProgramW6432") or os.environ.get("ProgramFiles"), ("Docker", "Docker")),
+    )
+    return tuple(Path(root).joinpath(*parts, "resources", "bin") for root, parts in roots if root)
+
+
+def _windows_docker_programs() -> tuple[str, ...]:
+    """Absolute `docker.exe` paths to try when the live PATH holds none.
+
+    Returns `()` the moment plain `docker` resolves, so a healthy machine never
+    reads the registry, never stats a directory, and never pays for a second
+    process spawn — the cost of this whole mechanism falls only on the run that
+    is actually broken.
+    """
+    if _which("docker") is not None:
+        return ()
+    found: list[str] = []
     try:
-        return do(["docker", "info"]).returncode == 0
-    except OSError:
-        return False
+        on_disk = _which("docker", _registry_search_path())
+    except (ImportError, OSError) as exc:
+        logger.debug(f"could not re-read the Windows PATH from the registry: {exc}")
+        on_disk = None
+    if on_disk:
+        found.append(on_disk)
+    for directory in _windows_docker_bins():
+        candidate = str(directory / "docker.exe")
+        if candidate not in found and Path(candidate).is_file():
+            found.append(candidate)
+    if found:
+        logger.info(f"docker is not on this process's PATH; found it at {found[0]}")
+    return tuple(found)
+
+
+def docker_programs() -> tuple[str, ...]:
+    """Every way of naming the `docker` CLI worth trying on this host, best first.
+
+    Off Windows this is exactly `("docker",)` and nothing else runs: PATH means
+    the same thing to a running process as it does to the shell that started it,
+    so `shutil.which` is correct and sufficient there.
+
+    On Windows it is not, and the gap is structural rather than unlucky. A
+    process inherits its environment at creation and Windows never updates a
+    live process's copy, so the launcher that just ran Docker Desktop's silent
+    installer cannot see the PATH entry that installer wrote. Reproduced in one
+    process (2026-08-23): with the engine fully up, stripping the docker
+    directory out of `os.environ["PATH"]` makes `shutil.which("docker")` return
+    None; resolving against the registry's PATH in the same breath still returns
+    `...\\DockerDesktop\\resources\\bin\\docker.EXE`.
+
+    What that cost the user: `ensure_docker()` would install Docker Desktop,
+    start it, watch it come up, poll `docker info` for the full 180 seconds
+    without ever finding the binary, and finish with "Docker Desktop was
+    installed but its engine has not answered yet — open Docker Desktop, wait
+    for 'Engine running', then try again". The engine WAS running. Restarting
+    the launcher was the only way through, so a first run could not finish
+    unattended no matter what else was fixed.
+
+    The registry is asked before the hardcoded install directories, inverting
+    the obvious order, because the registry is what the installer actually
+    wrote: it is right for a custom `--installdir` and right for whatever
+    layout the next Docker Desktop ships, while the hardcoded list was measured
+    wrong on the only real machine available (see `_windows_docker_bins()`).
+    Both cost microseconds next to the process spawn they precede.
+
+    Nothing is cached. The value is meant to change underneath us — that is the
+    entire point — so `_wait_docker_ready()`'s poll re-asks every few seconds
+    and picks up the PATH entry the installer writes mid-wait.
+    """
+    if detect() != "windows":
+        return ("docker",)
+    return ("docker", *_windows_docker_programs())
+
+
+def docker_ready(run: RunCmd | None = None) -> bool:
+    """True if `docker info` succeeds (daemon reachable); False if binary/daemon is missing.
+
+    Tries each of `docker_programs()` in turn, which is one plain `docker` off
+    Windows and one plain `docker` plus any off-PATH `docker.exe` on it — see
+    there for why the second is not optional in the run that installs Docker.
+
+    A candidate that cannot be started at all is a `FileNotFoundError` from
+    `subprocess`, not an answer, so it is logged and the next one is tried;
+    swallowing it silently is how the plain-`docker` failure went unexplained
+    for a full 180-second poll.
+    """
+    do = run if run is not None else (lambda argv: runner.run(argv))
+    for program in docker_programs():
+        try:
+            if do([program, "info"]).returncode == 0:
+                return True
+        except OSError as exc:
+            logger.debug(f"could not start {program}: {exc}")
+    return False
 
 
 def linux_package_manager(
