@@ -187,3 +187,40 @@ Two live bugs the review found in existing code, neither of them Phase 6 regress
 
 Plus the CRLF sweep (generated conf/realmlist files are LF regardless of host) and the six review
 fixes listed in `pyplan/checklist.md` under Phase 6.
+
+## Who owns a container — settled 2026-08-22, after getting it wrong twice
+
+AzerothCore pins its container names **globally**: every install of the game has an
+`ac-database`, an `ac-authserver` and an `ac-worldserver`. So a name proves that *something* is
+using it, never that the thing is ours. The only ownership proof Docker offers is the
+`com.docker.compose.project` label, and compose derives that project from the **directory
+basename** unless `COMPOSE_PROJECT_NAME` is set in `.env`.
+
+Three designs were tried against that. Two are now permanently rejected, and the reasons are
+worth keeping because both looked strictly better than what shipped:
+
+1. **Read the identity off a container's own label.** Fixes the moved-folder case outright. Also
+   means a *stopped* install adopts the *running* neighbour's project as its own and then stops
+   it, because the two share names. Rejected.
+2. **Write the identity into `.env` whenever it is provably right** — after our installer, and
+   after a stop whose census confirmed the labels. The value written is correct. It stops being
+   correct the moment somebody copies the folder (a second realm, a restored backup): `.env`
+   travels with the copy, `install_project()` prefers it over the directory, and the copy
+   inherits the original's identity. Measured end to end: Stop in the copy took down the
+   original's running server. **A file the user can duplicate is a claim, not a proof.** Rejected
+   for the attach and stop paths; the install-time pin survives only because it is what makes a
+   folder movable at all, and is written when exactly one install exists.
+3. **Filter `status()` and `port_conflicts()` by label too.** Sounds like the same fix applied
+   consistently. It moves the status poll's source of truth from `docker ps` — which is at least
+   honest about failing — onto a file, and then disables the Stop button whenever the two
+   disagree. Since Stop is the only thing that *explains* a disagreement, a live server showed as
+   "down" with no button and no message. Rejected.
+
+**What shipped:** names for *observation* (`status`, `port_conflicts`), labels for *action*
+(`stop_staged`), and a refusal — shown on the Server tab — whenever ownership cannot be
+established. Refusing to stop a server is recoverable; stopping somebody else's is not. The known
+limit is stated rather than papered over: with two installs of one game the port-conflict guard
+cannot fire, and `compose up` surfaces the daemon's own "container name is already in use".
+
+Carry into 6.2: the native engine should give each install an identity that is **not** a file in
+the install directory — the `.env` pin is a workaround for compose's basename rule, not a design.
