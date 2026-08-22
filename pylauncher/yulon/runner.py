@@ -439,12 +439,22 @@ def interact(
         return None if at < 0 else clean[at:]
 
     def _answer(text: str, *, blocked: bool = False) -> bool:
-        clean = strip_ansi(text)
-        reply = respond(clean)
-        if reply is None and ask is not None and blocked:
-            prompt = _the_prompt(text)
-            if prompt is not None:
+        prompt = _the_prompt(text) if blocked else None
+        if prompt is not None:
+            # The marker proves the child is blocked on the ONE prompt we know
+            # about. Everything printed before it is unrelated output that
+            # merely shares the buffer, and `respond()`'s rules are unanchored
+            # `search`es — so giving them the whole buffer let a bare
+            # `PromptRule(r"\(y/n\)", "y")` answer sudo's password read with
+            # "y". Measured: a child printing `Reset the keyring? (y/n) \r` and
+            # then the marker got `GOT:y` and `ask()` was never called, which is
+            # the pre-6.1.5 symptom arriving by a new route. Slicing for `ask`
+            # alone was half a fix (review, 2026-08-23).
+            reply = respond(prompt)
+            if reply is None and ask is not None:
                 reply = ask(prompt)
+        else:
+            reply = respond(strip_ansi(text))
         if reply is None:
             return False
         return _write((reply + "\n").encode("utf-8"))
@@ -459,7 +469,7 @@ def interact(
             try:
                 data = chunks.get(timeout=quiet_seconds)
             except queue.Empty:
-                if proc.poll() is not None and not buffer:
+                if proc.poll() is not None:
                     # The child is gone but the reader has not seen EOF. On a
                     # pty that is normal: the install scripts leave a
                     # `sudo -n true; sleep 60` keepalive whose orphaned `sleep`
@@ -467,7 +477,16 @@ def interact(
                     # neither b"" nor EIO for up to a minute after the install
                     # finished — a minute of "installing" with no output and no
                     # way out (review, 2026-08-22).
+                    #
+                    # This used to require an EMPTY buffer, so a script whose
+                    # last line had no trailing newline never took it — and on
+                    # cancel those bytes were dropped, which is exactly the text
+                    # `Installer.run()` builds its failure message from. Yield
+                    # them, then stop (review, 2026-08-23).
                     logger.debug("child exited; ending the read rather than waiting for EOF")
+                    if buffer:
+                        yield buffer
+                        buffer = ""
                     break
                 # A partial line that has gone quiet is the child waiting for
                 # input — or just a slow build. Ask about it once.

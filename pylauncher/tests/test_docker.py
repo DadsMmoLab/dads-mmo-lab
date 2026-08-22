@@ -1203,3 +1203,40 @@ def test_an_empty_last_assignment_unsets_the_pin(tmp_path: Path) -> None:
         newline=chr(10),
     )
     assert docker.pinned_project_name(tmp_path) is None
+
+
+def test_a_pin_that_needs_expanding_is_reported_as_no_pin_at_all(tmp_path: Path) -> None:
+    """Compose expands `${VAR}` in `.env`; reimplementing that here would be a second copy.
+
+    So a value needing expansion is treated as unpinned and ownership falls
+    through to asking compose. That fails closed — the install stays stoppable
+    while its compose files are readable — instead of believing in a project
+    literally named `ac-${REALM}` that no container carries
+    (review, 2026-08-23).
+    """
+    (tmp_path / ".env").write_text(
+        "COMPOSE_PROJECT_NAME=ac-${REALM}" + chr(10), encoding="utf-8", newline=chr(10)
+    )
+    assert docker.pinned_project_name(tmp_path) is None
+
+
+def test_export_is_accepted_with_a_tab_as_well_as_a_space(tmp_path: Path) -> None:
+    """`"export "` as a literal missed `export\\tNAME=x`, which compose accepts."""
+    (tmp_path / ".env").write_text(
+        "export" + chr(9) + "COMPOSE_PROJECT_NAME=tabbed" + chr(10),
+        encoding="utf-8",
+        newline=chr(10),
+    )
+    assert docker.pinned_project_name(tmp_path) == "tabbed"
+
+
+def test_the_unpinned_remedy_warns_about_the_copy_case(tmp_path: Path) -> None:
+    """This is the common branch now, and following it literally on a copy is destructive.
+
+    A copy that adopts the original's project name makes the next Stop here take
+    down the original's server — the measured failure that got the Stop-time pin
+    deleted. The remedy has to say so (review, 2026-08-23).
+    """
+    message = docker._stranger_message(((SPEC.world, "install-b"),), "ours", tmp_path)
+    assert "not copied" in message
+    assert "take down the other server" in message

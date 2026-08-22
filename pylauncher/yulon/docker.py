@@ -222,15 +222,32 @@ def pinned_project_name(server_dir: Path) -> str | None:
     found: str | None = None
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped.startswith("export "):
-            stripped = stripped[len("export ") :].lstrip()
+        if stripped.startswith("export"):
+            stripped = stripped[len("export") :].lstrip()
         if stripped.startswith(f"{PROJECT_NAME_VAR}="):
-            found = _env_value(stripped.split("=", 1)[1]) or None
+            value = _env_value(stripped.split("=", 1)[1])
+            if "${" in value or "$" in value:
+                # Needs interpolation; see `_env_value`. Report no pin rather
+                # than a literal no container carries.
+                logger.info(f"{PROJECT_NAME_VAR} in {env_path} needs expanding; asking compose")
+                value = ""
+            found = value or None
     return found
 
 
 def _env_value(raw: str) -> str:
-    """One `.env` right-hand side, read the way compose reads it."""
+    """One `.env` right-hand side, read the way compose reads it.
+
+    With one deliberate exception: compose expands `${VAR}` in unquoted and
+    double-quoted values, and this does not. Reimplementing interpolation here
+    would be a second copy of somebody else's rule — the thing
+    `compose_project_name()`'s docstring refuses to do — so a value that needs
+    expanding is reported as *no pin at all*, and ownership falls through to
+    asking compose. That fails closed: the install stays stoppable while its
+    compose files are readable, and refuses honestly when they are not, instead
+    of silently believing in a project literally named `ac-${REALM}` that no
+    container carries (review, 2026-08-23).
+    """
     raw = raw.strip()
     for quote in ('"', "'"):
         if len(raw) >= 2 and raw.startswith(quote):
@@ -563,10 +580,18 @@ def _stranger_message(
                 f"is '{owners[0]}', change it to that."
             )
         else:
+            # The copy warning is not optional here. This is now the common
+            # branch — almost nothing pins any more — and a user in the copy
+            # case who follows the remedy literally reproduces the exact
+            # failure that got the Stop-time pin deleted: the copy adopts the
+            # original's project and the next Stop takes down the original's
+            # server (review, 2026-08-23).
             lines.append(
-                f"If it IS this install and the folder was moved, add "
-                f"{PROJECT_NAME_VAR}={owners[0]} to {server_dir / '.env'}, or rename this "
-                f"folder to {owners[0]}."
+                f"Only if this folder IS the install those containers came from — moved or "
+                f"renamed, not copied — add {PROJECT_NAME_VAR}={owners[0]} to "
+                f"{server_dir / '.env'}, or rename this folder to {owners[0]}. If it is a copy "
+                f"of that install, do neither: adopting the name would make Stop here take "
+                f"down the other server."
             )
     elif len(owners) > 1:
         lines.append(
@@ -639,14 +664,25 @@ def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
     # pin lives in `.env`, `.env` travels with the folder, and `install_project()`
     # prefers it over the directory — so copying an install (a second realm, a
     # restored backup) hands the copy the original's identity, and pressing Stop
-    # in the copy stops the ORIGINAL's running server. Measured end to end. The
-    # unpinned copy fails closed instead, because its basename disagrees with the
-    # labels and the census catches it (review, 2026-08-22).
+    # in the copy stops the ORIGINAL's running server. Measured end to end.
     #
-    # The cost is that an attached install whose compose files later become
-    # unreadable cannot prove ownership, and `_refuse_without_an_identity()`
-    # says so rather than guessing. That is the right way round: refusing to
-    # stop a server is recoverable, stopping somebody else's is not.
+    # Not writing one does NOT make the copy safe, and an earlier version of
+    # this comment claimed it did. An unpinned copy resolves to its own
+    # basename, which catches `~/wow` copied to `~/wow2` and misses
+    # `~/wow-server` copied to `/mnt/backup/wow-server` — same basename, same
+    # project, same outcome. And the install-time pin in
+    # `catalog_view._on_run_finished()` is inherited by any copy of a folder it
+    # wrote, so that path carries the hazard too. This only declines to ADD a
+    # third way in (review, 2026-08-23). The candidate real fix — reading the
+    # containers' `com.docker.compose.project.working_dir` label and checking
+    # whether that directory still exists, which separates a move from a copy —
+    # is recorded in `pyplan/phase6-decisions.md`, not implemented here.
+    #
+    # The cost of not pinning is that an attached install whose compose files
+    # later become unreadable cannot prove ownership, and
+    # `_refuse_without_an_identity()` says so rather than guessing. That is the
+    # right way round: refusing to stop a server is recoverable, stopping
+    # somebody else's is not.
 
     # Run this even with nothing of ours in `docker ps`. The project holds more
     # than the three named containers — `ac-db-import` and `ac-client-data-init`

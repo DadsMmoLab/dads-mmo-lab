@@ -222,5 +222,23 @@ established. Refusing to stop a server is recoverable; stopping somebody else's 
 limit is stated rather than papered over: with two installs of one game the port-conflict guard
 cannot fire, and `compose up` surfaces the daemon's own "container name is already in use".
 
+**The residual hole, stated plainly.** Not pinning at attach or stop does not make a copied
+install safe; it only declines to add a third way in. Two remain:
+
+- the **install-time** pin in `catalog_view._on_run_finished()` is inherited by any copy of the
+  folder it wrote, and `pin_project_name()` never overwrites, so attaching the copy does not
+  clear it;
+- an **unpinned** copy resolves to its own basename, which catches `~/wow` → `~/wow2` and misses
+  `~/wow-server` → `/mnt/backup/wow-server`, where the basename is unchanged.
+
+**The candidate fix, not implemented.** Compose also stamps
+`com.docker.compose.project.working_dir` at create time. That alone cannot separate a move from a
+copy — it is stale in both — but *whether the directory it names still exists* can: gone means the
+folder moved, still there and not us means this is a copy. It needs care (network mounts,
+permissions, a path that exists but holds something else) and it should be designed rather than
+bolted on at the end of a review round. Until then the failure is loud rather than silent: the
+Stop refusal names both possibilities, and the unpinned remedy says in as many words not to adopt
+the name if this folder is a copy.
+
 Carry into 6.2: the native engine should give each install an identity that is **not** a file in
 the install directory — the `.env` pin is a workaround for compose's basename rule, not a design.

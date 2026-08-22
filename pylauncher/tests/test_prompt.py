@@ -638,3 +638,89 @@ def test_the_marker_says_it_is_sudo_asking_not_just_a_hex_token() -> None:
     assert "sudo" in marker
     assert "password" in marker
     assert is_secret(marker) is True
+
+
+def test_a_canned_rule_cannot_answer_the_sudo_prompt_from_neighbouring_output() -> None:
+    """The other half of the slicing fix, and the one that was missed.
+
+    `respond()` runs before `ask()` and short-circuits it, and its rules are
+    unanchored `search`es — including a bare `(y/n)`. Given the whole buffer it
+    matched output printed BEFORE the prompt and typed "y" into sudo's password
+    read, so `ask()` was never called and the install died on three failed
+    attempts. Exactly the pre-6.1.5 symptom, by a new route.
+
+    The child below reproduces the measured shape: a real prompt the rules DO
+    answer, then a carriage return (which never splits a line here), then the
+    marker (review, 2026-08-23).
+    """
+    from yulon.catalog.installer import InstallOptions, make_responder
+
+    asked: list[str] = []
+    code = (
+        "import sys\n"
+        "sys.stdout.write('Reset the keyring? (y/n) ')\n"
+        f"sys.stdout.write({chr(13)!r})\n"
+        f"sys.stdout.write({MARKER + ' '!r})\n"
+        "sys.stdout.flush()\n"
+        "answer = sys.stdin.readline().strip()\n"
+        "print('GOT:' + answer)\n"
+    )
+    lines = list(
+        runner.interact(
+            [sys.executable, "-c", code],
+            respond=make_responder(InstallOptions()),
+            ask=lambda prompt: (asked.append(prompt), "hunter2")[1],
+            ask_marker=MARKER,
+            quiet_seconds=0.15,
+            cancel=_expiring_cancel(),
+        )
+    )
+    assert asked == [MARKER + " "], f"the rules answered sudo instead of asking: {asked!r}"
+    assert any("GOT:hunter2" in line for line in lines)
+    assert not any("GOT:y" in line for line in lines), "typed 'y' as the password"
+
+
+def test_ask_is_never_consulted_for_a_complete_line() -> None:
+    """A marker on a finished line means something ECHOED it, not that anyone is waiting.
+
+    Nothing in the shipped scripts prints the environment, but `SUDO_PROMPT` is
+    exported to every descendant, so `set -x` or `env` in a future script would
+    put the marker on a complete line. Answering it writes the password into a
+    build's stdin (review, 2026-08-22/23).
+    """
+    asked: list[str] = []
+    code = "import sys\n" f"print({'SUDO_PROMPT=' + MARKER!r})\n" "sys.stdout.flush()\n"
+    list(
+        runner.interact(
+            [sys.executable, "-c", code],
+            respond=lambda _line: None,
+            ask=lambda prompt: asked.append(prompt) or "WRONG",  # type: ignore[func-returns-value]
+            ask_marker=MARKER,
+            quiet_seconds=0.15,
+            cancel=_expiring_cancel(),
+        )
+    )
+    assert asked == [], "answered a prompt nothing was waiting on"
+
+
+def test_the_last_line_survives_a_child_that_exits_without_a_newline() -> None:
+    """Those bytes are what `Installer.run()` builds its failure message from.
+
+    The "child is gone, stop waiting for EOF" shortcut required an EMPTY buffer,
+    so a script whose last words had no trailing newline never took it — and
+    when the wait was then cancelled, the text was dropped (review, 2026-08-23).
+    """
+    code = (
+        "import sys\n"
+        "sys.stdout.write('FATAL: could not reach the database')\n"
+        "sys.stdout.flush()\n"
+    )
+    lines = list(
+        runner.interact(
+            [sys.executable, "-c", code],
+            respond=lambda _line: None,
+            quiet_seconds=0.15,
+            cancel=_expiring_cancel(),
+        )
+    )
+    assert any("FATAL: could not reach the database" in line for line in lines), lines

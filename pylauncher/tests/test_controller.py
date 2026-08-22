@@ -221,3 +221,58 @@ def test_wotlk_controller_inherits_everything_with_its_own_spec(
         "ac-authserver",
         "ac-worldserver",
     ] in fake_runner.calls
+
+
+def test_status_raises_rather_than_reporting_a_dead_daemon_as_a_stopped_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The headline reason `status()` went back to `docker ps`.
+
+    A label-filtered version fell back to `_status_safe() or []` when no project
+    was pinned — which is every install adopted through "Use existing…" — so a
+    daemon that would not answer read as "everything is down", and the tab then
+    DISABLED Stop while the server was serving. Raising is what puts "Docker not
+    reachable" on screen instead (review, 2026-08-22).
+    """
+    monkeypatch.setattr(
+        runner,
+        "run",
+        lambda cmd, cwd=None, timeout=None: _completed(
+            1, "", "Cannot connect to the Docker daemon"
+        ),
+    )
+    with pytest.raises(docker.DockerCommandError):
+        Controller(SPEC, SERVER_DIR).status()
+
+
+def test_status_reports_a_neighbours_containers_and_that_is_deliberate(
+    fake_runner: _FakeRunner,
+) -> None:
+    """The accepted limit of going by name, pinned so it is a decision and not a surprise.
+
+    AzerothCore's container names are global, so a second install of the game
+    wears these exact names and this tab shows them as up. That is safe because
+    nothing ACTS on it: `stop_staged()` checks the compose project label and
+    refuses, and the refusal is shown on the Server tab. The alternative —
+    filtering status by label too — hid a live server behind "down" and disabled
+    the only button that explains why (review, 2026-08-22).
+    """
+    fake_runner.ps_lines = "t-db\nt-auth\nt-world\n"
+    fake_runner.project = "somebody-elses-install"  # the labels disagree with us
+    status = Controller(SPEC, SERVER_DIR).status()
+    assert status.all_running is True, "status is a view of names, not a claim of ownership"
+
+
+def test_port_conflicts_excuses_our_own_names_including_a_neighbours(
+    fake_runner: _FakeRunner,
+) -> None:
+    """The other half of that trade, stated rather than discovered.
+
+    Subtracting the three names excuses a second install's containers too, so
+    this guard cannot fire for the one collision it exists for. The label-based
+    version that could needed a second `docker ps`, and a blip on either made
+    Start refuse while naming the user's OWN containers.
+    """
+    fake_runner.ps_lines = "t-world\t0.0.0.0:2222->2222/tcp\nstranger\t0.0.0.0:1111->1111/tcp\n"
+    fake_runner.project = "somebody-elses-install"
+    assert Controller(SPEC, SERVER_DIR).port_conflicts() == ["stranger"]
