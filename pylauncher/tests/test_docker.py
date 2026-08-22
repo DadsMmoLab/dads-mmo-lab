@@ -1408,3 +1408,11 @@ def test_a_docker_uninstalled_mid_run_reads_as_missing_docker(
     assert docker.health("ac-worldserver") == "unknown"
     with pytest.raises(docker.DockerCommandError, match="Docker could not be found"):
         docker.start(Path("/tmp/wow"))
+
+    def gone_stream(cmd: list[str], cwd: Path | None = None):
+        raise FileNotFoundError(2, "The system cannot find the file specified")
+        yield  # pragma: no cover - a generator that only ever raises
+
+    monkeypatch.setattr(docker.runner, "stream", gone_stream)
+    with pytest.raises(docker.DockerCommandError, match="Docker could not be found"):
+        list(docker.follow_logs("ac-worldserver"))

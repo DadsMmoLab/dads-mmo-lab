@@ -1076,4 +1076,11 @@ def follow_logs(container: str, tail: int = 200) -> Iterator[str]:
     program = platform.docker_program()
     if program is None:
         raise DockerCommandError(platform.DOCKER_CLI_MISSING_HELP)
-    yield from runner.stream([program, "logs", "-f", "--tail", str(tail), container])
+    try:
+        yield from runner.stream([program, "logs", "-f", "--tail", str(tail), container])
+    except OSError as exc:
+        # The same uninstalled-mid-run case `_docker()` handles, arriving from
+        # `Popen` on the first line instead of from `subprocess.run`. Both roads
+        # have to end at the same sentence, or the panel shows a WinError for
+        # one kind of missing docker and an explanation for the other.
+        raise DockerCommandError(platform.DOCKER_CLI_MISSING_HELP) from exc
