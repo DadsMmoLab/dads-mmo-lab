@@ -44,19 +44,12 @@ class ConsoleReply:
     lines: tuple[str, ...]
 
 
-def pty_supported() -> bool:
-    """True where a pseudo-terminal can be opened (POSIX). False on Windows."""
-    return hasattr(os, "openpty")
-
-
-def _open_pty() -> tuple[int, int]:
-    """`os.openpty()`, fetched dynamically because it does not exist on Windows.
-
-    Callers must check `pty_supported()` first.
-    """
-    open_pty = getattr(os, "openpty")  # noqa: B009 - POSIX-only attribute
-    master, slave = open_pty()
-    return int(master), int(slave)
+# Both live in `yulon.runner` now: the installer needs a terminal too (sudo
+# reads its password from /dev/tty), and a helper two features share does not
+# belong in one game's package (style-guide §4). Re-exported so this module's
+# own callers and tests keep reading naturally.
+pty_supported = runner.pty_supported
+_open_pty = runner.open_pty
 
 
 NO_TTY_HELP = (

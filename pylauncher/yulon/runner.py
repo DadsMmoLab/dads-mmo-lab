@@ -154,33 +154,27 @@ def run(
 # codes stripped, returns the text to send to stdin (without newline) or None.
 Responder = Callable[[str], str | None]
 
-# What a line that is genuinely waiting for typed input looks like. `sudo`,
-# `read -p` and `ssh` all end their prompt with one of these, usually followed
-# by a space. Compile and download progress does not: it ends mid-word, in a
-# percentage, or in a carriage return. Without this guard, ANY output that
-# happened to pause for a moment — a slow build line, a stalled download —
-# would open a dialog at the user, or park an unattended install on a question
-# nobody asked (adversarial review finding, 2026-08-22).
-_LOOKS_LIKE_A_PROMPT = re.compile(r"[:?>\]]\s*$|\((?:y(?:es)?/no?|[yn]/[yn])\)\s*$", re.IGNORECASE)
-
-
-def looks_like_a_prompt(text: str) -> bool:
-    """True if this partial line is plausibly asking a person to type something."""
-    stripped = strip_ansi(text).rstrip("\r")
-    if not stripped.strip():
-        return False
-    return bool(_LOOKS_LIKE_A_PROMPT.search(stripped))
-
-
-# Asked only when a prompt is genuinely blocking and no rule answered it: the
-# child has printed something with no trailing newline and then gone quiet,
-# which is what "waiting for you to type" looks like from outside. Returning
-# None means "I cannot answer this either", and the caller is left to cancel.
+# Asked when the child prints the exact marker the CALLER chose, and never
+# otherwise. Returning None means "I cannot answer this either", and the caller
+# is left to cancel.
+#
+# There used to be a heuristic here: a partial line ending in one of : ? > ]
+# after a moment's quiet was taken for a prompt. Measured against real build
+# output it fires on "[ 43%]", "Get:12 ... [345 kB]", "note:", "#12 sha256:abc
+# [2/5]" and every gcc diagnostic — and `interact()` reads in 4096-byte chunks,
+# so a chunk boundary landing on one of those during a 2-4 hour compile is
+# routine rather than exotic. The result was an application-modal dialog that
+# blocked the Stop button, quoted a fragment of compiler output, and wrote
+# whatever was typed into the build's stdin.
+#
+# So the guess is gone. The one prompt that actually needed answering is sudo's,
+# and sudo lets the caller choose its wording through SUDO_PROMPT — an exact,
+# unguessable string no compiler will ever print (review, 2026-08-22).
 Prompter = Callable[[str], str | None]
 
 _ANSI = re.compile(r"\[[0-9;?]*[ -/]*[@-~]")
 
-# How long a partial line must sit unchanged before it is treated as a prompt.
+# How long a partial line must sit unchanged before it is looked at.
 _PROMPT_QUIET_SECONDS = 0.3
 
 
@@ -189,13 +183,52 @@ def strip_ansi(text: str) -> str:
     return _ANSI.sub("", text)
 
 
+def pty_supported() -> bool:
+    """True where a pseudo-terminal can be opened (POSIX). False on Windows."""
+    return hasattr(os, "openpty") and hasattr(os, "login_tty")
+
+
+def open_pty() -> tuple[int, int]:
+    """`os.openpty()`, fetched dynamically because it does not exist on Windows.
+
+    Callers must check `pty_supported()` first. Lives here rather than in a
+    per-game package because two unrelated features need a terminal: the
+    worldserver console (docker refuses to attach to a non-TTY) and the
+    installer (sudo reads its password from /dev/tty, never from stdin) —
+    style-guide §4.
+    """
+    open_it = getattr(os, "openpty")  # noqa: B009 - POSIX-only attribute
+    master, slave = open_it()
+    return int(master), int(slave)
+
+
+def _become_terminal_session(slave: int) -> None:
+    """Child-side: make `slave` this process's controlling terminal.
+
+    This is what makes `/dev/tty` resolve inside the child, and `/dev/tty` is
+    the whole point: sudo deliberately does not read its password from stdin, so
+    a child holding a pty on fd 0 but with no CONTROLLING terminal still fails
+    with "a terminal is required to read the password". Inheriting a pty is not
+    enough — the session has to be claimed.
+
+    Runs after fork and before exec, so it must do nothing that could take a
+    lock another thread held at fork time. `os.login_tty` is a single libc call
+    (setsid, TIOCSCTTY, dup2 onto 0/1/2), which is what makes it safe here where
+    a general Python callback would not be.
+    """
+    login_tty = getattr(os, "login_tty")  # noqa: B009 - POSIX-only attribute
+    login_tty(slave)
+
+
 def interact(
     command: list[str],
     cwd: Path | None = None,
     *,
     respond: Responder,
     ask: Prompter | None = None,
+    ask_marker: str | None = None,
     env: Mapping[str, str] | None = None,
+    terminal: bool = False,
     quiet_seconds: float = _PROMPT_QUIET_SECONDS,
     cancel: threading.Event | None = None,
 ) -> Iterator[str]:
@@ -209,36 +242,84 @@ def interact(
     end in a newline (`read -p`, `echo -n ...; read`) still surfaces: once a
     partial line has been quiet for `quiet_seconds`, `respond()` is asked about
     it. `respond()` also sees every complete line. Whenever it returns a
-    string, that string plus a newline is written to the child's stdin. Lines
+    string, that string plus a newline is written to the child's input. Lines
     are yielded raw (with colour codes); `respond()` receives them stripped.
 
-    `ask` is the escape hatch for a prompt no rule can answer, and the reason
-    installs on Linux used to die: the scripts run `sudo`, whose password prompt
-    is a partial line no `respond()` rule can possibly know the answer to. With
-    no `ask`, that prompt is asked about once and then abandoned — the child sits
-    on it until something cancels, which reads to the user as a freeze. With one,
-    the caller (in practice the UI) can put the question to the person sitting
-    there and hand the answer back. It is called ONLY for a quiet partial line,
-    i.e. only when the child is genuinely blocked on input, never for ordinary
-    output that happens to look like a question.
+    `ask` is the escape hatch for the one prompt no rule can answer: sudo's
+    password. It is consulted ONLY when the pending text contains `ask_marker`,
+    an exact string the caller arranged for the child to print. Without a
+    marker `ask` is never called at all — a deliberate dead default, because the
+    previous version guessed from the shape of a line and could not tell a
+    password prompt from `[ 43%]`.
+
+    `terminal=True` runs the child on a pseudo-terminal and makes that terminal
+    its controlling tty. This is what the sudo case needs and a pipe cannot
+    give: sudo reads from /dev/tty precisely so that a piped stdin cannot feed
+    it a password. Measured — a child reading stdin answers through a pipe, the
+    same child reading /dev/tty does not, and real sudo says "a terminal is
+    required to read the password". POSIX only; ignored where `pty_supported()`
+    is False, which is every Windows box and no installer host (the catalog's
+    install scripts are Linux-only).
 
     Raises `subprocess.CalledProcessError` on non-zero exit, like `stream()`.
     If the generator is abandoned early the child is terminated (then killed)
     and its reader thread joined, exactly like `stream()`.
     """
-    logger.debug(f"interact() called: command={command} cwd={cwd}")
-    proc = subprocess.Popen(
-        command,
-        cwd=_cwd_arg(cwd),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        env=dict(env) if env is not None else None,
-        bufsize=0,
-    )
-    assert proc.stdout is not None and proc.stdin is not None
+    logger.debug(f"interact() called: command={command} cwd={cwd} terminal={terminal}")
+    on_pty = terminal and pty_supported()
+    master = slave = -1
+    if on_pty:
+        master, slave = open_pty()
+    try:
+        if on_pty:
+            proc = subprocess.Popen(
+                command,
+                cwd=_cwd_arg(cwd),
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                env=dict(env) if env is not None else None,
+                bufsize=0,
+                preexec_fn=lambda: _become_terminal_session(slave),
+            )
+        else:
+            proc = subprocess.Popen(
+                command,
+                cwd=_cwd_arg(cwd),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=dict(env) if env is not None else None,
+                bufsize=0,
+            )
+    except BaseException:
+        for fd in (master, slave):
+            if fd >= 0:
+                os.close(fd)
+        raise
+    if on_pty:
+        # The parent's copy would otherwise hold the pty open forever, so the
+        # read below would never see EOF after the child exits.
+        os.close(slave)
+        slave = -1
+        out_fd = master
+    else:
+        assert proc.stdout is not None
+        out_fd = proc.stdout.fileno()
     chunks: queue.Queue[bytes | None] = queue.Queue()
-    out_fd = proc.stdout.fileno()
+
+    def _write(payload: bytes) -> bool:
+        """Send bytes to the child, whichever transport it is on."""
+        try:
+            if on_pty:
+                os.write(master, payload)
+            else:
+                assert proc.stdin is not None
+                proc.stdin.write(payload)
+                proc.stdin.flush()
+        except (BrokenPipeError, OSError):
+            return False
+        return True
 
     def _pump() -> None:
         try:
@@ -248,6 +329,8 @@ def interact(
                     break
                 chunks.put(data)
         except OSError:
+            # On a pty the master raises EIO rather than returning b"" when the
+            # last slave closes. That is this transport's EOF, not a failure.
             pass
         finally:
             chunks.put(None)
@@ -257,20 +340,20 @@ def interact(
     buffer = ""
     answered_partial = False
 
-    def _answer(text: str, *, may_ask: bool = False) -> bool:
+    def _is_the_prompt(text: str) -> bool:
+        """True only for the exact marker the caller arranged for. No guessing."""
+        if not ask_marker:
+            return False
+        return ask_marker in strip_ansi(text)
+
+    def _answer(text: str) -> bool:
         clean = strip_ansi(text)
         reply = respond(clean)
-        if reply is None and may_ask and ask is not None and looks_like_a_prompt(clean):
+        if reply is None and ask is not None and _is_the_prompt(text):
             reply = ask(clean)
         if reply is None:
             return False
-        try:
-            assert proc.stdin is not None
-            proc.stdin.write((reply + "\n").encode("utf-8"))
-            proc.stdin.flush()
-        except (BrokenPipeError, OSError):
-            return False
-        return True
+        return _write((reply + "\n").encode("utf-8"))
 
     try:
         eof = False
@@ -282,13 +365,19 @@ def interact(
             try:
                 data = chunks.get(timeout=quiet_seconds)
             except queue.Empty:
-                # A quiet partial line is a prompt waiting for input.
-                if buffer and not answered_partial and _answer(buffer, may_ask=True):
+                # A partial line that has gone quiet is the child waiting for
+                # input — or just a slow build. Ask about it once.
+                if not buffer or answered_partial:
+                    continue
+                if _answer(buffer) or _is_the_prompt(buffer):
+                    # Shown either way. A prompt the user declined still has to
+                    # reach the log, or the install appears to freeze with
+                    # nothing on screen explaining why (review, 2026-08-22).
                     yield buffer
                     buffer = ""
                     answered_partial = False
-                elif buffer:
-                    answered_partial = True  # asked once; do not spam the same prompt
+                else:
+                    answered_partial = True  # asked once; do not spam the same line
                 continue
             if data is None:
                 eof = True
@@ -321,5 +410,11 @@ def interact(
             if handle is not None:
                 try:
                     handle.close()
+                except OSError:
+                    pass
+        for fd in (master, slave):
+            if fd >= 0:
+                try:
+                    os.close(fd)
                 except OSError:
                     pass

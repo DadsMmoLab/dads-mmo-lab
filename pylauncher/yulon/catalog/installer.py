@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -228,6 +229,10 @@ class Installer:
         self._package_manager = package_manager
         self._bash_check = bash_check
         self._platform_id = platform_id
+        # Per-install, so one install's marker cannot answer another's, and
+        # random so no script output can imitate it. Only the wording is
+        # secret-adjacent; nothing sensitive is stored here.
+        self.sudo_marker = f"[yulon-sudo-{secrets.token_hex(8)}] password:"
 
     @property
     def script(self) -> Path:
@@ -240,16 +245,24 @@ class Installer:
         return self.installers_root / self.entry.install.script_for(self._package_manager())
 
     def script_env(self) -> dict[str, str]:
-        """The environment the script runs in: ours, plus `env` overrides, plus a `TERM`.
+        """The environment the script runs in: ours, plus `env` overrides, a `TERM`, a sudo prompt.
 
         The scripts call `clear`/`tput`, which exit non-zero when `TERM` is unset
         — and a desktop-launched app has no `TERM` (Phase 3 live-gate finding,
         2026-08-20: `TERM environment variable not set.` → exit 1 before the
         first prompt). The ANSI output this enables is stripped by `runner`.
+
+        `SUDO_PROMPT` is how the launcher recognises sudo's password prompt
+        without guessing. sudo prints this string verbatim instead of "[sudo]
+        password for pk:", so a marker containing a random token is proof the
+        text came from sudo — no regex over build output, and no dependence on
+        the user's locale, which "[sudo] password for" would have (a Danish box
+        prints "[sudo] adgangskode for pk:").
         """
         env = dict(os.environ)
         if not env.get("TERM"):  # unset OR empty — some session managers export TERM=""
             env["TERM"] = DEFAULT_TERM
+        env["SUDO_PROMPT"] = self.sudo_marker
         if self._env:
             env.update(self._env)
         return env
@@ -304,12 +317,22 @@ class Installer:
     ) -> Iterator[str]:
         """Run the install, yielding output lines live; answers prompts itself.
 
-        `ask` is consulted only for a prompt that has gone quiet and that no
-        rule in `PROMPT_RULES` can answer. In practice that means one thing:
-        `sudo` asking for a password during the distro package steps. No rule
-        can ever know it, so without `ask` the script stops there and the app
-        looks frozen — which is exactly what installing on Linux did. Passing a
-        prompter lets the UI put the question to the person at the keyboard.
+        `ask` is consulted for exactly one thing: `sudo` asking for a password
+        during the distro package steps. No rule in `PROMPT_RULES` can ever know
+        it, so without `ask` the script stops dead there — which is what
+        installing on Linux did (`sudo -v` at the top of the Ubuntu script,
+        guarded by `exit 1`, so it failed seconds in with "Could not cache sudo
+        credentials. Aborting.").
+
+        Two things make that work, and both are needed:
+
+        * The script runs on a pseudo-terminal. sudo reads its password from
+          /dev/tty, not stdin, precisely so a piped stdin cannot feed it one —
+          measured: a child reading stdin answers through a pipe, the same child
+          reading /dev/tty does not.
+        * `SUDO_PROMPT` (see `script_env()`) makes sudo announce itself with a
+          random marker, so the prompt is recognised by an exact match instead
+          of a guess about what a prompt looks like.
 
         Raises `InstallerError` if the script exits non-zero (after yielding
         everything it printed), or any `preflight()` error before it starts.
@@ -325,7 +348,9 @@ class Installer:
                 cwd=self.script.parent,
                 respond=make_responder(opts),
                 ask=ask,
+                ask_marker=self.sudo_marker,
                 env=self.script_env(),
+                terminal=True,
                 cancel=cancel,
             ):
                 text = runner.strip_ansi(line).strip()

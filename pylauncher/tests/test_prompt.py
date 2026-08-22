@@ -1,9 +1,22 @@
 """Tests for asking the user to answer a subprocess prompt (roadmap 6.1.5).
 
-The bug these guard against is the one that made installing on Linux impossible:
-the scripts run `sudo`, `sudo` prints `[sudo] password for pk:` with no trailing
-newline, no rule can answer it, and the install stopped there with the window
-looking frozen.
+The bug these guard against is the one that made installing on Linux
+impossible: the scripts run `sudo`, `sudo` wants a password, no rule can answer
+it, and the install stopped there with the window looking frozen.
+
+Two things had to be true before that could work, and the first version had
+neither:
+
+* The prompt has to REACH us. `sudo` reads from /dev/tty, not stdin, precisely
+  so a piped stdin cannot feed it a password — so the child needs a real
+  terminal, not three pipes.
+* We have to know it IS the prompt. The first version guessed from the shape of
+  the line, and the guess fires on ordinary build output; `test_build_output_*`
+  below is the measured list. `SUDO_PROMPT` lets the caller choose the wording
+  instead, so the test is an exact match on a random marker.
+
+Every test here carries a deadline. An `interact()` regression should fail,
+not hang the suite (review, 2026-08-22).
 """
 
 from __future__ import annotations
@@ -17,6 +30,17 @@ import pytest
 from tests.conftest import process_events
 from yulon import runner
 from yulon.ui.widgets.prompt import InputPrompter, is_secret, tidy
+
+MARKER = "[yulon-sudo-deadbeef] password:"
+
+
+def _expiring_cancel(after: float = 5.0) -> threading.Event:
+    """A cancel that trips on its own, so a broken seam fails instead of hanging."""
+    event = threading.Event()
+    timer = threading.Timer(after, event.set)
+    timer.daemon = True
+    timer.start()
+    return event
 
 
 def test_a_password_prompt_is_recognised_as_secret() -> None:
@@ -49,7 +73,7 @@ def _echo_prompt_script(prompt: str) -> list[str]:
     return [sys.executable, "-c", code]
 
 
-def test_interact_asks_the_user_when_no_rule_can_answer() -> None:
+def test_interact_asks_the_user_for_the_exact_marker() -> None:
     """The sudo case, end to end against a real child process.
 
     A rule table cannot contain a password, so without this seam the child sits
@@ -63,16 +87,82 @@ def test_interact_asks_the_user_when_no_rule_can_answer() -> None:
 
     lines = list(
         runner.interact(
-            _echo_prompt_script("[sudo] password for pk: "),
+            _echo_prompt_script(MARKER + " "),
             respond=lambda _line: None,  # no rule matches anything
             ask=ask,
+            ask_marker=MARKER,
             quiet_seconds=0.15,
+            cancel=_expiring_cancel(),
         )
     )
     # `ask` sees the prompt exactly as the child printed it, trailing space and
     # all; tidying is the prompter's job, at the moment of display.
-    assert asked == ["[sudo] password for pk: "]
+    assert asked == [MARKER + " "]
     assert any("GOT:hunter2" in line for line in lines)
+
+
+def test_the_user_is_never_asked_without_a_marker() -> None:
+    """No marker means the seam is inert — the safe default, and deliberately so.
+
+    `ask` used to be consulted for any quiet partial line that ended in one of
+    `: ? > ]`. That is a guess, it is wrong often (see the next test), and the
+    consequence was a modal dialog over a two-hour build. A caller that has not
+    arranged for the child to identify its prompt gets no dialog at all.
+    """
+    asked: list[str] = []
+    lines = list(
+        runner.interact(
+            _echo_prompt_script(MARKER + " "),
+            respond=lambda _line: None,
+            ask=lambda prompt: asked.append(prompt) or "hunter2",  # type: ignore[func-returns-value]
+            quiet_seconds=0.15,
+            cancel=_expiring_cancel(1.5),
+        )
+    )
+    assert asked == [], "asked about a prompt the caller never claimed to recognise"
+    assert not any("GOT:" in line for line in lines)
+
+
+@pytest.mark.parametrize(
+    "chunk",
+    [
+        "[ 43%] Building CXX object src/CMakeFiles/foo.dir/bar.cpp.o",
+        "Get:12 http://archive.ubuntu.com/ubuntu jammy/main amd64 libfoo amd64 1.2 [345 kB]",
+        "Downloading data.zip [====>    ]",
+        "/usr/include/c++/13/bits/stl_algo.h:1234:",
+        "note:",
+        "Selecting previously unselected package foo:",
+        "#12 sha256:abc [2/5]",
+    ],
+)
+def test_build_output_that_looks_like_a_prompt_is_never_asked_about(chunk: str) -> None:
+    """Every one of these was measured returning True from the old heuristic.
+
+    `interact()` reads with `os.read(fd, 4096)`, so a chunk boundary lands
+    mid-line constantly; over a 2-4 hour compile, one of these sitting in the
+    buffer for 0.3s is routine. The old code opened an application-modal dialog
+    quoting it, which blocked the Stop button and wrote whatever was typed into
+    the build's stdin (review, 2026-08-22).
+    """
+    asked: list[str] = []
+    code = (
+        "import sys, time\n"
+        f"sys.stdout.write({chunk!r})\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(0.5)\n"  # the pause that used to arm the dialog
+        "print()\n"
+    )
+    list(
+        runner.interact(
+            [sys.executable, "-c", code],
+            respond=lambda _line: None,
+            ask=lambda prompt: asked.append(prompt) or "WRONG",  # type: ignore[func-returns-value]
+            ask_marker=MARKER,
+            quiet_seconds=0.15,
+            cancel=_expiring_cancel(),
+        )
+    )
+    assert asked == [], f"opened a dialog over build output: {chunk!r}"
 
 
 def test_interact_prefers_a_rule_over_asking_the_user() -> None:
@@ -84,7 +174,9 @@ def test_interact_prefers_a_rule_over_asking_the_user() -> None:
             _echo_prompt_script("Continue anyway? "),
             respond=lambda line: "n" if "Continue anyway" in line else None,
             ask=lambda prompt: asked.append(prompt) or "SHOULD-NOT-BE-USED",  # type: ignore[func-returns-value]
+            ask_marker=MARKER,
             quiet_seconds=0.15,
+            cancel=_expiring_cancel(),
         )
     )
     assert asked == []
@@ -93,19 +185,13 @@ def test_interact_prefers_a_rule_over_asking_the_user() -> None:
 
 def test_interact_without_a_prompter_still_gives_up_rather_than_hanging() -> None:
     """The old behaviour, kept: unanswerable and no prompter means cancel is the way out."""
-    cancel = threading.Event()
-
-    def cancel_soon() -> None:
-        cancel.wait(0.1)
-        cancel.set()
-
-    threading.Timer(0.4, cancel.set).start()
     lines = list(
         runner.interact(
-            _echo_prompt_script("[sudo] password for pk: "),
+            _echo_prompt_script(MARKER + " "),
             respond=lambda _line: None,
+            ask_marker=MARKER,
             quiet_seconds=0.15,
-            cancel=cancel,
+            cancel=_expiring_cancel(0.6),
         )
     )
     assert not any("GOT:" in line for line in lines), "nothing should have been answered"
@@ -118,32 +204,109 @@ def test_a_declined_dialog_answers_nothing_rather_than_an_empty_line() -> None:
     the default" — so treating "the user pressed Cancel" as "" would silently
     confirm something they declined.
     """
-    written: list[str] = []
-
-    class _Fake:
-        def write(self, data: bytes) -> int:
-            written.append(data.decode())
-            return len(data)
-
-        def flush(self) -> None: ...
-
     lines = list(
         runner.interact(
-            _echo_prompt_script("[sudo] password for pk: "),
+            _echo_prompt_script(MARKER + " "),
             respond=lambda _line: None,
             ask=lambda _prompt: None,  # the user pressed Cancel
+            ask_marker=MARKER,
             quiet_seconds=0.15,
-            cancel=_expiring_cancel(0.6),
+            cancel=_expiring_cancel(0.8),
         )
     )
     assert not any("GOT:" in line for line in lines)
-    assert written == []
 
 
-def _expiring_cancel(after: float) -> threading.Event:
-    event = threading.Event()
-    threading.Timer(after, event.set).start()
-    return event
+def test_a_declined_prompt_is_still_shown_in_the_log() -> None:
+    """Declining left the question invisible: the install just stopped producing output.
+
+    A partial line that nothing answers is normally held back, because a build
+    pausing mid-line is not a line yet. The prompt is the exception — it is the
+    last thing the user will see before the install stalls, so it has to be on
+    screen (review, 2026-08-22).
+    """
+    lines = list(
+        runner.interact(
+            _echo_prompt_script(MARKER + " "),
+            respond=lambda _line: None,
+            ask=lambda _prompt: None,
+            ask_marker=MARKER,
+            quiet_seconds=0.15,
+            cancel=_expiring_cancel(0.8),
+        )
+    )
+    assert any(MARKER in line for line in lines), f"the prompt never reached the log: {lines!r}"
+
+
+# -- the terminal transport -------------------------------------------------
+
+
+def _has_bash() -> bool:
+    from yulon.catalog.installer import bash_available
+
+    try:
+        return bash_available()
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+needs_tty = pytest.mark.skipif(
+    not runner.pty_supported(), reason="no pseudo-terminal on this platform (Windows)"
+)
+
+
+@needs_tty
+def test_a_child_reading_dev_tty_is_answered_only_with_a_terminal() -> None:
+    """This is the whole reason 6.1.5 did not work, reduced to two lines of shell.
+
+    `sudo` does not read its password from stdin — it opens /dev/tty, so that a
+    piped stdin cannot supply one. Measured on the Ubuntu VM: the same child
+    reading *stdin* is answered through a pipe, and reading /dev/tty is not.
+    Only `terminal=True` gives it a controlling terminal for /dev/tty to
+    resolve to.
+    """
+    if not _has_bash():
+        pytest.skip("no bash that can run a script on this machine")
+    script = f'printf "{MARKER} "; read pw < /dev/tty; echo "GOT:$pw"'
+
+    def run(terminal: bool) -> list[str]:
+        return list(
+            runner.interact(
+                ["bash", "-c", script],
+                respond=lambda _line: None,
+                ask=lambda _prompt: "hunter2",
+                ask_marker=MARKER,
+                terminal=terminal,
+                quiet_seconds=0.2,
+                cancel=_expiring_cancel(6.0),
+            )
+        )
+
+    assert any("GOT:hunter2" in line for line in run(terminal=True))
+    with_pipes = run(terminal=False)
+    assert not any(
+        "GOT:hunter2" in line for line in with_pipes
+    ), "a pipe answered a /dev/tty read — the premise of the pty transport is wrong"
+
+
+@needs_tty
+def test_a_real_shell_prompt_is_answered_by_the_prompter() -> None:
+    """`read -p`-style prompts are the actual shape the install scripts use."""
+    if not _has_bash():
+        pytest.skip("no bash that can run a script on this machine")
+    script = f'printf "{MARKER} "; read word; echo "GOT:$word"'
+    lines = list(
+        runner.interact(
+            ["bash", "-c", script],
+            respond=lambda _line: None,
+            ask=lambda _prompt: "please",
+            ask_marker=MARKER,
+            terminal=True,
+            quiet_seconds=0.2,
+            cancel=_expiring_cancel(),
+        )
+    )
+    assert any("GOT:please" in line for line in lines)
 
 
 # -- the thread bridge ------------------------------------------------------
@@ -209,8 +372,15 @@ def test_prompter_stops_waiting_when_the_job_is_cancelled(
     assert answer == [None]
 
 
-def test_installer_run_forwards_the_prompter(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The seam has to actually reach `runner.interact`, not stop at the installer."""
+def test_installer_run_forwards_the_prompter_the_marker_and_the_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All three have to reach `runner.interact`, and the marker has to match SUDO_PROMPT.
+
+    Forwarding `ask` alone is what the first version did, and it delivered
+    nothing: without the marker the seam never fires, and without the terminal
+    sudo's prompt never arrives to fire it.
+    """
     from yulon.catalog import installer as installer_module
 
     seen: dict[str, object] = {}
@@ -228,34 +398,24 @@ def test_installer_run_forwards_the_prompter(monkeypatch: pytest.MonkeyPatch) ->
 
     list(inst.run(installer_module.InstallOptions(), ask=ask))
     assert seen.get("ask") is ask
+    assert seen.get("terminal") is True
+    assert seen.get("ask_marker") == inst.sudo_marker
+    # The marker is only useful because sudo is told to print exactly it.
+    assert inst.script_env()["SUDO_PROMPT"] == inst.sudo_marker
+
+
+def test_each_install_gets_its_own_unguessable_sudo_marker() -> None:
+    """A fixed string could be printed by a script; a per-install random one cannot."""
+    from yulon.catalog import installer as installer_module
+
+    entry = _first_installable_entry()
+    first = installer_module.Installer(entry).sudo_marker
+    second = installer_module.Installer(entry).sudo_marker
+    assert first != second
+    assert len(first) > 20
 
 
 def _first_installable_entry():  # type: ignore[no-untyped-def]
     from yulon.catalog.catalog import load_catalog
 
     return load_catalog().get("wow-wotlk")
-
-
-def test_a_real_shell_prompt_is_answered_by_the_prompter() -> None:
-    """`read -p`-style prompts are the actual shape the install scripts use."""
-    if not _has_bash():
-        pytest.skip("no bash that can run a script on this machine")
-    script = 'printf "Enter the magic word: "; read word; echo "GOT:$word"'
-    lines = list(
-        runner.interact(
-            ["bash", "-c", script],
-            respond=lambda _line: None,
-            ask=lambda _prompt: "please",
-            quiet_seconds=0.2,
-        )
-    )
-    assert any("GOT:please" in line for line in lines)
-
-
-def _has_bash() -> bool:
-    from yulon.catalog.installer import bash_available
-
-    try:
-        return bash_available()
-    except (OSError, subprocess.SubprocessError):
-        return False
