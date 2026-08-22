@@ -511,3 +511,79 @@ def test_pin_project_name_declines_rather_than_guess_when_compose_cannot_answer(
     )
     assert docker.pin_project_name(tmp_path) is None
     assert not (tmp_path / ".env").exists()
+
+
+def test_wait_ready_ignores_the_previous_runs_ready_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restarted server is not ready just because it once was.
+
+    Docker keeps a container's output across restarts, so after a stop/start the
+    previous run's `ready...` is still in the log. Reading the whole log made
+    this return True the instant the container came back, while the server was
+    still loading — measured on a real AzerothCore server, whose last words
+    before being killed were `>> Loaded 13567 Quest Offer Reward Locale
+    Strings`. Scoping the read to the current run is the fix.
+    """
+    seen: list[list[str]] = []
+    # What `docker logs` returns for the WHOLE history: the old run said ready.
+    whole_history = "starting up\nWorld initialized, ready...\nstopping\nstarting up again\n"
+    # What it returns for THIS run only: still loading.
+    this_run = "starting up again\n>> Loaded 13567 Quest Offer Reward Locale Strings\n"
+
+    def fake_run(cmd: list[str], cwd: Path | None = None):
+        seen.append(cmd)
+        if cmd[:2] == ["docker", "ps"]:
+            return _completed(stdout=f"{SPEC.auth}\n{SPEC.world}\n")
+        if cmd[:2] == ["docker", "inspect"]:
+            return _completed(stdout="2026-08-22T01:24:53.575296627Z\n")
+        if cmd[:2] == ["docker", "logs"]:
+            scoped = "--since" in cmd
+            if cmd[-1] == SPEC.auth:
+                return _completed(stdout="Added realm at 127.0.0.1:8085\n")
+            return _completed(stdout=this_run if scoped else whole_history)
+        return _completed()
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    assert (
+        docker.wait_ready(SPEC.auth, SPEC.world, "127.0.0.1", 8085, timeout=0.2, interval=0.1)
+        is False
+    )
+    assert any("--since" in cmd for cmd in seen), "readiness must scope logs to the current run"
+
+
+def test_wait_ready_still_succeeds_when_this_run_is_actually_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scoping must not break the case it exists to make honest."""
+
+    def fake_run(cmd: list[str], cwd: Path | None = None):
+        if cmd[:2] == ["docker", "ps"]:
+            return _completed(stdout=f"{SPEC.auth}\n{SPEC.world}\n")
+        if cmd[:2] == ["docker", "inspect"]:
+            return _completed(stdout="2026-08-22T01:24:53.575296627Z\n")
+        if cmd[:2] == ["docker", "logs"]:
+            if cmd[-1] == SPEC.auth:
+                return _completed(stdout="Added realm at 127.0.0.1:8085\n")
+            return _completed(stdout="World initialized, ready...\n")
+        return _completed()
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    assert (
+        docker.wait_ready(SPEC.auth, SPEC.world, "127.0.0.1", 8085, timeout=2.0, interval=0.1)
+        is True
+    )
+
+
+def test_logs_without_a_readable_start_time_falls_back_to_everything(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable start time must degrade to the old behaviour, not to silence."""
+
+    def fake_run(cmd: list[str], cwd: Path | None = None):
+        if cmd[:2] == ["docker", "inspect"]:
+            return _completed(returncode=1, stderr="no such container")
+        return _completed(stdout="everything\n")
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    assert docker.started_at("gone") == ""

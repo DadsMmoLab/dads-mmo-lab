@@ -403,9 +403,36 @@ def health(container: str) -> str:
     return proc.stdout.strip()
 
 
-def _logs(container: str) -> str:
-    """Return a container's combined logs, or `""` if they can't be read."""
-    proc = runner.run(["docker", "logs", container])
+def started_at(container: str) -> str:
+    """When the container's CURRENT run began, or `""` if it cannot be read."""
+    proc = runner.run(["docker", "inspect", container, "--format", "{{.State.StartedAt}}"])
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def _logs(container: str, *, this_run_only: bool = False) -> str:
+    """Return a container's logs, or `""` if they can't be read.
+
+    `docker logs` prints everything the container has ever written, across every
+    restart. That is the right default for showing a user what happened, and
+    exactly wrong for deciding whether a server is ready *now*: a restarted
+    worldserver still has the previous run's `ready...` sitting in its log, so a
+    readiness check reads it and says yes while the new run is still loading.
+
+    Measured on a real AzerothCore server (2026-08-22): after a stop/start
+    cycle, `wait_ready()` returned True immediately, and the container's own
+    last words were still `>> Loaded 13567 Quest Offer Reward Locale Strings` —
+    it was mid-startup, and the stop that followed killed it there (exit 137).
+
+    `this_run_only` scopes the read to the current run by asking when that run
+    started. `--tail` is not an alternative: the marker is printed once, so a
+    tail window either misses it or slides past it.
+    """
+    argv = ["docker", "logs"]
+    if this_run_only:
+        since = started_at(container)
+        if since:
+            argv += ["--since", since]
+    proc = runner.run([*argv, container])
     return proc.stdout if proc.returncode == 0 else ""
 
 
@@ -456,6 +483,11 @@ def wait_ready(
     transient `docker ps`/CLI failure during polling is treated as "not ready
     this iteration" and retried, never raised — see `_status_safe()`.
 
+    Both markers are looked for in the CURRENT run's logs only. Docker keeps a
+    container's output across restarts, so a restarted server still carries the
+    previous run's `ready...`; reading the whole log made this return True
+    instantly on every restart, while the server was in fact still loading.
+
     Note: worst-case wall-clock time before returning `False` is
     `timeout + interval`, same caveat as `wait_db_healthy()`.
 
@@ -473,7 +505,9 @@ def wait_ready(
     while time.monotonic() < deadline:
         running = _status_safe()
         if running is not None and auth_container in running and world_container in running:
-            if target in _logs(auth_container) and "ready..." in _logs(world_container):
+            if target in _logs(auth_container, this_run_only=True) and "ready..." in _logs(
+                world_container, this_run_only=True
+            ):
                 return True
         time.sleep(interval)
     return False
