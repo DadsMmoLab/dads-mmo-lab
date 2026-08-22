@@ -64,12 +64,34 @@ class InstallOptions:
     reinstall: bool = False
 
 
+class AskTheUser:
+    """A rule's answer when the app has no business choosing. See `PROMPT_RULES`."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "ASK_THE_USER"
+
+
+ASK_THE_USER = AskTheUser()
+"""Route this prompt to the person, because neither answer is the app's to give.
+
+There is exactly one of these, and it is not a general escape hatch: a rule that
+opens a dialog is the shape that made the old prompt heuristic dangerous. It
+exists because the installers' docker-group question has no safe canned answer.
+Answering yes grants root-equivalent access silently — the precise thing
+upstream's 1.4.4 security change added consent for. Answering no leaves the user
+outside the docker group, and the launcher's own `docker` calls then fail with
+permission denied, so the app would have quietly broken itself instead.
+"""
+
+
 @dataclass(frozen=True)
 class PromptRule:
     """`pattern` (regex, searched in the ANSI-stripped prompt) → the stdin answer."""
 
     pattern: str
-    answer: str | Callable[[InstallOptions], str]
+    answer: str | Callable[[InstallOptions], str] | AskTheUser
     note: str = ""
 
 
@@ -103,22 +125,51 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
     PromptRule(r"Open the GitHub README", "n"),
     PromptRule(r"Download wow-manage\.sh", "n"),
     PromptRule(r"stop the server now\?", "n"),
+    # Must sit ABOVE the `(y/n)` catch-all, which would otherwise answer "y" and
+    # grant root-equivalent access without anyone being asked — exactly what
+    # upstream's 1.4.4 security change exists to prevent (it removed the
+    # `/etc/sudoers.d/docker-nopasswd` rule and made group membership a
+    # consented step). The pattern requires the `(y/n)` suffix so it matches the
+    # QUESTION and not the paragraph of warning the script prints above it.
+    PromptRule(
+        r"to the docker group.*\(y/n\)",
+        ASK_THE_USER,
+        "root-equivalent; neither answer is the app's to give",
+    ),
     PromptRule(r"\(y/n\)", "y"),
 )
 
 
 def make_responder(
-    options: InstallOptions, rules: tuple[PromptRule, ...] = PROMPT_RULES
+    options: InstallOptions,
+    rules: tuple[PromptRule, ...] = PROMPT_RULES,
+    ask: runner.Prompter | None = None,
 ) -> runner.Responder:
-    """Build the `runner.Responder` that answers prompts per `rules` for `options`."""
+    """Build the `runner.Responder` that answers prompts per `rules` for `options`.
+
+    `ask` is consulted only for a rule whose answer is `ASK_THE_USER` — one rule,
+    matching one exact question, for the reason given there. Without an `ask`
+    (the CLI harness), such a prompt is DECLINED: refusing a privilege change is
+    recoverable and visible, granting one silently is neither.
+    """
     compiled = [(re.compile(r.pattern, re.IGNORECASE), r) for r in rules]
 
     def respond(line: str) -> str | None:
         for regex, rule in compiled:
-            if regex.search(line):
-                answer = rule.answer(options) if callable(rule.answer) else rule.answer
-                logger.debug(f"prompt {line.strip()!r} → {answer!r}")
+            if not regex.search(line):
+                continue
+            if isinstance(rule.answer, AskTheUser):
+                if ask is None:
+                    logger.warning(f"no prompter for {line.strip()!r}; declining")
+                    return "n"
+                reply = ask(line.strip())
+                # A dismissed dialog is not consent.
+                answer = "y" if reply and reply.strip().lower() in ("y", "yes") else "n"
+                logger.info(f"user was asked about {line.strip()!r} and answered {answer!r}")
                 return answer
+            answer = rule.answer(options) if callable(rule.answer) else rule.answer
+            logger.debug(f"prompt {line.strip()!r} → {answer!r}")
+            return answer
         return None
 
     return respond
@@ -365,7 +416,12 @@ class Installer:
             for line in self._interact(
                 ["bash", str(self.script)],
                 cwd=self.script.parent,
-                respond=make_responder(opts),
+                # `ask` reaches the rules as well as `interact()`. The rules
+                # need it for exactly one question — the docker-group consent
+                # added by the installers' 1.4.4 security change, which arrives
+                # as a COMPLETE line (the script `echo`s it, then reads), so
+                # `interact()`'s blocked-partial-line path never sees it.
+                respond=make_responder(opts, ask=ask),
                 ask=ask,
                 ask_marker=self.sudo_marker,
                 env=self.script_env(),

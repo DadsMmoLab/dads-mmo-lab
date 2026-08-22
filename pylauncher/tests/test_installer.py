@@ -367,3 +367,80 @@ def test_failure_message_carries_the_scripts_own_last_words(tmp_path: Path) -> N
     assert "It last said:" in message
     assert "ERROR: needs 20GB free, found 2GB" in message  # the script's real error
     assert "ERROR: needs 20GB free, found 2GB" in lines  # and it was streamed live too
+
+
+# -- upstream 1.4.4: the docker-group consent prompt --------------------------
+
+DOCKER_GROUP_PROMPT = "Add 'pk' to the docker group (grants root-equivalent access)? (y/n): "
+
+
+def test_the_docker_group_question_is_put_to_the_user_not_answered_by_a_rule() -> None:
+    """Upstream 1.4.4 removed the NOPASSWD sudoers rule and made group membership consented.
+
+    Our `(y/n)` catch-all would have answered "y" and granted root-equivalent
+    access with nobody asked — defeating the security change while syncing it.
+    Neither canned answer is defensible: "y" grants silently, and "n" leaves the
+    user outside the docker group so the launcher's own `docker` calls fail.
+    """
+    asked: list[str] = []
+    respond = installer_module.make_responder(
+        installer_module.InstallOptions(),
+        ask=lambda prompt: (asked.append(prompt), "y")[1],
+    )
+    assert respond(DOCKER_GROUP_PROMPT) == "y"
+    assert asked == [DOCKER_GROUP_PROMPT.strip()], "the user was not asked"
+
+
+def test_a_dismissed_dialog_is_not_consent() -> None:
+    """Cancelling the question must not read as yes."""
+    respond = installer_module.make_responder(
+        installer_module.InstallOptions(), ask=lambda _prompt: None
+    )
+    assert respond(DOCKER_GROUP_PROMPT) == "n"
+
+
+def test_without_a_prompter_the_privilege_change_is_declined() -> None:
+    """The CLI harness has no dialog. Refusing is recoverable and visible; granting is not."""
+    respond = installer_module.make_responder(installer_module.InstallOptions())
+    assert respond(DOCKER_GROUP_PROMPT) == "n"
+
+
+def test_the_warning_paragraph_above_the_question_does_not_trigger_a_dialog() -> None:
+    """The script prints several lines about the docker group before asking.
+
+    The rule requires the `(y/n)` suffix so it matches the question and not the
+    explanation — otherwise the dialog opens on prose nobody is waiting on.
+    """
+    asked: list[str] = []
+    respond = installer_module.make_responder(
+        installer_module.InstallOptions(),
+        ask=lambda prompt: asked.append(prompt) or "y",  # type: ignore[func-returns-value]
+    )
+    assert respond("  the installer can add your user to the docker group.") is None
+    assert respond("  To let you run docker without typing sudo each time,") is None
+    assert asked == []
+
+
+def test_the_consent_rule_wins_over_the_yes_no_catch_all() -> None:
+    """Order matters: `(y/n)` sits below it and would otherwise answer first."""
+    patterns = [rule.pattern for rule in installer_module.PROMPT_RULES]
+    consent = next(i for i, p in enumerate(patterns) if "docker group" in p)
+    catch_all = next(i for i, p in enumerate(patterns) if p == r"\(y/n\)")
+    assert consent < catch_all
+
+
+def test_the_shipped_installers_no_longer_write_a_passwordless_sudo_rule() -> None:
+    """Upstream 1.4.4's actual security change, asserted against the files we ship.
+
+    The docker group already grants root-equivalent access, so a
+    `/etc/sudoers.d/docker-nopasswd` rule only added attack surface. We shipped
+    it until this sync.
+    """
+    from yulon import resources
+
+    scripts = sorted((resources.installers_dir() / "wow-wotlk").glob("install-*.sh"))
+    assert scripts, "no installers found"
+    for script in scripts:
+        text = script.read_text(encoding="utf-8", errors="replace")
+        assert "sudo tee /etc/sudoers.d/docker-nopasswd" not in text, script.name
+        assert "docker_group_consent" in text, f"{script.name} is behind upstream 1.4.4"

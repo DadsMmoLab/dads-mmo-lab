@@ -71,8 +71,14 @@ python -m yulon.catalog.installer wow-wotlk --server-dir ~/wow-server-playerbots
 python -m yulon.catalog.installer wow-tbc --client-dir ~/Games/WoWTBC   # games that need a client folder
 ```
 
-Needs a reachable Docker daemon (otherwise it stops with the Phase 3.3 message) and, because
-the wrapped scripts start with `sudo -v`, cached or passwordless sudo.
+Needs a reachable Docker daemon (otherwise it stops with the Phase 3.3 message), and cached or
+passwordless sudo — the wrapped scripts still start with `sudo -v`. The **app** no longer needs
+that (roadmap 6.1.5 runs the script on a pty and answers the password through a dialog), but this
+CLI harness has no dialog to answer with, so the old requirement stands here.
+
+The harness also **declines** the installers' docker-group question, because there is nobody to
+ask: joining that group is a root-equivalent privilege change, and the app never makes one
+silently. Add yourself with `sudo usermod -aG docker "$USER"` if you want it.
 
 ## Building the desktop binary
 
