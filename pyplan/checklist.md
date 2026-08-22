@@ -238,6 +238,45 @@
     to end: pinned as `wow-server`, folder renamed, project still resolves to `wow-server`, stop works and
     start works where it previously died with `Conflict. The container name is already in use`.
 
+- **Windows: the launcher only works from the user's own desktop session (2026-08-22, measured
+  three ways).** Docker Desktop's credential helper fails with `A specified logon session does not
+  exist. It may already have been terminated.` from any non-interactive context — **even for an
+  anonymous pull of a public image**. Established by a clean three-way comparison, so it is the
+  *session* and not the login:
+
+  | context | result |
+  |---|---|
+  | SSH (non-interactive), desktop logged out | fails |
+  | desktop session 1 (interactive) | **6 passed, 1 skipped** in 83.75s |
+  | SSH (non-interactive), desktop logged **in** | fails identically |
+
+  Neither clearing `credsStore` from `~/.docker/config.json` nor pointing `DOCKER_CONFIG` at a
+  credential-free directory avoids it — Docker Desktop reinjects the helper. **Good news for the
+  product**: the GUI launcher runs in the user's session, so it is unaffected. **Bad news for
+  automation**: a CI runner, a service, or any headless gate cannot pull images on Windows, so the
+  Windows live gate must be driven from an interactive session (a scheduled task with `/IT`), not
+  over SSH.
+
+- **The full suite now runs on real Windows (2026-08-22).** Win11 Pro 25H2 with `core.autocrlf=true`
+  at system *and* repo level — the environment the CRLF guard exists for, where it had never once
+  executed because CI is Linux-only. Result: **221 passed, 6 skipped**, and the CRLF assertions ran
+  rather than passing vacuously. The four extra skips versus Linux are honest and expected: 2 ×
+  "no pty on this platform" (`test_console.py`) and 4 × "no bash that can run a script on this
+  machine" (`test_installer.py`, `test_runner.py`) — the clean-Windows findings, holding. Live
+  integration on Docker Desktop (Engine 29.7.2, Compose v5.4.0, WSL2, 15 CPUs, 9.7 GB): **6 passed,
+  1 skipped in 83.75s**, against 58s on the Linux VM.
+
+- **Two build-machine traps found while installing a real server on Windows (2026-08-22).**
+  1. **Large clones need HTTP/1.1.** `git clone` of `azerothcore-wotlk` (224k objects) died with
+     `fetch-pack: invalid index-pack output` / `unexpected disconnect while reading sideband packet`.
+     `git -c http.version=HTTP/1.1 -c http.postBuffer=524288000` fixes it. The native install engine
+     must set both, or its very first step fails on a large repo.
+  2. **A build must not be attached to a console.** The first attempt ran in a scheduled task with a
+     visible window; because the clone was failing silently the window looked blank, was closed, and
+     the build died with `STATUS_CONTROL_C_EXIT` (`-1073741510`). Long jobs need `-WindowStyle Hidden`
+     with a *separate*, disposable viewer — which is also how the launcher should treat its own log
+     window.
+
 - **Open follow-ups from the staged start/stop review (2026-08-22)** — found by a three-lens review whose
   findings were then adjudicated against a live daemon; the must-fix (parallel `docker stop`) and the
   latching config check are already fixed, these three are not:
