@@ -249,24 +249,58 @@ def _windows_lan_ip_from_wsl() -> str | None:
     return ip or None
 
 
+@dataclass(frozen=True)
+class PublicIpResult:
+    """The public-IP probe's answer, plus whether it was TLS and not the network that failed.
+
+    This used to be a bare `str | None`, and `networking.plan()` renders a None
+    as "could not determine the public IP (offline?)". That is the one diagnosis
+    this probe must never guess at: on the fresh Windows 11 box the downloads
+    block below was written for, OpenSSL could not build a certificate chain
+    while the machine was perfectly online, so the report sent the user to look
+    at their router when the fix was Windows Update. The flag is what lets the
+    report tell those two apart.
+    """
+
+    address: str | None
+    verification_failed: bool = False
+
+
 def detect_public_ip(
     http_get: Callable[[str], str] | None = None, services: Iterable[str] = _PUBLIC_IP_SERVICES
-) -> str | None:
-    """The public IPv4 as seen from the internet (icanhazip/ipify), or None if offline."""
+) -> PublicIpResult:
+    """The public IPv4 as seen from the internet (icanhazip/ipify), and why it failed.
+
+    `verification_failed` is set when at least one service was reached and its
+    certificate could not be verified, and none of them answered — i.e. the
+    probe found a server and refused to trust it, which is a machine problem
+    with a different fix than having no route out at all.
+    """
     get = http_get if http_get is not None else _http_get_text
+    verification_failed = False
     for url in services:
         try:
             text = get(url).strip()
             IPv4Address(text)
-            return text
+            return PublicIpResult(text)
         except (OSError, ValueError) as exc:
+            verification_failed = verification_failed or (
+                isinstance(exc, OSError) and _is_verification_failure(exc)
+            )
             logger.debug(f"detect_public_ip() via {url} failed: {exc}")
-    return None
+    return PublicIpResult(None, verification_failed)
 
 
 def _http_get_text(url: str) -> str:
+    """A small GET as text, over the same verified TLS the installer download uses.
+
+    The context is not optional here even though nothing executable is fetched:
+    without it this call inherits OpenSSL's snapshot of the Windows root store
+    and fails on exactly the hosts `verify_context()` exists to cover — and
+    `detect_public_ip()` would report that as "offline".
+    """
     request = urllib.request.Request(url, headers={"User-Agent": "yulon"})
-    with urllib.request.urlopen(request, timeout=5.0) as resp:
+    with urllib.request.urlopen(request, timeout=5.0, context=verify_context()) as resp:
         return str(resp.read().decode("utf-8", errors="replace"))
 
 
@@ -326,11 +360,16 @@ _MANUAL_DOCKER_DESKTOP = (
     "Download and install Docker Desktop by hand: "
     "https://www.docker.com/products/docker-desktop/"
 )
-_MANUAL_ROOT_CERTS = (
-    "This machine could not verify the download server's certificate, usually because it is "
-    "missing a root certificate. On Windows, run Windows Update (it installs the current roots) "
-    "and try again. Yu'lon will not install software it could not verify."
+# The sentence that is true wherever a TLS check fails on a box like the one in
+# the downloads block below: the root store, not the network, is what broke, and
+# Windows Update is what fixes it. Shared (style-guide §4) so the installer's
+# manual step and the networking report cannot drift into two different answers.
+CERT_VERIFY_FIX = (
+    "This machine could not verify the server's certificate, usually because it is missing a "
+    "root certificate. On Windows, run Windows Update (it installs the current roots) and "
+    "try again."
 )
+_MANUAL_ROOT_CERTS = f"{CERT_VERIFY_FIX} Yu'lon will not install software it could not verify."
 _MANUAL_WSL = (
     "Open an Administrator PowerShell and run: wsl --install --no-distribution, then reboot."
 )
@@ -708,7 +747,7 @@ def _os_curl() -> Path | None:
     return candidate if candidate.exists() else None
 
 
-def _verify_context() -> ssl.SSLContext:
+def verify_context() -> ssl.SSLContext:
     """A verifying TLS context with the widest root set we can honestly assemble.
 
     `ssl.create_default_context()` already means verify + check hostname; what it
@@ -718,6 +757,14 @@ def _verify_context() -> ssl.SSLContext:
     skipped `pip install -r requirements.txt` — the OS default is used unchanged:
     fewer roots, still fully verified. Nothing here relaxes verification, and
     there is no branch that can.
+
+    Public, and imported by `manifest_store` and `update`, because the root-store
+    gap is a fact about the OS this process runs on — the same thing `detect()`
+    and `config_dir()` are about — and every HTTPS call in the app has it. Both
+    of those modules already sit above this one in the import graph (this one
+    imports only `runner` and `log`), so there is no cycle to create; giving the
+    context its own module would only move the measurements above away from the
+    `download_verified()` code they were taken for.
     """
     try:
         import certifi
@@ -728,8 +775,8 @@ def _verify_context() -> ssl.SSLContext:
 
 
 def _open_url(request: urllib.request.Request) -> HttpResponse:
-    """`urlopen` with the verifying context from `_verify_context()`."""
-    resp: HttpResponse = urllib.request.urlopen(request, timeout=60.0, context=_verify_context())
+    """`urlopen` with the verifying context from `verify_context()`."""
+    resp: HttpResponse = urllib.request.urlopen(request, timeout=60.0, context=verify_context())
     return resp
 
 

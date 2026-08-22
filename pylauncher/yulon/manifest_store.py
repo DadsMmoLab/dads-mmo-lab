@@ -20,6 +20,7 @@ from typing import Protocol
 
 from yulon.log import get_logger
 from yulon.manifest import Index, Manifest, ManifestType, parse_index, parse_manifest
+from yulon.platform import verify_context
 
 logger = get_logger(__name__)
 
@@ -127,12 +128,24 @@ class HttpGet(Protocol):
 
 
 def urllib_get(url: str, etag: str | None) -> HttpResponse:
-    """Default `HttpGet`: stdlib urllib with `If-None-Match`; 304 → empty body."""
+    """Default `HttpGet`: stdlib urllib with `If-None-Match`; 304 → empty body.
+
+    The context comes from `platform.verify_context()` rather than urllib's
+    default because these bytes decide what gets cloned and applied to a
+    server: a manifest names a git repo and the SQL/DBC steps to run from it.
+    urllib's default reads OpenSSL's snapshot of the Windows root store, which
+    on a fresh install is a fraction of what the OS would fetch on demand
+    (measured, 2026-08-22: 18 roots) — so a refresh that "just works" against
+    raw.githubusercontent.com today is luck about which chain that host uses,
+    not a property of the code.
+    """
     request = urllib.request.Request(url, headers={"User-Agent": "yulon"})
     if etag:
         request.add_header("If-None-Match", etag)
     try:
-        with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS) as resp:
+        with urllib.request.urlopen(
+            request, timeout=_TIMEOUT_SECONDS, context=verify_context()
+        ) as resp:
             return HttpResponse(resp.status, resp.headers.get("ETag"), resp.read())
     except urllib.error.HTTPError as exc:
         if exc.code == 304:
