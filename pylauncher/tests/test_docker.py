@@ -159,11 +159,11 @@ def test_wait_ready_returns_true_once_markers_present(monkeypatch: pytest.Monkey
     def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
         if cmd[:2] == ["docker", "ps"]:
             return _completed(0, "ac-authserver\nac-worldserver\n", "")
-        if cmd[:2] == ["docker", "inspect"] and "{{.State.Status}}" in cmd:
-            return _completed(0, "running" + chr(10), "")
-        if cmd[:2] == ["docker", "logs"] and cmd[2] == "ac-authserver":
+        if cmd[:2] == ["docker", "inspect"] and "{{.State.Status}}" in cmd[-1]:
+            return _completed(0, "running" + chr(9) + "2026-01-01T00:00:00Z" + chr(10), "")
+        if cmd[:2] == ["docker", "logs"] and cmd[-1] == "ac-authserver":
             return _completed(0, "listening on 127.0.0.1:3724", "")
-        if cmd[:2] == ["docker", "logs"] and cmd[2] == "ac-worldserver":
+        if cmd[:2] == ["docker", "logs"] and cmd[-1] == "ac-worldserver":
             return _completed(0, "World initialized... ready...", "")
         return _completed(0, "", "")
 
@@ -194,11 +194,11 @@ def test_wait_ready_tolerates_transient_docker_ps_failure(
             if calls["ps"] == 1:
                 return _completed(1, "", "the docker daemon is restarting")
             return _completed(0, "ac-authserver\nac-worldserver\n", "")
-        if cmd[:2] == ["docker", "inspect"] and "{{.State.Status}}" in cmd:
-            return _completed(0, "running" + chr(10), "")
-        if cmd[:2] == ["docker", "logs"] and cmd[2] == "ac-authserver":
+        if cmd[:2] == ["docker", "inspect"] and "{{.State.Status}}" in cmd[-1]:
+            return _completed(0, "running" + chr(9) + "2026-01-01T00:00:00Z" + chr(10), "")
+        if cmd[:2] == ["docker", "logs"] and cmd[-1] == "ac-authserver":
             return _completed(0, "listening on 127.0.0.1:3724", "")
-        if cmd[:2] == ["docker", "logs"] and cmd[2] == "ac-worldserver":
+        if cmd[:2] == ["docker", "logs"] and cmd[-1] == "ac-worldserver":
             return _completed(0, "ready...", "")
         return _completed(0, "", "")
 
@@ -439,8 +439,10 @@ def test_wait_ready_ignores_the_previous_runs_ready_marker(
         if cmd[:2] == ["docker", "ps"]:
             return _completed(stdout=f"{SPEC.auth}\n{SPEC.world}\n")
         if cmd[:2] == ["docker", "inspect"]:
-            if "{{.State.Status}}" in cmd:
-                return _completed(stdout="running" + chr(10))
+            if "{{.State.Status}}" in cmd[-1]:
+                return _completed(
+                    stdout="running" + chr(9) + "2026-08-22T01:24:53.575296627Z" + chr(10)
+                )
             return _completed(stdout="2026-08-22T01:24:53.575296627Z" + chr(10))
         if cmd[:2] == ["docker", "logs"]:
             scoped = "--since" in cmd
@@ -466,8 +468,10 @@ def test_wait_ready_still_succeeds_when_this_run_is_actually_ready(
         if cmd[:2] == ["docker", "ps"]:
             return _completed(stdout=f"{SPEC.auth}\n{SPEC.world}\n")
         if cmd[:2] == ["docker", "inspect"]:
-            if "{{.State.Status}}" in cmd:
-                return _completed(stdout="running" + chr(10))
+            if "{{.State.Status}}" in cmd[-1]:
+                return _completed(
+                    stdout="running" + chr(9) + "2026-08-22T01:24:53.575296627Z" + chr(10)
+                )
             return _completed(stdout="2026-08-22T01:24:53.575296627Z" + chr(10))
         if cmd[:2] == ["docker", "logs"]:
             if cmd[-1] == SPEC.auth:
@@ -1020,25 +1024,51 @@ def test_the_message_for_two_owners_offers_no_single_name_to_pin() -> None:
     assert "docker compose ls" in message
 
 
-def test_the_remedy_names_the_pin_when_a_pin_is_what_disagrees(tmp_path: Path) -> None:
-    """Renaming the folder is inert once `.env` holds a name: the pin outranks it."""
+def test_the_remedy_offers_deleting_a_copied_pin_not_a_folder_rename(tmp_path: Path) -> None:
+    """With a pin in place, a folder move cannot be the cause — so do not suggest it.
+
+    The pin outranks the directory, so renaming the folder back is inert. The
+    causes that remain are a genuinely different install and a `.env` copied
+    along with the folder — and telling a user in the copy case to "change
+    COMPOSE_PROJECT_NAME because the folder was moved" is how the copy ends up
+    stopping the original's server (review, 2026-08-22).
+    """
     (tmp_path / ".env").write_text(
-        "COMPOSE_PROJECT_NAME=stale-pin\n", encoding="utf-8", newline="\n"
+        "COMPOSE_PROJECT_NAME=stale-pin" + chr(10), encoding="utf-8", newline=chr(10)
     )
     message = docker._stranger_message(((SPEC.world, "real-project"),), "stale-pin", tmp_path)
-    assert "change COMPOSE_PROJECT_NAME from 'stale-pin' to 'real-project'" in message
+    assert "copied here from another install, delete it" in message
+    assert "the folder was moved" not in message
     assert "rename this folder" not in message
 
 
-def test_a_stop_that_proves_ownership_writes_the_pin_down(
+def test_no_single_remedy_is_offered_when_an_unlabelled_stranger_is_also_present(
+    tmp_path: Path,
+) -> None:
+    """Adopting the one project leaves the unlabelled container foreign, so Stop still refuses.
+
+    The next refusal then has no owners at all and offers no remedy — a
+    permanent write that bought nothing (review, 2026-08-22).
+    """
+    strangers = ((SPEC.world, "install-b"), (SPEC.db, None))
+    message = docker._stranger_message(strangers, "ours", tmp_path)
+    assert f"{docker.PROJECT_NAME_VAR}=install-b" not in message
+    assert "no compose project at all" in message
+
+
+def test_a_stop_does_not_write_a_pin_even_though_it_could(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The one other moment the basename is provably right.
+    """The census proves the basename is right — and writing it down is still wrong.
 
-    Attach deliberately does not pin, so an install this app did not create had
-    no pin at all — and `pinned_project_name()` exists precisely for the case
-    where the compose files later cannot be read. A stop that just confirmed our
-    own containers by label has proved the directory and the containers agree
+    A pin lives in `.env`, `.env` travels with the folder, and `install_project()`
+    prefers it over the directory. So a pin written here is inherited by any COPY
+    of the install (a second realm, a restored backup), and pressing Stop in the
+    copy stops the ORIGINAL's running server — the copy having been handed the
+    original's identity. Unpinned, the copy's basename disagrees with the
+    container labels and the census refuses.
+
+    This was implemented, measured doing exactly that, and reverted the same day
     (review, 2026-08-22).
     """
     calls: list[list[str]] = []
@@ -1046,7 +1076,8 @@ def test_a_stop_that_proves_ownership_writes_the_pin_down(
         docker.runner, "run", _stop_runner(calls, running={SPEC.db, SPEC.auth, SPEC.world})
     )
     assert docker.stop_staged(SPEC, tmp_path) is True
-    assert docker.pinned_project_name(tmp_path) == PROJECT
+    assert docker.pinned_project_name(tmp_path) is None, "a Stop wrote a claimable identity"
+    assert not (tmp_path / ".env").exists()
 
 
 def test_pinned_project_name_takes_the_last_assignment_and_accepts_export(
@@ -1111,8 +1142,10 @@ def test_wait_ready_is_not_fooled_by_a_container_in_restart_backoff(
         if cmd[:2] == ["docker", "ps"]:
             return _completed(stdout=f"{SPEC.auth}\n{SPEC.world}\n")
         if cmd[:2] == ["docker", "inspect"]:
-            if "{{.State.Status}}" in cmd:
-                return _completed(stdout="restarting" + chr(10))
+            if "{{.State.Status}}" in cmd[-1]:
+                return _completed(
+                    stdout="restarting" + chr(9) + "2026-08-22T01:24:53.575296627Z" + chr(10)
+                )
             return _completed(stdout="2026-08-22T01:24:53.575296627Z" + chr(10))
         if cmd[:2] == ["docker", "logs"]:
             if cmd[-1] == SPEC.auth:

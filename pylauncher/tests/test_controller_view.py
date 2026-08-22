@@ -248,4 +248,4 @@ def test_a_stop_with_nothing_running_says_so(qapp: object, ps: _Ps, tmp_path: Pa
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     ps.names = ""  # nothing of ours is up
     view.stop_server()
-    assert "Nothing of this install was running" in view.problem_label.text()
+    assert "None of this install's servers were running" in view.problem_label.text()

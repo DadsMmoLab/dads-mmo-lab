@@ -157,7 +157,7 @@ class ControllerView(QWidget):
         self.refresh_button = QPushButton("Refresh", tab)
         self.start_button.clicked.connect(self.start_server)
         self.stop_button.clicked.connect(self.stop_server)
-        self.refresh_button.clicked.connect(self.refresh_status)
+        self.refresh_button.clicked.connect(self.recheck)
         row = QHBoxLayout()
         for b in (self.start_button, self.stop_button, self.refresh_button):
             row.addWidget(b)
@@ -191,11 +191,29 @@ class ControllerView(QWidget):
 
     @Slot()
     def refresh_status(self) -> None:
-        """Re-read `docker ps` off the GUI thread and update the Server tab."""
+        """Re-read `docker ps` off the GUI thread and update the Server tab.
+
+        Deliberately leaves `problem_label` alone: the five-second poll runs
+        immediately after a failed action, and clearing here would wipe the
+        explanation before it could be read. The Refresh BUTTON clears it —
+        see `recheck()`.
+        """
         if self._status_pending:
             return  # a poll is already in flight; never queue them up
         self._status_pending = True
         self._run(self.services.controller.status, self._status_ready, self._status_failed)
+
+    @Slot()
+    def recheck(self) -> None:
+        """What the Refresh button does: drop the last problem, then re-read status.
+
+        Without this the paragraph outlived whatever it described — a user could
+        fix the `.env` the refusal named, press Refresh, and read "db up, auth
+        up, world up" above "Nothing was stopped: this could equally be another
+        install…" (review, 2026-08-22).
+        """
+        self.problem_label.setText("")
+        self.refresh_status()
 
     @Slot(object)
     def _status_ready(self, result: object) -> None:
@@ -256,7 +274,7 @@ class ControllerView(QWidget):
         """
         self._set_busy(False)
         if result is False:
-            self.problem_label.setText("Nothing of this install was running — nothing to stop.")
+            self.problem_label.setText("None of this install's servers were running.")
         self.refresh_status()
 
     @Slot(object)

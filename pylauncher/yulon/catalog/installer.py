@@ -230,9 +230,11 @@ class Installer:
         self._bash_check = bash_check
         self._platform_id = platform_id
         # Per-install, so one install's marker cannot answer another's, and
-        # random so no script output can imitate it. Only the wording is
-        # secret-adjacent; nothing sensitive is stored here.
-        self.sudo_marker = f"[yulon-sudo-{secrets.token_hex(8)}] password:"
+        # random so no script output can imitate it. The wording around the
+        # token matters too: this string is the LABEL of the one dialog in the
+        # app that asks for the user's password, so it has to read as sudo
+        # asking, not as a bare hex token (review, 2026-08-22).
+        self.sudo_marker = f"[sudo via Yu'lon {secrets.token_hex(8)}] password:"
 
     @property
     def script(self) -> Path:
@@ -262,9 +264,26 @@ class Installer:
         env = dict(os.environ)
         if not env.get("TERM"):  # unset OR empty — some session managers export TERM=""
             env["TERM"] = DEFAULT_TERM
-        env["SUDO_PROMPT"] = self.sudo_marker
+        # Everything above is a preference and `env` may override it. Everything
+        # below is not.
         if self._env:
             env.update(self._env)
+        # `SUDO_PROMPT` is a protocol identifier, not a setting: it is one half
+        # of a matched pair with `ask_marker`, and letting a caller replace it
+        # desynchronises the two, so the prompt is never recognised and the
+        # install hangs with no dialog — the exact pre-6.1.5 failure
+        # (review, 2026-08-22).
+        env["SUDO_PROMPT"] = self.sudo_marker
+        # The script now runs on a terminal, which re-arms every apt/dpkg path
+        # that gates on isatty(): needrestart's service-restart menu and dpkg's
+        # conffile prompt both render full-screen ncurses dialogs, neither
+        # carries the marker, and no PROMPT_RULES entry answers them — so the
+        # install would park on one with Stop as the only way out. Under the old
+        # pipe transport those paths were non-interactive by accident; now they
+        # are non-interactive on purpose (review, 2026-08-22).
+        env.setdefault("DEBIAN_FRONTEND", "noninteractive")
+        env.setdefault("NEEDRESTART_MODE", "a")
+        env.setdefault("NEEDRESTART_SUSPEND", "yulon")
         return env
 
     def preflight(self, options: InstallOptions, cancel: threading.Event | None = None) -> None:

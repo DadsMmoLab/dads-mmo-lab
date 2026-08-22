@@ -540,3 +540,80 @@ class _NoopInstaller(Installer):
 
     def run(self, options: object = None, *, cancel: object = None, ask: object = None):  # type: ignore[override]
         yield "done"
+
+
+# -- round-2 review fixes ---------------------------------------------------
+
+
+def test_ask_receives_only_the_prompt_not_the_output_stuck_in_front_of_it() -> None:
+    """The dialog's label — and its masking decision — must come from the prompt alone.
+
+    `ask()` used to receive the whole pending buffer. On a terminal that buffer
+    is routinely non-empty (progress ends in `\\r`; only `\\n` splits a line), so
+    the question shown was `Checking directory /opt/azerothcore ... [marker]
+    password:` — and `is_secret()` read the word "directory" and turned masking
+    OFF, so the root password went into an echoed field and the log
+    (review, 2026-08-22).
+    """
+    asked: list[str] = []
+    code = (
+        "import sys\n"
+        "sys.stdout.write('Checking directory /opt/azerothcore ... ')\n"
+        "sys.stdout.flush()\n"
+        f"sys.stdout.write({MARKER + ' '!r})\n"
+        "sys.stdout.flush()\n"
+        "answer = sys.stdin.readline().strip()\n"
+        "print('GOT:' + answer)\n"
+    )
+    lines = list(
+        runner.interact(
+            [sys.executable, "-c", code],
+            respond=lambda _line: None,
+            ask=lambda prompt: (asked.append(prompt), "hunter2")[1],
+            ask_marker=MARKER,
+            quiet_seconds=0.15,
+            cancel=_expiring_cancel(),
+        )
+    )
+    assert any("GOT:hunter2" in line for line in lines)
+    assert asked == [MARKER + " "], f"ask() saw more than the prompt: {asked!r}"
+    assert is_secret(asked[0]) is True, "the very leak this guards against"
+
+
+def test_a_caller_cannot_desynchronise_the_sudo_marker_through_env() -> None:
+    """`SUDO_PROMPT` is a protocol identifier, not a setting.
+
+    `env={"SUDO_PROMPT": ...}` used to override it after the marker was set, so
+    sudo printed one string while `interact()` watched for another — the prompt
+    was never recognised and the install hung with no dialog, the exact
+    pre-6.1.5 failure (review, 2026-08-22).
+    """
+    from yulon.catalog import installer as installer_module
+
+    inst = installer_module.Installer(_first_installable_entry(), env={"SUDO_PROMPT": "Password:"})
+    assert inst.script_env()["SUDO_PROMPT"] == inst.sudo_marker
+
+
+def test_script_env_disarms_apt_and_needrestart_dialogs() -> None:
+    """A terminal re-arms every isatty() gate the pipe transport disarmed by accident.
+
+    needrestart's service-restart menu and dpkg's conffile prompt are
+    full-screen ncurses dialogs; neither carries the marker and no rule answers
+    them, so the install would park with Stop as the only exit
+    (review, 2026-08-22). setdefault, so a user's own setting wins.
+    """
+    from yulon.catalog import installer as installer_module
+
+    env = installer_module.Installer(_first_installable_entry()).script_env()
+    assert env["DEBIAN_FRONTEND"] == "noninteractive"
+    assert env["NEEDRESTART_MODE"] == "a"
+
+
+def test_the_marker_says_it_is_sudo_asking_not_just_a_hex_token() -> None:
+    """The marker is the label of the one dialog that asks for the user's password."""
+    from yulon.catalog import installer as installer_module
+
+    marker = installer_module.Installer(_first_installable_entry()).sudo_marker
+    assert "sudo" in marker
+    assert "password" in marker
+    assert is_secret(marker) is True

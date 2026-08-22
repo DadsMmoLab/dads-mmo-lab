@@ -84,15 +84,30 @@ class Controller:
     # -- queries ---------------------------------------------------------
 
     def status(self) -> InstallStatus:
-        """Report which of THIS install's containers are running.
+        """Report which containers carrying this install's names are running.
 
-        Ownership, not just names. AzerothCore pins its container names
-        globally, so a plain `docker ps` name match reports the neighbouring
-        install's running server as this one's — and the tab then offered a Stop
-        that `stop_staged()` categorically refuses, the two halves of one tab
-        disagreeing about who owns what (review, 2026-08-22).
+        By NAME, and deliberately so — an ownership-filtered version of this was
+        written and reverted the same day. It read `.env` and filtered
+        `docker ps` by the compose project label, which sounds strictly better
+        and was worse in three ways (review, 2026-08-22):
+
+        * An unpinned install (every one adopted through "Use existing…") fell
+          back to `docker ps` with an `or []`, so a daemon that would not answer
+          read as "everything is down" — measured, with the Stop button then
+          disabled while the server was serving.
+        * A pinned install whose `.env` disagreed with the containers showed
+          "down" and disabled Stop, which is the only button that produces the
+          explanation of *why* they disagree. A live server, reported down, with
+          no way to act and nothing on screen.
+        * It was the source of truth moving from `docker ps` to a file that can
+          be copied and hand-edited.
+
+        Names are honest about what they are: proof that something is using
+        these names, not proof it is ours. `stop_staged()` is where ownership is
+        established, because that is where acting on the wrong container does
+        damage, and its refusal is now shown on the tab.
         """
-        running = docker.ours_running(self.spec, self.server_dir)
+        running = set(docker.status())
         return InstallStatus(
             db=self.spec.db in running,
             auth=self.spec.auth in running,
@@ -107,14 +122,18 @@ class Controller:
         conflict — only something that is not ours counts — so they are
         filtered out here, once, for every game.
 
-        Filtered by ownership rather than by name: subtracting the three names
-        excused the OTHER install's containers too, which is the only situation
-        in which two installs of one game can collide — so the guard could never
-        fire in the single case it exists for, and the user got the daemon's raw
-        `Conflict. The container name "/ac-database" is already in use` instead
-        (review, 2026-08-22).
+        By name, for the reasons in `status()`, and for one more of its own: the
+        ownership-filtered version needed a second `docker ps`, and a single
+        blip on either of them made Start refuse with "another server is already
+        using ports (3724, 8085): ac-authserver, ac-worldserver" — naming the
+        user's own containers (review, 2026-08-22).
+
+        The known limit, stated rather than papered over: with two installs of
+        one game the other install's containers wear these same names and are
+        excused here, so this guard cannot catch that collision. `compose up`
+        then reports the daemon's own "container name is already in use".
         """
-        own = docker.ours_running(self.spec, self.server_dir)
+        own = {self.spec.db, self.spec.auth, self.spec.world}
         return [name for name in docker.port_conflicts_for(self.spec) if name not in own]
 
     # -- lifecycle -------------------------------------------------------

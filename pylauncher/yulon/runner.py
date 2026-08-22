@@ -11,6 +11,8 @@ docstring for the exact ordering.
 
 from __future__ import annotations
 
+import errno
+import importlib
 import os
 import queue
 import re
@@ -205,8 +207,14 @@ def strip_ansi(text: str) -> str:
 
 
 def pty_supported() -> bool:
-    """True where a pseudo-terminal can be opened (POSIX). False on Windows."""
-    return hasattr(os, "openpty") and hasattr(os, "login_tty")
+    """True where a pseudo-terminal can be opened (POSIX). False on Windows.
+
+    Only `openpty` is required. It briefly also demanded `os.login_tty`, which
+    is Python 3.11+, but `console.py` shares this predicate and needs no such
+    thing — a 3.10 interpreter would have been told "this platform has no
+    pseudo-terminal", which is false (review, 2026-08-22).
+    """
+    return hasattr(os, "openpty")
 
 
 def open_pty() -> tuple[int, int]:
@@ -223,22 +231,56 @@ def open_pty() -> tuple[int, int]:
     return int(master), int(slave)
 
 
-def _become_terminal_session(slave: int) -> None:
-    """Child-side: make `slave` this process's controlling terminal.
+# Claim the pty as the controlling terminal WITHOUT running Python after fork.
+#
+# `/dev/tty` is the whole point: sudo deliberately does not read its password
+# from stdin, so a child holding a pty on fd 0 but with no CONTROLLING terminal
+# still fails with "a terminal is required to read the password". Inheriting a
+# pty is not enough — the session has to be claimed.
+#
+# The obvious way to claim it is `preexec_fn=lambda: os.login_tty(slave)`. That
+# is a Python callback executed between fork and exec, in a process whose Qt GUI
+# thread and job threads are still live: closure read, global lookup, frame
+# creation, `getattr`, an args tuple — every step can allocate, and an allocator
+# lock held by another thread at fork time wedges the child there while the
+# parent blocks inside Popen, before `interact()`'s cancel loop is ever entered.
+# CPython's own comment at that call site reads "This is where the user has
+# asked us to deadlock their program" (review, 2026-08-22).
+#
+# So the claim is delegated to `sh`, after exec, where no Python is involved:
+# `start_new_session=True` calls setsid() in C, leaving a session leader with no
+# controlling terminal, and re-`open()`ing the slave BY NAME without O_NOCTTY is
+# what makes it one. The shell then execs the real command, so the pid, signals
+# and exit status are the command's own.
+_CLAIM_THE_TERMINAL = 'exec <"$1" >"$1" 2>&1; shift; exec "$@"'
 
-    This is what makes `/dev/tty` resolve inside the child, and `/dev/tty` is
-    the whole point: sudo deliberately does not read its password from stdin, so
-    a child holding a pty on fd 0 but with no CONTROLLING terminal still fails
-    with "a terminal is required to read the password". Inheriting a pty is not
-    enough — the session has to be claimed.
 
-    Runs after fork and before exec, so it must do nothing that could take a
-    lock another thread held at fork time. `os.login_tty` is a single libc call
-    (setsid, TIOCSCTTY, dup2 onto 0/1/2), which is what makes it safe here where
-    a general Python callback would not be.
+def _terminal_argv(slave: int, command: list[str]) -> list[str]:
+    """`command`, wrapped so it starts owning `slave` as its controlling terminal."""
+    ttyname = getattr(os, "ttyname")  # noqa: B009 - POSIX-only attribute
+    return ["sh", "-c", _CLAIM_THE_TERMINAL, "sh", str(ttyname(slave)), *command]
+
+
+def _silence_terminal_echo(slave: int) -> None:
+    """Stop the line discipline echoing back everything we type into the child.
+
+    A fresh pty has ECHO on, so every answer `respond()` writes would be echoed
+    onto the master, land in the output buffer, and be yielded straight into the
+    log panel. sudo turns echo off around its own password read, so the measured
+    "the password never appeared in the output" was sudo's doing, not ours —
+    which is not a property to rely on for anything else the app types
+    (review, 2026-08-22). Best effort: a pty that will not take the setting is
+    not a reason to refuse to install.
     """
-    login_tty = getattr(os, "login_tty")  # noqa: B009 - POSIX-only attribute
-    login_tty(slave)
+    try:
+        # Fetched dynamically for the same reason `open_pty` is: the module does
+        # not exist on Windows, and mypy checks this file for that platform too.
+        termios = importlib.import_module("termios")
+        attrs = termios.tcgetattr(slave)
+        attrs[3] &= ~(termios.ECHO | termios.ECHONL)  # index 3 is lflag
+        termios.tcsetattr(slave, termios.TCSANOW, attrs)
+    except Exception as exc:  # noqa: BLE001 - never fail an install over echo
+        logger.debug(f"could not turn off terminal echo: {exc}")
 
 
 def interact(
@@ -293,15 +335,16 @@ def interact(
         master, slave = open_pty()
     try:
         if on_pty:
+            _silence_terminal_echo(slave)
             proc = subprocess.Popen(
-                command,
+                _terminal_argv(slave, command),
                 cwd=_cwd_arg(cwd),
                 stdin=slave,
                 stdout=slave,
                 stderr=slave,
                 env=dict(env) if env is not None else None,
                 bufsize=0,
-                preexec_fn=lambda: _become_terminal_session(slave),
+                start_new_session=True,  # see _CLAIM_THE_TERMINAL
             )
         else:
             proc = subprocess.Popen(
@@ -349,29 +392,59 @@ def interact(
                 if not data:
                     break
                 chunks.put(data)
-        except OSError:
+        except OSError as exc:
             # On a pty the master raises EIO rather than returning b"" when the
-            # last slave closes. That is this transport's EOF, not a failure.
-            pass
+            # last slave closes. That is this transport's EOF, not a failure —
+            # and so is EBADF, which is what the `finally` closing `master` under
+            # a live read looks like from here. Anything else means output was
+            # lost, and a truncated log on a failed two-hour build is exactly
+            # when the log matters, so say so (review, 2026-08-22).
+            if exc.errno not in (errno.EIO, errno.EBADF):
+                logger.warning(f"reading the child's output stopped early: {exc}")
         finally:
             chunks.put(None)
 
     reader = threading.Thread(target=_pump, daemon=True)
-    reader.start()
+    try:
+        reader.start()
+    except BaseException:
+        # The child is already running and `master` is open, and the try/finally
+        # below has not been entered yet. `RuntimeError: can't start new thread`
+        # is not far-fetched in a long-lived GUI process (review, 2026-08-22).
+        proc.kill()
+        proc.wait()
+        if master >= 0:
+            os.close(master)
+        raise
     buffer = ""
     answered_partial = False
 
-    def _is_the_prompt(text: str) -> bool:
-        """True only for the exact marker the caller arranged for. No guessing."""
-        if not ask_marker:
-            return False
-        return ask_marker in strip_ansi(text)
+    def _the_prompt(text: str) -> str | None:
+        """The marker and everything after it, or None if the marker is not there.
 
-    def _answer(text: str) -> bool:
+        Only the exact marker the caller arranged for — no guessing. The slice
+        matters as much as the match: `ask()` used to receive the whole pending
+        buffer, which on a terminal is routinely non-empty (progress output ends
+        in `\\r`, and only `\\n` splits a line here). So the question put to the
+        user was whatever the script last printed with the prompt stuck on the
+        end — measured: `Checking directory /opt/azerothcore ... [marker]
+        password:`, which `is_secret()` then classified as NOT a secret because
+        it contains the word "directory", and the root password was typed into
+        an unmasked field and written to the log (review, 2026-08-22).
+        """
+        if not ask_marker:
+            return None
+        clean = strip_ansi(text)
+        at = clean.find(ask_marker)
+        return None if at < 0 else clean[at:]
+
+    def _answer(text: str, *, blocked: bool = False) -> bool:
         clean = strip_ansi(text)
         reply = respond(clean)
-        if reply is None and ask is not None and _is_the_prompt(text):
-            reply = ask(clean)
+        if reply is None and ask is not None and blocked:
+            prompt = _the_prompt(text)
+            if prompt is not None:
+                reply = ask(prompt)
         if reply is None:
             return False
         return _write((reply + "\n").encode("utf-8"))
@@ -386,11 +459,21 @@ def interact(
             try:
                 data = chunks.get(timeout=quiet_seconds)
             except queue.Empty:
+                if proc.poll() is not None and not buffer:
+                    # The child is gone but the reader has not seen EOF. On a
+                    # pty that is normal: the install scripts leave a
+                    # `sudo -n true; sleep 60` keepalive whose orphaned `sleep`
+                    # still holds the slave, so `os.read(master)` returns
+                    # neither b"" nor EIO for up to a minute after the install
+                    # finished — a minute of "installing" with no output and no
+                    # way out (review, 2026-08-22).
+                    logger.debug("child exited; ending the read rather than waiting for EOF")
+                    break
                 # A partial line that has gone quiet is the child waiting for
                 # input — or just a slow build. Ask about it once.
                 if not buffer or answered_partial:
                     continue
-                if _answer(buffer) or _is_the_prompt(buffer):
+                if _answer(buffer, blocked=True) or _the_prompt(buffer) is not None:
                     # Shown either way. A prompt the user declined still has to
                     # reach the log, or the install appears to freeze with
                     # nothing on screen explaining why (review, 2026-08-22).
@@ -414,7 +497,9 @@ def interact(
                 yield line
                 _answer(line)
         if not cancelled:
-            reader.join()
+            # Bounded: an orphan holding the slave keeps the reader in os.read
+            # long after the child is gone, and this join used to be unbounded.
+            reader.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
             proc.wait()
             if proc.returncode:
                 raise subprocess.CalledProcessError(proc.returncode, command)

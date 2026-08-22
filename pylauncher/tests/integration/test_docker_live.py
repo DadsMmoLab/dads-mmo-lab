@@ -246,17 +246,22 @@ def test_stop_staged_reports_whether_there_was_anything_to_stop(
     assert docker.container_exists(THROWAWAY_SPEC.world) is True
 
 
-def test_a_stop_that_proves_ownership_pins_the_project(throwaway_project: Path) -> None:
-    """Live counterpart of the unit test: the pin lands where it is provably right.
+def test_a_stop_never_writes_an_identity_the_folder_could_carry_away(
+    throwaway_project: Path,
+) -> None:
+    """Live counterpart of the unit test: no pin is written, deliberately.
 
-    Nothing pins an install this app did not create — attach deliberately does
-    not — so `pinned_project_name()` was dead for every script-made install
-    until the stop path started writing it (review, 2026-08-22).
+    A Stop-time pin was implemented — the census has just proved the basename
+    and the labels agree, so the value would even be correct — and reverted the
+    same day: `.env` travels with the folder, `install_project()` prefers it
+    over the directory, so a COPY of the install inherits the original's
+    identity and a Stop pressed in the copy stops the original's running
+    server. Measured end to end (review, 2026-08-22). The unpinned copy fails
+    closed instead, because its basename disagrees with the labels.
     """
     assert docker.pinned_project_name(throwaway_project) is None
     docker.start_staged(THROWAWAY_SPEC, throwaway_project)
     assert docker.stop_staged(THROWAWAY_SPEC, throwaway_project) is True
 
-    pinned = docker.pinned_project_name(throwaway_project)
-    assert pinned == docker.compose_project_name(throwaway_project)
-    assert pinned == docker.container_project(THROWAWAY_SPEC.db)
+    assert docker.pinned_project_name(throwaway_project) is None
+    assert not (throwaway_project / ".env").exists()

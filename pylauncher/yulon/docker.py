@@ -199,11 +199,18 @@ def pinned_project_name(server_dir: Path) -> str | None:
     one moment it is needed most, and a running server would be left up while
     the user is told it stopped.
 
-    The LAST assignment wins, and `export ` is accepted, because that is how the
-    file is actually read. Taking the first meant a user who followed the app's
-    own advice — "set COMPOSE_PROJECT_NAME=X in .env" — by appending to a file
-    that already had one got a silent, permanent disagreement between what
-    Yu'lon thought the project was and what compose did (review, 2026-08-22).
+    Every rule here was measured against the real `docker compose` rather than
+    assumed, because a disagreement is not cosmetic: this value decides which
+    containers the app believes are its own. Checked cases (review, 2026-08-22):
+
+    * the LAST assignment wins, not the first — appending is exactly how a user
+      follows the app's own "set COMPOSE_PROJECT_NAME=X in .env" advice;
+    * `export ` is accepted;
+    * an inline `# comment` is not part of the value — but a `#` inside quotes
+      is, so it can only be stripped outside them;
+    * surrounding single or double quotes are removed, and only a matched pair;
+    * an empty assignment UNSETS it (compose falls back to the basename), so it
+      cannot leave an earlier value standing.
     """
     env_path = server_dir / ".env"
     if not env_path.is_file():
@@ -218,9 +225,20 @@ def pinned_project_name(server_dir: Path) -> str | None:
         if stripped.startswith("export "):
             stripped = stripped[len("export ") :].lstrip()
         if stripped.startswith(f"{PROJECT_NAME_VAR}="):
-            value = stripped.split("=", 1)[1].strip().strip("\"'")
-            found = value or found
+            found = _env_value(stripped.split("=", 1)[1]) or None
     return found
+
+
+def _env_value(raw: str) -> str:
+    """One `.env` right-hand side, read the way compose reads it."""
+    raw = raw.strip()
+    for quote in ('"', "'"):
+        if len(raw) >= 2 and raw.startswith(quote):
+            end = raw.find(quote, 1)
+            if end > 0:
+                return raw[1:end]  # anything after the closing quote is a comment
+            return raw[1:].strip()  # unterminated: take the rest, minus the quote
+    return raw.split("#", 1)[0].strip()
 
 
 PROJECT_LABEL = "com.docker.compose.project"
@@ -334,39 +352,6 @@ def _running(spec: ContainerSpec, project: str) -> Running:
         else:
             strangers.append((name, owner))
     return Running(tuple(ours), tuple(strangers), tuple(unreadable))
-
-
-def running_under(project: str) -> list[str] | None:
-    """Names of running containers carrying `project`'s compose label, or None if unreadable.
-
-    One `docker ps` with a label filter, cheap enough for the status poll — the
-    alternative, inspecting each container, is three round trips every five
-    seconds.
-    """
-    proc = _run(["ps", "--filter", f"label={PROJECT_LABEL}={project}", "--format", "{{.Names}}"])
-    if proc.returncode != 0:  # pragma: no cover - _run raises on failure today
-        return None
-    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-
-
-def ours_running(spec: ContainerSpec, server_dir: Path) -> set[str]:
-    """Which of this install's containers are running AND provably belong to it.
-
-    Falls back to matching by name when no project is pinned. That fallback is
-    the old, wrong-for-two-installs behaviour, kept deliberately: the only way
-    to do better would be `docker compose config`, which takes about half a
-    second and cannot run on a five-second poll. An install this app created,
-    or one whose Stop has succeeded once, carries a pin and takes the exact
-    path (review, 2026-08-22).
-    """
-    names = {spec.db, spec.auth, spec.world}
-    project = pinned_project_name(server_dir)
-    if project is None:
-        return names & {line.strip() for line in _status_safe() or []}
-    listed = running_under(project)
-    if listed is None:  # pragma: no cover - see running_under()
-        return set()
-    return names & set(listed)
 
 
 def container_exists(container: str) -> bool:
@@ -559,21 +544,30 @@ def _stranger_message(
             "project's own compose file. If it is a different install, stop that server from "
             "its own folder and leave this one alone."
         )
-    if len(owners) == 1:
+    if len(owners) == 1 and not unlabelled:
+        # Both conditions matter. With a second, unlabelled stranger in the set,
+        # adopting the one project still leaves that container foreign — the
+        # next Stop refuses again, `owners` is then empty, and the message
+        # offers no remedy at all. A permanent write that bought nothing.
         pinned = pinned_project_name(server_dir)
-        fix = (
-            f"change {PROJECT_NAME_VAR} from '{pinned}' to '{owners[0]}' in "
-            f"{server_dir / '.env'}"
-            if pinned is not None
-            # With no pin the directory basename is what compose is going by, so
-            # either writing the name down or renaming the folder works. With a
-            # pin, renaming the folder is inert — the pin outranks it.
-            else (
-                f"add {PROJECT_NAME_VAR}={owners[0]} to {server_dir / '.env'}, or rename this "
-                f"folder to {owners[0]}"
+        if pinned is not None:
+            # A folder move CANNOT produce this state once a pin exists — the
+            # pin outranks the directory. So the causes are a genuinely
+            # different install, or a `.env` copied along with the folder, and
+            # saying "the folder was moved" here sent the user to change a file
+            # in the copy case, which is how the copy stops the original's
+            # server (review, 2026-08-22).
+            lines.append(
+                f"This install claims project '{pinned}' from {server_dir / '.env'}. If that "
+                f"line was copied here from another install, delete it. If this install really "
+                f"is '{owners[0]}', change it to that."
             )
-        )
-        lines.append(f"If it IS this install and the folder was moved, {fix}.")
+        else:
+            lines.append(
+                f"If it IS this install and the folder was moved, add "
+                f"{PROJECT_NAME_VAR}={owners[0]} to {server_dir / '.env'}, or rename this "
+                f"folder to {owners[0]}."
+            )
     elif len(owners) > 1:
         lines.append(
             "More than one project is involved, so no single name can reconcile them: sort the "
@@ -640,14 +634,19 @@ def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
     if before.strangers:
         raise DockerCommandError(_stranger_message(before.strangers, project, server_dir))
 
-    if before.ours:
-        # The census just proved the containers carry the label this directory
-        # resolves to, so the basename IS what compose named them — the one
-        # condition under which writing it down is safe. An install created by a
-        # script or adopted through "Use existing…" gets its pin here, which is
-        # what keeps it stoppable if its compose files later become unreadable
-        # (review, 2026-08-22).
-        pin_project_name(server_dir)
+    # No pin is written here, though the census has just proved the basename and
+    # the labels agree. Writing it down was tried and reverted the same day: a
+    # pin lives in `.env`, `.env` travels with the folder, and `install_project()`
+    # prefers it over the directory — so copying an install (a second realm, a
+    # restored backup) hands the copy the original's identity, and pressing Stop
+    # in the copy stops the ORIGINAL's running server. Measured end to end. The
+    # unpinned copy fails closed instead, because its basename disagrees with the
+    # labels and the census catches it (review, 2026-08-22).
+    #
+    # The cost is that an attached install whose compose files later become
+    # unreadable cannot prove ownership, and `_refuse_without_an_identity()`
+    # says so rather than guessing. That is the right way round: refusing to
+    # stop a server is recoverable, stopping somebody else's is not.
 
     # Run this even with nothing of ours in `docker ps`. The project holds more
     # than the three named containers — `ac-db-import` and `ac-client-data-init`
@@ -658,7 +657,11 @@ def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
     if proc.returncode != 0:
         logger.warning(f"compose stop failed ({proc.stderr.strip()}); stopping containers by name")
     if not before.ours:
-        logger.info("stop_staged(): nothing of this install was running")
+        # False means "none of the three SERVERS were up". It cannot mean
+        # "nothing was stopped": the `compose stop` above may well have stopped
+        # a one-shot service, and compose does not say what it touched. The
+        # caller's wording has to match that (review, 2026-08-22).
+        logger.info("stop_staged(): none of this install's servers were running")
         return False
 
     after = _running(spec, project)
@@ -735,30 +738,51 @@ def health(container: str) -> str:
     return proc.stdout.strip()
 
 
-def started_at(container: str) -> str:
-    """When the container's CURRENT run began, or `""` if it cannot be read."""
-    proc = runner.run(["docker", "inspect", container, "--format", "{{.State.StartedAt}}"])
-    return proc.stdout.strip() if proc.returncode == 0 else ""
+@dataclass(frozen=True)
+class ContainerState:
+    """A container's status and the start time of its current run."""
+
+    status: str = ""
+    started_at: str = ""
+
+    @property
+    def settled(self) -> bool:
+        """True if it is running right now, rather than between restarts.
+
+        Every compose service here carries `restart: unless-stopped`, and a
+        container in restart backoff still appears in a plain `docker ps` while
+        `.State.StartedAt` holds the previous run's timestamp. A crash-looping
+        worldserver therefore satisfies both of `wait_ready()`'s other checks
+        and is reported ready — the same false pass the `--since` scoping was
+        added to remove, arriving by a different route (review, 2026-08-22).
+        """
+        return self.status == "running"
 
 
-def settled(container: str) -> bool:
-    """True if the container is running right now, rather than between restarts.
+def container_state(container: str) -> ContainerState:
+    """Status and current-run start time in ONE `docker inspect`.
 
-    Every compose service here carries `restart: unless-stopped`, and a
-    container in restart backoff still appears in a plain `docker ps` while
-    `.State.StartedAt` holds the previous run's timestamp. A crash-looping
-    worldserver therefore satisfies both of `wait_ready()`'s other checks and
-    is reported ready — the same false pass the `--since` scoping was added to
-    remove, arriving by a different route (review, 2026-08-22).
+    One call, not two, because `wait_ready()` asks for both every two seconds
+    for up to eight minutes and a `docker inspect` costs about 0.3s of CLI
+    startup on its own — two of them per container per poll took a healthy poll
+    from five docker invocations to seven, enough to overrun the interval it
+    names (review, 2026-08-22).
     """
-    proc = runner.run(["docker", "inspect", container, "--format", "{{.State.Status}}"])
+    fmt = "{{.State.Status}}\t{{.State.StartedAt}}"
+    proc = runner.run(["docker", "inspect", container, "--format", fmt])
     if proc.returncode != 0:
         logger.warning(f"could not read the state of {container}: {proc.stderr.strip()}")
-        return False
-    return proc.stdout.strip() == "running"
+        return ContainerState()
+    status, _, started = proc.stdout.strip().partition("\t")
+    return ContainerState(status.strip(), started.strip())
 
 
-def _logs(container: str, *, this_run_only: bool = False) -> str:
+def started_at(container: str) -> str:
+    """When the container's CURRENT run began, or `""` if it cannot be read."""
+    return container_state(container).started_at
+
+
+def _logs(container: str, *, this_run_only: bool = False, since: str = "") -> str:
     """Return a container's logs, or `""` if they can't be read.
 
     `docker logs` prints everything the container has ever written, across every
@@ -778,7 +802,9 @@ def _logs(container: str, *, this_run_only: bool = False) -> str:
     """
     argv = ["docker", "logs"]
     if this_run_only:
-        since = started_at(container)
+        # The caller may already have the start time from the state read it
+        # had to do anyway; asking again is a second `docker inspect`.
+        since = since or started_at(container)
         if since:
             argv += ["--since", since]
     proc = runner.run([*argv, container])
@@ -861,11 +887,17 @@ def wait_ready(
     while time.monotonic() < deadline:
         running = _status_safe()
         listed = running is not None and auth_container in running and world_container in running
-        # `docker ps` lists a container that is in restart backoff, so being
-        # listed is not the same as being up; ask for the state as well.
-        if listed and settled(auth_container) and settled(world_container):
-            if target in _logs(auth_container, this_run_only=True) and "ready..." in _logs(
-                world_container, this_run_only=True
+        if listed:
+            # `docker ps` lists a container in restart backoff, so being listed
+            # is not the same as being up. One inspect per container answers
+            # both that and "when did THIS run start".
+            auth = container_state(auth_container)
+            world = container_state(world_container)
+            if (
+                auth.settled
+                and world.settled
+                and target in _logs(auth_container, this_run_only=True, since=auth.started_at)
+                and "ready..." in _logs(world_container, this_run_only=True, since=world.started_at)
             ):
                 return True
         time.sleep(interval)
