@@ -77,7 +77,7 @@
 - [x] 6.0 Rehome the install scripts — the eight executable files now live in `pylauncher/catalog/installers/<game>/` (parallel to `manifests/`), `catalog.json` paths are relative to that directory, `resources.installers_dir()` replaces `repo_root()`, `Installer(installers_root=…)` resolves them, and the spec ships the whole tree instead of globbing `archive/guides/**` — so the bundle no longer carries `archive/guides` at all (README §3a bonus). The Tortoise script was renamed to lowercase on the way (`install-tortoise-wow-wsl.sh`, style-guide §6a). Verified: 191 passed, and a frozen PyInstaller build contains all eight scripts under `catalog/installers/` and passes `YULON_SMOKE_TEST`. The DoD's third verb, *run*, is not re-evidenced post-move — but `git show --stat fcd95c5` shows all eight scripts as pure renames (0 changed lines) and `installer.py` already passed `cwd=self.script.parent` before the move, so what runs is byte-identical to what Phase 3 live-gated. `archive/guides/` keeps the human-facing guides plus the four non-catalog installers (Maplestory, Mu Online, RuneScape, the Unbound addon), which no catalog entry references.
 - [x] 6.1 Honest platform gating — `install.platforms` is data in `catalog.json` (all four entries `["linux"]`), `Installer.preflight()` raises `UnsupportedPlatformError` with a user-readable message BEFORE any subprocess, the catalog tile disables Install with the reason on the tile ("Use existing…" stays enabled — managing a server works everywhere), `start_install()` refuses before the folder prompts, and a failed script's dialog now carries the script's own last 12 output lines ("It last said: …") instead of a bare exit status. Mocked through the `platform_id` seam per roadmap 6.4; 196 tests green.
 - [ ] Rewrite the installer scripts off `pacman`/`systemctl`/`sudo` — the orphaned "update scripts and manifests to use proper systems and features" step, re-homed as a checkbox: it is subsumed by 6.2/6.3's native engine, and closes when WotLK installs without a shell script on macOS and Windows.
-- [ ] 6.1.5 Interactive input handling — the in-app terminal pauses on a subprocess that blocks on stdin (the canonical case is the Linux installer's `sudo` prompt during `pacman`/`systemctl`) and shows a prompt dialog, forwarding the typed value back to stdin and resuming the stream instead of deadlocking or failing "no tty"; `runner.py` owns the stdin write, the view only drives it via call-down/signal-up; verified on Linux (real `sudo`) and against the macOS/Windows variants' own prompts through the shared path.
+- [x] 6.1.5 Interactive input handling — the installer runs on a **pseudo-terminal** and answers `sudo`'s password prompt through a dialog, instead of dying seconds in on `sudo -v`. Two things were needed and the first attempt had neither. **Transport:** `sudo` reads from `/dev/tty`, not stdin, precisely so a piped stdin cannot feed it a password — so `interact(terminal=True)` opens a pty and the child claims it as its *controlling* terminal (via `sh` after exec, not `preexec_fn`: that runs Python bytecode after fork in a process with live Qt threads). **Recognition:** `SUDO_PROMPT` makes sudo announce itself with a per-install random marker, matched exactly — the first version guessed from the shape of a line (`: ? > ]` after a pause), which measurably fires on `[ 43%]`, `Get:12 … [345 kB]`, `note:` and every gcc diagnostic, and opened an application-modal dialog over a two-hour compile. Measured on the Ubuntu VM with sudo temporarily made to demand a password: **pipes → seam asked 0 times, `"sudo: a terminal is required to read the password"`; pty + marker → asked with the exact marker, every attempt read and evaluated by sudo, nothing typed echoed into the log.** Also: `ask()` receives only the prompt (it used to get the whole pending buffer, so `is_secret()` read a neighbouring "directory" and unmasked the password field), ECHO is off on the pty, and `DEBIAN_FRONTEND`/`NEEDRESTART_MODE` are set because a terminal re-arms every apt/dpkg dialog that gates on `isatty()`. Not yet exercised: the macOS/Windows variants' own prompts — those scripts do not run on this platform yet (6.2/6.3).
 - [ ] 6.2 macOS install path — the shared **native install engine** (`NativeInstaller`, per `phase6-decisions.md`): `install.platforms`/`install.script_platforms` dispatch, compose three-file generation + `.env` merge, preflight (refuse-don't-warn floors, bind-mount probe, `server_dir_problem()`, port-conflict before build), staged/resumable install, `keep_awake()`, readiness poll — all against Docker Desktop, no `pacman`/`systemctl`/`sudo`, no manual VM management (macOS has no Rust prior art; written fresh)
 - [ ] 6.3 Native Windows install path — same native engine against Docker Desktop's **WSL2 backend** (no bespoke WSL2/VM manager; `[blocked]` on 6.2); requires the three Windows provisioning defects in Cross-cutting fixed first (TLS cert, `Start-Process` path, PATH not re-read), plus `docker.exe`/`git` discovery, `autocrlf`+`HTTP/1.1`, path canonicalization, CR-strip across `wsl.exe`, and the nested-virtualization gate — proven on a clean box
 - [ ] 6.4 Tests & gates (mocked platform-gating + script-resolution tests; live-gate on real macOS and Windows 11 — WotLK only)
@@ -183,6 +183,111 @@
   arrow in log output crashes on the cp1252 console (`:605`, `:670`, and 13 sites in `apply.py`); and the
   629 MB installer is re-downloaded unconditionally with no resume or cache.
 
+  **All three are fixed and merged (2026-08-23).** Caching and resume landed with 1. 344 passed, exit 0.
+  Three corrections worth keeping, because each invalidates what the brief assumed:
+  - Defect 2's start step could not be fixed by hardcoding `C:\Program Files\Docker\Docker\Docker
+    Desktop.exe` either, which is what the brief suggested. Measured on the VM: Docker Desktop 4.83.0 is a
+    **per-user** install under `%LOCALAPPDATA%\Programs\DockerDesktop`, with nothing under Program Files, no
+    `HKLM:\SOFTWARE\Docker Inc.` key, no `App Paths` entry in either hive and nothing on PATH — the Start
+    menu shortcut was the only source that answered. So the probe asks Windows several ways and keeps the
+    first candidate that resolves to a real file; hardcoded layouts are the fallback, not the answer.
+    Reverting it costs 603 seconds in the test suite, because the old code polls out the full `wait_seconds`
+    after a start that resolved nowhere — the wall clock *is* the defect.
+  - The TLS failure is **not** Docker's CDN. Windows ships a small root set and fetches the rest on demand
+    through CryptoAPI while schannel builds a chain; OpenSSL reads a *snapshot* of that store and never
+    triggers the fetch. `desktop.docker.com` chains to Amazon Root CA 1 (absent), github.com to
+    Sectigo/USERTrust (present) — which is exactly why three hosts verified and one did not. Fixed with two
+    transports, System32 `curl.exe` by absolute path (schannel, so it sees the on-demand roots *and*
+    enterprise MITM roots) and `certifi` as the in-process backstop. Verification is never weakened.
+
+    **Two corrections to the in-process backstop, from an adversarial review against a real self-signed
+    server (2026-08-23).** (a) `create_default_context(cafile=certifi.where())` **replaces** the OS store
+    rather than widening it — it skips `load_default_certs()` whenever it is given a `cafile`. Measured
+    here: 58 OS CA certs, 121 in certifi, and 33 of the 58 absent from certifi, including every
+    administrator-installed root, i.e. exactly the enterprise-MITM case the curl transport was chosen for.
+    `verify_context()` now loads the OS store and adds certifi on top (154 roots, both sets contained), and
+    an unreadable certifi bundle degrades to the OS store instead of raising. (b) The "a bad certificate is
+    not 'offline'" fix was **inert**: `urlopen` never lets an `ssl.SSLCertVerificationError` escape, it
+    re-raises it inside `urllib.error.URLError`, so the predicate answered False for everything production
+    could raise. Every test that exercised the flag built the exception by hand, which is why it passed.
+    Both are fixed, with a test that runs the real `urllib` stack against a self-signed HTTPS server on
+    127.0.0.1 rather than constructing the failure.
+  - The stale-PATH fix must read **both** registry hives, not `HKLM`. Measured: Docker Desktop had installed
+    to `%LOCALAPPDATA%\Programs\DockerDesktop\resources\bin` and written the **user** PATH; `HKLM` named no
+    docker directory at all, and `C:\Program Files\Docker\Docker\resources\bin` did not exist. Registry
+    before hardcoded paths, since the registry is what the installer actually wrote.
+
+- **Both blindnesses outside `ensure_docker()` are now closed** (merged 2026-08-23, each implemented in
+  an isolated worktree and then adversarially reviewed twice — both were rejected on the first review).
+  1. **PATH — done.** `platform.docker_program()` resolves the CLI once and every argv is built from it:
+     the nine sites in `docker.py`, `console.attach_argv()`, and `git.ContainerGit`/`apply.DockerSql`,
+     which the original brief had missed. `installer.docker_available()` was deleted rather than fixed —
+     it was `platform.docker_ready()` written a second time (style-guide §4). Cache a hit, never a miss:
+     measured 7.5 ms resolved / 14.7 ms unresolved against 308 ms for one real `docker inspect`, and
+     never caching the miss is what lets a launcher started on a bare box pick up the docker its own
+     installer just wrote. The review then found the failure path was *dishonest* in two places — the
+     Stop button answered "no Docker" by blaming the user's install for having no
+     `COMPOSE_PROJECT_NAME`, and `wait_ready()` turned an instant hard failure into 480 s of silent
+     polling. Both fixed; all four modules now log the real errno before degrading to the shared
+     sentence, so an ACL or AV block is never reported as "install Docker Desktop".
+  2. **TLS — done, after the first attempt turned out not to work.** All three `urlopen` calls now pass
+     a verifying context, and an AST test fails on any *future* `urlopen` without one. Two defects the
+     suite could not see, both found by a reviewer running a real self-signed server: (a) the
+     "certificate, not offline" branch never fired, because `urlopen` wraps
+     `SSLCertVerificationError` in `URLError` and the predicate only checked the outer type — the unit
+     tests passed by raising a shape the real stack cannot produce; (b) `create_default_context(cafile=)`
+     **replaces** the OS trust store rather than widening it, dropping 33 of 58 OS roots and silently
+     breaking manifest refresh behind a corporate TLS proxy. The context is now a genuine union
+     (OS roots + certifi, verified by DER SHA-256), and a bundle it cannot read degrades to the OS
+     store instead of raising — a PyInstaller packaging fault must not present as "you are offline".
+
+- **What the three Windows provisioning fixes actually close, and what they do not.** They are 6.3
+  prerequisites landed early, not live-defect fixes: every `catalog.json` entry is
+  `platforms: ["linux"]` and `Installer.preflight()` raises `UnsupportedPlatformError` before
+  `ensure_docker()` — its only caller — is reached, so on Windows the provisioning chain is not
+  reachable through the app at all. Live on Windows today, and therefore genuinely fixed now:
+  attach-to-existing-install → Start, Stop, `docker logs -f`, and the `docker exec … mysql` behind a
+  module apply and the realmlist UPDATE. **Not** the Console tab's `docker attach` — `send_command()`
+  refuses on `pty_supported()` first, and 6.5 already scopes the console to Linux/macOS. Two successive
+  commit messages claimed more than this and were corrected; the claim is easy to make and worth
+  checking each time.
+
+- **`yulon --provision` exists so the chain can be exercised on a clean box before 6.3 makes it
+  reachable.** Headless, no Qt imported, one `YULON_PROVISION_JSON` line on stdout, and exit codes as a
+  protocol for the harness: 0 ready, 3 reboot required (`wsl --install` forces one on a box with no
+  WSL), 2 needs a human. Also a support diagnostic. `main.py` had no tests before it.
+
+- **How the clean-box run has to be driven (measured on the Win11 VM, 2026-08-23).** A plain `ssh`
+  exec cannot do it, for two independent reasons. (1) An ssh session is **SessionId 0**, and Windows
+  OpenSSH kills the whole descendant process tree when the ssh command returns — a fire-and-forget
+  `Start-Process 'Docker Desktop.exe'` brings the daemon up in 17.3 s and then it dies with the ssh
+  call. (2) `docker pull` from session 0 **always** fails with "A specified logon session does not
+  exist", because the credential helper is DPAPI-bound to the interactive logon; redirecting
+  `DOCKER_CONFIG` with `credsStore` removed does *not* work (fails in 0.1 s, measured). So the
+  payload runs in interactive session 1 via `Register-ScheduledTask` +
+  `New-ScheduledTaskPrincipal -LogonType Interactive` — **not** `schtasks /Create /TR`, which strips
+  the quotes off a spaced exe path and leaves a task with Last Result -2147024894 that silently
+  launches nothing. That session exists at boot only because the box has `AutoAdminLogon`; without
+  it an interactive task stays queued forever, silently. A UAC prompt raised from that session
+  appears on the console and a human clicks it — the run is automatic except that one click, and
+  stubbing UAC out would make it prove less.
+
+- **The clean box is a checkpoint, not a scarce one-shot.** `yulon-win11` has `clean-ssh` (fallback)
+  and `clean-debloated` (the test baseline: ssh-ready, debloated, autologon on, **no Docker, no WSL,
+  no real Python** — `python` on PATH is only the stock 0-byte Store alias stub, which is why the
+  harness ships a PyInstaller bundle rather than running the repo). Restoring is cheap and
+  repeatable, so the run can be repeated as often as the fixes need. Toolkit on the Hyper-V host at
+  `C:\Users\PK\claude\debloat\`, with a verifier that refuses to let a half-applied debloat become
+  the baseline.
+
+- **Run the suite on a second OS and a second Python before believing it (2026-08-23).** CI pinned
+  Python 3.11 on Linux and was green while the suite was red on every 3.12+ Linux box — `shutil.which`
+  grew a `_winapi` call in 3.12, and tests that set `sys.platform = "win32"` change it for the whole
+  stdlib, not just the module under test. Hardening that fake then exposed a second bug in the same
+  tests: `_windows_docker_programs()` stats the real filesystem regardless of the injected `which`
+  seam, so on a Windows box with Docker installed those tests were asserting about the host. CI now
+  runs 3.11 and 3.13.
+
 - **First launch of Docker Desktop is gated behind modal dialogs — a headless start waits forever.** The
   installer was run with `--accept-license` and Docker Desktop *still* showed license acceptance and an
   onboarding walkthrough; a human had to click both before the engine would boot. The state lands in
@@ -239,6 +344,45 @@
     overwritten, since re-attaching a moved install must not repoint it at its new basename. Proven end
     to end: pinned as `wow-server`, folder renamed, project still resolves to `wow-server`, stop works and
     start works where it previously died with `Conflict. The container name is already in use`.
+
+- **Windows: the launcher only works from the user's own desktop session (2026-08-22, measured
+  three ways).** Docker Desktop's credential helper fails with `A specified logon session does not
+  exist. It may already have been terminated.` from any non-interactive context — **even for an
+  anonymous pull of a public image**. Established by a clean three-way comparison, so it is the
+  *session* and not the login:
+
+  | context | result |
+  |---|---|
+  | SSH (non-interactive), desktop logged out | fails |
+  | desktop session 1 (interactive) | **6 passed, 1 skipped** in 83.75s |
+  | SSH (non-interactive), desktop logged **in** | fails identically |
+
+  Neither clearing `credsStore` from `~/.docker/config.json` nor pointing `DOCKER_CONFIG` at a
+  credential-free directory avoids it — Docker Desktop reinjects the helper. **Good news for the
+  product**: the GUI launcher runs in the user's session, so it is unaffected. **Bad news for
+  automation**: a CI runner, a service, or any headless gate cannot pull images on Windows, so the
+  Windows live gate must be driven from an interactive session (a scheduled task with `/IT`), not
+  over SSH.
+
+- **The full suite now runs on real Windows (2026-08-22).** Win11 Pro 25H2 with `core.autocrlf=true`
+  at system *and* repo level — the environment the CRLF guard exists for, where it had never once
+  executed because CI is Linux-only. Result: **221 passed, 6 skipped**, and the CRLF assertions ran
+  rather than passing vacuously. The four extra skips versus Linux are honest and expected: 2 ×
+  "no pty on this platform" (`test_console.py`) and 4 × "no bash that can run a script on this
+  machine" (`test_installer.py`, `test_runner.py`) — the clean-Windows findings, holding. Live
+  integration on Docker Desktop (Engine 29.7.2, Compose v5.4.0, WSL2, 15 CPUs, 9.7 GB): **6 passed,
+  1 skipped in 83.75s**, against 58s on the Linux VM.
+
+- **Two build-machine traps found while installing a real server on Windows (2026-08-22).**
+  1. **Large clones need HTTP/1.1.** `git clone` of `azerothcore-wotlk` (224k objects) died with
+     `fetch-pack: invalid index-pack output` / `unexpected disconnect while reading sideband packet`.
+     `git -c http.version=HTTP/1.1 -c http.postBuffer=524288000` fixes it. The native install engine
+     must set both, or its very first step fails on a large repo.
+  2. **A build must not be attached to a console.** The first attempt ran in a scheduled task with a
+     visible window; because the clone was failing silently the window looked blank, was closed, and
+     the build died with `STATUS_CONTROL_C_EXIT` (`-1073741510`). Long jobs need `-WindowStyle Hidden`
+     with a *separate*, disposable viewer — which is also how the launcher should treat its own log
+     window.
 
 - **Open follow-ups from the staged start/stop review (2026-08-22)** — found by a three-lens review whose
   findings were then adjudicated against a live daemon; the must-fix (parallel `docker stop`) and the

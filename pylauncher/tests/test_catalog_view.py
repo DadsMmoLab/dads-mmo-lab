@@ -2,18 +2,26 @@
 
 from __future__ import annotations
 
+import subprocess
 import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
 
+import pytest
 from PySide6.QtWidgets import QWidget
 
 from tests.conftest import process_events
+from yulon import runner
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.installer import Installer, InstallOptions
 from yulon.ui.catalog_view import CatalogView
 from yulon.ui.widgets.log_panel import LogPanel
+
+
+def _completed() -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess([], 0, "", "")
+
 
 CATALOG = load_catalog()
 
@@ -26,6 +34,7 @@ class _FakeInstaller(Installer):
         self.lines = lines
         self.ran_with: list[InstallOptions] = []
         self.cancels: list[threading.Event | None] = []
+        self.asks: list[object] = []
 
     def preflight(self, options: InstallOptions) -> None:
         if self.entry.install.requires_client_dir and options.client_dir is None:
@@ -36,9 +45,11 @@ class _FakeInstaller(Installer):
         options: InstallOptions | None = None,
         *,
         cancel: threading.Event | None = None,
+        ask: object = None,
     ) -> Iterator[str]:
         self.ran_with.append(options or InstallOptions())
         self.cancels.append(cancel)
+        self.asks.append(ask)
         yield from self.lines
 
 
@@ -144,6 +155,37 @@ def test_use_existing_registers_a_folder_that_holds_an_install(
     (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
     assert view.attach_existing(CATALOG.get("wow-wotlk")) is True
     assert got == [("wow-wotlk", tmp_path, None)]
+
+
+def test_use_existing_does_not_pin_the_compose_project(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Attaching must not write COMPOSE_PROJECT_NAME, and must not shell out at all.
+
+    `pin_project_name()` records whatever compose calls the project *now*, which
+    is the folder's current basename. An already-moved install is exactly what
+    "Use existing…" exists to adopt, so pinning here writes the one value that
+    is wrong — and a pin outranks the basename and is never revised, so the
+    server could never be stopped from Yu'lon again. It also made this an
+    accidental Docker-dependent test: `docker compose config` really ran, and
+    only a missing binary kept the default suite honest (review, 2026-08-22).
+    """
+    ran: list[list[str]] = []
+    monkeypatch.setattr(
+        runner, "run", lambda cmd, cwd=None, timeout=None: ran.append(cmd) or _completed()  # type: ignore[func-returns-value]
+    )
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        pick_dir=lambda *_: tmp_path,
+        home=tmp_path,
+    )
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    assert view.attach_existing(CATALOG.get("wow-wotlk")) is True
+    assert not (tmp_path / ".env").exists(), "attach pinned a project name"
+    assert ran == [], f"attach shelled out to {ran}"
 
 
 def test_use_existing_cancel_emits_nothing(qapp: object) -> None:

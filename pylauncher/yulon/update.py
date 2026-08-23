@@ -19,6 +19,7 @@ from dataclasses import dataclass
 
 from yulon import __version__
 from yulon.log import get_logger
+from yulon.platform import verify_context
 
 logger = get_logger(__name__)
 
@@ -57,10 +58,19 @@ def is_newer(latest: str, current: str) -> bool:
 
 
 def _urllib_get_text(url: str) -> str:
+    """GET the releases API over `platform.verify_context()`'s root set.
+
+    The check degrades to "no update known" on any failure, so an unverified
+    connection would not crash anything — it would quietly decide, from an
+    unauthenticated answer, which version the user is told to install. The
+    verified context costs nothing here and removes that.
+    """
     request = urllib.request.Request(
         url, headers={"User-Agent": f"yulon/{__version__}", "Accept": "application/vnd.github+json"}
     )
-    with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS) as resp:
+    with urllib.request.urlopen(
+        request, timeout=_TIMEOUT_SECONDS, context=verify_context()
+    ) as resp:
         return str(resp.read().decode("utf-8", errors="replace"))
 
 

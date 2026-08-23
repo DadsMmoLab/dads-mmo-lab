@@ -8,6 +8,7 @@ catalog view are remembered and get a tab. Everything else lives in `yulon/`.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -66,6 +67,12 @@ def build_window() -> object:
         entry = catalog.get(game)
         services = ControllerServices.for_wotlk(entry, server_dir, client_dir)
         view = ControllerView(entry, services)
+        # Every failure this view reports also lands in the app log. Each one is
+        # already shown on its own tab, but the log is what a user pastes into a
+        # bug report, and until now none of them reached it (review, 2026-08-22).
+        view.action_failed.connect(
+            lambda message, name=entry.name: logger.warning(f"{name}: {message}")
+        )
         controllers[key] = view
         controller_views.append(view)
         panels.append(view.console_log)
@@ -132,9 +139,73 @@ def build_window() -> object:
     return window
 
 
+PROVISION_READY = 0
+PROVISION_MANUAL = 2
+PROVISION_REBOOT = 3
+
+
+def provision_headless() -> int:
+    """Run the Docker provisioning chain with no GUI and report machine-readably.
+
+    Two audiences, and neither of them can drive a window.
+
+    Support: "run Yu'lon with --provision and send me the JSON" answers, in one
+    step, every question about why Docker will not come up on a user's machine —
+    which of the steps ran, which were skipped and why, and what is left that
+    only they can do.
+
+    The clean-box harness (checklist 6.3's "proven on a clean box"): on Windows
+    every shipped catalog entry is `platforms: ["linux"]`, so `Installer.preflight()`
+    refuses before `ensure_docker()` is ever reached and the provisioning chain
+    cannot be exercised through the app at all. That chain is nonetheless where
+    the four Cross-cutting Windows defects live — download over a verified
+    connection, silent install, find the executable that was just installed,
+    start it, poll for ready, then build an argv from a CLI this process's own
+    PATH never contained. This entry point is how those get exercised on a real
+    clean box before 6.2/6.3 make them reachable the ordinary way.
+
+    Exit codes are the harness's control flow, not decoration:
+      0  ready — a daemon answers and nothing is outstanding
+      3  a reboot is required first (`wsl --install` forces one on a box with no
+         WSL), so nothing after it can be judged yet; reboot and run again
+      2  not ready, and what remains needs a human
+    """
+    logger.info("Yu'lon provisioning (headless)")
+    report = platform.ensure_docker()
+    payload = {
+        "platform": str(report.platform),
+        "done": list(report.done),
+        "skipped": list(report.skipped),
+        "manual_steps": list(report.manual_steps),
+        "reboot_required": report.reboot_required,
+        "docker_ready": report.docker_ready,
+        "ok": report.ok,
+        # Which docker CLI this process resolved, or null. On a clean Windows box
+        # this is the single most useful line in the report: it is the difference
+        # between "the installer ran" and "the process that ran it can now use
+        # what it installed", which is Cross-cutting defect 3 and is invisible
+        # from anywhere else.
+        "docker_cli": platform.docker_program(),
+    }
+    # Written to stdout as one line so a harness can parse it without caring
+    # about the human-readable logging that shares this stream.
+    print("YULON_PROVISION_JSON " + json.dumps(payload, ensure_ascii=False))
+    for step in report.done:
+        logger.info("did: %s", step)
+    for step in report.skipped:
+        logger.warning("skipped: %s", step)
+    for step in report.manual_steps:
+        logger.warning("you must: %s", step)
+    if report.reboot_required:
+        return PROVISION_REBOOT
+    return PROVISION_READY if report.ok else PROVISION_MANUAL
+
+
 def main() -> int:
     """Start the launcher."""
     configure(config_dir=platform.config_dir())
+    if "--provision" in sys.argv[1:] or os.environ.get("YULON_PROVISION"):
+        return provision_headless()
     logger.info("Yu'lon launcher starting")
     from PySide6.QtWidgets import QApplication, QMainWindow
 

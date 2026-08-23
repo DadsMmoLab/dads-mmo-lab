@@ -58,6 +58,9 @@ services:
   auth:
     image: busybox:1.36
     container_name: {THROWAWAY_SPEC.auth}
+    depends_on:
+      db:
+        condition: service_healthy
     command:
       - sh
       - -c
@@ -67,8 +70,27 @@ services:
   world:
     image: busybox:1.36
     container_name: {THROWAWAY_SPEC.world}
+    depends_on:
+      db:
+        condition: service_healthy
     command: ["sh", "-c", "echo 'World initialized, ready...'; sleep 600"]
 """
+# The `depends_on: condition: service_healthy` edges above are not decoration.
+# `start_staged()` deleted its Python health-wait on the grounds that compose
+# owns the dependency graph and fails closed when the database never becomes
+# healthy — and nothing in this suite exercised either claim, because the
+# fixture declared a healthcheck and no depends_on at all (review, 2026-08-22).
+# `--no-deps` keeps these edges precisely because `db` is one of the named
+# services; it prunes only edges pointing outside the selected set, which is
+# what keeps the one-shot import out.
+
+# The same project with a database that can never report healthy: the
+# fail-closed case. A worldserver started against a dead database is the
+# outcome the health gate exists to prevent.
+_NEVER_HEALTHY_YML = _COMPOSE_YML.replace(
+    'command: ["sh", "-c", "sleep 2 && touch /tmp/ready && sleep 600"]',
+    'command: ["sh", "-c", "sleep 600"]',  # /tmp/ready is never created
+)
 
 
 def docker_available() -> bool:
@@ -137,6 +159,17 @@ def import_runs(project_dir: Path) -> int:
     if not marker.is_file():
         return 0
     return len([line for line in marker.read_text(encoding="utf-8").splitlines() if line.strip()])
+
+
+@pytest.fixture
+def never_healthy_project(tmp_path: Path, require_docker: None) -> Iterator[Path]:
+    """Like `throwaway_project`, but the database never reports healthy."""
+    (tmp_path / "docker-compose.yml").write_text(_NEVER_HEALTHY_YML, encoding="utf-8")
+    _compose_down(tmp_path)
+    try:
+        yield tmp_path
+    finally:
+        _compose_down(tmp_path)
 
 
 @pytest.fixture

@@ -1,2 +1,7 @@
 PySide6>=6.6
 pydantic>=2.7
+# Mozilla's root CA bundle. A fresh Windows install ships ~18 roots and fetches
+# the rest on demand through a mechanism OpenSSL never triggers, so Python could
+# not verify desktop.docker.com there (measured 2026-08-22) — see
+# yulon/platform.py's downloads section.
+certifi>=2024.7.4

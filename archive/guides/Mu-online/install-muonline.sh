@@ -81,6 +81,44 @@ ask_yes_no() {
 }
 
 # ─────────────────────────────────────────
+# DOCKER GROUP CONSENT
+# ─────────────────────────────────────────
+# Membership in the docker group is effectively root-equivalent (a member can
+# mount the host filesystem into a container). We never join silently — warn
+# and ask once before making the change.
+DOCKER_GROUP_CONSENT_DONE=0
+
+docker_group_consent() {
+    [[ "$DOCKER_GROUP_CONSENT_DONE" == "1" ]] && return 0
+    if id -nG "$USER" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+        DOCKER_GROUP_CONSENT_DONE=1
+        return 0
+    fi
+    echo ""
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RST}"
+    echo -e "${WHITE}${BOLD} ⚠️  Docker Group Membership — Please Read${RST}"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RST}"
+    echo ""
+    echo -e "  To run ${CYAN}docker${RST} without ${CYAN}sudo${RST}, the installer can add"
+    echo -e "  your user to the ${WHITE}docker${RST} group."
+    echo ""
+    echo -e "  ${RED}${BOLD}Heads up:${RST} docker group membership is effectively"
+    echo -e "  equivalent to full root access on this machine."
+    echo -e "  If you keep this machine locked down, you can skip it and"
+    echo -e "  run docker with ${CYAN}sudo${RST} instead."
+    echo ""
+    if ! ask_yes_no "Add '$USER' to the docker group (grants root-equivalent access)?"; then
+        echo ""
+        print_warning "Skipped docker group membership."
+        print_info "You'll need to prefix docker commands with 'sudo'."
+        DOCKER_GROUP_CONSENT_DONE=1
+        return 1
+    fi
+    DOCKER_GROUP_CONSENT_DONE=1
+    return 0
+}
+
+# ─────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────
 SERVER_DIR="$HOME/muonline-server"
@@ -151,10 +189,9 @@ install_docker() {
     check_pacman_keyring
     sudo pacman -Sy --noconfirm docker docker-compose git || \
         { print_error "Docker install failed"; exit 1; }
-    sudo usermod -aG docker "$USER"
+    docker_group_consent && sudo usermod -aG docker "$USER" 2>/dev/null || true
     sudo systemctl enable --now docker 2>/dev/null || true
     sleep 3
-    sudo chmod 666 /var/run/docker.sock 2>/dev/null || true
     if command -v steamos-readonly &>/dev/null; then
         sudo steamos-readonly enable 2>/dev/null || \
             print_warning "Could not re-enable steamos-readonly"

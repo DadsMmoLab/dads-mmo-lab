@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -63,12 +64,34 @@ class InstallOptions:
     reinstall: bool = False
 
 
+class AskTheUser:
+    """A rule's answer when the app has no business choosing. See `PROMPT_RULES`."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "ASK_THE_USER"
+
+
+ASK_THE_USER = AskTheUser()
+"""Route this prompt to the person, because neither answer is the app's to give.
+
+There is exactly one of these, and it is not a general escape hatch: a rule that
+opens a dialog is the shape that made the old prompt heuristic dangerous. It
+exists because the installers' docker-group question has no safe canned answer.
+Answering yes grants root-equivalent access silently — the precise thing
+upstream's 1.4.4 security change added consent for. Answering no leaves the user
+outside the docker group, and the launcher's own `docker` calls then fail with
+permission denied, so the app would have quietly broken itself instead.
+"""
+
+
 @dataclass(frozen=True)
 class PromptRule:
     """`pattern` (regex, searched in the ANSI-stripped prompt) → the stdin answer."""
 
     pattern: str
-    answer: str | Callable[[InstallOptions], str]
+    answer: str | Callable[[InstallOptions], str] | AskTheUser
     note: str = ""
 
 
@@ -102,22 +125,51 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
     PromptRule(r"Open the GitHub README", "n"),
     PromptRule(r"Download wow-manage\.sh", "n"),
     PromptRule(r"stop the server now\?", "n"),
+    # Must sit ABOVE the `(y/n)` catch-all, which would otherwise answer "y" and
+    # grant root-equivalent access without anyone being asked — exactly what
+    # upstream's 1.4.4 security change exists to prevent (it removed the
+    # `/etc/sudoers.d/docker-nopasswd` rule and made group membership a
+    # consented step). The pattern requires the `(y/n)` suffix so it matches the
+    # QUESTION and not the paragraph of warning the script prints above it.
+    PromptRule(
+        r"to the docker group.*\(y/n\)",
+        ASK_THE_USER,
+        "root-equivalent; neither answer is the app's to give",
+    ),
     PromptRule(r"\(y/n\)", "y"),
 )
 
 
 def make_responder(
-    options: InstallOptions, rules: tuple[PromptRule, ...] = PROMPT_RULES
+    options: InstallOptions,
+    rules: tuple[PromptRule, ...] = PROMPT_RULES,
+    ask: runner.Prompter | None = None,
 ) -> runner.Responder:
-    """Build the `runner.Responder` that answers prompts per `rules` for `options`."""
+    """Build the `runner.Responder` that answers prompts per `rules` for `options`.
+
+    `ask` is consulted only for a rule whose answer is `ASK_THE_USER` — one rule,
+    matching one exact question, for the reason given there. Without an `ask`
+    (the CLI harness), such a prompt is DECLINED: refusing a privilege change is
+    recoverable and visible, granting one silently is neither.
+    """
     compiled = [(re.compile(r.pattern, re.IGNORECASE), r) for r in rules]
 
     def respond(line: str) -> str | None:
         for regex, rule in compiled:
-            if regex.search(line):
-                answer = rule.answer(options) if callable(rule.answer) else rule.answer
-                logger.debug(f"prompt {line.strip()!r} → {answer!r}")
+            if not regex.search(line):
+                continue
+            if isinstance(rule.answer, AskTheUser):
+                if ask is None:
+                    logger.warning(f"no prompter for {line.strip()!r}; declining")
+                    return "n"
+                reply = ask(line.strip())
+                # A dismissed dialog is not consent.
+                answer = "y" if reply and reply.strip().lower() in ("y", "yes") else "n"
+                logger.info(f"user was asked about {line.strip()!r} and answered {answer!r}")
                 return answer
+            answer = rule.answer(options) if callable(rule.answer) else rule.answer
+            logger.debug(f"prompt {line.strip()!r} → {answer!r}")
+            return answer
         return None
 
     return respond
@@ -191,12 +243,13 @@ NO_BASH_HELP = (
 # WSL2 backend rather than running the bash script in a distro.
 
 
-def docker_available() -> bool:
-    """True if `docker info` succeeds; False if the binary or daemon is missing."""
-    try:
-        return runner.run(["docker", "info"]).returncode == 0
-    except OSError:
-        return False
+# `docker_available()` used to live here as `runner.run(["docker", "info"])`,
+# which is `platform.docker_ready()` written a second time (style-guide §4) —
+# and the copy that never learned about `docker_programs()`. Deleting it rather
+# than fixing it is what stops the pair drifting again: the preflight gate and
+# the provisioning probe now agree by construction, so an install can no longer
+# be refused with "Docker is not running" on a Windows box where
+# `ensure_docker()` had just proved that it is.
 
 
 class Installer:
@@ -211,7 +264,7 @@ class Installer:
         entry: CatalogEntry,
         *,
         installers_root: Path = DEFAULT_INSTALLERS_ROOT,
-        docker_check: Callable[[], bool] = docker_available,
+        docker_check: Callable[[], bool] = platform.docker_ready,
         ensure_docker: Callable[..., platform.ProvisionReport] = platform.ensure_docker,
         interact: Callable[..., Iterator[str]] = runner.interact,
         env: Mapping[str, str] | None = None,
@@ -228,6 +281,12 @@ class Installer:
         self._package_manager = package_manager
         self._bash_check = bash_check
         self._platform_id = platform_id
+        # Per-install, so one install's marker cannot answer another's, and
+        # random so no script output can imitate it. The wording around the
+        # token matters too: this string is the LABEL of the one dialog in the
+        # app that asks for the user's password, so it has to read as sudo
+        # asking, not as a bare hex token (review, 2026-08-22).
+        self.sudo_marker = f"[sudo via Yu'lon {secrets.token_hex(8)}] password:"
 
     @property
     def script(self) -> Path:
@@ -240,18 +299,43 @@ class Installer:
         return self.installers_root / self.entry.install.script_for(self._package_manager())
 
     def script_env(self) -> dict[str, str]:
-        """The environment the script runs in: ours, plus `env` overrides, plus a `TERM`.
+        """The environment the script runs in: ours, plus `env` overrides, a `TERM`, a sudo prompt.
 
         The scripts call `clear`/`tput`, which exit non-zero when `TERM` is unset
         — and a desktop-launched app has no `TERM` (Phase 3 live-gate finding,
         2026-08-20: `TERM environment variable not set.` → exit 1 before the
         first prompt). The ANSI output this enables is stripped by `runner`.
+
+        `SUDO_PROMPT` is how the launcher recognises sudo's password prompt
+        without guessing. sudo prints this string verbatim instead of "[sudo]
+        password for pk:", so a marker containing a random token is proof the
+        text came from sudo — no regex over build output, and no dependence on
+        the user's locale, which "[sudo] password for" would have (a Danish box
+        prints "[sudo] adgangskode for pk:").
         """
         env = dict(os.environ)
         if not env.get("TERM"):  # unset OR empty — some session managers export TERM=""
             env["TERM"] = DEFAULT_TERM
+        # Everything above is a preference and `env` may override it. Everything
+        # below is not.
         if self._env:
             env.update(self._env)
+        # `SUDO_PROMPT` is a protocol identifier, not a setting: it is one half
+        # of a matched pair with `ask_marker`, and letting a caller replace it
+        # desynchronises the two, so the prompt is never recognised and the
+        # install hangs with no dialog — the exact pre-6.1.5 failure
+        # (review, 2026-08-22).
+        env["SUDO_PROMPT"] = self.sudo_marker
+        # The script now runs on a terminal, which re-arms every apt/dpkg path
+        # that gates on isatty(): needrestart's service-restart menu and dpkg's
+        # conffile prompt both render full-screen ncurses dialogs, neither
+        # carries the marker, and no PROMPT_RULES entry answers them — so the
+        # install would park on one with Stop as the only way out. Under the old
+        # pipe transport those paths were non-interactive by accident; now they
+        # are non-interactive on purpose (review, 2026-08-22).
+        env.setdefault("DEBIAN_FRONTEND", "noninteractive")
+        env.setdefault("NEEDRESTART_MODE", "a")
+        env.setdefault("NEEDRESTART_SUSPEND", "yulon")
         return env
 
     def preflight(self, options: InstallOptions, cancel: threading.Event | None = None) -> None:
@@ -300,8 +384,26 @@ class Installer:
         options: InstallOptions | None = None,
         *,
         cancel: threading.Event | None = None,
+        ask: runner.Prompter | None = None,
     ) -> Iterator[str]:
         """Run the install, yielding output lines live; answers prompts itself.
+
+        `ask` is consulted for exactly one thing: `sudo` asking for a password
+        during the distro package steps. No rule in `PROMPT_RULES` can ever know
+        it, so without `ask` the script stops dead there — which is what
+        installing on Linux did (`sudo -v` at the top of the Ubuntu script,
+        guarded by `exit 1`, so it failed seconds in with "Could not cache sudo
+        credentials. Aborting.").
+
+        Two things make that work, and both are needed:
+
+        * The script runs on a pseudo-terminal. sudo reads its password from
+          /dev/tty, not stdin, precisely so a piped stdin cannot feed it one —
+          measured: a child reading stdin answers through a pipe, the same child
+          reading /dev/tty does not.
+        * `SUDO_PROMPT` (see `script_env()`) makes sudo announce itself with a
+          random marker, so the prompt is recognised by an exact match instead
+          of a guess about what a prompt looks like.
 
         Raises `InstallerError` if the script exits non-zero (after yielding
         everything it printed), or any `preflight()` error before it starts.
@@ -315,8 +417,16 @@ class Installer:
             for line in self._interact(
                 ["bash", str(self.script)],
                 cwd=self.script.parent,
-                respond=make_responder(opts),
+                # `ask` reaches the rules as well as `interact()`. The rules
+                # need it for exactly one question — the docker-group consent
+                # added by the installers' 1.4.4 security change, which arrives
+                # as a COMPLETE line (the script `echo`s it, then reads), so
+                # `interact()`'s blocked-partial-line path never sees it.
+                respond=make_responder(opts, ask=ask),
+                ask=ask,
+                ask_marker=self.sudo_marker,
                 env=self.script_env(),
+                terminal=True,
                 cancel=cancel,
             ):
                 text = runner.strip_ansi(line).strip()

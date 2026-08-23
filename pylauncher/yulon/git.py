@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from yulon import runner
+from yulon import platform, runner
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -282,8 +282,28 @@ class ContainerGit:
             self._run(spec, ["sparse-checkout", "set", "--no-cone", spec.sparse_path.rstrip("/")])
 
     def _run(self, spec: CloneSpec, git_args: list[str]) -> None:
+        """One containerized `git` invocation, or `GitError` if it fails.
+
+        argv[0] comes from `platform.docker_program()` for the reason spelled
+        out there: this class exists *because* Windows and macOS already have
+        Docker Desktop, so it is by definition the git that runs on the machine
+        whose PATH does not yet mention docker — the first clone of a first
+        install, minutes after `ensure_docker()` put it there.
+
+        Both ways of having no docker end at the same sentence. `None` is "it
+        was never found"; the `OSError` is the case the resolution cache cannot
+        follow — a hit is remembered for the life of the process, so Docker
+        uninstalled or self-updated while the launcher is open leaves that
+        pinned path aimed at a file that is gone. Only the first was guarded
+        when this moved off the literal `docker`, so the second still reached
+        the user as `[WinError 2] The system cannot find the file specified`
+        (review, 2026-08-23) — the exact failure the change was made to end.
+        """
+        program = platform.docker_program()
+        if program is None:
+            raise GitError(platform.DOCKER_CLI_MISSING_HELP)
         argv = [
-            "docker",
+            program,
             "run",
             "--rm",
             "-v",
@@ -299,7 +319,15 @@ class ContainerGit:
             *_LINE_ENDING_ARGS,
             *git_args,
         ]
-        proc = runner.run(argv, env=_no_prompt_env())
+        try:
+            proc = runner.run(argv, env=_no_prompt_env())
+        except OSError as exc:
+            # Logged with the real errno first, the way `docker._docker()` does, so a
+            # docker.exe blocked by an ACL or by AV leaves evidence instead of being
+            # reported to the user as "install Docker Desktop" with nothing in the log
+            # to contradict it (review finding, 2026-08-23).
+            logger.warning(f"{argv[0]} could not be started: {exc}")
+            raise GitError(platform.DOCKER_CLI_MISSING_HELP) from exc
         if proc.returncode != 0:
             raise GitError(f"containerized git {' '.join(git_args)} failed: {proc.stderr.strip()}")
 

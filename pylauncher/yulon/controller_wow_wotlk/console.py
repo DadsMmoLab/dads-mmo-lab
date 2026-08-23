@@ -18,7 +18,7 @@ import threading
 import time
 from dataclasses import dataclass
 
-from yulon import runner
+from yulon import platform, runner
 from yulon.controller_wow_wotlk import docker_ctl
 from yulon.log import get_logger
 
@@ -44,19 +44,12 @@ class ConsoleReply:
     lines: tuple[str, ...]
 
 
-def pty_supported() -> bool:
-    """True where a pseudo-terminal can be opened (POSIX). False on Windows."""
-    return hasattr(os, "openpty")
-
-
-def _open_pty() -> tuple[int, int]:
-    """`os.openpty()`, fetched dynamically because it does not exist on Windows.
-
-    Callers must check `pty_supported()` first.
-    """
-    open_pty = getattr(os, "openpty")  # noqa: B009 - POSIX-only attribute
-    master, slave = open_pty()
-    return int(master), int(slave)
+# Both live in `yulon.runner` now: the installer needs a terminal too (sudo
+# reads its password from /dev/tty), and a helper two features share does not
+# belong in one game's package (style-guide §4). Re-exported so this module's
+# own callers and tests keep reading naturally.
+pty_supported = runner.pty_supported
+_open_pty = runner.open_pty
 
 
 NO_TTY_HELP = (
@@ -69,8 +62,26 @@ NO_TTY_HELP = (
 
 
 def attach_argv(container: str) -> list[str]:
-    """The exact `docker attach` invocation used (pinned by tests)."""
-    return ["docker", "attach", "--sig-proxy=false", container]
+    """The exact `docker attach` invocation used (pinned by tests).
+
+    argv[0] is `platform.docker_program()`, not the literal `docker`, and this
+    is the site where getting that wrong is worst. Everywhere else an
+    unresolved CLI is a command that failed and can be retried; here it is the
+    GM console — account creation, `.server info`, every gameplay command the
+    app offers — coming up dead on a machine where Docker is installed and
+    running, because this process was started before the installer wrote its
+    PATH entry (see `platform.docker_program()`).
+
+    Raises:
+        ConsoleError: this host has no docker CLI at all. Raised rather than
+            returned as an unusable argv so `send_command()` fails before it
+            opens a pty, and so the user gets `DOCKER_CLI_MISSING_HELP` instead
+            of a `FileNotFoundError` from `Popen`.
+    """
+    program = platform.docker_program()
+    if program is None:
+        raise ConsoleError(platform.DOCKER_CLI_MISSING_HELP)
+    return [program, "attach", "--sig-proxy=false", container]
 
 
 def send_command(
@@ -86,6 +97,10 @@ def send_command(
     logger.info(f"console → {container}: {command.split(' ', 2)[0:2]}")  # never log passwords
     if not pty_supported():
         raise ConsoleError(NO_TTY_HELP.format(container=container))
+    # Resolve the CLI BEFORE the pty exists. `attach_argv()` can raise, and the
+    # `except OSError` below would not catch a ConsoleError — the master/slave
+    # pair would leak one fd per attempt.
+    argv = attach_argv(container)
     # The worldserver container runs with tty=true, so docker REFUSES to attach
     # unless its stdin is a terminal ("the input device is not a TTY"). Writing
     # to /proc/1/fd/0 does not help either: that fd is the terminal, so a write
@@ -94,7 +109,7 @@ def send_command(
     master, slave = _open_pty()
     try:
         proc = popen(
-            attach_argv(container),
+            argv,
             stdin=slave,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -103,7 +118,17 @@ def send_command(
     except OSError as exc:
         os.close(master)
         os.close(slave)
-        raise ConsoleError(f"docker attach failed to start: {exc}") from exc
+        # The fourth module that has to say this — `DOCKER_CLI_MISSING_HELP`'s own
+        # docstring names all four. `attach_argv()` above covers the never-resolved
+        # case; this covers the pinned-then-removed one, where argv[0] is an
+        # absolute path that has since gone (a Docker Desktop uninstall or in-place
+        # upgrade mid-session), which used to surface as a bare [Errno 2].
+        # Logged with the real errno first, the way `docker._docker()` does, so a
+        # docker.exe blocked by an ACL or by AV leaves evidence instead of being
+        # reported to the user as "install Docker Desktop" with nothing in the log
+        # to contradict it (review finding, 2026-08-23).
+        logger.warning(f"{argv[0]} could not be started: {exc}")
+        raise ConsoleError(platform.DOCKER_CLI_MISSING_HELP) from exc
     os.close(slave)  # the child holds its own copy
     assert proc.stdout is not None
     out: list[str] = []
