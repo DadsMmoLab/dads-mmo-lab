@@ -103,7 +103,7 @@ def plan(
     wsl: bool | None = None,
     rule_prefix: str = "Yulon",
     detect_lan: Callable[[], str | None] = platform.detect_lan_ip,
-    detect_public: Callable[[], str | None] = platform.detect_public_ip,
+    detect_public: Callable[[], platform.PublicIpResult] = platform.detect_public_ip,
 ) -> NetworkPlan:
     """Compute the plan for `mode`. Detection seams default to the real platform probes."""
     ports = (entry.ports.auth, entry.ports.world)
@@ -112,8 +112,10 @@ def plan(
     in_wsl = wsl if wsl is not None else platform.in_wsl()
     lan = lan_ip if lan_ip is not None else detect_lan()
     public = public_ip
+    probe: platform.PublicIpResult | None = None
     if mode == "internet" and public is None:
-        public = detect_public()
+        probe = detect_public()
+        public = probe.address
 
     warnings: list[str] = []
     manual: list[str] = []
@@ -150,6 +152,15 @@ def plan(
     elif mode == "lan":
         sql = realmlist_sql(entry, lan, lan)
         client_realmlist = lan
+    elif public is None and probe is not None and probe.verification_failed:
+        # Not "offline?": the lookup reached a server and refused to trust it, so
+        # nothing was learned about this connection. Saying "offline" here sends
+        # the user to the router for a problem that lives in the root store.
+        warnings.append(
+            "could not determine the public IP — the lookup service's certificate could not be "
+            "verified, which is not the same as being offline, so internet play is not "
+            f"configured and the connection itself is untested. {platform.CERT_VERIFY_FIX}"
+        )
     elif public is None:
         warnings.append(
             "could not determine the public IP (offline?) — internet play not configured"

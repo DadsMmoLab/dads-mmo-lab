@@ -181,3 +181,87 @@ def test_a_missing_container_is_recreated_without_re_running_the_import(
     assert docker.start_staged(THROWAWAY_SPEC, staged_project) is True
     assert docker.container_exists(THROWAWAY_SPEC.world) is True
     assert import_runs(staged_project) == 1, "recreating a container re-ran the import"
+
+
+def test_start_staged_waits_for_the_database_before_starting_the_servers(
+    throwaway_project: Path,
+) -> None:
+    """The claim `start_staged()` gave up its own health-wait for.
+
+    It deleted the Python polling on the grounds that compose owns the
+    dependency graph and honours `condition: service_healthy` even under
+    `--no-deps` — because `--no-deps` prunes only edges pointing OUTSIDE the
+    selected set, and `db` is one of the three named services. Nothing
+    exercised that until now; the fixture declared a healthcheck and no
+    depends_on at all (review, 2026-08-22).
+
+    The database here takes two seconds to become healthy, so if the ordering
+    were not honoured the servers would start first.
+    """
+    assert docker.start_staged(THROWAWAY_SPEC, throwaway_project) is True
+
+    db_started = docker.started_at(THROWAWAY_SPEC.db)
+    world_started = docker.started_at(THROWAWAY_SPEC.world)
+    assert db_started and world_started
+    assert world_started > db_started, (
+        f"world started at {world_started}, database at {db_started} — the health gate was not "
+        "honoured, so a worldserver can come up against a database that is not ready"
+    )
+    assert docker.health(THROWAWAY_SPEC.db) == "healthy"
+
+
+def test_start_staged_fails_closed_when_the_database_never_becomes_healthy(
+    never_healthy_project: Path,
+) -> None:
+    """A worldserver started against a dead database is what the gate prevents.
+
+    With the Python health-wait gone, compose's own `service_healthy` condition
+    is the ONLY thing standing between a restart and that outcome — so it has
+    to fail, loudly, rather than start the servers anyway.
+    """
+    with pytest.raises(docker.DockerCommandError):
+        docker.start_staged(THROWAWAY_SPEC, never_healthy_project)
+
+    running = set(docker.status())
+    assert THROWAWAY_SPEC.world not in running, "started a server against an unhealthy database"
+    assert THROWAWAY_SPEC.auth not in running
+
+
+def test_stop_staged_reports_whether_there_was_anything_to_stop(
+    throwaway_project: Path,
+) -> None:
+    """True means "was up, now down"; False means "there was nothing of ours".
+
+    It used to return `compose stop`'s exit code, which is 0 for a project where
+    nothing was running — so a Stop pressed on an already-stopped install said
+    the same thing as one that really stopped a server (review, 2026-08-22).
+    """
+    assert docker.stop_staged(THROWAWAY_SPEC, throwaway_project) is False
+
+    docker.start_staged(THROWAWAY_SPEC, throwaway_project)
+    assert docker.stop_staged(THROWAWAY_SPEC, throwaway_project) is True
+    assert docker.stop_staged(THROWAWAY_SPEC, throwaway_project) is False
+
+    # And the containers survived, so the next start stays staged.
+    assert docker.container_exists(THROWAWAY_SPEC.world) is True
+
+
+def test_a_stop_never_writes_an_identity_the_folder_could_carry_away(
+    throwaway_project: Path,
+) -> None:
+    """Live counterpart of the unit test: no pin is written, deliberately.
+
+    A Stop-time pin was implemented — the census has just proved the basename
+    and the labels agree, so the value would even be correct — and reverted the
+    same day: `.env` travels with the folder, `install_project()` prefers it
+    over the directory, so a COPY of the install inherits the original's
+    identity and a Stop pressed in the copy stops the original's running
+    server. Measured end to end (review, 2026-08-22). The unpinned copy fails
+    closed instead, because its basename disagrees with the labels.
+    """
+    assert docker.pinned_project_name(throwaway_project) is None
+    docker.start_staged(THROWAWAY_SPEC, throwaway_project)
+    assert docker.stop_staged(THROWAWAY_SPEC, throwaway_project) is True
+
+    assert docker.pinned_project_name(throwaway_project) is None
+    assert not (throwaway_project / ".env").exists()

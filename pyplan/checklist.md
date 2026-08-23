@@ -77,7 +77,7 @@
 - [x] 6.0 Rehome the install scripts — the eight executable files now live in `pylauncher/catalog/installers/<game>/` (parallel to `manifests/`), `catalog.json` paths are relative to that directory, `resources.installers_dir()` replaces `repo_root()`, `Installer(installers_root=…)` resolves them, and the spec ships the whole tree instead of globbing `archive/guides/**` — so the bundle no longer carries `archive/guides` at all (README §3a bonus). The Tortoise script was renamed to lowercase on the way (`install-tortoise-wow-wsl.sh`, style-guide §6a). Verified: 191 passed, and a frozen PyInstaller build contains all eight scripts under `catalog/installers/` and passes `YULON_SMOKE_TEST`. The DoD's third verb, *run*, is not re-evidenced post-move — but `git show --stat fcd95c5` shows all eight scripts as pure renames (0 changed lines) and `installer.py` already passed `cwd=self.script.parent` before the move, so what runs is byte-identical to what Phase 3 live-gated. `archive/guides/` keeps the human-facing guides plus the four non-catalog installers (Maplestory, Mu Online, RuneScape, the Unbound addon), which no catalog entry references.
 - [x] 6.1 Honest platform gating — `install.platforms` is data in `catalog.json` (all four entries `["linux"]`), `Installer.preflight()` raises `UnsupportedPlatformError` with a user-readable message BEFORE any subprocess, the catalog tile disables Install with the reason on the tile ("Use existing…" stays enabled — managing a server works everywhere), `start_install()` refuses before the folder prompts, and a failed script's dialog now carries the script's own last 12 output lines ("It last said: …") instead of a bare exit status. Mocked through the `platform_id` seam per roadmap 6.4; 196 tests green.
 - [ ] Rewrite the installer scripts off `pacman`/`systemctl`/`sudo` — the orphaned "update scripts and manifests to use proper systems and features" step, re-homed as a checkbox: it is subsumed by 6.2/6.3's native engine, and closes when WotLK installs without a shell script on macOS and Windows.
-- [ ] 6.1.5 Interactive input handling — the in-app terminal pauses on a subprocess that blocks on stdin (the canonical case is the Linux installer's `sudo` prompt during `pacman`/`systemctl`) and shows a prompt dialog, forwarding the typed value back to stdin and resuming the stream instead of deadlocking or failing "no tty"; `runner.py` owns the stdin write, the view only drives it via call-down/signal-up; verified on Linux (real `sudo`) and against the macOS/Windows variants' own prompts through the shared path.
+- [x] 6.1.5 Interactive input handling — the installer runs on a **pseudo-terminal** and answers `sudo`'s password prompt through a dialog, instead of dying seconds in on `sudo -v`. Two things were needed and the first attempt had neither. **Transport:** `sudo` reads from `/dev/tty`, not stdin, precisely so a piped stdin cannot feed it a password — so `interact(terminal=True)` opens a pty and the child claims it as its *controlling* terminal (via `sh` after exec, not `preexec_fn`: that runs Python bytecode after fork in a process with live Qt threads). **Recognition:** `SUDO_PROMPT` makes sudo announce itself with a per-install random marker, matched exactly — the first version guessed from the shape of a line (`: ? > ]` after a pause), which measurably fires on `[ 43%]`, `Get:12 … [345 kB]`, `note:` and every gcc diagnostic, and opened an application-modal dialog over a two-hour compile. Measured on the Ubuntu VM with sudo temporarily made to demand a password: **pipes → seam asked 0 times, `"sudo: a terminal is required to read the password"`; pty + marker → asked with the exact marker, every attempt read and evaluated by sudo, nothing typed echoed into the log.** Also: `ask()` receives only the prompt (it used to get the whole pending buffer, so `is_secret()` read a neighbouring "directory" and unmasked the password field), ECHO is off on the pty, and `DEBIAN_FRONTEND`/`NEEDRESTART_MODE` are set because a terminal re-arms every apt/dpkg dialog that gates on `isatty()`. Not yet exercised: the macOS/Windows variants' own prompts — those scripts do not run on this platform yet (6.2/6.3).
 - [ ] **Privilege transparency (binding across every install path)** — no silent host privilege escalation, carried from the first-generation `install-*.sh` finding into the native engine: never write a `sudoers.d`/`NOPASSWD` docker rule (redundant beside the group, pure attack surface), never `chmod 666` the docker socket, and never `usermod -aG docker` without an explicit opt-in that states the group is root-equivalent (the `-v /:/mnt` container-mount example). Applies to `ensure_docker()` provisioning, the Linux bash scripts (bugfix-only), and the 6.2/6.3 native engine; tested structurally via the argv-parse seam and surfaced in the 6.5 install gate.
 - [ ] 6.2 macOS install path — the shared **native install engine** (`NativeInstaller`, per `phase6-decisions.md`): `install.platforms`/`install.script_platforms` dispatch, compose three-file generation + `.env` merge, preflight (refuse-don't-warn floors, bind-mount probe, `server_dir_problem()`, port-conflict before build), staged/resumable install, `keep_awake()`, readiness poll — all against Docker Desktop, no `pacman`/`systemctl`/`sudo`, no manual VM management (macOS has no Rust prior art; written fresh)
 - [ ] 6.3 Native Windows install path — same native engine against Docker Desktop's **WSL2 backend** (no bespoke WSL2/VM manager; `[blocked]` on 6.2); requires the three Windows provisioning defects in Cross-cutting fixed first (TLS cert, `Start-Process` path, PATH not re-read), plus `docker.exe`/`git` discovery, `autocrlf`+`HTTP/1.1`, path canonicalization, CR-strip across `wsl.exe`, and the nested-virtualization gate — proven on a clean box
@@ -184,19 +184,6 @@
   arrow in log output crashes on the cp1252 console (`:605`, `:670`, and 13 sites in `apply.py`); and the
   629 MB installer is re-downloaded unconditionally with no resume or cache.
 
-- **No silent `sudo`/docker-group escalation — the principle the native engine inherits (2026-08-22).**
-  The original `install-*.sh` installers had `enable_docker_sudo_wrapper()` doing two unheralded
-  host changes: `usermod -aG docker "$USER"` and a write of `/etc/sudoers.d/docker-nopasswd`
-  (`NOPASSWD: /usr/bin/docker`, chmod 0440), the latter behind `|| true` so it could fail silently.
-  Two facts are now binding on all install paths: (1) docker-group membership **is** root —
-  `docker run -v /:/mnt --rm -it alpine chroot /mnt sh` edits any host file, no boundary; (2) the
-  `NOPASSWD` rule is therefore redundant attack surface and is **removed**, not worked around.
-  MapleStory and Mu Online additionally ran `chmod 666 /var/run/docker.sock` (socket open to every
-  local user) — also removed. Rule going forward: join the group only with explicit consent plus a
-  root-equivalence warning; never write `sudoers.d`/`NOPASSWD` docker rules; never `chmod 666` the
-  socket. Enforced structurally via the argv-parse seam so the native engine and `ensure_docker()`
-  cannot reintroduce it.
-
 - **First launch of Docker Desktop is gated behind modal dialogs — a headless start waits forever.** The
   installer was run with `--accept-license` and Docker Desktop *still* showed license acceptance and an
   onboarding walkthrough; a human had to click both before the engine would boot. The state lands in
@@ -253,6 +240,45 @@
     overwritten, since re-attaching a moved install must not repoint it at its new basename. Proven end
     to end: pinned as `wow-server`, folder renamed, project still resolves to `wow-server`, stop works and
     start works where it previously died with `Conflict. The container name is already in use`.
+
+- **Windows: the launcher only works from the user's own desktop session (2026-08-22, measured
+  three ways).** Docker Desktop's credential helper fails with `A specified logon session does not
+  exist. It may already have been terminated.` from any non-interactive context — **even for an
+  anonymous pull of a public image**. Established by a clean three-way comparison, so it is the
+  *session* and not the login:
+
+  | context | result |
+  |---|---|
+  | SSH (non-interactive), desktop logged out | fails |
+  | desktop session 1 (interactive) | **6 passed, 1 skipped** in 83.75s |
+  | SSH (non-interactive), desktop logged **in** | fails identically |
+
+  Neither clearing `credsStore` from `~/.docker/config.json` nor pointing `DOCKER_CONFIG` at a
+  credential-free directory avoids it — Docker Desktop reinjects the helper. **Good news for the
+  product**: the GUI launcher runs in the user's session, so it is unaffected. **Bad news for
+  automation**: a CI runner, a service, or any headless gate cannot pull images on Windows, so the
+  Windows live gate must be driven from an interactive session (a scheduled task with `/IT`), not
+  over SSH.
+
+- **The full suite now runs on real Windows (2026-08-22).** Win11 Pro 25H2 with `core.autocrlf=true`
+  at system *and* repo level — the environment the CRLF guard exists for, where it had never once
+  executed because CI is Linux-only. Result: **221 passed, 6 skipped**, and the CRLF assertions ran
+  rather than passing vacuously. The four extra skips versus Linux are honest and expected: 2 ×
+  "no pty on this platform" (`test_console.py`) and 4 × "no bash that can run a script on this
+  machine" (`test_installer.py`, `test_runner.py`) — the clean-Windows findings, holding. Live
+  integration on Docker Desktop (Engine 29.7.2, Compose v5.4.0, WSL2, 15 CPUs, 9.7 GB): **6 passed,
+  1 skipped in 83.75s**, against 58s on the Linux VM.
+
+- **Two build-machine traps found while installing a real server on Windows (2026-08-22).**
+  1. **Large clones need HTTP/1.1.** `git clone` of `azerothcore-wotlk` (224k objects) died with
+     `fetch-pack: invalid index-pack output` / `unexpected disconnect while reading sideband packet`.
+     `git -c http.version=HTTP/1.1 -c http.postBuffer=524288000` fixes it. The native install engine
+     must set both, or its very first step fails on a large repo.
+  2. **A build must not be attached to a console.** The first attempt ran in a scheduled task with a
+     visible window; because the clone was failing silently the window looked blank, was closed, and
+     the build died with `STATUS_CONTROL_C_EXIT` (`-1073741510`). Long jobs need `-WindowStyle Hidden`
+     with a *separate*, disposable viewer — which is also how the launcher should treat its own log
+     window.
 
 - **Open follow-ups from the staged start/stop review (2026-08-22)** — found by a three-lens review whose
   findings were then adjudicated against a live daemon; the must-fix (parallel `docker stop`) and the

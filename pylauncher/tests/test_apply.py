@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from yulon import apply as apply_module
 from yulon.apply import Applier, ApplyError, DockerSql, _set_conf_key
 from yulon.git import CloneSpec, RunnerGit
 from yulon.manifest import parse_manifest
@@ -399,3 +400,71 @@ def test_generated_files_are_lf_even_on_windows(tmp_path: Path) -> None:
     fresh.write_text("", encoding="utf-8")
     _set_conf_key(fresh, "First.Key", "1")
     assert fresh.read_bytes() == b"First.Key = 1\n"
+
+
+# --------------------------------------------------------- naming the docker CLI
+# A manifest apply runs straight after an install, in the same process that may
+# still be blind to the PATH Docker Desktop's installer wrote (see
+# `platform.docker_program()`). `docker exec` here had the same hardcoded name
+# as everything else.
+
+OFF_PATH_EXE = r"C:\Users\pk\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
+
+
+def test_docker_sql_execs_through_the_cli_this_host_can_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess
+
+    monkeypatch.setattr(apply_module.platform, "_resolved_docker_cli", OFF_PATH_EXE)
+    seen: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    DockerSql("ac-database", "hunter2").run_statement("characters", "SELECT 1")
+    assert seen[0][0] == OFF_PATH_EXE
+    assert seen[0][1:3] == ["exec", "-i"], "only argv[0] moved"
+
+
+def test_docker_sql_without_any_docker_raises_apply_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An `ApplyError` naming Docker, not a `FileNotFoundError` from `subprocess.run`."""
+    monkeypatch.setattr(apply_module.platform, "_resolved_docker_cli", None)
+    monkeypatch.setattr(apply_module.platform, "docker_programs", lambda: ("docker",))
+    monkeypatch.setattr(apply_module.platform, "_which", lambda name, path=None: None)
+    with pytest.raises(ApplyError, match="Docker could not be found"):
+        DockerSql("ac-database", "hunter2").run_statement("characters", "SELECT 1")
+
+
+def test_docker_sql_says_the_same_thing_when_a_resolved_docker_has_gone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The other way to have no Docker, on both of `DockerSql`'s entry points.
+
+    `docker_program()` remembers a hit for the life of the process, so Docker
+    Desktop uninstalling or updating itself while the launcher is open leaves
+    that pinned path aimed at a file that is gone. `subprocess` reports it as
+    `OSError`, which used to reach the user as `[Errno 2]` while `docker.start()`
+    on the same run said "Docker could not be found" (review, 2026-08-23).
+
+    `run_file()` is exercised as well as `run_statement()` because the guard is
+    shared by both and a guard on one of two call sites is the bug being fixed.
+    """
+    import subprocess
+
+    monkeypatch.setattr(apply_module.platform, "_resolved_docker_cli", OFF_PATH_EXE)
+
+    def gone(argv: list[str], **kwargs: object):
+        raise FileNotFoundError(2, "The system cannot find the file specified", OFF_PATH_EXE)
+
+    monkeypatch.setattr(subprocess, "run", gone)
+    sql_file = tmp_path / "seed.sql"
+    sql_file.write_text("SELECT 1;\n", encoding="utf-8")
+    with pytest.raises(ApplyError, match="Docker could not be found"):
+        DockerSql("ac-database", "hunter2").run_statement("characters", "SELECT 1")
+    with pytest.raises(ApplyError, match="Docker could not be found"):
+        DockerSql("ac-database", "hunter2").run_file("characters", sql_file)

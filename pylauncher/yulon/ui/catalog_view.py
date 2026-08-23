@@ -37,6 +37,7 @@ from yulon.catalog.installer import (
 )
 from yulon.log import get_logger
 from yulon.ui.widgets.log_panel import LogPanel
+from yulon.ui.widgets.prompt import InputPrompter
 
 logger = get_logger(__name__)
 
@@ -91,6 +92,7 @@ class CatalogView(QWidget):
         self._gated: set[str] = set()  # ids the platform gate disabled (roadmap 6.1)
         self._existing_buttons: dict[str, QPushButton] = {}
         self._current: tuple[str, Path, Path | None] | None = None
+        self._prompter: InputPrompter | None = None
 
         grid = QGridLayout()
         for index, entry in enumerate(catalog.games):
@@ -186,7 +188,16 @@ class CatalogView(QWidget):
             if client_dir is None:
                 return False
         logger.info(f"attaching existing {entry.id} install at {server_dir}")
-        _pin_compose_project(server_dir)
+        # Deliberately NOT pinned here. `pin_project_name()` writes whatever
+        # compose calls the project *now*, which is the folder's current
+        # basename — and an already-moved install is precisely what this path
+        # exists to adopt. Pinning `azerothcore` onto containers compose created
+        # under `wow-server` makes the mismatch permanent (a pin outranks the
+        # basename, and it is never revised), so the server could never be
+        # stopped from here again and a later start would build a fresh, empty
+        # database volume beside the real one. Only `_on_run_finished()` may
+        # pin: there the basename provably is what the containers were just
+        # created under (review, 2026-08-22).
         self.installed.emit(entry.id, server_dir, client_dir)
         return True
 
@@ -230,8 +241,19 @@ class CatalogView(QWidget):
         cancel = threading.Event()
         self._current = (entry.id, server_dir, client_dir)
         self._set_buttons_enabled(False)
+        # One prompter for this view, reused. It has to be held on `self` at all
+        # — PySide6 keeps bound-method slots by weak reference, so a prompter
+        # owned only by this frame would be collected and its dialog would never
+        # appear — but building a NEW one per install parented to the view left
+        # every previous one alive for the session, each still holding the
+        # password it last carried. `ask()` clears the answer on the way out;
+        # this stops the objects accumulating (review, 2026-08-22).
+        if self._prompter is None:
+            self._prompter = InputPrompter(self)
+        prompter = self._prompter
+        prompter.bind_cancel(cancel)
         started = self._log.run(
-            lambda: installer.run(options, cancel=cancel),
+            lambda: installer.run(options, cancel=cancel, ask=prompter.ask),
             title=f"Installing {entry.name}",
             cancel=cancel,
         )

@@ -11,12 +11,24 @@ defaults:
 jobs:
   lint-type-test:
     runs-on: ubuntu-latest
+    # Two versions, not one. Pinning only 3.11 hid a red suite for a day:
+    # `shutil.which` grew a `_winapi` call in 3.12, so tests that fake
+    # sys.platform="win32" — which changes it for the whole stdlib, not just the
+    # module under test — died inside shutil on every 3.12+ interpreter while CI
+    # stayed green. README §2 says 3.11+, so CI has to mean it. Ends are cheaper
+    # than the middle: 3.11 is the floor we promise, 3.13 is what a developer
+    # actually has installed.
+    name: lint-type-test (py${{ matrix.python-version }})
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
 
       # PySide6's Qt libraries need these even for QT_QPA_PLATFORM=offscreen (the UI tests).
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq libegl1 libgl1 libxkbcommon0 libdbus-1-3

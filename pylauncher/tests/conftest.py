@@ -1,4 +1,4 @@
-"""Shared pytest fixtures: an offscreen Qt application for the UI tests."""
+"""Shared pytest fixtures: an offscreen Qt application, and a pinned docker CLI name."""
 
 from __future__ import annotations
 
@@ -7,7 +7,31 @@ from collections.abc import Iterator
 
 import pytest
 
+from yulon import platform
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+
+@pytest.fixture(autouse=True)
+def _docker_cli_is_the_plain_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every argv assertion in the suite gets `docker` at argv[0], on any machine.
+
+    `platform.docker_program()` answers with what THIS host has: the plain name
+    where docker is on the live PATH, an absolute `...\\resources\\bin\\docker.exe`
+    on a Windows box where it is not, and `None` where Docker is not installed
+    at all. All three are correct, and all three would be baked into the ~60
+    tests that assert `["docker", "compose", ...]` — which would then pass or
+    fail on the developer's Docker install rather than on the code. Pinning the
+    resolved value keeps those tests about argv *shape*, and keeps the promise
+    that the suite needs no Docker (and no Windows install) to run.
+
+    Pinning the cache rather than the function leaves `docker_programs()` and
+    `docker_ready()` untouched, so `test_provision.py` still exercises the real
+    resolution; the tests that exercise `docker_program()` itself set the cache
+    back to None first, and a `monkeypatch` from the test body wins over this
+    one.
+    """
+    monkeypatch.setattr(platform, "_resolved_docker_cli", "docker")
 
 
 @pytest.fixture(scope="session")

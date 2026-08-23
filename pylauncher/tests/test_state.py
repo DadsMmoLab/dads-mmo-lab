@@ -38,3 +38,20 @@ def test_broken_state_file_is_moved_aside_not_raised(tmp_path: Path) -> None:
     target.write_text('{"schema_version": 1, "installs": [], "from_the_future": true}', "utf-8")
     assert load_state(target).installs == []
     assert '"from_the_future"' in (tmp_path / "state.json.broken").read_text(encoding="utf-8")
+
+
+def test_a_state_file_with_a_byte_order_mark_is_not_treated_as_corrupt(tmp_path: Path) -> None:
+    """Every Windows tool that writes UTF-8 writes a BOM, and a BOM is legal.
+
+    Read as plain `utf-8` it raises "Unexpected UTF-8 BOM", so a hand-edited
+    state file was declared corrupt, moved to `.broken`, and every remembered
+    install silently forgotten. Measured on the Win11 test VM, 2026-08-22.
+    """
+    target = tmp_path / "state.json"
+    body = '{"schema_version": 1, "installs": [{"game": "wow-wotlk", "server_dir": "C:/wow"}]}'
+    target.write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+
+    loaded = load_state(target)
+
+    assert [i.game for i in loaded.installs] == ["wow-wotlk"]
+    assert not (tmp_path / "state.json.broken").exists(), "moved a perfectly good file aside"

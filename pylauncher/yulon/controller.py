@@ -84,7 +84,29 @@ class Controller:
     # -- queries ---------------------------------------------------------
 
     def status(self) -> InstallStatus:
-        """Report which of this install's containers are running (`docker ps`)."""
+        """Report which containers carrying this install's names are running.
+
+        By NAME, and deliberately so — an ownership-filtered version of this was
+        written and reverted the same day. It read `.env` and filtered
+        `docker ps` by the compose project label, which sounds strictly better
+        and was worse in three ways (review, 2026-08-22):
+
+        * An unpinned install (every one adopted through "Use existing…") fell
+          back to `docker ps` with an `or []`, so a daemon that would not answer
+          read as "everything is down" — measured, with the Stop button then
+          disabled while the server was serving.
+        * A pinned install whose `.env` disagreed with the containers showed
+          "down" and disabled Stop, which is the only button that produces the
+          explanation of *why* they disagree. A live server, reported down, with
+          no way to act and nothing on screen.
+        * It was the source of truth moving from `docker ps` to a file that can
+          be copied and hand-edited.
+
+        Names are honest about what they are: proof that something is using
+        these names, not proof it is ours. `stop_staged()` is where ownership is
+        established, because that is where acting on the wrong container does
+        damage, and its refusal is now shown on the tab.
+        """
         running = set(docker.status())
         return InstallStatus(
             db=self.spec.db in running,
@@ -99,6 +121,17 @@ class Controller:
         this install's own containers (e.g. mid-restart). Those are not a
         conflict — only something that is not ours counts — so they are
         filtered out here, once, for every game.
+
+        By name, for the reasons in `status()`, and for one more of its own: the
+        ownership-filtered version needed a second `docker ps`, and a single
+        blip on either of them made Start refuse with "another server is already
+        using ports (3724, 8085): ac-authserver, ac-worldserver" — naming the
+        user's own containers (review, 2026-08-22).
+
+        The known limit, stated rather than papered over: with two installs of
+        one game the other install's containers wear these same names and are
+        excused here, so this guard cannot catch that collision. `compose up`
+        then reports the daemon's own "container name is already in use".
         """
         own = {self.spec.db, self.spec.auth, self.spec.world}
         return [name for name in docker.port_conflicts_for(self.spec) if name not in own]
@@ -120,15 +153,13 @@ class Controller:
         if conflicts:
             logger.warning(f"start() refused: ports {self.spec.ports} bound by {conflicts}")
             raise PortConflictError(conflicts, self.spec.ports)
-        docker.start_staged(
-            self.spec,
-            self.server_dir,
-            wait_healthy=lambda container: docker.wait_db_healthy(
-                container, timeout=_START_DB_HEALTH_TIMEOUT
-            ),
-        )
+        # No `wait_healthy` closure: `start_staged()` deleted the argument on
+        # entry, so the lambda that used to be built here was dead code reading
+        # like a health wait that no longer happens. Compose does the waiting
+        # now, through the project's own `service_healthy` conditions.
+        docker.start_staged(self.spec, self.server_dir)
 
-    def stop(self) -> None:
+    def stop(self) -> bool:
         """Stop the install, keeping its containers so the next start is staged.
 
         Uses `docker.stop_staged()`. Stopping with `docker compose down` would
@@ -136,8 +167,13 @@ class Controller:
         name — putting the very next start back on `compose up -d` and re-running
         the one-shot database import. Teardown that really should remove the
         containers calls `docker.stop()` directly.
+
+        Returns:
+            True if something of this install was running and is now down, False
+            if there was nothing to stop. This used to be discarded, so the tab
+            said the same thing either way (review, 2026-08-22).
         """
-        docker.stop_staged(self.spec, self.server_dir)
+        return docker.stop_staged(self.spec, self.server_dir)
 
     # -- polling ---------------------------------------------------------
 
