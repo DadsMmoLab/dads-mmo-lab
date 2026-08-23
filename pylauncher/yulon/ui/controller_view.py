@@ -1057,7 +1057,23 @@ class ControllerView(QWidget):
             lines += [f"  - {r}" for r in result.refusals]
         else:
             lines.append("")
-            lines.append("Every character on the server is replaced. Press Restore to go ahead.")
+            # Named from the plan rather than asserted. This said "Every
+            # character on the server is replaced" on EVERY allowed plan — with
+            # no check that `acore_characters` was even in it — so a world-only
+            # restore threatened characters it would not touch, and the word
+            # "replaced" was wrong besides: mysqldump emits `DROP TABLE IF
+            # EXISTS` per table and no `DROP DATABASE`, so a restore MERGES
+            # (measured on Windows, 2026-08-23: a table created after the backup
+            # survived a full 306 MB restore of that schema). A warning that
+            # overstates on one axis and understates on the other teaches the
+            # user to discount it (review, 2026-08-24).
+            named = ", ".join(result.databases) if result.databases else "nothing"
+            lines.append(f"This overwrites: {named}.")
+            lines.append(
+                "Tables the backup does not contain are LEFT AS THEY ARE — a restore merges "
+                "into the databases it names rather than returning them to the state the backup "
+                "was taken from. Press Restore to go ahead."
+            )
         self.maintenance_report.setPlainText("\n".join(lines))
         # Only a plan that is allowed arms the button, and only for this file.
         self._restore_plan = result if result.allowed else None

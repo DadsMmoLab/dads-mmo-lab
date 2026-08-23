@@ -83,10 +83,14 @@ All of the below on Linux; none of it yet on Windows or macOS.
 - **Database backup and restore** — 2026-08-23, full round trip against a live AzerothCore install:
   four schemas found rather than the three the old guide hardcodes, a 292 MB world dump, the value
   in the dump read back after the restore, and a wrong confirmation token refused. Restore is the
-  one action here that can destroy a server: it replaces the live databases with the contents of a
-  backup file. It refuses while the worldserver is running, it shows you what it is about to do and
-  will not act until you confirm with a token that only that plan can produce, and it takes a copy
-  of what it is about to overwrite first.
+  one action here that can destroy a server, and it is worth knowing exactly what it does: it loads
+  a backup file over the live databases, table by table. Anything the backup contains replaces what
+  is live. Anything it does NOT contain is left alone — so a restore is a merge, not a return to
+  the state the backup was taken from, and a table added since (by a module, or by SQL pasted from
+  a guide) is still there afterwards. Measured on Windows, 2026-08-23. It refuses while the
+  worldserver is running, it shows you which databases it will touch and will not act until you
+  confirm with a token that only that plan can produce, and it copies what it is about to
+  overwrite first.
 - **Account creation** — 2026-08-23. The salt and verifier we write are byte-for-byte what the
   worldserver itself wrote for accounts it created at its own console, non-ASCII passwords
   included.

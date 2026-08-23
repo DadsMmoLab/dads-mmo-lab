@@ -1016,7 +1016,15 @@ def _safety_backup(
     running: RunningNames | None,
     now: datetime | None,
 ) -> tuple[Path, ...]:
-    """A copy of every database this restore will overwrite, so it is undoable.
+    """A copy of every database this restore will overwrite, so it can be put back.
+
+    "Undoable" is what this used to claim and it is not quite true, which
+    matters because it is the only unqualified promise in the restore path.
+    Loading this copy back merges the same way the restore did: it returns every
+    table the copy holds, and leaves behind anything the restore ADDED that was
+    not in the live database before. So it recovers the data, and it does not
+    guarantee the exact bytes of the schema you started with (review,
+    2026-08-24, following the merge finding measured on Windows).
 
     Only the schemas the restore will touch, and only those that exist — a
     backup file for a database this server does not have yet is creating

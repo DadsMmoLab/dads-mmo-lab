@@ -990,3 +990,31 @@ def test_the_armed_paragraph_does_not_offer_a_cancel_it_cannot_honour(
     assert "Press Refresh to cancel." not in said
     assert "while nothing has happened yet" in said, said
     assert "cannot be stopped" in said
+
+
+def test_the_restore_warning_names_the_plan_and_does_not_overstate(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The one screen where somebody decides whether to overwrite their server.
+
+    It used to append "Every character on the server is replaced" to EVERY
+    allowed plan, with no check that `acore_characters` was in it — so a
+    world-only restore threatened characters it would not touch. And "replaced"
+    was wrong in the other direction: mysqldump emits `DROP TABLE IF EXISTS` per
+    table and no `DROP DATABASE`, so a restore merges. Measured on Windows,
+    2026-08-23: a table created after the backup survived a full restore of that
+    schema.
+
+    A warning that overstates on one axis and understates on the other is one a
+    user learns to discount, which is the opposite of what it is for.
+    """
+    made = _FakeMaintenance()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, [], made), status_poll_ms=0)
+    _add_backup(view, tmp_path)
+    view.show_restore_plan()
+
+    said = view.maintenance_report.toPlainText()
+    assert "acore_characters" in said, said
+    assert "Every character on the server is replaced" not in said
+    assert "LEFT AS THEY ARE" in said, "the merge is not stated"
+    assert "merges" in said
