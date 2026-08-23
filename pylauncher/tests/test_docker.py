@@ -1323,6 +1323,47 @@ def test_export_is_accepted_with_a_tab_as_well_as_a_space(tmp_path: Path) -> Non
     assert docker.pinned_project_name(tmp_path) == "tabbed"
 
 
+def test_a_utf8_bom_does_not_hide_the_pin(tmp_path: Path) -> None:
+    """PowerShell writes a BOM; compose reads past it and this used not to.
+
+    `_stranger_message()` tells the user to add `COMPOSE_PROJECT_NAME=<x>` to
+    this file. On Windows the tools to hand put `EF BB BF` in front of it
+    (PowerShell 5.1's `Set-Content -Encoding utf8`, Notepad's "UTF-8 with BOM"),
+    and under a plain `utf-8` decode the first line began `\\ufeffCOMPOSE_...`,
+    so the pin was invisible.
+
+    That is a disagreement rather than a quirk, which is what makes it a bug:
+    measured on Windows 11 / Docker 29.7.2 (2026-08-23), `docker compose config`
+    read the very same file and reported the project as `bomtest` while this
+    function reported `None`. The fallback that hides it — asking compose — is
+    exactly what is unavailable in the case this function exists for.
+    """
+    (tmp_path / ".env").write_bytes(
+        b"\xef\xbb\xbfCOMPOSE_PROJECT_NAME=bomtest\r\n# written on Windows\r\n"
+    )
+    assert docker.pinned_project_name(tmp_path) == "bomtest"
+
+
+def test_a_utf8_bom_does_not_make_pinning_append_a_second_assignment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The BOM's second victim: a pin the app cannot see is a pin it writes over.
+
+    `pin_project_name()` asks `pinned_project_name()` first and returns early
+    when something is already pinned. Blind to the BOM'd line it wrote a second
+    `COMPOSE_PROJECT_NAME=` below it, and compose takes the LAST assignment — so
+    the app silently overrode the name the user had set, on the app's own
+    instructions.
+    """
+    (tmp_path / ".env").write_bytes(b"\xef\xbb\xbfCOMPOSE_PROJECT_NAME=the-users-name\r\n")
+    monkeypatch.setattr(docker, "compose_project_name", lambda _dir: "the-directory-basename")
+
+    assert docker.pin_project_name(tmp_path) is None
+    raw = (tmp_path / ".env").read_bytes()
+    assert raw.count(b"COMPOSE_PROJECT_NAME=") == 1, "the user's pin was written over"
+    assert docker.pinned_project_name(tmp_path) == "the-users-name"
+
+
 def test_the_unpinned_remedy_warns_about_the_copy_case(tmp_path: Path) -> None:
     """This is the common branch now, and following it literally on a copy is destructive.
 
