@@ -40,6 +40,25 @@ class DockerCommandError(RuntimeError):
     """Raised when a `docker` CLI command exits with a non-zero status."""
 
 
+class DockerCliMissingError(DockerCommandError):
+    """Raised when there is no docker CLI to run at all — nothing was asked of Docker.
+
+    A subclass, so every `except DockerCommandError` already written keeps
+    catching it and no caller has to learn a second type to stay correct. What
+    the subclass buys is the callers that must NOT treat it as "Docker was asked
+    and would not answer": that answer is transient and worth retrying or
+    degrading past, and this one is neither.
+
+    Added 2026-08-23. The commit that routed every argv through
+    `platform.docker_program()` said "failure stays honest" and it was not quite
+    true: `_status_safe()` degraded a missing CLI to `None` exactly as it
+    degrades a daemon hiccup, so `stop_staged()` told the user their install had
+    no `COMPOSE_PROJECT_NAME` pinned — blaming the install for the absence of
+    Docker — and `wait_ready()` polled out its full 480s without a word above
+    DEBUG.
+    """
+
+
 @dataclass(frozen=True)
 class ContainerSpec:
     """How one server install is addressed: its containers, services and ports.
@@ -92,11 +111,14 @@ def _docker(
     A host with no docker CLI at all comes back as a non-zero
     `CompletedProcess` carrying `DOCKER_CLI_MISSING_HELP` in `stderr`, not as an
     exception — the same shape `runner.run()` gives a timeout, and for the same
-    reason: `health()` answers `"unknown"`, `container_state()` answers empty
-    and `_status_safe()` swallows-and-retries, and every one of those degraded
-    answers is right for "docker is missing" too. Raising instead would take a
-    polling loop off the GUI thread's rails to say something its caller already
-    knows how to report.
+    reason: `health()` answers `"unknown"` and `container_state()` answers
+    empty, and both of those degraded answers are right for "docker is missing"
+    too. Raising instead would take a polling loop off the GUI thread's rails to
+    say something its caller already knows how to report.
+
+    It stays *recognisable* while it degrades, though — see `_cli_missing()`.
+    The callers that must not confuse it with "Docker was asked and would not
+    answer" are the ones that go on to explain themselves to the user.
 
     `OSError` is caught for the one case resolution cannot cover: Docker
     uninstalled while the launcher is open, leaving `docker_program()`'s pinned
@@ -122,9 +144,35 @@ def _docker(
     )
 
 
+def _cli_missing(proc: subprocess.CompletedProcess[str]) -> bool:
+    """True if this result is `_docker()`'s "there is no docker CLI" sentinel.
+
+    Both halves are checked on purpose. The exit code alone would be a guess:
+    `docker run` and `docker exec` return the *container's* status, so a real
+    docker command can genuinely exit 127 (a command not found inside the
+    image). Nothing in this module runs either — but `_CLI_MISSING_RETURNCODE`'s
+    "no docker command can exit 127 itself" is only true of the commands here
+    today, and pairing it with the exact help text means adding one costs
+    nothing.
+    """
+    return (
+        proc.returncode == _CLI_MISSING_RETURNCODE
+        and proc.stderr == platform.DOCKER_CLI_MISSING_HELP
+    )
+
+
 def _run(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-    """Run `docker <argv...>`; raise `DockerCommandError` on non-zero exit."""
+    """Run `docker <argv...>`; raise `DockerCommandError` on non-zero exit.
+
+    Raises `DockerCliMissingError` — a subclass — when there was no CLI to run,
+    carrying `DOCKER_CLI_MISSING_HELP` and nothing else. The argv is dropped
+    from the message deliberately: `docker ps --format {{.Names}} exited 127:`
+    in front of the sentence is noise to the user reading it in a dialog, and
+    `_docker()` has already put the command in the log at DEBUG.
+    """
     proc = _docker(argv, cwd=cwd)
+    if _cli_missing(proc):
+        raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP)
     if proc.returncode != 0:
         raise DockerCommandError(
             f"docker {' '.join(argv)} exited {proc.returncode}: {proc.stderr.strip()}"
@@ -398,6 +446,10 @@ def _running(spec: ContainerSpec, project: str) -> Running:
     caller must fail closed on those and say so rather than fall back to a name.
 
     Raises:
+        DockerCliMissingError: There is no docker CLI here — allowed through
+            from `_status_safe()` so the user hears that rather than "the stop
+            cannot be confirmed", which describes a Docker that answered badly
+            and says nothing about one that is not installed.
         DockerCommandError: Docker could not be asked what is running at all,
             so no claim about this install can be made.
     """
@@ -547,6 +599,16 @@ def _refuse_without_an_identity(spec: ContainerSpec, server_dir: Path) -> None:
 
     Returns quietly when nothing of the sort is up: there is simply nothing to
     stop, which is not an error.
+
+    Raises:
+        DockerCliMissingError: There is no docker CLI here. Deliberately allowed
+            straight through from `_status_safe()` rather than folded into the
+            message below. When Docker is absent, the project name is not
+            *also* a problem — it is not a problem at all, since compose would
+            have nothing to say it to — and naming it sends the user to edit
+            their install's `.env` over a machine that has no Docker on it
+            (review, 2026-08-23).
+        DockerCommandError: Docker was asked and would not answer.
     """
     listed = _status_safe()
     if listed is None:
@@ -793,14 +855,24 @@ def status() -> list[str]:
 
 
 def _status_safe() -> list[str] | None:
-    """Like `status()`, but returns `None` instead of raising on failure.
+    """Like `status()`, but returns `None` instead of raising on a *transient* failure.
 
-    Used by polling loops (`wait_ready()`) where a single transient `docker ps`
-    failure (daemon restart, brief overload, etc.) must be treated as "not
-    ready this iteration, try again," not as a reason to abort the whole wait.
+    Used by polling loops (`wait_ready()`) where a single `docker ps` failure
+    (daemon restart, brief overload, etc.) must be treated as "not ready this
+    iteration, try again," not as a reason to abort the whole wait.
+
+    `DockerCliMissingError` is not one of those and is re-raised. Degrading it
+    here was measured doing real harm (2026-08-23): the two stop-path callers
+    turn `None` into their own message, so a Windows box with no Docker was told
+    its install had no `COMPOSE_PROJECT_NAME` pinned, and `wait_ready()` treated
+    "there is no Docker on this machine" as a hiccup worth retrying 240 times.
+    Every caller that wants the degradation still gets it for the failure it was
+    written for.
     """
     try:
         return status()
+    except DockerCliMissingError:
+        raise
     except DockerCommandError as exc:
         logger.debug(f"status() failed during poll, will retry: {exc}")
         return None
@@ -819,11 +891,22 @@ def health(container: str) -> str:
     report `"healthy"` and will look identical to "container missing."
     Mirrors `dml-start.sh`'s `... || echo unknown`.
     """
+    return _health(container)[0]
+
+
+def _health(container: str) -> tuple[str, bool]:
+    """`health()`'s answer, plus whether there was a docker CLI to ask.
+
+    Split out so `wait_db_healthy()` can tell "no Docker on this machine" from
+    every other reason the status is `"unknown"` without spending a second
+    command per poll to find out. `health()`'s own answer still collapses the
+    two, deliberately — see there — so this is additive, not a contract change.
+    """
     logger.debug(f"health() called: container={container}")
     proc = _docker(["inspect", container, "--format", "{{.State.Health.Status}}"])
     if proc.returncode != 0 or not proc.stdout.strip():
-        return "unknown"
-    return proc.stdout.strip()
+        return "unknown", _cli_missing(proc)
+    return proc.stdout.strip(), False
 
 
 @dataclass(frozen=True)
@@ -906,6 +989,55 @@ def _logs(container: str, *, this_run_only: bool = False, since: str = "") -> st
     return proc.stdout
 
 
+_CLI_MISSING_GRACE_SECONDS = 30.0
+"""How long a poll keeps going with no docker CLI before it gives up.
+
+Neither zero nor the full timeout, and both extremes were the wrong answer.
+
+Zero — stop the first time the CLI does not resolve — would fight the cache
+design in `platform.docker_program()`, which refuses to remember a miss
+precisely so that Docker arriving mid-run is picked up. It would also turn a
+Docker Desktop self-update, which replaces the executable the pinned path names,
+into a failed start.
+
+The full timeout is what this constant exists to end: 480s of `wait_ready()`
+polling for a container that cannot appear, because there is nothing to ask.
+
+30s is `_ensure_docker_linux()`'s own `min(wait_seconds, 30.0)` — the window the
+provisioner already believes is enough for a Docker it just installed to become
+answerable. Borrowing it keeps one number instead of inventing a second, and a
+CLI that has not appeared inside the window the installer is given is not going
+to appear because we waited another 450 seconds in silence.
+"""
+
+
+def _cli_missing_run(since: float | None, what: str) -> tuple[float, bool]:
+    """Track a poll's run of consecutive missing-CLI iterations; True once it should stop.
+
+    The stopping rule for both polling loops, in one place (style-guide §4).
+    Pass the previous return's timestamp (or `None` on the first miss) and get
+    back the timestamp to carry forward plus whether to give up.
+
+    The user learns the cause once. WARNING on the first miss and on the
+    decision to stop, DEBUG for everything between: `wait_ready()` issues five
+    docker commands per poll for up to 480s, and 1200 copies of the same
+    sentence is how a log stops being read.
+    """
+    now = time.monotonic()
+    if since is None:
+        logger.warning(f"{what}: {platform.DOCKER_CLI_MISSING_HELP}")
+        return now, False
+    waited = now - since
+    if waited < _CLI_MISSING_GRACE_SECONDS:
+        logger.debug(f"{what}: still no docker CLI after {waited:.1f}s; waiting")
+        return since, False
+    logger.warning(
+        f"{what}: no docker CLI for {waited:.0f}s, so nothing can be watched or started here. "
+        "Giving up rather than polling out the rest of the timeout in silence."
+    )
+    return since, True
+
+
 def wait_db_healthy(
     db_container: str,
     timeout: float = _DB_HEALTHY_TIMEOUT_SECONDS,
@@ -917,6 +1049,11 @@ def wait_db_healthy(
     with explicit timeouts so callers/tests aren't forced to sleep. Never
     raises `DockerCommandError` — `health()` already swallows CLI failures
     into `"unknown"`, which this treats as "not yet healthy."
+
+    The one failure it does not treat that way is "there is no docker CLI on
+    this machine": `"unknown"` is then not a container that is still starting,
+    it is a question nobody was asked, and waiting 180s for the answer to change
+    without saying why is not a diagnosis. See `_cli_missing_run()`.
 
     Note: worst-case wall-clock time before returning `False` is
     `timeout + interval` (the loop always sleeps once after its final check),
@@ -931,9 +1068,17 @@ def wait_db_healthy(
         raise ValueError(f"interval must be positive, got {interval!r}")
     logger.debug(f"wait_db_healthy() called: db_container={db_container} timeout={timeout}")
     deadline = time.monotonic() + timeout
+    cli_missing_since: float | None = None
     while time.monotonic() < deadline:
-        if health(db_container) == "healthy":
-            return True
+        status, cli_missing = _health(db_container)
+        if cli_missing:
+            cli_missing_since, give_up = _cli_missing_run(cli_missing_since, "wait_db_healthy()")
+            if give_up:
+                return False
+        else:
+            cli_missing_since = None
+            if status == "healthy":
+                return True
         time.sleep(interval)
     return False
 
@@ -952,6 +1097,12 @@ def wait_ready(
     `<realm_host>:<realm_port>` and the world log must contain `ready...`. A
     transient `docker ps`/CLI failure during polling is treated as "not ready
     this iteration" and retried, never raised — see `_status_safe()`.
+
+    A missing docker CLI is not treated as transient. It still does not raise —
+    the answer is `False`, as it is for every other way a server fails to come
+    up — but it is said out loud at WARNING and it stops within
+    `_CLI_MISSING_GRACE_SECONDS` instead of polling out the default 480s with
+    nothing above DEBUG to show for it (this happened; fixed 2026-08-23).
 
     Both markers are looked for in the CURRENT run's logs only. Docker keeps a
     container's output across restarts, so a restarted server still carries the
@@ -972,8 +1123,17 @@ def wait_ready(
     )
     target = f"{realm_host}:{realm_port}"
     deadline = time.monotonic() + timeout
+    cli_missing_since: float | None = None
     while time.monotonic() < deadline:
-        running = _status_safe()
+        try:
+            running = _status_safe()
+        except DockerCliMissingError:
+            cli_missing_since, give_up = _cli_missing_run(cli_missing_since, "wait_ready()")
+            if give_up:
+                return False
+            time.sleep(interval)
+            continue
+        cli_missing_since = None
         listed = running is not None and auth_container in running and world_container in running
         if listed:
             # `docker ps` lists a container in restart backoff, so being listed
@@ -1075,7 +1235,7 @@ def follow_logs(container: str, tail: int = 200) -> Iterator[str]:
     logger.debug(f"follow_logs() called: container={container} tail={tail}")
     program = platform.docker_program()
     if program is None:
-        raise DockerCommandError(platform.DOCKER_CLI_MISSING_HELP)
+        raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP)
     try:
         yield from runner.stream([program, "logs", "-f", "--tail", str(tail), container])
     except OSError as exc:
@@ -1083,4 +1243,4 @@ def follow_logs(container: str, tail: int = 200) -> Iterator[str]:
         # `Popen` on the first line instead of from `subprocess.run`. Both roads
         # have to end at the same sentence, or the panel shows a WinError for
         # one kind of missing docker and an explanation for the other.
-        raise DockerCommandError(platform.DOCKER_CLI_MISSING_HELP) from exc
+        raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP) from exc
