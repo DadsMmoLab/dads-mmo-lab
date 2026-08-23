@@ -17,6 +17,8 @@ from yulon import docker
 from yulon.controller_wow_wotlk import docker_ctl
 
 SPEC = docker_ctl.SPEC
+_GRACE = str(docker.STOP_GRACE_SECONDS)
+"""The stop grace as it appears in argv, so an expected command reads like the real one."""
 
 
 def _completed(
@@ -543,7 +545,7 @@ def _stop_runner(
             return _completed(stdout="".join(n + "\n" for n in sorted(live)))
         if cmd[:2] == ["docker", "stop"]:
             if stop_really_works:
-                live.discard(cmd[2])
+                live.discard(cmd[-1])
             return _completed()
         return _completed()
 
@@ -559,7 +561,7 @@ def test_stop_staged_uses_compose_stop_so_the_containers_survive(
         docker.runner, "run", _stop_runner(calls, running={SPEC.db, SPEC.auth, SPEC.world})
     )
     assert docker.stop_staged(SPEC, Path("/tmp/wow")) is True
-    assert ["docker", "compose", "stop"] in calls
+    assert any(cmd[:3] == ["docker", "compose", "stop"] for cmd in calls)
     assert ["docker", "compose", "down"] not in calls
     assert not any(cmd[:2] == ["docker", "stop"] for cmd in calls), "did not trust compose stop"
 
@@ -579,7 +581,7 @@ def test_stop_staged_says_false_when_there_was_nothing_of_ours_to_stop(
     # `compose stop` still runs: the project also holds ac-db-import and
     # ac-client-data-init, and an interrupted install leaves one of those
     # downloading. What must NOT happen is a container stopped by name.
-    assert ["docker", "compose", "stop"] in calls
+    assert any(cmd[:3] == ["docker", "compose", "stop"] for cmd in calls)
     assert not any(cmd[:2] == ["docker", "stop"] for cmd in calls)
 
 
@@ -680,9 +682,9 @@ def test_stop_staged_finishes_the_job_when_compose_stopped_nothing(
     )
     assert docker.stop_staged(SPEC, Path("/tmp/moved-install")) is True
     assert [cmd for cmd in calls if cmd[:2] == ["docker", "stop"]] == [
-        ["docker", "stop", SPEC.world],
-        ["docker", "stop", SPEC.auth],
-        ["docker", "stop", SPEC.db],
+        ["docker", "stop", "--timeout", _GRACE, SPEC.world],
+        ["docker", "stop", "--timeout", _GRACE, SPEC.auth],
+        ["docker", "stop", "--timeout", _GRACE, SPEC.db],
     ]
 
 
@@ -716,7 +718,7 @@ def test_docker_stop_treats_a_vanished_container_as_already_stopped(
         if cmd[:2] == ["docker", "ps"]:
             return _completed(stdout="".join(n + "\n" for n in sorted(live)))
         if cmd[:2] == ["docker", "stop"]:
-            live.discard(cmd[2])
+            live.discard(cmd[-1])
             return _completed(
                 returncode=1, stderr="Error response from daemon: No such container: " + cmd[2]
             )
@@ -790,16 +792,16 @@ def test_stop_staged_reads_the_pin_when_compose_cannot_be_parsed(
         if cmd[:2] == ["docker", "ps"]:
             return _completed(stdout="".join(n + "\n" for n in sorted(live)))
         if cmd[:2] == ["docker", "stop"]:
-            live.discard(cmd[2])
+            live.discard(cmd[-1])
             return _completed()
         return _completed()
 
     monkeypatch.setattr(docker.runner, "run", fake_run)
     assert docker.stop_staged(SPEC, tmp_path) is True
     assert [cmd for cmd in calls if cmd[:2] == ["docker", "stop"]] == [
-        ["docker", "stop", SPEC.world],
-        ["docker", "stop", SPEC.auth],
-        ["docker", "stop", SPEC.db],
+        ["docker", "stop", "--timeout", _GRACE, SPEC.world],
+        ["docker", "stop", "--timeout", _GRACE, SPEC.auth],
+        ["docker", "stop", "--timeout", _GRACE, SPEC.db],
     ]
 
 
@@ -861,7 +863,7 @@ def test_stop_staged_reports_rather_than_guesses_when_a_moved_install_was_never_
         if cmd[:2] == ["docker", "ps"]:
             return _completed(stdout="".join(n + "\n" for n in sorted(live)))
         if cmd[:2] == ["docker", "stop"]:
-            live.discard(cmd[2])
+            live.discard(cmd[-1])
             return _completed()
         return _completed()
 
@@ -895,16 +897,16 @@ def test_stop_staged_stops_a_moved_install_that_WAS_pinned(
         if cmd[:2] == ["docker", "ps"]:
             return _completed(stdout="".join(n + "\n" for n in sorted(live)))
         if cmd[:2] == ["docker", "stop"]:
-            live.discard(cmd[2])
+            live.discard(cmd[-1])
             return _completed()
         return _completed()
 
     monkeypatch.setattr(docker.runner, "run", fake_run)
     assert docker.stop_staged(SPEC, tmp_path) is True
     assert [cmd for cmd in calls if cmd[:2] == ["docker", "stop"]] == [
-        ["docker", "stop", SPEC.world],
-        ["docker", "stop", SPEC.auth],
-        ["docker", "stop", SPEC.db],
+        ["docker", "stop", "--timeout", _GRACE, SPEC.world],
+        ["docker", "stop", "--timeout", _GRACE, SPEC.auth],
+        ["docker", "stop", "--timeout", _GRACE, SPEC.db],
     ]
     assert live == set()
 
@@ -994,6 +996,82 @@ def test_stop_staged_refuses_a_half_and_half_project(monkeypatch: pytest.MonkeyP
     named_as_strangers = message.split(" are running", 1)[0]
     assert SPEC.db not in named_as_strangers, "listed our own container among the strangers"
     assert "install-b" in message
+
+
+def test_the_stop_grace_covers_the_slowest_shutdown_ever_measured() -> None:
+    """Docker's 10-second default was measured killing a live save; this is the floor.
+
+    Two clean shutdowns of a populated worldserver on yulon-ubuntu (1980
+    characters online, AzerothCore + playerbots, 2026-08-23) took 90.7s and
+    73.4s under a grace long enough not to bind. A grace below the worse of
+    those two would have SIGKILLed the first one mid-save, which is exactly what
+    a 10-second `compose stop` did on that box the same day: exit 137.
+
+    The bound is the measurement, not the chosen value, so re-tuning the margin
+    stays possible without editing a test — dropping back towards Docker's
+    default does not.
+    """
+    assert docker.STOP_GRACE_SECONDS >= 91, "shorter than a shutdown we have actually watched"
+
+
+def test_compose_stop_asks_for_the_measured_grace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without `--timeout`, `compose stop` takes Docker's 10s and kills the save queue."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner, "run", _stop_runner(calls, running={SPEC.db, SPEC.auth, SPEC.world})
+    )
+    assert docker.stop_staged(SPEC, Path("/tmp/wow")) is True
+    stops = [cmd for cmd in calls if cmd[:3] == ["docker", "compose", "stop"]]
+    assert stops == [["docker", "compose", "stop", "--timeout", _GRACE]]
+
+
+def test_the_by_name_fallback_asks_for_the_measured_grace_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fallback is the path an unreadable-compose install stops on — the same server.
+
+    It is the easier one to leave on the 10-second default, since it is only
+    reached when `compose stop` could not run or stopped nothing, and it is
+    where the worldserver is stopped first and alone.
+    """
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+        calls.append(cmd)
+        return _completed()
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    docker._run_docker_stop(SPEC.world)
+    assert calls == [["docker", "stop", "--timeout", _GRACE, SPEC.world]]
+
+
+def test_the_stop_paths_impose_no_subprocess_deadline_of_their_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `runner.run()` timeout shorter than the grace would kill the CLI mid-shutdown.
+
+    `runner.run()` reports a timeout as a non-zero return code, so a deadline
+    here would not raise — `stop_staged()` would fall through to its by-name
+    fallback while the daemon was still stopping the same containers, and the
+    user would be told the stop could not be confirmed on a server that was
+    shutting down normally.
+    """
+    calls: list[list[str]] = []
+    # `compose_stop_matches=False` is the moved folder, so both stop paths run.
+    inner = _stop_runner(
+        calls, running={SPEC.db, SPEC.auth, SPEC.world}, compose_stop_matches=False
+    )
+    seen: list[float | None] = []
+
+    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+        if cmd[:2] == ["docker", "stop"] or cmd[:3] == ["docker", "compose", "stop"]:
+            seen.append(timeout)
+        return inner(cmd, cwd, timeout)
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    docker.stop_staged(SPEC, Path("/tmp/moved-install"))
+    assert seen, "no stop command ran"
+    assert set(seen) == {None}, f"a stop carried a subprocess deadline: {seen}"
 
 
 def test_the_message_for_two_owners_offers_no_single_name_to_pin() -> None:
@@ -1292,7 +1370,7 @@ def test_every_command_is_built_with_the_resolved_cli(off_path_docker: list[list
         ["compose", "up"],
         ["compose", "config"],
         ["inspect", SPEC.world],
-        ["stop", SPEC.world],
+        ["stop", "--timeout"],
         ["inspect", SPEC.world],
         ["inspect", SPEC.world],
         ["logs", SPEC.world],

@@ -143,7 +143,7 @@ def test_stop_keeps_the_containers_so_the_next_start_is_staged(
     # Something of ours has to be up, or there is correctly nothing to stop.
     fake_runner.ps_lines = "t-db\nt-auth\nt-world\n"
     Controller(SPEC, SERVER_DIR).stop()
-    assert ["docker", "compose", "stop"] in fake_runner.calls
+    assert any(c[:3] == ["docker", "compose", "stop"] for c in fake_runner.calls)
     assert ["docker", "compose", "down"] not in fake_runner.calls
 
 
