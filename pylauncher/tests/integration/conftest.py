@@ -17,6 +17,8 @@ Two layers of opt-in, both deliberate:
 
 from __future__ import annotations
 
+import os
+import socket
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
@@ -25,21 +27,56 @@ import pytest
 
 from yulon import docker, runner
 
-# Unusual, fixed ports so the throwaway project never collides with a real
-# install (3724/8085) and so `port_conflicts()` has something to find.
-THROWAWAY_PORTS: tuple[int, ...] = (47321, 47322)
+THROWAWAY_REALM_HOST = "127.0.0.1"
+
+# One tag per pytest process, mixed into every name this suite creates.
+#
+# Fixed names meant the suite could not be run twice at once on one machine: a
+# second run's `compose up` died with `Conflict. The container name
+# "/yulon-it-db" is already in use`, taking 8 of its 10 tests with it (measured
+# 2026-08-23, two concurrent runs on this box — the same failure a shared dev
+# box or two parallel CI jobs on one runner produce). A pid is unique among
+# live processes, which is exactly the set of runs that can overlap, and it
+# covers `pytest-xdist` workers for free since each is its own process.
+_RUN_TAG = f"{os.getpid():x}"
+
+
+def _free_ports(count: int) -> tuple[int, ...]:
+    """`count` TCP ports nothing holds, asked of the OS rather than picked.
+
+    Every socket is kept open until all of them are bound, so the same port is
+    never handed out twice. The window between closing them and compose binding
+    them is a race in principle; in practice the OS hands out ephemeral ports
+    (32768+ on Linux, 49152+ on Windows) round-robin, which is also why these
+    can never collide with the real install's 3724/8085 the way a hand-picked
+    number could.
+    """
+    held = [socket.socket(socket.AF_INET, socket.SOCK_STREAM) for _ in range(count)]
+    try:
+        for sock in held:
+            sock.bind((THROWAWAY_REALM_HOST, 0))
+        return tuple(sock.getsockname()[1] for sock in held)
+    finally:
+        for sock in held:
+            sock.close()
+
+
+# Published, so `port_conflicts()` has something to find. Per-run rather than
+# fixed for the same reason the names are: two runs publishing one port is the
+# other half of the collision, and `Controller.port_conflicts() == []` is only
+# true of a run whose ports nobody else has.
+THROWAWAY_PORTS: tuple[int, ...] = _free_ports(2)
 # The compose services here are `db`/`auth`/`world` while the containers are
 # `yulon-it-*`, so this fixture also exercises the case `services` exists for:
 # a project whose service names differ from its container names. AzerothCore's
 # happen to match, which is exactly why it is worth testing the other way.
 THROWAWAY_SPEC = docker.ContainerSpec(
-    db="yulon-it-db",
-    auth="yulon-it-auth",
-    world="yulon-it-world",
+    db=f"yulon-it-{_RUN_TAG}-db",
+    auth=f"yulon-it-{_RUN_TAG}-auth",
+    world=f"yulon-it-{_RUN_TAG}-world",
     ports=THROWAWAY_PORTS,
     services=("db", "auth", "world"),
 )
-THROWAWAY_REALM_HOST = "127.0.0.1"
 THROWAWAY_REALM_PORT = THROWAWAY_PORTS[1]
 
 _COMPOSE_YML = f"""\
@@ -111,6 +148,23 @@ def _compose_down(project_dir: Path) -> None:
     )
 
 
+def _project_dir(tmp_path: Path, compose_yml: str) -> Path:
+    """A compose project directory whose BASENAME belongs to this run alone.
+
+    Compose names a project after its directory unless told otherwise, and
+    pytest names `tmp_path` after the test — so two concurrent runs of the same
+    test get two different paths with the *same* basename, and therefore one
+    project name. `compose down` selects by that name, so each run's teardown
+    would reach into the other's containers. The tag is what stops it, and it
+    is why the teardown here can stay a plain `compose down`: the project it
+    names is this run's own.
+    """
+    project = tmp_path / f"yulon-it-{_RUN_TAG}"
+    project.mkdir()
+    (project / "docker-compose.yml").write_text(compose_yml, encoding="utf-8")
+    return project
+
+
 @pytest.fixture(scope="session")
 def require_docker() -> None:
     """Skip the requesting test when no Docker daemon is reachable."""
@@ -122,15 +176,20 @@ def require_docker() -> None:
 def throwaway_project(tmp_path: Path, require_docker: None) -> Iterator[Path]:
     """A fresh throwaway compose project dir, torn down after the test.
 
-    Also runs `compose down` *before* yielding, so containers left behind by a
-    previous crashed run (fixed `container_name`s) never poison this one.
+    Also runs `compose down` *before* yielding, because every test in one run
+    shares that run's tag and so its project name: containers an earlier test
+    in this process failed to tear down would otherwise poison this one.
+    Leftovers from a run that was *killed* can no longer poison anything — they
+    carry that run's tag and hold no port this one wants — but they are also no
+    longer cleaned up by the next run, so a machine that has had runs killed
+    accumulates them (`docker rm -f $(docker ps -aq --filter name=yulon-it-)`).
     """
-    (tmp_path / "docker-compose.yml").write_text(_COMPOSE_YML, encoding="utf-8")
-    _compose_down(tmp_path)
+    project = _project_dir(tmp_path, _COMPOSE_YML)
+    _compose_down(project)
     try:
-        yield tmp_path
+        yield project
     finally:
-        _compose_down(tmp_path)
+        _compose_down(project)
 
 
 # AzerothCore's install runs one-shot containers (`ac-db-import`,
@@ -139,7 +198,7 @@ def throwaway_project(tmp_path: Path, require_docker: None) -> Iterator[Path]:
 # every restart — which `dml-start.sh` warns "was killing the database". This
 # service is that shape in miniature: it appends one line per run to a
 # bind-mounted file, so a test can simply count how many times it ran.
-IMPORT_CONTAINER = "yulon-it-import"
+IMPORT_CONTAINER = f"yulon-it-{_RUN_TAG}-import"
 IMPORT_MARKER_DIR = "marker"
 IMPORT_MARKER_FILE = "import.log"
 
@@ -164,12 +223,12 @@ def import_runs(project_dir: Path) -> int:
 @pytest.fixture
 def never_healthy_project(tmp_path: Path, require_docker: None) -> Iterator[Path]:
     """Like `throwaway_project`, but the database never reports healthy."""
-    (tmp_path / "docker-compose.yml").write_text(_NEVER_HEALTHY_YML, encoding="utf-8")
-    _compose_down(tmp_path)
+    project = _project_dir(tmp_path, _NEVER_HEALTHY_YML)
+    _compose_down(project)
     try:
-        yield tmp_path
+        yield project
     finally:
-        _compose_down(tmp_path)
+        _compose_down(project)
 
 
 @pytest.fixture
@@ -180,11 +239,11 @@ def staged_project(tmp_path: Path, require_docker: None) -> Iterator[Path]:
     three-container shape; the extra service exists only for the restart tests,
     which need something that must *not* run twice.
     """
-    (tmp_path / "docker-compose.yml").write_text(_COMPOSE_YML + _ONE_SHOT_YML, encoding="utf-8")
-    (tmp_path / IMPORT_MARKER_DIR).mkdir()
-    _compose_down(tmp_path)
+    project = _project_dir(tmp_path, _COMPOSE_YML + _ONE_SHOT_YML)
+    (project / IMPORT_MARKER_DIR).mkdir()
+    _compose_down(project)
     try:
-        yield tmp_path
+        yield project
     finally:
-        _compose_down(tmp_path)
+        _compose_down(project)
         subprocess.run(["docker", "rm", "-f", IMPORT_CONTAINER], capture_output=True, check=False)

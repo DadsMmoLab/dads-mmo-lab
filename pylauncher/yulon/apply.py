@@ -58,6 +58,24 @@ class ApplyError(RuntimeError):
     """A step failed in a way that must stop the run (missing template value, git failure, ...)."""
 
 
+def mysql_env(root_password: str) -> dict[str, str]:
+    """This process's environment plus `MYSQL_PWD`, so the password never enters argv.
+
+    `docker exec -e MYSQL_PWD` (no `=value`) forwards the variable from OUR
+    environment into the container, where the client reads it instead of
+    prompting. `-p<password>` would put the secret in a command line every local
+    process can read (`ps`, Task Manager, `/proc/<pid>/cmdline`).
+
+    Module-level rather than a `DockerSql` method because `maintenance.py` runs
+    `mysqldump`, not `mysql`, and so cannot reuse `DockerSql` itself — but the
+    one rule that must never be re-derived is how the password is handed over
+    (style-guide §4).
+    """
+    env = dict(os.environ)
+    env["MYSQL_PWD"] = root_password
+    return env
+
+
 # ------------------------------------------------------------------- seams
 
 
@@ -136,15 +154,7 @@ class DockerSql:
             raise ApplyError(platform.DOCKER_CLI_MISSING_HELP) from exc
 
     def _env(self) -> dict[str, str]:
-        """Our environment plus `MYSQL_PWD`, so the password never enters argv.
-
-        `docker exec` passes `-e MYSQL_PWD` through to the client inside the
-        container; `mysql` reads it instead of prompting. `-p<password>` would
-        put the secret in a command line every local process can read.
-        """
-        env = dict(os.environ)
-        env["MYSQL_PWD"] = self.root_password
-        return env
+        return mysql_env(self.root_password)
 
     def _argv(self, db: Db) -> list[str]:
         """`docker exec ... mysql <db>`, with the CLI name this host can start.
