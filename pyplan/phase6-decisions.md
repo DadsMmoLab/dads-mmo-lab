@@ -337,11 +337,17 @@ renamed so the copy could not touch the original. What it settled:
 
 **What the gate did NOT settle, and a review was right to say so:**
 
-- **It never repaired a `partial` database** — the state this action exists for. All three runs
-  began from `absent`, manufactured with `DROP DATABASE`. A dropped schema is not an interrupted
-  import: a real interruption leaves schemas that exist, with some tables, and with rows already
-  in AzerothCore's own `updates` table, which is what decides whether a re-run skips files it has
-  already applied. Until that is run, the action is proven for a state it will rarely meet.
+- ~~It never repaired a `partial` database~~ — **run 2026-08-23, and it changed the design.**
+  Interrupting a real import (`docker kill ac-db-import`, 19 s in) left `acore_world` with 3
+  tables of 316. Two findings. The probe called that `imported`, because it asked only whether a
+  schema had any tables — fixed to read `updates`/`updates_include`, AzerothCore's own updater
+  bookkeeping. And re-running the one-shot over it **reported success in 28 s and left the schema
+  permanently unimportable**: AzerothCore skips the base data for a database that already exists,
+  so `acore_world` went 3 → 5 tables while `acore_world.updates` gained 2671 rows recording every
+  remaining file as applied. `partial` is therefore refused outright now, and `repairable` is
+  `absent` alone. The fix that would make `partial` genuinely repairable — drop the unfinished
+  schemas first, so the importer does a real base import — needs a write seam this module does
+  not have, and its own gate. It is not built.
 - **Assumption 1 was proven by container NAME, not by container ID.** The three start/finish pairs
   could in principle be three different containers reusing the name. The run pinned `ac-database`'s
   ID for exactly this reason and did not pin the one-shot's.
