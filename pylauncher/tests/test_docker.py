@@ -9,6 +9,7 @@ real AzerothCore compose project gets exercised.
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -1744,3 +1745,250 @@ def test_remove_staged_will_not_claim_success_when_docker_stops_answering(
     )
     with pytest.raises(docker.DockerCommandError):
         docker.remove_staged(SPEC, Path("/tmp/wow"))
+
+
+# ------------------------------------------- repair_import (the re-import)
+
+
+def _probe(*answers: docker.ImportState) -> Callable[[], docker.ImportState]:
+    """A probe that gives each answer in turn, repeating the last one forever.
+
+    Repeating matters: `repair_import()` asks before and again after, and a test
+    that supplied one answer would otherwise fail on the post-check for reasons
+    that have nothing to do with what it is testing.
+    """
+    remaining = list(answers)
+
+    def probe() -> docker.ImportState:
+        return remaining.pop(0) if len(remaining) > 1 else remaining[0]
+
+    return probe
+
+
+UNIMPORTED = docker.ImportState("absent", "acore_world holds no tables")
+IMPORTED = docker.ImportState("imported", "acore_world has 1103 tables")
+PLAYED_ON = docker.ImportState("populated", "651 rows in acore_auth.account")
+
+
+def _repair_runner(
+    calls: list[list[str]],
+    *,
+    running: set[str] | None = None,
+    owner: str | None = PROJECT,
+    inspect_fails: bool = False,
+    health: str = "healthy",
+    import_exit: int = 0,
+):
+    """A `runner.run` double for the repair path.
+
+    `running` is what `docker ps` reports before anything is done; a
+    `compose up -d --no-deps <db>` adds the database to it, which is how a test
+    can tell whether the database was started rather than merely demanded.
+    """
+    live = set() if running is None else set(running)
+
+    def fake_run(cmd: list[str], cwd=None, timeout: float | None = None):
+        calls.append(cmd)
+        if cmd[:4] == ["docker", "compose", "config", "--format"]:
+            return _completed(stdout='{"name": "' + PROJECT + '"}')
+        if cmd[:5] == ["docker", "compose", "up", "-d", "--no-deps"]:
+            live.update(cmd[5:])
+            return _completed()
+        if cmd[:4] == ["docker", "compose", "up", "--no-deps"]:
+            said = "import said no" if import_exit else ""
+            return _completed(returncode=import_exit, stderr=said)
+        if cmd[:2] == ["docker", "inspect"]:
+            if "Health" in cmd[-1]:
+                return _completed(stdout=health)
+            if inspect_fails:
+                return _completed(returncode=1, stderr="Cannot connect to the Docker daemon")
+            return _completed(stdout="" if owner is None else owner + chr(10))
+        if cmd[:2] == ["docker", "ps"]:
+            return _completed(stdout="".join(n + "\n" for n in sorted(live)))
+        return _completed()
+
+    return fake_run
+
+
+def test_repair_import_names_only_the_one_shot_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The whole point of the action is the services it does NOT select.
+
+    `docker compose up -d` with no arguments re-runs the import and everything
+    else, and `start_staged()` names three services precisely so an ordinary
+    start can never reach `ac-db-import`. This is the one caller allowed to
+    reach it, so it must reach nothing else: the import command names one
+    service, and `--no-deps` is what stops compose adding a second.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _repair_runner(calls, running={SPEC.db}))
+    assert docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, IMPORTED)) is True
+
+    ups = [c for c in calls if c[:3] == ["docker", "compose", "up"]]
+    assert ups == [["docker", "compose", "up", "--no-deps", "ac-db-import"]], ups
+    for cmd in calls:
+        assert SPEC.world not in cmd, cmd
+        assert SPEC.auth not in cmd, cmd
+
+
+def test_repair_import_starts_the_database_it_needs_and_nothing_else(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stop takes the database down with everything else, so repair has to bring it back.
+
+    Without this the action is unreachable through the buttons this app has: it
+    refuses while the servers are running, and the only way to stop them also
+    stops the database it must ask and write to.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _repair_runner(calls, running=set()))
+    assert docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, IMPORTED)) is True
+
+    started = [c for c in calls if c[:5] == ["docker", "compose", "up", "-d", "--no-deps"]]
+    assert started == [["docker", "compose", "up", "-d", "--no-deps", SPEC.db]], started
+
+
+def test_repair_import_does_not_restart_a_database_that_is_already_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A running database is already the state this needs; recreating one is not free."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _repair_runner(calls, running={SPEC.db}))
+    docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, IMPORTED))
+    assert not any(c[:4] == ["docker", "compose", "up", "-d"] for c in calls)
+
+
+def test_repair_import_refuses_over_a_database_with_player_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refusal this whole action is built around, and it is not offered twice.
+
+    Re-importing over a populated database destroys characters, so a probe that
+    finds accounts ends the action — with the way back (Restore) named, because
+    that path exists and was live-gated against a real backup.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _repair_runner(calls, running={SPEC.db}))
+    with pytest.raises(docker.DockerCommandError, match="restore the last backup") as raised:
+        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(PLAYED_ON))
+    assert "651 rows in acore_auth.account" in str(raised.value)
+    assert not any(c[:3] == ["docker", "compose", "up"] for c in calls), "it imported anyway"
+
+
+def test_repair_import_refuses_while_this_installs_servers_are_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live worldserver holds characters in memory and writes them back over the import."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _repair_runner(calls, running={SPEC.db, SPEC.world}))
+    with pytest.raises(docker.DockerCommandError, match="Press Stop first"):
+        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, IMPORTED))
+    assert not any(c[:3] == ["docker", "compose", "up"] for c in calls)
+
+
+def test_repair_import_will_not_run_against_containers_it_cannot_prove_are_its_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same ownership census as the stop and teardown paths, so the three agree."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        _repair_runner(calls, running={SPEC.db}, owner="somebody-elses-server"),
+    )
+    with pytest.raises(docker.DockerCommandError, match="another install"):
+        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, IMPORTED))
+    assert not any(c[:3] == ["docker", "compose", "up"] for c in calls)
+
+    calls.clear()
+    monkeypatch.setattr(
+        docker.runner, "run", _repair_runner(calls, running={SPEC.db}, inspect_fails=True)
+    )
+    with pytest.raises(docker.DockerCommandError, match="cannot prove"):
+        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, IMPORTED))
+    assert not any(c[:3] == ["docker", "compose", "up"] for c in calls)
+
+
+def test_repair_import_catches_an_import_that_exited_zero_having_done_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exit code is not the answer, exactly as it is not for `compose down`.
+
+    A one-shot that died part-way and one that never touched a table look
+    identical from outside, so the database is asked again instead, and only a
+    database that now reads as imported counts as a repair.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _repair_runner(calls, running={SPEC.db}))
+    with pytest.raises(docker.DockerCommandError, match="still read as absent") as raised:
+        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED))
+    assert "ac-db-import" in str(raised.value), "did not say which logs to read"
+    assert ["docker", "compose", "up", "--no-deps", "ac-db-import"] in calls
+
+
+def test_repair_import_refuses_a_database_it_could_not_ask(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unanswerable database is not an empty one — the fail-closed rule again."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _repair_runner(calls, running={SPEC.db}))
+    unreadable = docker.ImportState("unreadable", "mysql: connection refused")
+    with pytest.raises(docker.DockerCommandError, match="could not be asked"):
+        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(unreadable))
+    assert not any(c[:3] == ["docker", "compose", "up"] for c in calls)
+
+
+def test_repair_import_declines_an_install_that_is_already_imported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing to repair is a refusal, not a no-op: the import would overwrite a good database."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _repair_runner(calls, running={SPEC.db}))
+    with pytest.raises(docker.DockerCommandError, match="already completed"):
+        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(IMPORTED))
+    assert not any(c[:3] == ["docker", "compose", "up"] for c in calls)
+
+
+def test_repair_import_refuses_a_game_that_never_named_an_import_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A guessed service name is a guess about which container gets run."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _repair_runner(calls, running={SPEC.db}))
+    spec = docker.ContainerSpec(db="a-db", auth="a-auth", world="a-world", ports=(1,))
+    with pytest.raises(docker.DockerCommandError, match="does not say which compose service"):
+        docker.repair_import(spec, Path("/tmp/wow"), _probe(UNIMPORTED, IMPORTED))
+    assert calls == [], "something was asked of Docker before the refusal"
+
+
+def test_repair_import_says_no_when_the_database_never_becomes_healthy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Importing into a database that has not come up writes into nothing."""
+    # The poll always sleeps once after its final check; without this the test
+    # spends the default two-second interval proving nothing.
+    monkeypatch.setattr(docker.time, "sleep", lambda _seconds: None)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner, "run", _repair_runner(calls, running=set(), health="starting")
+    )
+    with pytest.raises(docker.DockerCommandError, match="did not report healthy"):
+        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, IMPORTED), db_timeout=0.05)
+    assert not any(c[:4] == ["docker", "compose", "up", "--no-deps"] for c in calls)
+
+
+def test_repair_import_refuses_an_install_that_cannot_name_its_project(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With no identity there is no telling whose database would be overwritten."""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+        calls.append(cmd)
+        if cmd[:3] == ["docker", "compose", "config"]:
+            return _completed(returncode=1, stderr="no configuration file provided")
+        return _completed()
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    with pytest.raises(docker.DockerCommandError, match="which compose project"):
+        docker.repair_import(SPEC, tmp_path, _probe(UNIMPORTED, IMPORTED))
+    assert not any(c[:3] == ["docker", "compose", "up"] for c in calls)

@@ -44,6 +44,7 @@ from yulon.controller_wow_wotlk import accounts as wotlk_accounts
 from yulon.controller_wow_wotlk import console as wotlk_console
 from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
 from yulon.controller_wow_wotlk import modules as wotlk_modules
+from yulon.controller_wow_wotlk import repair as wotlk_repair
 from yulon.log import get_logger
 from yulon.manifest import Manifest
 from yulon.manifest_store import FAMILY_FILES, ManifestStore
@@ -79,13 +80,18 @@ class ControllerServices:
     ) -> ControllerServices:
         """The real WotLK wiring for an install at `server_dir`."""
         spec = entry.container_spec()
-        controller = Controller(spec, server_dir)
         password = entry.install.db_root_password or wotlk_modules.DEFAULT_DB_ROOT_PASSWORD
         sql = DockerSql(spec.db, password)
         # Bound to this entry's own db container, not `mysql_for()`'s
         # `docker_ctl.SPEC.db`, so a catalog entry that names a different one
         # cannot end up backing up somebody else's database.
         mysql = wotlk_maintenance.DockerMysql(spec.db, password)
+        # Both seams, because neither answers the whole question on its own:
+        # `DockerMysql` can ask what schemas exist without naming one to connect
+        # to, `DockerSql` can then read inside them. See `repair.import_state()`.
+        controller = Controller(
+            spec, server_dir, import_probe=lambda: wotlk_repair.import_state(sql, mysql)
+        )
         return cls(
             controller=controller,
             logs_source=lambda: docker.follow_logs(spec.world),
@@ -136,6 +142,17 @@ paragraph naming what is kept, `problem_label` already renders those, and a
 modal would arrive from a worker thread.
 """
 
+REPAIR_IDLE = "Repair: finish the database import…"
+REPAIR_ARMED = "Press again to overwrite the databases"
+"""The same two-press gesture, for the action that really can destroy data.
+
+Deliberately not a second kind of confirmation. There is one arm/disarm shape
+on this tab and both destructive buttons use it, so a user who has learned that
+pressing once only arms is not surprised by the one where it would matter most.
+The armed wording is where they differ: the teardown's says what is *kept*,
+this one says what is *overwritten*.
+"""
+
 
 class ControllerView(QWidget):
     """Per-install tabs; see module docstring."""
@@ -169,6 +186,13 @@ class ControllerView(QWidget):
 
         self._restore_plan: wotlk_maintenance.RestorePlan | None = None
         self._remove_armed = False
+        self._repair_armed = False
+        # The last answer the database gave about its own import, and whether it
+        # has been asked since the database came up. Remembered because the
+        # question can only be put while the database is running, and the state
+        # this action exists for is one the user reaches by pressing Stop.
+        self._import_state: docker.ImportState | None = None
+        self._import_asked = False
         self._build_server_tab()
         self._build_console_tab()
         self._build_accounts_tab()
@@ -205,17 +229,35 @@ class ControllerView(QWidget):
         # whatever does must not be a stray click next to Stop. It arms on the
         # first press and acts on the second, and anything else disarms it.
         self.remove_button = QPushButton(REMOVE_IDLE, tab)
+        # Hidden unless the database has said there is an unfinished import to
+        # finish. A destructive action that is always on screen is one that gets
+        # pressed by accident, and this one is only ever right for a broken
+        # install — the installer imports on every healthy path.
+        self.repair_button = QPushButton(REPAIR_IDLE, tab)
+        self.repair_button.setVisible(False)
+        self.repair_label = QLabel("", tab)
+        self.repair_label.setWordWrap(True)
+        self.repair_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.repair_label.setVisible(False)
         self.start_button.clicked.connect(self.start_server)
         self.stop_button.clicked.connect(self.stop_server)
         self.refresh_button.clicked.connect(self.recheck)
         self.remove_button.clicked.connect(self.remove_containers)
+        self.repair_button.clicked.connect(self.repair_import)
         row = QHBoxLayout()
-        for b in (self.start_button, self.stop_button, self.refresh_button, self.remove_button):
+        for b in (
+            self.start_button,
+            self.stop_button,
+            self.refresh_button,
+            self.remove_button,
+            self.repair_button,
+        ):
             row.addWidget(b)
         box.addWidget(QLabel(f"<b>{self.entry.name}</b> — {self.services.controller.server_dir}"))
         box.addWidget(self.status_label)
         box.addLayout(row)
         box.addWidget(self.problem_label)
+        box.addWidget(self.repair_label)
         box.addStretch(1)
         self._tabs.addTab(tab, "Server")
 
@@ -263,8 +305,11 @@ class ControllerView(QWidget):
         up, world up" above "Nothing was stopped: this could equally be another
         install…" (review, 2026-08-22).
         """
-        self._disarm_remove()
+        self._disarm_actions()
         self.problem_label.setText("")
+        # Ask the database again: Refresh is the only way for a user who has
+        # just fixed something to make the tab re-examine an unfinished import.
+        self._import_asked = False
         self.refresh_status()
 
     @Slot(object)
@@ -281,7 +326,62 @@ class ControllerView(QWidget):
         self.status_label.setText("status: " + ", ".join(parts))
         self.start_button.setEnabled(not status.all_running and not self._busy)
         self.stop_button.setEnabled(status.any_running and not self._busy)
+        self._ask_about_the_import(status)
         self.status_changed.emit(status)
+
+    def _ask_about_the_import(self, status: InstallStatus) -> None:
+        """Put the import question once per time the database comes up.
+
+        Not on every poll: the probe is three `docker exec`s, and the poll runs
+        every five seconds forever. Not never, either — the button has to be
+        able to appear without the user knowing to press Refresh first, and the
+        install this exists for is one whose Start visibly fails.
+        """
+        if not status.db:
+            self._import_asked = False
+            return
+        if self._import_asked:
+            return
+        self._import_asked = True
+        self._run(
+            self.services.controller.import_state, self._import_state_ready, self._import_failed
+        )
+
+    @Slot(object)
+    def _import_state_ready(self, result: object) -> None:
+        if not isinstance(result, docker.ImportState):
+            return
+        self._import_state = result
+        self._show_repair()
+
+    @Slot(object)
+    def _import_failed(self, exc: object) -> None:
+        """A probe that raised says nothing about the database, so nothing is offered.
+
+        `Controller.import_state()` is documented not to raise; this is the
+        boundary that holds even if some future probe forgets, because the one
+        outcome that must never follow from a failed question is a destructive
+        button appearing.
+        """
+        logger.warning(f"could not ask the databases about their import: {exc}")
+        self._import_state = None
+        self._show_repair()
+
+    def _show_repair(self) -> None:
+        """Offer the repair only while the database itself says there is one to do."""
+        state = self._import_state
+        offer = state is not None and state.repairable
+        self.repair_button.setVisible(offer)
+        self.repair_label.setVisible(offer)
+        if offer and state is not None:
+            self.repair_label.setText(
+                "This install's databases were never finished: "
+                f"{state.detail}. The server will not start until the import is completed. "
+                "Repair runs it again — see the button."
+            )
+        else:
+            self._disarm_repair()
+            self.repair_label.setText("")
 
     @Slot(object)
     def _status_failed(self, exc: object) -> None:
@@ -298,7 +398,7 @@ class ControllerView(QWidget):
     @Slot()
     def start_server(self) -> None:
         """Start the install; a README §12 conflict is shown, never a raw Docker error."""
-        self._disarm_remove()
+        self._disarm_actions()
         self.problem_label.setText("")
         self._set_busy(True)
         self.status_label.setText("status: starting…")
@@ -306,7 +406,7 @@ class ControllerView(QWidget):
 
     @Slot()
     def stop_server(self) -> None:
-        self._disarm_remove()
+        self._disarm_actions()
         self.problem_label.setText("")
         self._set_busy(True)
         self.status_label.setText("status: stopping…")
@@ -371,6 +471,11 @@ class ControllerView(QWidget):
         stop refusals use, before anything is touched.
         """
         if not self._remove_armed:
+            # Only one of the two destructive buttons is ever armed. Both write
+            # their warning into the same label, so two armed at once would show
+            # one paragraph over two loaded buttons, and the second press would
+            # do whichever the user had forgotten about.
+            self._disarm_repair()
             self._remove_armed = True
             self.remove_button.setText(REMOVE_ARMED)
             self.problem_label.setText(
@@ -389,6 +494,15 @@ class ControllerView(QWidget):
         self._remove_armed = False
         self.remove_button.setText(REMOVE_IDLE)
 
+    def _disarm_repair(self) -> None:
+        self._repair_armed = False
+        self.repair_button.setText(REPAIR_IDLE)
+
+    def _disarm_actions(self) -> None:
+        """Any other server action means the user moved on from both of them."""
+        self._disarm_remove()
+        self._disarm_repair()
+
     @Slot(object)
     def _remove_done(self, result: object) -> None:
         self._set_busy(False)
@@ -404,6 +518,57 @@ class ControllerView(QWidget):
         self._set_busy(False)
         self.problem_label.setText(f"Could not remove the containers: {exc}")
         self.action_failed.emit(str(exc))
+
+    @Slot()
+    def repair_import(self) -> None:
+        """Arm on the first press; re-run the one-shot import on the second.
+
+        The armed paragraph says what is overwritten rather than what is kept —
+        the opposite of the teardown's, and the honest way round. Everything the
+        import writes is replaced, and the only reason this is offered at all is
+        that the probe has already found no accounts and no characters to lose.
+        `docker.repair_import()` asks the database again itself and refuses if
+        that has changed since, so this text is a warning and not the guard.
+        """
+        if not self._repair_armed:
+            self._disarm_remove()
+            self._repair_armed = True
+            self.repair_button.setText(REPAIR_ARMED)
+            self.problem_label.setText(
+                "This re-runs the database import that never finished. Everything in the auth, "
+                "characters and world databases is OVERWRITTEN. It is offered because those "
+                "databases hold no accounts and no characters — if that is wrong, press Refresh "
+                "now and restore a backup from the Maintenance tab instead. The server must be "
+                "stopped; the database is started if it is not running and is left running "
+                "afterwards. A full import takes several minutes. Press Refresh to cancel."
+            )
+            return
+        self._disarm_repair()
+        self._set_busy(True)
+        self.problem_label.setText("Running the database import… this takes several minutes.")
+        self._run(self.services.controller.repair_import, self._repair_done, self._repair_failed)
+
+    @Slot(object)
+    def _repair_done(self, _result: object) -> None:
+        self._set_busy(False)
+        self.problem_label.setText(
+            "The database import finished. Press Start — the server has a database to talk to now."
+        )
+        # The remembered answer is now stale in the one direction that matters:
+        # leaving it would keep offering a repair for an install that has just
+        # been repaired.
+        self._import_state = None
+        self._import_asked = False
+        self._show_repair()
+        self.refresh_status()
+
+    @Slot(object)
+    def _repair_failed(self, exc: object) -> None:
+        self._set_busy(False)
+        self.problem_label.setText(str(exc))
+        self.action_failed.emit(str(exc))
+        self._import_asked = False
+        self.refresh_status()
 
     # ----------------------------------------------------------- console tab
 

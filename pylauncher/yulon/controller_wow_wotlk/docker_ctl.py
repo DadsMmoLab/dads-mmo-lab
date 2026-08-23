@@ -17,6 +17,10 @@ SPEC = docker.ContainerSpec(
     auth="ac-authserver",
     world="ac-worldserver",
     ports=(3724, 8085),
+    # The one-shot that populates the three schemas. It is named here so
+    # `repair_import()` can select it deliberately; every other path in this
+    # package exists to make sure nothing selects it by accident.
+    import_service="ac-db-import",
 )
 
 # Re-export the shared operations so callers import from here, not from
@@ -27,6 +31,10 @@ start_staged = docker.start_staged
 # two ways to stop -- when one keeps the containers and the other deletes
 # them. Checklist 6.5 asks for exactly this rename (2026-08-23).
 remove = docker.remove_staged
+# The repair for an install interrupted before its import finished. Not a peer
+# of `start`/`start_staged` either: it is the only export here that may run
+# `SPEC.import_service`, and it refuses far more often than it acts.
+repair_import = docker.repair_import
 stop_staged = docker.stop_staged
 status = docker.status
 health = docker.health

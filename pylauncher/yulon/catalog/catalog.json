@@ -23,7 +23,12 @@
         "default_server_dir": "wow-server-playerbots",
         "db_root_password": "password"
       },
-      "containers": {"db": "ac-database", "auth": "ac-authserver", "world": "ac-worldserver"},
+      "containers": {
+        "db": "ac-database",
+        "auth": "ac-authserver",
+        "world": "ac-worldserver",
+        "db_import": "ac-db-import"
+      },
       "ports": {"auth": 3724, "world": 8085, "db": 3306},
       "databases": {
         "auth": "acore_auth",

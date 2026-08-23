@@ -20,9 +20,10 @@ import json
 import os
 import subprocess
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from yulon import platform, runner
 from yulon.log import get_logger
@@ -78,6 +79,16 @@ class ContainerSpec:
     world: str
     ports: tuple[int, ...]
     services: tuple[str, ...] = ()
+
+    import_service: str = ""
+    """The one-shot compose service that populates the databases, if the game has one.
+
+    Named here rather than deduced, and empty for a game that has not said.
+    `compose_services()` exists to keep this service *out* of every ordinary
+    start; `repair_import()` is the only thing allowed to select it, and it
+    refuses outright when this is empty rather than guessing at a service name
+    and running whatever happens to answer to it.
+    """
 
     def compose_services(self) -> tuple[str, ...]:
         """The long-running compose services, in dependency order (db first).
@@ -711,6 +722,200 @@ This is the CLI grace on the stop path, not compose's `stop_grace_period` key.
 The key belongs to the install engine that generates compose files, which this
 repo does not do yet.
 """
+
+
+DatabaseImport = Literal["absent", "partial", "imported", "populated", "unreadable"]
+"""What a probe found in the databases the one-shot import is supposed to fill.
+
+* `absent` — nothing of the schema set is there. Never imported.
+* `partial` — some of it is there and some is not. An import that stopped.
+* `imported` — all of it is there, and nobody has played on it yet.
+* `populated` — there are accounts or characters. Somebody's server.
+* `unreadable` — the database could not be asked, so nothing is established.
+
+The line that matters is between `populated` and everything else: it is drawn
+on player data, not on completeness, because player data is the thing whose loss
+cannot be undone. A half-imported database that somehow holds characters is
+`populated` and is refused, even though the import really did stop half-way.
+"""
+
+
+@dataclass(frozen=True)
+class ImportState:
+    """One probe's answer, with the sentence that produced it.
+
+    `detail` is carried rather than recomputed by the caller because the probe
+    is the only thing that knows *why* — which schema was missing, how many
+    accounts were found — and a refusal that cannot say why is a refusal the
+    user has no way to act on.
+    """
+
+    state: DatabaseImport
+    detail: str = ""
+
+    @property
+    def repairable(self) -> bool:
+        """True only where re-running the import can put something right.
+
+        Deliberately false for `unreadable`. An unanswerable database is not an
+        empty one — the same fail-closed rule `_refuse_without_an_identity()`
+        applies to ownership — and offering a destructive button on the strength
+        of a question nobody answered is how it gets pressed by accident.
+        """
+        return self.state in ("absent", "partial")
+
+
+ImportProbe = Callable[[], ImportState]
+"""Asks the install's databases what state they are in.
+
+A seam, because this module must not know what a schema is called or which
+table holds an account (style-guide §3) — those are per-game facts, and the
+per-game module owns them. See `controller_wow_wotlk/repair.py`.
+"""
+
+
+def repair_import(
+    spec: ContainerSpec,
+    server_dir: Path,
+    probe: ImportProbe,
+    *,
+    db_timeout: float = _DB_HEALTHY_TIMEOUT_SECONDS,
+) -> bool:
+    """Re-run this install's one-shot database import. For a BROKEN install only.
+
+    The installer is the only thing that runs the import on a healthy path, and
+    `start_staged()` exists precisely so an ordinary Start can never reach it.
+    This is the repair for the one state that leaves behind: an install
+    interrupted *after* its containers were created but *before* the import
+    finished, whose Start now brings a worldserver up against empty schemas and
+    fails in a way that explains nothing.
+
+    It refuses far more often than it acts, and the refusals are the feature:
+
+    * no `spec.import_service` — this game never said which service imports, and
+      guessing a service name is guessing which container gets run;
+    * ownership cannot be established, or containers wearing our names belong to
+      another compose project. Identical to `remove_staged()`/`stop_staged()`, so
+      the three cannot disagree about whose install this is;
+    * an authserver or worldserver of this install is running. A live worldserver
+      holds character state in memory, and the import writes underneath it;
+    * the probe says the database holds player data. **This is the refusal that
+      matters.** Re-importing over a populated database destroys characters, and
+      it is not offered a second time for a user who asks twice — the way back
+      from a bad database is Restore, which exists, and which was live-gated
+      against a real 386 MB backup;
+    * the probe says the import already completed, or could not be asked at all.
+
+    Two commands, both naming their service explicitly:
+
+    1. `compose up -d --no-deps <db>`, only when the database is not already
+       running. The import has to have somewhere to write, and the probe has to
+       have something to ask — and a user cannot reach "database up, servers
+       down" with the buttons this app has, since Start starts all three and
+       Stop stops all three. Naming the database by hand is narrower than
+       dropping `--no-deps` and letting compose's dependency graph decide what
+       else comes up, which this repo has never measured.
+    2. `compose up --no-deps <import_service>`, attached. `--no-deps` is what
+       makes attached mode terminate: the one-shot is then the only container
+       compose brings up, so `up` returns when it exits. Without it, `up` would
+       also attach to the database and wait for a container that never stops.
+
+    The exit code of that second command is not the answer, for the same reason
+    `remove_staged()` does not believe `compose down`'s: the probe is run again
+    afterwards, and only a database that now reads as imported counts.
+
+    Returns:
+        True once the probe says the databases are imported.
+
+    Raises:
+        DockerCommandError: any of the refusals above, the database never became
+            healthy, or the import ran and the databases still do not read as
+            imported.
+    """
+    logger.debug(f"repair_import() called: server_dir={server_dir}")
+    service = spec.import_service
+    if not service:
+        raise DockerCommandError(
+            "this game does not say which compose service imports its databases, so there is "
+            "nothing to re-run. Nothing was changed."
+        )
+
+    project = install_project(spec, server_dir)
+    if project is None:
+        _refuse_without_an_identity(spec, server_dir)
+        raise DockerCommandError(
+            f"the install in {server_dir} cannot say which compose project it is — its compose "
+            f"files are unreadable and no {PROJECT_NAME_VAR} is pinned — so the import was not "
+            "re-run. Running it against the wrong project would overwrite the wrong database."
+        )
+
+    running = _running(spec, project)
+    if running.unreadable:
+        raise DockerCommandError(
+            f"Docker would not say which project owns {', '.join(running.unreadable)}, so this "
+            f"install in {server_dir} cannot prove those containers are its own. The import was "
+            "not re-run."
+        )
+    if running.strangers:
+        raise DockerCommandError(_stranger_message(running.strangers, project, server_dir))
+    servers = [name for name in (spec.world, spec.auth) if name in running.ours]
+    if servers:
+        verb = "is" if len(servers) == 1 else "are"
+        raise DockerCommandError(
+            f"{', '.join(servers)} {verb} running. The import rewrites the databases underneath "
+            "them, and a running worldserver holds characters in memory and saves them back over "
+            "whatever it finds. Press Stop first, then try again."
+        )
+
+    if spec.db not in set(status()):
+        # Started rather than demanded, because Stop takes the database down with
+        # everything else — a user who followed the refusal above would otherwise
+        # have no way back to a state this action accepts.
+        logger.info(f"repair_import(): starting {spec.db} alone; the import needs it")
+        _run(["compose", "up", "-d", "--no-deps", spec.db], cwd=server_dir)
+        if not wait_db_healthy(spec.db, timeout=db_timeout):
+            raise DockerCommandError(
+                f"{spec.db} did not report healthy within {db_timeout:.0f}s, so nothing was "
+                f"imported. `docker compose logs {spec.db}` in {server_dir} will say why."
+            )
+
+    before = probe()
+    logger.info(f"repair_import(): the databases read as {before.state} — {before.detail}")
+    if before.state == "populated":
+        raise DockerCommandError(
+            f"this install's databases hold player data ({before.detail}). Re-running the import "
+            "would overwrite it, so it was not run. If the database is damaged, restore the last "
+            "backup from the Maintenance tab instead — that is the path that keeps characters."
+        )
+    if before.state == "imported":
+        raise DockerCommandError(
+            f"the import has already completed ({before.detail}), so there is nothing to repair. "
+            "If the server still will not start, its logs are where the reason is."
+        )
+    if not before.repairable:
+        raise DockerCommandError(
+            f"the databases could not be asked what state they are in ({before.detail}), so the "
+            "import was not re-run. Nothing can be established about them either way."
+        )
+
+    logger.warning(f"repair_import(): `compose up --no-deps {service}` in {server_dir}")
+    proc = _docker(["compose", "up", "--no-deps", service], cwd=server_dir)
+    if proc.returncode != 0:
+        # Not raised here. A one-shot that failed part-way and one that failed
+        # having done nothing are the same exit code, and the probe below is the
+        # only thing that can tell them apart — so the check happens either way
+        # and this only makes sure the reason is in the log.
+        logger.warning(f"{service} exited {proc.returncode}: {proc.stderr.strip()}")
+
+    after = probe()
+    if after.state != "imported":
+        raise DockerCommandError(
+            f"{service} ran, but the databases still read as {after.state} ({after.detail}). "
+            f"Nothing is imported that was not imported before. `docker compose logs {service}` "
+            f"in {server_dir} will say what it was unable to do."
+        )
+    logger.info(f"repair_import(): {service} finished and the databases now read as imported")
+    return True
 
 
 def _run_docker_stop(container: str) -> None:
