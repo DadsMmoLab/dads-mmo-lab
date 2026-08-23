@@ -90,11 +90,21 @@ class Install(_Strict):
 
 
 class Containers(_Strict):
-    """The three container names the controller manages."""
+    """The three container names the controller manages, and the import job's service."""
 
     db: str = Field(min_length=1)
     auth: str = Field(min_length=1)
     world: str = Field(min_length=1)
+    db_import: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Compose SERVICE (not container) that populates the databases, e.g. ac-db-import. "
+            "Only `docker.repair_import()` may select it; leaving it out means this game offers "
+            "no repair action, which is the right answer for a core whose import is not a "
+            "separate one-shot service."
+        ),
+    )
 
 
 class Ports(_Strict):
@@ -159,6 +169,7 @@ class CatalogEntry(_Strict):
             auth=self.containers.auth,
             world=self.containers.world,
             ports=(self.ports.auth, self.ports.world),
+            import_service=self.containers.db_import or "",
         )
 
 

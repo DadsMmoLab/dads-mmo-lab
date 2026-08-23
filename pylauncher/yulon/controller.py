@@ -77,9 +77,20 @@ class Controller:
     the subclass should reimplement it (style-guide §4).
     """
 
-    def __init__(self, spec: docker.ContainerSpec, server_dir: Path) -> None:
+    def __init__(
+        self,
+        spec: docker.ContainerSpec,
+        server_dir: Path,
+        *,
+        import_probe: docker.ImportProbe | None = None,
+    ) -> None:
         self.spec = spec
         self.server_dir = server_dir
+        # Composed, not inherited, and optional: asking a database what state it
+        # is in needs a SQL client and per-game schema names, neither of which
+        # this class may know (style-guide §3). A controller built without one
+        # simply never offers the repair — see `import_state()`.
+        self.import_probe = import_probe
 
     # -- queries ---------------------------------------------------------
 
@@ -193,6 +204,39 @@ class Controller:
             there was nothing of it to remove.
         """
         return docker.remove_staged(self.spec, self.server_dir)
+
+    def import_state(self) -> docker.ImportState:
+        """Ask this install's databases whether the one-shot import ever finished.
+
+        Never raises: a probe that cannot reach the database answers
+        `unreadable`, and so does a controller built without one. The caller is
+        a five-second status path and a button's visibility, and neither has
+        anywhere useful to put an exception — while `unreadable` is not
+        `repairable`, so the destructive action stays hidden either way.
+        """
+        if self.import_probe is None:
+            return docker.ImportState(
+                "unreadable", "this game has no way to ask its databases what state they are in"
+            )
+        return self.import_probe()
+
+    def repair_import(self) -> bool:
+        """Re-run the one-shot database import. Only for an install broken before it ran.
+
+        See `docker.repair_import()` for every refusal, in particular the one
+        that matters: a database holding accounts or characters is never
+        re-imported, however many times the button is pressed.
+
+        Raises:
+            docker.DockerCommandError: any of those refusals, or an import that
+                ran and left the databases exactly as unimported as they were.
+        """
+        if self.import_probe is None:
+            raise docker.DockerCommandError(
+                "this game cannot be asked what state its databases are in, so its import will "
+                "not be re-run — an import that cannot be checked afterwards is a guess."
+            )
+        return docker.repair_import(self.spec, self.server_dir, self.import_probe)
 
     # -- polling ---------------------------------------------------------
 

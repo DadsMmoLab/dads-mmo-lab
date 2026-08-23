@@ -242,3 +242,73 @@ the name if this folder is a copy.
 
 Carry into 6.2: the native engine should give each install an identity that is **not** a file in
 the install directory — the `.env` pin is a workaround for compose's basename rule, not a design.
+
+## The repair / re-import action — settled 2026-08-23
+
+Checklist 6.5 owed a deliberate "repair / re-import" for an install interrupted *after* its
+containers were created but *before* the import finished. `start_staged()` names three services
+with `--no-deps` so an ordinary Start can never re-run `ac-db-import`; the honest consequence is
+that nothing in the app could finish an import that never finished itself. Five judgement calls
+went into `docker.repair_import()` and `controller_wow_wotlk/repair.py`, and each had a plausible
+alternative.
+
+**1. Detection is drawn on player data, not on completeness.** The obvious design asks "did the
+import finish" and refuses when the answer is yes. It cannot be built: AzerothCore writes no
+completion marker, and the only alternative — "`acore_world` should have N tables" — is a number
+that silently rots with every upstream release, in the direction that offers to overwrite a good
+database. So the refusal is keyed on the thing whose loss cannot be undone: rows in
+`acore_auth.account` and `acore_characters.characters`. That question is asked **before** any
+judgement about completeness, because a half-imported database that holds characters is still
+somebody's server; asked the other way round, an install whose world schema never finished would
+read as `partial`, offer the button, and take the accounts with it.
+
+**The third state, stated rather than papered over.** A machine that died *late* in the import —
+every schema created, some tables missing — reads as `imported` here and is not offered a repair.
+That is a known blind spot, not a claim of correctness. What makes it acceptable is that it is
+only reachable on a database with no player data, where the fallback (remove the containers,
+install again) costs time and nothing else. A machine that died *early* — a schema with no tables
+at all — reads as `partial` and is offered the repair, which is the common case: the import fills
+one schema at a time.
+
+**2. Two seams, because neither answers the whole question.** `apply.DockerSql` puts the database
+in argv (`mysql -uroot acore_auth`), so against a never-imported server every call it makes fails
+with "Unknown database" — it cannot ask whether the schemas exist. `maintenance.DockerMysql`'s
+`databases()` runs with no schema selected and can. So existence comes from `DockerMysql`, and
+everything inside an existing schema comes from `DockerSql`, routed through a schema the first
+answer proved is there. Neither seam was widened, and the probe declares the read-only half of
+`DockerSql` rather than reusing `accounts.SqlSeam`, which also carries `run_statement()`: nothing
+in a probe should be able to write.
+
+**3. The action starts the database, and that is a deliberate widening of "runs only the one-shot
+service".** The requirement was one command naming one service. It is two, and the first is
+`compose up -d --no-deps <db>` when the database is not already running. Without it the action is
+**unreachable through the app's own buttons**: it refuses while the servers are up, Stop is the
+only thing that stops them, and Stop stops the database with them. The alternative — drop
+`--no-deps` from the import command and let compose's `depends_on` start the database — was
+rejected twice over. The dependency closure of `ac-db-import` has never been measured in this
+repo (upstream's compose file is not in the tree), and dropping `--no-deps` would also break
+attached mode: `compose up` returns when every attached container stops, and the database never
+stops, so the command would hang forever. `--no-deps` is what makes the one-shot the only
+container compose brings up, which is what makes attached mode terminate.
+
+**4. The exit code is not the answer, for the same reason it is not for `compose down`.** A
+one-shot that died part-way and one that never touched a table are the same exit code from
+outside. The probe runs again afterwards and only a database that now reads as `imported` counts.
+
+**5. Visibility is a remembered answer, not a live one.** The probe costs three `docker exec`s and
+the status poll runs every five seconds, so it is put once per time the database comes up (plus
+whenever Refresh is pressed) and the answer is kept. Keeping it is not laziness: the state this
+action exists for is reached by pressing Stop, after which the database cannot be asked at all, so
+a strictly-live answer would hide the button exactly when it is needed. The action itself never
+trusts that memory — it re-censuses ownership and re-probes the database before it does anything.
+
+**Unproven against a live daemon.** Everything above is unit-tested with `runner.run` faked and
+fifteen mutations proven to die. Nothing here has met a real `ac-db-import`. A live gate has to:
+interrupt an install between `compose up` and the end of the import (killing `ac-db-import`
+mid-run is enough); confirm the probe reads `absent` or `partial` and names which schema; confirm
+Start still fails; run the repair and confirm it runs `ac-db-import` and no other service (`docker
+events` or `docker ps -a --filter label=…` before and after); confirm Start then works; and then
+run the repair again on the now-populated server and confirm it refuses, naming the account count.
+The refusal on a populated database is the one that has to be gated on a server with real
+characters on it, not on an empty one.
+

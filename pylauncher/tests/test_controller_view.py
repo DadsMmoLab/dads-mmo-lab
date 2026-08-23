@@ -507,3 +507,198 @@ def test_a_removal_that_found_nothing_says_so(qapp: object, ps: _Ps, tmp_path: P
     view.remove_containers()
     view.remove_containers()
     assert "no containers to remove" in view.problem_label.text()
+
+
+UNIMPORTED = docker.ImportState("partial", "acore_characters holds no tables")
+
+
+def _watch_repair(
+    view: ControllerView,
+    state: docker.ImportState = UNIMPORTED,
+    result: BaseException | bool = True,
+) -> list[int]:
+    """Replace the controller's probe and repair with recorders.
+
+    The view's job is the offering and the arming; whether the import is safe to
+    run is `docker.repair_import()`'s, and that has its own tests including the
+    refusal over a populated database.
+    """
+    calls: list[int] = []
+
+    def fake_repair() -> bool:
+        calls.append(1)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    view.services.controller.import_state = lambda: state  # type: ignore[method-assign]
+    view.services.controller.repair_import = fake_repair  # type: ignore[method-assign]
+    return calls
+
+
+def _db_up(view: ControllerView, ps: _Ps) -> None:
+    """The database running is what lets the tab ask about the import at all."""
+    ps.names = "ac-database\n"
+    view.refresh_status()
+
+
+def test_the_repair_is_not_offered_until_the_database_says_it_is_needed(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A destructive action that is always on screen is one that gets pressed by accident.
+
+    The installer imports on every healthy path, so an offer to import again is
+    only ever right for an install that is already broken — and the only thing
+    that can say it is broken is the database itself.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert view.repair_button.isHidden(), "offered before anything was asked"
+
+    _watch_repair(view, docker.ImportState("imported", "acore_world has 1103 tables"))
+    _db_up(view, ps)
+    assert view.repair_button.isHidden(), "offered on a database that is already imported"
+
+    _watch_repair(view, docker.ImportState("populated", "651 rows in acore_auth.account"))
+    view.recheck()
+    assert view.repair_button.isHidden(), "offered on a database with characters on it"
+
+    _watch_repair(view, docker.ImportState("unreadable", "no such container"))
+    view.recheck()
+    assert view.repair_button.isHidden(), "offered on the strength of a question nobody answered"
+
+    _watch_repair(view, UNIMPORTED)
+    view.recheck()
+    assert not view.repair_button.isHidden(), "an unfinished import was never offered a repair"
+    assert "acore_characters holds no tables" in view.repair_label.text()
+
+
+def test_the_repair_takes_two_presses_and_says_what_is_overwritten(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The teardown's warning says what is kept; this one has to say what is lost.
+
+    It is offered because the probe found no accounts and no characters. If that
+    is wrong — the wrong install, a probe that read a stale database — the
+    sentence has to give the user somewhere else to go, and Restore is the path
+    that keeps characters.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    calls = _watch_repair(view)
+    _db_up(view, ps)
+
+    view.repair_import()
+    assert calls == [], "the first press imported something"
+    assert view.repair_button.text() == controller_view_module.REPAIR_ARMED
+    said = view.problem_label.text()
+    assert "OVERWRITTEN" in said, said
+    assert "restore a backup" in said, "no way out was offered"
+    assert "Refresh" in said, "no way to cancel was offered"
+
+    view.repair_import()
+    assert calls == [1]
+    assert view.repair_button.text() == controller_view_module.REPAIR_IDLE, "still armed after"
+
+
+def test_the_two_destructive_buttons_are_never_armed_together(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Both write their warning into the same label, so one has to disarm the other.
+
+    Two loaded buttons under one paragraph is a second press that does whichever
+    of them the user had forgotten about.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    removals = _watch_remove(view)
+    repairs = _watch_repair(view)
+    _db_up(view, ps)
+
+    view.remove_containers()
+    view.repair_import()
+    assert view.remove_button.text() == controller_view_module.REMOVE_IDLE
+    assert view.repair_button.text() == controller_view_module.REPAIR_ARMED
+
+    view.remove_containers()
+    assert repairs == [], "arming the teardown left the import armed and it ran"
+    assert removals == [], "the teardown ran on what was its first press again"
+
+
+def test_refresh_start_and_stop_all_cancel_an_armed_repair(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Arming then walking away must not leave the most destructive button loaded."""
+    for action in ("recheck", "start_server", "stop_server"):
+        view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+        calls = _watch_repair(view)
+        _db_up(view, ps)
+        view.repair_import()
+        assert view.repair_button.text() == controller_view_module.REPAIR_ARMED, action
+        getattr(view, action)()
+        assert view.repair_button.text() == controller_view_module.REPAIR_IDLE, action
+        view.repair_import()
+        assert calls == [], f"the press after {action} imported something"
+
+
+def test_a_finished_repair_stops_offering_itself(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """The remembered answer is stale the moment the import succeeds."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    _watch_repair(view)
+    _db_up(view, ps)
+    assert not view.repair_button.isHidden()
+
+    view.services.controller.import_state = lambda: docker.ImportState(  # type: ignore[method-assign]
+        "imported", "acore_world has 1103 tables"
+    )
+    view.repair_import()
+    view.repair_import()
+    assert "import finished" in view.problem_label.text()
+    assert view.repair_button.isHidden(), "still offering to import an install it just imported"
+
+
+def test_a_refused_repair_is_readable_on_screen(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """`repair_import()` asks the database again itself and refuses on what it finds.
+
+    That refusal names the accounts it found and points at Restore; discarded,
+    the tab would say nothing at all about why the button did nothing.
+    """
+    refusal = docker.DockerCommandError(
+        "this install's databases hold player data (651 rows in acore_auth.account)."
+    )
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    _watch_repair(view, result=refusal)
+    _db_up(view, ps)
+
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    view.repair_import()
+    view.repair_import()
+    assert "651 rows in acore_auth.account" in view.problem_label.text()
+    assert failures and "player data" in failures[0]
+
+
+def test_the_database_is_asked_about_its_import_once_per_time_it_comes_up(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The probe is three `docker exec`s and the status poll runs every five seconds.
+
+    Asking on every poll would put that on a loop forever; asking once and never
+    again would leave the answer wrong after the user fixed something.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    asked: list[int] = []
+
+    def probe() -> docker.ImportState:
+        asked.append(1)
+        return UNIMPORTED
+
+    view.services.controller.import_state = probe  # type: ignore[method-assign]
+
+    _db_up(view, ps)
+    view.refresh_status()
+    view.refresh_status()
+    assert asked == [1], "the probe ran on every poll"
+
+    ps.names = ""  # the database went down again
+    view.refresh_status()
+    ps.names = "ac-database\n"
+    view.refresh_status()
+    assert asked == [1, 1], "the probe never ran again after the database came back"
