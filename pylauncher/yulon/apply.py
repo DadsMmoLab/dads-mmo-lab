@@ -116,9 +116,10 @@ class DockerSql:
                 (the `OSError` here). The second used to surface as a bare
                 `[WinError 2]` (review, 2026-08-23).
         """
+        argv = self._argv(db)
         try:
             return subprocess.run(
-                self._argv(db),
+                argv,
                 stdin=stdin,
                 input=statement,
                 capture_output=True,
@@ -127,6 +128,11 @@ class DockerSql:
                 env=self._env(),
             )
         except OSError as exc:
+            # Logged with the real errno first, the way `docker._docker()` does, so a
+            # docker.exe blocked by an ACL or by AV leaves evidence instead of being
+            # reported to the user as "install Docker Desktop" with nothing in the log
+            # to contradict it (review finding, 2026-08-23).
+            logger.warning(f"{argv[0]} could not be started: {exc}")
             raise ApplyError(platform.DOCKER_CLI_MISSING_HELP) from exc
 
     def _env(self) -> dict[str, str]:

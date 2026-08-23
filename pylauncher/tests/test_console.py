@@ -10,6 +10,7 @@ error; the behaviour tests below only run where a pty exists.
 from __future__ import annotations
 
 import io
+import logging
 import os
 import subprocess
 from typing import Any
@@ -90,12 +91,31 @@ def test_send_command_rejects_multiline_or_empty() -> None:
 
 
 @needs_pty
-def test_send_command_wraps_popen_failure() -> None:
+def test_send_command_wraps_popen_failure(caplog: pytest.LogCaptureFixture) -> None:
+    """A spawn that fails says what the other three docker modules say — errno kept.
+
+    This used to re-raise the OSError's own text. The path that actually
+    produces it is a `docker.exe` the resolution cache pinned and something then
+    removed — a Docker Desktop uninstall or in-place upgrade mid-session, which
+    the cache cannot follow because it deliberately remembers a hit. "No such
+    file" is not something a user can act on; the shared sentence is.
+
+    The real error is logged at WARNING FIRST, which is the half worth pinning:
+    without it a docker.exe blocked by an ACL or by AV would be reported as
+    "install Docker Desktop" with nothing in the log to contradict it
+    (review finding, 2026-08-23).
+    """
+
     def boom(argv: list[str], **kwargs: Any) -> subprocess.Popen[bytes]:
         raise OSError("no docker")
 
-    with pytest.raises(console.ConsoleError, match="no docker"):
-        console.send_command("server info", popen=boom)  # type: ignore[arg-type]
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(console.ConsoleError, match="Docker could not be found"):
+            console.send_command("server info", popen=boom)  # type: ignore[arg-type]
+    assert any("no docker" in r.getMessage() for r in caplog.records), (
+        "the real error was swallowed; an ACL or AV block would be indistinguishable "
+        "from Docker not being installed"
+    )
 
 
 def test_send_command_rejects_carriage_returns_too() -> None:

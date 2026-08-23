@@ -1229,7 +1229,7 @@ def follow_logs(container: str, tail: int = 200) -> Iterator[str]:
     `CompletedProcess`: `runner.stream()` yields lines, so there is no exit
     status to hand back. `LogPanel`'s worker catches everything the source
     raises and shows it as `"<type>: <message>"`, so a missing CLI reads as
-    "DockerCommandError: Docker could not be found on this machine..." in the
+    "DockerCliMissingError: Docker could not be found on this machine..." in the
     panel — where the unresolved name used to surface a bare WinError 2.
     """
     logger.debug(f"follow_logs() called: container={container} tail={tail}")

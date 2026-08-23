@@ -322,6 +322,11 @@ class ContainerGit:
         try:
             proc = runner.run(argv, env=_no_prompt_env())
         except OSError as exc:
+            # Logged with the real errno first, the way `docker._docker()` does, so a
+            # docker.exe blocked by an ACL or by AV leaves evidence instead of being
+            # reported to the user as "install Docker Desktop" with nothing in the log
+            # to contradict it (review finding, 2026-08-23).
+            logger.warning(f"{argv[0]} could not be started: {exc}")
             raise GitError(platform.DOCKER_CLI_MISSING_HELP) from exc
         if proc.returncode != 0:
             raise GitError(f"containerized git {' '.join(git_args)} failed: {proc.stderr.strip()}")

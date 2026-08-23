@@ -118,7 +118,17 @@ def send_command(
     except OSError as exc:
         os.close(master)
         os.close(slave)
-        raise ConsoleError(f"docker attach failed to start: {exc}") from exc
+        # The fourth module that has to say this — `DOCKER_CLI_MISSING_HELP`'s own
+        # docstring names all four. `attach_argv()` above covers the never-resolved
+        # case; this covers the pinned-then-removed one, where argv[0] is an
+        # absolute path that has since gone (a Docker Desktop uninstall or in-place
+        # upgrade mid-session), which used to surface as a bare [Errno 2].
+        # Logged with the real errno first, the way `docker._docker()` does, so a
+        # docker.exe blocked by an ACL or by AV leaves evidence instead of being
+        # reported to the user as "install Docker Desktop" with nothing in the log
+        # to contradict it (review finding, 2026-08-23).
+        logger.warning(f"{argv[0]} could not be started: {exc}")
+        raise ConsoleError(platform.DOCKER_CLI_MISSING_HELP) from exc
     os.close(slave)  # the child holds its own copy
     assert proc.stdout is not None
     out: list[str] = []
