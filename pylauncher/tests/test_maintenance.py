@@ -348,6 +348,39 @@ def test_restore_takes_a_copy_of_what_it_is_about_to_overwrite(tmp_path: Path) -
     assert mysql.loaded == [good_dump("acore_world")]
 
 
+def test_a_restore_notices_a_marker_that_appeared_after_its_plan_was_made(
+    tmp_path: Path,
+) -> None:
+    """The marker is re-read with the census, not carried over from a stale plan.
+
+    Reading the plan's copy would take a safety dump of a database some other
+    restore had already part-overwritten, which captures the mess and drops the
+    pointer to the last good copy.
+    """
+    mysql = FakeMysql(("acore_world",))
+    path = a_backup_of(tmp_path, "acore_world")
+    plan = plan_restore(path, tmp_path, running=running(DB))
+    assert plan.interrupted is None
+
+    earlier = backups_dir(tmp_path) / "20260823_120000_pre-restore_acore_world.sql"
+    earlier.parent.mkdir(parents=True, exist_ok=True)
+    earlier.write_bytes(good_dump("acore_world"))
+    maintenance.marker_path(tmp_path).write_text(
+        maintenance.InterruptedRestore(
+            marker=maintenance.marker_path(tmp_path),
+            backup=path,
+            databases=("acore_world",),
+            safety_backup=(earlier,),
+            started_at="2026-08-23T12:00:00",
+        ).as_json(),
+        encoding="utf-8",
+    )
+
+    report = restore(plan, mysql, confirm=plan.token, running=running(DB), now=AT)
+    assert report.safety_backup == (earlier,)
+    assert mysql.dumped == [], "no dump of a database a previous restore had part-overwritten"
+
+
 def test_a_finished_restore_leaves_no_marker(tmp_path: Path) -> None:
     """The marker means "in flight"; a completed restore must not look interrupted."""
     mysql = FakeMysql(("acore_world",))

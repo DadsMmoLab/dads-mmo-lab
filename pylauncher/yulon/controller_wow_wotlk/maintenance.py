@@ -789,12 +789,17 @@ def restore(
 
     marker = marker_path(plan.server_dir)
     marker.parent.mkdir(parents=True, exist_ok=True)
-    if plan.interrupted is not None:
+    # `fresh`, not `plan`: the marker is the one thing here that can appear
+    # BETWEEN a plan being made and it being used, and reading the stale copy
+    # would take a fresh safety dump of a database another restore had already
+    # part-overwritten — capturing the mess and losing the pointer to the last
+    # good copy, which is the exact accident the carry-forward exists to stop.
+    if fresh.interrupted is not None:
         logger.warning(
-            f"a previous restore of {plan.interrupted.backup.name} never finished; keeping its "
+            f"a previous restore of {fresh.interrupted.backup.name} never finished; keeping its "
             "safety copy rather than dumping a half-restored database over it"
         )
-        safety: tuple[Path, ...] = plan.interrupted.safety_backup
+        safety: tuple[Path, ...] = fresh.interrupted.safety_backup
     else:
         safety = _safety_backup(plan, mysql, spec=spec, running=running, now=now)
 
