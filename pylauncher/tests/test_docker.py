@@ -2000,7 +2000,7 @@ def test_repair_import_accepts_an_import_that_seeded_its_own_accounts(
     by the run that just happened.
     """
     calls: list[list[str]] = []
-    monkeypatch.setattr(docker.runner, "run", _repair_runner(calls, running={SPEC.db}))
+    _repair_doubles(monkeypatch, calls, running={SPEC.db})
     seeded = docker.ImportState(
         "populated", "400 rows in acore_auth.account, 400 rows in acore_characters.characters"
     )
