@@ -266,6 +266,70 @@ def test_console_tab_sends_commands(qapp: object, ps: _Ps, tmp_path: Path) -> No
     assert "> server info" in view.console_log.text() and "ok" in view.console_log.text()
 
 
+def test_an_empty_reply_is_said_out_loud_rather_than_shown_as_silence(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Cutting between prompts makes `()` routine; silence reads as a dropped command.
+
+    Before the parser delimited anything an empty reply was near impossible on a
+    busy server — the old window always carried something back. Now a command
+    with no output, or one whose answer outlived the window, ends here, and the
+    user was left staring at their own echo with nothing to act on.
+    """
+    services = _services(ps, tmp_path, [])
+    services.send_console = lambda cmd: ConsoleReply(cmd, ())
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.command_edit.setText("gm list")
+    view.send_console_command()
+    assert "no reply inside the 3s window" in view.console_log.text()
+
+
+def test_a_window_with_no_prompt_is_not_presented_as_an_answer(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A worldserver still loading maps prints no `AC> ` — and Send is live throughout.
+
+    Those lines are the startup log, which this same panel already streams. They
+    are still shown, because docker's own failure arrives in exactly this shape
+    and hiding it would turn the one explanation into silence — but they are no
+    longer shown as the command's reply.
+    """
+    services = _services(ps, tmp_path, [])
+    services.send_console = lambda cmd: ConsoleReply(cmd, ("Loading maps 12%",), prompted=False)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.command_edit.setText("gm list")
+    view.send_console_command()
+    text = view.console_log.text()
+    assert "no console prompt in the reply window" in text
+    assert "Loading maps 12%" in text
+
+
+def test_send_refuses_a_second_command_while_one_is_in_flight(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A second attach client on one tty corrupts both windows (see `console._PROMPT`).
+
+    Nothing answers for three seconds, so pressing Send again is the natural
+    thing to do; it used to start a concurrent `docker attach` and overwrite the
+    pending callback.
+    """
+    pending: list[object] = []
+
+    def never_finishes(work: object, on_done: object, on_error: object) -> None:
+        pending.append(work)
+
+    view = ControllerView(
+        WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=never_finishes
+    )
+    view.command_edit.setText("server info")
+    view.send_console_command()
+    view.command_edit.setText("gm list")
+    view.send_console_command()
+    assert len(pending) == 1, "a second attach was started while the first was still open"
+    assert not view.send_button.isEnabled()
+    assert "gm list" not in view.console_log.text()
+
+
 def test_creating_an_account_never_touches_the_console(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:

@@ -123,3 +123,58 @@ def test_the_next_job_is_not_still_cancelled_from_the_last_one(qapp: object) -> 
     _wait_for(panel)
     assert panel.cancelled is False
     assert panel.status_text() == "finished: done"
+
+
+def test_stopping_a_panel_that_is_not_running_does_not_call_the_last_job_cancelled(
+    qapp: object,
+) -> None:
+    """`main._stop_background_threads()` stops EVERY panel at exit, running or not.
+
+    A panel that finished its job cleanly then ended the session reporting
+    `cancelled is True` beside a header reading "finished: done" — two
+    statements about the same job, one of them false.
+    """
+    panel = LogPanel()
+    panel.stop()
+    assert panel.cancelled is False, "a panel that never ran a job reported a cancelled one"
+
+    panel.run(lambda: iter(["a line"]))
+    _wait_for(panel)
+    assert panel.status_text() == "finished: done"
+    panel.stop()
+    assert panel.cancelled is False
+
+
+def test_terminal_colour_codes_never_reach_the_panel(qapp: object) -> None:
+    """Both sources feed raw escapes: the install script's colour and the worldserver's.
+
+    `\\x1b[36m` on every `[mod-city-bots]` line and the bracketed-paste
+    `\\x1b[?2004h` around the console prompt are confirmed in the real stream,
+    and a QPlainTextEdit renders neither — it showed the sequences themselves.
+    """
+    panel = LogPanel()
+    panel.append("\x1b[36m[mod-city-bots] completed pending teleport for Ella\x1b[0m")
+    panel.append("\x1b[?2004hAC> No gamemasters.")
+    panel.append("\x1b(Bplain")
+    assert panel.text().splitlines() == [
+        "[mod-city-bots] completed pending teleport for Ella",
+        "AC> No gamemasters.",
+        "(Bplain",
+    ]
+    assert "\x1b" not in panel.text()
+
+
+def test_the_thread_can_be_joined_without_an_event_loop(qapp: object) -> None:
+    """The one caller that must join is the one with no event loop left to pump.
+
+    `main()` calls `_stop_background_threads()` from its `finally`, after
+    `app.exec()` has returned, and that blocks in `panel.wait()`. The worker's
+    `finished -> thread.quit` connection is queued into the main thread, so it
+    could never be delivered from inside that wait: measured `wait(3000)` ->
+    False with the worker long since done, then Qt torn down with the QThread
+    still running (0xC0000409).
+    """
+    panel = LogPanel()
+    panel.run(lambda: iter(["one", "two"]))
+    assert panel.wait(5000) is True, "the join timed out with nothing pumping the main thread"
+    assert panel.running is False

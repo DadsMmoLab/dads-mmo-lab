@@ -288,6 +288,24 @@ def _stop_background_threads(window: object) -> None:
     A `QThread` destroyed while running does not warn — it ABORTS the process
     (0xC0000409, verified): closing the window mid-install or while following
     a log must first stop and join those panels (review finding, 2026-08-21).
+
+    This runs from `main()`'s `finally`, AFTER `app.exec()` has returned, so
+    nothing is pumping the main thread's event queue while `panel.wait()`
+    blocks in it. That is not incidental — it is why the join has to be able to
+    complete without one, and for a while it could not: a panel's worker
+    reached its thread only through `worker.finished -> thread.quit`, a queued
+    connection into this very thread. Measured: `wait(3000)` returned False
+    with the worker long finished, and Qt was then torn down with the QThread
+    still running — the abort above, arriving through the function meant to
+    prevent it. `LogPanel`'s worker now ends its own thread's loop directly
+    (see `_StreamWorker.run()`), and `ThreadedJobRunner.wait()` quits each
+    thread before waiting on it. Nothing here may go back to relying on a
+    queued quit (review, 2026-08-23).
+
+    What a close mid-install does NOT do, and never did, is register the
+    install: `_on_finished` is queued into this same blocked thread, so
+    `run_finished` never fires, `CatalogView._on_run_finished()` never runs and
+    nothing is written to `state.json` on this path.
     """
     from PySide6.QtCore import QThread
 

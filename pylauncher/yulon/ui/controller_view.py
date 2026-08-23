@@ -222,7 +222,7 @@ class ControllerView(QWidget):
         self._busy = False
         self._status_pending = False
         self._module_pending: str | None = None
-        self._pending_console: Callable[[], None] | None = None
+        self._console_pending = False
         self._tabs = QTabWidget(self)
         layout = QVBoxLayout(self)
         layout.addWidget(self._tabs)
@@ -771,33 +771,67 @@ class ControllerView(QWidget):
             self._send(command)
             self.command_edit.clear()
 
-    def _send(self, command: str, then: Callable[[], None] | None = None) -> None:
+    def _send(self, command: str) -> None:
         """Send one console command off the GUI thread (it waits for the reply window).
 
-        `then` runs after a successful reply — that is how `create_account()`
-        chains `account set gmlevel` without blocking the window.
+        Guarded the way `refresh_status()` is, and for a sharper reason. A
+        command costs the whole 3s window whatever it answers, an empty answer
+        is a routine outcome, and silence invites a second press — which used to
+        start a SECOND `docker attach` on the same container and overwrite the
+        pending callback. Two clients on one tty is what puts foreign prompts
+        and echoes inside each other's windows (see `console._PROMPT`), so the
+        obvious response to a quiet console was also the way to corrupt the next
+        reply (review, 2026-08-23).
+
+        It used to take a `then` callback so account creation could chain
+        `account set gmlevel` behind `account create`. Nothing passes it any
+        more — accounts have their own tab and write the row through SRP6 — so
+        it went, along with a docstring that described a caller that no longer
+        exists.
         """
+        if self._console_pending:
+            return
         shown = command if not command.startswith("account create") else "account create ****"
         self.console_log.append(f"> {shown}")
-        self._pending_console = then
+        self._console_pending = True
+        self.send_button.setEnabled(False)
         self._run(
             lambda: self.services.send_console(command),
             self._console_reply,
             self._console_failed,
         )
 
+    def _console_idle(self) -> None:
+        """Re-arm Send — never where there is no pty (see `_build_console_tab()`)."""
+        self._console_pending = False
+        self.send_button.setEnabled(wotlk_console.pty_supported())
+
     @Slot(object)
     def _console_reply(self, result: object) -> None:
-        then, self._pending_console = self._pending_console, None
-        if isinstance(result, wotlk_console.ConsoleReply):
-            for line in result.lines:
-                self.console_log.append(line)
-        if then is not None:
-            then()
+        self._console_idle()
+        if not isinstance(result, wotlk_console.ConsoleReply):
+            return
+        if not result.prompted:
+            # No `AC> ` anywhere in the window, so those lines are whatever
+            # arrived rather than an answer. Docker's own failure looks like
+            # this, and so does a worldserver still loading maps — which the tab
+            # used to print as if it were a reply, into the panel that is
+            # already streaming the same log.
+            self.console_log.append(
+                "(no console prompt in the reply window — what follows is whatever arrived, "
+                "not an answer; the worldserver may still be starting)"
+            )
+        elif not result.lines:
+            # Cutting between prompts makes an empty answer normal, and an empty
+            # answer used to leave the user staring at their own echo with
+            # nothing to distinguish it from a command the app had dropped.
+            self.console_log.append("(no reply inside the 3s window)")
+        for line in result.lines:
+            self.console_log.append(line)
 
     @Slot(object)
     def _console_failed(self, exc: object) -> None:
-        self._pending_console = None
+        self._console_idle()
         self.console_log.append(f"!! {exc}")
         self.action_failed.emit(str(exc))
 

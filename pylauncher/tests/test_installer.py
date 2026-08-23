@@ -185,6 +185,88 @@ def test_a_cancelled_run_is_not_logged_as_a_finished_install(
     assert not any("finished" in message for message in said), said
 
 
+def test_the_cancel_log_survives_a_line_arriving_after_stop(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The other cancel shape, and the one that left the log with no ending at all.
+
+    `_StreamWorker.run()` breaks its loop on the first line received AFTER Stop,
+    and breaking drops the last reference to this generator — CPython closes it
+    and raises `GeneratorExit` at the `yield`, which `except CalledProcessError`
+    does not catch. The app log is the file a user pastes into a bug report and
+    it held "installing wow-wotlk via ..." and then nothing (review,
+    2026-08-23).
+    """
+    import threading
+
+    entry = load_catalog().get("wow-wotlk")
+    script = tmp_path / entry.install.script
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/bin/bash\n", encoding="utf-8")
+    cancel = threading.Event()
+
+    def interact(command: list[str], **kwargs: object) -> Iterator[str]:
+        yield "cloning"
+        cancel.set()  # Stop, mid-stream
+        yield "one more line the worker will never take"
+
+    installer = _installer(
+        entry,
+        installers_root=tmp_path,
+        docker_check=lambda: True,
+        interact=interact,  # type: ignore[arg-type]
+    )
+    with caplog.at_level("INFO", logger="yulon.catalog.installer"):
+        lines = installer.run(InstallOptions(), cancel=cancel)
+        for _ in lines:
+            if cancel.is_set():
+                break  # exactly what `_StreamWorker.run()` does
+        lines.close()
+    said = [record.message for record in caplog.records]
+    assert any("was cancelled" in message for message in said), said
+    assert not any("finished" in message for message in said), said
+
+
+def test_the_cancel_copy_points_at_use_existing_when_the_source_is_on_disk(
+    tmp_path: Path,
+) -> None:
+    """Stop after the build finished throws away hours; the recovery is one button.
+
+    `interact()` breaks on `cancel.is_set()` at the top of its loop, before it
+    ever looks at the child's return code, so a Stop pressed while the script
+    sits in `wait_for_server` (up to 1800 s of bare dots, with the containers
+    already up) discards a completed install. The app cannot prove that from
+    here — see `cancelled_install_message()` — but it can name the evidence it
+    does have and the button that adopts the folder without pinning it.
+    """
+    from yulon.catalog.installer import cancelled_install_message
+
+    nothing_there = cancelled_install_message("WoW WotLK", tmp_path)
+    assert "Use existing" not in nothing_there
+    assert "nothing to resume" in nothing_there
+
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    source_there = cancelled_install_message("WoW WotLK", tmp_path)
+    assert "Use existing" in source_there
+    assert str(tmp_path) in source_there
+
+
+def test_neither_new_rule_answers_a_line_that_is_not_the_question() -> None:
+    """`respond()` sees every line, and on a quiet partial line the whole buffer.
+
+    An unanchored `Remove snap Docker` writes "n" into a child that is not
+    reading, which desynchronises the next real prompt; an unanchored
+    rpm-ostree rule opens a modal dialog over ordinary build output. Both new
+    rules now carry the `(y/n)` suffix `ask_yes_no` prints, the way the
+    docker-group rule already did (review, 2026-08-23).
+    """
+    asked: list[str] = []
+    respond = make_responder(InstallOptions(), ask=lambda prompt: (asked.append(prompt), "y")[1])
+    assert respond("  Remove snap Docker first if you want to keep your own containers.") is None
+    assert respond("Step 4/9: Install Docker via rpm-ostree and reboot now was skipped") is None
+    assert asked == []
+
+
 @pytest.mark.parametrize(
     ("package_manager", "expected"),
     [

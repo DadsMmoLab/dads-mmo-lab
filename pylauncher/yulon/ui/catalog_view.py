@@ -286,6 +286,28 @@ class CatalogView(QWidget):
             QMessageBox.information(self, "Install cancelled", note)
             self.install_finished.emit(game_id, False, note)
             return
+        if ok and not (server_dir / "docker-compose.yml").is_file():
+            # A clean exit is not proof of an install. The scripts exit 0 for
+            # "Keeping existing install — exiting." too, which is what a user
+            # gets by pressing Install a second time on a folder the previous
+            # attempt left behind: `PROMPT_RULES` answers "n" to "Remove it and
+            # start fresh?" because nothing in the GUI ever sets `reinstall`.
+            # That used to pin a compose project name into a half-cloned folder
+            # and grow a permanent tab for a server that was never built — and
+            # the pin is the part with teeth, since `docker.py` records that an
+            # install-time pin is inherited by any copy of the folder, so Stop
+            # in the copy can stop the original's server. The check is the one
+            # `attach_existing()` makes, deliberately: the compose file is the
+            # single thing every install of every game has (review, 2026-08-23).
+            ok = False
+            message = (
+                f"The installer exited without error, but {server_dir} has no "
+                "docker-compose.yml — so there is nothing installed there to remember. "
+                "That is what the scripts do when they find an existing folder and are "
+                "told not to replace it: delete the folder and install again, or pick a "
+                "different one."
+            )
+            logger.info(f"{game_id} exited 0 with no compose file in {server_dir}; not remembered")
         if not ok:
             QMessageBox.warning(self, "Install failed", message)
         self.install_finished.emit(game_id, ok, message)

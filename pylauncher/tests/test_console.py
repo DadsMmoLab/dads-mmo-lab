@@ -6,9 +6,16 @@ command to the master end (live-verified on Linux, 2026-08-21). Windows has no
 pty, so `send_command()` refuses with an explanation instead of a raw docker
 error; the transport tests below only run where a pty exists.
 
-The parsing tests do not, and their fixtures are byte-exact captures from the
-real playerbots worldserver on yulon-ubuntu, 2026-08-23 — the live gate that
-found what they pin (`console._reply_lines()`).
+The parsing tests do not. Their fixtures are RECONSTRUCTED from the real
+playerbots worldserver on yulon-ubuntu, 2026-08-23 — the live gate that found
+what they pin (`console._parse_reply()`). The content is real; the line
+terminators and the long `[mod-city-bots]` lines are abridged. They were
+described here as "byte-exact captures" until a re-read of the container's own
+log showed the real answer lines end `\r\r\n` where these end `\r\n`, and the
+bot-log lines carry detail these drop (review, 2026-08-23). The difference is
+inert to this parser — `rstrip("\r\n")` eats both — but "byte-exact capture" is
+the phrase that licenses three unit tests to stand in for a live run nobody will
+repeat, so it has to be true or gone.
 """
 
 from __future__ import annotations
@@ -123,24 +130,29 @@ def test_send_command_wraps_popen_failure(caplog: pytest.LogCaptureFixture) -> N
 
 
 # ------------------------------------------- cutting the answer out of the window
-# Every byte string below was captured from the real playerbots worldserver on
-# yulon-ubuntu, 2026-08-23 (1843 characters in world), through a spy on
-# `_reply_lines()`. Before the fix these three windows returned 2, 5 and 1
-# lines respectively where the true answers are 1, 1 and 1.
+# Every byte string below is reconstructed from the real playerbots worldserver
+# on yulon-ubuntu, 2026-08-23 (1843 characters in world) — see the module
+# docstring for what is abridged. Before the fix these three windows returned 2,
+# 5 and 1 lines respectively where the true answers are 1, 1 and 1.
 
 
-def _reply(stdout: bytes, command: str) -> tuple[str, ...]:
+def _parse(stdout: bytes, command: str) -> console.ConsoleReply:
     """Parse `stdout` the way `send_command()`'s reader thread and parser do.
 
     Not routed through `send_command()`, deliberately: that path needs a pty and
-    would skip on Windows, and these three cases are about how an answer is cut
-    out of a window — behaviour that is identical on every platform and that
-    nobody would ever watch fail if the tests only ran on Linux. The one line
-    borrowed from the reader thread is its `rstrip`, so the fixtures can stay
-    byte-exact captures rather than hand-typed line lists.
+    would skip on Windows, and these cases are about how an answer is cut out of
+    a window — behaviour that is identical on every platform and that nobody
+    would ever watch fail if the tests only ran on Linux. The one line borrowed
+    from the reader thread is its `rstrip`, so the fixtures can stay byte
+    strings rather than hand-typed line lists.
     """
     pumped = [raw.decode("utf-8", errors="replace").rstrip("\r\n") for raw in io.BytesIO(stdout)]
-    return console._reply_lines(pumped, command)
+    return console._parse_reply(pumped, command)
+
+
+def _reply(stdout: bytes, command: str) -> tuple[str, ...]:
+    """Just the answer lines — what most of these tests are about."""
+    return _parse(stdout, command).lines
 
 
 def test_the_reply_ends_where_the_console_prints_its_prompt_again() -> None:
@@ -185,6 +197,71 @@ def test_a_window_with_no_prompt_hands_back_everything_it_saw() -> None:
     assert _reply(stopped, "server info") == (
         "cannot attach to a stopped container, start it first",
     )
+
+
+def test_a_stale_prompt_on_our_own_echo_does_not_swallow_the_answer() -> None:
+    """The window opened on the PREVIOUS command's closing prompt; the count restarts.
+
+    AzerothCore closes a command with `AC> ` and no newline, so the next thing
+    printed continues that physical line — here, our own echo. Counting prompts
+    from the top of the window then puts the real answer at prompt #2 and throws
+    it away: the user sees `> gm list` and then nothing at all, which is worse
+    than the unbounded window this replaced (review, 2026-08-23).
+    """
+    captured = (
+        b"AC> gm list\r\n"
+        b"\x1b[?2004l\r\x1b[?2004hAC> No gamemasters.\r\r\n"
+        b"AC> \x1b[36m[mod-city-bots] completed pending teleport for Ella (guid 9000030)\r\n"
+    )
+    assert _reply(captured, "gm list") == ("No gamemasters.",)
+
+
+def test_a_stale_prompt_on_a_log_line_is_not_reported_as_the_answer() -> None:
+    """The other shape of the same off-by-one, and the one that lies rather than hides.
+
+    The stale prompt lands on a bot-log line, so that line sits at prompt #1 and
+    is handed back AS the reply to `server info` while the real lines, at prompt
+    #2, are discarded.
+    """
+    captured = (
+        b"AC> \x1b[36m[mod-city-bots] completed pending teleport for Ella (guid 9000030)\r\n"
+        b"\x1b[0mserver info\r\n"
+        b"\x1b[?2004l\r\x1b[?2004hAC> AzerothCore rev. 8a2b1c9d0e4f 2026-08-20\r\r\n"
+        b"Connected players: 0. Characters in world: 1843.\r\r\n"
+        b"AC> \x1b[36m[mod-city-bots] status: 1845 bots\r\n"
+    )
+    assert _reply(captured, "server info") == (
+        "AzerothCore rev. 8a2b1c9d0e4f 2026-08-20",
+        "Connected players: 0. Characters in world: 1843.",
+    )
+
+
+def test_two_prompts_glued_onto_one_line_count_as_two() -> None:
+    """A command with no output closes on `AC> AC> `, and both halves are prompts.
+
+    Simplifying the strip loop to a single `if` is a plausible cleanup, and
+    without this the whole suite stays green while it turns every trailing
+    bot-log line into that command's reply.
+    """
+    assert _reply(b"gm list\r\nAC> AC> \r\n[mod-city-bots] noise\r\n", "gm list") == ()
+
+
+def test_a_console_that_never_prompted_says_so() -> None:
+    """`prompted` is what separates docker's error from an answer, and from startup spew.
+
+    The worldserver prints no `AC> ` until the world has finished loading, which
+    takes minutes, and the Console tab's Send button is live throughout. Without
+    this flag the tab replays that startup log as the command's answer — the
+    pre-fix defect, in the one window where a user is most likely to be poking
+    at the console (review, 2026-08-23).
+    """
+    loading = b"Loading maps 12%\r\nLoading maps 40%\r\ngm list\r\n"
+    reply = _parse(loading, "gm list")
+    assert reply.prompted is False
+    assert reply.lines == ("Loading maps 12%", "Loading maps 40%")
+    answered = _parse(b"gm list\r\nAC> No gamemasters.\r\nAC> \r\n", "gm list")
+    assert answered.prompted is True
+    assert answered.lines == ("No gamemasters.",)
 
 
 def test_send_command_rejects_carriage_returns_too() -> None:
