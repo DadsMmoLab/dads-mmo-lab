@@ -19,9 +19,11 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 import time
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -100,6 +102,15 @@ class ContainerSpec:
         """
         return self.services or (self.db, self.auth, self.world)
 
+
+CANCELLED_RETURNCODE = -1
+"""What `run_attached()` reports when the caller's cancel token stopped the read.
+
+Negative on purpose: a real process exit status is 0-255, and Python already
+spells "killed by signal N" as `-N`, so no docker command can produce this by
+exiting. A caller must not read it as a failure of the thing being run — the
+build step or the one-shot is still finishing inside the daemon.
+"""
 
 _CLI_MISSING_RETURNCODE = 127
 """What a shell reports for "command not found", and what `_docker()` returns.
@@ -1066,16 +1077,65 @@ def repair_import(
         )
 
     logger.warning(f"repair_import(): `compose up --no-deps {service}` in {server_dir}")
-    # Byte-identical argv to the version that was live-gated against a real
-    # AzerothCore import; only the way its output is read has changed.
-    run = run_attached(["compose", "up", "--no-deps", service], server_dir, sink=output)
-    if run.returncode != 0:
-        # Not raised here. A one-shot that failed part-way and one that failed
-        # having done nothing are the same exit code, and the probe below is the
-        # only thing that can tell them apart — so the check happens either way
-        # and this only makes sure the reason is in the log.
-        logger.warning(f"{service} exited {run.returncode}: {last_words(run.tail)}")
+    run = run_one_shot(service, server_dir, sink=output)
+    verify_import(probe, service, server_dir, run)
+    return True
 
+
+def run_one_shot(
+    service: str,
+    server_dir: Path,
+    *,
+    sink: OutputSink | None = None,
+    cancel: threading.Event | None = None,
+) -> AttachedRun:
+    """Run one compose one-shot service attached, and return what it left behind.
+
+    Byte-identical argv to the version live-gated against a real AzerothCore
+    import on yulon-ubuntu (2026-08-23) — `--no-deps` is what makes an attached
+    `up` terminate, because the one-shot is then the only container compose
+    brings up. It is shared by the repair button and by the native install
+    engine's `import`/`client-data` stages (roadmap 6.2) so the two can never
+    drift into running different commands for the same job.
+
+    The exit status is returned rather than raised for the reason
+    `repair_import()` records: a one-shot that failed part-way and one that
+    failed having done nothing exit alike, and only a probe of the result can
+    tell them apart.
+    """
+    run = run_attached(
+        ["compose", "up", "--no-deps", service], server_dir, sink=sink, cancel=cancel
+    )
+    if run.returncode != 0:
+        # Not raised here. See above — the probe is the only thing that can
+        # tell the two failures apart, so this only makes sure the reason is in
+        # the log.
+        logger.warning(f"{service} exited {run.returncode}: {last_words(run.tail)}")
+    return run
+
+
+def verify_import(
+    probe: ImportProbe, service: str, server_dir: Path, run: AttachedRun
+) -> ImportState:
+    """Ask the databases whether the one-shot actually finished; raise if not.
+
+    The post-check both the repair button and the install engine use, so
+    "finished" means one thing in this codebase. Its two accepting answers are
+    `imported`, and `populated` *with* `complete` — the second because an
+    AzerothCore import applies every module's own `db-auth`/`db-characters`
+    updates and a module is free to seed rows (measured: a first-ever import
+    carrying mod-city-bots came out with 400 accounts and 400 characters,
+    yulon-ubuntu 2026-08-23), and the `complete` half because `populated` alone
+    reports an import that seeded rows and then died on the world schema as a
+    success (review, 2026-08-23).
+
+    Safe only because of the order the callers keep: `populated` is refused
+    *before* the one-shot runs, so a database that is populated afterwards was
+    populated by the run that just happened.
+
+    Raises:
+        DockerCommandError: the databases do not read as finished.
+    """
     after = probe()
     # `populated` counts as success, and finding that out took a live import.
     # An AzerothCore import is not only AzerothCore's SQL: every module in the
@@ -1088,10 +1148,6 @@ def repair_import(
     # this raised "Nothing is imported that was not imported before" over an
     # import that had just done everything — the action reporting failure for
     # its own success, on the servers this project actually ships.
-    #
-    # Safe because of the order: `populated` is refused *before* the import
-    # runs, so a database that is populated afterwards was populated by the run
-    # that just happened.
     #
     # But `populated` on its own is not enough, and a review caught that after
     # the gate had run. The probe answers `populated` the instant one row
@@ -1121,8 +1177,8 @@ def repair_import(
             f"{last_words(run.tail)}. `docker compose logs {service}` in {server_dir} has the "
             "rest of what it printed."
         )
-    logger.info(f"repair_import(): {service} finished; the databases now read as {after.state}")
-    return True
+    logger.info(f"{service} finished; the databases now read as {after.state}")
+    return after
 
 
 def _run_docker_stop(container: str) -> None:
@@ -1884,6 +1940,8 @@ def run_attached(
     *,
     sink: OutputSink | None = None,
     keep: int = KEEP_OUTPUT_LINES,
+    cancel: threading.Event | None = None,
+    merge_stderr: bool = False,
 ) -> AttachedRun:
     """Run `docker <argv...>` attached, handing stdout lines to `sink` as they arrive.
 
@@ -1918,6 +1976,18 @@ def run_attached(
     A host with no docker CLI comes back as `_CLI_MISSING_RETURNCODE` carrying
     `DOCKER_CLI_MISSING_HELP`, the same shape `_docker()` gives it, rather than
     as an exception — the callers here already have to handle a failed run.
+
+    `cancel`, when set mid-run, stops reading and lets `runner.stream()`'s
+    generator-abandonment path terminate the compose client. The result comes
+    back as `CANCELLED_RETURNCODE`. What it does NOT do is stop work already
+    handed to the daemon: BuildKit finishes the build step it is on, and a
+    one-shot container keeps running to completion. That is desirable (the
+    layer cache keeps the work, and a resumed install re-probes the databases)
+    and it is the caller's job to say so — see `native.CANCEL_NOTE`. `repair_
+    import()` deliberately passes no cancel at all; see there.
+
+    `merge_stderr` is for the build, whose entire progress output is stderr;
+    see `runner.stream()`.
     """
     logger.debug(f"run_attached() called: argv={argv} cwd={cwd}")
     tail: deque[str] = deque(maxlen=keep)
@@ -1927,14 +1997,22 @@ def run_attached(
         return AttachedRun(_CLI_MISSING_RETURNCODE, (platform.DOCKER_CLI_MISSING_HELP,))
     live = sink
     try:
-        for line in runner.stream([program, *argv], cwd=cwd):
-            tail.append(line)
-            if live is not None:
-                try:
-                    live(line)
-                except Exception as exc:  # noqa: BLE001 - a dead sink must not kill the child
-                    logger.warning(f"the output sink stopped accepting lines: {exc}")
-                    live = None
+        # `closing`, not a bare `for`: leaving the loop early has to CLOSE the
+        # generator for `stream()`'s finally to terminate the child, and
+        # relying on the loop variable falling out of scope makes that depend
+        # on refcounting rather than on the code saying so.
+        with closing(runner.stream([program, *argv], cwd=cwd, merge_stderr=merge_stderr)) as lines:
+            for line in lines:
+                if cancel is not None and cancel.is_set():
+                    logger.warning(f"docker {' '.join(argv)} was cancelled; abandoning the client")
+                    return AttachedRun(CANCELLED_RETURNCODE, tuple(tail))
+                tail.append(line)
+                if live is not None:
+                    try:
+                        live(line)
+                    except Exception as exc:  # noqa: BLE001 - a dead sink must not kill the child
+                        logger.warning(f"the output sink stopped accepting lines: {exc}")
+                        live = None
     except subprocess.CalledProcessError as exc:
         return AttachedRun(exc.returncode, tuple(tail))
     except OSError as exc:
@@ -1943,3 +2021,125 @@ def run_attached(
         logger.warning(f"{program} could not be started: {exc}")
         return AttachedRun(_CLI_MISSING_RETURNCODE, (platform.DOCKER_CLI_MISSING_HELP,))
     return AttachedRun(0, tuple(tail))
+
+
+# ------------------------------------------------------------- the build
+
+_TIMEOUT_RETURNCODE = 124
+"""What `runner.run()` reports for a command that did not answer in time.
+
+Its own choice, borrowed from `timeout(1)`; named here so `bind_mount_ok()`
+can tell "Docker said no" from "Docker said nothing".
+"""
+
+BIND_PROBE_TIMEOUT_SECONDS = 30.0
+"""How long the bind-mount probe gets, first image pull included.
+
+Reconciles two numbers. `pyplan/rust-prior-art.md` §3 bounds probes at 30s
+because a wedged dockerd accepts the socket and never answers; the 5-second
+figure in roadmap 6.2 assumed the image was already pulled. The probe uses the
+same `alpine/git` image the clone stages need anyway, so on a first install the
+bound has to cover pulling it — a bound too short to pull under would report
+"your folder is not shared with Docker" for what is really a slow network.
+"""
+
+
+def build_staged(
+    server_dir: Path,
+    compose_files: Sequence[str],
+    *,
+    sink: OutputSink | None = None,
+    cancel: threading.Event | None = None,
+) -> AttachedRun:
+    """Build this install's images from the THREE compose files, streamed.
+
+    The only builder. `compose_files` must be the base, the override and the
+    build overlay, in that order, because of a trap that costs a whole install:
+    a bare `docker compose build` in a generated install's directory builds
+    NOTHING and exits 0 — the `build:` blocks live in a file compose never
+    auto-loads — and naming any `-f` at all disables auto-loading, so the base
+    and the override have to be listed too or the build loses the image tags
+    and runtime env it is meant to produce (`rust-prior-art.md` §2).
+    Centralising the argv here is what keeps a caller from spelling that
+    discipline a second, wrong way (style-guide §4).
+
+    `--progress plain` is deliberate: the default renders an ANSI progress
+    display for a terminal that is not there, and a log panel would show the
+    escape sequences instead of the build. Output is read with `merge_stderr`,
+    because BuildKit writes ALL of its progress to stderr and `runner.stream()`
+    otherwise withholds it until the child exits — which for a two-to-four-hour
+    compile is a blank panel for the entire build.
+
+    Unbounded on purpose (rust-prior-art §1: probes are bounded, builds are
+    not). Returns the run rather than raising, so the caller can tell a
+    cancellation from a failure.
+    """
+    argv = ["compose"]
+    for name in compose_files:
+        argv += ["-f", name]
+    argv += ["build", "--progress", "plain"]
+    logger.info(f"build_staged(): `docker {' '.join(argv)}` in {server_dir}")
+    return run_attached(argv, server_dir, sink=sink, cancel=cancel, merge_stderr=True)
+
+
+def images_built(server_dir: Path, compose_files: Sequence[str]) -> bool | None:
+    """Has this install's build already produced images? None = could not ask.
+
+    The disk evidence behind the install engine's `build` stage: a state file
+    that says "built" is a hint, and `compose images -q` is the thing that can
+    contradict it (rust-prior-art §1). The same `-f` discipline as
+    `build_staged()` applies, since the build overlay is where the built
+    stages' image refs come from.
+
+    `None` is not `False`. A resume that cannot ask must not conclude "nothing
+    is built" and spend four hours proving itself wrong, and it must not
+    conclude "built" either; the caller decides.
+    """
+    argv = ["compose"]
+    for name in compose_files:
+        argv += ["-f", name]
+    argv += ["images", "-q"]
+    proc = _docker(argv, cwd=server_dir)
+    if proc.returncode != 0:
+        logger.warning(f"could not list built images in {server_dir}: {proc.stderr.strip()}")
+        return None
+    return any(line.strip() for line in proc.stdout.splitlines())
+
+
+def bind_mount_ok(
+    server_dir: Path, image: str, *, timeout: float = BIND_PROBE_TIMEOUT_SECONDS
+) -> bool | None:
+    """Can a container actually see the chosen folder? None = could not ask.
+
+    Docker Desktop shares only the directories its file-sharing settings list.
+    A folder outside them mounts as an EMPTY directory rather than failing the
+    run, so the clone appears to succeed, the build gets an empty context, and
+    the first thing that reports the problem is a compile error hours later.
+    The probe is one `ls` inside the mount, which cannot be wrong about the one
+    thing it is asked.
+
+    `None` means the question could not be answered — no docker CLI, or the
+    daemon did not reply inside `timeout`. That is preflight's *unchecked*
+    tri-state, never a pass and never a refusal: a caller that read it as False
+    would refuse an install that would have worked.
+
+    Unverified on macOS. `/Users` is *believed* shared by default there, which
+    is exactly why this probe exists rather than a rule about paths.
+    """
+    proc = _docker(
+        ["run", "--rm", "-v", f"{server_dir}:/probe", image, "ls", "/probe"], timeout=timeout
+    )
+    if _cli_missing(proc):
+        return None
+    if proc.returncode == 0:
+        return True
+    # A non-zero exit is the daemon answering "no", which IS an answer — unless
+    # it never answered at all. `runner.run()` reports a timeout as 124 with the
+    # reason in stderr rather than raising, so that case has to be separated out
+    # or a wedged dockerd reaches the user as "your folder is not shared with
+    # Docker Desktop", which is a different fix entirely.
+    if proc.returncode == _TIMEOUT_RETURNCODE:
+        logger.warning(f"the bind-mount probe of {server_dir} did not answer within {timeout:.0f}s")
+        return None
+    logger.warning(f"the bind-mount probe of {server_dir} failed: {proc.stderr.strip()}")
+    return False

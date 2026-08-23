@@ -116,6 +116,13 @@ class Git(Protocol):
     def clone(self, spec: CloneSpec) -> None: ...
 
 
+# `remote_url()` is deliberately NOT on that Protocol. `apply.py` — the only
+# other user of this seam — never asks the question, and widening a Protocol
+# breaks every fake that implements it for a capability the fake's caller does
+# not use. The install engine asks for the concrete implementation's method
+# through its own seam instead (roadmap 6.2).
+
+
 def _depth_args(depth: int | None) -> list[str]:
     return [] if depth is None else ["--depth", str(depth)]
 
@@ -172,6 +179,23 @@ def _run_git(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedPr
 
 class RunnerGit:
     """`Git` over the host's `git` CLI, through `yulon.runner`."""
+
+    def remote_url(self, dest: Path) -> str | None:
+        """What `origin` points at in the checkout at `dest`, or None if it cannot be read.
+
+        The disk evidence behind the install engine's clone stages: a state
+        file claiming the clone is done is a hint, and this is the thing that
+        can contradict it. `None` means "not a checkout, or git would not say"
+        — never "no remote", because the caller's next move on a `None` is to
+        clone, and doing that over somebody else's checkout is what the check
+        exists to prevent.
+        """
+        try:
+            proc = _run_git(["git", "remote", "get-url", "origin"], cwd=dest)
+        except GitError as exc:
+            logger.debug(f"could not read origin in {dest}: {exc}")
+            return None
+        return proc.stdout.strip() or None
 
     def clone(self, spec: CloneSpec) -> None:
         if (spec.dest / ".git").is_dir():
@@ -253,6 +277,22 @@ class ContainerGit:
 
     image: str = _CONTAINER_GIT_IMAGE
 
+    def remote_url(self, dest: Path) -> str | None:
+        """`git remote get-url origin` in the checkout at `dest`; see `RunnerGit.remote_url()`.
+
+        Containerized like every other git call here, for the same reason: the
+        machine this class exists for may have no git at all, and a question
+        that needs one would put the second prerequisite straight back.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = self._capture(dest, ["remote", "get-url", "origin"])
+        except GitError as exc:
+            logger.debug(f"could not read origin in {dest}: {exc}")
+            return None
+        return proc.stdout.strip() or None
+
     def clone(self, spec: CloneSpec) -> None:
         if (spec.dest / ".git").is_dir():
             self._run(
@@ -282,6 +322,10 @@ class ContainerGit:
             self._run(spec, ["sparse-checkout", "set", "--no-cone", spec.sparse_path.rstrip("/")])
 
     def _run(self, spec: CloneSpec, git_args: list[str]) -> None:
+        """One containerized `git` invocation against this spec's destination."""
+        self._capture(spec.dest, git_args)
+
+    def _capture(self, dest: Path, git_args: list[str]) -> subprocess.CompletedProcess[str]:
         """One containerized `git` invocation, or `GitError` if it fails.
 
         argv[0] comes from `platform.docker_program()` for the reason spelled
@@ -307,7 +351,7 @@ class ContainerGit:
             "run",
             "--rm",
             "-v",
-            f"{spec.dest}:/git",
+            f"{dest}:/git",
             # State the working directory rather than inheriting the image's.
             # `image` is a public field, so an override would otherwise clone
             # into the wrong place — silently, since `.` would resolve
@@ -330,6 +374,7 @@ class ContainerGit:
             raise GitError(platform.DOCKER_CLI_MISSING_HELP) from exc
         if proc.returncode != 0:
             raise GitError(f"containerized git {' '.join(git_args)} failed: {proc.stderr.strip()}")
+        return proc
 
     @staticmethod
     def _user_args() -> list[str]:

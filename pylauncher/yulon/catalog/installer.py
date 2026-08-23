@@ -36,8 +36,9 @@ from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
-from yulon import platform, resources, runner
+from yulon import docker, platform, resources, runner
 from yulon.catalog.catalog import CatalogEntry
 from yulon.log import get_logger
 
@@ -450,6 +451,69 @@ class Installer:
                 f"{self.script.name} exited with status {exc.returncode}.{detail}"
             ) from exc
         logger.info(f"install of {self.entry.id} finished")
+
+
+class InstallEngine(Protocol):
+    """What a catalog view can drive, whichever engine it got.
+
+    Both `Installer` (the bash script) and `native.NativeInstaller` satisfy it,
+    which is the whole reason `catalog_view.py`, `log_panel.py` and the job
+    runner needed no changes for roadmap 6.2.
+    """
+
+    def preflight(self, options: InstallOptions, cancel: threading.Event | None = None) -> None: ...
+
+    def run(
+        self,
+        options: InstallOptions | None = None,
+        *,
+        cancel: threading.Event | None = None,
+        ask: runner.Prompter | None = None,
+    ) -> Iterator[str]: ...
+
+
+def installer_for(
+    entry: CatalogEntry,
+    *,
+    platform_id: Callable[[], str] = platform.detect,
+    installers_root: Path = DEFAULT_INSTALLERS_ROOT,
+    import_probe: docker.ImportProbe | None = None,
+    reset_unfinished: docker.ResetUnfinished | None = None,
+) -> InstallEngine:
+    """The engine that installs `entry` on THIS platform. The only place that decides.
+
+    Three rules, in order, all of them reading `catalog.json` rather than
+    asking what OS this is (style-guide §3):
+
+    1. the platform is not in `install.platforms` — refused by whoever calls
+       `preflight()`, unchanged from roadmap 6.1. A `Installer` is returned so
+       that refusal comes from the one place that words it;
+    2. the platform is in `install.script_platforms` — today's script path,
+       byte for byte what Linux already runs;
+    3. otherwise — the native engine.
+
+    `import_probe`/`reset_unfinished` are per-game seams the CALLER supplies
+    (the app wires `controller_wow_wotlk.repair`), because `catalog/` must not
+    import a controller package. They are ignored on the script path, which
+    runs its import through the script.
+
+    Imported inside the function on purpose: `native.py` imports this module
+    for `InstallOptions` and the error types, so naming it at module scope
+    would be a cycle. The alternative — a fourth module holding three
+    exceptions and a dataclass — buys nothing but an import.
+    """
+    from yulon.catalog import native
+
+    here = platform_id()
+    if entry.install.is_native(here):
+        return native.NativeInstaller(
+            entry,
+            installers_root=installers_root,
+            import_probe=import_probe,
+            reset_unfinished=reset_unfinished,
+            seams=native.Seams(platform_id=platform_id),
+        )
+    return Installer(entry, installers_root=installers_root, platform_id=platform_id)
 
 
 def _main(argv: list[str] | None = None) -> int:

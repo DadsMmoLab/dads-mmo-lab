@@ -25,8 +25,8 @@ def build_window() -> object:
     from PySide6.QtWidgets import QLabel, QMainWindow, QSplitter, QTabWidget, QVBoxLayout, QWidget
 
     from yulon import __version__
-    from yulon.catalog.catalog import load_catalog
-    from yulon.catalog.installer import Installer
+    from yulon.catalog.catalog import CatalogEntry, load_catalog
+    from yulon.catalog.installer import InstallEngine
     from yulon.state import KnownInstall, load_state, save_state
     from yulon.ui.catalog_view import CatalogView
     from yulon.ui.controller_view import ControllerServices, ControllerView
@@ -49,7 +49,39 @@ def build_window() -> object:
 
     log_panel = LogPanel()
     panels: list[LogPanel] = [log_panel]
-    catalog_view = CatalogView(catalog, lambda entry: Installer(entry), log_panel)
+
+    def make_installer(entry: CatalogEntry) -> InstallEngine:
+        """The engine for one entry: the bash script, or the native one (roadmap 6.2).
+
+        The per-game import seams are assembled HERE and passed down, the same
+        way `ControllerServices.for_wotlk()` assembles them for the Server tab:
+        `catalog/` must not import a controller package, and `repair.py` knows
+        the `acore_*` schema names that answer the question. Both are attached
+        only for an entry that names a one-shot import service, so a game whose
+        import is not a separate service never gets a probe that looks for
+        somebody else's schemas.
+        """
+        from yulon.apply import DockerSql
+        from yulon.catalog.installer import installer_for
+        from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
+        from yulon.controller_wow_wotlk import modules as wotlk_modules
+        from yulon.controller_wow_wotlk import repair as wotlk_repair
+
+        spec = entry.container_spec()
+        password = entry.install.db_root_password or wotlk_modules.DEFAULT_DB_ROOT_PASSWORD
+        sql = DockerSql(spec.db, password)
+        mysql = wotlk_maintenance.DockerMysql(spec.db, password)
+        return installer_for(
+            entry,
+            import_probe=(
+                (lambda: wotlk_repair.import_state(sql, mysql)) if spec.import_service else None
+            ),
+            reset_unfinished=(
+                (lambda: wotlk_repair.reset_unfinished(sql, mysql)) if spec.import_service else None
+            ),
+        )
+
+    catalog_view = CatalogView(catalog, make_installer, log_panel)
     splitter = QSplitter()
     splitter.addWidget(catalog_view)
     splitter.addWidget(log_panel)

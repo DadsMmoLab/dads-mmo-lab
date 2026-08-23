@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 from yulon import docker, platform
 from yulon.catalog.catalog import Catalog, CatalogEntry
 from yulon.catalog.installer import (
-    Installer,
+    InstallEngine,
     InstallOptions,
     platform_names,
     unsupported_platform_message,
@@ -41,7 +41,14 @@ from yulon.ui.widgets.prompt import InputPrompter
 
 logger = get_logger(__name__)
 
-InstallerFactory = Callable[[CatalogEntry], Installer]
+InstallerFactory = Callable[[CatalogEntry], InstallEngine]
+"""What builds the engine for one entry.
+
+The Protocol rather than the `Installer` class since roadmap 6.2: an entry may
+now be installed by the bash script or by the native engine, `installer_for()`
+decides which from `catalog.json` data, and this view is deliberately not told
+what it got — the two have the same `run()`.
+"""
 DirPicker = Callable[[QWidget, str, Path | None], Path | None]
 
 

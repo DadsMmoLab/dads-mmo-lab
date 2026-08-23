@@ -72,6 +72,31 @@ def test_stream_yields_stderr_lines_after_stdout() -> None:
     assert lines == ["o1", "o2", "e1"]
 
 
+def test_stream_can_interleave_stderr_live_for_a_command_whose_output_is_stderr() -> None:
+    """`merge_stderr` puts both streams on one pipe, in the child's own order.
+
+    Written for the native install engine's build stage (roadmap 6.2): BuildKit
+    writes ALL of its progress to stderr, so the default ordering above turns a
+    two-to-four-hour compile into a log panel that stays blank until the build
+    has already finished.
+    """
+    script = (
+        "import sys\n"
+        "print('o1'); sys.stdout.flush()\n"
+        "print('e1', file=sys.stderr); sys.stderr.flush()\n"
+        "print('o2'); sys.stdout.flush()\n"
+    )
+    assert list(stream(_python_cmd(script), merge_stderr=True)) == ["o1", "e1", "o2"]
+    # And the default is unchanged, because every other caller reads a command
+    # whose stderr is an error report rather than its output.
+    assert list(stream(_python_cmd(script))) == ["o1", "o2", "e1"]
+
+
+def test_stream_still_reports_a_failure_with_the_streams_merged() -> None:
+    with pytest.raises(subprocess.CalledProcessError):
+        list(stream(_python_cmd("import sys; sys.exit(5)"), merge_stderr=True))
+
+
 def test_stream_raises_on_nonzero_exit() -> None:
     """`stream()` raises CalledProcessError if the command exits non-zero."""
     with pytest.raises(subprocess.CalledProcessError):

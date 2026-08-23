@@ -1859,7 +1859,9 @@ def _repair_doubles(
             return _completed(stdout="".join(n + "\n" for n in sorted(live)))
         return _completed()
 
-    def fake_stream(cmd: list[str], cwd: Path | None = None) -> Iterator[str]:
+    def fake_stream(
+        cmd: list[str], cwd: Path | None = None, *, merge_stderr: bool = False
+    ) -> Iterator[str]:
         calls.append(cmd)
         if cwds is not None:
             cwds.append(cwd)
@@ -2213,7 +2215,16 @@ def test_a_thirty_minute_import_is_not_kept_in_memory(
     """
     lines = [f"line {n}" for n in range(10_000)]
     seen: list[str] = []
-    monkeypatch.setattr(docker.runner, "stream", lambda cmd, cwd=None: iter(lines))
+
+    def fake_stream(
+        cmd: list[str], cwd: Path | None = None, *, merge_stderr: bool = False
+    ) -> Iterator[str]:
+        # A generator, not `iter(list)`: `run_attached()` closes what it is
+        # given so an early exit terminates the child, and a double that cannot
+        # be closed is not the thing being replaced.
+        yield from lines
+
+    monkeypatch.setattr(docker.runner, "stream", fake_stream)
     run = docker.run_attached(
         ["compose", "up", "--no-deps", "ac-db-import"],
         Path("/tmp/wow"),
@@ -2546,3 +2557,133 @@ def test_an_absent_database_is_never_cleared(monkeypatch: pytest.MonkeyPatch) ->
         is True
     )
     assert cleared == [], "an absent database was dropped"
+
+
+# ------------------------------------------------- the build (roadmap 6.2)
+
+
+def _stream_double(
+    monkeypatch: pytest.MonkeyPatch, lines: Iterable[str]
+) -> tuple[list[list[str]], list[bool]]:
+    """Record what `run_attached()` asks `runner.stream()` to run, and how."""
+    seen: list[list[str]] = []
+    merged: list[bool] = []
+
+    def fake_stream(
+        cmd: list[str], cwd: Path | None = None, *, merge_stderr: bool = False
+    ) -> Iterator[str]:
+        seen.append(cmd)
+        merged.append(merge_stderr)
+        yield from lines
+
+    monkeypatch.setattr(docker.runner, "stream", fake_stream)
+    return seen, merged
+
+
+def test_build_staged_passes_all_three_compose_files_and_plain_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The trap: a bare `docker compose build` here builds NOTHING and exits 0.
+
+    The `build:` blocks live in a file compose never auto-loads, and naming any
+    `-f` disables auto-loading — so the base and the override have to be listed
+    too, or the build loses the image tags and env it is meant to produce.
+    """
+    seen, merged = _stream_double(monkeypatch, ["#1 [internal] load build definition"])
+    run = docker.build_staged(
+        Path("/tmp/wow"),
+        ("docker-compose.yml", "docker-compose.override.yml", "docker-compose.build.yml"),
+    )
+    assert seen == [
+        [
+            "docker",
+            "compose",
+            "-f",
+            "docker-compose.yml",
+            "-f",
+            "docker-compose.override.yml",
+            "-f",
+            "docker-compose.build.yml",
+            "build",
+            "--progress",
+            "plain",
+        ]
+    ]
+    # BuildKit writes ALL of its progress to stderr, which `stream()` otherwise
+    # withholds until the child exits — a blank log panel for the whole build.
+    assert merged == [True]
+    assert run.returncode == 0
+
+
+def test_run_one_shot_keeps_the_argv_that_was_live_gated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--no-deps` is what makes an attached `up` terminate. Byte-identical since the gate."""
+    seen, merged = _stream_double(monkeypatch, ["importing"])
+    docker.run_one_shot("ac-db-import", Path("/tmp/wow"))
+    assert seen == [["docker", "compose", "up", "--no-deps", "ac-db-import"]]
+    assert merged == [False]
+
+
+def test_a_cancelled_run_is_not_reported_as_a_failed_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stop and a failed build are different events; the exit code has to say which."""
+    _stream_double(monkeypatch, ["#5 2.1 building", "#5 4.0 still building"])
+    cancel = docker.threading.Event()
+    cancel.set()
+    run = docker.run_attached(["compose", "build"], Path("/tmp/wow"), cancel=cancel)
+    assert run.returncode == docker.CANCELLED_RETURNCODE
+    assert run.returncode not in (0, 1)  # never mistakable for a real exit status
+
+
+def test_images_built_says_unknown_rather_than_no_when_docker_will_not_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`None` is not `False`: a resume must not conclude "nothing is built" from silence."""
+    monkeypatch.setattr(
+        docker.runner, "run", lambda *a, **k: _completed(returncode=1, stderr="no such file")
+    )
+    assert docker.images_built(Path("/tmp/wow"), ("docker-compose.yml",)) is None
+    monkeypatch.setattr(docker.runner, "run", lambda *a, **k: _completed(stdout="sha256:abc\n"))
+    assert docker.images_built(Path("/tmp/wow"), ("docker-compose.yml",)) is True
+    monkeypatch.setattr(docker.runner, "run", lambda *a, **k: _completed(stdout="\n"))
+    assert docker.images_built(Path("/tmp/wow"), ("docker-compose.yml",)) is False
+
+
+def test_the_bind_mount_probe_mounts_the_folder_and_tells_no_from_no_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wedged daemon must not be reported as "your folder is not shared with Docker"."""
+    seen: list[list[str]] = []
+
+    def answer(
+        returncode: int, stderr: str = ""
+    ) -> Callable[..., subprocess.CompletedProcess[str]]:
+        def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            seen.append(argv)
+            return _completed(returncode=returncode, stderr=stderr)
+
+        return run
+
+    monkeypatch.setattr(docker.runner, "run", answer(0))
+    server_dir = Path("/home/pk/wow")
+    assert docker.bind_mount_ok(server_dir, "alpine/git") is True
+    # `str(Path)` and not a literal: the mount source is spelled the way THIS
+    # OS spells the folder the user picked, which is the whole point of asking
+    # Docker rather than reasoning about the path.
+    assert seen[-1] == [
+        "docker",
+        "run",
+        "--rm",
+        "-v",
+        f"{server_dir}:/probe",
+        "alpine/git",
+        "ls",
+        "/probe",
+    ]
+    monkeypatch.setattr(docker.runner, "run", answer(1, "invalid mount config"))
+    assert docker.bind_mount_ok(Path("/home/pk/wow"), "alpine/git") is False
+    # 124 is what `runner.run()` reports for a command that never answered.
+    monkeypatch.setattr(docker.runner, "run", answer(124, "timed out after 30.0s"))
+    assert docker.bind_mount_ok(Path("/home/pk/wow"), "alpine/git") is None

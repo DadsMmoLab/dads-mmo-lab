@@ -307,8 +307,13 @@ def test_bash_available_probes_that_bash_actually_runs() -> None:
 
 
 def test_installer_refuses_a_platform_its_script_cannot_run(tmp_path: Path) -> None:
-    """Roadmap 6.1: an off-Linux click is refused BEFORE any subprocess starts."""
-    entry = load_catalog().get("wow-wotlk")
+    """Roadmap 6.1: an off-Linux click is refused BEFORE any subprocess starts.
+
+    Asked of TBC rather than WotLK since 6.2: WotLK is now installable on macOS
+    through the native engine, so it is no longer an example of an entry that
+    is not installable off Linux. The refusal itself is unchanged.
+    """
+    entry = load_catalog().get("wow-tbc")
     assert entry.install.platforms == ("linux",)
     assert entry.install.supports("linux") is True
     assert entry.install.supports("macos") is False

@@ -9,25 +9,28 @@
       "emulator": {
         "name": "AzerothCore (mod-playerbots fork) + mod-playerbots",
         "sources": [
-          {"repo": "mod-playerbots/azerothcore-wotlk", "branch": "Playerbot"},
+          {"repo": "mod-playerbots/azerothcore-wotlk", "branch": "Playerbot", "depth": null},
           {"repo": "mod-playerbots/mod-playerbots", "branch": "master"}
         ]
       },
       "install": {
-        "platforms": ["linux"],
+        "platforms": ["linux", "macos"],
+        "script_platforms": ["linux"],
         "script": "wow-wotlk/install-wow-wotlk.sh",
         "script_variants": {
           "apt": "wow-wotlk/install-wow-wotlk-ubuntu.sh",
           "dnf": "wow-wotlk/install-wow-wotlk-fedora.sh"
         },
         "default_server_dir": "wow-server-playerbots",
-        "db_root_password": "password"
+        "db_root_password": "password",
+        "native": {"templates": "wow-wotlk/native"}
       },
       "containers": {
         "db": "ac-database",
         "auth": "ac-authserver",
         "world": "ac-worldserver",
-        "db_import": "ac-db-import"
+        "db_import": "ac-db-import",
+        "client_data": "ac-client-data-init"
       },
       "ports": {"auth": 3724, "world": 8085, "db": 3306},
       "databases": {
