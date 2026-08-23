@@ -1,5 +1,22 @@
 # 🧙 WoW WotLK — Dad's MMO Lab
 
+> **Archived — this is not the launcher's documentation.**
+>
+> This folder documents the original **shell-script** project: the `install-wow-wotlk.sh`
+> installers, `wow-manage.sh`, and the third-party The Lab GUI. It is kept for reference and for
+> anyone already running a server that way, and it is no longer updated.
+>
+> It is **not** documentation for Yu'lon, the launcher application that replaced it. For what the
+> launcher does today, and on which operating system, read
+> [`pylauncher/README.md`](../../../pylauncher/README.md); the plan is in
+> [`pyplan/`](../../../pyplan/README.md).
+>
+> Two things described below have moved since this page was written. The WotLK installer scripts
+> and `wow-manage.sh` now live in
+> [`pylauncher/catalog/installers/wow-wotlk/`](../../../pylauncher/catalog/installers/wow-wotlk/),
+> because the launcher runs them; and the `legacy/` folder described near the bottom is no longer
+> in this repository.
+
 Run a fully offline **World of Warcraft: Wrath of the Lich King (3.3.5a)** private server on your own hardware — no subscription, no internet required after setup.
 
 **Supported platforms:** Steam Deck (SteamOS) · Ubuntu / Debian / Linux Mint · Fedora · Windows 10/11 (WSL2)
@@ -122,6 +139,8 @@ The installer script that `WoW-WotLK-HOWTO.md` walks you through. It automates t
 4. Waits for the worldserver to initialize, then guides you through account creation
 5. Creates the Gaming Mode launcher script and reference card
 
+The script now lives at [`pylauncher/catalog/installers/wow-wotlk/install-wow-wotlk.sh`](../../../pylauncher/catalog/installers/wow-wotlk/install-wow-wotlk.sh), not in this folder — the launcher runs it. The Fedora and Ubuntu variants are beside it.
+
 Download it from this repo and run it on your Steam Deck — full instructions in [WoW-WotLK-HOWTO.md](./WoW-WotLK-HOWTO.md).
 
 ```bash
@@ -137,6 +156,8 @@ chmod +x ~/Downloads/install-wow-wotlk.sh
 A full-screen, menu-driven terminal script for managing your server after it's installed — no need to remember Docker commands. Contains installers and configuration menus for many popular modules and mods as well as SQL database edits. It can backup your server and setup many features for your server.
 
 **Version:** 2.2.1 "ALE House Edition"
+
+In this repository the script now lives at [`pylauncher/catalog/installers/wow-wotlk/wow-manage.sh`](../../../pylauncher/catalog/installers/wow-wotlk/wow-manage.sh). The download below fetches it from the upstream repo, where the old layout still stands.
 
 **Download and run:**
 ```bash
@@ -215,9 +236,9 @@ Contents:
 
 ## 📦 legacy/
 
-**Folder:** [`legacy/`](./legacy/)
+**Folder:** `legacy/` — **removed from the repository.** The link that used to be here pointed at nothing; the table below is kept as a record of what the folder held, not as something you can open.
 
-This folder contains the **old installer scripts** that were used before `install-wow-wotlk.sh` replaced them. They are kept for reference only — **do not use these for a fresh install.**
+It contained the **old installer scripts** that were used before `install-wow-wotlk.sh` replaced them. They were kept for reference only — **they were never for a fresh install.**
 
 | File | What it was |
 |---|---|
