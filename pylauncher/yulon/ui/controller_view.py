@@ -13,6 +13,7 @@ the view is testable offscreen with fakes.
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,7 +50,7 @@ from yulon.log import get_logger
 from yulon.manifest import Manifest
 from yulon.manifest_store import FAMILY_FILES, ManifestStore
 from yulon.networking import Mode, NetworkPlan, NetworkReport
-from yulon.ui.widgets.job import JobRunner, threaded_job_runner
+from yulon.ui.widgets.job import JobRunner, LineRelay, threaded_job_runner
 from yulon.ui.widgets.log_panel import LogPanel
 
 logger = get_logger(__name__)
@@ -165,6 +166,33 @@ The armed wording is where they differ: the teardown's says what is *kept*,
 this one says what is *overwritten*.
 """
 
+IMPORT_RUNNING = (
+    "Running the database import. A full one takes 10-30 minutes and cannot be stopped once "
+    "it has started. What the import is printing:"
+)
+"""The heading above the import's live output, and the one honest thing to say.
+
+It used to be "Running the database import… this takes several minutes." and
+then nothing changed on screen until it finished, which for the action whose
+armed copy warns it overwrites databases is indistinguishable from a hang — the
+user's only recourse being to kill the app, during a database import.
+
+It says "cannot be stopped" because it cannot, and the tab must not suggest
+otherwise: every button on it is disabled while this runs, and there is no
+cancel to offer. Abandoning a `compose up` means terminating it, which stops
+`ac-db-import` part-way through writing schemas.
+"""
+
+_IMPORT_TAIL_LINES = 2
+_IMPORT_LINE_CHARS = 110
+"""How much of the import's output the label carries: the last two lines, trimmed.
+
+Two, because one line looks static whenever a step is slow while two show which
+way it is moving. Trimmed, because this label sits above the rest of the tab and
+a single 500-character line of SQL would wrap into five rows and move
+everything under it.
+"""
+
 
 class ControllerView(QWidget):
     """Per-install tabs; see module docstring."""
@@ -205,6 +233,12 @@ class ControllerView(QWidget):
         # this action exists for is one the user reaches by pressing Stop.
         self._import_state: docker.ImportState | None = None
         self._import_asked = False
+        # The import talks from a worker thread; this is how what it says gets
+        # onto the GUI thread. See `LineRelay` — handing `_import_line` itself
+        # down as the sink would call it on the worker thread instead.
+        self._import_relay = LineRelay(self)
+        self._import_relay.line.connect(self._import_line)
+        self._import_tail: deque[str] = deque(maxlen=_IMPORT_TAIL_LINES)
         self._build_server_tab()
         self._build_console_tab()
         self._build_accounts_tab()
@@ -582,13 +616,40 @@ class ControllerView(QWidget):
                 "databases hold no accounts and no characters — if that is wrong, press Refresh "
                 "now and restore a backup from the Maintenance tab instead. The server must be "
                 "stopped; the database is started if it is not running and is left running "
-                "afterwards. A full import takes several minutes. Press Refresh to cancel."
+                "afterwards. A full import takes 10-30 minutes and cannot be stopped once it "
+                "has started. Press Refresh to cancel."
             )
             return
         self._disarm_repair()
         self._set_busy(True)
-        self.problem_label.setText("Running the database import… this takes several minutes.")
-        self._run(self.services.controller.repair_import, self._repair_done, self._repair_failed)
+        self._import_tail.clear()
+        self.problem_label.setText(IMPORT_RUNNING)
+        # The sink is the relay's emitter, not `_import_line`: this call runs on
+        # a worker thread, and everything it invokes runs there too.
+        self._run(
+            lambda: self.services.controller.repair_import(self._import_relay.emit_line),
+            self._repair_done,
+            self._repair_failed,
+        )
+
+    @Slot(str)
+    def _import_line(self, line: str) -> None:
+        """Show the import's most recent output, so a long job cannot look like a hung one.
+
+        Reached only through `_import_relay`, which is what puts it on the GUI
+        thread. The whole log is deliberately NOT collected here: `docker
+        compose logs ac-db-import` keeps it, `docker.run_attached()` retains a
+        bounded tail for the failure message, and a half-hour of lines
+        accumulating in a window that may stay open for days is the defect this
+        change exists to avoid rather than one to introduce elsewhere.
+        """
+        text = line.strip()
+        if not text:
+            return
+        if len(text) > _IMPORT_LINE_CHARS:
+            text = text[:_IMPORT_LINE_CHARS] + "…"
+        self._import_tail.append(text)
+        self.problem_label.setText("\n".join([IMPORT_RUNNING, *self._import_tail]))
 
     @Slot(object)
     def _repair_done(self, _result: object) -> None:

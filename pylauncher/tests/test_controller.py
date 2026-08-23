@@ -278,3 +278,35 @@ def test_port_conflicts_excuses_our_own_names_including_a_neighbours(
     fake_runner.ps_lines = "t-world\t0.0.0.0:2222->2222/tcp\nstranger\t0.0.0.0:1111->1111/tcp\n"
     fake_runner.project = "somebody-elses-install"
     assert Controller(SPEC, SERVER_DIR).port_conflicts() == ["stranger"]
+
+
+def test_repair_import_hands_the_output_sink_through_to_docker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sink is the whole of the progress feature, so dropping it is silent.
+
+    Nothing else would notice: the import still runs, still refuses on the same
+    things, still reports the same result — and the window shows one frozen
+    sentence for the 10-30 minutes it takes, which is what this was built to
+    end.
+    """
+    seen: list[tuple[object, ...]] = []
+
+    def fake_repair_import(
+        spec: docker.ContainerSpec,
+        server_dir: Path,
+        probe: docker.ImportProbe,
+        *,
+        output: docker.OutputSink | None = None,
+        db_timeout: float = 1.0,
+    ) -> bool:
+        seen.append((spec, server_dir, output))
+        return True
+
+    monkeypatch.setattr(docker, "repair_import", fake_repair_import)
+    lines: list[str] = []
+    ctl = Controller(SPEC, SERVER_DIR, import_probe=lambda: docker.ImportState("absent"))
+    assert ctl.repair_import(lines.append) is True
+    # And a caller that wants nothing shown still gets an import.
+    assert ctl.repair_import() is True
+    assert seen == [(SPEC, SERVER_DIR, lines.append), (SPEC, SERVER_DIR, None)]
