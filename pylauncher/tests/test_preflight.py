@@ -13,8 +13,9 @@ from pathlib import Path
 
 import pytest
 
+from yulon import docker, git
 from yulon import platform as platform_module
-from yulon.catalog import preflight
+from yulon.catalog import composegen, preflight
 from yulon.catalog.catalog import load_catalog
 
 ENTRY = load_catalog().get("wow-wotlk")
@@ -223,6 +224,93 @@ def test_gather_only_calls_a_port_in_use_when_the_connection_completed(tmp_path:
         ),
     )
     assert got.ports_in_use == (ENTRY.ports.world,)
+
+
+def _gather(tmp_path: Path) -> preflight.Facts:
+    """`gather()` with every seam faked except the one under test."""
+    return preflight.gather(
+        ENTRY,
+        tmp_path,
+        platform_id=lambda: "macos",
+        docker_ready=lambda: True,
+        vm_resources=lambda: None,
+        data_root=lambda: None,
+        disk_free=lambda _p: 100 * GIB,
+        dir_problem=lambda _p: None,
+        bind_mount_ok=lambda _p: True,
+        probe_port=lambda host, port: platform_module.PortProbe(host, port, "unknown", ""),
+    )
+
+
+def test_gather_does_not_report_this_installs_own_containers_as_a_port_conflict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The blocker that made a resume impossible once `up` had run.
+
+    `port_conflicts_for()` is a global scan whose own docstring says it "will
+    also flag the same install's own containers (e.g. on a restart)", and
+    `_port_check()` turns any non-empty result into a hard refusal. Preflight
+    re-runs on every attempt, the three services carry `restart:
+    unless-stopped`, and `wait_ready` is bounded at 480 s against a first
+    playerbots boot the engine itself calls "many minutes" — so a `ready`
+    timeout left the containers up and the next Install was told to remove the
+    containers of the install it was trying to finish (review, 2026-08-23).
+
+    The real `docker.foreign_port_conflicts()` is left wired in and only the two
+    subprocess-backed answers under it are faked: a double that filters is a
+    double that cannot reproduce the bug.
+    """
+    ours = composegen.project_name(ENTRY.id, tmp_path, platform_id=lambda: "macos")
+    monkeypatch.setattr(
+        docker, "port_conflicts", lambda _ports: ["ac-authserver", "ac-worldserver", "someone-else"]
+    )
+    monkeypatch.setattr(
+        docker,
+        "container_project",
+        lambda name: ours if name.startswith("ac-") else "another-project",
+    )
+    got = _gather(tmp_path)
+    assert got.port_conflicts == ("someone-else",)
+    assert verdict(preflight.evaluate(ENTRY, tmp_path, got), "the server's ports") == "refuse"
+    # …and with nothing but our own containers publishing them, it passes.
+    monkeypatch.setattr(docker, "container_project", lambda _name: ours)
+    again = _gather(tmp_path)
+    assert again.port_conflicts == ()
+    assert verdict(preflight.evaluate(ENTRY, tmp_path, again), "the server's ports") == "pass"
+
+
+def test_a_publisher_docker_will_not_name_an_owner_for_still_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreadable owner is not proof of ownership, so it is not filtered out."""
+    monkeypatch.setattr(docker, "port_conflicts", lambda _ports: ["ac-worldserver"])
+    monkeypatch.setattr(docker, "container_project", lambda _name: docker.UNREADABLE)
+    assert _gather(tmp_path).port_conflicts == ("ac-worldserver",)
+
+
+def test_the_windows_volume_branch_is_reachable_without_running_on_windows() -> None:
+    """The injected platform has to reach `_same_volume()`, not just `gather()`.
+
+    Reading the real platform inside one unseamed call is the pattern that once
+    made this suite red on every Python 3.12+ Linux box while CI stayed green.
+    """
+    root = Path.cwd()
+    assert preflight._same_volume(root, root, "windows") is True
+    assert preflight._volume_of(root, "windows") == str(root.resolve().drive).lower()
+    # POSIX asks `st_dev`, which is a different question and a different value.
+    assert preflight._volume_of(root, "macos") != preflight._volume_of(root, "windows")
+
+
+def test_the_bind_probe_pulls_the_same_pinned_image_the_clone_does() -> None:
+    """A tag and a digest are two different image references, so this is not cosmetic.
+
+    `alpine/git` here meant a SECOND, unpinned pull, and a bind mount of the
+    user's chosen directory handed to whatever `:latest` resolved to that day —
+    in a repo that pins this exact image by digest for that very reason.
+    """
+    assert preflight.PROBE_IMAGE == git.CONTAINER_GIT_IMAGE
+    assert preflight.PROBE_IMAGE == git.ContainerGit().image
+    assert "@sha256:" in preflight.PROBE_IMAGE
 
 
 def _vm(gigabytes: float, cpus: int = 4) -> platform_module.VmResources:

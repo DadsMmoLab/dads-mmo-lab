@@ -244,6 +244,29 @@ def test_port_conflicts_for_uses_spec_ports(monkeypatch: pytest.MonkeyPatch) -> 
     assert docker.port_conflicts_for(spec) == ["other"]
 
 
+def test_foreign_port_conflicts_drops_our_own_containers_and_keeps_everything_else(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The global scan cannot tell "somebody else's server" from "mine, still running".
+
+    A caller that refuses on its raw answer refuses its own install on every
+    resume, which is what the native engine's preflight did (review,
+    2026-08-23). An UNREADABLE owner is deliberately kept: not knowing who owns
+    a container is not proof that we do.
+    """
+    labels = {"mine": "yulon-wow-wotlk-abc", "theirs": "some-other", "?": docker.UNREADABLE}
+    monkeypatch.setattr(docker, "port_conflicts", lambda _ports: list(labels))
+    monkeypatch.setattr(docker, "container_project", labels.get)
+    spec = docker.ContainerSpec(db="d", auth="a", world="w", ports=(9999,))
+    assert docker.foreign_port_conflicts(spec, "yulon-wow-wotlk-abc") == ["theirs", "?"]
+    # Nothing publishing the ports means nothing is asked about ownership either.
+    monkeypatch.setattr(docker, "port_conflicts", lambda _ports: [])
+    monkeypatch.setattr(
+        docker, "container_project", lambda _n: pytest.fail("asked who owns nothing")
+    )
+    assert docker.foreign_port_conflicts(spec, "yulon-wow-wotlk-abc") == []
+
+
 def test_docker_ctl_convenience_wrappers_delegate_to_spec(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2652,38 +2675,84 @@ def test_images_built_says_unknown_rather_than_no_when_docker_will_not_answer(
 
 
 def test_the_bind_mount_probe_mounts_the_folder_and_tells_no_from_no_answer(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A wedged daemon must not be reported as "your folder is not shared with Docker"."""
     seen: list[list[str]] = []
 
     def answer(
-        returncode: int, stderr: str = ""
+        returncode: int, stdout: str = "", stderr: str = ""
     ) -> Callable[..., subprocess.CompletedProcess[str]]:
         def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
             seen.append(argv)
-            return _completed(returncode=returncode, stderr=stderr)
+            return _completed(returncode=returncode, stdout=stdout, stderr=stderr)
 
         return run
 
-    monkeypatch.setattr(docker.runner, "run", answer(0))
-    server_dir = Path("/home/pk/wow")
+    (tmp_path / "already-here.txt").write_text("x", encoding="utf-8")
+    server_dir = tmp_path / "wow"  # the folder the user picked; not created yet
+    monkeypatch.setattr(docker.runner, "run", answer(0, "already-here.txt\n"))
     assert docker.bind_mount_ok(server_dir, "alpine/git") is True
-    # `str(Path)` and not a literal: the mount source is spelled the way THIS
-    # OS spells the folder the user picked, which is the whole point of asking
-    # Docker rather than reasoning about the path.
+    # The mount source is the nearest ancestor that HAS something in it, not the
+    # chosen folder: `-v <missing>:/probe` makes Docker create the directory,
+    # and an empty directory's listing proves nothing either way.
     assert seen[-1] == [
         "docker",
         "run",
         "--rm",
         "-v",
-        f"{server_dir}:/probe",
+        # Read-only: that ancestor is routinely the user's home directory, and
+        # listing it is all this asks.
+        f"{tmp_path}:/probe:ro",
         "alpine/git",
         "ls",
+        "-A",
         "/probe",
     ]
-    monkeypatch.setattr(docker.runner, "run", answer(1, "invalid mount config"))
-    assert docker.bind_mount_ok(Path("/home/pk/wow"), "alpine/git") is False
+    assert not server_dir.exists()
+    monkeypatch.setattr(docker.runner, "run", answer(1, stderr="invalid mount config"))
+    assert docker.bind_mount_ok(server_dir, "alpine/git") is False
     # 124 is what `runner.run()` reports for a command that never answered.
-    monkeypatch.setattr(docker.runner, "run", answer(124, "timed out after 30.0s"))
-    assert docker.bind_mount_ok(Path("/home/pk/wow"), "alpine/git") is None
+    monkeypatch.setattr(docker.runner, "run", answer(124, stderr="timed out after 30.0s"))
+    assert docker.bind_mount_ok(server_dir, "alpine/git") is None
+
+
+def test_the_bind_mount_probe_catches_the_silently_empty_mount_it_exists_for(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The failure this check was written for, which its exit code could not see.
+
+    Docker Desktop mounts a folder outside its file-sharing list as an EMPTY
+    directory instead of failing the run. `ls` on an empty directory exits 0, so
+    a probe that read the exit code answered True for exactly the broken case
+    and preflight printed `[pass] sharing the folder with Docker` (review,
+    2026-08-23).
+    """
+    (tmp_path / "the-host-can-see-this").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(docker.runner, "run", lambda *a, **k: _completed(returncode=0, stdout="\n"))
+    assert docker.bind_mount_ok(tmp_path / "wow", "alpine/git") is False
+
+
+def test_the_probe_walks_up_to_a_directory_that_has_something_in_it(tmp_path: Path) -> None:
+    """An empty directory's listing proves nothing, so it is not what gets mounted."""
+    empty = tmp_path / "a" / "b"
+    empty.mkdir(parents=True)
+    # `b` is empty and `wow` does not exist, so the walk goes up to `a`, which
+    # holds `b`. A directory holding only an empty subdirectory still counts:
+    # the comparison needs a non-empty listing, not files.
+    assert docker._first_populated_ancestor(empty / "wow") == tmp_path / "a"
+    (empty / "something").write_text("x", encoding="utf-8")
+    assert docker._first_populated_ancestor(empty) == empty
+
+
+def test_a_directory_that_cannot_be_looked_into_is_unchecked_not_a_pass(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ "We could not tell" must never reach preflight as a shared folder."""
+
+    def refuse(_self: Path) -> object:
+        raise PermissionError("Operation not permitted")
+
+    monkeypatch.setattr(Path, "iterdir", refuse)
+    assert docker._first_populated_ancestor(tmp_path) is None
+    assert docker.bind_mount_ok(tmp_path / "wow", "alpine/git") is None

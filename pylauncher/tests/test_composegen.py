@@ -232,6 +232,42 @@ def test_write_plan_refuses_a_compose_file_it_did_not_write(tmp_path: Path) -> N
     assert (server_dir / composegen.BASE_FILE).read_text(encoding="utf-8") == theirs
 
 
+def test_write_plan_replaces_only_the_files_the_caller_proved_replaceable(
+    tmp_path: Path,
+) -> None:
+    """The narrow exception the emulator repository's own compose file needs.
+
+    The server directory IS the checkout and that repo ships a
+    `docker-compose.yml` at its root, so the marker rule alone refused every
+    install (review, 2026-08-23). `write_plan()` still refuses to guess which
+    file that is — `native._generate_compose()` asks git and names it here.
+    """
+    server_dir = tmp_path / "wow"
+    server_dir.mkdir()
+    upstream = "services:\n  ac-database:\n    image: mysql:8.4\n"
+    theirs = "services:\n  ac-worldserver:\n    environment: {MY_SETTING: 1}\n"
+    (server_dir / composegen.BASE_FILE).write_text(upstream, encoding="utf-8")
+    written = composegen.write_plan(
+        render(server_dir), server_dir, replaceable=(composegen.BASE_FILE,)
+    )
+    assert len(written) == 3
+    assert (
+        (server_dir / composegen.BASE_FILE)
+        .read_text(encoding="utf-8")
+        .startswith(composegen.GENERATED_MARKER)
+    )
+    # Nothing is replaceable by default: the same directory refuses again once
+    # the base file is somebody else's rather than ours.
+    (server_dir / composegen.BASE_FILE).write_text(upstream, encoding="utf-8")
+    with pytest.raises(composegen.ComposeGenError, match="not written by Yu'lon"):
+        composegen.write_plan(render(server_dir), server_dir)
+    # And naming the base file does not widen the rule to its neighbours.
+    (server_dir / composegen.OVERRIDE_FILE).write_text(theirs, encoding="utf-8")
+    with pytest.raises(composegen.ComposeGenError, match="not written by Yu'lon"):
+        composegen.write_plan(render(server_dir), server_dir, replaceable=(composegen.BASE_FILE,))
+    assert (server_dir / composegen.OVERRIDE_FILE).read_text(encoding="utf-8") == theirs
+
+
 def test_write_plan_rewrites_its_own_files_and_leaves_identical_ones_alone(tmp_path: Path) -> None:
     server_dir = tmp_path / "wow"
     server_dir.mkdir()

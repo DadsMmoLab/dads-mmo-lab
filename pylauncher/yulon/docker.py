@@ -1008,22 +1008,7 @@ def repair_import(
             "whatever it finds. Press Stop first, then try again."
         )
 
-    if spec.db not in set(status()):
-        # Started rather than demanded, because Stop takes the database down with
-        # everything else — a user who followed the refusal above would otherwise
-        # have no way back to a state this action accepts.
-        logger.info(f"repair_import(): starting {spec.db} alone; the import needs it")
-        # `compose_services()[0]`, not `spec.db`: compose takes SERVICE names and
-        # `spec.db` is a CONTAINER name. They are equal for AzerothCore and
-        # `ContainerSpec` exists precisely so a game whose compose file disagrees
-        # can say so — reaching past it here would have made that promise false
-        # for the first such game (review, 2026-08-23).
-        _run(["compose", "up", "-d", "--no-deps", spec.compose_services()[0]], cwd=server_dir)
-        if not wait_db_healthy(spec.db, timeout=db_timeout):
-            raise DockerCommandError(
-                f"{spec.db} did not report healthy within {db_timeout:.0f}s, so nothing was "
-                f"imported. `docker compose logs {spec.db}` in {server_dir} will say why."
-            )
+    start_database(spec, server_dir, timeout=db_timeout, because="nothing was imported")
 
     before = probe()
     logger.info(f"repair_import(): the databases read as {before.state} — {before.detail}")
@@ -1080,6 +1065,56 @@ def repair_import(
     run = run_one_shot(service, server_dir, sink=output)
     verify_import(probe, service, server_dir, run)
     return True
+
+
+def start_database(
+    spec: ContainerSpec,
+    server_dir: Path,
+    *,
+    timeout: float = _DB_HEALTHY_TIMEOUT_SECONDS,
+    because: str = "nothing was run",
+) -> None:
+    """Start this install's database alone and wait for it to report healthy.
+
+    Shared by `repair_import()` and by the native install engine's `start-db`
+    stage (roadmap 6.2) so the two cannot drift, and byte-identical to the argv
+    live-gated on yulon-ubuntu 2026-08-23 (23s from this call to healthy on a
+    brand-new volume; 7.1s when the container already existed).
+
+    Both callers need it for the same reason and it is not optional for either:
+    the import one-shot runs with `--no-deps`, so compose will NOT bring up the
+    database the `depends_on: service_healthy` edge names, and the import PROBE
+    is a `docker exec ac-database mysql …` that answers `unreadable` when there
+    is no such container. An install that skipped this refused itself at the
+    import stage after a multi-hour build (review, 2026-08-23).
+
+    Does nothing when the database container is already running, which is the
+    ordinary case on a resume.
+
+    `because` completes the sentence a timeout raises with, so a repair and an
+    install each say what was not done.
+
+    Raises:
+        DockerCommandError: compose would not start it, or it never became
+            healthy inside `timeout`.
+    """
+    if spec.db in set(status()):
+        return
+    # Started rather than demanded, because Stop takes the database down with
+    # everything else — a user who followed the repair refusals would otherwise
+    # have no way back to a state that action accepts.
+    logger.info(f"start_database(): starting {spec.db} alone")
+    # `compose_services()[0]`, not `spec.db`: compose takes SERVICE names and
+    # `spec.db` is a CONTAINER name. They are equal for AzerothCore and
+    # `ContainerSpec` exists precisely so a game whose compose file disagrees
+    # can say so — reaching past it here would have made that promise false
+    # for the first such game (review, 2026-08-23).
+    _run(["compose", "up", "-d", "--no-deps", spec.compose_services()[0]], cwd=server_dir)
+    if not wait_db_healthy(spec.db, timeout=timeout):
+        raise DockerCommandError(
+            f"{spec.db} did not report healthy within {timeout:.0f}s, so {because}. "
+            f"`docker compose logs {spec.db}` in {server_dir} will say why."
+        )
 
 
 def run_one_shot(
@@ -1831,6 +1866,28 @@ def port_conflicts_for(spec: ContainerSpec) -> list[str]:
     return port_conflicts(spec.ports)
 
 
+def foreign_port_conflicts(spec: ContainerSpec, project: str) -> list[str]:
+    """`port_conflicts_for()` minus the containers belonging to `project`.
+
+    The global scan cannot answer "is this MY server?", and a caller that
+    refuses on its raw answer refuses its own install. That is not theoretical:
+    the native engine's preflight re-runs on every resume, so once `up` had
+    started the three containers — which carry `restart: unless-stopped` — the
+    next attempt was told "ac-authserver, ac-worldserver already publish the
+    ports this server needs. Stop that server first (or remove its containers)",
+    naming the containers of the install being finished (review, 2026-08-23).
+
+    Ownership is decided the way `_running()` decides it: the compose project
+    label, which is the only proof there is. A container Docker will not answer
+    for is NOT filtered out — an unreadable owner is not proof of ownership, and
+    the caller refusing is the fail-closed direction here.
+    """
+    conflicts = port_conflicts(spec.ports)
+    if not conflicts:
+        return []
+    return [name for name in conflicts if container_project(name) != project]
+
+
 def published_bindings() -> dict[int, str]:
     """Host address each published port is bound to, parsed from `docker ps` (`{{.Ports}}`).
 
@@ -1983,8 +2040,9 @@ def run_attached(
     handed to the daemon: BuildKit finishes the build step it is on, and a
     one-shot container keeps running to completion. That is desirable (the
     layer cache keeps the work, and a resumed install re-probes the databases)
-    and it is the caller's job to say so — see `native.CANCEL_NOTE`. `repair_
-    import()` deliberately passes no cancel at all; see there.
+    and it is the caller's job to say so, per stage — see
+    `native.BUILD_CANCEL_NOTE` and its neighbours. `repair_import()`
+    deliberately passes no cancel at all; see there.
 
     `merge_stderr` is for the build, whose entire progress output is stderr;
     see `runner.stream()`.
@@ -2085,11 +2143,21 @@ def build_staged(
 def images_built(server_dir: Path, compose_files: Sequence[str]) -> bool | None:
     """Has this install's build already produced images? None = could not ask.
 
-    The disk evidence behind the install engine's `build` stage: a state file
-    that says "built" is a hint, and `compose images -q` is the thing that can
-    contradict it (rust-prior-art §1). The same `-f` discipline as
-    `build_staged()` applies, since the build overlay is where the built
-    stages' image refs come from.
+    A hint that can contradict the state file's "built", for the install
+    engine's `build` stage (rust-prior-art §1). The same `-f` discipline as
+    `build_staged()` applies, since the build overlay is where the built stages'
+    image refs come from.
+
+    **Not the disk evidence it was once documented as, and the difference is on
+    the first gate's list.** Compose v2's `images` enumerates the images of the
+    project's CREATED CONTAINERS, not of its service definitions — so in the
+    exact window this is asked in (build finished, `up` not yet run) it very
+    likely answers empty and a resume re-runs `compose build` (review,
+    2026-08-23). That direction is safe rather than wrong — BuildKit's cache
+    makes the re-run cheap and a false "built" would start a server with no
+    binaries — but nobody here has watched it answer, and the gate's job is to
+    run `compose images -q` against a built project with no containers and
+    record what it says.
 
     `None` is not `False`. A resume that cannot ask must not conclude "nothing
     is built" and spend four hours proving itself wrong, and it must not
@@ -2115,31 +2183,82 @@ def bind_mount_ok(
     A folder outside them mounts as an EMPTY directory rather than failing the
     run, so the clone appears to succeed, the build gets an empty context, and
     the first thing that reports the problem is a compile error hours later.
-    The probe is one `ls` inside the mount, which cannot be wrong about the one
-    thing it is asked.
 
-    `None` means the question could not be answered — no docker CLI, or the
-    daemon did not reply inside `timeout`. That is preflight's *unchecked*
-    tri-state, never a pass and never a refusal: a caller that read it as False
-    would refuse an install that would have worked.
+    **The exit code of an `ls` cannot detect that**, and an earlier version of
+    this function claimed it could. `ls` on an empty directory exits 0, and the
+    server directory is empty or absent at preflight time by construction — so
+    against the silently-empty mount this exists for, the probe answered True
+    and preflight printed `[pass] sharing the folder with Docker` (review,
+    2026-08-23). What it can do is compare CONTENTS: mount a directory the host
+    can see files in, and check the container sees files too.
 
-    Unverified on macOS. `/Users` is *believed* shared by default there, which
-    is exactly why this probe exists rather than a rule about paths.
+    So the probe runs against the deepest ANCESTOR of `server_dir` that exists
+    and has entries in it, not against `server_dir`. Two reasons, both
+    load-bearing. Docker Desktop shares whole trees, so an ancestor's answer is
+    the chosen folder's answer; and `-v <server_dir>:/probe` on a folder that
+    does not exist yet makes Docker CREATE it, which put a directory on disk
+    before `guard` had claimed it.
+
+    `None` means the question could not be answered: no docker CLI, the daemon
+    did not reply inside `timeout`, or no ancestor with anything in it could be
+    found to compare against. That is preflight's *unchecked* tri-state, never a
+    pass and never a refusal — a caller that read it as False would refuse an
+    install that would have worked.
+
+    Unverified on macOS, and this is the check most in need of the first gate:
+    that Docker Desktop mounts an unshared folder as empty rather than failing
+    is inherited from the Rust launcher, and what a Mac actually does with an
+    unshared path is exactly what nobody here can run.
     """
+    mount = _first_populated_ancestor(server_dir)
+    if mount is None:
+        logger.info(
+            f"nothing on the way up from {server_dir} had files in it, so a container's view of "
+            "it cannot be compared against the host's"
+        )
+        return None
+    # `:ro`, because the mount is now an ANCESTOR of the chosen folder and that
+    # is routinely the user's home directory. The probe only lists; the clone
+    # stage is the thing that needs write access, and it gets its own mount.
     proc = _docker(
-        ["run", "--rm", "-v", f"{server_dir}:/probe", image, "ls", "/probe"], timeout=timeout
+        ["run", "--rm", "-v", f"{mount}:/probe:ro", image, "ls", "-A", "/probe"], timeout=timeout
     )
     if _cli_missing(proc):
         return None
-    if proc.returncode == 0:
-        return True
     # A non-zero exit is the daemon answering "no", which IS an answer — unless
     # it never answered at all. `runner.run()` reports a timeout as 124 with the
     # reason in stderr rather than raising, so that case has to be separated out
     # or a wedged dockerd reaches the user as "your folder is not shared with
     # Docker Desktop", which is a different fix entirely.
     if proc.returncode == _TIMEOUT_RETURNCODE:
-        logger.warning(f"the bind-mount probe of {server_dir} did not answer within {timeout:.0f}s")
+        logger.warning(f"the bind-mount probe of {mount} did not answer within {timeout:.0f}s")
         return None
-    logger.warning(f"the bind-mount probe of {server_dir} failed: {proc.stderr.strip()}")
+    if proc.returncode != 0:
+        logger.warning(f"the bind-mount probe of {mount} failed: {proc.stderr.strip()}")
+        return False
+    if any(line.strip() for line in proc.stdout.splitlines()):
+        return True
+    logger.warning(
+        f"a container saw {mount} as empty although the host sees files in it — Docker is not "
+        "sharing that folder"
+    )
     return False
+
+
+def _first_populated_ancestor(path: Path) -> Path | None:
+    """The nearest directory at or above `path` that exists and is not empty.
+
+    The probe needs a host directory whose contents it can hold the container's
+    answer up against; an empty one proves nothing either way.
+    """
+    probe = path
+    while True:
+        try:
+            if probe.is_dir() and any(probe.iterdir()):
+                return probe
+        except OSError as exc:
+            logger.info(f"could not look inside {probe}: {exc}")
+            return None
+        if probe == probe.parent:
+            return None
+        probe = probe.parent

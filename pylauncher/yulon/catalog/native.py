@@ -15,8 +15,9 @@ install. The rules below each cost the earlier Rust launcher an evening
 careful than its length suggests:
 
 * `preflight` and `guard` are NEVER recorded complete — a guard a resume skips
-  is not a guard. `up` and `ready` are not recorded either: a resume must
-  always end by actually starting and verifying the server, and both are cheap.
+  is not a guard. `start-db`, `up` and `ready` are not recorded either: a resume
+  must always end by actually starting and verifying the server, and it must
+  bring the database back up before the import stage can ask it anything.
 * **The state file is a hint.** Every stage re-checks disk evidence before
   skipping: the clone stages ask git for the remote, the build asks compose for
   images, compose generation reads its own marker. An `is_done` short-circuit
@@ -75,25 +76,67 @@ STAGE_ORDER: tuple[str, ...] = (
     "generate-compose",
     "build",
     "client-data",
+    "start-db",
     "import",
     "up",
     "ready",
 )
 
-NEVER_RECORDED = frozenset({"preflight", "guard", "up", "ready"})
-"""Stages whose completion is never written down. See the module docstring."""
+NEVER_RECORDED = frozenset({"preflight", "guard", "start-db", "up", "ready"})
+"""Stages whose completion is never written down. See the module docstring.
 
-CANCEL_NOTE = (
+`start-db` is here because it is a precondition rather than progress: the
+import stage after it needs a live database both to probe and to write to, and
+a resume that skipped it would fail the same way a first install without it
+did. It costs seconds against an already-running container.
+"""
+
+OPENING_NOTE = (
+    "You can stop this at any time. Nothing is written outside the folder below, and starting the "
+    "install again continues from the last step that finished — only the step that was interrupted "
+    "runs again."
+)
+"""What a Stop costs, said before it is pressed, and true of every stage.
+
+The sentence this replaced was about the build (see `BUILD_CANCEL_NOTE`) and
+was said as the second line of every install and appended to every
+cancellation, so a user who stopped during the clone or the download was told
+Docker was finishing a build step (review, 2026-08-23).
+"""
+
+BUILD_CANCEL_NOTE = (
     "Stopping now leaves Docker finishing the build step it is already on, in the background. "
     "That is deliberate: the work it has done is kept, and starting this install again picks up "
     "from there instead of compiling it all a second time."
 )
-"""What a Stop actually does, said before it is pressed.
+"""What a Stop does DURING THE BUILD, said just before the build starts.
 
 Abandoning the compose client does not abandon the daemon's work, and the
 layer cache is precisely what makes a resume cheap — a user told "cancelled"
 without this sentence reaches for `docker builder prune` and throws away the
 thing that would have saved them three hours.
+"""
+
+DOWNLOAD_CANCEL_NOTE = (
+    "The part of the download that finished is kept: the fetch resumes from where it stopped."
+)
+"""True of this stage only, and it is the generated entrypoint that makes it true.
+
+`curl --continue-at -` against a version-keyed file, plus an `unzip -t` before
+anything is extracted (see the base template). Upstream's own downloader
+truncates and restarts at byte zero, which is why the fetch is replaced.
+"""
+
+IMPORT_CANCEL_NOTE = (
+    "Databases left half-written are detected and cleared before the import is run again, so "
+    "nothing here has to be undone by hand."
+)
+"""Why a stopped import is recoverable — measured, not assumed.
+
+Re-running the importer over a schema that already exists reports success in 28
+seconds and leaves `acore_world` permanently unimportable (yulon-ubuntu,
+2026-08-23). The `partial` branch of `_import()` is what makes this sentence
+true; without it the honest copy would be the opposite.
 """
 
 # What the auth server prints once it is serving the realm. A fresh install's
@@ -196,6 +239,15 @@ def write_state(server_dir: Path, state: InstallState) -> None:
         logger.warning(f"could not record install progress in {path}: {exc}")
 
 
+def _git_file_unmodified(dest: Path, relative_path: str) -> bool | None:
+    """`git status --porcelain -- <path>` inside a container; see `ContainerGit`.
+
+    Defined above `Seams` rather than beside `_git_remote_url()` because it is a
+    default value, evaluated when the dataclass is created.
+    """
+    return git.ContainerGit().is_unmodified(dest, relative_path)
+
+
 @dataclass
 class Seams:
     """Everything the engine reaches outside itself through. Real by default.
@@ -213,11 +265,14 @@ class Seams:
     gather: Callable[..., preflight.Facts] = preflight.gather
     clone: Callable[[git.CloneSpec], None] = field(default_factory=lambda: git.ContainerGit().clone)
     remote_url: Callable[[Path], str | None] | None = None
+    file_unmodified: Callable[[Path, str], bool | None] = _git_file_unmodified
     images_built: Callable[[Path, Sequence[str]], bool | None] = docker.images_built
     build: Callable[..., docker.AttachedRun] = docker.build_staged
     one_shot: Callable[..., docker.AttachedRun] = docker.run_one_shot
     verify_import: Callable[..., docker.ImportState] = docker.verify_import
+    container_exists: Callable[[str], bool] = docker.container_exists
     container_project: Callable[[str], str | None] = docker.container_project
+    start_db: Callable[[docker.ContainerSpec, Path], None] = docker.start_database
     start: Callable[[docker.ContainerSpec, Path], bool] = docker.start_staged
     wait_db_healthy: Callable[[docker.ContainerSpec], bool] = docker.wait_db_healthy_for
     wait_ready: Callable[[docker.ContainerSpec, str, int], bool] = docker.wait_ready_for
@@ -288,7 +343,7 @@ class NativeInstaller:
         opts = options or InstallOptions()
         server_dir = self.server_dir(opts)
         yield f"Installing {self.entry.name} into {server_dir}"
-        yield CANCEL_NOTE
+        yield OPENING_NOTE
         yield from self._preflight_lines(opts, cancel)
         self._check_cancel(cancel)
 
@@ -354,7 +409,27 @@ class NativeInstaller:
                     "Docker isn't available and could not be set up automatically. "
                     + (details or "Install Docker, start it, and try again.")
                 )
-        facts = self._seams.gather(self.entry, server_dir)
+        try:
+            # The engine's own seams are handed down rather than letting
+            # preflight fall back to its real defaults: without this an engine
+            # built with `platform_id=lambda: "macos"` dispatches as macOS and
+            # then gathers facts about whatever host it is really on, and the
+            # two can disagree with nothing noticing.
+            facts = self._seams.gather(
+                self.entry,
+                server_dir,
+                platform_id=self._seams.platform_id,
+                docker_ready=self._seams.docker_ready,
+            )
+        except docker.DockerCommandError as exc:
+            # `gather()`'s port scan goes through `docker._run()`, which RAISES.
+            # Every other outward call in this engine is wrapped, and an
+            # unwrapped one escapes `run()` as a traceback instead of the
+            # sentence this method's contract promises.
+            raise InstallerError(
+                f"Docker answered once and then would not answer again, so nothing was started: "
+                f"{exc}"
+            ) from exc
         report_checks = preflight.evaluate(self.entry, server_dir, facts)
         yield from preflight.lines(report_checks)
         if not report_checks.ok():
@@ -408,17 +483,37 @@ class NativeInstaller:
         the wild uses the same three, so this is not exotic: a second install
         while the first exists is the normal way to meet it. The remedy named
         is Remove, which the app has.
+
+        **Existence is asked FIRST, and that is the whole of the fresh-install
+        case.** `container_project()` answers `UNREADABLE` for any non-zero
+        `docker inspect`, and `docker inspect <missing>` exits 1 — so asking it
+        about a container that is not there refused every install on every
+        machine that had never run this server, naming a container the user
+        could then not find (review, 2026-08-23). The pre-existing caller in
+        `docker._running()` guards the same way, `if name not in running:
+        continue`; this is that check, spelled for containers that exist but are
+        stopped as well as running ones.
         """
         ours = composegen.project_name(
             self.entry.id, server_dir, platform_id=self._seams.platform_id
         )
         spec = self.entry.container_spec()
         for name in (spec.db, spec.auth, spec.world):
+            try:
+                if not self._seams.container_exists(name):
+                    continue
+            except docker.DockerCommandError as exc:
+                raise InstallerError(
+                    "Docker would not say what containers already exist on this machine "
+                    f"({exc}), so this install cannot prove it is safe to create its own. "
+                    "Nothing was written."
+                ) from exc
             owner = self._seams.container_project(name)
             if owner is None or owner == ours:
-                # No compose label at all is not proof of a conflict — the
-                # container may not exist, which is what `container_project()`
-                # answers for a name nothing carries.
+                # `None` is a container that exists and carries no compose label
+                # — something started outside compose, wearing our name. Not a
+                # project conflict, and the daemon's own duplicate-name error is
+                # the honest report if it is still there at `up`.
                 continue
             if owner == docker.UNREADABLE:
                 raise InstallerError(
@@ -451,6 +546,8 @@ class NativeInstaller:
             yield from self._build(state, server_dir, cancel)
         elif stage == "client-data":
             yield from self._client_data(server_dir, cancel)
+        elif stage == "start-db":
+            yield from self._start_db(server_dir)
         elif stage == "import":
             yield from self._import(server_dir, cancel)
         elif stage == "up":
@@ -520,7 +617,17 @@ class NativeInstaller:
         yield f"{source.repo} is in place."
 
     def _clone_modules(self, server_dir: Path) -> Iterator[str]:
-        """Clone every other source under `modules/`, which is what the build mounts."""
+        """Clone every other source under `modules/`, which is what the build mounts.
+
+        Guarded exactly like `_clone_core()`, and for a reason this loop once
+        did not have: the clone seam `shutil.rmtree`s a destination it does not
+        recognise, and `_remote_of()` answers `None` for a directory with no
+        `.git`. A `modules/mod-playerbots` a user had put there by hand — a
+        tarball, a copied tree, a checkout without its `.git` — fell straight
+        through the only check here and was deleted (review, 2026-08-23). One
+        engine that refuses to touch what it does not own must do it at every
+        level, not just the top one.
+        """
         sources = self.entry.emulator.sources[1:]
         if not sources:
             yield "This server has no extra modules to clone."
@@ -528,11 +635,22 @@ class NativeInstaller:
         for source in sources:
             name = source.repo.rstrip("/").split("/")[-1]
             dest = server_dir / "modules" / name
+            has_git = (dest / ".git").is_dir()
             existing = self._remote_of(dest)
+            if has_git and existing is None:
+                raise InstallerError(
+                    f"{dest} contains a git checkout, but git would not say what it is a "
+                    "checkout of, so nothing was changed. Move that folder aside and try again."
+                )
             if existing is not None and not _same_repo(existing, source.url):
                 raise InstallerError(
                     f"{dest} is a checkout of {existing}, not of {source.url}. Nothing was "
                     "changed."
+                )
+            if not has_git and dest.is_dir() and any(dest.iterdir()):
+                raise InstallerError(
+                    f"{dest} has files in it but is not a checkout of {source.url}, so it was "
+                    "left alone. Move that folder aside and try again."
                 )
             yield f"Cloning {source.repo} into modules/{name}"
             self._clone(
@@ -547,15 +665,40 @@ class NativeInstaller:
         yield "Modules are in place."
 
     def _generate_compose(self, server_dir: Path) -> Iterator[str]:
-        """Write the three compose files, and refuse to overwrite ones we did not write."""
+        """Write the three compose files, and refuse to overwrite ones we did not write.
+
+        With one recognised exception, which every install needs. The server dir
+        IS the emulator checkout and that repository ships its own
+        `docker-compose.yml` at the root — the Linux installer's whole mechanism
+        depends on it being there — so the clone stage lays an unmarked base
+        file down before this ever runs. Refusing it refused every install, with
+        "point the install at an empty folder" said to a user who had (review,
+        2026-08-23).
+
+        The exception is narrow and mechanical: git is asked whether that path
+        is tracked and unmodified in this checkout. Empty output from `git
+        status --porcelain -- docker-compose.yml` proves the file is byte for
+        byte what the clone wrote and that `git checkout -- docker-compose.yml`
+        restores it, so replacing it destroys nothing. A file a user has edited
+        answers ` M`, an untracked one answers `??`, and a git that cannot be
+        asked answers `None` — all three keep the refusal. The override and
+        build files get no exception at all: upstream ships neither, so an
+        unmarked one there is somebody's own settings.
+        """
         plan = composegen.render(
             self.entry,
             server_dir,
             templates_root=self.installers_root,
             platform_id=self._seams.platform_id,
         )
+        replaceable = self._replaceable_compose(server_dir)
+        if replaceable:
+            yield (
+                f"Replacing the {composegen.BASE_FILE} that came with the repository; it is "
+                "unchanged from what git has, so `git checkout` brings it back."
+            )
         try:
-            written = composegen.write_plan(plan, server_dir)
+            written = composegen.write_plan(plan, server_dir, replaceable=replaceable)
         except composegen.ComposeGenError as exc:
             raise InstallerError(str(exc)) from exc
         except OSError as exc:
@@ -564,6 +707,15 @@ class NativeInstaller:
             yield "The compose files are already exactly what this install needs."
         for path in written:
             yield f"Wrote {path.name}"
+
+    def _replaceable_compose(self, server_dir: Path) -> tuple[str, ...]:
+        """`docker-compose.yml`, when git proves it is the one the clone wrote. See above."""
+        path = server_dir / composegen.BASE_FILE
+        if not path.exists() or composegen.is_ours(path):
+            return ()
+        if self._seams.file_unmodified(server_dir, composegen.BASE_FILE):
+            return (composegen.BASE_FILE,)
+        return ()
 
     def _build(
         self, state: InstallState, server_dir: Path, cancel: threading.Event | None
@@ -583,12 +735,13 @@ class NativeInstaller:
         if state.has("build") and built is None:
             yield "Docker would not say whether this install is built, so it is being rebuilt."
         yield "Building the server. This takes hours on a first install; the output below is live."
+        yield BUILD_CANCEL_NOTE
         run = yield from self._pump(
             lambda sink: self._seams.build(
                 server_dir, composegen.COMPOSE_FILES, sink=sink, cancel=cancel
             )
         )
-        self._check_run(run, "the build", cancel)
+        self._check_run(run, "the build", cancel, BUILD_CANCEL_NOTE)
         yield "The build finished."
 
     def _client_data(self, server_dir: Path, cancel: threading.Event | None) -> Iterator[str]:
@@ -611,8 +764,43 @@ class NativeInstaller:
         run = yield from self._pump(
             lambda sink: self._seams.one_shot(service, server_dir, sink=sink, cancel=cancel)
         )
-        self._check_run(run, "the server-data download", cancel)
+        self._check_run(run, "the server-data download", cancel, DOWNLOAD_CANCEL_NOTE)
         yield "Server data is in place."
+
+    def _start_db(self, server_dir: Path) -> Iterator[str]:
+        """Bring the database up alone, before the import stage asks it anything.
+
+        Not an optimisation and not tidiness — without it the install cannot
+        finish. `_import()` probes first, and the real probe is a `docker exec
+        <db container> mysql …`; with no such container it raises and the probe
+        answers `unreadable`, which `_import()` turns into a hard refusal. So
+        the fresh install died at the import stage AFTER the multi-hour build,
+        every time, and every resume died in the same place (review,
+        2026-08-23). Running the one-shot anyway would not have helped:
+        `run_one_shot()` passes `--no-deps`, which prunes exactly the
+        `depends_on: <db>: condition: service_healthy` edge the generated base
+        file declares on the import service.
+
+        `pyplan/phase6-decisions.md` had already settled this for the repair
+        button — "The action starts the database, and that is a deliberate
+        widening of 'runs only the one-shot service'… Without it the action is
+        unreachable" — and `docker.start_database()` is that same code, shared
+        so the two paths cannot drift.
+
+        Never recorded: it is a precondition, not progress, and it returns
+        immediately when the container is already up.
+        """
+        if not self.entry.containers.db_import:
+            yield "This server has no database step, so nothing needs the database yet."
+            return
+        yield "Starting the database, which the import writes into."
+        try:
+            self._seams.start_db(self.entry.container_spec(), server_dir)
+        except docker.DockerCommandError as exc:
+            raise InstallerError(
+                f"The database could not be started, so nothing was imported: {exc}"
+            ) from exc
+        yield "The database is up."
 
     def _import(self, server_dir: Path, cancel: threading.Event | None) -> Iterator[str]:
         """Populate the databases, using the same probe/reset machinery as the repair button.
@@ -632,6 +820,11 @@ class NativeInstaller:
         * `unreadable`, or `populated` but incomplete — refuse. An unanswerable
           database is not an empty one, and a database with rows in it is
           somebody's.
+
+        `unreadable` means what it says here only because `start-db` ran first:
+        the probe reaches the databases through `docker exec` on the database
+        container, so without one running it answers `unreadable` for a machine
+        with nothing wrong with it. See `_start_db()`.
         """
         service = self.entry.containers.db_import
         if not service or self._probe is None:
@@ -672,7 +865,7 @@ class NativeInstaller:
             lambda sink: self._seams.one_shot(service, server_dir, sink=sink, cancel=cancel)
         )
         if run.returncode == docker.CANCELLED_RETURNCODE:
-            raise InstallerError(_cancelled_message("the database import"))
+            raise InstallerError(_cancelled_message("the database import", IMPORT_CANCEL_NOTE))
         try:
             after = self._seams.verify_import(self._probe, service, server_dir, run)
         except docker.DockerCommandError as exc:
@@ -768,10 +961,21 @@ class NativeInstaller:
         return outcome[0]
 
     def _check_run(
-        self, run: docker.AttachedRun, what: str, cancel: threading.Event | None
+        self,
+        run: docker.AttachedRun,
+        what: str,
+        cancel: threading.Event | None,
+        note: str,
     ) -> None:
+        """`note` is what a Stop costs FOR THIS STAGE, and only this stage.
+
+        Required rather than defaulted, because there is no sentence about
+        keeping work that is true of the build, the download and the import
+        alike — and the copy that was true of one was being said for all three.
+        A default here is the shape that mistake had.
+        """
         if run.returncode == docker.CANCELLED_RETURNCODE:
-            raise InstallerError(_cancelled_message(what))
+            raise InstallerError(_cancelled_message(what, note))
         if run.returncode != 0:
             raise InstallerError(
                 f"{what} failed (exit {run.returncode}). Its last words were: "
@@ -819,8 +1023,13 @@ class NativeInstaller:
         write_state(server_dir, replace(state, last_error=message))
 
 
-def _cancelled_message(what: str) -> str:
-    return f"{what} was stopped. {CANCEL_NOTE}"
+def _cancelled_message(what: str, note: str = "") -> str:
+    """ "<what> was stopped", plus whatever is TRUE of the stage that was stopped.
+
+    No note is the honest default. A cancel between stages has nothing to add
+    beyond `OPENING_NOTE`, which the user was already told.
+    """
+    return f"{what} was stopped. {note}".rstrip()
 
 
 def _same_repo(existing: str, wanted: str) -> bool:

@@ -69,9 +69,20 @@ _LINE_ENDING_CONFIG = [
 # for readability; the digest is what docker actually resolves.
 # Resolved 2026-08-22 by pulling alpine/git:2.49.1 (git version 2.49.1) and
 # reading back its RepoDigest; re-resolve the same way when bumping.
-_CONTAINER_GIT_IMAGE = (
+CONTAINER_GIT_IMAGE = (
     "alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26"
 )
+"""Public because preflight's bind-mount probe has to run THIS reference.
+
+A tag and a digest are two different image references to Docker. A probe that
+asked for `alpine/git` pulled a second, unpinned image and bind-mounted the
+user's chosen directory into whatever `:latest` resolved to that day, while the
+clone stage that followed pulled the digest below (review, 2026-08-23).
+Exporting the pinned value is what makes preflight's "the probe costs one pull
+that was going to happen anyway" true rather than merely written.
+"""
+
+_CONTAINER_GIT_IMAGE = CONTAINER_GIT_IMAGE
 
 MISSING_GIT_HELP = {
     "linux": "Install git with your package manager (e.g. `sudo apt install git`) and try again.",
@@ -292,6 +303,32 @@ class ContainerGit:
             logger.debug(f"could not read origin in {dest}: {exc}")
             return None
         return proc.stdout.strip() or None
+
+    def is_unmodified(self, dest: Path, relative_path: str) -> bool | None:
+        """Is `relative_path` exactly what this checkout's HEAD committed? None = cannot ask.
+
+        One question, `git status --porcelain -- <path>`, and the three answers
+        it distinguishes are the three that matter: no output means the path is
+        tracked and matches the index and working tree; `?? path` means it is
+        untracked; ` M path` (or any other code) means it was changed. So an
+        empty answer — and only an empty answer — proves that replacing the file
+        destroys nothing, because `git checkout -- <path>` restores it byte for
+        byte.
+
+        `None` when git could not be asked at all, which callers must fail
+        closed on: "we could not check" is not "it is safe to overwrite".
+
+        Deliberately NOT on the `Git` Protocol, for the same reason
+        `remote_url()` is not — see the comment there.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = self._capture(dest, ["status", "--porcelain", "--", relative_path])
+        except GitError as exc:
+            logger.debug(f"could not ask git about {relative_path} in {dest}: {exc}")
+            return None
+        return not proc.stdout.strip()
 
     def clone(self, spec: CloneSpec) -> None:
         if (spec.dest / ".git").is_dir():

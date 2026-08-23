@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -182,12 +182,21 @@ def _slug(text: str) -> str:
 
 @dataclass(frozen=True)
 class ComposePlan:
-    """The three files' text plus the `.env` keys this install actually needs.
+    """The three files' text plus the `.env` keys this install needs on top of them.
 
-    `dotenv` holds only keys whose value is NOT already the interpolation
-    default rendered into the base file — an `.env` that repeats the defaults
-    is noise that the next reader has to diff against the compose file to
-    understand.
+    `dotenv` is **always empty as this module is called today**, and saying so
+    is the point: `render()` has no caller that passes a per-install password,
+    so every value it writes is the catalog's fixed one, which the base file's
+    interpolation default has to carry anyway. A docstring here once promised
+    that a non-default password "lands in `.env` rather than being baked into
+    the file"; nothing implemented that, and a caller trusting it would have
+    written a generated secret into `docker-compose.yml` in seven places
+    (review, 2026-08-23).
+
+    The field stays because the `.env` merge is real machinery
+    (`write_dotenv()`) that `write_plan()` applies when this is non-empty — it
+    is the seam a per-install password would arrive through, not a claim that
+    one already does.
     """
 
     base: str
@@ -208,8 +217,10 @@ def render(
     """Render this entry's three compose files for an install in `server_dir`.
 
     `db_password` overrides the catalog's fixed password (for a game that
-    generates one per install); when it differs from what the template renders
-    as its default, it lands in `.env` rather than being baked into the file.
+    generates one per install). **Whatever it is, it is rendered into
+    `docker-compose.yml`** — as the `${DB_ROOT_PASSWORD:-…}` interpolation
+    default, in seven places. The returned plan's `dotenv` is empty; see
+    `ComposePlan.dotenv` for why that is stated rather than fixed.
 
     Raises:
         ComposeGenError: the entry has no `install.native` block, a template is
@@ -333,7 +344,9 @@ def is_ours(path: Path) -> bool:
         return False
 
 
-def write_plan(plan: ComposePlan, server_dir: Path) -> tuple[Path, ...]:
+def write_plan(
+    plan: ComposePlan, server_dir: Path, *, replaceable: Sequence[str] = ()
+) -> tuple[Path, ...]:
     """Write the three files (and merge `.env`), refusing to overwrite foreign ones.
 
     Returns the paths written, which is deliberately not always all three: a
@@ -341,10 +354,23 @@ def write_plan(plan: ComposePlan, server_dir: Path) -> tuple[Path, ...]:
     move, and an unchanged compose file is what tells a user's own `docker
     compose` that nothing needs recreating.
 
+    `replaceable` names files the CALLER has separately proved may be
+    overwritten despite carrying no marker, and it exists for exactly one file:
+    `docker-compose.yml`, which the emulator repository ships at its own root.
+    The server directory IS that checkout, so on every single install the clone
+    stage lays an unmarked `docker-compose.yml` down before this runs, and the
+    marker rule alone refused every install with "point the install at an empty
+    folder" — told to a user who did, after a 2.4 GB clone (review,
+    2026-08-23). This module cannot tell upstream's file from a real server's,
+    so it does not guess; `native._generate_compose()` asks git whether the
+    file is the tracked, unmodified one the clone wrote and passes the answer
+    in. Nothing is replaceable by default.
+
     Raises:
-        ComposeGenError: a compose file exists that this engine did not write.
-            Never deleted, never overwritten — the install stops instead, since
-            the alternative is orphaning somebody's character volumes.
+        ComposeGenError: a compose file exists that this engine did not write
+            and the caller did not name. Never deleted, never overwritten — the
+            install stops instead, since the alternative is orphaning somebody's
+            character volumes.
     """
     written: list[Path] = []
     for name, text in (
@@ -353,7 +379,7 @@ def write_plan(plan: ComposePlan, server_dir: Path) -> tuple[Path, ...]:
         (BUILD_FILE, plan.build),
     ):
         path = server_dir / name
-        if not is_ours(path):
+        if name not in replaceable and not is_ours(path):
             raise ComposeGenError(
                 f"{path} was not written by Yu'lon, so it was not touched and nothing was "
                 "installed. Point the install at an empty folder, or move that file aside."
@@ -369,6 +395,12 @@ def write_plan(plan: ComposePlan, server_dir: Path) -> tuple[Path, ...]:
 
 def merge_dotenv(existing: str, additions: Mapping[str, str]) -> str:
     """`.env` text with `additions` applied: existing assignments replaced, new ones appended.
+
+    No non-test caller reaches this today — `render()` returns an empty
+    `dotenv`, so `write_plan()`'s branch never fires. It is written and tested
+    ahead of the first caller that needs it (a per-install database password,
+    or the settings surface writing a port binding), not because something
+    already merges an `.env`.
 
     A merge and not a rewrite, because this file is shared. Compose interpolates
     the compose files from it, a later SOAP setup writes its own port binding

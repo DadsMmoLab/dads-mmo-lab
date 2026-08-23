@@ -28,7 +28,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from yulon import docker, platform
+from yulon import docker, git, platform
+from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry
 from yulon.log import get_logger
 
@@ -38,13 +39,15 @@ Verdict = Literal["pass", "warn", "unchecked", "refuse"]
 
 GIB = 1024**3
 
-PROBE_IMAGE = "alpine/git"
-"""What the bind-mount probe runs.
+PROBE_IMAGE = git.CONTAINER_GIT_IMAGE
+"""What the bind-mount probe runs: the exact reference the clone stages pull.
 
-The image the clone stages need anyway (`git.ContainerGit`), so the probe costs
-one pull that was going to happen rather than a second one. Only its name is
-needed here — `git.py` owns the digest pin, since that is the copy that gets
-write access to a user's directory.
+Imported rather than spelled, because a tag and a digest are two different
+image references. Writing `alpine/git` here made the probe pull a SECOND,
+unpinned image and hand it a bind mount of the user's chosen directory, while
+`git.ContainerGit` pulled the pinned one — two pulls, and the 30 s
+`BIND_PROBE_TIMEOUT_SECONDS` budget had been reasoned about as covering the one
+the clone needed anyway (review, 2026-08-23).
 """
 
 
@@ -134,6 +137,11 @@ def gather(
     `None`, and the daemon is asked exactly once: with no Docker there is no VM
     size, no data root and no bind-mount probe, and asking anyway would produce
     the fabricated zeroes this module exists to keep out.
+
+    `platform_id` is threaded into every question that has a per-OS answer,
+    including the volume comparison. Reading the real platform inside one of
+    them is how this suite once went red on every Python 3.12+ Linux box while
+    CI stayed green.
     """
     here = platform_id()
     ready = docker_ready()
@@ -143,7 +151,11 @@ def gather(
     root_free = free(root) if root is not None else None
     dir_free = free(server_dir)
     probe = bind_mount_ok if bind_mount_ok is not None else _default_bind_probe
-    conflicts = port_conflicts if port_conflicts is not None else _default_conflicts(entry)
+    conflicts = (
+        port_conflicts
+        if port_conflicts is not None
+        else _default_conflicts(entry, server_dir, platform_id)
+    )
     listening: list[int] = []
     for port in (entry.ports.auth, entry.ports.world):
         # Only a completed connection counts. `probe_tcp()` reports a refusal,
@@ -159,7 +171,7 @@ def gather(
         data_root=root,
         data_root_free=root_free,
         server_dir_free=dir_free,
-        same_volume=_same_volume(root, server_dir),
+        same_volume=_same_volume(root, server_dir, here),
         dir_problem=dir_problem(server_dir),
         bind_mount=probe(server_dir) if ready else None,
         port_conflicts=tuple(conflicts()) if ready else (),
@@ -171,9 +183,22 @@ def _default_bind_probe(server_dir: Path) -> bool | None:
     return docker.bind_mount_ok(server_dir, PROBE_IMAGE)
 
 
-def _default_conflicts(entry: CatalogEntry) -> Callable[[], list[str]]:
+def _default_conflicts(
+    entry: CatalogEntry, server_dir: Path, platform_id: Callable[[], str]
+) -> Callable[[], list[str]]:
+    """Publishers of this entry's ports that are NOT this install's own containers.
+
+    The unfiltered scan is a global one and refuses the install it belongs to:
+    preflight re-runs on every resume, so once `up` had started the three
+    containers — which carry `restart: unless-stopped` — the next attempt was
+    refused and told to remove the containers of the install it was trying to
+    finish (review, 2026-08-23). The compose project is the same ownership
+    proof the install guard uses, so the two cannot disagree about whose
+    containers these are.
+    """
     spec = entry.container_spec()
-    return lambda: docker.port_conflicts_for(spec)
+    project = composegen.project_name(entry.id, server_dir, platform_id=platform_id)
+    return lambda: docker.foreign_port_conflicts(spec, project)
 
 
 def _free_bytes(path: Path) -> int | None:
@@ -193,27 +218,31 @@ def _free_bytes(path: Path) -> int | None:
         return None
 
 
-def _same_volume(data_root: Path | None, server_dir: Path) -> bool | None:
+def _same_volume(data_root: Path | None, server_dir: Path, platform_id: str) -> bool | None:
     """Do the images and the checkout share one pool of free space? None = unknown.
 
     It matters because the floors then ADD rather than each being met on its
     own: both grow, at the same time, out of the same free space.
+
+    `platform_id` is passed in rather than detected here so the Windows branch
+    below is reachable from a test that injects a platform — the module's whole
+    claim is that every threshold is testable without a daemon, a disk or a Mac.
     """
     if data_root is None:
         return None
     try:
-        return _volume_of(data_root) == _volume_of(server_dir)
+        return _volume_of(data_root, platform_id) == _volume_of(server_dir, platform_id)
     except OSError as exc:
         logger.info(f"could not tell whether {data_root} and {server_dir} share a volume: {exc}")
         return None
 
 
-def _volume_of(path: Path) -> object:
+def _volume_of(path: Path, platform_id: str) -> object:
     """A value equal for two paths on the same volume, on Windows and POSIX alike."""
     probe = path
     while not probe.exists() and probe != probe.parent:
         probe = probe.parent
-    if platform.detect() == "windows":
+    if platform_id == "windows":
         # `st_dev` is not a volume id on Windows before the file is opened;
         # the drive letter is what actually answers the question there.
         return str(probe.resolve().drive).lower()
@@ -384,13 +413,15 @@ def _folder_check(facts: Facts, server_dir: Path) -> Check:
 
 
 def _bind_check(facts: Facts, server_dir: Path) -> Check:
-    """The probe that cannot be wrong about the one thing it is asked.
+    """Does a container actually see what the host sees in that folder?
 
     Docker Desktop mounts a folder outside its file-sharing list as an EMPTY
     directory instead of failing, so the clone "succeeds", the build context is
     empty and the first report of the problem is a compile error hours later.
-    `_folder_check()` explains *why* a mount would fail; this proves whether it
-    does.
+    `_folder_check()` explains *why* a mount would fail; this reports whether it
+    does — see `docker.bind_mount_ok()`, which compares the container's listing
+    against the host's rather than trusting an exit code, since `ls` on an empty
+    directory exits 0 and the chosen folder is empty at preflight time.
     """
     if facts.bind_mount is None:
         return Check(
@@ -413,11 +444,14 @@ def _bind_check(facts: Facts, server_dir: Path) -> Check:
 def _port_check(facts: Facts) -> Check:
     """Refuse a port conflict BEFORE the build, not after it.
 
-    Two sources, and only one of them refuses. A container already publishing
-    the port is proof. A raw socket probe is not: Hyper-V and WSL reserve
-    ranges, and a permission error looks exactly like a listener — so the socket
-    half only ever warns, because hard-refusing on it would refuse a server that
-    would have started (`rust-prior-art.md` §4).
+    Two sources, and only one of them refuses. A FOREIGN container already
+    publishing the port is proof — `gather()` drops this install's own
+    containers by compose project before the list gets here, or a resume would
+    be refused because its own half-started server is still up. A raw socket
+    probe is not proof: Hyper-V and WSL reserve ranges, and a permission error
+    looks exactly like a listener — so the socket half only ever warns, because
+    hard-refusing on it would refuse a server that would have started
+    (`rust-prior-art.md` §4).
     """
     if facts.port_conflicts:
         return Check(

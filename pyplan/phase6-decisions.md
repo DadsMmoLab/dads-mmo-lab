@@ -423,7 +423,15 @@ Straight from `rust-prior-art.md` §2, because every row of that table is an inc
 | `docker-compose.yml` | `name:`, services, `container_name:`, image tags, **all** `ports:`, binds, volumes, `depends_on`, healthchecks, `stdin_open`/`tty`/`stop_grace_period` | `build:` blocks |
 | `docker-compose.override.yml` | runtime `AC_*` env, the `./modules` mount | anything structural — the future config system rewrites this file and its YAML writer keeps nothing it does not understand |
 | `docker-compose.build.yml` | `build:` blocks only, each with an explicit `dockerfile:` and per-service `target:` | anything auto-loaded behavior depends on |
-| `.env` | merged, non-default keys only (the DB root password among them) | the project name — see identity, below |
+| `.env` | merged, non-default keys only | the project name — see identity, below |
+
+**The DB root password is NOT in that `.env` row, and the code never put it there.** `render()`
+writes it into `docker-compose.yml` as the `${DB_ROOT_PASSWORD:-…}` interpolation default, in
+seven places, and returns an empty `dotenv`. Nothing today passes a per-install password — the
+value is the catalog's fixed one, which the base file has to carry anyway — so this is a plan that
+was not built rather than a behaviour that is wrong. `merge_dotenv()`/`write_dotenv()` exist and
+are tested, with no non-test caller; they are the seam a generated per-install secret would
+arrive through when something needs one.
 
 **The `ports:` trap is a hard rule with a test.** Compose CONCATENATES `ports:` across files — a
 port added in the override does not replace the base's, it publishes both. So `ports:` appears in
@@ -488,9 +496,9 @@ zeroes, so nothing reads a resource number without confirming the engine actuall
 | Docker data-root free space | < 40 GB refuse, < 60 GB warn | refuse | inherited. On macOS/Windows `/var/lib/docker` is INSIDE the VM — measuring the host answers for the wrong drive, so the root resolves from Docker Desktop's settings JSON; on macOS that resolution is fresh and unverified (list below), and until the Mac gate proves it, macOS reports this check as *unchecked* rather than guessing |
 | server-dir free space | < 8 GB refuse, < 15 GB warn | refuse | inherited: checkout 2.4 GB but clone PEAK ~3.7 GB, measured in Rust |
 | data root and server dir on the same volume | floors ADD (48 / 75 GB) | refuse/warn as above | inherited |
-| bind-mount probe: `docker run --rm -v <server_dir>:/probe <git image> ls /probe` | bounded 30 s | refuse, with the file-sharing explanation | grafted-in above; the 5 s figure there assumed a pulled image — the probe uses the `alpine/git` image the clone stages need anyway, and 30 s covers its first pull, matching prior art's bound for probes against a wedged dockerd |
-| `server_dir_problem()` | OneDrive/iCloud-synced, UNC, mapped drive | refuse, with the reason | grafted-in; layered on top of the probe, not instead of it — the probe cannot be wrong, the path rules explain *why* |
-| port conflict (`port_conflicts_for(spec)` + socket probe) | any listener on the entry's ports | refuse — before the build, not after | grafted-in; the socket half refuses only on `AddrInUse`, because Hyper-V/WSL reserved ranges and permission errors would hard-refuse a server that would have started (rust-prior-art §4) |
+| bind-mount probe: `docker run --rm -v <nearest populated ancestor>:/probe <git image> ls -A /probe` | bounded 30 s | refuse, with the file-sharing explanation | grafted-in above; the probe pulls `git.CONTAINER_GIT_IMAGE` — the exact **digest** the clone stages pull, since a tag is a different image reference and asking for `alpine/git` cost a second, unpinned pull. **Corrected during implementation:** the exit code of `ls` cannot see the failure this exists for, because an unshared folder mounts as an EMPTY directory and `ls` on an empty directory exits 0 — and the chosen folder is empty at preflight time by construction. The probe therefore mounts the nearest ancestor that has entries and checks the container sees entries too; an ancestor's answer is the chosen folder's, and it also stops `-v` creating the directory before `guard` has claimed it |
+| `server_dir_problem()` | OneDrive/iCloud-synced, UNC, mapped drive | refuse, with the reason | grafted-in; layered on top of the probe, not instead of it — the probe reports whether a mount works, the path rules explain *why* |
+| port conflict (`foreign_port_conflicts(spec, project)` + socket probe) | a listener on the entry's ports that is not this install's own container | refuse — before the build, not after | grafted-in; the socket half refuses only on `AddrInUse`, because Hyper-V/WSL reserved ranges and permission errors would hard-refuse a server that would have started (rust-prior-art §4). **Corrected during implementation:** `port_conflicts_for()` is a global scan with no concept of which install a container belongs to, and preflight re-runs on every resume — so a `ready` timeout left the three `restart: unless-stopped` containers up and the next Install was refused and told to remove the containers of the install it was finishing. The conflict list is filtered by compose project, the same ownership proof `guard` uses; an unreadable owner is not filtered out |
 
 Every numeric floor above is **inherited, none is measured by this project**. That is stated here
 so the first live gates know their job: record the actual peak RAM, the actual data-root growth,
@@ -507,7 +515,19 @@ gate. Clones retry 3x for transport resets, as prior art did.
 
 ### The stages, by name
 
-    preflight, guard, clone-core, clone-modules, generate-compose, build, client-data, import, up, ready
+    preflight, guard, clone-core, clone-modules, generate-compose, build, client-data,
+    start-db, import, up, ready
+
+**`start-db` was added during implementation, and it is not optional.** This design settled the
+same point for the repair button ("The action starts the database… Without it the action is
+unreachable") and then wrote an install stage list without it. The import stage probes first and
+the probe is a `docker exec <db container> mysql …`, so with no database container it answers
+`unreadable` and the engine refuses — after the multi-hour build, on every install and every
+resume. Running the one-shot regardless would not have helped either: `run_one_shot()` passes
+`--no-deps`, which prunes exactly the `depends_on: ac-database: condition: service_healthy` edge
+the generated base file declares. `docker.start_database()` is now the one implementation both the
+repair button and this stage call, so the two cannot drift. It is never recorded: it is a
+precondition, not progress.
 
 State file `.yulon-install.json` in the server dir: `{version, game_id, install_id, completed[],
 last_error, updated_unix}`, `install_id` = SHA-256 of the ABSOLUTE server dir path — a state file
@@ -515,8 +535,9 @@ copied into another directory is refused, which is the engine's answer to the co
 The rules, each of which cost the Rust launcher an evening:
 
 - **`preflight` and `guard` are never recorded complete.** A guard that a resume skips is not a
-  guard. `up` and `ready` are never recorded either: a resume always ends by actually starting and
-  verifying the server, and both are cheap re-runs.
+  guard. `start-db`, `up` and `ready` are never recorded either: a resume always ends by actually
+  starting and verifying the server, and it must bring the database back up before the import
+  stage can ask it anything. All are cheap re-runs.
 - **The state file is a HINT; every stage re-checks disk evidence.** clone stages: `.git` exists
   and `git remote get-url origin` matches the catalog source (an existing valid clone gets
   fetch+reset via the seam's own update path; a directory with the wrong remote is refused by
@@ -524,13 +545,28 @@ The rules, each of which cost the Rust launcher an evening:
   The Rust incident this rule exists for: an `is_done` short-circuit let a dropped-in state file
   make generate-compose rewrite a real server's compose file and orphan its character volumes.
 - **`generate-compose` rewrites only files carrying the engine's own first-line marker comment**,
-  and refuses to overwrite compose files it did not write. Idempotent by content.
+  and refuses to overwrite compose files it did not write. Idempotent by content. **One exception,
+  and every install needs it:** the server dir IS the emulator checkout and that repository ships
+  its own `docker-compose.yml` at the root — which is why the Linux installer writes only an
+  override — so the clone stage lays an unmarked base file down before this stage ever runs, and
+  the marker rule alone refused every install with "point the install at an empty folder", said to
+  a user who had. The three-file split colliding with upstream's own file was not settled here and
+  was invented at implementation time; it is settled now. `generate-compose` asks git whether
+  `docker-compose.yml` is tracked and unmodified (`git status --porcelain -- docker-compose.yml`
+  prints nothing) and replaces it only then, because that is the one state in which `git checkout`
+  restores it byte for byte. A file the user edited answers ` M`, an untracked one `??`, an
+  unaskable git answers nothing at all — all three keep the refusal. The override and build files
+  get no exception: upstream ships neither.
 - **Failure mid-stage records nothing** — the stage re-runs. `last_error` is only written when the
   state file already exists, and `guard` treats a directory containing only our state file as
   empty, so the state file can never become the non-empty dir that blocks its own retry.
 - **`guard` is the claim on the chosen directory**, distinct from `preflight`'s machine facts:
   the dir is empty, or ours (state file's `install_id` matches this path); no container wearing
   the entry's names belongs to a foreign project (the remedy named is Remove, which exists).
+  **Existence is asked before ownership.** `container_project()` returns `UNREADABLE` for any
+  non-zero `docker inspect`, and `docker inspect <missing>` exits 1 — so asking it about all three
+  names unconditionally refused every machine that had never run this server, naming a container
+  the user could not then find. `docker._running()` has always guarded the same way.
 
 **The `import` stage is where today's live gates paid off**, and it reuses `repair_import()`'s
 pieces rather than restating them — the run+verify core is extracted into a helper both call, and
@@ -557,6 +593,14 @@ Cancel generally: checked between stages and inside every streamed loop; abandon
 step in the daemon — desirable, the work lands in the layer cache. The cancel copy must say so
 ("finishing the current build step in the background; already-built work is kept") and never imply
 an instant halt, or users `docker builder prune` away the thing that makes resume cheap.
+
+**That copy belongs to the build and to nothing else.** The first implementation said it as the
+second line of every install and appended it to every cancellation, so a user who stopped 20
+minutes into the 2.4 GB clone was told Docker was finishing a build step. Each stage now carries
+the sentence that is true of it — the build's layer cache, the client-data fetch's
+`--continue-at -` resume, the import's clear-then-re-run — and a cancel between stages carries
+none, because there is nothing extra to say. The opening line says only what holds everywhere:
+nothing is written outside the chosen folder, and a restart repeats only the interrupted step.
 
 ### Streaming the build — the one `runner.py` change
 
@@ -629,6 +673,28 @@ claim to check, not a fact:
 The 6.2 Definition of done itself — a working WotLK server on a real Mac, zero shell interaction,
 clean resume after a mid-build cancel, clean second install to a different directory — is by
 construction unverifiable until that machine runs it.
+
+### What the first gate must run before this engine is trusted
+
+Four blockers survived 677 green tests and a 41-mutation run, and every one of them survived
+because a test double answered a question the real seam cannot answer. The tests have since been
+rewritten to model the real answers, but a double that models a function correctly is still not
+the function. These are the checks nobody here can perform, in the order they would fail:
+
+1. **Clone the real repository into a tmp dir and run `generate-compose` against it.** This is the
+   check that would have caught the base-file collision. Record what the checkout actually has at
+   its root, and confirm `git status --porcelain -- docker-compose.yml` prints nothing on a fresh
+   clone of the branch `catalog.json` names — the whole replace-it rule rests on that.
+2. **Diff the generated files against `docker compose config` on the proven yulon-ubuntu install**
+   (already asked for above, still not done).
+3. **`docker compose -f… images -q` against a project that has been built but never started.**
+   `images_built()` is documented as a hint precisely because compose v2 enumerates the images of
+   created CONTAINERS; if it answers empty here, every resume re-runs the build.
+4. **A folder outside Docker Desktop's file-sharing list.** The bind-mount probe's whole premise is
+   that Docker mounts such a folder as EMPTY rather than failing the run — inherited from the Rust
+   launcher, never executed here. Confirm both what Docker does and that the probe reports it.
+5. **`compose up -d --no-deps <db>` on a brand-new install**, i.e. the `start-db` stage against
+   images this engine just built rather than the existing install the repair gate used.
 
 ### What the implementer should NOT build yet
 

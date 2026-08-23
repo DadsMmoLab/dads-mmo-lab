@@ -187,6 +187,41 @@ def test_container_git_mounts_the_destination_and_clones_into_it(
     assert "@sha256:" in " ".join(argv), "the image must be pinned by digest, not by a moving tag"
 
 
+def test_is_unmodified_tells_upstreams_own_file_from_one_somebody_edited(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """One question with three answers, and the install engine treats each differently.
+
+    `git status --porcelain -- <path>` prints nothing for a tracked file that
+    matches HEAD, `?? path` for an untracked one and ` M path` for a changed
+    one — so an empty answer, and only an empty answer, proves `git checkout`
+    can put the file back. That is what lets `generate-compose` replace the
+    `docker-compose.yml` the clone brought with it without ever touching one a
+    user wrote.
+    """
+    dest = tmp_path / "core"
+    (dest / ".git").mkdir(parents=True)
+    answers: list[subprocess.CompletedProcess[str]] = []
+    seen_argv: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen_argv.append(argv)
+        return answers.pop(0)
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    answers.append(_completed(stdout=""))
+    assert git.ContainerGit().is_unmodified(dest, "docker-compose.yml") is True
+    assert seen_argv[-1][-4:] == ["status", "--porcelain", "--", "docker-compose.yml"]
+    answers.append(_completed(stdout=" M docker-compose.yml\n"))
+    assert git.ContainerGit().is_unmodified(dest, "docker-compose.yml") is False
+    answers.append(_completed(stdout="?? docker-compose.yml\n"))
+    assert git.ContainerGit().is_unmodified(dest, "docker-compose.yml") is False
+    # A git that cannot be asked answers None, which callers must fail closed on.
+    answers.append(_completed(returncode=128, stderr="not a git repository"))
+    assert git.ContainerGit().is_unmodified(dest, "docker-compose.yml") is None
+    assert git.ContainerGit().is_unmodified(tmp_path / "not-a-checkout", "x") is None
+
+
 def test_both_git_implementations_check_out_the_same_sparse_tree(
     seen: list[list[str]], tmp_path: Path
 ) -> None:
