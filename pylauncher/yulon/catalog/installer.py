@@ -4,9 +4,17 @@ Phase 3a wraps the scripts we already ship instead of reimplementing them
 (README §7/§9): the orchestrator resolves the entry's script, answers the
 script's prompts from a typed rule table so no shell interaction is needed,
 and streams the output up to whoever is listening (a CLI today, the
-`log_panel` in Phase 4). It never downloads client assets — the user's own
-client directory is *passed in* (README §3a) — and it never contains
-per-game logic: what differs per game is `catalog.json` data.
+`log_panel` in Phase 4). This module never downloads anything itself — the
+user's own client directory is *passed in* (README §3a) — and it never
+contains per-game logic: what differs per game is `catalog.json` data.
+
+That is a claim about this module, not about the whole install. An earlier
+wording said "never downloads client assets" full stop, which is not true of
+what it drives: the WotLK script fetches AzerothCore's own client-data archive
+(maps, vmaps, mmaps, DBC) into a Docker volume, which is why `wow-wotlk` is the
+one entry with `requires_client_dir` false and is never asked for a folder.
+That archive is server-side data, not the client a player logs in with, and
+nothing here ships or fetches the latter (review, 2026-08-23).
 
 Docker provisioning is wired in (roadmap 3.3 → 5.1): if no daemon answers,
 `platform.ensure_docker()` is asked to provide one; when it cannot (needs a
