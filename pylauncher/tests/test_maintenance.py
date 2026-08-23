@@ -280,7 +280,7 @@ def test_restore_refuses_while_the_worldserver_is_running(tmp_path: Path) -> Non
     path = a_backup_of(tmp_path, "acore_characters")
     plan = plan_restore(path, tmp_path, running=running(DB, WORLD))
     assert not plan.allowed
-    assert any("are running" in reason for reason in plan.refusals)
+    assert any("is running" in reason for reason in plan.refusals)
 
 
 def test_restore_refuses_when_the_database_container_is_down(tmp_path: Path) -> None:
@@ -349,7 +349,7 @@ def test_restore_refuses_when_the_server_came_up_after_the_plan_was_made(tmp_pat
     path = a_backup_of(tmp_path, "acore_world")
     plan = plan_restore(path, tmp_path, running=running(DB))
     assert plan.allowed
-    with pytest.raises(MaintenanceError, match="are running"):
+    with pytest.raises(MaintenanceError, match="is running"):
         restore(plan, mysql, confirm=plan.token, running=running(DB, WORLD), now=AT)
     assert mysql.loaded == []
 
@@ -889,3 +889,23 @@ def test_a_marker_whose_fields_are_the_wrong_shape_names_nothing(tmp_path: Path)
     assert record is not None, "a marker that is there still means a restore was in flight"
     assert record.readable is False
     assert record.databases == ()
+
+
+def test_the_running_server_refusal_reads_as_english_for_one_container(
+    tmp_path: Path,
+) -> None:
+    """A live run printed "ac-worldserver are running" (2026-08-23).
+
+    This is the refusal a user is most likely to actually read, because it is
+    the one standing between them and losing every character on the server. It
+    should not look broken while it is doing that.
+    """
+    path = a_backup_of(tmp_path, "acore_world")
+
+    one = plan_restore(path, tmp_path, running=running(DB, WORLD))
+    assert any("ac-worldserver is running" in r for r in one.refusals), one.refusals
+
+    both = plan_restore(path, tmp_path, running=running(DB, WORLD, AUTH))
+    assert any(
+        "ac-worldserver, ac-authserver are running" in r for r in both.refusals
+    ), both.refusals

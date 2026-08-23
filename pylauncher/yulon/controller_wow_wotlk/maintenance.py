@@ -784,8 +784,13 @@ def plan_restore(
     else:
         up = [name for name in (spec.world, spec.auth) if name in names]
         if up:
+            # "ac-worldserver are running" is what a live run actually printed
+            # (2026-08-23). This refusal is the one a user is most likely to
+            # read, because it is the one standing between them and losing
+            # characters, so it should not read as broken.
+            verb = "is" if len(up) == 1 else "are"
             refusals.append(
-                f"{', '.join(up)} are running. A restore has to happen with the game servers "
+                f"{', '.join(up)} {verb} running. A restore has to happen with the game servers "
                 "stopped: the worldserver keeps characters in memory and saves them back, so it "
                 "would overwrite the restored data within minutes. Stop the server and try again."
             )
