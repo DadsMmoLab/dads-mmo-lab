@@ -40,7 +40,9 @@ from yulon import docker, networking
 from yulon.apply import Applier, ApplyReport, DockerSql
 from yulon.catalog.catalog import CatalogEntry
 from yulon.controller import Controller, InstallStatus, PortConflictError
+from yulon.controller_wow_wotlk import accounts as wotlk_accounts
 from yulon.controller_wow_wotlk import console as wotlk_console
+from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
 from yulon.controller_wow_wotlk import modules as wotlk_modules
 from yulon.log import get_logger
 from yulon.manifest import Manifest
@@ -63,6 +65,13 @@ class ControllerServices:
     applier: Applier | None
     network_plan: Callable[[Mode], NetworkPlan]
     network_apply: Callable[[NetworkPlan], NetworkReport]
+    create_account: Callable[[str, str, int], wotlk_accounts.AccountResult]
+    backup: Callable[[], wotlk_maintenance.BackupReport]
+    backups_dir: Callable[[], Path]
+    plan_restore: Callable[[Path], wotlk_maintenance.RestorePlan]
+    restore: Callable[[wotlk_maintenance.RestorePlan], wotlk_maintenance.RestoreReport]
+    interrupted_restore: Callable[[], wotlk_maintenance.InterruptedRestore | None]
+    forget_interrupted: Callable[[], bool]
 
     @classmethod
     def for_wotlk(
@@ -73,6 +82,10 @@ class ControllerServices:
         controller = Controller(spec, server_dir)
         password = entry.install.db_root_password or wotlk_modules.DEFAULT_DB_ROOT_PASSWORD
         sql = DockerSql(spec.db, password)
+        # Bound to this entry's own db container, not `mysql_for()`'s
+        # `docker_ctl.SPEC.db`, so a catalog entry that names a different one
+        # cannot end up backing up somebody else's database.
+        mysql = wotlk_maintenance.DockerMysql(spec.db, password)
         return cls(
             controller=controller,
             logs_source=lambda: docker.follow_logs(spec.world),
@@ -85,6 +98,25 @@ class ControllerServices:
             ),
             network_plan=lambda mode: networking.plan(entry, mode, bindings=_safe_bindings()),
             network_apply=lambda plan: networking.apply(plan, sql=sql),
+            # `gm_level` is passed through rather than defaulted here: the guide
+            # pairs every `account create` with `account set gmlevel ... 3`, and
+            # copying that would hand administrator to every account made from
+            # the tile. The spin box defaults to 0 and the user raises it.
+            create_account=lambda name, pw, gm: wotlk_accounts.create_account(
+                sql, name, pw, gm_level=gm
+            ),
+            backup=lambda: wotlk_maintenance.backup(server_dir, mysql, spec=spec),
+            backups_dir=lambda: wotlk_maintenance.backups_dir(server_dir),
+            plan_restore=lambda path: wotlk_maintenance.plan_restore(path, server_dir, spec=spec),
+            # `confirm=plan.token` is not a rubber stamp: the token can only come
+            # from a plan, a plan can only come from a real file, and the human
+            # confirmation is the dialog the view puts in front of this call.
+            # What the token buys is that no confirmation can be spelled `True`.
+            restore=lambda plan: wotlk_maintenance.restore(
+                plan, mysql, confirm=plan.token, spec=spec
+            ),
+            interrupted_restore=lambda: wotlk_maintenance.interrupted_restore(server_dir),
+            forget_interrupted=lambda: wotlk_maintenance.forget_interrupted_restore(server_dir),
         )
 
 
@@ -125,8 +157,11 @@ class ControllerView(QWidget):
         layout = QVBoxLayout(self)
         layout.addWidget(self._tabs)
 
+        self._restore_plan: wotlk_maintenance.RestorePlan | None = None
         self._build_server_tab()
         self._build_console_tab()
+        self._build_accounts_tab()
+        self._build_maintenance_tab()
         self._build_modules_tab()
         self._build_networking_tab()
 
@@ -323,24 +358,28 @@ class ControllerView(QWidget):
         cmd_row.addWidget(self.command_edit, 1)
         cmd_row.addWidget(self.send_button)
 
-        accounts = QGroupBox("Create account", tab)
-        form = QFormLayout(accounts)
-        self.account_name = QLineEdit(accounts)
-        self.account_password = QLineEdit(accounts)
-        self.account_password.setEchoMode(QLineEdit.EchoMode.Password)
-        self.account_gm = QSpinBox(accounts)
-        self.account_gm.setRange(0, 3)
-        self.create_account_button = QPushButton("Create", accounts)
-        self.create_account_button.clicked.connect(self.create_account)
-        form.addRow("Username", self.account_name)
-        form.addRow("Password", self.account_password)
-        form.addRow("GM level", self.account_gm)
-        form.addRow(self.create_account_button)
+        self.console_note = QLabel("", tab)
+        self.console_note.setWordWrap(True)
+        self.console_note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.console_note.setVisible(False)
+        if not wotlk_console.pty_supported():
+            # Checklist 6.5 asks for this gap to be re-scoped, "not left silently
+            # broken". Refusing on click and printing the error afterwards is not
+            # the same as saying so up front: the catalog tile already disables
+            # Install with the reason on the tile (6.1), so the console says it
+            # the same way. Following the worldserver log needs no pty and stays
+            # enabled, which is most of what this tab is for.
+            self.send_button.setEnabled(False)
+            self.command_edit.setEnabled(False)
+            self.console_note.setText(
+                wotlk_console.NO_TTY_HELP.format(container=self.entry.container_spec().world)
+            )
+            self.console_note.setVisible(True)
 
         box.addWidget(self.follow_button)
         box.addWidget(self.console_log, 1)
         box.addLayout(cmd_row)
-        box.addWidget(accounts)
+        box.addWidget(self.console_note)
         self._tabs.addTab(tab, "Console")
 
     @Slot()
@@ -384,26 +423,301 @@ class ControllerView(QWidget):
         self.console_log.append(f"!! {exc}")
         self.action_failed.emit(str(exc))
 
+    # ----------------------------------------------------------- accounts tab
+
+    def _build_accounts_tab(self) -> None:
+        """Account creation, in its own tab because it no longer needs the console.
+
+        It used to live under Console because it WAS the console: two commands
+        typed down a `docker attach` pty. Writing the row directly means it works
+        where there is no pty, which is every Windows box — so leaving it on a tab
+        whose other controls are disabled there would hide the one thing that
+        does work.
+        """
+        tab = QWidget(self)
+        box = QVBoxLayout(tab)
+        accounts = QGroupBox("Create account", tab)
+        form = QFormLayout(accounts)
+        self.account_name = QLineEdit(accounts)
+        self.account_password = QLineEdit(accounts)
+        self.account_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.account_gm = QSpinBox(accounts)
+        self.account_gm.setRange(0, 3)
+        self.create_account_button = QPushButton("Create", accounts)
+        self.create_account_button.clicked.connect(self.create_account)
+        form.addRow("Username", self.account_name)
+        form.addRow("Password", self.account_password)
+        form.addRow("GM level", self.account_gm)
+        form.addRow(self.create_account_button)
+
+        self.account_report = QLabel("", tab)
+        self.account_report.setWordWrap(True)
+        self.account_report.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        box.addWidget(accounts)
+        box.addWidget(self.account_report)
+        box.addStretch(1)
+        self._tabs.addTab(tab, "Accounts")
+
     @Slot()
     def create_account(self) -> None:
-        """`account create <name> <password>` then `account set gmlevel` when > 0."""
+        """Write the account row directly, rather than typing it at the console.
+
+        This is the only way to make an account on a platform with no pty, and
+        the only way to make the FIRST one anywhere — SOAP needs an account
+        before it will authenticate, so it cannot bootstrap itself.
+        """
         name = self.account_name.text().strip()
         password = self.account_password.text()
         if not name or not password:
-            # The Console tab is what the user is looking at; the signal alone
-            # left the button doing nothing at all (review, 2026-08-22).
-            self.console_log.append("!! username and password are required")
+            # The signal alone left the button doing nothing at all
+            # (review, 2026-08-22), so the tab says it as well.
+            self.account_report.setText("Username and password are required.")
             self.action_failed.emit("username and password are required")
             return
         gm_level = self.account_gm.value()
-        follow_up = None
-        if gm_level > 0:
-
-            def follow_up() -> None:  # noqa: F811 - the chained second command
-                self._send(f"account set gmlevel {name} {gm_level} -1")
-
-        self._send(f"account create {name} {password}", follow_up)
+        self.account_report.setText(f"Creating {name}…")
+        self.create_account_button.setEnabled(False)
+        # The password is passed straight into the call and the field cleared; it
+        # is never stored on the view, so no later repr or traceback frame of
+        # this widget can carry it.
+        self._run(
+            lambda: self.services.create_account(name, password, gm_level),
+            self._account_done,
+            self._account_failed,
+        )
         self.account_password.clear()
+
+    @Slot(object)
+    def _account_done(self, result: object) -> None:
+        self.create_account_button.setEnabled(True)
+        if not isinstance(result, wotlk_accounts.AccountResult):
+            return
+        made = "created" if result.created else "already existed"
+        gm = f", GM level {result.gm_level}" if result.gm_level else ""
+        self.account_report.setText(f"{result.username}: {made} (id {result.account_id}){gm}.")
+
+    @Slot(object)
+    def _account_failed(self, exc: object) -> None:
+        self.create_account_button.setEnabled(True)
+        self.account_report.setText(f"Could not create the account: {exc}")
+        self.action_failed.emit(str(exc))
+
+    # -------------------------------------------------------- maintenance tab
+
+    def _build_maintenance_tab(self) -> None:
+        """Backups, and a restore that cannot happen without its plan on screen.
+
+        Deliberately shaped like the Networking tab (plan, then apply) rather
+        than a confirmation dialog. A restore replaces every character on the
+        server, so the thing being agreed to has to be readable while agreeing —
+        `plan_restore()` collects every refusal instead of raising, precisely so
+        all of them can be shown at once.
+        """
+        tab = QWidget(self)
+        box = QVBoxLayout(tab)
+
+        self.interrupted_label = QLabel("", tab)
+        self.interrupted_label.setWordWrap(True)
+        self.interrupted_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.forget_button = QPushButton("Forget that record", tab)
+        self.forget_button.clicked.connect(self.forget_interrupted)
+        self.interrupted_label.setVisible(False)
+        self.forget_button.setVisible(False)
+
+        top = QHBoxLayout()
+        self.backup_button = QPushButton("Back up now", tab)
+        self.refresh_backups_button = QPushButton("Refresh", tab)
+        self.backup_button.clicked.connect(self.back_up)
+        self.refresh_backups_button.clicked.connect(self.refresh_backups)
+        top.addWidget(self.backup_button)
+        top.addWidget(self.refresh_backups_button)
+        top.addStretch(1)
+
+        self.backup_list = QListWidget(tab)
+        self.backup_list.currentItemChanged.connect(self._backup_selection_changed)
+
+        actions = QHBoxLayout()
+        self.plan_restore_button = QPushButton("Show restore plan", tab)
+        self.restore_button = QPushButton("Restore", tab)
+        self.plan_restore_button.clicked.connect(self.show_restore_plan)
+        self.restore_button.clicked.connect(self.run_restore)
+        # Never enabled by selecting a file: only a plan that came back allowed
+        # turns this on, and changing the selection turns it off again.
+        self.restore_button.setEnabled(False)
+        actions.addWidget(self.plan_restore_button)
+        actions.addWidget(self.restore_button)
+        actions.addStretch(1)
+
+        self.maintenance_report = QPlainTextEdit(tab)
+        self.maintenance_report.setReadOnly(True)
+
+        box.addWidget(self.interrupted_label)
+        box.addWidget(self.forget_button)
+        box.addLayout(top)
+        box.addWidget(self.backup_list, 2)
+        box.addLayout(actions)
+        box.addWidget(self.maintenance_report, 1)
+        self._tabs.addTab(tab, "Maintenance")
+        self.refresh_backups()
+
+    def _selected_backup(self) -> Path | None:
+        item = self.backup_list.currentItem()
+        if item is None:
+            return None
+        path = item.data(Qt.ItemDataRole.UserRole)
+        return Path(str(path))
+
+    @Slot(object, object)
+    def _backup_selection_changed(self, _current: object, _previous: object) -> None:
+        """A plan belongs to one file. Selecting another must not carry it over."""
+        self._restore_plan = None
+        self.restore_button.setEnabled(False)
+
+    @Slot()
+    def refresh_backups(self) -> None:
+        """Re-list the backups directory. Reading a directory, not doing any work."""
+        self._restore_plan = None
+        self.restore_button.setEnabled(False)
+        self.backup_list.clear()
+        directory = self.services.backups_dir()
+        for path in sorted(directory.glob("*.sql"), reverse=True):
+            size = path.stat().st_size / (1024 * 1024)
+            item = QListWidgetItem(f"{path.name}  ({size:.1f} MB)")
+            item.setData(Qt.ItemDataRole.UserRole, str(path))
+            self.backup_list.addItem(item)
+        if self.backup_list.count() == 0:
+            self.maintenance_report.setPlainText(f"No backups yet in {directory}.")
+        self._show_interrupted()
+
+    def _show_interrupted(self) -> None:
+        """Surface a restore that never finished, and offer to put the record down."""
+        record = self.services.interrupted_restore()
+        if record is None:
+            self.interrupted_label.setVisible(False)
+            self.forget_button.setVisible(False)
+            return
+        if record.readable:
+            named = ", ".join(record.databases) or "an unknown database"
+            text = (
+                f"A restore of {named} did not finish. Those databases may be half-written. "
+                f"Restoring again is how that is escaped; the copy taken beforehand is "
+                f"{', '.join(str(p) for p in record.safety_backup) or 'not recorded'}."
+            )
+        else:
+            text = (
+                f"There is a restore record at {record.marker} that cannot be read, so a restore "
+                "was in flight but nothing about it can be established."
+            )
+        self.interrupted_label.setText(text)
+        self.interrupted_label.setVisible(True)
+        self.forget_button.setVisible(True)
+
+    @Slot()
+    def forget_interrupted(self) -> None:
+        self._run(self.services.forget_interrupted, self._forget_done, self._maintenance_failed)
+
+    @Slot(object)
+    def _forget_done(self, _result: object) -> None:
+        self._show_interrupted()
+
+    @Slot()
+    def back_up(self) -> None:
+        self.backup_button.setEnabled(False)
+        self.maintenance_report.setPlainText("Backing up… this can take minutes on a full world.")
+        self._run(self.services.backup, self._backup_done, self._maintenance_failed)
+
+    @Slot(object)
+    def _backup_done(self, result: object) -> None:
+        self.backup_button.setEnabled(True)
+        if not isinstance(result, wotlk_maintenance.BackupReport):
+            return
+        lines = [f"Backed up to {result.directory}:"]
+        lines += [
+            f"  {d.database}  {d.size_bytes / (1024 * 1024):.1f} MB  {d.path.name}"
+            for d in result.dumps
+        ]
+        if result.missing_core:
+            lines.append(f"  !! expected but absent: {', '.join(result.missing_core)}")
+        if result.server_was_running:
+            lines.append("  note: the server was running, so this is a hot copy.")
+        # Re-list BEFORE writing the report: refresh_backups() writes its own
+        # message when the directory is empty, so refreshing afterwards wipes
+        # the one thing the user just asked for (caught by its own test).
+        self.refresh_backups()
+        self.maintenance_report.setPlainText("\n".join(lines))
+
+    @Slot()
+    def show_restore_plan(self) -> None:
+        path = self._selected_backup()
+        if path is None:
+            self.maintenance_report.setPlainText("Select a backup first.")
+            return
+        self._restore_plan = None
+        self.restore_button.setEnabled(False)
+        self._run(
+            lambda: self.services.plan_restore(path),
+            self._restore_plan_ready,
+            self._maintenance_failed,
+        )
+
+    @Slot(object)
+    def _restore_plan_ready(self, result: object) -> None:
+        if not isinstance(result, wotlk_maintenance.RestorePlan):
+            return
+        lines = [
+            f"Restoring {result.backup.name} would OVERWRITE: {', '.join(result.databases)}",
+            f"  size: {result.size_bytes / (1024 * 1024):.1f} MB",
+        ]
+        if result.interrupted is not None and result.interrupted.readable:
+            lines.append(
+                "  an earlier restore of "
+                f"{', '.join(result.interrupted.databases)} never finished"
+            )
+        if result.refusals:
+            lines.append("")
+            lines.append("This cannot go ahead:")
+            lines += [f"  - {r}" for r in result.refusals]
+        else:
+            lines.append("")
+            lines.append("Every character on the server is replaced. Press Restore to go ahead.")
+        self.maintenance_report.setPlainText("\n".join(lines))
+        # Only a plan that is allowed arms the button, and only for this file.
+        self._restore_plan = result if result.allowed else None
+        self.restore_button.setEnabled(result.allowed)
+
+    @Slot()
+    def run_restore(self) -> None:
+        plan = self._restore_plan
+        if plan is None:
+            # Belt and braces: the button is disabled without a plan, but a
+            # restore is not something to leave to a widget's enabled state.
+            self.maintenance_report.setPlainText("Show the restore plan first.")
+            return
+        self.restore_button.setEnabled(False)
+        self.maintenance_report.setPlainText(f"Restoring {plan.backup.name}…")
+        self._run(lambda: self.services.restore(plan), self._restore_done, self._maintenance_failed)
+
+    @Slot(object)
+    def _restore_done(self, result: object) -> None:
+        self._restore_plan = None
+        if not isinstance(result, wotlk_maintenance.RestoreReport):
+            return
+        safety = ", ".join(str(p) for p in result.safety_backup) or "none"
+        # Re-list BEFORE writing the report: refresh_backups() writes its own
+        # message when the directory is empty, so refreshing afterwards wipes
+        # the one thing the user just asked for (caught by its own test).
+        self.refresh_backups()
+        self.maintenance_report.setPlainText(
+            f"Restored {', '.join(result.databases)} from {result.backup}.\n"
+            f"The copy taken beforehand: {safety}"
+        )
+
+    @Slot(object)
+    def _maintenance_failed(self, exc: object) -> None:
+        self.backup_button.setEnabled(True)
+        self.maintenance_report.setPlainText(f"FAILED: {exc}")
+        self.action_failed.emit(str(exc))
+        self._show_interrupted()
 
     # ----------------------------------------------------------- modules tab
 

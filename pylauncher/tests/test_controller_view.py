@@ -13,7 +13,14 @@ from yulon.apply import Applier, ApplyReport
 from yulon.catalog.catalog import load_catalog
 from yulon.controller import Controller
 from yulon.controller_wow_wotlk import console, modules
+from yulon.controller_wow_wotlk.accounts import AccountResult
 from yulon.controller_wow_wotlk.console import ConsoleReply
+from yulon.controller_wow_wotlk.maintenance import (
+    BackupReport,
+    InterruptedRestore,
+    RestorePlan,
+    RestoreReport,
+)
 from yulon.networking import NetworkPlan, NetworkReport
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui.controller_view import ControllerServices, ControllerView
@@ -81,7 +88,54 @@ class _FakeApplier(Applier):
         return ApplyReport("install", item_id, done=("clone",), rebuild_required=True)
 
 
-def _services(ps: _Ps, tmp_path: Path, sent: list[str]) -> ControllerServices:
+class _FakeMaintenance:
+    """Stands in for `maintenance` and `accounts` in the view tests.
+
+    The view must not do any of this work itself (style-guide §3), so every one
+    of these is a seam it calls down into. Recording the calls is how the tests
+    check that a restore cannot happen without a plan first.
+    """
+
+    def __init__(self) -> None:
+        self.created: list[tuple[str, str, int]] = []
+        self.backups = 0
+        self.planned: list[Path] = []
+        self.restored: list[RestorePlan] = []
+        self.forgotten = 0
+        self.interrupted: InterruptedRestore | None = None
+        self.refusals: tuple[str, ...] = ()
+
+    def create(self, name: str, password: str, gm: int) -> AccountResult:
+        self.created.append((name, password, gm))
+        return AccountResult(username=name, account_id=12401, created=True, gm_level=gm)
+
+    def back_up(self) -> BackupReport:
+        self.backups += 1
+        return BackupReport(directory=Path("backups"), dumps=())
+
+    def plan(self, path: Path) -> RestorePlan:
+        self.planned.append(path)
+        return RestorePlan(
+            backup=path,
+            server_dir=path.parent,
+            databases=("acore_characters",),
+            size_bytes=2048,
+            refusals=self.refusals,
+        )
+
+    def do_restore(self, plan: RestorePlan) -> RestoreReport:
+        self.restored.append(plan)
+        return RestoreReport(backup=plan.backup, databases=plan.databases, safety_backup=())
+
+    def forget(self) -> bool:
+        self.forgotten += 1
+        self.interrupted = None
+        return True
+
+
+def _services(
+    ps: _Ps, tmp_path: Path, sent: list[str], made: _FakeMaintenance | None = None
+) -> ControllerServices:
     plan = networking.plan(
         WOTLK, "lan", lan_ip="192.168.1.25", firewall="none", steamos=False, wsl=False
     )
@@ -93,6 +147,7 @@ def _services(ps: _Ps, tmp_path: Path, sent: list[str]) -> ControllerServices:
     def logs() -> Iterator[str]:
         yield "world log line"
 
+    made = made if made is not None else _FakeMaintenance()
     return ControllerServices(
         controller=Controller(WOTLK.container_spec(), tmp_path),
         logs_source=logs,
@@ -103,6 +158,13 @@ def _services(ps: _Ps, tmp_path: Path, sent: list[str]) -> ControllerServices:
         network_apply=lambda p: NetworkReport(
             p, done=("realmlist → 192.168.1.25",), restart_required=True
         ),
+        create_account=made.create,
+        backup=made.back_up,
+        backups_dir=lambda: tmp_path / "sql_scripts" / "backups",
+        plan_restore=made.plan,
+        restore=made.do_restore,
+        interrupted_restore=lambda: made.interrupted,
+        forget_interrupted=made.forget,
     )
 
 
@@ -171,22 +233,29 @@ def test_a_refused_stop_is_readable_on_screen_not_just_emitted(
     assert not any(c[:2] == ["docker", "stop"] for c in ps.calls), "stopped a foreign server"
 
 
-def test_missing_account_fields_say_so_in_the_console(
+def _add_backup(view: ControllerView, tmp_path: Path, name: str = "chars.sql") -> None:
+    """Put a file where `backups_dir()` points and re-list, then select it."""
+    directory = tmp_path / "sql_scripts" / "backups"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / name).write_bytes(b"-- dump\n")
+    view.refresh_backups()
+    view.backup_list.setCurrentRow(0)
+
+
+def test_missing_account_fields_say_so_on_the_accounts_tab(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """Pressing Create with an empty form used to do nothing visible at all."""
-    sent: list[str] = []
-    view = ControllerView(WOTLK, _services(ps, tmp_path, sent), status_poll_ms=0)
+    made = _FakeMaintenance()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, [], made), status_poll_ms=0)
     view.account_name.setText("")
     view.account_password.setText("")
     view.create_account()
-    assert "username and password are required" in view.console_log.text()
-    assert sent == []
+    assert "required" in view.account_report.text()
+    assert made.created == []
 
 
-def test_console_tab_sends_commands_and_creates_accounts(
-    qapp: object, ps: _Ps, tmp_path: Path
-) -> None:
+def test_console_tab_sends_commands(qapp: object, ps: _Ps, tmp_path: Path) -> None:
     sent: list[str] = []
     view = ControllerView(WOTLK, _services(ps, tmp_path, sent), status_poll_ms=0)
     view.command_edit.setText("server info")
@@ -194,13 +263,118 @@ def test_console_tab_sends_commands_and_creates_accounts(
     assert sent == ["server info"]
     assert "> server info" in view.console_log.text() and "ok" in view.console_log.text()
 
+
+def test_creating_an_account_never_touches_the_console(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The point of the SRP6 path: it works where `docker attach` cannot.
+
+    It used to be two commands typed at the console, which needs a pty, which
+    Windows does not have — so on Windows an account could not be created at
+    all. Nothing may reach `send_console` here, and the password must not be
+    left in the field or echoed into the log.
+    """
+    sent: list[str] = []
+    made = _FakeMaintenance()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, sent, made), status_poll_ms=0)
     view.account_name.setText("dad")
     view.account_password.setText("s3cret")
     view.account_gm.setValue(3)
     view.create_account()
-    assert sent[1:] == ["account create dad s3cret", "account set gmlevel dad 3 -1"]
-    assert "s3cret" not in view.console_log.text()  # password never echoed
+
+    assert made.created == [("dad", "s3cret", 3)]
+    assert sent == [], "account creation went through the console"
     assert view.account_password.text() == ""
+    assert "s3cret" not in view.console_log.text()
+    assert "s3cret" not in view.account_report.text()
+    assert "dad" in view.account_report.text()
+
+
+def test_the_console_says_why_it_is_disabled_where_there_is_no_pty(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Checklist 6.5 asks for this gap re-scoped, "not left silently broken".
+
+    Refusing on click and printing the error afterwards leaves a button that
+    looks usable. Following the log needs no pty and stays enabled, which is
+    what makes disabling the rest honest rather than punitive.
+    """
+    monkeypatch.setattr(console, "pty_supported", lambda: False)
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert not view.send_button.isEnabled()
+    assert not view.command_edit.isEnabled()
+    assert view.console_note.isVisible() or view.console_note.text()
+    assert "terminal" in view.console_note.text()
+    assert view.follow_button.isEnabled(), "following the log needs no pty"
+
+
+def test_a_restore_will_not_run_without_a_plan(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """The button is disabled, and the slot refuses anyway.
+
+    A restore replaces every character on the server, so "the widget was
+    disabled" is not the only thing standing between a click and that.
+    """
+    made = _FakeMaintenance()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, [], made), status_poll_ms=0)
+    assert not view.restore_button.isEnabled()
+    view.run_restore()
+    assert made.restored == []
+
+
+def test_a_refused_plan_never_arms_the_restore_button(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Every refusal is shown at once, and none of them is dismissible by clicking."""
+    made = _FakeMaintenance()
+    made.refusals = ("the worldserver is running", "the database container is not up")
+    view = ControllerView(WOTLK, _services(ps, tmp_path, [], made), status_poll_ms=0)
+    _add_backup(view, tmp_path)
+
+    view.show_restore_plan()
+    assert not view.restore_button.isEnabled()
+    assert "the worldserver is running" in view.maintenance_report.toPlainText()
+    assert "the database container is not up" in view.maintenance_report.toPlainText()
+
+    view.run_restore()
+    assert made.restored == []
+
+
+def test_choosing_a_different_backup_forgets_the_plan(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A plan belongs to one file; carrying it over would restore the wrong one."""
+    made = _FakeMaintenance()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, [], made), status_poll_ms=0)
+    _add_backup(view, tmp_path, "a.sql")
+    _add_backup(view, tmp_path, "b.sql")
+
+    view.backup_list.setCurrentRow(0)
+    view.show_restore_plan()
+    assert view.restore_button.isEnabled()
+
+    view.backup_list.setCurrentRow(1)
+    assert not view.restore_button.isEnabled()
+    view.run_restore()
+    assert made.restored == []
+
+
+def test_a_planned_restore_runs_and_reports(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    made = _FakeMaintenance()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, [], made), status_poll_ms=0)
+    _add_backup(view, tmp_path)
+
+    view.show_restore_plan()
+    view.run_restore()
+    assert [p.backup.name for p in made.restored] == ["chars.sql"]
+    assert "acore_characters" in view.maintenance_report.toPlainText()
+
+
+def test_backing_up_says_where_it_went(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    made = _FakeMaintenance()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, [], made), status_poll_ms=0)
+    view.back_up()
+    assert made.backups == 1
+    assert "Backed up to" in view.maintenance_report.toPlainText()
 
 
 def test_modules_tab_lists_manifests_and_installs_selected(
