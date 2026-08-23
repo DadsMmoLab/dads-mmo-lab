@@ -800,12 +800,24 @@ class ImportState:
     def repairable(self) -> bool:
         """True only where re-running the import can put something right.
 
-        Deliberately false for `unreadable`. An unanswerable database is not an
-        empty one — the same fail-closed rule `_refuse_without_an_identity()`
+        `absent` alone, and the exclusion of `partial` was bought with a live
+        gate. Re-running `ac-db-import` over a schema that already exists does
+        NOT finish it: AzerothCore skips the base dump for a database that is
+        already there, creates its `updates` bookkeeping, and seeds it with
+        every known SQL file marked as applied. Measured on yulon-ubuntu,
+        2026-08-23 — an import killed 19 seconds in left `acore_world` with 3
+        tables of 316, and re-running the one-shot took it to 5 tables and
+        **2671 rows in `acore_world.updates`**. The schema is then permanently
+        unimportable: every file a later run might apply is recorded as done.
+        So the action did not merely fail to repair the state it was built for,
+        it destroyed the only route out of it.
+
+        Deliberately false for `unreadable` too. An unanswerable database is not
+        an empty one — the same fail-closed rule `_refuse_without_an_identity()`
         applies to ownership — and offering a destructive button on the strength
         of a question nobody answered is how it gets pressed by accident.
         """
-        return self.state in ("absent", "partial")
+        return self.state == "absent"
 
 
 ImportProbe = Callable[[], ImportState]
@@ -998,6 +1010,19 @@ def repair_import(
         raise DockerCommandError(
             f"the import has already completed ({before.detail}), so there is nothing to repair. "
             "If the server still will not start, its logs are where the reason is."
+        )
+    if before.state == "partial":
+        # The finding that cost this action most of its scope. Re-running the
+        # one-shot here is not a no-op, it is destructive: see
+        # `ImportState.repairable` for the measurement. Nothing this module can
+        # do puts a half-written schema right, so it says so instead of trying.
+        raise DockerCommandError(
+            f"this install's import stopped part-way ({before.detail}), and re-running it cannot "
+            "finish the job: AzerothCore skips the base data for a database that already exists, "
+            "so the import would record every remaining file as applied and leave the schema "
+            'permanently unfinished. Nothing was run. Use "Stop and remove containers", then '
+            "delete this install's database volume and install again — the containers were "
+            "removed, so nothing is holding it open."
         )
     if not before.repairable:
         raise DockerCommandError(

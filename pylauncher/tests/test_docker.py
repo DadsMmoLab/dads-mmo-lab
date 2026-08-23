@@ -2432,3 +2432,32 @@ def test_a_probe_that_forgets_to_say_complete_cannot_claim_success(
         docker.repair_import(
             SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, docker.ImportState("populated", "rows"))
         )
+
+
+def test_repair_import_refuses_a_half_written_schema_and_says_why(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-running the one-shot here is destructive, not useless, and that is the point.
+
+    Measured on yulon-ubuntu, 2026-08-23. An import killed 19 seconds in left
+    `acore_world` with 3 tables of 316. Re-running `ac-db-import` over it took
+    it to 5 tables and **2671 rows in `acore_world.updates`** — AzerothCore
+    skips the base data for a database that already exists, then records every
+    remaining SQL file as applied. The schema is unimportable from that moment
+    on: no later run will ever apply those files.
+
+    So the refusal is not tidiness. It is the difference between a user who can
+    still delete a volume and reinstall, and one who cannot.
+    """
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db})
+    half_written = docker.ImportState(
+        "partial", "acore_world has 3 tables but no import record, so it was never finished"
+    )
+    with pytest.raises(docker.DockerCommandError) as caught:
+        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(half_written))
+
+    said = str(caught.value)
+    assert "cannot finish the job" in said, said
+    assert "install again" in said, "no way out was offered"
+    assert not any(c[:3] == ["docker", "compose", "up"] for c in calls), "the import was run"

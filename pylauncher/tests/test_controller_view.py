@@ -511,7 +511,18 @@ def test_a_removal_that_found_nothing_says_so(qapp: object, ps: _Ps, tmp_path: P
     assert "no containers to remove" in view.problem_label.text()
 
 
-UNIMPORTED = docker.ImportState("partial", "acore_characters holds no tables")
+UNIMPORTED = docker.ImportState(
+    "absent", "none of acore_auth, acore_characters, acore_world exists on this server yet"
+)
+"""The one state the repair is offered for, and it is narrower than it was.
+
+`partial` used to be here too. The live gate of 2026-08-23 took it away: an
+import killed part-way leaves a schema that exists, and re-running the one-shot
+over one of those does not finish it — AzerothCore skips the base data for a
+database that is already there and records every remaining file as applied. So
+a `partial` install is offered nothing, because there is nothing honest to
+offer it. See `docker.ImportState.repairable`.
+"""
 
 
 def _watch_repair(
@@ -580,7 +591,7 @@ def test_the_repair_is_not_offered_until_the_database_says_it_is_needed(
     _watch_repair(view, UNIMPORTED)
     view.recheck()
     assert not view.repair_button.isHidden(), "an unfinished import was never offered a repair"
-    assert "acore_characters holds no tables" in view.repair_label.text()
+    assert "none of acore_auth" in view.repair_label.text()
 
 
 def test_the_repair_takes_two_presses_and_says_what_is_overwritten(

@@ -69,14 +69,27 @@ class _Sql:
         return "\t".join(str(n) for n in wanted) + "\n"
 
 
+def _done(*tables: str) -> list[str]:
+    """A schema as a FINISHED import leaves it: its own tables plus the updater's.
+
+    `updates` and `updates_include` are AzerothCore's bookkeeping, and they are
+    what `import_state()` reads to decide whether a schema was finished. The
+    fixtures here used to model "finished" as "has one table", which is the
+    model the live gate of 2026-08-23 disproved: an import killed 19 seconds in
+    left `acore_world` with three tables and no updater record, and the probe
+    called it imported.
+    """
+    return [*tables, *repair.IMPORT_MARKERS]
+
+
 def _full_world() -> list[str]:
-    return [f"world_table_{n}" for n in range(1103)]
+    return _done(*(f"world_table_{n}" for n in range(1103)))
 
 
 def test_a_populated_database_is_never_reported_as_repairable() -> None:
     """The answer that stops a re-import. It is about rows, not about completeness."""
     sql = _Sql(
-        tables={AUTH: ["account"], CHARACTERS: ["characters"], WORLD: _full_world()},
+        tables={AUTH: _done("account"), CHARACTERS: _done("characters"), WORLD: _full_world()},
         counts={f"{AUTH}.account": 651, f"{CHARACTERS}.characters": 37},
     )
     state = repair.import_state(sql, _Mysql(AUTH, CHARACTERS, WORLD))
@@ -93,7 +106,7 @@ def test_player_data_outranks_a_visibly_unfinished_import() -> None:
     and lose the accounts somebody had already made.
     """
     sql = _Sql(
-        tables={AUTH: ["account"], CHARACTERS: ["characters"], WORLD: []},
+        tables={AUTH: _done("account"), CHARACTERS: _done("characters"), WORLD: []},
         counts={f"{AUTH}.account": 4},
     )
     state = repair.import_state(sql, _Mysql(AUTH, CHARACTERS))
@@ -118,16 +131,18 @@ def test_schemas_that_exist_but_hold_no_tables_also_read_as_absent() -> None:
 
 def test_an_import_that_stopped_part_way_reads_as_partial() -> None:
     """Some schemas filled and some not is the interrupted install this action exists for."""
-    sql = _Sql(tables={AUTH: ["account"], CHARACTERS: [], WORLD: _full_world()})
+    sql = _Sql(tables={AUTH: _done("account"), CHARACTERS: [], WORLD: _full_world()})
     state = repair.import_state(sql, _Mysql(AUTH, CHARACTERS, WORLD))
     assert state.state == "partial", state
-    assert state.repairable is True
+    assert state.repairable is False, "a half-written schema must not offer a re-import"
     assert CHARACTERS in state.detail
 
 
 def test_a_finished_import_with_nobody_on_it_yet_is_not_repairable() -> None:
     """Straight after an install there are no accounts, and there is nothing to repair either."""
-    sql = _Sql(tables={AUTH: ["account"], CHARACTERS: ["characters"], WORLD: _full_world()})
+    sql = _Sql(
+        tables={AUTH: _done("account"), CHARACTERS: _done("characters"), WORLD: _full_world()}
+    )
     state = repair.import_state(sql, _Mysql(AUTH, CHARACTERS, WORLD))
     assert state.state == "imported", state
     assert state.repairable is False
@@ -154,7 +169,7 @@ def test_a_count_that_cannot_be_read_is_treated_as_data_present() -> None:
     tables are there and does not know what is in them. Reporting `partial`
     would offer to overwrite them.
     """
-    sql = _Sql(tables={AUTH: ["account"], CHARACTERS: ["characters"], WORLD: []})
+    sql = _Sql(tables={AUTH: _done("account"), CHARACTERS: _done("characters"), WORLD: []})
     real_query = sql.query
 
     def flaky(db: Db, statement: str) -> str:
@@ -208,7 +223,7 @@ def test_rows_plus_an_empty_schema_is_populated_but_not_complete() -> None:
     """
     half_done = repair.import_state(
         _Sql(
-            tables={AUTH: ["account"], CHARACTERS: ["characters"], WORLD: []},
+            tables={AUTH: _done("account"), CHARACTERS: _done("characters"), WORLD: []},
             counts={f"{AUTH}.account": 400, f"{CHARACTERS}.characters": 400},
         ),
         _Mysql(AUTH, CHARACTERS, WORLD),
@@ -219,10 +234,41 @@ def test_rows_plus_an_empty_schema_is_populated_but_not_complete() -> None:
 
     finished = repair.import_state(
         _Sql(
-            tables={AUTH: ["account"], CHARACTERS: ["characters"], WORLD: _full_world()},
+            tables={AUTH: _done("account"), CHARACTERS: _done("characters"), WORLD: _full_world()},
             counts={f"{AUTH}.account": 400, f"{CHARACTERS}.characters": 400},
         ),
         _Mysql(AUTH, CHARACTERS, WORLD),
     )
     assert finished.state == "populated"
     assert finished.complete is True, finished.detail
+
+
+def test_a_schema_with_tables_but_no_updater_record_is_not_finished() -> None:
+    """The partial gate's finding, pinned.
+
+    An import killed 19 seconds in left `acore_world` holding exactly three
+    tables — the base dump had reached the letter "a" — out of the 316 a
+    finished import writes. Asking only "does this schema have any tables"
+    called that `imported`, so `repair_import()` refused with "there is nothing
+    to repair" and the button built for this exact state never appeared
+    (live gate, 2026-08-23).
+    """
+    barely_started = repair.import_state(
+        _Sql(
+            tables={
+                AUTH: _done("account"),
+                CHARACTERS: _done("characters"),
+                WORLD: [
+                    "achievement_category_dbc",
+                    "achievement_criteria_data",
+                    "achievement_criteria_dbc",
+                ],
+            }
+        ),
+        _Mysql(AUTH, CHARACTERS, WORLD),
+    )
+    assert barely_started.state == "partial", barely_started
+    assert barely_started.repairable is False, "a half-written schema offered a re-import"
+    assert barely_started.complete is False
+    assert "3 tables" in barely_started.detail, barely_started.detail
+    assert WORLD in barely_started.detail

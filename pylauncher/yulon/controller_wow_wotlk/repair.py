@@ -25,17 +25,34 @@ order, and only the first two have certain answers:
    written by mod-city-bots' own update files. So a freshly imported server
    here can read `populated` and there is no honest way from this module to say
    otherwise — see `docker.DatabaseImport`.
-3. *Did the import finish?* This one is only half-answerable, and the honest
-   answer is written into the state rather than hidden. A schema with no tables
-   proves the import did not get to it; a schema with tables proves nothing
-   about whether it got *all* of them. AzerothCore writes no completion marker,
-   and a hardcoded "acore_world should have N tables" would be a number that
-   silently rots with every upstream release. So a machine that died late in the
-   import — every schema created, some tables missing — reads as `imported`
-   here, and this module does not pretend otherwise. What makes that acceptable
-   is question 2: the case is only reachable on a database with no player data,
-   where the fallback (delete the containers and install again) costs time and
-   nothing else. Recorded in `pyplan/phase6-decisions.md`.
+3. *Did the import finish?* Answered from AzerothCore's own bookkeeping, and
+   the first version of this got it badly wrong. It asked only whether each
+   schema had **any** tables, argued in this docstring that a late death was an
+   acceptable blind spot, and was then handed a real interrupted import by the
+   live gate of 2026-08-23: `ac-db-import` killed 19 seconds in left
+   `acore_world` holding exactly three tables — `achievement_category_dbc`,
+   `achievement_criteria_data`, `achievement_criteria_dbc`, the base dump having
+   reached the letter "a" — out of the 316 a finished import writes. This probe
+   called that `imported`, so `repair_import()` refused with "there is nothing
+   to repair" and the button built for precisely this state never appeared. The
+   blind spot was not late, it was total.
+
+   What is used instead is `updates` and `updates_include`, the two tables
+   AzerothCore's own updater keeps to record which SQL files it has applied. A
+   finished import has both in every core schema; the interrupted one above had
+   them in `acore_auth` and `acore_characters` and neither in `acore_world`,
+   which is exactly the distinction that was missing. This is upstream's
+   bookkeeping rather than a table count of ours, so it does not rot with every
+   release the way a hardcoded "`acore_world` should have N tables" would.
+
+   It is still not a completion marker, because AzerothCore does not write one.
+   The base dump is applied in one file and its tables land in roughly
+   alphabetical order, so an interruption *after* `updates_include` and before
+   the end leaves a schema this reads as finished. That window is small — for
+   the world schema it is the tables sorting after "u" — and the fallback for
+   anything inside it is unchanged: no player data can be at risk, because
+   question 2 is asked first, so deleting the containers and installing again
+   costs time and nothing else. Recorded in `pyplan/phase6-decisions.md`.
 
 Nothing here writes. The seam is deliberately the read-only half of
 `apply.DockerSql` — narrower than `accounts.SqlSeam`, which also carries
@@ -73,6 +90,18 @@ KEY_TABLES: dict[str, str] = {
     DB_NAMES["auth"]: "account",
     DB_NAMES["characters"]: "characters",
 }
+
+
+# The two tables AzerothCore's updater maintains for itself: `updates` records
+# every SQL file it has applied, `updates_include` the directories it draws
+# them from. A schema that has them has been through the updater; a schema
+# that does not has, at most, part of a base dump in it.
+#
+# Chosen over a table count after the live gate of 2026-08-23 produced an
+# `acore_world` holding three tables out of 316 and a probe that called it
+# imported. A count would have caught that one too, and would have needed a
+# new number every time upstream added a table.
+IMPORT_MARKERS: tuple[str, ...] = ("updates", "updates_include")
 
 
 class SqlQuery(Protocol):
@@ -132,7 +161,10 @@ def import_state(sql: SqlQuery, mysql: MysqlDocker) -> docker.ImportState:
             "unreadable", "the account and character counts could not be read"
         )
 
-    empty = [name for name in CORE_DATABASES if not tables[name]]
+    # "Unfinished", not "empty". The distinction is the whole of what the
+    # partial gate found: a schema can be far from empty and nowhere near done.
+    unfinished = [name for name in CORE_DATABASES if not set(IMPORT_MARKERS) <= tables[name]]
+    bare = [name for name in CORE_DATABASES if not tables[name]]
     if populated:
         # Completeness is carried alongside, not folded into the state. The
         # state has to stay ordered by danger — any row at all means refuse,
@@ -143,26 +175,39 @@ def import_state(sql: SqlQuery, mysql: MysqlDocker) -> docker.ImportState:
         # alone (review, 2026-08-23).
         return docker.ImportState(
             "populated",
-            populated if not empty else f"{populated}, but {_holds(empty)} no tables",
-            complete=not empty,
+            (
+                populated
+                if not unfinished
+                else f"{populated}, but {_unfinished_detail(unfinished, tables)}"
+            ),
+            complete=not unfinished,
         )
 
-    if not empty:
+    if not unfinished:
         return docker.ImportState(
             "imported",
             "; ".join(f"{name} has {len(tables[name])} tables" for name in CORE_DATABASES),
             complete=True,
         )
-    if len(empty) == len(CORE_DATABASES):
+    if len(bare) == len(CORE_DATABASES):
         return docker.ImportState(
-            "absent", f"{_holds(empty)} no tables at all, so the import never ran"
+            "absent", f"{_holds(bare)} no tables at all, so the import never ran"
         )
-    filled = [name for name in CORE_DATABASES if name not in empty]
-    return docker.ImportState(
-        "partial",
-        f"{_holds(empty)} no tables, while "
-        + "; ".join(f"{name} has {len(tables[name])} tables" for name in filled),
-    )
+    return docker.ImportState("partial", _unfinished_detail(unfinished, tables))
+
+
+def _unfinished_detail(unfinished: list[str], tables: dict[str, set[str]]) -> str:
+    """Name each unfinished schema and say how far it actually got.
+
+    The count is in the sentence because "acore_world was never finished" and
+    "acore_world has 3 of the 316 tables it should" are the same fact told at
+    very different volumes, and this string is what a user reads before deciding
+    whether to let something overwrite their databases.
+    """
+    said = ", ".join(f"{name} has {len(tables[name])} tables" for name in unfinished)
+    one = len(unfinished) == 1
+    subject, verb = ("it", "was") if one else ("they", "were")
+    return f"{said} but no import record, so {subject} {verb} never finished"
 
 
 def _holds(names: list[str]) -> str:
