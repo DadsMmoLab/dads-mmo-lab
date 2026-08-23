@@ -170,6 +170,17 @@ def provision_headless() -> int:
          WSL), so nothing after it can be judged yet; reboot and run again
       2  not ready, and what remains needs a human
     """
+    # The same defect's other half: the human-readable lines below put that same
+    # step text through `logging`, and a cp1252 stream cannot encode it either.
+    # `errors="replace"` rather than letting it raise, because a diagnostic that
+    # kills the thing it is diagnosing is worse than one with a "?" in it.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):  # a stream that cannot be re-wrapped
+                pass
     logger.info("Yu'lon provisioning (headless)")
     report = platform.ensure_docker()
     payload = {
@@ -189,7 +200,16 @@ def provision_headless() -> int:
     }
     # Written to stdout as one line so a harness can parse it without caring
     # about the human-readable logging that shares this stream.
-    print("YULON_PROVISION_JSON " + json.dumps(payload, ensure_ascii=False))
+    #
+    # `ensure_ascii` is left at its default, and that is the whole point: this
+    # ran as `yulon.exe --provision > log 2>&1` on a clean Windows 11 box and
+    # died here with UnicodeEncodeError, because a redirected Windows stdout is
+    # cp1252 and platform's own step text contains an arrow ("downloaded the
+    # installer -> C:\..."). The run had already spent a 659 MB download by
+    # then. JSON escapes non-ASCII as \uXXXX, so an ASCII-safe line is not a
+    # lossy one -- json.loads returns the identical object (clean-box run,
+    # 2026-08-23).
+    print("YULON_PROVISION_JSON " + json.dumps(payload))
     for step in report.done:
         logger.info("did: %s", step)
     for step in report.skipped:

@@ -162,3 +162,33 @@ def test_main_takes_the_headless_path_without_building_a_window(
     monkeypatch.setattr(main, "build_window", _boom)
     monkeypatch.setattr(main.platform, "ensure_docker", lambda **_k: _report(docker_ready=True))
     assert main.main() == 0
+
+
+def test_the_report_line_survives_a_console_that_cannot_spell_the_step_text(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """This crashed a real clean-Windows run, at the moment it reported success.
+
+    `platform`'s own step text contains an arrow, and the harness runs the frozen
+    app as `yulon.exe --provision > log 2>&1`, which gives a cp1252 stdout. The
+    first version of this function passed `ensure_ascii=False` for prettier
+    output and died with UnicodeEncodeError right here -- after the run had
+    already spent a 659 MB download (clean-box run, 2026-08-23).
+
+    So the marked line has to be encodable by the narrowest console encoding it
+    can plausibly meet, and the escaping has to be lossless: a harness that reads
+    a mangled path is no better off than one that reads nothing.
+    """
+    step = r"downloaded the installer → C:\Users\pk\x.exe"
+    monkeypatch.setattr(
+        main.platform,
+        "ensure_docker",
+        lambda **_k: _report(done=(step,), docker_ready=True),
+    )
+    main.provision_headless()
+    line = next(
+        ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("YULON_PROVISION_JSON ")
+    )
+    line.encode("cp1252")  # the whole assertion: this is what raised
+    payload = json.loads(line[len("YULON_PROVISION_JSON ") :])
+    assert payload["done"] == [step], "the escaping lost or changed the step text"
