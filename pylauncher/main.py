@@ -227,7 +227,8 @@ def main() -> int:
     if "--provision" in sys.argv[1:] or os.environ.get("YULON_PROVISION"):
         return provision_headless()
     logger.info("Yu'lon launcher starting")
-    from PySide6.QtWidgets import QApplication, QMainWindow
+    from PySide6.QtCore import QEvent, QObject
+    from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
 
     app = QApplication(sys.argv)
     window = build_window()
@@ -237,6 +238,44 @@ def main() -> int:
             # CI / packaging check: prove the frozen app can build its window, then leave.
             logger.info("YULON_SMOKE_TEST set: window built, exiting 0")
             return 0
+
+        # Defined here rather than at module scope because this module imports
+        # PySide6 lazily — the class body names QObject, so a module-level
+        # definition would need Qt at import time.
+        class _RefuseCloseWhileBusy(QObject):
+            """Decline to close the window while something is running that cannot be stopped.
+
+            There is exactly one such thing today: the database import, which runs for
+            10-30 minutes. Closing during one used to freeze the window for
+            `STOP_GRACE_SECONDS + 30` seconds — `ControllerView.shutdown()` joins its
+            worker, `_JobWorker.run()` calls its work synchronously so `thread.quit()`
+            cannot preempt a blocking `subprocess.run` — and then abort the process
+            exactly as `_stop_background_threads()` below describes, because the join
+            expires while the thread is still running.
+
+            Refusing is the honest answer rather than a restriction. The import cannot
+            be stopped part-way without leaving the databases half-written, so the only
+            choice that ever existed was between waiting and a crash; this makes that
+            choice visible and takes the crash off the table (review, 2026-08-23).
+            """
+
+            def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+                if event.type() is not QEvent.Type.Close:
+                    return False
+                reasons = [
+                    reason
+                    for view in (watched.property("controllers") or [])
+                    if (reason := getattr(view, "busy_reason", lambda: None)())
+                ]
+                if not reasons:
+                    return False
+                logger.info(f"close refused: {reasons[0]}")
+                QMessageBox.information(None, "Yu'lon is still working", reasons[0])
+                event.ignore()
+                return True
+
+        guard = _RefuseCloseWhileBusy(window)
+        window.installEventFilter(guard)
         window.show()
         return int(app.exec())
     finally:

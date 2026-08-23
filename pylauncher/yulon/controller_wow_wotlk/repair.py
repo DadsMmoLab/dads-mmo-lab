@@ -131,14 +131,27 @@ def import_state(sql: SqlQuery, mysql: MysqlDocker) -> docker.ImportState:
         return docker.ImportState(
             "unreadable", "the account and character counts could not be read"
         )
-    if populated:
-        return docker.ImportState("populated", populated)
 
     empty = [name for name in CORE_DATABASES if not tables[name]]
+    if populated:
+        # Completeness is carried alongside, not folded into the state. The
+        # state has to stay ordered by danger — any row at all means refuse,
+        # and it is computed before completeness for exactly that reason — but
+        # `repair_import()`'s post-check needs to know whether the schemas are
+        # finished, and a half-imported database that a module has already
+        # seeded rows into looks identical to a finished one from the state
+        # alone (review, 2026-08-23).
+        return docker.ImportState(
+            "populated",
+            populated if not empty else f"{populated}, but {_holds(empty)} no tables",
+            complete=not empty,
+        )
+
     if not empty:
         return docker.ImportState(
             "imported",
             "; ".join(f"{name} has {len(tables[name])} tables" for name in CORE_DATABASES),
+            complete=True,
         )
     if len(empty) == len(CORE_DATABASES):
         return docker.ImportState(

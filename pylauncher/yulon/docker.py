@@ -776,6 +776,25 @@ class ImportState:
 
     state: DatabaseImport
     detail: str = ""
+    complete: bool = False
+    """Whether every schema the import is supposed to fill actually has tables.
+
+    Separate from `state` because the two answer different questions and only
+    one of them is about danger. `populated` short-circuits the moment a single
+    row exists, precisely so a database with player data in it is refused before
+    anything is written — which means it says nothing at all about whether the
+    schemas are finished. That is fine for the refusal and useless for the
+    post-check, which needs to know whether the one-shot did its job.
+
+    A review found the hole this closes: an import that applies a module's
+    `db-auth` updates (mod-city-bots seeds 400 accounts) and then dies on the
+    world schema leaves `populated` with `acore_world` empty. Reading only the
+    state, the action reported that as a finished repair, hid its own button,
+    and left the user with a broken server and a success message.
+
+    Defaults False so a probe that does not compute it cannot claim completeness
+    by omission.
+    """
 
     @property
     def repairable(self) -> bool:
@@ -885,7 +904,14 @@ def repair_import(
       this is what the post-check below had to change for — see the comment
       there.
 
-    `output`, when given, receives each line the import prints as it prints it —
+    `output`, when given, receives each line of the import's STDOUT as it prints
+    it. Not every line: `runner.stream()` withholds stderr until the child has
+    exited and then yields it in one block, so anything the one-shot writes
+    there — compose's own `Container ... Created/Started` progress among it —
+    arrives at the end rather than live. That is the same trade `follow_logs()`
+    makes and it is what keeps a full pipe from deadlocking the child, but a
+    caller putting these lines on screen should not promise the user more than
+    it delivers (review, 2026-08-23). What is guaranteed is:
     see `run_attached()`, which is what turned that second command from a
     10-30 minute silence into something a caller can show. It is called on
     whatever thread is running this, so a UI sink has to be one that can cross
@@ -900,7 +926,8 @@ def repair_import(
     user a button for while the alternative is waiting.
 
     Returns:
-        True once the probe says the databases are no longer repairable.
+        True once the probe says the import finished — every schema filled,
+        whether or not the run also seeded rows of its own.
 
     Raises:
         DockerCommandError: any of the refusals above, the database never became
@@ -1004,9 +1031,30 @@ def repair_import(
     #
     # Safe because of the order: `populated` is refused *before* the import
     # runs, so a database that is populated afterwards was populated by the run
-    # that just happened. The only states that mean the one-shot achieved
-    # nothing are the two it was allowed to start from, and `unreadable`.
-    if after.state not in ("imported", "populated"):
+    # that just happened.
+    #
+    # But `populated` on its own is not enough, and a review caught that after
+    # the gate had run. The probe answers `populated` the instant one row
+    # exists, before it has looked at whether the schemas are finished — which
+    # is right for the refusal and useless here. An import that applies the
+    # module's `db-auth` updates and then dies on the world schema is
+    # `populated` with `acore_world` empty, and this reported it as a finished
+    # repair. So the post-check reads `complete` too, which is the question it
+    # was actually asking all along.
+    if after.state == "imported" or (after.state == "populated" and after.complete):
+        pass
+    elif after.state == "populated":
+        # Rows but not every schema: the one-shot got far enough to apply a
+        # module's `db-auth` updates and then died. Reading the state alone
+        # called this a finished repair, hid the button, and left the user a
+        # broken server with a success message (review, 2026-08-23).
+        raise DockerCommandError(
+            f"{service} ran and wrote some rows, but did not finish: {after.detail}. The "
+            f"databases are in a half-imported state. Its last words were: "
+            f"{last_words(run.tail)}. `docker compose logs {service}` in {server_dir} has the "
+            "rest of what it printed."
+        )
+    else:
         raise DockerCommandError(
             f"{service} ran, but the databases still read as {after.state} ({after.detail}). "
             f"Nothing is imported that was not imported before. Its last words were: "
@@ -1777,7 +1825,7 @@ def run_attached(
     sink: OutputSink | None = None,
     keep: int = KEEP_OUTPUT_LINES,
 ) -> AttachedRun:
-    """Run `docker <argv...>` attached, handing each output line to `sink` as it arrives.
+    """Run `docker <argv...>` attached, handing stdout lines to `sink` as they arrive.
 
     The streaming counterpart to `_docker()`, and the second site in this module
     that goes through `runner.stream()` rather than `runner.run()`. It lives
@@ -1798,7 +1846,9 @@ def run_attached(
       something else (see `repair_import()`, where a one-shot that failed
       part-way and one that failed having done nothing exit alike).
     * **Only the last `keep` lines are retained** — see `KEEP_OUTPUT_LINES`.
-      The sink sees every line; this process remembers a bounded end of them.
+      The sink sees every line, though not all of them live — stdout arrives as
+      it is written and stderr in one block after the child exits. This process
+      remembers a bounded end of them.
     * **A sink that raises is dropped, not propagated.** Letting it out would
       abandon the generator mid-iteration, and `stream()` terminates the child
       when that happens — so a widget deleted while an import was running would

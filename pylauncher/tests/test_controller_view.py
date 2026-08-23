@@ -886,3 +886,96 @@ def test_a_game_that_names_no_import_service_is_offered_no_repair(
         update={"containers": WOTLK.containers.model_copy(update={"db_import": None})}
     )
     assert ControllerServices.for_wotlk(without, tmp_path).controller.import_probe is None
+
+
+# --------------------------------------- what the second review found (2026-08-23)
+
+
+def _run_a_fake_import(view: ControllerView, during: object = None) -> list[object]:
+    """Arm and fire Repair with the controller's repair replaced by a recorder.
+
+    `during`, when given, is called while the import is notionally in flight —
+    the point at which the tab is at its most misleading, and the only moment
+    the findings below are reachable.
+    """
+    seen: list[object] = []
+
+    def fake_repair(sink: object = None) -> bool:
+        seen.append(sink)
+        if callable(during):
+            during()
+        return True
+
+    view.services.controller.repair_import = fake_repair  # type: ignore[method-assign]
+    view.repair_import()
+    view.repair_import()
+    return seen
+
+
+def test_refresh_is_locked_while_the_import_runs(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """Refresh blanks the live output and probes the database being written into.
+
+    `recheck()` sets `problem_label` to "", which during an import is the log the
+    user is watching, and then fires `Controller.import_state()` - three
+    `docker exec ... mysql` calls against the database `ac-db-import` is filling.
+    The armed paragraph also teaches "press Refresh now", so it is exactly the
+    button a hesitating user reaches for.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    enabled: list[bool] = []
+    _run_a_fake_import(view, during=lambda: enabled.append(view.refresh_button.isEnabled()))
+    assert enabled == [False], "Refresh was live during the import"
+    assert view.refresh_button.isEnabled(), "Refresh never came back"
+
+
+def test_the_stale_repair_offer_is_hidden_while_the_import_runs(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """It sat under the live heading still saying the import had never finished."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view.repair_label.setText("This install's databases were never finished")
+    view.repair_label.setVisible(True)
+    # `isHidden()`, not `isVisible()`: nothing is visible in an offscreen test
+    # because no ancestor is shown, so `isVisible()` answers False either way
+    # and the assertion would pass with the fix removed.
+    assert not view.repair_label.isHidden(), "the offer was not up to begin with"
+    hidden: list[bool] = []
+    _run_a_fake_import(view, during=lambda: hidden.append(view.repair_label.isHidden()))
+    assert hidden == [True], "the offer contradicted the heading above it"
+
+
+def test_the_window_will_not_close_while_the_import_runs(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Closing during one froze the window for 330s and then aborted the process.
+
+    `shutdown()` joins the worker, `_JobWorker.run()` calls its work
+    synchronously so `quit()` cannot preempt it, and a QThread destroyed while
+    running aborts rather than warns. An import runs for 10-30 minutes, so the
+    join always expired.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert view.busy_reason() is None, "a quiet tab refused to close"
+
+    reasons: list[str | None] = []
+    _run_a_fake_import(view, during=lambda: reasons.append(view.busy_reason()))
+    assert reasons and reasons[0], "the close guard had nothing to say mid-import"
+    assert "cannot be stopped" in reasons[0]
+    assert view.busy_reason() is None, "the tab stayed unclosable after the import"
+
+
+def test_the_armed_paragraph_does_not_offer_a_cancel_it_cannot_honour(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """It said "cannot be stopped once it has started" and "Press Refresh to cancel".
+
+    Both were true of different moments and the paragraph did not say which, on
+    the one screen where a user decides whether to overwrite their databases.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view.services.controller.repair_import = lambda sink=None: True  # type: ignore[method-assign]
+    view.repair_import()
+    said = view.problem_label.text()
+    assert "Press Refresh to cancel." not in said
+    assert "while nothing has happened yet" in said, said
+    assert "cannot be stopped" in said

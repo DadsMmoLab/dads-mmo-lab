@@ -226,6 +226,7 @@ class ControllerView(QWidget):
 
         self._restore_plan: wotlk_maintenance.RestorePlan | None = None
         self._remove_armed = False
+        self._import_running = False
         self._repair_armed = False
         # The last answer the database gave about its own import, and whether it
         # has been asked since the database came up. Remembered because the
@@ -306,6 +307,28 @@ class ControllerView(QWidget):
         box.addWidget(self.repair_label)
         box.addStretch(1)
         self._tabs.addTab(tab, "Server")
+
+    def busy_reason(self) -> str | None:
+        """Why this tab must not be torn down yet, or None.
+
+        Only the import. Everything else here finishes inside `shutdown()`'s
+        join; a database import runs for 10-30 minutes, which is long enough
+        that a user WILL close the window during one — and closing during one
+        froze the window for `STOP_GRACE_SECONDS + 30` seconds and then aborted
+        the process, because `_JobWorker.run()` calls its work synchronously so
+        `thread.quit()` cannot preempt a blocking `subprocess.run`, and a
+        QThread destroyed while running aborts rather than warns (0xC0000409,
+        verified, and recorded in `main.py`). Refusing the close is the honest
+        outcome: the import cannot be stopped, so the only choice available was
+        ever between waiting and a crash (review, 2026-08-23).
+        """
+        if not self._import_running:
+            return None
+        return (
+            "The database import is still running. It cannot be stopped, and closing now would "
+            "leave the databases half-written. This window will close normally once the import "
+            "finishes — it takes 10-30 minutes, and the Server tab shows what it is doing."
+        )
 
     def shutdown(self) -> None:
         """Stop this tab's timers and join its background jobs (called before teardown)."""
@@ -465,7 +488,16 @@ class ControllerView(QWidget):
             self.stop_button.setEnabled(False)
             self.remove_button.setEnabled(False)
             self.repair_button.setEnabled(False)
+            # Refresh too, and this one is not symmetry. `recheck()` blanks
+            # `problem_label` — which during an import is the live output the
+            # user is watching — and then fires `Controller.import_state()`,
+            # three `docker exec ... mysql` probes, at the database the import
+            # is writing schemas into. Worse, the armed paragraph teaches
+            # "press Refresh now", so it is the button a hesitating user
+            # reaches for (review, 2026-08-23).
+            self.refresh_button.setEnabled(False)
         else:
+            self.refresh_button.setEnabled(True)
             # Re-enabled, not re-shown: `_show_repair()` owns whether Repair is
             # visible at all, and an invisible button being enabled is harmless.
             self.remove_button.setEnabled(True)
@@ -613,16 +645,26 @@ class ControllerView(QWidget):
             self.problem_label.setText(
                 "This re-runs the database import that never finished. Everything in the auth, "
                 "characters and world databases is OVERWRITTEN. It is offered because those "
-                "databases hold no accounts and no characters — if that is wrong, press Refresh "
-                "now and restore a backup from the Maintenance tab instead. The server must be "
-                "stopped; the database is started if it is not running and is left running "
-                "afterwards. A full import takes 10-30 minutes and cannot be stopped once it "
-                "has started. Press Refresh to cancel."
+                "databases hold no accounts and no characters — if that is wrong, press "
+                "Refresh now, while nothing has happened yet, and restore a backup from the "
+                "Maintenance tab instead. The server must be stopped; the database is started "
+                "if it is not running and is left running afterwards.\n\n"
+                "Press the button again to start. A full import takes 10-30 minutes, and once "
+                "it starts it cannot be stopped and the window cannot be closed until it "
+                "finishes."
             )
             return
         self._disarm_repair()
         self._set_busy(True)
+        self._import_running = True
         self._import_tail.clear()
+        # The offer described the state this run is in the middle of ending.
+        # `_disarm_repair()` resets the flag and the button text and nothing
+        # else, and `_show_repair()` is not reached again until the run
+        # finishes — so "this install's databases were never finished" sat
+        # directly under "Running the database import" for the whole 10-30
+        # minutes, contradicting it (review, 2026-08-23).
+        self.repair_label.setVisible(False)
         self.problem_label.setText(IMPORT_RUNNING)
         # The sink is the relay's emitter, not `_import_line`: this call runs on
         # a worker thread, and everything it invokes runs there too.
@@ -654,6 +696,7 @@ class ControllerView(QWidget):
     @Slot(object)
     def _repair_done(self, _result: object) -> None:
         self._set_busy(False)
+        self._import_running = False
         self.problem_label.setText(
             "The database import finished. Press Start — the server has a database to talk to now."
         )
@@ -668,6 +711,7 @@ class ControllerView(QWidget):
     @Slot(object)
     def _repair_failed(self, exc: object) -> None:
         self._set_busy(False)
+        self._import_running = False
         self.problem_label.setText(str(exc))
         self.action_failed.emit(str(exc))
         self._import_asked = False

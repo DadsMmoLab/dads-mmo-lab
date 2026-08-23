@@ -293,7 +293,25 @@ container compose brings up, which is what makes attached mode terminate.
 
 **4. The exit code is not the answer, for the same reason it is not for `compose down`.** A
 one-shot that died part-way and one that never touched a table are the same exit code from
-outside. The probe runs again afterwards and only a database that now reads as `imported` counts.
+outside. The probe runs again afterwards, and what counts is the schemas being FULL — `imported`,
+or `populated` with `complete` set.
+
+That last clause is not a hedge, and it took two corrections to get right. It first read "only a
+database that now reads as `imported` counts", which the live gate broke: an AzerothCore import is
+not only AzerothCore's SQL, because every module in the tree gets its own `data/sql/db-auth` and
+`db-characters` updates applied by the same one-shot. Measured on yulon-ubuntu, 2026-08-23: a
+first-ever import of an install carrying mod-city-bots finished exit 0 with all three schemas full
+AND 400 accounts plus 400 characters the module's own update files had written. So the action
+failed itself over its own success, and would have on every install this project ships.
+
+Widening it to accept `populated` then opened a second hole, which a review caught before it
+shipped: the probe answers `populated` on the FIRST row it finds, deliberately, because that is
+the refusal protecting player data and it must not wait to finish counting tables. An import that
+applies the module's `db-auth` updates and then dies on the world schema is therefore `populated`
+with `acore_world` empty — indistinguishable, by state alone, from the finished one above. Hence
+`ImportState.complete`, carried alongside the state rather than folded into it: the state stays
+ordered by danger for the refusal, and the post-check reads completeness, which is the question it
+was actually asking all along.
 
 **5. Visibility is a remembered answer, not a live one.** The probe costs three `docker exec`s and
 the status poll runs every five seconds, so it is put once per time the database comes up (plus
@@ -302,13 +320,35 @@ action exists for is reached by pressing Stop, after which the database cannot b
 a strictly-live answer would hide the button exactly when it is needed. The action itself never
 trusts that memory — it re-censuses ownership and re-probes the database before it does anything.
 
-**Unproven against a live daemon.** Everything above is unit-tested with `runner.run` faked and
-fifteen mutations proven to die. Nothing here has met a real `ac-db-import`. A live gate has to:
-interrupt an install between `compose up` and the end of the import (killing `ac-db-import`
-mid-run is enough); confirm the probe reads `absent` or `partial` and names which schema; confirm
-Start still fails; run the repair and confirm it runs `ac-db-import` and no other service (`docker
-events` or `docker ps -a --filter label=…` before and after); confirm Start then works; and then
-run the repair again on the now-populated server and confirm it refuses, naming the account count.
-The refusal on a populated database is the one that has to be gated on a server with real
-characters on it, not on an empty one.
+**Live-gated 2026-08-23, partly.** Run on yulon-ubuntu against a throwaway copy of the real
+AzerothCore + playerbots + city-bots install, on a fresh empty volume, with container names
+renamed so the copy could not touch the original. What it settled:
+
+- **Attached `compose up --no-deps <one-shot>` terminates.** One `repair_import()` call took
+  209.0s around a container that ran 208.0s.
+- **It re-runs an EXITED one-shot** rather than no-opping, with no `--force-recreate`. The same
+  container was started three times (16:59:10 → 17:05:06 → 17:09:38), exit 0 each time, refilling
+  schemas that had been dropped in between.
+- **A finished import does NOT leave the account table empty** — see point 4 above. This is the
+  one that broke the action, and it would have broken it on every shipped install.
+- The refusal on a real populated server was exercised against the 650-account install and pointed
+  at Restore, as did the refusals for a running server, an unreadable database, and an install
+  that cannot name its project.
+
+**What the gate did NOT settle, and a review was right to say so:**
+
+- **It never repaired a `partial` database** — the state this action exists for. All three runs
+  began from `absent`, manufactured with `DROP DATABASE`. A dropped schema is not an interrupted
+  import: a real interruption leaves schemas that exist, with some tables, and with rows already
+  in AzerothCore's own `updates` table, which is what decides whether a re-run skips files it has
+  already applied. Until that is run, the action is proven for a state it will rarely meet.
+- **Assumption 1 was proven by container NAME, not by container ID.** The three start/finish pairs
+  could in principle be three different containers reusing the name. The run pinned `ac-database`'s
+  ID for exactly this reason and did not pin the one-shot's.
+- **`acore_playerbots` is outside the probe's `CORE_DATABASES`**, and the compose file gives
+  `ac-db-import` no `AC_PLAYERBOTS_DATABASE_INFO`, so the one-shot never creates it. On the
+  playerbots install this project actually ships, `repair_import()` can therefore report success
+  with that database still missing.
+- The counterfactual for `--no-deps` — that without it `up` attaches to the database and never
+  returns — is still an argument, not a measurement.
 

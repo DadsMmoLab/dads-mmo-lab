@@ -193,3 +193,36 @@ def test_the_schema_listing_is_asked_for_once_not_once_per_schema() -> None:
     mysql = _Mysql("acore_auth", "acore_world", "acore_characters")
     repair.import_state(_Sql({"acore_auth": ["account"]}, {"account": 0}), mysql)
     assert mysql.asked == 1, f"SHOW DATABASES ran {mysql.asked} times"
+
+
+def test_rows_plus_an_empty_schema_is_populated_but_not_complete() -> None:
+    """The state stays ordered by danger; completeness rides alongside it.
+
+    Both facts are needed and they answer different questions. `populated` has
+    to short-circuit on the first row — that is the refusal protecting player
+    data, and it must not wait to finish counting tables. But
+    `repair_import()`'s post-check needs to know whether the schemas are
+    FINISHED, and an import that seeded a module's accounts and then died on the
+    world schema is indistinguishable from a finished one by state alone. That
+    was reported as a completed repair (review, 2026-08-23).
+    """
+    half_done = repair.import_state(
+        _Sql(
+            tables={AUTH: ["account"], CHARACTERS: ["characters"], WORLD: []},
+            counts={f"{AUTH}.account": 400, f"{CHARACTERS}.characters": 400},
+        ),
+        _Mysql(AUTH, CHARACTERS, WORLD),
+    )
+    assert half_done.state == "populated"
+    assert half_done.complete is False
+    assert WORLD in half_done.detail, half_done.detail
+
+    finished = repair.import_state(
+        _Sql(
+            tables={AUTH: ["account"], CHARACTERS: ["characters"], WORLD: _full_world()},
+            counts={f"{AUTH}.account": 400, f"{CHARACTERS}.characters": 400},
+        ),
+        _Mysql(AUTH, CHARACTERS, WORLD),
+    )
+    assert finished.state == "populated"
+    assert finished.complete is True, finished.detail

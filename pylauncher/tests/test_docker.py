@@ -1810,7 +1810,7 @@ def _probe(*answers: docker.ImportState) -> Callable[[], docker.ImportState]:
 
 UNIMPORTED = docker.ImportState("absent", "acore_world holds no tables")
 IMPORTED = docker.ImportState("imported", "acore_world has 1103 tables")
-PLAYED_ON = docker.ImportState("populated", "651 rows in acore_auth.account")
+HAS_ROWS = docker.ImportState("populated", "651 rows in acore_auth.account")
 
 
 def _repair_doubles(
@@ -1932,7 +1932,7 @@ def test_repair_import_refuses_over_a_database_with_player_data(
     calls: list[list[str]] = []
     _repair_doubles(monkeypatch, calls, running={SPEC.db})
     with pytest.raises(docker.DockerCommandError, match="restore the last backup") as raised:
-        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(PLAYED_ON))
+        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(HAS_ROWS))
     assert "651 rows in acore_auth.account" in str(raised.value)
     assert not any(c[:3] == ["docker", "compose", "up"] for c in calls), "it imported anyway"
 
@@ -2002,7 +2002,9 @@ def test_repair_import_accepts_an_import_that_seeded_its_own_accounts(
     calls: list[list[str]] = []
     _repair_doubles(monkeypatch, calls, running={SPEC.db})
     seeded = docker.ImportState(
-        "populated", "400 rows in acore_auth.account, 400 rows in acore_characters.characters"
+        "populated",
+        "400 rows in acore_auth.account, 400 rows in acore_characters.characters",
+        complete=True,
     )
     assert docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, seeded)) is True
     assert ["docker", "compose", "up", "--no-deps", "ac-db-import"] in calls
@@ -2385,3 +2387,48 @@ def test_repair_asks_the_database_only_after_it_has_started_it(
 
     assert docker.repair_import(SPEC, Path("/tmp/wow"), probe) is True
     assert asked_after[0] is True, "the database was probed before it was started"
+
+
+def test_repair_import_refuses_an_import_that_seeded_rows_and_then_died(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hole the widened post-check opened, closed.
+
+    Accepting `populated` was right — a finished import really does leave rows,
+    because every module's `db-auth` updates run in the same one-shot — but the
+    probe answers `populated` on the FIRST row it finds, before it has looked at
+    whether the schemas are finished. So an import that applies mod-city-bots'
+    400 accounts and then dies on the world schema reads exactly like a finished
+    one.
+
+    Reported as success, that hides the Repair button (the probe no longer says
+    `repairable`) and leaves the user a broken server, a success message, and no
+    way back. `complete` is what separates the two (review, 2026-08-23).
+    """
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db}, import_exit=1)
+    half_done = docker.ImportState(
+        "populated",
+        "400 rows in acore_auth.account, but acore_world holds no tables",
+        complete=False,
+    )
+    with pytest.raises(docker.DockerCommandError, match="did not finish"):
+        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, half_done))
+
+
+def test_a_probe_that_forgets_to_say_complete_cannot_claim_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`complete` defaults False so completeness is never claimed by omission.
+
+    `ImportProbe` is a seam any per-game module implements. One written against
+    the old two-field `ImportState` would answer `populated` with no third
+    argument, and a default of True would silently hand it the success path.
+    """
+    assert docker.ImportState("populated", "some rows").complete is False
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db})
+    with pytest.raises(docker.DockerCommandError, match="did not finish"):
+        docker.repair_import(
+            SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, docker.ImportState("populated", "rows"))
+        )
