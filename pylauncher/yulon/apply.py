@@ -25,7 +25,7 @@ import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import IO, Literal, Protocol
 
 from yulon import platform
 from yulon.git import CloneSpec, Git, GitError, RunnerGit
@@ -84,28 +84,50 @@ class DockerSql:
 
     def run_file(self, db: Db, path: Path) -> None:
         with path.open("rb") as fh:
-            proc = subprocess.run(
-                self._argv(db),
-                stdin=fh,
-                capture_output=True,
-                text=True,
-                check=False,
-                env=self._env(),
-            )
+            proc = self._mysql(db, stdin=fh)
         _check_sql(proc, f"{path.name} → {DB_NAMES[db]}")
 
     def run_statement(self, db: Db, statement: str) -> None:
         # Over stdin, never `-e <sql>`: argv is world-readable (`ps`, Task
         # Manager, /proc/<pid>/cmdline) and a statement can carry a password.
-        proc = subprocess.run(
-            self._argv(db),
-            input=statement,
-            capture_output=True,
-            text=True,
-            check=False,
-            env=self._env(),
-        )
+        proc = self._mysql(db, statement=statement)
         _check_sql(proc, f"inline → {DB_NAMES[db]}")
+
+    def _mysql(
+        self, db: Db, *, stdin: IO[bytes] | None = None, statement: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        """Run one `docker exec ... mysql`, with the missing-CLI guards in one place.
+
+        Exactly one of `stdin` (a file to pipe in) and `statement` (a string to
+        pipe in) is given; both arrive as the child's stdin, and neither is ever
+        put in argv — see `run_statement()`.
+
+        `subprocess.run` is called here rather than `yulon.runner`, which is a
+        style-guide §3 deviation the file already carried: `run_file()` needs
+        `stdin=<open file>` and `runner.run()` has no way to express it. Left as
+        it was found, and not widened — the point of this method is that the two
+        callers stop repeating the call, not that a third gets added.
+
+        Raises:
+            ApplyError: There is no docker CLI to run. Both roads to that, since
+                the resolution cache remembers a hit: never resolved at all
+                (`_argv()`), and resolved earlier to a `docker.exe` that has
+                since been uninstalled or moved by a Docker Desktop update
+                (the `OSError` here). The second used to surface as a bare
+                `[WinError 2]` (review, 2026-08-23).
+        """
+        try:
+            return subprocess.run(
+                self._argv(db),
+                stdin=stdin,
+                input=statement,
+                capture_output=True,
+                text=True,
+                check=False,
+                env=self._env(),
+            )
+        except OSError as exc:
+            raise ApplyError(platform.DOCKER_CLI_MISSING_HELP) from exc
 
     def _env(self) -> dict[str, str]:
         """Our environment plus `MYSQL_PWD`, so the password never enters argv.

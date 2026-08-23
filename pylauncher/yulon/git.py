@@ -289,6 +289,15 @@ class ContainerGit:
         Docker Desktop, so it is by definition the git that runs on the machine
         whose PATH does not yet mention docker — the first clone of a first
         install, minutes after `ensure_docker()` put it there.
+
+        Both ways of having no docker end at the same sentence. `None` is "it
+        was never found"; the `OSError` is the case the resolution cache cannot
+        follow — a hit is remembered for the life of the process, so Docker
+        uninstalled or self-updated while the launcher is open leaves that
+        pinned path aimed at a file that is gone. Only the first was guarded
+        when this moved off the literal `docker`, so the second still reached
+        the user as `[WinError 2] The system cannot find the file specified`
+        (review, 2026-08-23) — the exact failure the change was made to end.
         """
         program = platform.docker_program()
         if program is None:
@@ -310,7 +319,10 @@ class ContainerGit:
             *_LINE_ENDING_ARGS,
             *git_args,
         ]
-        proc = runner.run(argv, env=_no_prompt_env())
+        try:
+            proc = runner.run(argv, env=_no_prompt_env())
+        except OSError as exc:
+            raise GitError(platform.DOCKER_CLI_MISSING_HELP) from exc
         if proc.returncode != 0:
             raise GitError(f"containerized git {' '.join(git_args)} failed: {proc.stderr.strip()}")
 

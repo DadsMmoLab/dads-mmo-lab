@@ -274,3 +274,27 @@ def test_container_git_without_any_docker_explains_itself(
         git.ContainerGit().clone(
             git.CloneSpec(url="https://example/core.git", dest=tmp_path / "core")
         )
+
+
+def test_container_git_says_the_same_thing_when_a_resolved_docker_has_gone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The other way to have no Docker, which only `yulon.docker` guarded.
+
+    `docker_program()` remembers a hit for the life of the process, so a Docker
+    Desktop uninstall or self-update while the launcher is open leaves that
+    pinned path aimed at a file that is gone. That arrives as `OSError` from
+    `subprocess`, not as `None` from the resolver, and it used to come out of
+    here as `FileNotFoundError: [Errno 2]` while `docker.start()` on the same
+    run said "Docker could not be found on this machine" (review, 2026-08-23).
+    """
+    monkeypatch.setattr(git.platform, "_resolved_docker_cli", OFF_PATH_EXE)
+
+    def gone(argv: list[str], **kwargs: object):
+        raise FileNotFoundError(2, "The system cannot find the file specified", OFF_PATH_EXE)
+
+    monkeypatch.setattr(git.runner, "run", gone)
+    with pytest.raises(git.GitError, match="Docker could not be found"):
+        git.ContainerGit().clone(
+            git.CloneSpec(url="https://example/core.git", dest=tmp_path / "core")
+        )
