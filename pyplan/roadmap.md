@@ -340,7 +340,17 @@ automatically.
 > cross-platform install paths and controllers are explicitly out of scope for Phase 6 — they are
 > Phase 7.** Phase 7 must not start until Phase 6's WotLK exit criteria (6.5) are fully met on
 > Linux, macOS, and native Windows.
-
+> **Privilege transparency (decided): no silent escalation of host privileges.** Every install
+> path — the Linux bash scripts (bugfix-only until Phase 7 retires them), the native engine
+> (6.2/6.3), and `ensure_docker()`'s provisioning — must honor one binding rule: **never add the
+> user to the `docker` group, and never write a passwordless `sudo` rule, without the user's
+> explicit, informed consent.** Two facts a game-server audience won't infer on its own: (1)
+> `docker`-group membership **is** root — `docker run -v /:/mnt --rm -it alpine chroot /mnt sh`
+> edits any host file, so there is no privilege boundary to protect; (2) a `NOPASSWD` docker rule
+> is therefore **redundant** (pure attack surface, no benefit) and must never be written. The
+> first-generation `install-*.sh` scripts did exactly this — `enable_docker_sudo_wrapper()` wrote
+> `/etc/sudoers.d/docker-nopasswd` behind `|| true`, so it could fail undetectably — and the native
+> engine must not reintroduce it. Incident history lives in `pyplan/checklist.md` (Cross-cutting).
 ### 6.0 Rehome the install scripts (prerequisite refactor)
 
 > Before any macOS/Windows installer is added, the installers need a real home: today the
@@ -419,7 +429,12 @@ automatically.
 3. **Preflight — refuse, don't warn** (`rust-prior-art.md` §3): RAM 2 GB/job (refuse < 6 GB, warn
    < 8 GB), Docker data-root refuse < 40 GB, games-dir refuse < 8 GB, CPU-vs-RAM advisory, the
    5-second bind-mount probe, `server_dir_problem()` (OneDrive/iCloud/UNC/mapped-drive), and the
-   port-conflict check *before* the build. macOS specifics are **unwritten in the Rust prior
+   port-conflict check *before* the build. Privilege consent belongs in preflight, not after the
+   fact: before any `docker`-group join or privileged provisioning step, name the change, state
+   plainly that group membership == root (with the `-v /:/mnt` chroot example), and require an
+   explicit opt-in; never write a `sudoers.d`/`NOPASSWD` docker rule and never `chmod 666` the
+   docker socket — both are redundant beside the group and violate the preamble's
+   no-silent-escalation rule. macOS specifics are **unwritten in the Rust prior
    art** — resolve Docker Desktop's data root from its settings JSON (`DataFolder`/`diskPath`,
    absent = default) and write the macOS firewall/driver facts fresh.
 4. **Staged, resumable install** (`rust-prior-art.md` §1): stage order recorded by NAME, a state
@@ -433,7 +448,8 @@ automatically.
 7. _Definition of done:_ the native engine completes a working WotLK server on a real macOS
    machine (Docker Desktop, no other Linux), zero shell interaction, streaming output to the
    console — with a clean resume after a mid-build cancel and a clean second install to a
-   different directory.
+   different directory — and the preflight records explicit consent for the docker-group join,
+   with no `sudoers.d`/`NOPASSWD` write and no socket `chmod 666` anywhere in the path.
 
 ### 6.3 Native Windows install path
 
@@ -464,6 +480,10 @@ automatically.
    the mocked suite.
 2. Live-gate 6.2 on a real macOS machine and 6.3 on a real Windows 11 machine (both currently
    unverified — the whole point of this phase), **WotLK only** (per the scope gate above).
+3. Assert the privilege-transparency rule structurally: a test fails if any install/provision path
+   emits a `sudoers.d`/`NOPASSWD` write, a docker-socket `chmod 666`, or a bare
+   `usermod -aG docker` without a recorded consent — parse the emitted argv through the same
+   mocked seam as the port-conflict check, so the native engine cannot reintroduce the bug.
 
 ### 6.5 Full WotLK feature coverage on Linux, macOS, and native Windows (Phase 6 exit gate)
 
@@ -476,7 +496,8 @@ automatically.
    (already proven), macOS (6.2), native Windows (6.3). Includes the install-time robustness the
    native engine must ship: staged/resumable install (a mid-build cancel resumes, never re-runs the
    import), preflight floors that refuse-not-warn (RAM/disk/data-root + bind-mount probe +
-   `server_dir_problem()`), `keep_awake()` across the compile, and honest cancel copy — each
+   `server_dir_problem()`), privilege transparency (no silent docker-group join or `sudoers.d`
+   write anywhere in the path), `keep_awake()` across the compile, and honest cancel copy — each
    live-gated, not just unit-tested, on all three platforms.
 2. **Server lifecycle (README §12).** Start/stop/status/health polling, and the single-instance
    port-conflict guard, all correct on each platform's `docker compose` (native Linux Engine,
