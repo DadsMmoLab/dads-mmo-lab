@@ -810,3 +810,40 @@ def test_the_root_password_is_not_in_the_repr() -> None:
     mysql = DockerMysql(DB, "hunter2")
     assert "hunter2" not in repr(mysql)
     assert mysql.root_password == "hunter2", "still readable where it is actually needed"
+
+
+def test_a_finished_restore_is_not_reported_as_failed_when_the_marker_will_not_shrink(
+    tmp_path: Path,
+) -> None:
+    """The data is already loaded, so "Nothing was restored" is the one wrong thing to say.
+
+    After the load the marker shrinks to whatever an earlier interrupted restore
+    left unfinished. If THAT write fails, the restore has still happened —
+    raising there reported a completed restore as a failure, in the exact words
+    that would send a user to run it a second time (review, 2026-08-23).
+
+    Nothing is mocked but the disk turning hostile mid-load, which is how a real
+    one behaves: the `.tmp` path becomes a directory while mysql is applying the
+    dump, so `os.replace` fails the way a full or read-only disk would.
+    """
+    marker = maintenance.marker_path(tmp_path)
+
+    class HostileDisk(FakeMysql):
+        def load_from(self, source: IO[bytes]) -> None:
+            super().load_from(source)
+            marker.with_name(marker.name + ".tmp").mkdir(parents=True, exist_ok=True)
+
+    mysql = HostileDisk(("acore_ale", "acore_world"))
+    a_marker(
+        tmp_path,
+        backup=tmp_path / "ale.sql",
+        databases=("acore_ale",),
+        safety=(an_earlier_copy_of(tmp_path, "acore_ale"),),
+    )
+    path = a_backup_of(tmp_path, "acore_world")
+    plan = plan_restore(path, tmp_path, running=running(DB))
+
+    report = restore(plan, mysql, confirm=plan.token, running=running(DB), now=AT)
+
+    assert report.databases == ("acore_world",)
+    assert mysql.loaded, "the dump was applied, so the restore really did happen"

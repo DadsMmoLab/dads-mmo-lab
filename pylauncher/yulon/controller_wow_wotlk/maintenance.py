@@ -847,7 +847,11 @@ def restore(
         ),
         started_at=(now or datetime.now()).isoformat(timespec="seconds"),
     )
-    _write_marker(record)
+    _write_marker(
+        record,
+        consequence="An interrupted restore could not have been detected afterwards, so "
+        "nothing was restored.",
+    )
     logger.warning(f"restoring {', '.join(plan.databases)} from {plan.backup}")
     try:
         with plan.backup.open("rb") as source:
@@ -863,11 +867,30 @@ def restore(
     else:
         # This restore finished; the earlier one it did not cover has not, so
         # the marker shrinks to what is still unfinished instead of vanishing.
-        _write_marker(unresolved)
-        logger.warning(
-            f"{', '.join(unresolved.databases)} were left part-restored by an earlier restore "
-            f"that this one does not put right; {marker} still records them"
-        )
+        #
+        # Failing to shrink it must NOT fail the restore. The data is already
+        # loaded — raising here reported a completed restore as
+        # "Nothing was restored", which invites the user to run it again
+        # (review, 2026-08-23). A marker that still over-names databases is a
+        # false alarm on the next start, which is recoverable; a second restore
+        # of a database that was already fine is not.
+        try:
+            _write_marker(
+                unresolved,
+                consequence=f"{', '.join(plan.databases)} WERE restored successfully; only the "
+                "record of the earlier unfinished restore could not be updated.",
+            )
+        except (MaintenanceError, OSError) as exc:
+            logger.error(
+                f"{', '.join(plan.databases)} were restored successfully, but {marker} could not "
+                f"be updated ({exc}); it still names them as part-restored, so the next start may "
+                f"warn about databases that are in fact fine. Nothing needs re-running."
+            )
+        else:
+            logger.warning(
+                f"{', '.join(unresolved.databases)} were left part-restored by an earlier restore "
+                f"that this one does not put right; {marker} still records them"
+            )
     logger.info(f"restored {', '.join(plan.databases)} from {plan.backup}")
     return RestoreReport(backup=plan.backup, databases=plan.databases, safety_backup=safety)
 
@@ -980,7 +1003,7 @@ def _still_unresolved(
     )
 
 
-def _write_marker(record: InterruptedRestore) -> None:
+def _write_marker(record: InterruptedRestore, *, consequence: str) -> None:
     """Write the marker atomically, and fail the restore if it cannot be written.
 
     Not best-effort. The marker is the only evidence a half-applied restore
@@ -992,11 +1015,14 @@ def _write_marker(record: InterruptedRestore) -> None:
         tmp.write_text(record.as_json() + "\n", encoding="utf-8")
         os.replace(tmp, record.marker)
     except OSError as exc:
-        tmp.unlink(missing_ok=True)
-        raise MaintenanceError(
-            f"could not write {record.marker}, so an interrupted restore could not be detected "
-            f"afterwards: {exc}. Nothing was restored."
-        ) from exc
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            # Losing the temp file matters less than losing the real error, and
+            # an unguarded cleanup let a raw PermissionError escape a function
+            # that documents `MaintenanceError` (review, 2026-08-23).
+            logger.warning(f"could not remove {tmp} after failing to write {record.marker}")
+        raise MaintenanceError(f"could not write {record.marker}: {exc}. {consequence}") from exc
 
 
 def _databases_named_in(path: Path) -> tuple[str, ...]:
