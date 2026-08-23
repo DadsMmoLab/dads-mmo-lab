@@ -25,9 +25,8 @@ Three values, deliberately:
   That is not the same claim and this file will not make it.
 - **never run** — nobody has started the app on this operating system at all.
 
-There is no Mac on *this side* of the project. The macOS gates have an owner — Baerthe runs them,
-and `../pyplan/checklist.md` lists what each one has to send back — but until that evidence lands,
-nothing in the macOS column is a claim.
+There is no Mac on this side of the project, so nothing in the macOS column is a claim. The code
+is real and has tests; nobody has started the app on a Mac.
 
 "Opens" is also the weaker word it looks like. The evidence for the AppImage and the `.exe` is a
 `YULON_SMOKE_TEST=1` run that builds the window and exits; a person has used the app on Linux and
