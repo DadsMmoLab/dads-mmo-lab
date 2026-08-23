@@ -675,13 +675,51 @@ def interrupted_restore(server_dir: Path) -> InterruptedRestore | None:
     if not isinstance(raw, dict):
         logger.warning(f"restore marker at {marker} is not an object; it names nothing")
         return InterruptedRestore(marker, Path(), (), (), "", readable=False)
+    databases = raw.get("databases", [])
+    safety = raw.get("safety_backup", [])
+    if not isinstance(databases, list) or not isinstance(safety, list):
+        # A readable dict whose VALUES are the wrong shape is not a marker this
+        # code wrote, and reading it as one invents facts: `tuple(str(n) for n
+        # in "acore_world")` iterates a STRING CHARACTER BY CHARACTER, which
+        # produced a marker naming eleven fictional one-letter databases and,
+        # since a marker naming databases nothing will ever restore is never
+        # cleared, kept it forever (review, 2026-08-23).
+        logger.warning(
+            f"restore marker at {marker} has fields of the wrong shape; it names nothing"
+        )
+        return InterruptedRestore(marker, Path(), (), (), "", readable=False)
     return InterruptedRestore(
         marker=marker,
         backup=Path(str(raw.get("backup", ""))),
-        databases=tuple(str(name) for name in raw.get("databases", [])),
-        safety_backup=tuple(Path(str(p)) for p in raw.get("safety_backup", [])),
+        databases=tuple(str(name) for name in databases),
+        safety_backup=tuple(Path(str(p)) for p in safety),
         started_at=str(raw.get("started_at", "")),
     )
+
+
+def forget_interrupted_restore(server_dir: Path) -> bool:
+    """Put down the record of an interrupted restore. True if there was one to put down.
+
+    `restore()` deliberately KEEPS a marker whose databases it did not put
+    right, so the evidence survives every later restore of every other database.
+    That is correct, and without this it is also a trap: a marker naming a
+    database no restore will ever cover — a schema this server does not have, an
+    install that has moved on, a copy the user restored by hand — warns on every
+    start forever, and nothing could acknowledge it (review, 2026-08-23).
+
+    It removes the RECORD, not the backups. The safety copies the marker named
+    are left exactly where they are, because the usual reason to acknowledge a
+    marker is that you have already used one of them and know where it went.
+    """
+    marker = marker_path(server_dir)
+    try:
+        marker.unlink()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise MaintenanceError(f"could not remove {marker}: {exc}") from exc
+    logger.warning(f"forgot the interrupted-restore record at {marker}")
+    return True
 
 
 def plan_restore(
@@ -901,8 +939,11 @@ def _usable_copies(earlier: InterruptedRestore | None) -> dict[str, Path]:
     Keyed by the database each file is a dump OF, read out of the file rather
     than taken from the marker's word for it: the marker is evidence about the
     databases its copies actually hold and about nothing else. `verify_dump()`
-    answers all three questions that matter in one head-and-tail read — the file
-    is still there, it is a complete dump, and it is that database's — so a copy
+    is called WITHOUT a database here, because which database the file holds is
+    the thing being discovered — so it answers two of the three questions in one
+    head-and-tail read (the file is still there, and it is a complete dump) and
+    the third, identity, comes from reading the head. An earlier version of this
+    sentence claimed all three (review, 2026-08-23). So a copy
     the user has since deleted, or one that was cut short, stops counting as
     cover and the database it named is dumped afresh. Before 2026-08-23 nothing
     was checked: the marker file existing was the whole test, and a restore

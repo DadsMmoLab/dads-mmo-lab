@@ -847,3 +847,45 @@ def test_a_finished_restore_is_not_reported_as_failed_when_the_marker_will_not_s
 
     assert report.databases == ("acore_world",)
     assert mysql.loaded, "the dump was applied, so the restore really did happen"
+
+
+def test_an_interrupted_restore_can_be_acknowledged_and_stops_warning(tmp_path: Path) -> None:
+    """A kept marker with nothing left to put it right would warn forever.
+
+    Keeping the marker across later restores is deliberate — it is the only
+    record that a database was left half-written. But a marker naming a schema
+    this server does not have, or one the user restored by hand, is never
+    covered by any future restore, so nothing ever cleared it and there was no
+    way to say "I have dealt with this" (review, 2026-08-23).
+
+    The backups it named must survive: acknowledging usually means one of them
+    has already been used.
+    """
+    copy = an_earlier_copy_of(tmp_path, "acore_ale")
+    a_marker(tmp_path, backup=tmp_path / "ale.sql", databases=("acore_ale",), safety=(copy,))
+    assert interrupted_restore(tmp_path) is not None
+
+    assert maintenance.forget_interrupted_restore(tmp_path) is True
+    assert interrupted_restore(tmp_path) is None
+    assert copy.exists(), "acknowledging the record must not delete the safety copy"
+
+    assert maintenance.forget_interrupted_restore(tmp_path) is False, "nothing left to forget"
+
+
+def test_a_marker_whose_fields_are_the_wrong_shape_names_nothing(tmp_path: Path) -> None:
+    """A readable dict is not automatically a marker this code wrote.
+
+    `{"databases": "acore_world"}` is valid JSON and a valid object, and
+    `tuple(str(n) for n in ...)` iterates a STRING CHARACTER BY CHARACTER — so it
+    produced a marker naming eleven fictional one-letter databases, which then
+    could never be cleared because no restore would ever cover them
+    (review, 2026-08-23).
+    """
+    marker = maintenance.marker_path(tmp_path)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text('{"databases": "acore_world"}', encoding="utf-8")
+
+    record = interrupted_restore(tmp_path)
+    assert record is not None, "a marker that is there still means a restore was in flight"
+    assert record.readable is False
+    assert record.databases == ()
