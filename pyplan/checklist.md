@@ -217,20 +217,45 @@
     docker directory at all, and `C:\Program Files\Docker\Docker\resources\bin` did not exist. Registry
     before hardcoded paths, since the registry is what the installer actually wrote.
 
-- **The same two blindnesses exist outside `ensure_docker()` — found independently by both fixes, not yet
-  addressed.** This is the honest limit of what the two merged fixes deliver:
-  1. **PATH:** `docker.py` resolves a bare `docker` at 8 call sites (`_run`, `compose_project_name`,
-     `container_project`, `_run_docker_stop`, the `compose stop`, `health`, `container_state`, `_logs`,
-     `follow_logs`), plus `installer.docker_available()` and `console.py`'s `docker attach` argv. So
-     `ensure_docker()` can now *succeed* and the very next `compose up` still fails to find the binary on a
-     fresh Windows box. `installer.py` self-heals (preflight checks `report.docker_ready` first); the
-     controller's start/stop does not, and the console's failure is user-visible as a broken GM console.
-     Route them through the new `docker_programs()`. Note `installer.docker_available()` duplicates
-     `platform.docker_ready()` outright — style-guide §4 — so collapsing them fixes one site for free.
-  2. **TLS:** `platform._http_get_text` (`:261`), `manifest_store.urllib_get` (`:135`) and
-     `update._urllib_get_text` (`:63`) all call `urlopen` with no verified context. `detect_public_ip()` is
-     the worst of the three because it fails *silently* — it returns `None` and the networking report simply
-     tells the user they are offline.
+- **Both blindnesses outside `ensure_docker()` are now closed** (merged 2026-08-23, each implemented in
+  an isolated worktree and then adversarially reviewed twice — both were rejected on the first review).
+  1. **PATH — done.** `platform.docker_program()` resolves the CLI once and every argv is built from it:
+     the nine sites in `docker.py`, `console.attach_argv()`, and `git.ContainerGit`/`apply.DockerSql`,
+     which the original brief had missed. `installer.docker_available()` was deleted rather than fixed —
+     it was `platform.docker_ready()` written a second time (style-guide §4). Cache a hit, never a miss:
+     measured 7.5 ms resolved / 14.7 ms unresolved against 308 ms for one real `docker inspect`, and
+     never caching the miss is what lets a launcher started on a bare box pick up the docker its own
+     installer just wrote. The review then found the failure path was *dishonest* in two places — the
+     Stop button answered "no Docker" by blaming the user's install for having no
+     `COMPOSE_PROJECT_NAME`, and `wait_ready()` turned an instant hard failure into 480 s of silent
+     polling. Both fixed; all four modules now log the real errno before degrading to the shared
+     sentence, so an ACL or AV block is never reported as "install Docker Desktop".
+  2. **TLS — done, after the first attempt turned out not to work.** All three `urlopen` calls now pass
+     a verifying context, and an AST test fails on any *future* `urlopen` without one. Two defects the
+     suite could not see, both found by a reviewer running a real self-signed server: (a) the
+     "certificate, not offline" branch never fired, because `urlopen` wraps
+     `SSLCertVerificationError` in `URLError` and the predicate only checked the outer type — the unit
+     tests passed by raising a shape the real stack cannot produce; (b) `create_default_context(cafile=)`
+     **replaces** the OS trust store rather than widening it, dropping 33 of 58 OS roots and silently
+     breaking manifest refresh behind a corporate TLS proxy. The context is now a genuine union
+     (OS roots + certifi, verified by DER SHA-256), and a bundle it cannot read degrades to the OS
+     store instead of raising — a PyInstaller packaging fault must not present as "you are offline".
+
+- **What the three Windows provisioning fixes actually close, and what they do not.** They are 6.3
+  prerequisites landed early, not live-defect fixes: every `catalog.json` entry is
+  `platforms: ["linux"]` and `Installer.preflight()` raises `UnsupportedPlatformError` before
+  `ensure_docker()` — its only caller — is reached, so on Windows the provisioning chain is not
+  reachable through the app at all. Live on Windows today, and therefore genuinely fixed now:
+  attach-to-existing-install → Start, Stop, `docker logs -f`, and the `docker exec … mysql` behind a
+  module apply and the realmlist UPDATE. **Not** the Console tab's `docker attach` — `send_command()`
+  refuses on `pty_supported()` first, and 6.5 already scopes the console to Linux/macOS. Two successive
+  commit messages claimed more than this and were corrected; the claim is easy to make and worth
+  checking each time.
+
+- **`yulon --provision` exists so the chain can be exercised on a clean box before 6.3 makes it
+  reachable.** Headless, no Qt imported, one `YULON_PROVISION_JSON` line on stdout, and exit codes as a
+  protocol for the harness: 0 ready, 3 reboot required (`wsl --install` forces one on a box with no
+  WSL), 2 needs a human. Also a support diagnostic. `main.py` had no tests before it.
 
 - **First launch of Docker Desktop is gated behind modal dialogs — a headless start waits forever.** The
   installer was run with `--accept-license` and Docker Desktop *still* showed license acceptance and an
