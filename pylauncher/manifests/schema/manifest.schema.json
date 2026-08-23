@@ -354,6 +354,20 @@
           "default": null,
           "title": "Branch"
         },
+        "depth": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 1,
+          "description": "Shallow-clone depth, or null for a full clone. Data because the warning in `git.CloneSpec` is a per-source fact: AzerothCore's core repo must say null, since its `genrev.cmake` reads the revision out of git history and a shallow clone hands a three-hour build the wrong answer.",
+          "title": "Depth"
+        },
         "repo": {
           "minLength": 3,
           "title": "Repo",

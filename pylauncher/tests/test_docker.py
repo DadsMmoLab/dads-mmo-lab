@@ -244,6 +244,29 @@ def test_port_conflicts_for_uses_spec_ports(monkeypatch: pytest.MonkeyPatch) -> 
     assert docker.port_conflicts_for(spec) == ["other"]
 
 
+def test_foreign_port_conflicts_drops_our_own_containers_and_keeps_everything_else(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The global scan cannot tell "somebody else's server" from "mine, still running".
+
+    A caller that refuses on its raw answer refuses its own install on every
+    resume, which is what the native engine's preflight did (review,
+    2026-08-23). An UNREADABLE owner is deliberately kept: not knowing who owns
+    a container is not proof that we do.
+    """
+    labels = {"mine": "yulon-wow-wotlk-abc", "theirs": "some-other", "?": docker.UNREADABLE}
+    monkeypatch.setattr(docker, "port_conflicts", lambda _ports: list(labels))
+    monkeypatch.setattr(docker, "container_project", labels.get)
+    spec = docker.ContainerSpec(db="d", auth="a", world="w", ports=(9999,))
+    assert docker.foreign_port_conflicts(spec, "yulon-wow-wotlk-abc") == ["theirs", "?"]
+    # Nothing publishing the ports means nothing is asked about ownership either.
+    monkeypatch.setattr(docker, "port_conflicts", lambda _ports: [])
+    monkeypatch.setattr(
+        docker, "container_project", lambda _n: pytest.fail("asked who owns nothing")
+    )
+    assert docker.foreign_port_conflicts(spec, "yulon-wow-wotlk-abc") == []
+
+
 def test_docker_ctl_convenience_wrappers_delegate_to_spec(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1900,7 +1923,9 @@ def _repair_doubles(
             return _completed(stdout="".join(n + "\n" for n in sorted(live)))
         return _completed()
 
-    def fake_stream(cmd: list[str], cwd: Path | None = None) -> Iterator[str]:
+    def fake_stream(
+        cmd: list[str], cwd: Path | None = None, *, merge_stderr: bool = False
+    ) -> Iterator[str]:
         calls.append(cmd)
         if cwds is not None:
             cwds.append(cwd)
@@ -2254,7 +2279,16 @@ def test_a_thirty_minute_import_is_not_kept_in_memory(
     """
     lines = [f"line {n}" for n in range(10_000)]
     seen: list[str] = []
-    monkeypatch.setattr(docker.runner, "stream", lambda cmd, cwd=None: iter(lines))
+
+    def fake_stream(
+        cmd: list[str], cwd: Path | None = None, *, merge_stderr: bool = False
+    ) -> Iterator[str]:
+        # A generator, not `iter(list)`: `run_attached()` closes what it is
+        # given so an early exit terminates the child, and a double that cannot
+        # be closed is not the thing being replaced.
+        yield from lines
+
+    monkeypatch.setattr(docker.runner, "stream", fake_stream)
     run = docker.run_attached(
         ["compose", "up", "--no-deps", "ac-db-import"],
         Path("/tmp/wow"),
@@ -2587,3 +2621,179 @@ def test_an_absent_database_is_never_cleared(monkeypatch: pytest.MonkeyPatch) ->
         is True
     )
     assert cleared == [], "an absent database was dropped"
+
+
+# ------------------------------------------------- the build (roadmap 6.2)
+
+
+def _stream_double(
+    monkeypatch: pytest.MonkeyPatch, lines: Iterable[str]
+) -> tuple[list[list[str]], list[bool]]:
+    """Record what `run_attached()` asks `runner.stream()` to run, and how."""
+    seen: list[list[str]] = []
+    merged: list[bool] = []
+
+    def fake_stream(
+        cmd: list[str], cwd: Path | None = None, *, merge_stderr: bool = False
+    ) -> Iterator[str]:
+        seen.append(cmd)
+        merged.append(merge_stderr)
+        yield from lines
+
+    monkeypatch.setattr(docker.runner, "stream", fake_stream)
+    return seen, merged
+
+
+def test_build_staged_passes_all_three_compose_files_and_plain_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The trap: a bare `docker compose build` here builds NOTHING and exits 0.
+
+    The `build:` blocks live in a file compose never auto-loads, and naming any
+    `-f` disables auto-loading — so the base and the override have to be listed
+    too, or the build loses the image tags and env it is meant to produce.
+    """
+    seen, merged = _stream_double(monkeypatch, ["#1 [internal] load build definition"])
+    run = docker.build_staged(
+        Path("/tmp/wow"),
+        ("docker-compose.yml", "docker-compose.override.yml", "docker-compose.build.yml"),
+    )
+    assert seen == [
+        [
+            "docker",
+            "compose",
+            "-f",
+            "docker-compose.yml",
+            "-f",
+            "docker-compose.override.yml",
+            "-f",
+            "docker-compose.build.yml",
+            "build",
+            "--progress",
+            "plain",
+        ]
+    ]
+    # BuildKit writes ALL of its progress to stderr, which `stream()` otherwise
+    # withholds until the child exits — a blank log panel for the whole build.
+    assert merged == [True]
+    assert run.returncode == 0
+
+
+def test_run_one_shot_keeps_the_argv_that_was_live_gated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--no-deps` is what makes an attached `up` terminate. Byte-identical since the gate."""
+    seen, merged = _stream_double(monkeypatch, ["importing"])
+    docker.run_one_shot("ac-db-import", Path("/tmp/wow"))
+    assert seen == [["docker", "compose", "up", "--no-deps", "ac-db-import"]]
+    assert merged == [False]
+
+
+def test_a_cancelled_run_is_not_reported_as_a_failed_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stop and a failed build are different events; the exit code has to say which."""
+    _stream_double(monkeypatch, ["#5 2.1 building", "#5 4.0 still building"])
+    cancel = docker.threading.Event()
+    cancel.set()
+    run = docker.run_attached(["compose", "build"], Path("/tmp/wow"), cancel=cancel)
+    assert run.returncode == docker.CANCELLED_RETURNCODE
+    assert run.returncode not in (0, 1)  # never mistakable for a real exit status
+
+
+def test_images_built_says_unknown_rather_than_no_when_docker_will_not_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`None` is not `False`: a resume must not conclude "nothing is built" from silence."""
+    monkeypatch.setattr(
+        docker.runner, "run", lambda *a, **k: _completed(returncode=1, stderr="no such file")
+    )
+    assert docker.images_built(Path("/tmp/wow"), ("docker-compose.yml",)) is None
+    monkeypatch.setattr(docker.runner, "run", lambda *a, **k: _completed(stdout="sha256:abc\n"))
+    assert docker.images_built(Path("/tmp/wow"), ("docker-compose.yml",)) is True
+    monkeypatch.setattr(docker.runner, "run", lambda *a, **k: _completed(stdout="\n"))
+    assert docker.images_built(Path("/tmp/wow"), ("docker-compose.yml",)) is False
+
+
+def test_the_bind_mount_probe_mounts_the_folder_and_tells_no_from_no_answer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A wedged daemon must not be reported as "your folder is not shared with Docker"."""
+    seen: list[list[str]] = []
+
+    def answer(
+        returncode: int, stdout: str = "", stderr: str = ""
+    ) -> Callable[..., subprocess.CompletedProcess[str]]:
+        def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            seen.append(argv)
+            return _completed(returncode=returncode, stdout=stdout, stderr=stderr)
+
+        return run
+
+    (tmp_path / "already-here.txt").write_text("x", encoding="utf-8")
+    server_dir = tmp_path / "wow"  # the folder the user picked; not created yet
+    monkeypatch.setattr(docker.runner, "run", answer(0, "already-here.txt\n"))
+    assert docker.bind_mount_ok(server_dir, "alpine/git") is True
+    # The mount source is the nearest ancestor that HAS something in it, not the
+    # chosen folder: `-v <missing>:/probe` makes Docker create the directory,
+    # and an empty directory's listing proves nothing either way.
+    assert seen[-1] == [
+        "docker",
+        "run",
+        "--rm",
+        "-v",
+        # Read-only: that ancestor is routinely the user's home directory, and
+        # listing it is all this asks.
+        f"{tmp_path}:/probe:ro",
+        "alpine/git",
+        "ls",
+        "-A",
+        "/probe",
+    ]
+    assert not server_dir.exists()
+    monkeypatch.setattr(docker.runner, "run", answer(1, stderr="invalid mount config"))
+    assert docker.bind_mount_ok(server_dir, "alpine/git") is False
+    # 124 is what `runner.run()` reports for a command that never answered.
+    monkeypatch.setattr(docker.runner, "run", answer(124, stderr="timed out after 30.0s"))
+    assert docker.bind_mount_ok(server_dir, "alpine/git") is None
+
+
+def test_the_bind_mount_probe_catches_the_silently_empty_mount_it_exists_for(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The failure this check was written for, which its exit code could not see.
+
+    Docker Desktop mounts a folder outside its file-sharing list as an EMPTY
+    directory instead of failing the run. `ls` on an empty directory exits 0, so
+    a probe that read the exit code answered True for exactly the broken case
+    and preflight printed `[pass] sharing the folder with Docker` (review,
+    2026-08-23).
+    """
+    (tmp_path / "the-host-can-see-this").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(docker.runner, "run", lambda *a, **k: _completed(returncode=0, stdout="\n"))
+    assert docker.bind_mount_ok(tmp_path / "wow", "alpine/git") is False
+
+
+def test_the_probe_walks_up_to_a_directory_that_has_something_in_it(tmp_path: Path) -> None:
+    """An empty directory's listing proves nothing, so it is not what gets mounted."""
+    empty = tmp_path / "a" / "b"
+    empty.mkdir(parents=True)
+    # `b` is empty and `wow` does not exist, so the walk goes up to `a`, which
+    # holds `b`. A directory holding only an empty subdirectory still counts:
+    # the comparison needs a non-empty listing, not files.
+    assert docker._first_populated_ancestor(empty / "wow") == tmp_path / "a"
+    (empty / "something").write_text("x", encoding="utf-8")
+    assert docker._first_populated_ancestor(empty) == empty
+
+
+def test_a_directory_that_cannot_be_looked_into_is_unchecked_not_a_pass(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ "We could not tell" must never reach preflight as a shared folder."""
+
+    def refuse(_self: Path) -> object:
+        raise PermissionError("Operation not permitted")
+
+    monkeypatch.setattr(Path, "iterdir", refuse)
+    assert docker._first_populated_ancestor(tmp_path) is None
+    assert docker.bind_mount_ok(tmp_path / "wow", "alpine/git") is None

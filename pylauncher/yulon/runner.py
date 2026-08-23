@@ -5,8 +5,10 @@ container output without buffering the whole run. Stderr is drained
 concurrently on a background thread — this exists purely to avoid pipe-buffer
 deadlock (a chatty stderr filling its OS pipe buffer while nobody reads it),
 not to interleave stderr into the stream in real time: stderr lines are
-yielded only after the process exits and stdout is exhausted. See `stream()`'s
-docstring for the exact ordering.
+yielded only after the process exits and stdout is exhausted — unless the
+caller asks for `merge_stderr`, which puts both on one pipe for commands whose
+real output IS stderr (BuildKit). See `stream()`'s docstring for the exact
+ordering.
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ import queue
 import re
 import subprocess
 import threading
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Generator, Iterator, Mapping
 from pathlib import Path
 
 from yulon.log import get_logger
@@ -35,7 +37,9 @@ def _cwd_arg(cwd: Path | None) -> str | None:
     return str(cwd) if cwd is not None else None
 
 
-def stream(command: list[str], cwd: Path | None = None) -> Iterator[str]:
+def stream(
+    command: list[str], cwd: Path | None = None, *, merge_stderr: bool = False
+) -> Generator[str, None, None]:
     """Run a command, yielding stdout lines live and stderr lines at the end.
 
     Stdout lines are yielded one at a time as they arrive. Stderr is **not**
@@ -49,14 +53,27 @@ def stream(command: list[str], cwd: Path | None = None) -> Iterator[str]:
     collected), the child process is terminated (escalating to `kill()` after
     a timeout) and the stderr-reader thread is joined before the generator
     finishes unwinding — the child and thread are never silently orphaned.
+    That is why the return type is a `Generator` and not an `Iterator`: the
+    `close()` is part of the contract, and a caller that stops early should say
+    so (`contextlib.closing`) rather than leave it to refcounting.
 
     Args:
         command: The argv list to execute (no shell interpolation).
         cwd: Optional working directory for the child process.
+        merge_stderr: Send the child's stderr into the SAME pipe as its stdout,
+            so both are yielded live and in the order the child wrote them.
+            Added for the native install engine's build stage (roadmap 6.2):
+            BuildKit writes all of its progress to stderr, and the default
+            ordering above turns a two-to-four-hour compile into a blank log
+            panel that only fills in once the build has already finished.
+            Interleaving costs the ability to tell the two streams apart, which
+            is why it is opt-in: every existing caller reads a command whose
+            stderr is an error report rather than its output.
 
     Yields:
         Each output line (all of stdout, in order, then any stderr) as a
-        string without a trailing newline.
+        string without a trailing newline. With `merge_stderr`, one interleaved
+        stream in the child's own order.
 
     Raises:
         subprocess.CalledProcessError: If the command exits non-zero (only
@@ -64,12 +81,12 @@ def stream(command: list[str], cwd: Path | None = None) -> Iterator[str]:
         OSError: If `command`'s executable cannot be found/started (propagates
             directly from `subprocess.Popen`).
     """
-    logger.debug(f"stream() called: command={command} cwd={cwd}")
+    logger.debug(f"stream() called: command={command} cwd={cwd} merge_stderr={merge_stderr}")
     proc = subprocess.Popen(
         command,
         cwd=_cwd_arg(cwd),
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=subprocess.STDOUT if merge_stderr else subprocess.PIPE,
         text=True,
         encoding="utf-8",
         errors="replace",
@@ -80,15 +97,21 @@ def stream(command: list[str], cwd: Path | None = None) -> Iterator[str]:
         assert proc.stderr is not None
         stderr_lines.extend(line.rstrip("\n") for line in proc.stderr)
 
-    reader = threading.Thread(target=_drain_stderr, daemon=True)
-    reader.start()
+    # With the streams merged there is no second pipe to drain, and starting a
+    # reader on `proc.stderr` (which is then None) would raise inside the
+    # thread rather than at the call site.
+    reader: threading.Thread | None = None
+    if not merge_stderr:
+        reader = threading.Thread(target=_drain_stderr, daemon=True)
+        reader.start()
 
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
             yield line.rstrip("\n")
 
-        reader.join()
+        if reader is not None:
+            reader.join()
         proc.wait()
         yield from stderr_lines
 
@@ -106,7 +129,8 @@ def stream(command: list[str], cwd: Path | None = None) -> Iterator[str]:
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
-        reader.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
+        if reader is not None:
+            reader.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
         if proc.stdout is not None:
             proc.stdout.close()
         if proc.stderr is not None:

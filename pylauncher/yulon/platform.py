@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import functools
 import importlib
+import json
 import os
 import shutil
 import socket
@@ -18,8 +19,8 @@ import sys
 import threading
 import time
 import urllib.request
-from collections.abc import Callable, Iterable
-from contextlib import closing
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
@@ -1583,3 +1584,360 @@ def _ensure_docker_macos(
             "icon, then try again.",
         )
     return ProvisionReport("macos", tuple(done), tuple(skipped), manual, False, ready)
+
+
+# ------------------------------------------------- machine facts (roadmap 6.2)
+# What the native install engine's preflight needs to know about THIS machine,
+# and nothing about any game (style-guide §3). Every function here answers
+# `None` for "could not be established", which `catalog/preflight.py` renders as
+# *unchecked* — never as a pass and never as a refusal. A stopped Docker Desktop
+# prints zeroes, so a fact that is merely absent must not arrive as a number
+# (`rust-prior-art.md` §3).
+
+
+@dataclass(frozen=True)
+class VmResources:
+    """What the Linux VM the containers run in actually has.
+
+    On Windows and macOS this is the VM's allowance, NOT the host's hardware —
+    a 32 GB Mac whose Docker Desktop is set to 4 GB compiles AzerothCore into
+    the OOM killer, and asking the host would have called that fine. On Linux
+    the engine is the host, so the two coincide.
+    """
+
+    memory_bytes: int
+    cpus: int
+
+
+def vm_resources(run: RunCmd | None = None) -> VmResources | None:
+    """Memory and CPU count the container engine reports, or None if it did not answer.
+
+    `docker info` rather than `psutil`/`os.cpu_count()` for the reason above:
+    the number that decides whether a build survives is the engine's, and only
+    the engine knows it.
+
+    Zeroes are treated as no answer. A stopped Docker Desktop still prints a
+    well-formed JSON document with `MemTotal: 0`, and a preflight that believed
+    it would refuse every install on the machine with "0 GB of RAM" — the exact
+    fabricated refusal the tri-state discipline exists to prevent.
+    """
+    do = run if run is not None else (lambda argv: runner.run(argv))
+    program = docker_program()
+    if program is None:
+        return None
+    try:
+        proc = do([program, "info", "--format", "{{json .}}"])
+    except OSError as exc:
+        logger.debug(f"could not start {program}: {exc}")
+        return None
+    if proc.returncode != 0:
+        logger.info(f"docker info would not answer, so the VM's size is unknown: {proc.stderr}")
+        return None
+    try:
+        parsed = json.loads(proc.stdout)
+    except ValueError:
+        logger.info("docker info did not return JSON, so the VM's size is unknown")
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    memory = parsed.get("MemTotal")
+    cpus = parsed.get("NCPU")
+    if not isinstance(memory, int) or not isinstance(cpus, int) or memory <= 0 or cpus <= 0:
+        logger.info(f"docker info reported MemTotal={memory!r} NCPU={cpus!r}; treating as unknown")
+        return None
+    return VmResources(memory, cpus)
+
+
+_DOCKER_DESKTOP_SETTINGS_KEYS = ("dataFolder", "DataFolder", "diskPath", "DiskPath")
+"""Keys Docker Desktop is believed to store its data root under.
+
+Four spellings because the file has been through several: `rust-prior-art.md`
+§3 names `DataFolder`/`dataFolder`/`diskPath`, and the casing differs between
+Docker Desktop versions. All four are read and the first present one wins;
+absent means the platform default.
+"""
+
+
+def docker_desktop_settings_file() -> Path | None:
+    """Where Docker Desktop keeps the settings JSON that names its data root.
+
+    Windows: `%APPDATA%\\Docker\\settings-store.json`, with `settings.json` as
+    the older name. **Verified on no machine by this project** — it is read
+    defensively and a miss falls through to the default.
+
+    macOS: `~/Library/Group Containers/group.com.docker/settings-store.json` is
+    what the design believes, and believing is not knowing (phase6-decisions,
+    "Baerthe's list" item 1). Returned so the Mac gate can check it against a
+    real install; `docker_desktop_data_root()` deliberately does NOT use it yet.
+
+    Linux: None. There is no Docker Desktop settings store on the path this
+    project supports there — the engine is the host's own.
+    """
+    here = detect()
+    if here == "windows":
+        appdata = os.environ.get("APPDATA")
+        base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+        store = base / "Docker" / "settings-store.json"
+        return store if store.is_file() else base / "Docker" / "settings.json"
+    if here == "macos":
+        return (
+            Path.home()
+            / "Library"
+            / "Group Containers"
+            / "group.com.docker"
+            / "settings-store.json"
+        )
+    return None
+
+
+def docker_desktop_data_root() -> Path | None:
+    """The directory whose free space decides whether the build fits. None = unknown.
+
+    This is NOT the server directory. On Windows and macOS the images and the
+    build cache live inside the Linux VM's disk, so measuring the folder the
+    user picked answers for the wrong drive entirely (`rust-prior-art.md` §3) —
+    what has to be measured is the host file that backs the VM.
+
+    * Linux: `/var/lib/docker`, which really is a host directory.
+    * Windows: the `dataFolder`/`diskPath` in Docker Desktop's settings store,
+      falling back to `%LOCALAPPDATA%\\Docker\\wsl` — the WSL2 backend's default
+      home for `docker_data`. Believed, not measured on a real box.
+    * macOS: **None, deliberately.** Two things are unverified at once — the
+      settings path and its keys, and what "free space" even means against a
+      sparse `Docker.raw` (host free space on that volume, or the VM's
+      allocation minus what it has used). Guessing would produce a confident
+      number that could refuse a Mac with plenty of room, so preflight reports
+      *unchecked* until the first Mac gate replaces this with a measurement.
+    """
+    here = detect()
+    if here == "linux":
+        return Path("/var/lib/docker")
+    if here == "macos":
+        return None
+    store = docker_desktop_settings_file()
+    configured = _settings_data_folder(store) if store is not None else None
+    if configured is not None:
+        return configured
+    local = os.environ.get("LOCALAPPDATA")
+    return (Path(local) / "Docker" / "wsl") if local else None
+
+
+def _settings_data_folder(store: Path) -> Path | None:
+    """The data root Docker Desktop's settings name, if that file can be read at all."""
+    try:
+        with store.open(encoding="utf-8") as fh:
+            parsed = json.load(fh)
+    except (OSError, ValueError) as exc:
+        logger.debug(f"could not read {store}: {exc}")
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    for key in _DOCKER_DESKTOP_SETTINGS_KEYS:
+        value = parsed.get(key)
+        if isinstance(value, str) and value.strip():
+            return Path(value)
+    return None
+
+
+# Folder-name fragments that mean a cloud sync client owns this directory. A
+# 2.4 GB checkout of build artefacts inside one is not a slow install, it is a
+# sync client rewriting files under a compiler and a user's quota exhausted
+# overnight. Matched case-insensitively against the path's PARTS, so a folder
+# genuinely called "OneDrive" anywhere above the install is enough.
+_SYNCED_DIR_NAMES = ("onedrive", "dropbox", "google drive", "googledrive", "icloud drive")
+_ICLOUD_MARKER = "com~apple~clouddocs"
+"""How iCloud Drive spells itself on disk (`~/Library/Mobile Documents/com~apple~CloudDocs`)."""
+
+
+def server_dir_problem(server_dir: Path) -> str | None:
+    """Why this folder is a bad place for a server install, in the user's words.
+
+    None means "no known problem", which is not the same as "proved good" —
+    `docker.bind_mount_ok()` is the check that cannot be wrong, and this one
+    exists to explain *why* a mount would fail, or to catch the failures that
+    only show up hours later:
+
+    * a cloud-synced folder (OneDrive, Dropbox, Google Drive, iCloud Drive):
+      the sync client rewrites files while the build reads them and uploads a
+      multi-gigabyte checkout the user never meant to store;
+    * a UNC path (`\\\\server\\share`): Docker Desktop cannot bind-mount one,
+      and the failure arrives as an empty directory rather than an error;
+    * a mapped network drive: the same, wearing a local drive letter.
+
+    All three are refusals in preflight rather than warnings, because each of
+    them fails AFTER the two-to-four-hour build rather than before it.
+    """
+    text = str(server_dir)
+    if text.startswith("\\\\") or text.startswith("//"):
+        return (
+            f"{server_dir} is a network path. Docker Desktop cannot share one with its Linux "
+            "VM, so the install would appear to work and the containers would see an empty "
+            "folder. Pick a folder on this machine's own disk."
+        )
+    lowered = [part.lower() for part in Path(text).parts]
+    if any(_ICLOUD_MARKER in part for part in lowered):
+        return (
+            f"{server_dir} is inside iCloud Drive, which syncs and evicts files while the "
+            "server is running. Pick a folder outside it."
+        )
+    for part in lowered:
+        for name in _SYNCED_DIR_NAMES:
+            if part == name or part.startswith(f"{name} -"):
+                return (
+                    f"{server_dir} is inside a cloud-synced folder ({part}). The sync client "
+                    "would rewrite files under the compiler and upload the whole checkout. "
+                    "Pick a folder outside it."
+                )
+    mapped = _mapped_network_drive(server_dir)
+    if mapped is not None:
+        return (
+            f"{server_dir} is on {mapped}, a mapped network drive. Docker Desktop cannot share "
+            "one with its Linux VM. Pick a folder on this machine's own disk."
+        )
+    return None
+
+
+def _mapped_network_drive(path: Path) -> str | None:
+    """The drive letter, if `path` sits on a Windows network drive. None otherwise.
+
+    `GetDriveTypeW` is asked rather than a heuristic about drive letters,
+    because a mapped drive is indistinguishable from a local one by name. Off
+    Windows there is nothing to ask and the answer is None.
+    """
+    if detect() != "windows":
+        return None
+    drive = os.path.splitdrive(str(path))[0]
+    if not drive:
+        return None
+    try:
+        import ctypes
+
+        # `getattr`, not `ctypes.windll`: the attribute only exists on Windows,
+        # and CI type-checks on Linux, where naming it directly is an error —
+        # while a `type: ignore` for that is itself an error when the same
+        # checker runs on a developer's Windows box. Same reason
+        # `_registry_search_path()` imports `winreg` dynamically.
+        kernel32 = getattr(ctypes, "windll").kernel32  # noqa: B009 - Windows-only attribute
+        drive_type = kernel32.GetDriveTypeW(f"{drive}\\")
+    except (AttributeError, OSError) as exc:  # pragma: no cover - non-Windows or no ctypes
+        logger.debug(f"could not ask Windows what kind of drive {drive} is: {exc}")
+        return None
+    return drive if drive_type == _DRIVE_REMOTE else None
+
+
+_DRIVE_REMOTE = 4
+"""`DRIVE_REMOTE` from winbase.h — what `GetDriveTypeW` returns for a network drive."""
+
+
+class KeepAwake(Protocol):
+    """A held assertion that the machine must not doze off. Released on exit."""
+
+    def __enter__(self) -> None: ...
+
+    def __exit__(self, *exc: object) -> None: ...
+
+
+@contextmanager
+def keep_awake(
+    *,
+    platform_id: Callable[[], PlatformId] = detect,
+    spawn: Callable[[list[str]], subprocess.Popen[bytes]] | None = None,
+) -> Iterator[None]:
+    """Hold the machine awake for the duration of the block. Best effort, and it says so.
+
+    **What this promises, exactly.** An *idle* machine will not go to sleep
+    mid-compile. That is the case that actually eats a four-hour build: nobody
+    touches the keyboard for three hours because the build is the whole point.
+
+    **What it cannot promise, and the roadmap's wording overpromises here.**
+    Closing the laptop lid still suspends the machine, on both platforms.
+    `caffeinate` does not override the lid action without an external display
+    and power, and `SetThreadExecutionState` does not either — the lid is a
+    power *setting*, and rewriting a user's power settings is not something an
+    installer may do behind their back. The lid case is UI copy shown before
+    the build starts, not an assertion. This docstring is the flag.
+
+    macOS: `caffeinate -dims -w <our pid>` — a child that dies when we do, so
+    there is no cleanup path to forget. Unverified: `caffeinate` ships with the
+    OS and `-dims` is believed to be the right assertion set for a Docker
+    Desktop VM, and neither claim has been executed on a Mac by this project.
+
+    Windows: `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)`,
+    which is a THREAD-scoped assertion — it must be set and cleared on the same
+    thread, and it only holds while that thread lives. That makes the worker
+    thread running the install the only correct place to call it, so calling it
+    from the main (GUI) thread is refused rather than silently doing nothing
+    useful the moment the install moves off it.
+
+    Linux: a no-op for Phase 6. The Linux path still runs the bash installer,
+    and `systemd-inhibit` waits for the 6.5 Linux gate rather than being
+    written blind here.
+    """
+    here = platform_id()
+    if here == "macos":
+        argv = ["caffeinate", "-dims", "-w", str(os.getpid())]
+        start = spawn if spawn is not None else _spawn_detached
+        try:
+            child = start(argv)
+        except OSError as exc:
+            logger.warning(f"could not hold this Mac awake ({exc}); the build may be interrupted")
+            yield
+            return
+        logger.info(f"holding this Mac awake for the build: {' '.join(argv)}")
+        try:
+            yield
+        finally:
+            child.terminate()
+        return
+    if here == "windows":
+        if threading.current_thread() is threading.main_thread():
+            raise RuntimeError(
+                "keep_awake() must run on the worker thread doing the install: Windows scopes "
+                "the assertion to the thread that set it, so holding it on the GUI thread would "
+                "claim a guarantee the install does not have."
+            )
+        with _keep_awake_windows():
+            yield
+        return
+    logger.debug(f"keep_awake() is a no-op on {here}")
+    yield
+
+
+def _spawn_detached(argv: list[str]) -> subprocess.Popen[bytes]:
+    """Start a helper process we do not read from and will terminate ourselves."""
+    return subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+_ES_CONTINUOUS = 0x80000000
+_ES_SYSTEM_REQUIRED = 0x00000001
+"""`SetThreadExecutionState` flags: keep the assertion until cleared; no sleep.
+
+`ES_DISPLAY_REQUIRED` is deliberately NOT among them. Keeping a laptop's screen
+lit for four hours to compile a server is a battery cost with no benefit — the
+build does not need the display, only the CPU.
+"""
+
+
+@contextmanager
+def _keep_awake_windows() -> Iterator[None]:
+    """Assert `ES_SYSTEM_REQUIRED` on THIS thread, and clear it on the way out.
+
+    Unverified on a real Windows box by this project (roadmap 6.3's gate owns
+    that). A failure to set it is logged and the block still runs: an install
+    that would have completed must not be refused because a power API said no.
+    """
+    try:
+        import ctypes
+
+        # `getattr` for the reason `_mapped_network_drive()` gives.
+        set_state = getattr(ctypes, "windll").kernel32.SetThreadExecutionState  # noqa: B009
+    except (AttributeError, OSError) as exc:  # pragma: no cover - non-Windows
+        logger.warning(f"could not hold this machine awake ({exc}); the build may be interrupted")
+        yield
+        return
+    if not set_state(_ES_CONTINUOUS | _ES_SYSTEM_REQUIRED):
+        logger.warning("Windows refused the keep-awake assertion; the build may be interrupted")
+    try:
+        yield
+    finally:
+        set_state(_ES_CONTINUOUS)

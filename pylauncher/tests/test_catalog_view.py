@@ -353,7 +353,12 @@ def test_a_cancelled_install_is_not_remembered_and_says_what_it_left(
 def test_unsupported_platform_is_said_on_the_tile_and_refused_before_any_prompt(
     qapp: object, monkeypatch: object
 ) -> None:
-    """Roadmap 6.1: no folder dialog, no subprocess — just an honest message."""
+    """Roadmap 6.1: no folder dialog, no subprocess — just an honest message.
+
+    Asked of TBC rather than WotLK since 6.2 made WotLK installable on macOS
+    through the native engine. The tile gate is unchanged; the entry that
+    demonstrates it moved.
+    """
     from PySide6.QtWidgets import QMessageBox
 
     panel = LogPanel()
@@ -375,12 +380,15 @@ def test_unsupported_platform_is_said_on_the_tile_and_refused_before_any_prompt(
     finished: list[tuple[str, bool, str]] = []
     view.install_finished.connect(lambda g, ok, m: finished.append((g, ok, m)))
 
-    assert view.button_for("wow-wotlk").isEnabled() is False  # said on the tile
-    assert view.start_install(CATALOG.get("wow-wotlk")) is False
+    assert view.button_for("wow-tbc").isEnabled() is False  # said on the tile
+    assert view.start_install(CATALOG.get("wow-tbc")) is False
     assert prompted == []  # never asked where to install it
     assert shown and "cannot be installed on macOS" in shown[0]
-    assert finished == [("wow-wotlk", False, shown[0])]
+    assert finished == [("wow-tbc", False, shown[0])]
     assert panel.running is False
+    # And the entry that DID gain a macOS path is offered rather than gated,
+    # which is the other half of the same rule.
+    assert view.button_for("wow-wotlk").isEnabled() is True
 
 
 def test_supported_platform_keeps_the_install_button(qapp: object) -> None:
