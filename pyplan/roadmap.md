@@ -464,6 +464,9 @@ automatically.
    the mocked suite.
 2. Live-gate 6.2 on a real macOS machine and 6.3 on a real Windows 11 machine (both currently
    unverified — the whole point of this phase), **WotLK only** (per the scope gate above).
+   **The macOS half is run by Baerthe**, who has the only Mac on the project; the split between
+   what we implement and what he verifies, and what counts as evidence, is written down once in
+   `checklist.md` under the Phase 6 scope gate rather than restated here.
 
 ### 6.5 Full WotLK feature coverage on Linux, macOS, and native Windows (Phase 6 exit gate)
 
