@@ -53,6 +53,34 @@ class _FakeInstaller(Installer):
         yield from self.lines
 
 
+class _CancellableInstaller(Installer):
+    """Shaped like the real thing under cancel: it yields, then RETURNS — never raises.
+
+    That is what `runner.interact()` does when its cancel event is set, and it
+    is the whole difficulty: from anywhere downstream a stopped install looks
+    exactly like a finished one.
+    """
+
+    def __init__(self, entry: CatalogEntry) -> None:
+        super().__init__(entry, docker_check=lambda: True)
+        self.streaming = threading.Event()
+
+    def preflight(self, options: InstallOptions, cancel: threading.Event | None = None) -> None:
+        return None
+
+    def run(
+        self,
+        options: InstallOptions | None = None,
+        *,
+        cancel: threading.Event | None = None,
+        ask: object = None,
+    ) -> Iterator[str]:
+        yield "cloning"
+        self.streaming.set()
+        while cancel is not None and not cancel.is_set():
+            time.sleep(0.005)
+
+
 def _wait(panel: LogPanel, timeout: float = 5.0) -> None:
     deadline = time.monotonic() + timeout
     while panel.running and time.monotonic() < deadline:
@@ -195,6 +223,72 @@ def test_use_existing_cancel_emits_nothing(qapp: object) -> None:
     view.installed.connect(lambda *a: got.append(a))
     assert view.attach_existing(CATALOG.get("wow-tbc")) is False
     assert got == []
+
+
+def test_a_cancelled_install_is_not_remembered_and_says_what_it_left(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stopping an install must not register it (roadmap 6.5, "honest cancel copy").
+
+    Driven through this button against the real install script on Ubuntu and
+    stopped during the source clone, this path reported `ok=True` with the
+    message "done", wrote a `COMPOSE_PROJECT_NAME` pin into the half-cloned
+    folder, emitted `installed` — which `main.py` saves into `state.json` and
+    turns into a permanent tab — and showed no message at all about the 2.3 GB
+    it had left behind (install gate, 2026-08-23). On a run stopped earlier
+    still, the folder it registered did not exist.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    ran: list[list[str]] = []
+    monkeypatch.setattr(
+        runner, "run", lambda cmd, cwd=None, timeout=None: ran.append(cmd) or _completed()  # type: ignore[func-returns-value]
+    )
+    told: list[tuple[str, str]] = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: told.append((a[1], a[2])))  # type: ignore[attr-defined]
+    warned: list[str] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))  # type: ignore[attr-defined]
+
+    panel = LogPanel()
+    made: list[_CancellableInstaller] = []
+
+    def factory(entry: CatalogEntry) -> Installer:
+        inst = _CancellableInstaller(entry)
+        made.append(inst)
+        return inst
+
+    view = CatalogView(
+        CATALOG,
+        factory,
+        panel,
+        pick_dir=lambda *_: tmp_path,
+        home=tmp_path,
+        platform_id=lambda: "linux",
+    )
+    events: list[tuple[str, ...]] = []
+    view.install_finished.connect(lambda g, ok, m: events.append(("finished", g, str(ok), m)))
+    view.installed.connect(lambda g, s, c: events.append(("installed", g, str(s), str(c))))
+
+    assert view.start_install(CATALOG.get("wow-wotlk")) is True
+    deadline = time.monotonic() + 5.0
+    while not made[0].streaming.is_set() and time.monotonic() < deadline:
+        process_events(10)
+    panel.stop()
+    _wait(panel)
+
+    assert [event[0] for event in events] == ["finished"], "a cancelled install was registered"
+    assert events[0][2] == "False"
+    assert not (tmp_path / ".env").exists(), "a cancelled install pinned a compose project"
+    assert ran == [], f"a cancelled install shelled out to {ran}"
+    assert warned == [], "cancelling is not a failure"
+    assert told and told[0][0] == "Install cancelled"
+    # The copy has to carry three things, and the folder is the one a user acts on.
+    assert str(tmp_path) in told[0][1]
+    assert "NOT installed" in told[0][1]
+    assert "build cache" in told[0][1]
+    assert told[0][1] == events[0][3]
+    assert panel.status_text() == "cancelled"
+    assert view.button_for("wow-wotlk").isEnabled() is True  # and the tiles come back
 
 
 def test_unsupported_platform_is_said_on_the_tile_and_refused_before_any_prompt(

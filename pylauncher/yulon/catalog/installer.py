@@ -84,13 +84,17 @@ class AskTheUser:
 ASK_THE_USER = AskTheUser()
 """Route this prompt to the person, because neither answer is the app's to give.
 
-There is exactly one of these, and it is not a general escape hatch: a rule that
-opens a dialog is the shape that made the old prompt heuristic dangerous. It
-exists because the installers' docker-group question has no safe canned answer.
-Answering yes grants root-equivalent access silently — the precise thing
-upstream's 1.4.4 security change added consent for. Answering no leaves the user
-outside the docker group, and the launcher's own `docker` calls then fail with
-permission denied, so the app would have quietly broken itself instead.
+Not a general escape hatch: a rule that opens a dialog is the shape that made
+the old prompt heuristic dangerous, so the bar is narrow and stated. A question
+qualifies only if it is matched EXACTLY, arrives as a whole line, and its two
+answers cost the user different things that the app cannot weigh for them.
+
+Two clear it today. The installers' docker-group question: yes grants
+root-equivalent access silently — the precise thing upstream's 1.4.4 security
+change added consent for — while no leaves the user outside the docker group,
+so the launcher's own `docker` calls fail with permission denied and the app
+has quietly broken itself instead. And immutable Fedora's rpm-ostree question,
+which reboots the machine ten seconds after a yes.
 """
 
 
@@ -108,6 +112,14 @@ class PromptRule:
 # accepted. The shared prompt helpers (`ask_yes_no`, `press_enter`,
 # `choose_install_dir`) are identical across the four installers, so one
 # table serves all of them.
+#
+# Read the last rule as the real policy: anything ending in `(y/n)` that no
+# earlier rule claims is answered YES, unseen. That is not a safe default, it
+# is a workable one — a question nobody answers parks the install forever,
+# because nothing here has a timeout — so every destructive question a script
+# can ask has to be named ABOVE it, and a new one that is not named is
+# consented to on the user's behalf. Two were found that way while driving a
+# real install through the Catalog's own button (2026-08-23); see their rules.
 PROMPT_RULES: tuple[PromptRule, ...] = (
     PromptRule(
         r"Install path:",
@@ -143,6 +155,34 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
         r"to the docker group.*\(y/n\)",
         ASK_THE_USER,
         "root-equivalent; neither answer is the app's to give",
+    ),
+    # Also above the catch-all, which answered both of these "y" until this
+    # gate read the scripts line by line looking for what the button would say
+    # on a machine unlike the test box (2026-08-23).
+    #
+    # Declined, not asked: `snap remove docker` takes away a working Docker the
+    # user installed themselves, with every container and volume on it, and the
+    # only reason the installer wants it gone is that IT cannot use snap
+    # Docker. Saying no costs an exit with the script's own instruction to
+    # remove it by hand ("Cannot continue with snap Docker"), which the 6.1
+    # failure dialog now shows verbatim; saying yes costs data nobody agreed to
+    # lose.
+    PromptRule(
+        r"Remove snap Docker",
+        "n",
+        "would remove the user's own Docker install; the script says how to do it by hand",
+    ),
+    # Asked, not decided: this one REBOOTS the machine ten seconds later
+    # (`sudo systemctl reboot`, immutable Fedora / Bazzite path). The app
+    # cannot know what else is open, and declining silently is no better — the
+    # script then exits 0 having installed nothing. This is the second
+    # `ASK_THE_USER` and the bar it clears is the same as the first's: an
+    # exact question, printed as a whole line, whose two answers cost the user
+    # different things that only they can weigh.
+    PromptRule(
+        r"Install Docker via rpm-ostree and reboot now",
+        ASK_THE_USER,
+        "reboots the machine in 10s; neither answer is the app's to give",
     ),
     PromptRule(r"\(y/n\)", "y"),
 )
@@ -202,6 +242,38 @@ def unsupported_platform_message(entry: CatalogEntry, platform_id: str) -> str:
         f"{entry.name} cannot be installed on {where} yet: its installer needs "
         f"{supported}. Nothing was started. Install it on {supported} for now — "
         "a native path for this platform is planned."
+    )
+
+
+def cancelled_install_message(entry_name: str, server_dir: Path) -> str:
+    """What Stop actually did, and what it did not (roadmap 6.5 "honest cancel copy").
+
+    Three things are easy to imply and all three are false. It is not an
+    install, so the app must not remember the folder — which it did until this
+    existed. Stopping undoes nothing and tidies nothing away. And terminating
+    the compose client does not stop a build that had started: BuildKit
+    finishes the step it is on inside the daemon. That last one is deliberate
+    rather than a wart — those layers are cached and are what makes a second
+    attempt cheap — so the copy says so, because a message implying an instant
+    halt is what sends someone to `docker builder prune` to tidy up, throwing
+    away the hours it would have saved (`phase6-decisions.md`).
+
+    What it deliberately does NOT promise is that files are there. Both
+    outcomes were measured on the same machine on the same day: cancelled after
+    the source clone finished, 2.3 GB stayed; cancelled 1.3 s in, `git` removed
+    its own half-written target and the folder was gone. So the copy points at
+    the folder and lets the user look, rather than asserting a state it cannot
+    know (install gate, 2026-08-23).
+    """
+    return (
+        f"{entry_name} is NOT installed, and this folder has not been remembered as an "
+        f"install. Stopping undoes nothing and tidies nothing away — look in {server_dir} "
+        "to see what the installer had got to (a download it was in the middle of may have "
+        "removed its own leftovers; anything already finished stays). If the build had "
+        "started, Docker keeps finishing the step it was on in the background — that is "
+        "deliberate, and the finished pieces are what make a second attempt much faster, "
+        "so do not clear Docker's build cache to tidy up. Press Install again and choose "
+        f"{server_dir} to carry on, or delete that folder first to start over."
     )
 
 
@@ -441,6 +513,14 @@ class Installer:
                 if text:
                     tail.append(text)
                 yield line
+            if cancel is not None and cancel.is_set():
+                # `interact()` RETURNS on cancel rather than raising, so this
+                # used to fall through to "install of wow-wotlk finished" — in
+                # the app log, which is the file a user pastes into a bug
+                # report, for an install they had just stopped 2.3 GB into a
+                # clone (install gate, 2026-08-23).
+                logger.info(f"install of {self.entry.id} was cancelled")
+                return
         except subprocess.CalledProcessError as exc:
             # Never just "exited with status N": the script's own last words are
             # the only thing that tells the user what went wrong (roadmap 6.1).

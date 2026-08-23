@@ -73,3 +73,53 @@ def test_stop_ends_an_endless_job(qapp: object) -> None:
     _wait_for(panel)
     assert finished and finished[0] == (True, "stopped")
     assert "tick 0" in panel.text()
+
+
+def _cancellable(release: threading.Event) -> Iterator[str]:
+    """A source shaped like `runner.interact()` under cancel: it RETURNS, never raises."""
+    yield "cloning"
+    release.wait(5.0)
+
+
+def test_a_stopped_job_says_cancelled_and_not_finished(qapp: object) -> None:
+    """A cancelled source reports success, so only the panel can tell the difference.
+
+    `runner.interact()` returns when its cancel event is set rather than
+    raising, so the worker ends its loop normally and reports `ok=True` with
+    the same "done" any completed job produces. Measured through the Catalog's
+    Install button against the real install script: Stop during the source
+    clone left the header reading "finished: stopped" (install gate,
+    2026-08-23).
+    """
+    panel = LogPanel()
+    finished: list[tuple[bool, str]] = []
+    panel.run_finished.connect(lambda ok, msg: finished.append((ok, msg)))
+    release = threading.Event()
+
+    assert panel.cancelled is False
+    panel.run(lambda: _cancellable(release), title="Installing")
+    process_events(50)
+    panel.stop()
+    release.set()
+    _wait_for(panel)
+
+    assert finished and finished[0][0] is True  # the job itself claims success
+    assert panel.cancelled is True
+    assert panel.status_text() == "cancelled"
+
+
+def test_the_next_job_is_not_still_cancelled_from_the_last_one(qapp: object) -> None:
+    """`run()` resets the flag, or every job after a Stop would be called cancelled."""
+    panel = LogPanel()
+    release = threading.Event()
+    panel.run(lambda: _cancellable(release))
+    process_events(50)
+    panel.stop()
+    release.set()
+    _wait_for(panel)
+    assert panel.cancelled is True
+
+    panel.run(lambda: iter(["second job"]))
+    _wait_for(panel)
+    assert panel.cancelled is False
+    assert panel.status_text() == "finished: done"

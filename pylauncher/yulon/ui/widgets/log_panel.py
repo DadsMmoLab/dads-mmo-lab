@@ -84,6 +84,7 @@ class LogPanel(QWidget):
         self._cancel: threading.Event | None = None
         self._thread: QThread | None = None
         self._worker: _StreamWorker | None = None
+        self._stop_requested = False
 
     # -- public ---------------------------------------------------------
 
@@ -92,9 +93,26 @@ class LogPanel(QWidget):
         """True while a job is streaming into the panel."""
         return self._thread is not None and self._thread.isRunning()
 
+    @property
+    def cancelled(self) -> bool:
+        """True if `stop()` was asked for the job now running, or the last one.
+
+        Nothing downstream can work this out for itself. A cancelled source
+        does not raise — `runner.interact()` returns when its cancel event is
+        set — so the worker reports `ok=True` and a message ("done"/"stopped")
+        that a completed job could also produce. The panel is the only thing
+        that knows the Stop button was pressed, so it is the thing that says
+        so. Reset by `run()`, so it always describes the current job.
+        """
+        return self._stop_requested
+
     def text(self) -> str:
         """Everything currently shown."""
         return self._text.toPlainText()
+
+    def status_text(self) -> str:
+        """What the header says about the job (tests / accessibility)."""
+        return self._status.text()
 
     def clear(self) -> None:
         """Empty the panel."""
@@ -121,6 +139,7 @@ class LogPanel(QWidget):
             logger.debug("log panel busy; run() ignored")
             return False
         self._cancel = cancel
+        self._stop_requested = False
         self._status.setText(title)
         self._stop_button.setEnabled(True)
         thread = QThread(self)
@@ -139,6 +158,7 @@ class LogPanel(QWidget):
     @Slot()
     def stop(self) -> None:
         """Ask the running job to stop after its current line (and cancel a blocked one)."""
+        self._stop_requested = True
         if self._cancel is not None:
             self._cancel.set()
         if self._worker is not None:
@@ -154,6 +174,18 @@ class LogPanel(QWidget):
 
     @Slot(bool, str)
     def _on_finished(self, ok: bool, message: str) -> None:
-        self._status.setText(("finished: " if ok else "FAILED: ") + message)
+        # Cancellation is asked about FIRST, because a stopped job arrives here
+        # with ok=True and message "done" — indistinguishable, from here, from
+        # one that ran to the end. Measured on a real install driven through
+        # the Catalog's own button: Stop pressed during the source clone left
+        # the panel reading "finished: stopped" (install gate, 2026-08-23).
+        # "finished" is a claim about the work, and a stopped job did not
+        # finish it. What was left behind is the caller's story to tell — the
+        # panel does not know whether it was following a log or building a
+        # server.
+        if self._stop_requested:
+            self._status.setText("cancelled")
+        else:
+            self._status.setText(("finished: " if ok else "FAILED: ") + message)
         self._stop_button.setEnabled(False)
         self.run_finished.emit(ok, message)
