@@ -659,6 +659,12 @@ _DOWNLOAD_CHUNK_BYTES = 1 << 20
 _CURL_NO_RANGE_EXIT = 33
 _CURL_VERIFY_EXITS = frozenset({60, 77})
 
+# How far `_is_verification_failure()` follows `.reason`. urllib wraps once; the
+# rest of the budget is for an injected opener that wraps again, and the bound
+# itself is what makes a self-referential chain terminate.
+_REASON_UNWRAP_LIMIT = 4
+
+
 _CURL_ARGS: tuple[str, ...] = (
     "--fail",
     "--location",
@@ -854,10 +860,40 @@ def _download_urllib(url: str, part: Path, open_url: UrlOpener) -> None:
 
 
 def _is_verification_failure(exc: OSError) -> bool:
-    """True when `exc` means 'could not verify the certificate', not 'could not connect'."""
-    if isinstance(exc, ssl.SSLCertVerificationError):
-        return True
-    return isinstance(exc, DownloadError) and exc.verification
+    """True when `exc` means 'could not verify the certificate', not 'could not connect'.
+
+    The `.reason` walk is the whole function, not padding (review finding,
+    2026-08-23): `urllib.request.urlopen` NEVER lets an
+    `ssl.SSLCertVerificationError` escape. `AbstractHTTPHandler.do_open` catches
+    the `OSError` the handshake raises and re-raises it as
+    `urllib.error.URLError(err)`, keeping the original in `.reason`. So the bare
+    `isinstance` check this shipped with answered False for every exception
+    `_http_get_text()` or `_download_urllib()` can raise, which left the
+    certificate branch of `networking.plan()` unreachable — it went on printing
+    "could not determine the public IP (offline?)" — and left `_MANUAL_ROOT_CERTS`
+    reachable only through `_download_curl`'s exit code, i.e. silent on a box
+    with no OS curl. Measured against a self-signed server on 127.0.0.1:
+    `URLError(SSLCertVerificationError(...))`, one level deep.
+
+    That `raise URLError(err)` is the only site in `urllib` that wraps an
+    arbitrary `OSError`, so the stdlib never nests deeper than one; the loop
+    rather than a single unwrap is for the `open_url`/`http_get` seams, which a
+    caller may wrap again, and it is bounded so a self-referential `.reason`
+    cannot spin.
+    """
+    current: BaseException = exc
+    for _ in range(_REASON_UNWRAP_LIMIT):
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return True
+        if isinstance(current, DownloadError) and current.verification:
+            return True
+        # `HTTPError.reason` is a str, and a plain OSError has no `.reason` at
+        # all; either way there is nothing further to unwrap.
+        reason = getattr(current, "reason", None)
+        if not isinstance(reason, BaseException):
+            return False
+        current = reason
+    return False
 
 
 def download_verified(

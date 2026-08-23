@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ssl
 import subprocess
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,10 @@ from yulon.catalog.catalog import load_catalog
 
 WOTLK = load_catalog().get("wow-wotlk")
 TORTOISE = load_catalog().get("wow-tortoise")
+
+# What the fresh Windows 11 box actually raised; test_download.py keeps the
+# verbatim message, this only needs the exception type.
+_CERT_ERROR = ssl.SSLCertVerificationError("unable to get local issuer certificate")
 
 
 def test_firewall_commands_match_the_guide() -> None:
@@ -97,17 +102,31 @@ def test_detect_public_ip_validates_and_falls_back() -> None:
     )
 
 
-def test_detect_public_ip_separates_a_bad_certificate_from_being_offline() -> None:
+@pytest.mark.parametrize(
+    "raised",
+    [urllib.error.URLError(_CERT_ERROR), _CERT_ERROR],
+    ids=["as urlopen raises it", "as a non-urllib seam might"],
+)
+def test_detect_public_ip_separates_a_bad_certificate_from_being_offline(
+    raised: OSError,
+) -> None:
     """The failure that used to be invisible: reached the service, refused to trust it.
 
     Both give address=None, and before this flag existed the networking report
     told a machine with an incomplete root store that it was offline.
+
+    The first case is the one that matters: `urlopen` never lets an
+    `ssl.SSLCertVerificationError` out, it re-raises it inside a
+    `urllib.error.URLError`, and this test asserted only the bare shape — so it
+    stayed green while the production path could not reach the flag at all
+    (review finding, 2026-08-23). The shape is still hand-built here, because
+    what this file tests is `plan()`'s reaction to the flag; test_download.py
+    runs the same predicate against a real self-signed server so that no file
+    has to take the shape on trust.
     """
 
     def cannot_verify(url: str) -> str:
-        # What the fresh Windows 11 box actually raised; test_download.py keeps
-        # the verbatim message, this only needs the exception type.
-        raise ssl.SSLCertVerificationError("unable to get local issuer certificate")
+        raise raised
 
     probe = platform.detect_public_ip(cannot_verify, services=("https://a", "https://b"))
     assert probe == platform.PublicIpResult(None, True)

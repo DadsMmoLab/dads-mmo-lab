@@ -1,25 +1,34 @@
 """Tests for the verified installer download in `yulon.platform`, and for the TLS
 rules the whole package has to keep.
 
-Nothing here opens a socket: the curl transport is exercised through the `run`
-seam, the in-process transport through an `open_url` seam that returns canned
-responses, and the three small GETs through a stand-in `urlopen`. The assertions
-are about the thing that actually broke on a real Windows 11 box (2026-08-22) —
-`urllib` could not verify desktop.docker.com because OpenSSL cannot see the roots
-Windows fetches on demand — and about the two rules that came out of it: a
-transfer that cannot be verified fails loudly rather than retrying with
-verification off, and no module in the package calls `urlopen` without a
-verifying context. The second rule is here rather than in a file of its own
-because it is the same measurement that motivates the first.
+Almost nothing here opens a socket: the curl transport is exercised through the
+`run` seam, the in-process transport through an `open_url` seam that returns
+canned responses, and the three small GETs through a stand-in `urlopen`. The
+assertions are about the thing that actually broke on a real Windows 11 box
+(2026-08-22) — `urllib` could not verify desktop.docker.com because OpenSSL
+cannot see the roots Windows fetches on demand — and about the two rules that
+came out of it: a transfer that cannot be verified fails loudly rather than
+retrying with verification off, and no module in the package calls `urlopen`
+without a verifying context. The second rule is here rather than in a file of its
+own because it is the same measurement that motivates the first.
+
+The exception is the last section, which stands up a real self-signed HTTPS
+server on 127.0.0.1 (review finding, 2026-08-23). Building the failure by hand is
+what let a defect through: every "verification" test constructed the exception
+itself, so nobody noticed that `urlopen` never raises the one the code was
+looking for. One test has to earn its answer from the real stack.
 """
 
 from __future__ import annotations
 
 import ast
+import http.server
 import ssl
 import subprocess
 import sys
+import threading
 import types
+import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
@@ -33,6 +42,15 @@ MEASURED_TLS_FAILURE = (
     "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get "
     "local issuer certificate (_ssl.c:1000)"
 )
+
+# A throwaway certificate + key for 127.0.0.1, pre-generated and committed rather
+# than built at test time: there is no X.509 builder in the standard library and
+# nothing in requirements-dev.txt can make one (`cryptography` is not a
+# dependency and is not worth becoming one for a single file), while shelling out
+# to an `openssl` binary would make the test depend on what happens to be
+# installed on the runner. The file's own header says how it was generated. It is
+# a fixture, not a secret — the test's whole point is that trusting it FAILS.
+SELF_SIGNED_PEM = Path(__file__).parent / "data" / "self-signed-localhost.pem"
 
 
 @pytest.fixture(autouse=True)
@@ -607,3 +625,121 @@ def test_the_os_curl_is_taken_by_absolute_path_not_from_path(
     system32.mkdir()
     (system32 / "curl.exe").write_bytes(b"")
     assert platform._os_curl() == system32 / "curl.exe"
+
+
+# ------------------------------------------- against a real, untrusted handshake
+
+
+class _SelfSignedHandler(http.server.BaseHTTPRequestHandler):
+    """Answers any GET with a plausible public IP. No client should ever read it."""
+
+    def do_GET(self) -> None:  # noqa: N802 - the stdlib chooses this name
+        body = b"203.0.113.7\n"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt: str, *args: object) -> None:
+        """Silence the per-request line the stdlib prints to stderr."""
+
+
+@pytest.fixture
+def self_signed_https() -> Iterator[str]:
+    """A real HTTPS server on 127.0.0.1 with a certificate no root store trusts.
+
+    Loopback and a committed certificate, so this needs no network and reaches
+    nothing outside the machine. Port 0 with the assigned port read back, because
+    a hardcoded one collides with whatever else the runner is doing; a daemon
+    thread, so a server that somehow refuses to stop cannot wedge the session;
+    and the socket is listening before the fixture yields, so a client connects
+    immediately and the handshake fails in milliseconds rather than sitting on a
+    timeout.
+    """
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certfile=str(SELF_SIGNED_PEM))
+    server = http.server.HTTPServer(("127.0.0.1", 0), _SelfSignedHandler)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"https://127.0.0.1:{server.server_port}/"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5.0)
+
+
+def test_urlopen_reports_a_refused_certificate_as_a_wrapped_url_error(
+    self_signed_https: str,
+) -> None:
+    """The mechanism the rest of this section depends on, pinned to the real stack.
+
+    `AbstractHTTPHandler.do_open` catches the `OSError` the handshake raises and
+    re-raises it as `urllib.error.URLError(err)`, so an
+    `ssl.SSLCertVerificationError` NEVER escapes `urlopen` — it arrives one level
+    down, in `.reason`. Asserting the shape here means that if a future CPython
+    stops wrapping, this test says so instead of the predicate quietly going back
+    to being dead code (review finding, 2026-08-23).
+    """
+    with pytest.raises(urllib.error.URLError) as caught:
+        platform._http_get_text(self_signed_https)
+
+    assert isinstance(caught.value.reason, ssl.SSLCertVerificationError)
+    assert "CERTIFICATE_VERIFY_FAILED" in str(caught.value)
+
+
+def test_the_predicate_answers_true_for_what_a_real_handshake_actually_raises(
+    self_signed_https: str,
+) -> None:
+    """The test whose absence let a dead fix pass two RED runs.
+
+    Every other verification assertion in this suite and in test_networking.py
+    constructs the exception by hand — `DownloadError(..., verification=True)`,
+    or a bare `ssl.SSLCertVerificationError` — so all of them stayed green
+    against a predicate that nothing in production could satisfy. This one hands
+    `_is_verification_failure()` whatever the real `urllib` stack produced and
+    accepts no substitute.
+    """
+    try:
+        platform._http_get_text(self_signed_https)
+    except OSError as exc:
+        assert platform._is_verification_failure(exc) is True
+    else:
+        pytest.fail("the self-signed certificate was trusted; the server is not what it claims")
+
+
+def test_the_public_ip_probe_calls_a_real_bad_certificate_a_certificate_problem(
+    self_signed_https: str,
+) -> None:
+    """End to end over a socket: reached a server, refused to trust it, said so.
+
+    The user-visible half is `networking.plan()`, which reads this flag to choose
+    between the certificate sentence and "could not determine the public IP
+    (offline?)" — a branch that measured as unreachable until the predicate was
+    fixed.
+    """
+    probe = platform.detect_public_ip(services=(self_signed_https,))
+
+    assert probe == platform.PublicIpResult(None, True)
+
+
+def test_a_box_with_no_os_curl_still_gets_told_about_root_certificates(
+    self_signed_https: str, tmp_path: Path
+) -> None:
+    """The corollary of the same defect: `download_verified()`'s urllib branch was silent.
+
+    `verification` was only ever set from `_download_curl`'s exit code, because
+    the `URLError` the urllib branch raises did not satisfy the predicate either.
+    On a box with no OS curl — Windows before 1803, and the case that branch
+    exists for — the installer failure therefore never mentioned the root store,
+    which is the one thing the user could act on (review finding, 2026-08-23).
+    """
+    dest = tmp_path / "installer.exe"
+
+    with pytest.raises(platform.DownloadError) as caught:
+        platform.download_verified(self_signed_https, dest, find_curl=lambda: None)
+
+    assert caught.value.verification is True
+    assert platform._MANUAL_ROOT_CERTS in platform._download_manual_steps(caught.value)
+    assert not dest.exists()
