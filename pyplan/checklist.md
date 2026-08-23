@@ -111,6 +111,7 @@
   - [ ] **macOS (Baerthe)** — the suite green on macOS: `pytest`, `mypy`, `ruff`, `black --check`. Needs no server and no Docker, so it is the cheapest of these and the one most likely to find something — nothing in this project has ever been run on a Darwin interpreter, and the last time an untested platform was assumed fine, `shutil.which`'s win32 branch had grown a `_winapi` call that killed the suite on every 3.12+ box. The live install half of 6.4 is not asked for: 6.2 is unbuilt
 - [ ] 6.5 Full WotLK feature coverage on Linux, macOS, and native Windows (the Phase 6 exit gate):
   - [ ] Install (zero shell interaction, all three platforms) — incl. staged/resumable install, preflight floors refusing-not-warning, `keep_awake()`, honest cancel copy
+    - [ ] **Linux, through the Install BUTTON (2026-08-24)** — the gap the README review named is closed on the driving half and opened on another. `CatalogView.button_for("wow-wotlk").click()` offscreen, real `LogPanel`, real `Installer` from the factory, real sudo dialog (a watchdog `QTimer` found `activeModalWidget()` and typed into it, so the seam was driven the way a person drives it) — only `pick_dir` stubbed, since a `QFileDialog` cannot run headless and it is already a constructor seam. **33 m 23 s; the C++ compile SUCCEEDED (~30 min, 1828 objects, all four images built).** Every prompt was answered by the rule that should have answered it, and the anchored `^\s*Press ENTER` rule correctly did NOT eat the "Leave blank and press ENTER" hint, so the blank line reached `Install path:` as designed. **But `ok=False`**: `ac-db-import` died 0.3 s after Docker called the database healthy — see the first-run race below. The app's own `repair_import()` then finished the job in 212.1 s, and the resulting server started, reached ready, took an account (and refused the duplicate), and stopped in 49.8 s with `acore_auth` 22 / `acore_characters` 111 / `acore_world` 315 / `acore_playerbots` 30 tables. **Unticked because the two halves are each proven and the single uninterrupted run is not**, and because the script's post-install prompts (`Press ENTER when done creating accounts`, the stop-the-server question, the wow-manage download, the Steam/Gaming-mode launcher) were never reached, so those `PROMPT_RULES` entries are still untested against a live script. `ASK_THE_USER`'s docker-group question was skipped too — `pk` was already in the group
   - [ ] Server lifecycle: start/stop/status/health polling + README §12 port-conflict guard
     - [x] **Windows (2026-08-23)** — 23/23 against a stock server on `yulon-win11` (Windows 11 Pro 26200, Docker Desktop 29.7.2, WSL2, Linux containers). `Controller.start()` 3.2 s; `wait_db_healthy` 0.1 s; `wait_ready(127.0.0.1, 8085)` 27.7 s; **stop 8.8 s**, containers kept; `ac-db-import` stayed `Exited (0)` throughout, so `start_staged` never selected it. README §12 guard: a foreign container published on 3724 produced `PortConflictError` naming `yulon-port-hog` and nothing started, while `port_conflicts()` excused our own three. A further 18 checks covered the fallbacks nobody had run on Windows: with the compose file hidden and no pin, stop and remove both REFUSE; pinned, the by-name `docker stop -t 300` path stopped all three in 7.4 s
     - [ ] **macOS (Baerthe)** — against a server attached with "Use existing…": start, stop, restart, status and health polling, plus the port-conflict guard with something else already holding 3724 or 8085. Worth timing the stop: `STOP_GRACE_SECONDS` is 300 s from a Linux measurement of a populated worldserver, and Docker Desktop for Mac goes through a VM, so the shutdown drain may not behave the same way
@@ -174,6 +175,34 @@
 ---
 
 ## Cross-cutting
+
+### Two things the first button-driven install found (2026-08-24)
+
+**1. A first-run race in AzerothCore's own compose file, and a message that sends the user the
+wrong way.** `ac-db-import` failed with `Can't connect to MySQL server on 'ac-database:3306' (111)`
+0.3 s after compose reported the database healthy. The healthcheck is
+`mysql --user=root --password=… --execute "SHOW DATABASES;"` with **no `-h`**, so it goes over the
+unix socket; MySQL 8.4 initialising a brand-new data directory runs a *temporary server* that is
+reachable on that socket and not on TCP. Healthcheck green, import connects over TCP, refused. It
+can only fire on a first-ever install — a fresh volume is what triggers the initialisation phase —
+which is exactly why every script-driven install and every restart of an existing server has missed
+it, here and on Windows. Worse, the installer script's `PIPESTATUS` check reports it as
+`❌ Compilation failed. Check ~/playerbots-build.log`, which is false: the compile had succeeded
+thirty minutes earlier. Not fixed — the healthcheck is upstream's file and the message is in a shell
+script that 6.2's native engine replaces. **The engine must not inherit it**: its generated compose
+has to give the database healthcheck a `-h 127.0.0.1`, or make the import wait on something other
+than health. Reproducibility unmeasured: one fresh volume, one failure.
+
+**2. Image tags are global, and nothing in the app protects them.** The build re-pointed
+`acore/ac-wotlk-{worldserver,authserver,db-import}:master` at binaries from the new checkout, so the
+EXISTING install on that box is now running images it did not ask for. This is the same class of
+collision as the pinned container names — `remove_staged()` guards volumes and names, and there is
+nothing equivalent for tags. Verified rather than assumed: the original install starts on the new
+binaries, reaches ready, and its data is intact (650 accounts, 2901 characters, 18665 playerbot
+rows), but it is a de-facto server upgrade nobody asked for and it will have applied any pending DB
+updates on that first boot. A second install of the same game on one machine therefore silently
+upgrades the first. Worth a decision in `phase6-decisions.md` before 6.2 generates compose files
+that build.
 
 > Anything that doesn't cleanly belong to one phase — style-guide amendments, cross-document corrections, tooling gotchas, etc.
 
