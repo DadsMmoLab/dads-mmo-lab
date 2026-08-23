@@ -20,6 +20,7 @@ import json
 import os
 import subprocess
 import time
+from collections import deque
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -787,11 +788,24 @@ per-game module owns them. See `controller_wow_wotlk/repair.py`.
 """
 
 
+OutputSink = Callable[[str], None]
+"""Where a long-running docker command's output goes, one line at a time.
+
+Called on whatever thread is running the command — which for every caller in
+this app is a worker thread, never the GUI thread. A sink that writes into a
+widget directly is therefore the bug this seam exists to make avoidable, not
+the use it exists for: the UI hands in something that can cross a thread
+boundary (`ui/widgets/job.py`'s `LineRelay`), and `run_attached()` never learns
+what happens at the far end.
+"""
+
+
 def repair_import(
     spec: ContainerSpec,
     server_dir: Path,
     probe: ImportProbe,
     *,
+    output: OutputSink | None = None,
     db_timeout: float = _DB_HEALTHY_TIMEOUT_SECONDS,
 ) -> bool:
     """Re-run this install's one-shot database import. For a BROKEN install only.
@@ -836,6 +850,20 @@ def repair_import(
     The exit code of that second command is not the answer, for the same reason
     `remove_staged()` does not believe `compose down`'s: the probe is run again
     afterwards, and only a database that now reads as imported counts.
+
+    `output`, when given, receives each line the import prints as it prints it —
+    see `run_attached()`, which is what turned that second command from a
+    10-30 minute silence into something a caller can show. It is called on
+    whatever thread is running this, so a UI sink has to be one that can cross
+    threads. Passing nothing changes nothing except that the lines are dropped
+    instead of forwarded; they are retained and reported either way.
+
+    **This cannot be cancelled, deliberately.** There is no cancel token here
+    and the UI offers no Stop, because the only way to abandon a running
+    `compose up` is to terminate it — which stops `ac-db-import` part-way
+    through writing schemas. That is a recoverable state (the probe reads it as
+    `partial` and this action is offered again), but it is not one to hand a
+    user a button for while the alternative is waiting.
 
     Returns:
         True once the probe says the databases are imported.
@@ -917,20 +945,23 @@ def repair_import(
         )
 
     logger.warning(f"repair_import(): `compose up --no-deps {service}` in {server_dir}")
-    proc = _docker(["compose", "up", "--no-deps", service], cwd=server_dir)
-    if proc.returncode != 0:
+    # Byte-identical argv to the version that was live-gated against a real
+    # AzerothCore import; only the way its output is read has changed.
+    run = run_attached(["compose", "up", "--no-deps", service], server_dir, sink=output)
+    if run.returncode != 0:
         # Not raised here. A one-shot that failed part-way and one that failed
         # having done nothing are the same exit code, and the probe below is the
         # only thing that can tell them apart — so the check happens either way
         # and this only makes sure the reason is in the log.
-        logger.warning(f"{service} exited {proc.returncode}: {proc.stderr.strip()}")
+        logger.warning(f"{service} exited {run.returncode}: {last_words(run.tail)}")
 
     after = probe()
     if after.state != "imported":
         raise DockerCommandError(
             f"{service} ran, but the databases still read as {after.state} ({after.detail}). "
-            f"Nothing is imported that was not imported before. `docker compose logs {service}` "
-            f"in {server_dir} will say what it was unable to do."
+            f"Nothing is imported that was not imported before. Its last words were: "
+            f"{last_words(run.tail)}. `docker compose logs {service}` in {server_dir} has the "
+            "rest of what it printed."
         )
     logger.info(f"repair_import(): {service} finished and the databases now read as imported")
     return True
@@ -1635,3 +1666,120 @@ def follow_logs(container: str, tail: int = 200) -> Iterator[str]:
         # have to end at the same sentence, or the panel shows a WinError for
         # one kind of missing docker and an explanation for the other.
         raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP) from exc
+
+
+KEEP_OUTPUT_LINES = 200
+"""How many of a streamed command's output lines are kept for the failure text.
+
+A bound rather than a buffer, and the number is chosen for what has to survive
+rather than for what looks generous. `runner.stream()` yields all of stdout as
+it arrives and then every line of stderr in one block at the end, so the LAST
+lines are the ones that explain a failure — which is the whole reason anything
+is retained at all.
+
+The alternative, keeping everything, is what this replaces: a full AzerothCore
+import runs 10-30 minutes and prints a line per SQL file, and the previous
+version held all of it in one string inside a GUI process that may then stay
+open for days. Unbounded growth driven by how long somebody's import took is a
+defect of its own, and one that gets worse on exactly the slow machine whose
+import is worth watching.
+
+200 lines is roughly 20 KB. What it costs: the middle of a failed import is
+gone from this process. It is not gone from Docker — `docker compose logs
+<service>` still has all of it, and the failure message says so.
+"""
+
+_LAST_WORDS_LINES = 5
+_LAST_WORDS_CHARS = 400
+"""How much of the retained tail goes into a message a user reads.
+
+The retained tail is for the log; a `QLabel` on the Server tab is for one
+paragraph. Five lines capped at 400 characters is enough to carry a mysql error
+and not enough to push the rest of the tab off screen.
+"""
+
+
+def last_words(tail: tuple[str, ...]) -> str:
+    """The end of a command's output, short enough to put inside a sentence.
+
+    Blank lines are dropped before the count, because a shell script's spacing
+    is exactly what a five-line window cannot afford to spend itself on.
+    """
+    said = [line.strip() for line in tail if line.strip()]
+    if not said:
+        return "it printed nothing at all"
+    text = " / ".join(said[-_LAST_WORDS_LINES:])
+    return text if len(text) <= _LAST_WORDS_CHARS else "…" + text[-_LAST_WORDS_CHARS:]
+
+
+@dataclass(frozen=True)
+class AttachedRun:
+    """What a streamed docker command left behind: its exit code and the end of its output."""
+
+    returncode: int
+    tail: tuple[str, ...] = ()
+
+
+def run_attached(
+    argv: list[str],
+    cwd: Path,
+    *,
+    sink: OutputSink | None = None,
+    keep: int = KEEP_OUTPUT_LINES,
+) -> AttachedRun:
+    """Run `docker <argv...>` attached, handing each output line to `sink` as it arrives.
+
+    The streaming counterpart to `_docker()`, and the second site in this module
+    that goes through `runner.stream()` rather than `runner.run()`. It lives
+    beside `follow_logs()` for the reason recorded there: no `ui/` module builds
+    a docker argv (style-guide §3), so a view that wants to show a command's
+    output asks for a sink rather than for a subprocess.
+
+    Why it exists: `_docker()` buffers a whole run into one string and returns
+    it at the end, which for the database import means 10-30 minutes in which
+    the caller has nothing to say and the user cannot tell a long job from a
+    hung one. The argv is unchanged by this — only the reading of it is.
+
+    Three deliberate differences from `runner.stream()`'s own contract:
+
+    * **The exit status is returned, never raised.** `stream()` raises
+      `CalledProcessError` once an exhausted generator finds a non-zero exit;
+      that would take the decision away from callers who must go on and check
+      something else (see `repair_import()`, where a one-shot that failed
+      part-way and one that failed having done nothing exit alike).
+    * **Only the last `keep` lines are retained** — see `KEEP_OUTPUT_LINES`.
+      The sink sees every line; this process remembers a bounded end of them.
+    * **A sink that raises is dropped, not propagated.** Letting it out would
+      abandon the generator mid-iteration, and `stream()` terminates the child
+      when that happens — so a widget deleted while an import was running would
+      kill the import. The first failure is logged and nothing is sent onward
+      after it.
+
+    A host with no docker CLI comes back as `_CLI_MISSING_RETURNCODE` carrying
+    `DOCKER_CLI_MISSING_HELP`, the same shape `_docker()` gives it, rather than
+    as an exception — the callers here already have to handle a failed run.
+    """
+    logger.debug(f"run_attached() called: argv={argv} cwd={cwd}")
+    tail: deque[str] = deque(maxlen=keep)
+    program = platform.docker_program()
+    if program is None:
+        logger.debug(f"no docker CLI on this host; not running: docker {' '.join(argv)}")
+        return AttachedRun(_CLI_MISSING_RETURNCODE, (platform.DOCKER_CLI_MISSING_HELP,))
+    live = sink
+    try:
+        for line in runner.stream([program, *argv], cwd=cwd):
+            tail.append(line)
+            if live is not None:
+                try:
+                    live(line)
+                except Exception as exc:  # noqa: BLE001 - a dead sink must not kill the child
+                    logger.warning(f"the output sink stopped accepting lines: {exc}")
+                    live = None
+    except subprocess.CalledProcessError as exc:
+        return AttachedRun(exc.returncode, tuple(tail))
+    except OSError as exc:
+        # Docker uninstalled while the launcher is open, arriving from `Popen`;
+        # `follow_logs()` handles the same case one line above.
+        logger.warning(f"{program} could not be started: {exc}")
+        return AttachedRun(_CLI_MISSING_RETURNCODE, (platform.DOCKER_CLI_MISSING_HELP,))
+    return AttachedRun(0, tuple(tail))

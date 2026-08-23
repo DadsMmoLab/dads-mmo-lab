@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 import pytest
@@ -518,17 +518,26 @@ def _watch_repair(
     view: ControllerView,
     state: docker.ImportState = UNIMPORTED,
     result: BaseException | bool = True,
-) -> list[int]:
+    says: Sequence[str] = (),
+) -> list[docker.OutputSink | None]:
     """Replace the controller's probe and repair with recorders.
 
     The view's job is the offering and the arming; whether the import is safe to
     run is `docker.repair_import()`'s, and that has its own tests including the
     refusal over a populated database.
-    """
-    calls: list[int] = []
 
-    def fake_repair() -> bool:
-        calls.append(1)
+    What each call was handed as its output sink is recorded rather than
+    discarded: that argument is the whole of the progress feature, and it is
+    also where the threading rule lives, so a test has to be able to look at it.
+    `says` is what the fake import prints through it before finishing.
+    """
+    calls: list[docker.OutputSink | None] = []
+
+    def fake_repair(output: docker.OutputSink | None = None) -> bool:
+        calls.append(output)
+        for line in says:
+            if output is not None:
+                output(line)
         if isinstance(result, BaseException):
             raise result
         return result
@@ -597,7 +606,7 @@ def test_the_repair_takes_two_presses_and_says_what_is_overwritten(
     assert "Refresh" in said, "no way to cancel was offered"
 
     view.repair_import()
-    assert calls == [1]
+    assert len(calls) == 1
     assert view.repair_button.text() == controller_view_module.REPAIR_IDLE, "still armed after"
 
 
@@ -638,6 +647,94 @@ def test_refresh_start_and_stop_all_cancel_an_armed_repair(
         assert view.repair_button.text() == controller_view_module.REPAIR_IDLE, action
         view.repair_import()
         assert calls == [], f"the press after {action} imported something"
+
+
+def test_the_import_shows_its_own_output_instead_of_one_frozen_sentence(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Ten to thirty minutes of an unchanging label is indistinguishable from a hang.
+
+    The label is read back after each line the fake import prints, because
+    "shows the output" and "shows the output while it is still running" are
+    different claims and only the second one is worth anything here. The window
+    is the last two lines: this label sits above the rest of the tab, and a
+    half-hour of import output accumulating in it is the same unbounded growth
+    in a different place.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    printed = ["applying acore_auth", "applying acore_characters", "applying acore_world"]
+    shown: list[str] = []
+
+    def fake_repair(output: docker.OutputSink | None = None) -> bool:
+        assert output is not None, "the import was run with nowhere to say anything"
+        for line in printed:
+            output(line)
+            shown.append(view.problem_label.text())
+        return True
+
+    view.services.controller.import_state = lambda: UNIMPORTED  # type: ignore[method-assign]
+    view.services.controller.repair_import = fake_repair  # type: ignore[method-assign]
+    _db_up(view, ps)
+    view.repair_import()
+    view.repair_import()
+
+    assert len(shown) == 3
+    assert all(controller_view_module.IMPORT_RUNNING in text for text in shown), shown
+    assert printed[0] in shown[0], "the first line was not on screen until the import ended"
+    assert printed[1] in shown[2] and printed[2] in shown[2], shown[2]
+    assert printed[0] not in shown[2], "every line is kept, so the label grows all import long"
+
+
+def test_the_import_talks_through_a_relay_because_it_talks_from_a_worker_thread(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """`repair_import()` calls its sink on the thread it runs on, which is not this one.
+
+    Handing down the view's own `@Slot(str)` would look identical here and be a
+    plain Python call from the worker thread into a widget. `LineRelay` is the
+    difference, and only the identity of what gets passed down can pin it —
+    running inline, as these tests do, the wrong version behaves the same.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    calls = _watch_repair(view, says=("applying acore_world",))
+    _db_up(view, ps)
+    view.repair_import()
+    view.repair_import()
+
+    assert len(calls) == 1
+    sink = calls[0]
+    assert getattr(sink, "__self__", None) is view._import_relay, (
+        "the import was handed something that is not the relay, so its lines "
+        "would reach a widget on the worker thread"
+    )
+
+
+def test_neither_the_armed_copy_nor_the_running_one_offers_a_stop(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """There is no cancel, so nothing may look like one.
+
+    Abandoning a `compose up` means terminating it, which stops `ac-db-import`
+    part-way through writing schemas. The tab therefore says so and disables
+    every button while the import runs, rather than offering a Stop that would
+    have to lie about what it does.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    disabled: list[bool] = []
+
+    def fake_repair(output: docker.OutputSink | None = None) -> bool:
+        buttons = (view.start_button, view.stop_button, view.remove_button, view.repair_button)
+        disabled.append(not any(b.isEnabled() for b in buttons))
+        return True
+
+    view.services.controller.import_state = lambda: UNIMPORTED  # type: ignore[method-assign]
+    view.services.controller.repair_import = fake_repair  # type: ignore[method-assign]
+    _db_up(view, ps)
+    view.repair_import()
+    armed = view.problem_label.text()
+    assert "cannot be stopped" in armed, armed
+    view.repair_import()
+    assert disabled == [True], "a button was live while the import it cannot stop was running"
 
 
 def test_a_finished_repair_stops_offering_itself(qapp: object, ps: _Ps, tmp_path: Path) -> None:

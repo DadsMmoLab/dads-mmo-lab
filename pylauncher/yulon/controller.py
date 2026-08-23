@@ -220,12 +220,18 @@ class Controller:
             )
         return self.import_probe()
 
-    def repair_import(self) -> bool:
+    def repair_import(self, output: docker.OutputSink | None = None) -> bool:
         """Re-run the one-shot database import. Only for an install broken before it ran.
 
         See `docker.repair_import()` for every refusal, in particular the one
         that matters: a database holding accounts or characters is never
         re-imported, however many times the button is pressed.
+
+        `output` receives the import's own lines as they arrive, which is the
+        only thing that distinguishes a 30-minute import from a hang. It is
+        called on the thread this runs on — a worker thread in the app — so a
+        caller in the UI layer hands in something that can cross threads rather
+        than something that touches a widget.
 
         Raises:
             docker.DockerCommandError: any of those refusals, or an import that
@@ -236,7 +242,7 @@ class Controller:
                 "this game cannot be asked what state its databases are in, so its import will "
                 "not be re-run — an import that cannot be checked afterwards is a guess."
             )
-        return docker.repair_import(self.spec, self.server_dir, self.import_probe)
+        return docker.repair_import(self.spec, self.server_dir, self.import_probe, output=output)
 
     # -- polling ---------------------------------------------------------
 
