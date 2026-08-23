@@ -344,10 +344,13 @@ renamed so the copy could not touch the original. What it settled:
   bookkeeping. And re-running the one-shot over it **reported success in 28 s and left the schema
   permanently unimportable**: AzerothCore skips the base data for a database that already exists,
   so `acore_world` went 3 → 5 tables while `acore_world.updates` gained 2671 rows recording every
-  remaining file as applied. `partial` is therefore refused outright now, and `repairable` is
-  `absent` alone. The fix that would make `partial` genuinely repairable — drop the unfinished
-  schemas first, so the importer does a real base import — needs a write seam this module does
-  not have, and its own gate. It is not built.
+  remaining file as applied. `partial` was therefore refused outright, and then
+  **the fix was built and gated the same day**: `repair.reset_unfinished()` drops the unfinished
+  schemas through a write seam of its own (`SqlWrite`, separate from the read-only probe), and
+  `repair_import()` calls it before the one-shot. Re-gated against a fresh interruption that left
+  `acore_world` with one table: dropped, re-imported in 195 s, back at 316 tables, with the
+  finished schemas untouched and the same one-shot container re-run. The seam stays optional —
+  without it `partial` is still refused, which is what makes it safe to offer at all.
 - **Assumption 1 was proven by container NAME, not by container ID.** The three start/finish pairs
   could in principle be three different containers reusing the name. The run pinned `ac-database`'s
   ID for exactly this reason and did not pin the one-shot's.
