@@ -260,6 +260,26 @@ class DockerMysql:
         things. `--triggers` is mysqldump's default and is named anyway, so the
         set is a list rather than a list plus an assumption.
 
+        **`--add-drop-database` is deliberately NOT asked for, and that makes a
+        restore a merge rather than a replacement.** mysqldump emits
+        `DROP TABLE IF EXISTS` before each table it carries and no
+        `DROP DATABASE` at all, so loading this file replaces every table the
+        backup holds and leaves every table it does not. Measured on Windows 11
+        / Docker 29.7.2 (2026-08-23): a table created in `acore_world` after the
+        backup was taken was still there after a full 306 MB restore of that
+        schema — 313 tables where the backup had 312.
+
+        That is the safer of the two, which is why it stays. Adding the flag
+        would make a restore drop the whole schema first, so a load that dies
+        part-way — a killed process, a full disk, the connection going — would
+        leave *nothing* where today it leaves a database missing only whatever
+        the load had not reached. The recovery story here is built on the second
+        shape: `interrupted_restore()` reports a half-applied database and names
+        the safety copy taken beforehand.
+
+        What it costs is stated rather than hidden: a restore does not return a
+        schema to exactly the state the backup describes. `restore()` says so.
+
         Not compressed. Compression would put this process back in the data path
         for the whole payload, and the plain `.sql` produced here is exactly
         what the guide's own restore line consumes.
@@ -824,6 +844,17 @@ def restore(
     Takes a `RestorePlan`, never a path, so a mistyped path is rejected by
     `plan_restore()` before anything is touched rather than half-way through a
     load. `confirm` must be `plan.token`.
+
+    **What "overwrite" means here, exactly: every table the backup holds is
+    replaced, and every table it does not hold is left alone.** A restore is
+    therefore a merge, not a return to the state the backup describes — a table
+    created since it was taken survives it. This follows from `_dump_argv()`
+    declining `--add-drop-database`, which is a deliberate choice recorded
+    there, and it was measured rather than reasoned about: a marker table made
+    after the backup was still in `acore_world` after a full 306 MB restore of
+    that schema (Windows 11 / Docker 29.7.2, 2026-08-23). Rows inside a table
+    the backup does carry are replaced wholesale, which is the case a user
+    restoring characters is actually in.
 
     The order is: re-census, safety dump, marker, load, marker removed. The
     marker is what makes the middle of that sequence recognisable afterwards —

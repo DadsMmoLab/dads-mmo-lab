@@ -909,3 +909,29 @@ def test_the_running_server_refusal_reads_as_english_for_one_container(
     assert any(
         "ac-worldserver, ac-authserver are running" in r for r in both.refusals
     ), both.refusals
+
+
+def test_a_dump_does_not_ask_mysqldump_to_drop_the_database() -> None:
+    """A restore is a merge, and this argv is the reason. Measured, not assumed.
+
+    Without `--add-drop-database`, mysqldump writes `DROP TABLE IF EXISTS`
+    before each table it carries and no `DROP DATABASE` at all, so loading the
+    file replaces the tables the backup holds and leaves every table it does
+    not. Live evidence, Windows 11 / Docker 29.7.2 (2026-08-23): a marker table
+    created in `acore_world` after the backup was taken was still there after a
+    full 306 MB restore of that schema — 313 tables where the backup had 312.
+
+    The flag stays absent on purpose. Adding it would make the load drop the
+    whole schema first, so a restore that dies part-way would leave nothing at
+    all, where today it leaves a database missing only what the load had not yet
+    reached — the shape `interrupted_restore()` and the pre-restore safety copy
+    are both built around. This test exists so the flag cannot be added as an
+    obvious improvement without meeting that argument first, and so the merge
+    behaviour `restore()` documents cannot be changed silently.
+    """
+    argv = DockerMysql("ac-database", "pw")._dump_argv("acore_world")
+
+    assert "--add-drop-database" not in argv, "a restore would stop being recoverable part-way"
+    assert argv[:2] == ["mysqldump", "-uroot"]
+    assert argv[-2:] == ["--databases", "acore_world"]
+    assert "--single-transaction" in argv, "a backup must be takeable while people are playing"

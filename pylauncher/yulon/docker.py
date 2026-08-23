@@ -322,13 +322,40 @@ def pinned_project_name(server_dir: Path) -> str | None:
       is, so it can only be stripped outside them;
     * surrounding single or double quotes are removed, and only a matched pair;
     * an empty assignment UNSETS it (compose falls back to the basename), so it
-      cannot leave an earlier value standing.
+      cannot leave an earlier value standing;
+    * a **UTF-8 byte-order mark** in front of the first line is not part of the
+      first variable's name — see `utf-8-sig` below.
+
+    `utf-8-sig`, not `utf-8`, and this one was found on Windows rather than
+    reasoned about. `_stranger_message()` tells the user in as many words to add
+    `COMPOSE_PROJECT_NAME=<x>` to this file, and on Windows the tools they have
+    to hand put a BOM in front of it: PowerShell 5.1's `Set-Content -Encoding
+    utf8` writes `EF BB BF`, and Notepad's "UTF-8 with BOM" does the same.
+    Decoded as plain `utf-8` that becomes a leading `\\ufeff` on the first line,
+    so `startswith("COMPOSE_PROJECT_NAME=")` is False and the pin is invisible.
+
+    What makes it a defect rather than a quirk is that **compose reads the same
+    file and does not agree**. Measured on Windows 11 / Docker 29.7.2
+    (2026-08-23): with a BOM'd `.env`, `docker compose config` reports the
+    project as `bomtest` while this function reported `None`. The two then
+    disagree about which project this install is, which is the exact condition
+    `install_project()` exists to prevent — and the fallback that hides it,
+    asking compose, is unavailable in the one case this function exists for (an
+    install whose compose files cannot be read). It also made `pin_project_name()`
+    believe nothing was pinned and append a SECOND assignment, where compose's
+    last-one-wins then silently overrides whatever the user had set.
+
+    `utf-8-sig` strips a BOM if there is one and is byte-for-byte `utf-8` if
+    there is not, so nothing else changes. A UTF-16 `.env` — what PowerShell's
+    bare `>` and `Out-File` write — is deliberately NOT handled: compose cannot
+    read one either, so that file is broken for both of us and guessing at an
+    encoding here would be the app inventing an agreement that does not exist.
     """
     env_path = server_dir / ".env"
     if not env_path.is_file():
         return None
     try:
-        text = env_path.read_text(encoding="utf-8", errors="replace")
+        text = env_path.read_text(encoding="utf-8-sig", errors="replace")
     except OSError:
         return None
     found: str | None = None
