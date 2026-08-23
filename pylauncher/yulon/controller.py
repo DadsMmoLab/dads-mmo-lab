@@ -162,11 +162,17 @@ class Controller:
     def stop(self) -> bool:
         """Stop the install, keeping its containers so the next start is staged.
 
-        Uses `docker.stop_staged()`. Stopping with `docker compose down` would
-        remove the containers, and `start()` would then have nothing to start by
-        name — putting the very next start back on `compose up -d` and re-running
-        the one-shot database import. Teardown that really should remove the
-        containers calls `docker.stop()` directly.
+        Uses `docker.stop_staged()`, which keeps the containers so the next
+        start reuses them instead of recreating them.
+
+        An earlier version of this docstring said removing them would put the
+        next start "back on `compose up -d` and re-running the one-shot database
+        import". That has not been true since `start_staged()` began naming its
+        three services explicitly: it selects `db auth world` with `--no-deps`,
+        so compose cannot reach `ac-db-import` even when the containers are
+        gone. Keeping them is now a matter of speed, not of safety, and saying
+        otherwise made the safe action look dangerous (2026-08-23). Teardown
+        that really should remove them is `remove()`.
 
         Returns:
             True if something of this install was running and is now down, False
@@ -174,6 +180,19 @@ class Controller:
             said the same thing either way (review, 2026-08-22).
         """
         return docker.stop_staged(self.spec, self.server_dir)
+
+    def remove(self) -> bool:
+        """Stop the install and remove its containers, keeping every volume.
+
+        The deliberate teardown for a project that needs recreating rather than
+        restarting. Characters are not at risk: the database is a named volume
+        and `docker.remove_staged()` never passes `-v`.
+
+        Returns:
+            True if this install had containers and they are now gone, False if
+            there was nothing of it to remove.
+        """
+        return docker.remove_staged(self.spec, self.server_dir)
 
     # -- polling ---------------------------------------------------------
 

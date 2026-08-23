@@ -127,6 +127,16 @@ def _safe_bindings() -> dict[int, str] | None:
         return None
 
 
+REMOVE_IDLE = "Stop and remove containers…"
+REMOVE_ARMED = "Press again to remove"
+"""Two labels for one button, because a teardown should not be one click away.
+
+The wording changes rather than a dialog appearing: the explanation is a
+paragraph naming what is kept, `problem_label` already renders those, and a
+modal would arrive from a worker thread.
+"""
+
+
 class ControllerView(QWidget):
     """Per-install tabs; see module docstring."""
 
@@ -158,6 +168,7 @@ class ControllerView(QWidget):
         layout.addWidget(self._tabs)
 
         self._restore_plan: wotlk_maintenance.RestorePlan | None = None
+        self._remove_armed = False
         self._build_server_tab()
         self._build_console_tab()
         self._build_accounts_tab()
@@ -190,11 +201,16 @@ class ControllerView(QWidget):
         self.start_button = QPushButton("Start", tab)
         self.stop_button = QPushButton("Stop", tab)
         self.refresh_button = QPushButton("Refresh", tab)
+        # Deliberate, per checklist 6.5: nothing removes a container today, and
+        # whatever does must not be a stray click next to Stop. It arms on the
+        # first press and acts on the second, and anything else disarms it.
+        self.remove_button = QPushButton(REMOVE_IDLE, tab)
         self.start_button.clicked.connect(self.start_server)
         self.stop_button.clicked.connect(self.stop_server)
         self.refresh_button.clicked.connect(self.recheck)
+        self.remove_button.clicked.connect(self.remove_containers)
         row = QHBoxLayout()
-        for b in (self.start_button, self.stop_button, self.refresh_button):
+        for b in (self.start_button, self.stop_button, self.refresh_button, self.remove_button):
             row.addWidget(b)
         box.addWidget(QLabel(f"<b>{self.entry.name}</b> — {self.services.controller.server_dir}"))
         box.addWidget(self.status_label)
@@ -247,6 +263,7 @@ class ControllerView(QWidget):
         up, world up" above "Nothing was stopped: this could equally be another
         install…" (review, 2026-08-22).
         """
+        self._disarm_remove()
         self.problem_label.setText("")
         self.refresh_status()
 
@@ -281,6 +298,7 @@ class ControllerView(QWidget):
     @Slot()
     def start_server(self) -> None:
         """Start the install; a README §12 conflict is shown, never a raw Docker error."""
+        self._disarm_remove()
         self.problem_label.setText("")
         self._set_busy(True)
         self.status_label.setText("status: starting…")
@@ -288,6 +306,7 @@ class ControllerView(QWidget):
 
     @Slot()
     def stop_server(self) -> None:
+        self._disarm_remove()
         self.problem_label.setText("")
         self._set_busy(True)
         self.status_label.setText("status: stopping…")
@@ -341,6 +360,50 @@ class ControllerView(QWidget):
         self.problem_label.setText(msg)
         self.action_failed.emit(msg)
         self.refresh_status()
+
+    @Slot()
+    def remove_containers(self) -> None:
+        """Arm on the first press; remove on the second.
+
+        The action is safe for player data — the database is a named volume and
+        `remove_staged()` never passes `-v` — but it is still a teardown, and it
+        sits next to Stop. Arming says what will happen, in the same label the
+        stop refusals use, before anything is touched.
+        """
+        if not self._remove_armed:
+            self._remove_armed = True
+            self.remove_button.setText(REMOVE_ARMED)
+            self.problem_label.setText(
+                "This stops the server and deletes its containers. Your characters are NOT "
+                "affected — the database lives in a Docker volume, which is kept. The next "
+                "Start recreates the containers, which takes longer than a normal start. "
+                "Press Refresh to cancel."
+            )
+            return
+        self._disarm_remove()
+        self._set_busy(True)
+        self.problem_label.setText("Removing containers…")
+        self._run(self.services.controller.remove, self._remove_done, self._remove_failed)
+
+    def _disarm_remove(self) -> None:
+        self._remove_armed = False
+        self.remove_button.setText(REMOVE_IDLE)
+
+    @Slot(object)
+    def _remove_done(self, result: object) -> None:
+        self._set_busy(False)
+        self.problem_label.setText(
+            "Containers removed; volumes kept. The next Start will recreate them."
+            if result
+            else "There were no containers to remove."
+        )
+        self.refresh_status()
+
+    @Slot(object)
+    def _remove_failed(self, exc: object) -> None:
+        self._set_busy(False)
+        self.problem_label.setText(f"Could not remove the containers: {exc}")
+        self.action_failed.emit(str(exc))
 
     # ----------------------------------------------------------- console tab
 

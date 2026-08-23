@@ -560,16 +560,119 @@ def start_staged(spec: ContainerSpec, server_dir: Path) -> bool:
     return True
 
 
-def stop(server_dir: Path) -> None:
-    """Take the compose project in `server_dir` down, REMOVING its containers.
+def _project_containers(project: str) -> list[str] | None:
+    """Every container compose stamped with `project`, running or exited.
 
-    This is the teardown path (uninstall, or recovering from a broken project).
-    For the stop half of a normal start/stop cycle use `stop_staged()`: removing
-    the containers here is what forces the next start back onto `compose up -d`,
-    and with it the one-shot database import.
+    `container_exists()` cannot answer this: AzerothCore pins container names
+    GLOBALLY (`ac-worldserver`, not `<project>-worldserver`), so a name search
+    finds a second install's container and calls it ours. Filtering on the
+    project label is the only way to ask about this install, and `-a` is what
+    makes it about existence rather than about running.
+
+    Returns None when Docker could not be asked, which callers must not read as
+    "nothing is there".
     """
-    logger.debug(f"stop() called: server_dir={server_dir}")
-    _run(["compose", "down"], cwd=server_dir)
+    proc = _docker(
+        ["ps", "-a", "--filter", f"label={PROJECT_LABEL}={project}", "--format", "{{.Names}}"]
+    )
+    if proc.returncode != 0:
+        logger.warning(f"could not list containers for project {project}: {proc.stderr.strip()}")
+        return None
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def remove_staged(spec: ContainerSpec, server_dir: Path) -> bool:
+    """Stop this install and REMOVE its containers. Volumes are never touched.
+
+    The deliberate teardown, for a project that needs recreating rather than
+    restarting: a container wedged in a state `compose up` will not fix, a
+    compose change that needs a fresh container, or clearing the way before an
+    install is deleted by hand.
+
+    WHAT THIS DOES NOT DO, because it is the whole reason the action is safe:
+    it never removes a volume. The database lives in a named volume
+    (`${DOCKER_VOL_DB:-ac-database}:/var/lib/mysql`) and the client data in
+    another, so `compose down` WITHOUT `-v` leaves every character exactly where
+    it was. `-v` is the flag that would turn this into data loss, and a test
+    asserts the argv never grows one.
+
+    It also no longer costs the next start its database. An earlier version of
+    this module warned that removing containers "forces the next start back onto
+    `compose up -d`, and with it the one-shot database import" — that stopped
+    being true when `start_staged()` began naming its three services explicitly.
+    It selects `db auth world` and `--no-deps`, so compose cannot reach
+    `ac-db-import` whether the containers are missing or not, and it recreates
+    what is gone. The warning outlived the danger (2026-08-23).
+
+    Ownership is proved the same way `stop_staged()` proves it, and refuses the
+    same way, so the two actions cannot disagree about whose containers these
+    are. `compose down` is project-scoped and would not touch a stranger anyway,
+    but a census that cannot establish ownership means something is wrong with
+    this install, and acting confidently on it is how the wrong server gets torn
+    down.
+
+    Returns:
+        True if this install had containers and they are now gone; False if
+        there was nothing of it to remove. Not `compose down`'s exit code, which
+        is 0 for a project that never existed.
+
+    Raises:
+        DockerCommandError: Ownership could not be established, or containers of
+            this install are still there afterwards.
+    """
+    logger.debug(f"remove_staged() called: server_dir={server_dir}")
+    project = install_project(spec, server_dir)
+    if project is None:
+        _refuse_without_an_identity(spec, server_dir)
+        return False
+
+    # The same look-before-touching census as the stop path, for the same
+    # reason: a refusal has to happen before the command, not after it.
+    running = _running(spec, project)
+    if running.unreadable:
+        raise DockerCommandError(
+            f"Docker would not say which project owns {', '.join(running.unreadable)}, so this "
+            f"install in {server_dir} cannot prove those containers are its own. Nothing was "
+            "removed."
+        )
+    if running.strangers:
+        raise DockerCommandError(_stranger_message(running.strangers, project, server_dir))
+
+    before = _project_containers(project)
+    if before is None:
+        raise DockerCommandError(
+            "could not ask Docker which containers this install has, so nothing was removed"
+        )
+    if not before:
+        logger.info("remove_staged(): this install has no containers")
+        return False
+
+    # `down` and not `rm`: it walks the project's own depends_on graph in
+    # reverse, so the servers close their database connections before the
+    # database goes. `--remove-orphans` clears services dropped from the compose
+    # file, which are exactly the leftovers that make a project need recreating.
+    # No `-v`, ever.
+    proc = _docker(["compose", "down", "--remove-orphans"], cwd=server_dir)
+    if proc.returncode != 0:
+        logger.warning(f"compose down failed ({proc.stderr.strip()}); removing by name")
+
+    after = _project_containers(project)
+    if after is None:
+        raise DockerCommandError(
+            "the containers were asked to go, but Docker will no longer say what this install "
+            "has, so the removal cannot be confirmed. Check with `docker ps -a`."
+        )
+    if after:
+        # Only names the census already proved carry this project's label.
+        logger.warning(f"compose down left {after}; removing by name")
+        for name in after:
+            _docker(["rm", "-f", name])
+        after = _project_containers(project) or []
+    if after:
+        raise DockerCommandError(f"still present after remove: {', '.join(after)}")
+
+    logger.info(f"remove_staged(): removed {len(before)} container(s); volumes untouched")
+    return True
 
 
 def _run_docker_stop(container: str) -> None:

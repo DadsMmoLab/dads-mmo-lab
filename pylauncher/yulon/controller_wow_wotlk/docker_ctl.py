@@ -23,7 +23,10 @@ SPEC = docker.ContainerSpec(
 # yulon.docker directly — this package stays the single entry point for WotLK.
 start = docker.start
 start_staged = docker.start_staged
-stop = docker.stop
+# Not `stop`. Sitting next to `stop_staged` that name read as its peer --
+# two ways to stop -- when one keeps the containers and the other deletes
+# them. Checklist 6.5 asks for exactly this rename (2026-08-23).
+remove = docker.remove_staged
 stop_staged = docker.stop_staged
 status = docker.status
 health = docker.health

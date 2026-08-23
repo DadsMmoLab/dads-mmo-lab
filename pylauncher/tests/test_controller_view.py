@@ -423,3 +423,87 @@ def test_a_stop_with_nothing_running_says_so(qapp: object, ps: _Ps, tmp_path: Pa
     ps.names = ""  # nothing of ours is up
     view.stop_server()
     assert "None of this install's servers were running" in view.problem_label.text()
+
+
+def _watch_remove(view: ControllerView, result: bool = True) -> list[int]:
+    """Replace the controller's teardown with a recorder.
+
+    The view's job here is the arming, not the removal; `remove_staged()` has
+    its own tests in test_docker.py, including the mutation that would add the
+    `-v` this button must never cause.
+    """
+    calls: list[int] = []
+
+    def fake_remove() -> bool:
+        calls.append(1)
+        return result
+
+    view.services.controller.remove = fake_remove  # type: ignore[method-assign]
+    return calls
+
+
+def test_removing_containers_takes_two_presses(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """A teardown sitting next to Stop must not be one click away."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    calls = _watch_remove(view)
+
+    view.remove_containers()
+    assert calls == [], "the first press removed something"
+    assert view.remove_button.text() == controller_view_module.REMOVE_ARMED
+
+    view.remove_containers()
+    assert calls == [1]
+    assert view.remove_button.text() == controller_view_module.REMOVE_IDLE, "still armed after"
+
+
+def test_the_armed_warning_says_the_characters_are_kept(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The reason this action is safe is the reason it must be stated.
+
+    Someone reading "delete containers" next to a server they have played on
+    will assume the worst unless told otherwise, and the truth — the database is
+    a volume and volumes are kept — is exactly what makes it pressable.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    _watch_remove(view)
+    view.remove_containers()
+    said = view.problem_label.text()
+    assert "NOT" in said and "characters" in said
+    assert "volume" in said
+    assert "Refresh" in said, "no way out was offered"
+
+
+def test_refresh_cancels_an_armed_remove(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """Arming then walking away must not leave a loaded button behind."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    calls = _watch_remove(view)
+
+    view.remove_containers()
+    assert view.remove_button.text() == controller_view_module.REMOVE_ARMED
+    view.recheck()
+    assert view.remove_button.text() == controller_view_module.REMOVE_IDLE
+
+    view.remove_containers()
+    assert calls == [], "the press after a cancel removed something"
+
+
+def test_starting_or_stopping_also_disarms(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """Any other server action means the user moved on."""
+    for action in ("start_server", "stop_server"):
+        view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+        calls = _watch_remove(view)
+        view.remove_containers()
+        getattr(view, action)()
+        assert view.remove_button.text() == controller_view_module.REMOVE_IDLE, action
+        view.remove_containers()
+        assert calls == [], action
+
+
+def test_a_removal_that_found_nothing_says_so(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """False means "there was nothing of ours", which is not the same as done."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    _watch_remove(view, result=False)
+    view.remove_containers()
+    view.remove_containers()
+    assert "no containers to remove" in view.problem_label.text()

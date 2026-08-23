@@ -50,19 +50,6 @@ def test_start_runs_compose_up(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cwds == [server_dir]
 
 
-def test_stop_runs_compose_down(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`stop()` shells out to `docker compose down` in the server dir."""
-    calls: list[list[str]] = []
-
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
-        calls.append(cmd)
-        return _completed()
-
-    monkeypatch.setattr(docker.runner, "run", fake_run)
-    docker.stop(Path("/tmp/wow"))
-    assert calls == [["docker", "compose", "down"]]
-
-
 def test_start_raises_docker_command_error_on_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1503,3 +1490,179 @@ def test_a_readiness_poll_still_rides_out_a_docker_that_only_stumbles(
 
     monkeypatch.setattr(docker.runner, "run", fake_run)
     assert docker.wait_ready(SPEC.auth, SPEC.world, "realm.example", 3724, 5.0, 0.01) is True
+
+
+# ------------------------------------------------- remove_staged (teardown)
+
+
+def _remove_runner(
+    calls: list[list[str]],
+    *,
+    present: set[str] | None = None,
+    running: set[str] | None = None,
+    owner: str | None = PROJECT,
+    owners: dict[str, str | None] | None = None,
+    inspect_fails: bool = False,
+    down_removes: bool = True,
+    list_fails: bool = False,
+    rm_works: bool = True,
+):
+    """A `runner.run` double for the teardown path.
+
+    `present` is what `docker ps -a --filter label=...` reports (existence);
+    `running` is what `docker ps` reports. They are separate because removal is
+    about the first and ownership refusals are about the second, and a container
+    can be stopped-but-present, which is the state this action exists for.
+    """
+    live = set() if running is None else set(running)
+    exists = set(present if present is not None else live)
+
+    def fake_run(cmd: list[str], cwd=None, timeout: float | None = None):
+        calls.append(cmd)
+        if cmd[:4] == ["docker", "compose", "config", "--format"]:
+            return _completed(stdout='{"name": "' + PROJECT + '"}')
+        if cmd[:3] == ["docker", "compose", "down"]:
+            if down_removes:
+                exists.clear()
+                live.clear()
+            return _completed()
+        if cmd[:2] == ["docker", "inspect"]:
+            if inspect_fails:
+                return _completed(returncode=1, stderr="Cannot connect to the Docker daemon")
+            who = owners.get(cmd[2], owner) if owners is not None else owner
+            return _completed(stdout="" if who is None else who + chr(10))
+        if cmd[:3] == ["docker", "ps", "-a"]:
+            if list_fails:
+                return _completed(returncode=1, stderr="Cannot connect to the Docker daemon")
+            return _completed(stdout="".join(n + "\n" for n in sorted(exists)))
+        if cmd[:2] == ["docker", "ps"]:
+            return _completed(stdout="".join(n + "\n" for n in sorted(live)))
+        if cmd[:3] == ["docker", "rm", "-f"]:
+            if rm_works:
+                exists.discard(cmd[3])
+            return _completed()
+        return _completed()
+
+    return fake_run
+
+
+def test_remove_staged_never_passes_a_flag_that_would_delete_a_volume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one mistake here is unrecoverable, so it is pinned rather than trusted.
+
+    The database is a named volume (`ac-database:/var/lib/mysql`), so
+    `compose down` keeps every character. `compose down -v` deletes them. There
+    is no legitimate reason for this argv to grow a `-v`, and a test is cheaper
+    than finding out.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _remove_runner(calls, present={SPEC.db, SPEC.world}))
+    assert docker.remove_staged(SPEC, Path("/tmp/wow")) is True
+
+    assert ["docker", "compose", "down", "--remove-orphans"] in calls
+    for cmd in calls:
+        assert "-v" not in cmd, cmd
+        assert "--volumes" not in cmd, cmd
+
+
+def test_remove_staged_asks_by_project_label_not_by_container_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AzerothCore pins container names globally, so a name search finds the neighbour.
+
+    `container_exists()` answers "is there an ac-worldserver", which is a
+    different question from "does THIS install still have containers" whenever
+    two installs of the same game exist.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _remove_runner(calls, present={SPEC.db}))
+    docker.remove_staged(SPEC, Path("/tmp/wow"))
+
+    listings = [c for c in calls if c[:3] == ["docker", "ps", "-a"]]
+    assert listings, "existence was never asked about"
+    for cmd in listings:
+        assert any(a.startswith("label=com.docker.compose.project=") for a in cmd), cmd
+
+
+def test_remove_staged_says_false_when_this_install_has_no_containers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`compose down` exits 0 for a project that never existed; that is not a removal."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _remove_runner(calls, present=set()))
+    assert docker.remove_staged(SPEC, Path("/tmp/wow")) is False
+    assert not any(c[:3] == ["docker", "compose", "down"] for c in calls), "nothing to take down"
+
+
+def test_remove_staged_will_not_remove_containers_it_cannot_prove_are_its_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same refusal as the stop path, so the two cannot disagree about ownership."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        _remove_runner(calls, running={SPEC.world}, owner="somebody-elses-server"),
+    )
+    with pytest.raises(docker.DockerCommandError, match="another install"):
+        docker.remove_staged(SPEC, Path("/tmp/wow"))
+    assert not any(c[:3] == ["docker", "compose", "down"] for c in calls)
+
+
+def test_remove_staged_gives_up_rather_than_guessing_when_ownership_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Docker refusing to answer is not the same as "not ours", and must not read as it."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner, "run", _remove_runner(calls, running={SPEC.world}, inspect_fails=True)
+    )
+    with pytest.raises(docker.DockerCommandError, match="cannot prove"):
+        docker.remove_staged(SPEC, Path("/tmp/wow"))
+    assert not any(c[:3] == ["docker", "compose", "down"] for c in calls)
+
+
+def test_remove_staged_finishes_the_job_when_compose_down_removed_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The moved-folder case: compose exits 0 having matched no container.
+
+    The by-name removal that follows is only reached for names the census has
+    already proved carry this project's label.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        _remove_runner(calls, present={SPEC.db, SPEC.world}, down_removes=False),
+    )
+    assert docker.remove_staged(SPEC, Path("/tmp/wow")) is True
+    removed = {c[3] for c in calls if c[:3] == ["docker", "rm", "-f"]}
+    assert removed == {SPEC.db, SPEC.world}
+
+
+def test_remove_staged_refuses_to_report_success_while_containers_remain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reporting a teardown that did not happen is how a stale install gets reused."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        _remove_runner(calls, present={SPEC.db}, down_removes=False, rm_works=False),
+    )
+    with pytest.raises(docker.DockerCommandError, match="still present"):
+        docker.remove_staged(SPEC, Path("/tmp/wow"))
+
+
+def test_remove_staged_will_not_claim_success_when_docker_stops_answering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unanswerable "what is left" is not an empty one."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner, "run", _remove_runner(calls, present={SPEC.db}, list_fails=True)
+    )
+    with pytest.raises(docker.DockerCommandError):
+        docker.remove_staged(SPEC, Path("/tmp/wow"))
