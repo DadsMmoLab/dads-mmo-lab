@@ -539,3 +539,48 @@ def test_docker_sql_says_the_same_thing_when_a_resolved_docker_has_gone(
         DockerSql("ac-database", "hunter2").run_statement("characters", "SELECT 1")
     with pytest.raises(ApplyError, match="Docker could not be found"):
         DockerSql("ac-database", "hunter2").run_file("characters", sql_file)
+
+
+def test_output_that_is_not_utf8_does_not_escape_as_a_decode_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real query against a real server raised UnicodeDecodeError out of here.
+
+    `text=True` on its own decodes strictly, so any byte mysql emits that is not
+    UTF-8 -- a binary column selected as text, a latin1 error message -- came
+    back as `UnicodeDecodeError`. That is neither `ApplyError` nor the
+    `AccountError` that `accounts.create_account` documents as the only type a
+    caller has to handle, so it went straight past both contracts
+    (found live, 2026-08-23).
+
+    This drives the REAL decode path: a genuine subprocess writing genuine
+    non-UTF-8 bytes. Faking `subprocess.run` would skip the only thing under
+    test.
+    """
+    import sys
+
+    sql = DockerSql("ac-database", "hunter2")
+    monkeypatch.setattr(
+        DockerSql,
+        "_argv",
+        lambda self, db, extra=(): [
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.buffer.write(b'\\x81\\x81 ok')",
+        ],
+    )
+
+    out = sql.query("auth", "SELECT 1")
+
+    # 0x81 is deliberate: it is undefined in cp1252 AND an orphan continuation
+    # byte in UTF-8, so a strict decode raises on every platform. 0xbf does not
+    # -- cp1252 renders it happily, so the first version of this test passed on
+    # Windows with the fix removed, which is a test that cannot fail where it is
+    # run.
+    #
+    # The guarantee is that nothing raises and the readable part survives, NOT
+    # that a particular replacement character appears: `text=True` decodes with
+    # the locale codec, so those bytes come back as U+FFFD on a UTF-8 box and as
+    # perfectly valid cp1252 characters on this one. Asserting U+FFFD passed on
+    # Linux and failed on Windows, which is the wrong thing to pin.
+    assert "ok" in out, out

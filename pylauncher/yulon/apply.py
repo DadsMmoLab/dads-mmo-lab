@@ -173,6 +173,15 @@ class DockerSql:
                 input=statement,
                 capture_output=True,
                 text=True,
+                # Not the default strict decode. `text=True` alone raises
+                # UnicodeDecodeError out of here on any byte mysql emits that is
+                # not UTF-8 -- a binary column selected as text, or a latin1
+                # error message -- and that type is neither `ApplyError` nor the
+                # `AccountError` that `accounts.create_account` documents as the
+                # only one a caller has to handle. `runner.py` already decodes
+                # this way. Found by a live query against a real server
+                # (2026-08-23).
+                errors="replace",
                 check=False,
                 env=self._env(),
             )
