@@ -1968,6 +1968,32 @@ def test_repair_import_catches_an_import_that_exited_zero_having_done_nothing(
     assert ["docker", "compose", "up", "--no-deps", "ac-db-import"] in calls
 
 
+def test_repair_import_accepts_an_import_that_seeded_its_own_accounts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finished import can leave player data behind, and that is a repair, not a failure.
+
+    The live gate on yulon-ubuntu (2026-08-23) ran a first-ever import against
+    an empty volume on an install carrying mod-city-bots. It finished exit 0
+    with every schema full — and with 400 accounts and 400 characters the
+    module's own `db-auth`/`db-characters` update files had written. Demanding
+    `imported` from the second probe therefore failed the action over its own
+    success, and would have failed it on every install this project ships,
+    since the shipped ones carry modules.
+
+    Safe only because of the order this asserts around: `populated` is a refusal
+    *before* the one-shot runs, so a database populated afterwards was populated
+    by the run that just happened.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _repair_runner(calls, running={SPEC.db}))
+    seeded = docker.ImportState(
+        "populated", "400 rows in acore_auth.account, 400 rows in acore_characters.characters"
+    )
+    assert docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, seeded)) is True
+    assert ["docker", "compose", "up", "--no-deps", "ac-db-import"] in calls
+
+
 def test_repair_import_refuses_a_database_it_could_not_ask(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

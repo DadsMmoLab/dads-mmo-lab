@@ -743,13 +743,23 @@ DatabaseImport = Literal["absent", "partial", "imported", "populated", "unreadab
 * `absent` — nothing of the schema set is there. Never imported.
 * `partial` — some of it is there and some is not. An import that stopped.
 * `imported` — all of it is there, and nobody has played on it yet.
-* `populated` — there are accounts or characters. Somebody's server.
+* `populated` — there are accounts or characters. Possibly somebody's server.
 * `unreadable` — the database could not be asked, so nothing is established.
 
 The line that matters is between `populated` and everything else: it is drawn
 on player data, not on completeness, because player data is the thing whose loss
 cannot be undone. A half-imported database that somehow holds characters is
 `populated` and is refused, even though the import really did stop half-way.
+
+`populated` does NOT mean "somebody played here", and calling it that was
+wrong until a live import said so (yulon-ubuntu, 2026-08-23). The one-shot
+applies every module's `data/sql/db-auth` and `db-characters` updates as well
+as AzerothCore's own, so a module is free to seed rows: a first-ever import of
+an install carrying mod-city-bots came out of the box with 400 accounts and 400
+characters, none of them a person's. The state is still refused, because
+nothing here can tell a seeded row from a made one and the fail-closed answer
+is the only safe one — but a caller must read it as "there is data that a
+re-import would destroy", not as "this server has been played on".
 """
 
 
@@ -816,7 +826,11 @@ def repair_import(
       matters.** Re-importing over a populated database destroys characters, and
       it is not offered a second time for a user who asks twice — the way back
       from a bad database is Restore, which exists, and which was live-gated
-      against a real 386 MB backup;
+      against a real 386 MB backup. On an install whose modules seed accounts
+      this is also the refusal a *finished* repair leaves behind — pressing
+      again lands here rather than on "already imported", which is a worse
+      sentence for that case and still the right answer, since nothing can
+      prove the rows are not a person's (see `DatabaseImport`);
     * the probe says the import already completed, or could not be asked at all.
 
     Two commands, both naming their service explicitly:
@@ -835,15 +849,35 @@ def repair_import(
 
     The exit code of that second command is not the answer, for the same reason
     `remove_staged()` does not believe `compose down`'s: the probe is run again
-    afterwards, and only a database that now reads as imported counts.
+    afterwards, and only a database that is no longer repairable counts.
+
+    **Live-gated on yulon-ubuntu, 2026-08-23**, against a copy of a real
+    AzerothCore + playerbots + city-bots install on a brand-new empty volume,
+    Docker 29.1.3. Three things this docstring had asserted without a daemon:
+
+    * *Attached `up` terminates.* It does, and so does the detached database
+      start. One whole call took 209.0s against a one-shot container that ran
+      208.0s, so `up` came back within about a second of the import exiting.
+      The database half: 23s from `compose up -d --no-deps <db>` to healthy on
+      a brand-new volume, and 7.1s start-to-refusal on an existing container.
+      "A full import takes several minutes", which is what the button says, is
+      the right order of magnitude — 215s and 208s for two full imports.
+    * *`compose up` re-runs a one-shot whose container already exists and has
+      exited.* It does, with no `--force-recreate`. The same `rt-ac-db-import`
+      container went `StartedAt 16:59:10 → 17:05:06`, `FinishedAt 17:02:45 →
+      17:08:34`, exit 0 both times, and the second run refilled three schemas
+      that had been `DROP DATABASE`d in between.
+    * *A finished import leaves `acore_auth.account` empty.* **False**, and
+      this is what the post-check below had to change for — see the comment
+      there.
 
     Returns:
-        True once the probe says the databases are imported.
+        True once the probe says the databases are no longer repairable.
 
     Raises:
         DockerCommandError: any of the refusals above, the database never became
-            healthy, or the import ran and the databases still do not read as
-            imported.
+            healthy, or the import ran and the databases still read as `absent`,
+            `partial` or `unreadable`.
     """
     logger.debug(f"repair_import() called: server_dir={server_dir}")
     service = spec.import_service
@@ -926,13 +960,29 @@ def repair_import(
         logger.warning(f"{service} exited {proc.returncode}: {proc.stderr.strip()}")
 
     after = probe()
-    if after.state != "imported":
+    # `populated` counts as success, and finding that out took a live import.
+    # An AzerothCore import is not only AzerothCore's SQL: every module in the
+    # tree gets its own `data/sql/db-auth` and `db-characters` updates applied
+    # by the same one-shot, and a module is free to seed rows. Measured on
+    # yulon-ubuntu, 2026-08-23: a first-ever import of an install carrying
+    # mod-city-bots finished exit 0 with all three schemas full AND 400 rows in
+    # `acore_auth.account` plus 400 in `acore_characters.characters`, every one
+    # of them written by that module's own update files. Against `!= "imported"`
+    # this raised "Nothing is imported that was not imported before" over an
+    # import that had just done everything — the action reporting failure for
+    # its own success, on the servers this project actually ships.
+    #
+    # Safe because of the order: `populated` is refused *before* the import
+    # runs, so a database that is populated afterwards was populated by the run
+    # that just happened. The only states that mean the one-shot achieved
+    # nothing are the two it was allowed to start from, and `unreadable`.
+    if after.state not in ("imported", "populated"):
         raise DockerCommandError(
             f"{service} ran, but the databases still read as {after.state} ({after.detail}). "
             f"Nothing is imported that was not imported before. `docker compose logs {service}` "
             f"in {server_dir} will say what it was unable to do."
         )
-    logger.info(f"repair_import(): {service} finished and the databases now read as imported")
+    logger.info(f"repair_import(): {service} finished; the databases now read as {after.state}")
     return True
 
 

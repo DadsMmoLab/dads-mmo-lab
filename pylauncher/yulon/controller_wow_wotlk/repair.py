@@ -18,7 +18,13 @@ order, and only the first two have certain answers:
    This is the question the refusal is built on, because it is the one about
    something that cannot be recreated. It is asked whenever those tables exist,
    *before* any judgement about completeness — a half-imported database that
-   holds characters is still somebody's server.
+   holds characters is still somebody's server. What it cannot tell is *who*
+   made the rows: the import applies every module's `data/sql/db-auth` and
+   `db-characters` updates too, and a live import on yulon-ubuntu (2026-08-23)
+   left 400 accounts and 400 characters on a never-played install, all of them
+   written by mod-city-bots' own update files. So a freshly imported server
+   here can read `populated` and there is no honest way from this module to say
+   otherwise — see `docker.DatabaseImport`.
 3. *Did the import finish?* This one is only half-answerable, and the honest
    answer is written into the state rather than hidden. A schema with no tables
    proves the import did not get to it; a schema with tables proves nothing
