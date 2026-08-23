@@ -257,6 +257,33 @@
   protocol for the harness: 0 ready, 3 reboot required (`wsl --install` forces one on a box with no
   WSL), 2 needs a human. Also a support diagnostic. `main.py` had no tests before it.
 
+- **THE CLEAN-BOX RUN PASSED (2026-08-23 10:01).** `yulon.exe --provision` on a Windows 11 box that
+  had never had Docker: `ok: true`, `docker_ready: true`, `skipped: none`, `manual_steps: none`,
+  and independently `docker version` -> `client=29.7.2 server=29.7.2`. The chain it walked, in
+  order: WSL2 installed under a UAC prompt -> `reboot_required` -> exit 3 -> reboot -> a
+  **659,189,680-byte Docker Desktop download over the certifi-widened TLS path** -> silent install
+  under a second UAC (`install --quiet --accept-license --backend=wsl-2`) -> Docker Desktop found
+  and started -> daemon ready.
+  **`docker_cli` came back as `C:\Program Files\Docker\Docker\resources\bin\docker.EXE`, not
+  `docker`** — Cross-cutting defect 3 demonstrated rather than argued: the process that ran the
+  installer really cannot see the PATH it wrote, and really does resolve the CLI another way.
+  So all three Windows provisioning prerequisites 6.3 names are now proven on real hardware state,
+  not by mechanism. 6.3 itself remains `[blocked]` on 6.2 — this proves the prerequisites, not the
+  install path.
+
+- **Two defects only the clean box could find, both in code the suite called green.**
+  1. `--provision` crashed with `UnicodeEncodeError` one line after the 659 MB download.
+     `json.dumps(..., ensure_ascii=False)` met a redirected Windows stdout, which is cp1252, and
+     platform.py's own step text contains an arrow. The report line was unencodable exactly when it
+     had something worth reporting. Fixed; the test encodes the line as cp1252, which is what raised.
+  2. Nested virtualisation was off on the guest, so `wsl --install` succeeded and WSL2 still could
+     not start. Now enabled by the harness on every run, because restoring a checkpoint restores VM
+     *configuration* too and a by-hand fix is silently undone.
+  Also learned the hard way: **do not start any process in the guest's interactive session while a
+  UAC prompt is up.** Doing so switches away from the secure desktop and the prompt comes back as
+  `Start-Process: The operation was canceled by the user`, which reads exactly like a product
+  failure. One whole pass was lost to that.
+
 - **How the clean-box run has to be driven (measured on the Win11 VM, 2026-08-23).** A plain `ssh`
   exec cannot do it, for two independent reasons. (1) An ssh session is **SessionId 0**, and Windows
   OpenSSH kills the whole descendant process tree when the ssh command returns — a fire-and-forget
