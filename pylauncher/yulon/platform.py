@@ -815,11 +815,23 @@ def verify_context() -> ssl.SSLContext:
         return context
     try:
         context.load_verify_locations(cafile=certifi.where())
-    except OSError as exc:
+    except Exception as exc:
+        # Deliberately broader than OSError, and `where()` is inside the try for
+        # the same reason: locating the bundle can fail in ways that are not
+        # OSError. A frozen build whose certifi module spec is broken makes
+        # `importlib.resources.files("certifi")` raise AttributeError (measured).
+        # The caller that matters here is `detect_public_ip`, which catches only
+        # (OSError, ValueError) -- so anything else does not become a wrong
+        # diagnosis, it becomes an unhandled traceback out of `networking.plan()`,
+        # which is worse than the "offline?" lie this function exists to prevent.
+        # Degrading to the OS store is correct for every one of these failures:
+        # the context still verifies, it just knows fewer roots
+        # (review finding, 2026-08-23).
         logger.warning(
-            f"certifi's bundle at {certifi.where()} could not be read ({exc}); continuing with "
-            "the OS root store alone. Connections are still fully verified, but a host whose "
-            "root this machine has not materialized will fail to verify."
+            "certifi's bundle could not be used (%s); continuing with the OS root store alone. "
+            "Connections are still fully verified, but a host whose root this machine has not "
+            "materialized will fail to verify.",
+            exc,
         )
     return context
 
@@ -916,7 +928,10 @@ def _is_verification_failure(exc: OSError) -> bool:
     cannot spin.
     """
     current: BaseException = exc
-    for _ in range(_REASON_UNWRAP_LIMIT):
+    # +1 because the limit counts HOPS, and the exception handed in has been
+    # followed zero times: without it a certificate error at the limit's own
+    # depth answers False and the constant overstates the code by one.
+    for _ in range(_REASON_UNWRAP_LIMIT + 1):
         if isinstance(current, ssl.SSLCertVerificationError):
             return True
         if isinstance(current, DownloadError) and current.verification:

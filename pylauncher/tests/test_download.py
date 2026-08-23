@@ -500,7 +500,12 @@ def test_the_os_roots_survive_certifi_being_added_to_them() -> None:
     os_roots = _fingerprints(ssl.create_default_context())
     ours = _fingerprints(platform.verify_context())
 
-    assert os_roots, "no OS roots to compare against; this box cannot answer the question"
+    if not os_roots:
+        # A slim container without ca-certificates, or SSL_CERT_FILE pointed
+        # elsewhere. The box cannot answer the question, which is a skip -- as
+        # a failure it reports a red for a condition already diagnosed as
+        # not-a-defect (review finding, 2026-08-23).
+        pytest.skip("this box exposes no OS trust anchors to compare against")
     assert os_roots <= ours, (
         f"{len(os_roots - ours)} OS root(s) are no longer trusted: certifi replaced the OS "
         "store instead of widening it"
@@ -783,7 +788,7 @@ class _SelfSignedHandler(http.server.BaseHTTPRequestHandler):
 
 
 @pytest.fixture
-def self_signed_https() -> Iterator[str]:
+def self_signed_https(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     """A real HTTPS server on 127.0.0.1 with a certificate no root store trusts.
 
     Loopback and a committed certificate, so this needs no network and reaches
@@ -794,6 +799,17 @@ def self_signed_https() -> Iterator[str]:
     immediately and the handshake fails in milliseconds rather than sitting on a
     timeout.
     """
+    # `urlopen` is called with an explicit context, which makes it build a FRESH
+    # opener per call -- and `build_opener()` installs `ProxyHandler(getproxies())`.
+    # 127.0.0.1 is not in urllib's default bypass set (Windows' `<local>` matches
+    # dotless hosts only), so on a machine with a proxy configured these tests
+    # would connect to the proxy instead of the fixture and go red for no defect.
+    # Emptying `getproxies` is deterministic where NO_PROXY is not: on Windows the
+    # proxy can come from the registry, which no_proxy does not govern. The irony
+    # of a corporate proxy breaking the tests that exist to protect corporate
+    # proxy users is why this is patched rather than documented (review finding,
+    # 2026-08-23).
+    monkeypatch.setattr(urllib.request, "getproxies", dict)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(certfile=str(SELF_SIGNED_PEM))
     server = http.server.HTTPServer(("127.0.0.1", 0), _SelfSignedHandler)
