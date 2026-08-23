@@ -681,10 +681,17 @@ because a test double answered a question the real seam cannot answer. The tests
 rewritten to model the real answers, but a double that models a function correctly is still not
 the function. These are the checks nobody here can perform, in the order they would fail:
 
-1. **Clone the real repository into a tmp dir and run `generate-compose` against it.** This is the
-   check that would have caught the base-file collision. Record what the checkout actually has at
-   its root, and confirm `git status --porcelain -- docker-compose.yml` prints nothing on a fresh
-   clone of the branch `catalog.json` names — the whole replace-it rule rests on that.
+1. ~~**Clone the real repository into a tmp dir and run `generate-compose` against it.**~~ **Half
+   settled, 2026-08-24, and the half that mattered.** The premise the whole replace-it rule rests on
+   is confirmed: `mod-playerbots/azerothcore-wotlk` at branch `Playerbot` — the repo and branch
+   `catalog.json` names — **does** ship a `docker-compose.yml` at its root, 7,930 bytes, listed
+   alongside `.dockerignore` and `env/` (GitHub contents API, so an observation rather than an
+   inference from this repo's fixtures). That confirms the missed blocker was real: without the
+   exception, `generate-compose` would have refused every native install because the file it wants
+   to write is already there. Still open: that `git status --porcelain -- docker-compose.yml` prints
+   nothing on a fresh clone. It follows from the file being tracked and untouched, and
+   `is_unmodified()` keeps the refusal when git says anything else or cannot answer — so the
+   remaining risk is that the rule is too strict, not that it overwrites something.
 2. **Diff the generated files against `docker compose config` on the proven yulon-ubuntu install**
    (already asked for above, still not done).
 3. **`docker compose -f… images -q` against a project that has been built but never started.**
