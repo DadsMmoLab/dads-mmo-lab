@@ -90,7 +90,19 @@ class ControllerServices:
         # `DockerMysql` can ask what schemas exist without naming one to connect
         # to, `DockerSql` can then read inside them. See `repair.import_state()`.
         controller = Controller(
-            spec, server_dir, import_probe=lambda: wotlk_repair.import_state(sql, mysql)
+            spec,
+            server_dir,
+            # Only for a game that named a one-shot import service. `for_wotlk()`
+            # is called for EVERY install in state.json, not just wow-wotlk, and
+            # `repair.import_state()` looks for the `acore_*` schemas by name — so
+            # attaching it unconditionally told a healthy CMaNGOS install its
+            # databases were never imported, and offered it the destructive
+            # Repair button. `import_service` is the same fact `repair_import()`
+            # already refuses on, so the two agree by construction rather than by
+            # a second list of which games are AzerothCore (review, 2026-08-23).
+            import_probe=(
+                (lambda: wotlk_repair.import_state(sql, mysql)) if spec.import_service else None
+            ),
         )
         return cls(
             controller=controller,
@@ -268,7 +280,15 @@ class ControllerView(QWidget):
         self.console_log.wait(5000)
         waiter = getattr(self._jobs, "wait", None)
         if callable(waiter):
-            waiter(10_000)
+            # Derived from the grace, not a flat ten seconds. `_JobWorker.run()`
+            # calls its work synchronously, so `thread.quit()` cannot interrupt a
+            # blocking `subprocess.run` — and `main.py` records that a QThread
+            # destroyed while running ABORTS the process (0xC0000409) rather than
+            # warning. A stop now takes 58-91s measured, so a ten-second join
+            # made that abort the ordinary outcome of closing the window during
+            # one. Waiting out the grace is the lesser evil: the alternative is
+            # not a faster exit, it is a crash (review, 2026-08-23).
+            waiter(int((docker.STOP_GRACE_SECONDS + 30) * 1000))
 
     # -------------------------------------------------------- background work
 
@@ -318,12 +338,20 @@ class ControllerView(QWidget):
         status = result
         if not isinstance(status, InstallStatus):
             return
-        parts = [
-            f"db {'up' if status.db else 'down'}",
-            f"auth {'up' if status.auth else 'down'}",
-            f"world {'up' if status.world else 'down'}",
-        ]
-        self.status_label.setText("status: " + ", ".join(parts))
+        if not self._busy:
+            # Only while nothing of ours is running. The five-second poll used to
+            # overwrite the label unconditionally, which was invisible at a
+            # ten-second stop and is not at a five-minute one: the user pressed
+            # Stop, read "stopping…", and then watched it revert to "world up"
+            # for the next minute and a half with both buttons dead and no
+            # explanation. The buttons below are still updated — it is the
+            # sentence that has to hold still, not the state (review, 2026-08-23).
+            parts = [
+                f"db {'up' if status.db else 'down'}",
+                f"auth {'up' if status.auth else 'down'}",
+                f"world {'up' if status.world else 'down'}",
+            ]
+            self.status_label.setText("status: " + ", ".join(parts))
         self.start_button.setEnabled(not status.all_running and not self._busy)
         self.stop_button.setEnabled(status.any_running and not self._busy)
         self._ask_about_the_import(status)
@@ -389,11 +417,25 @@ class ControllerView(QWidget):
         self.status_label.setText(f"status: Docker not reachable ({exc})")
 
     def _set_busy(self, busy: bool) -> None:
-        """Lock the Server buttons while an action of ours is running."""
+        """Lock the Server buttons while an action of ours is running.
+
+        All four, not two. Remove and Repair were left live while their own
+        action ran, so a second arm-and-press during a multi-minute import or
+        teardown started a second one on top of the first — and whichever
+        finished first called `_set_busy(False)` and unlocked Start while the
+        other was still writing schemas (review, 2026-08-23).
+        """
         self._busy = busy
         if busy:
             self.start_button.setEnabled(False)
             self.stop_button.setEnabled(False)
+            self.remove_button.setEnabled(False)
+            self.repair_button.setEnabled(False)
+        else:
+            # Re-enabled, not re-shown: `_show_repair()` owns whether Repair is
+            # visible at all, and an invisible button being enabled is harmless.
+            self.remove_button.setEnabled(True)
+            self.repair_button.setEnabled(True)
 
     @Slot()
     def start_server(self) -> None:

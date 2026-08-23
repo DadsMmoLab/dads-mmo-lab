@@ -201,7 +201,9 @@ def test_server_tab_status_start_and_port_conflict_message(
     view.stop_server()
     # Stop keeps the containers (`compose stop`), so the next start stays staged.
     assert any(c[:3] == ["docker", "compose", "stop"] for c in ps.calls)
-    assert ["docker", "compose", "down"] not in ps.calls
+    assert not any(
+        cmd[:3] == ["docker", "compose", "down"] for cmd in ps.calls
+    ), "a stop removed containers"
 
 
 def test_a_refused_stop_is_readable_on_screen_not_just_emitted(
@@ -702,3 +704,88 @@ def test_the_database_is_asked_about_its_import_once_per_time_it_comes_up(
     ps.names = "ac-database\n"
     view.refresh_status()
     assert asked == [1, 1], "the probe never ran again after the database came back"
+
+
+# ------------------------------------------- what the review of 2026-08-23 found
+
+
+def test_the_status_line_holds_still_while_an_action_of_ours_is_running(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A five-minute stop made a five-second poll into a liar.
+
+    `stop_server()` writes "stopping…"; the poll then answered "db up, auth up,
+    world up" and kept answering it for the whole drain, with both buttons dead
+    and nothing on screen explaining why. Invisible at a ten-second stop, and
+    not at a ninety-second one.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    ps.names = "\n".join([WOTLK.container_spec().db, WOTLK.container_spec().world])
+
+    view._set_busy(True)
+    view.status_label.setText("status: stopping…")
+    view.refresh_status()
+    assert view.status_label.text() == "status: stopping…", "the poll overwrote a live action"
+
+    view._set_busy(False)
+    view.refresh_status()
+    assert "db up" in view.status_label.text(), "the label never came back"
+
+
+def test_every_action_button_is_locked_while_an_action_runs(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Remove and Repair stayed live during their own multi-minute actions.
+
+    Two presses is not a defence when the button is still there afterwards: the
+    second arm-and-press launches a second teardown or a second import, and
+    whichever finishes first calls `_set_busy(False)` and unlocks Start while
+    the other is still writing.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view._set_busy(True)
+    for name in ("start_button", "stop_button", "remove_button", "repair_button"):
+        assert not getattr(view, name).isEnabled(), name
+    view._set_busy(False)
+    for name in ("remove_button", "repair_button"):
+        assert getattr(view, name).isEnabled(), name
+
+
+def test_closing_the_window_waits_out_the_grace_rather_than_aborting(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A ten-second join plus a five-minute stop is a documented process abort.
+
+    `_JobWorker.run()` calls its work synchronously, so `thread.quit()` cannot
+    interrupt a blocking `subprocess.run`, and `main.py` records that a QThread
+    destroyed while running aborts the process (0xC0000409). The join therefore
+    has to follow the grace rather than sit at a number chosen when a stop took
+    ten seconds.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    waited: list[int] = []
+    view._jobs.wait = lambda ms: waited.append(ms)  # type: ignore[attr-defined]
+    view.shutdown()
+    assert waited, "no join at all"
+    assert waited[0] >= docker.STOP_GRACE_SECONDS * 1000, waited
+
+
+def test_a_game_that_names_no_import_service_is_offered_no_repair(
+    qapp: object, tmp_path: Path
+) -> None:
+    """`for_wotlk()` is called for every install, not only AzerothCore ones.
+
+    `repair.import_state()` looks for the `acore_*` schemas by name, so wiring
+    it unconditionally told a healthy CMaNGOS install its databases were never
+    imported — and offered it the button that overwrites them.
+    """
+    spec = WOTLK.container_spec()
+    assert spec.import_service, "wotlk should name one, or this test proves nothing"
+    assert (
+        ControllerServices.for_wotlk(WOTLK, tmp_path).controller.import_probe is not None
+    ), "the game that HAS an import service lost its probe"
+
+    without = WOTLK.model_copy(
+        update={"containers": WOTLK.containers.model_copy(update={"db_import": None})}
+    )
+    assert ControllerServices.for_wotlk(without, tmp_path).controller.import_probe is None

@@ -84,9 +84,15 @@ def import_state(sql: SqlQuery, mysql: MysqlDocker) -> docker.ImportState:
     answer rather than an exception, and `unreadable` is not `repairable`.
     """
     try:
-        present = [name for name in CORE_DATABASES if name in mysql.databases()]
+        # Asked once and held. Written as a comprehension condition, the call is
+        # re-evaluated for every element of `CORE_DATABASES` — three real
+        # `docker exec ... SHOW DATABASES` round trips instead of one, which
+        # quietly made this probe five execs while its own docstring, its test,
+        # and `phase6-decisions.md` §5 all said three (review, 2026-08-23).
+        existing = mysql.databases()
     except MaintenanceError as exc:
         return docker.ImportState("unreadable", str(exc))
+    present = [name for name in CORE_DATABASES if name in existing]
     if not present:
         return docker.ImportState(
             "absent", f"none of {', '.join(CORE_DATABASES)} exists on this server yet"
@@ -130,15 +136,23 @@ def import_state(sql: SqlQuery, mysql: MysqlDocker) -> docker.ImportState:
         )
     if len(empty) == len(CORE_DATABASES):
         return docker.ImportState(
-            "absent", f"{', '.join(empty)} hold no tables at all, so the import never ran"
+            "absent", f"{_holds(empty)} no tables at all, so the import never ran"
         )
+    filled = [name for name in CORE_DATABASES if name not in empty]
     return docker.ImportState(
         "partial",
-        f"{', '.join(empty)} hold no tables, while "
-        + "; ".join(
-            f"{name} has {len(tables[name])}" for name in CORE_DATABASES if name not in empty
-        ),
+        f"{_holds(empty)} no tables, while "
+        + "; ".join(f"{name} has {len(tables[name])} tables" for name in filled),
     )
+
+
+def _holds(names: list[str]) -> str:
+    """`"acore_auth holds"` for one name, `"a, b hold"` for several.
+
+    A detail string here is rendered verbatim into the Server tab, so it has to
+    agree with itself grammatically for one schema as well as three.
+    """
+    return f"{', '.join(names)} {'holds' if len(names) == 1 else 'hold'}"
 
 
 def _player_data(sql: SqlQuery, through: Db, tables: dict[str, set[str]]) -> str | None:

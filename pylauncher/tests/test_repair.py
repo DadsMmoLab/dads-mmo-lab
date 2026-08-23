@@ -21,8 +21,10 @@ class _Mysql:
     def __init__(self, *schemas: str, fails: str = "") -> None:
         self.schemas = schemas
         self.fails = fails
+        self.asked = 0
 
     def databases(self) -> tuple[str, ...]:
+        self.asked += 1
         if self.fails:
             raise MaintenanceError(self.fails)
         return ("information_schema", "mysql", *self.schemas)
@@ -177,3 +179,17 @@ def test_the_probe_connects_through_a_schema_that_exists() -> None:
     repair.import_state(sql, _Mysql(WORLD))
     assert sql.asked, "nothing was queried at all"
     assert sql.asked[0][0] == "world", sql.asked[0]
+
+
+def test_the_schema_listing_is_asked_for_once_not_once_per_schema() -> None:
+    """`SHOW DATABASES` is a real `docker exec`, and it was being run three times.
+
+    Written as a comprehension condition — `[n for n in CORE_DATABASES if n in
+    mysql.databases()]` — the call is re-evaluated for every element, so the
+    probe cost five execs while its own docstring, the poll guard that fires it,
+    and `phase6-decisions.md` §5 all justified themselves against three
+    (review, 2026-08-23).
+    """
+    mysql = _Mysql("acore_auth", "acore_world", "acore_characters")
+    repair.import_state(_Sql({"acore_auth": ["account"]}, {"account": 0}), mysql)
+    assert mysql.asked == 1, f"SHOW DATABASES ran {mysql.asked} times"

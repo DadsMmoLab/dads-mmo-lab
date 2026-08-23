@@ -634,7 +634,7 @@ def remove_staged(spec: ContainerSpec, server_dir: Path) -> bool:
     logger.debug(f"remove_staged() called: server_dir={server_dir}")
     project = install_project(spec, server_dir)
     if project is None:
-        _refuse_without_an_identity(spec, server_dir)
+        _refuse_without_an_identity(spec, server_dir, "Nothing was removed.")
         return False
 
     # The same look-before-touching census as the stop path, for the same
@@ -663,7 +663,15 @@ def remove_staged(spec: ContainerSpec, server_dir: Path) -> bool:
     # database goes. `--remove-orphans` clears services dropped from the compose
     # file, which are exactly the leftovers that make a project need recreating.
     # No `-v`, ever.
-    proc = _docker(["compose", "down", "--remove-orphans"], cwd=server_dir)
+    # The grace matters here as much as it does on the stop path, and it was
+    # missed the first time round: this button is offered on a RUNNING server,
+    # under copy that says the characters are not affected. At Docker's 10s
+    # default that copy is false for a populated realm — the worldserver is
+    # SIGKILLed mid-drain and the save queue is what is lost, not the containers
+    # (review, 2026-08-23; the measurement is under `STOP_GRACE_SECONDS`).
+    proc = _docker(
+        ["compose", "down", "-t", str(STOP_GRACE_SECONDS), "--remove-orphans"], cwd=server_dir
+    )
     if proc.returncode != 0:
         logger.warning(f"compose down failed ({proc.stderr.strip()}); removing by name")
 
@@ -677,6 +685,11 @@ def remove_staged(spec: ContainerSpec, server_dir: Path) -> bool:
         # Only names the census already proved carry this project's label.
         logger.warning(f"compose down left {after}; removing by name")
         for name in after:
+            # Stopped with the full grace BEFORE it is removed. `rm -f` is a
+            # SIGKILL with no grace at all, so leaving it as the only fallback
+            # left a hard-kill path reachable from the same button whose copy
+            # promises the characters survive (review, 2026-08-23).
+            _run_docker_stop(name)
             _docker(["rm", "-f", name])
         after = _project_containers(project) or []
     if after:
@@ -842,7 +855,7 @@ def repair_import(
 
     project = install_project(spec, server_dir)
     if project is None:
-        _refuse_without_an_identity(spec, server_dir)
+        _refuse_without_an_identity(spec, server_dir, "The import was not re-run.")
         raise DockerCommandError(
             f"the install in {server_dir} cannot say which compose project it is — its compose "
             f"files are unreadable and no {PROJECT_NAME_VAR} is pinned — so the import was not "
@@ -872,7 +885,12 @@ def repair_import(
         # everything else — a user who followed the refusal above would otherwise
         # have no way back to a state this action accepts.
         logger.info(f"repair_import(): starting {spec.db} alone; the import needs it")
-        _run(["compose", "up", "-d", "--no-deps", spec.db], cwd=server_dir)
+        # `compose_services()[0]`, not `spec.db`: compose takes SERVICE names and
+        # `spec.db` is a CONTAINER name. They are equal for AzerothCore and
+        # `ContainerSpec` exists precisely so a game whose compose file disagrees
+        # can say so — reaching past it here would have made that promise false
+        # for the first such game (review, 2026-08-23).
+        _run(["compose", "up", "-d", "--no-deps", spec.compose_services()[0]], cwd=server_dir)
         if not wait_db_healthy(spec.db, timeout=db_timeout):
             raise DockerCommandError(
                 f"{spec.db} did not report healthy within {db_timeout:.0f}s, so nothing was "
@@ -937,7 +955,13 @@ def _run_docker_stop(container: str) -> None:
     A container that has vanished since it was listed is not an error: the goal
     state is "not running", and it is already there.
     """
-    proc = _docker(["stop", "--timeout", str(STOP_GRACE_SECONDS), container])
+    # `-t` and not `--timeout`. Docker renamed the long form: through 27.x the
+    # flag is spelled `-t, --time`, and `--timeout` only became valid in CLI
+    # 28.0.0 (docker/cli#5485). The short form has meant the same thing across
+    # every version this project can meet, so it is the only spelling that is
+    # safe here — `--timeout` would exit 125 with `unknown flag` on any older
+    # daemon, turning a working by-name stop into a hard failure (review).
+    proc = _docker(["stop", "-t", str(STOP_GRACE_SECONDS), container])
     if proc.returncode == 0:
         return
     if "No such container" in proc.stderr:
@@ -946,7 +970,9 @@ def _run_docker_stop(container: str) -> None:
     raise DockerCommandError(f"docker stop {container} failed: {proc.stderr.strip()}")
 
 
-def _refuse_without_an_identity(spec: ContainerSpec, server_dir: Path) -> None:
+def _refuse_without_an_identity(
+    spec: ContainerSpec, server_dir: Path, nothing_was: str = "Nothing was stopped."
+) -> None:
     """Raise if anything is running under our names while we cannot name our project.
 
     Returns quietly when nothing of the sort is up: there is simply nothing to
@@ -972,7 +998,7 @@ def _refuse_without_an_identity(spec: ContainerSpec, server_dir: Path) -> None:
         raise DockerCommandError(
             f"could not ask Docker what is running, and the install in {server_dir} has no "
             f"{PROJECT_NAME_VAR} pinned either, so nothing about it can be established. "
-            "Nothing was stopped."
+            f"{nothing_was}"
         )
     named = {line.strip() for line in listed}
     up = [name for name in (spec.world, spec.auth, spec.db) if name in named]
@@ -982,7 +1008,7 @@ def _refuse_without_an_identity(spec: ContainerSpec, server_dir: Path) -> None:
     raise DockerCommandError(
         f"cannot tell which containers belong to the install in {server_dir}: its compose files "
         "are unreadable and no COMPOSE_PROJECT_NAME is pinned, while "
-        f"{', '.join(up)} are running. Nothing was stopped."
+        f"{', '.join(up)} are running. {nothing_was}"
     )
 
 
@@ -1165,7 +1191,10 @@ def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
     # measured SIGKILLing a populated worldserver mid-save (see
     # `STOP_GRACE_SECONDS`). It is per container, not for the whole project, and
     # only the worldserver ever comes close to using it.
-    proc = _docker(["compose", "stop", "--timeout", str(STOP_GRACE_SECONDS)], cwd=server_dir)
+    # `-t` for the same reason as `_run_docker_stop()`; compose has always
+    # accepted the short form, and spelling the two call sites alike means a
+    # future reader does not have to know which CLI they are looking at.
+    proc = _docker(["compose", "stop", "-t", str(STOP_GRACE_SECONDS)], cwd=server_dir)
     if proc.returncode != 0:
         logger.warning(f"compose stop failed ({proc.stderr.strip()}); stopping containers by name")
     if not before.ours:

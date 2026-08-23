@@ -41,7 +41,9 @@ def test_start_runs_compose_up(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
     cwds: list[Path | None] = []
 
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         calls.append(cmd)
         cwds.append(cwd)
         return _completed()
@@ -146,7 +148,9 @@ def test_wait_ready_returns_true_once_markers_present(monkeypatch: pytest.Monkey
     """`wait_ready()` returns True once both containers are up with ready markers."""
     monkeypatch.setattr(docker.time, "sleep", lambda _seconds: None)
 
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         if cmd[:2] == ["docker", "ps"]:
             return _completed(0, "ac-authserver\nac-worldserver\n", "")
         if cmd[:2] == ["docker", "inspect"] and "{{.State.Status}}" in cmd[-1]:
@@ -178,7 +182,9 @@ def test_wait_ready_tolerates_transient_docker_ps_failure(
     monkeypatch.setattr(docker.time, "sleep", lambda _seconds: None)
     calls = {"ps": 0}
 
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         if cmd[:2] == ["docker", "ps"]:
             calls["ps"] += 1
             if calls["ps"] == 1:
@@ -213,7 +219,9 @@ def test_wait_db_healthy_for_uses_spec_db_container(monkeypatch: pytest.MonkeyPa
     """`wait_db_healthy_for()` reads the container name from the spec."""
     seen: list[str] = []
 
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         if cmd[:2] == ["docker", "inspect"]:
             seen.append(cmd[2])
             return _completed(0, "healthy", "")
@@ -281,7 +289,9 @@ def test_start_staged_names_the_services_so_compose_cannot_pick_the_import(
     calls: list[list[str]] = []
     cwds: list[Path | None] = []
 
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         calls.append(cmd)
         cwds.append(cwd)
         if cmd[:2] == ["docker", "ps"]:  # the post-start confirmation
@@ -424,7 +434,9 @@ def test_wait_ready_ignores_the_previous_runs_ready_marker(
     # What it returns for THIS run only: still loading.
     this_run = "starting up again\n>> Loaded 13567 Quest Offer Reward Locale Strings\n"
 
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         seen.append(cmd)
         if cmd[:2] == ["docker", "ps"]:
             return _completed(stdout=f"{SPEC.auth}\n{SPEC.world}\n")
@@ -454,7 +466,9 @@ def test_wait_ready_still_succeeds_when_this_run_is_actually_ready(
 ) -> None:
     """The scoping must not break the case it exists to make honest."""
 
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         if cmd[:2] == ["docker", "ps"]:
             return _completed(stdout=f"{SPEC.auth}\n{SPEC.world}\n")
         if cmd[:2] == ["docker", "inspect"]:
@@ -481,7 +495,9 @@ def test_logs_without_a_readable_start_time_falls_back_to_everything(
 ) -> None:
     """An unreadable start time must degrade to the old behaviour, not to silence."""
 
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         if cmd[:2] == ["docker", "inspect"]:
             return _completed(returncode=1, stderr="no such container")
         return _completed(stdout="everything\n")
@@ -563,7 +579,9 @@ def test_stop_staged_uses_compose_stop_so_the_containers_survive(
     )
     assert docker.stop_staged(SPEC, Path("/tmp/wow")) is True
     assert any(cmd[:3] == ["docker", "compose", "stop"] for cmd in calls)
-    assert ["docker", "compose", "down"] not in calls
+    assert not any(
+        cmd[:3] == ["docker", "compose", "down"] for cmd in calls
+    ), "a stop removed containers"
     assert not any(cmd[:2] == ["docker", "stop"] for cmd in calls), "did not trust compose stop"
 
 
@@ -646,7 +664,9 @@ def test_stop_staged_gives_up_rather_than_guessing_when_ownership_is_unreadable(
     with pytest.raises(docker.DockerCommandError, match="would not say which project owns") as e:
         docker.stop_staged(SPEC, Path("/tmp/wow"))
     assert not any(cmd[:2] == ["docker", "stop"] for cmd in calls)
-    assert ["docker", "compose", "down"] not in calls
+    assert not any(
+        cmd[:3] == ["docker", "compose", "down"] for cmd in calls
+    ), "a stop removed containers"
     assert "another install" not in str(e.value) or "rather than" in str(e.value)
 
 
@@ -683,9 +703,9 @@ def test_stop_staged_finishes_the_job_when_compose_stopped_nothing(
     )
     assert docker.stop_staged(SPEC, Path("/tmp/moved-install")) is True
     assert [cmd for cmd in calls if cmd[:2] == ["docker", "stop"]] == [
-        ["docker", "stop", "--timeout", _GRACE, SPEC.world],
-        ["docker", "stop", "--timeout", _GRACE, SPEC.auth],
-        ["docker", "stop", "--timeout", _GRACE, SPEC.db],
+        ["docker", "stop", "-t", _GRACE, SPEC.world],
+        ["docker", "stop", "-t", _GRACE, SPEC.auth],
+        ["docker", "stop", "-t", _GRACE, SPEC.db],
     ]
 
 
@@ -721,7 +741,8 @@ def test_docker_stop_treats_a_vanished_container_as_already_stopped(
         if cmd[:2] == ["docker", "stop"]:
             live.discard(cmd[-1])
             return _completed(
-                returncode=1, stderr="Error response from daemon: No such container: " + cmd[2]
+                returncode=1,
+                stderr="Error response from daemon: No such container: " + cmd[-1],
             )
         return _completed()
 
@@ -800,9 +821,9 @@ def test_stop_staged_reads_the_pin_when_compose_cannot_be_parsed(
     monkeypatch.setattr(docker.runner, "run", fake_run)
     assert docker.stop_staged(SPEC, tmp_path) is True
     assert [cmd for cmd in calls if cmd[:2] == ["docker", "stop"]] == [
-        ["docker", "stop", "--timeout", _GRACE, SPEC.world],
-        ["docker", "stop", "--timeout", _GRACE, SPEC.auth],
-        ["docker", "stop", "--timeout", _GRACE, SPEC.db],
+        ["docker", "stop", "-t", _GRACE, SPEC.world],
+        ["docker", "stop", "-t", _GRACE, SPEC.auth],
+        ["docker", "stop", "-t", _GRACE, SPEC.db],
     ]
 
 
@@ -905,9 +926,9 @@ def test_stop_staged_stops_a_moved_install_that_WAS_pinned(
     monkeypatch.setattr(docker.runner, "run", fake_run)
     assert docker.stop_staged(SPEC, tmp_path) is True
     assert [cmd for cmd in calls if cmd[:2] == ["docker", "stop"]] == [
-        ["docker", "stop", "--timeout", _GRACE, SPEC.world],
-        ["docker", "stop", "--timeout", _GRACE, SPEC.auth],
-        ["docker", "stop", "--timeout", _GRACE, SPEC.db],
+        ["docker", "stop", "-t", _GRACE, SPEC.world],
+        ["docker", "stop", "-t", _GRACE, SPEC.auth],
+        ["docker", "stop", "-t", _GRACE, SPEC.db],
     ]
     assert live == set()
 
@@ -1023,7 +1044,7 @@ def test_compose_stop_asks_for_the_measured_grace(monkeypatch: pytest.MonkeyPatc
     )
     assert docker.stop_staged(SPEC, Path("/tmp/wow")) is True
     stops = [cmd for cmd in calls if cmd[:3] == ["docker", "compose", "stop"]]
-    assert stops == [["docker", "compose", "stop", "--timeout", _GRACE]]
+    assert stops == [["docker", "compose", "stop", "-t", _GRACE]]
 
 
 def test_the_by_name_fallback_asks_for_the_measured_grace_too(
@@ -1037,13 +1058,15 @@ def test_the_by_name_fallback_asks_for_the_measured_grace_too(
     """
     calls: list[list[str]] = []
 
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         calls.append(cmd)
         return _completed()
 
     monkeypatch.setattr(docker.runner, "run", fake_run)
     docker._run_docker_stop(SPEC.world)
-    assert calls == [["docker", "stop", "--timeout", _GRACE, SPEC.world]]
+    assert calls == [["docker", "stop", "-t", _GRACE, SPEC.world]]
 
 
 def test_the_stop_paths_impose_no_subprocess_deadline_of_their_own(
@@ -1064,7 +1087,9 @@ def test_the_stop_paths_impose_no_subprocess_deadline_of_their_own(
     )
     seen: list[float | None] = []
 
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         if cmd[:2] == ["docker", "stop"] or cmd[:3] == ["docker", "compose", "stop"]:
             seen.append(timeout)
         return inner(cmd, cwd, timeout)
@@ -1204,7 +1229,9 @@ def test_wait_ready_is_not_fooled_by_a_container_in_restart_backoff(
     """
     monkeypatch.setattr(docker.time, "sleep", lambda _seconds: None)
 
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         if cmd[:2] == ["docker", "ps"]:
             return _completed(stdout=f"{SPEC.auth}\n{SPEC.world}\n")
         if cmd[:2] == ["docker", "inspect"]:
@@ -1325,7 +1352,9 @@ def off_path_docker(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     monkeypatch.setattr(docker.platform, "_resolved_docker_cli", OFF_PATH_EXE)
     calls: list[list[str]] = []
 
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         calls.append(cmd)
         return _completed(stdout="running\tsomewhen")
 
@@ -1341,7 +1370,9 @@ def no_docker(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     monkeypatch.setattr(docker.platform, "_which", lambda name, path=None: None)
     escaped: list[list[str]] = []
 
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         escaped.append(cmd)
         raise AssertionError(f"spawned {cmd[0]} on a host that has no docker")
 
@@ -1367,14 +1398,20 @@ def test_every_command_is_built_with_the_resolved_cli(off_path_docker: list[list
     assert off_path_docker, "nothing ran"
     assert all(cmd[0] == OFF_PATH_EXE for cmd in off_path_docker), off_path_docker
     # ...and nothing else moved: the command each site sends is unchanged.
-    assert [cmd[1:3] for cmd in off_path_docker] == [
+    # The stop row is read whole rather than through the two-element slice the
+    # others use. Sliced, it became `["stop", "-t"]` when the grace arrived — a
+    # row that no longer asserted the container name reaches argv at all, unlike
+    # every one of its neighbours (review, 2026-08-23).
+    assert [cmd[1:3] for cmd in off_path_docker if cmd[1] != "stop"] == [
         ["compose", "up"],
         ["compose", "config"],
         ["inspect", SPEC.world],
-        ["stop", "--timeout"],
         ["inspect", SPEC.world],
         ["inspect", SPEC.world],
         ["logs", SPEC.world],
+    ]
+    assert [cmd[1:] for cmd in off_path_docker if cmd[1] == "stop"] == [
+        ["stop", "-t", _GRACE, SPEC.world]
     ]
 
 
@@ -1391,7 +1428,9 @@ def test_stop_staged_reaches_compose_through_the_resolved_cli(
     calls: list[list[str]] = []
     live = {SPEC.db, SPEC.auth, SPEC.world}
 
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         calls.append(cmd)
         rest = cmd[1:]
         if rest[:3] == ["compose", "config", "--format"]:
@@ -1558,7 +1597,9 @@ def test_a_readiness_poll_still_rides_out_a_docker_that_only_stumbles(
     """
     stumbles = iter([True, False])
 
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         if cmd[1] == "ps":
             if next(stumbles):
                 return _completed(returncode=1, stderr="Cannot connect to the Docker daemon")
@@ -1639,7 +1680,9 @@ def test_remove_staged_never_passes_a_flag_that_would_delete_a_volume(
     monkeypatch.setattr(docker.runner, "run", _remove_runner(calls, present={SPEC.db, SPEC.world}))
     assert docker.remove_staged(SPEC, Path("/tmp/wow")) is True
 
-    assert ["docker", "compose", "down", "--remove-orphans"] in calls
+    down = [cmd for cmd in calls if cmd[:3] == ["docker", "compose", "down"]]
+    assert down, "nothing was taken down"
+    assert "--remove-orphans" in down[0], down[0]
     for cmd in calls:
         assert "-v" not in cmd, cmd
         assert "--volumes" not in cmd, cmd
@@ -1982,7 +2025,9 @@ def test_repair_import_refuses_an_install_that_cannot_name_its_project(
     """With no identity there is no telling whose database would be overwritten."""
     calls: list[list[str]] = []
 
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         calls.append(cmd)
         if cmd[:3] == ["docker", "compose", "config"]:
             return _completed(returncode=1, stderr="no configuration file provided")
@@ -1992,3 +2037,128 @@ def test_repair_import_refuses_an_install_that_cannot_name_its_project(
     with pytest.raises(docker.DockerCommandError, match="which compose project"):
         docker.repair_import(SPEC, tmp_path, _probe(UNIMPORTED, IMPORTED))
     assert not any(c[:3] == ["docker", "compose", "up"] for c in calls)
+
+
+# ------------------------------------------- what the review of 2026-08-23 found
+
+
+def test_no_stop_path_uses_a_flag_spelling_docker_only_learned_in_28(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--timeout` is a Docker CLI 28.0.0 spelling; `-t` has always worked.
+
+    Through 27.x the long form of this flag is `--time`, so `docker stop
+    --timeout 300 x` exits 125 with `unknown flag` on any older CLI — turning
+    the by-name fallback, which exists for installs that can least afford to
+    fail, into a hard error. The short form means the same thing on every
+    version this project can meet, so it is the only one that is safe to send.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner, "run", _stop_runner(calls, running={SPEC.db, SPEC.auth, SPEC.world})
+    )
+    docker.stop_staged(SPEC, Path("/tmp/wow"))
+    monkeypatch.setattr(docker.runner, "run", _remove_runner(calls, present={SPEC.db}))
+    docker.remove_staged(SPEC, Path("/tmp/wow"))
+
+    graced = [cmd for cmd in calls if _GRACE in cmd]
+    assert graced, "no command carried the grace at all"
+    for cmd in graced:
+        assert "-t" in cmd, cmd
+        assert "--timeout" not in cmd, cmd
+        assert "--time" not in cmd, cmd
+
+
+def test_the_teardown_gives_a_populated_server_the_same_grace_a_stop_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Remove is offered on a RUNNING server, under copy promising no data loss.
+
+    `compose down` at Docker's 10s default SIGKILLs a populated worldserver
+    mid-drain — measured — so the button whose armed text says the characters
+    are kept was the one path still able to lose them.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _remove_runner(calls, present={SPEC.db, SPEC.world}))
+    assert docker.remove_staged(SPEC, Path("/tmp/wow")) is True
+
+    down = [cmd for cmd in calls if cmd[:3] == ["docker", "compose", "down"]]
+    assert down == [["docker", "compose", "down", "-t", _GRACE, "--remove-orphans"]], down
+
+
+def test_the_teardowns_by_name_fallback_stops_before_it_removes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`docker rm -f` is a SIGKILL with no grace at all.
+
+    Putting the grace on `compose down` alone left a hard-kill path reachable
+    from the same button, in exactly the case that reaches it: a moved install
+    whose compose files no longer match, which is not a reason to lose a save
+    queue.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        _remove_runner(calls, present={SPEC.db, SPEC.world}, down_removes=False),
+    )
+    assert docker.remove_staged(SPEC, Path("/tmp/wow")) is True
+
+    order = [
+        cmd for cmd in calls if cmd[:2] == ["docker", "stop"] or cmd[:3] == ["docker", "rm", "-f"]
+    ]
+    for name in (SPEC.db, SPEC.world):
+        stopped = order.index(["docker", "stop", "-t", _GRACE, name])
+        removed = order.index(["docker", "rm", "-f", name])
+        assert stopped < removed, f"{name} was removed before it was stopped: {order}"
+
+
+def test_repair_starts_a_compose_service_not_a_container_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`compose up` takes SERVICE names; `spec.db` is a CONTAINER name.
+
+    They happen to be equal for AzerothCore, which is why reaching past
+    `compose_services()` looked harmless. `ContainerSpec` exists so a game whose
+    compose file names its services differently can say so, and this is the one
+    call that would have silently ignored it.
+    """
+    spec = docker.ContainerSpec(
+        db="pinned-db-container",
+        auth="pinned-auth-container",
+        world="pinned-world-container",
+        ports=(3724, 8085),
+        services=("db-service", "auth-service", "world-service"),
+        import_service="import-service",
+    )
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _repair_runner(calls, running=set()))
+    assert docker.repair_import(spec, Path("/tmp/wow"), _probe(UNIMPORTED, IMPORTED)) is True
+
+    started = [c for c in calls if c[:5] == ["docker", "compose", "up", "-d", "--no-deps"]]
+    assert started == [["docker", "compose", "up", "-d", "--no-deps", "db-service"]], started
+
+
+def test_repair_asks_the_database_only_after_it_has_started_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The order is the whole justification for starting the database at all.
+
+    Both the probe and the import need a running database, so a probe asked
+    first would answer `unreadable` for the very install this action exists for
+    and refuse it. Nothing pinned that ordering, so moving the two lines was
+    free.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _repair_runner(calls, running=set()))
+
+    asked_after: list[bool] = []
+
+    def probe() -> docker.ImportState:
+        asked_after.append(
+            any(c[:5] == ["docker", "compose", "up", "-d", "--no-deps"] for c in calls)
+        )
+        return UNIMPORTED if len(asked_after) == 1 else IMPORTED
+
+    assert docker.repair_import(SPEC, Path("/tmp/wow"), probe) is True
+    assert asked_after[0] is True, "the database was probed before it was started"

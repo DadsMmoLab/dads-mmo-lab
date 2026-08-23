@@ -144,7 +144,9 @@ def test_stop_keeps_the_containers_so_the_next_start_is_staged(
     fake_runner.ps_lines = "t-db\nt-auth\nt-world\n"
     Controller(SPEC, SERVER_DIR).stop()
     assert any(c[:3] == ["docker", "compose", "stop"] for c in fake_runner.calls)
-    assert ["docker", "compose", "down"] not in fake_runner.calls
+    assert not any(
+        cmd[:3] == ["docker", "compose", "down"] for cmd in fake_runner.calls
+    ), "a stop removed containers"
 
 
 def test_status_reports_which_of_our_containers_are_running(fake_runner: _FakeRunner) -> None:
