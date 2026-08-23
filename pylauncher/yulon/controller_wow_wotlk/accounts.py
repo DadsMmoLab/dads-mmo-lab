@@ -230,10 +230,15 @@ def _text_literal(text: str) -> str:
     exactly as `AccountMgr::GetId()` is.
 
     `CONVERT(… USING utf8mb4)` was the obvious spelling and is the wrong one:
-    its result carries the connection's default collation, so on MySQL 8.4
-    (`utf8mb4_0900_ai_ci`) every lookup died with `ERROR 1267 Illegal mix of
-    collations`. Found against the real database on 2026-08-23, not by a unit
-    test — a fake SQL seam cannot have an opinion about collations.
+    its result carries the DEFAULT COLLATION OF THE TARGET CHARSET with
+    IMPLICIT coercibility — on MySQL 8.4 that is `utf8mb4_0900_ai_ci`, which
+    ties with the column's `utf8mb4_unicode_ci` and every lookup died with
+    `ERROR 1267 Illegal mix of collations`. (This file said "the connection's
+    default collation" when it was written on 2026-08-23; the connection was
+    `latin1_swedish_ci` on the box where the error was reproduced, so that was
+    never the mechanism — corrected 2026-08-23 after a review probed it.) Found
+    against the real database, not by a unit test: a fake SQL seam cannot have
+    an opinion about collations.
     """
     return f"_utf8mb4 {_hex_literal(text.encode())}"
 
@@ -248,12 +253,30 @@ def create_account(
     *,
     gm_level: int = NO_GM,
 ) -> AccountResult:
-    """Create one game account, or report that the name is already taken.
+    """Create one game account, or bring an existing one up to what was asked for.
 
     Reproduces what `AccountMgr::CreateAccount()` does, in the same order: the
     `account` row, then `realmcharacters` for every realm that has no counter
     for it yet. An `account_access` row is written only when `gm_level` is
-    above `NO_GM`.
+    above what the account already holds.
+
+    **Every call drives the account to the same end state, so repeating a call
+    that died half way finishes it.** There is no transaction to lean on: every
+    statement is its own `docker exec`, so the `account` row is committed before
+    the two after it can even start. Until 2026-08-23 this function returned
+    early the moment the name existed, which meant a call interrupted after that
+    first commit left an account whose GM grant NO later call could ever make —
+    every retry reported "already exists" and wrote nothing (review,
+    2026-08-23). The steps after the account row therefore run on every path,
+    not only the one that inserted it: `realmcharacters` is idempotent as
+    AzerothCore wrote it, and the GM grant is skipped when the account is
+    already at the level.
+
+    An account that exists keeps its credentials — salt and verifier are never
+    rewritten, so a second call with a different password does not lock the
+    owner out — and its GM level is only ever raised. `gm_level` means "at
+    least this", so the default cannot demote an administrator and a caller
+    asking for 1 cannot strip a 3.
 
     **`gm_level` defaults to 0 — no `account_access` row at all.** The guide
     pairs `account create` with `account set gmlevel <name> 3 -1`, but that is
@@ -262,36 +285,62 @@ def create_account(
     server's own `account create` grants nothing. Defaulting to 3 would make
     every account a full administrator, so the second family member to make a
     character could delete the realm. The bootstrap admin passes `gm_level=3`
-    explicitly.
+    explicitly — which now works even when the console already made that
+    account, and did not before.
 
     Returns:
-        `AccountResult` with `created=True` for a new account, or
-        `created=False` when the username was already present — in which case
-        nothing is written and the existing account's id and GM level are
-        reported unchanged. Callers tell the two apart on `created`; a genuine
-        failure never returns.
+        `AccountResult`. `created` is True only when THIS call wrote the
+        `account` row; False means the name was already taken (by an earlier
+        call, by the console, or by whoever won a race with us) and its
+        password was left alone. `gm_level` is the level the account holds on
+        return — the higher of what was asked for and what it already had. A
+        genuine failure never returns.
 
     Raises:
         AccountError: the username or password is unusable, `gm_level` is out
-            of range, or the write failed. Never contains the password.
+            of range, or a statement failed. The seam's own `ApplyError` (no
+            Docker, MySQL refused the statement, the connection dropped) is
+            translated here rather than left to escape, so this is the only
+            type a caller has to handle — it used to leak out of the lookup and
+            out of every statement but the first (review, 2026-08-23). Never
+            contains the password.
     """
     name = _checked_username(username)
     _check_password(password)
     if not NO_GM <= gm_level <= MAX_GM_LEVEL:
         raise AccountError(f"GM level must be between {NO_GM} and {MAX_GM_LEVEL}, got {gm_level}")
 
+    account_id, created = _account_row(sql, name, password)
+    # AccountMgr::CreateAccount runs LOGIN_INS_REALM_CHARACTERS_INIT right after
+    # the insert. Reproduced verbatim; its `WHERE acctid IS NULL` makes it
+    # idempotent, which is what lets it run on the already-exists path too and
+    # repair an account whose counters never got written.
+    _run(
+        sql,
+        "INSERT INTO realmcharacters (realmid, acctid, numchars)"
+        " SELECT realmlist.id, account.id, 0 FROM realmlist, account"
+        " LEFT JOIN realmcharacters ON acctid=account.id WHERE acctid IS NULL",
+        f"seed the realm character counters for {name}",
+    )
+    level = _ensure_gm(sql, account_id, gm_level)
+    return AccountResult(username=name, account_id=account_id, created=created, gm_level=level)
+
+
+def _account_row(sql: SqlSeam, name: str, password: str) -> tuple[int, bool]:
+    """The account's id, and whether *this* call wrote its row.
+
+    Never touches a row that is already there: re-salting a taken name would
+    silently change the owner's password, which is the one thing worse than
+    refusing (`tests/integration/test_accounts_live.py` checks that against a
+    real database).
+    """
     existing = _account_id(sql, name)
     if existing is not None:
-        logger.info(f"account {name} already exists (id {existing}), leaving it alone")
-        return AccountResult(
-            username=name,
-            account_id=existing,
-            created=False,
-            gm_level=_gm_level(sql, existing),
-        )
+        logger.info(f"account {name} already exists (id {existing}), keeping its password")
+        return existing, False
 
     salt, verifier = registration_data(name, password)
-    logger.info(f"creating account {name} (gm level {gm_level})")  # never the password
+    logger.info(f"creating account {name}")  # never the password
     try:
         sql.run_statement(
             _ACCOUNTS_DB,
@@ -308,14 +357,12 @@ def create_account(
         # with that name and there is one.
         raced = _account_id(sql, name)
         if raced is None:
+            # The failure is named but not quoted: this is the only statement
+            # carrying the salt and verifier, and MySQL echoes the statement
+            # back in some errors. `from exc` keeps the reason on the chain.
             raise AccountError(f"could not create account {name}: the insert failed") from exc
         logger.info(f"account {name} appeared while we were inserting it (id {raced})")
-        return AccountResult(
-            username=name,
-            account_id=raced,
-            created=False,
-            gm_level=_gm_level(sql, raced),
-        )
+        return raced, False
 
     account_id = _account_id(sql, name)
     if account_id is None:
@@ -323,35 +370,41 @@ def create_account(
         # instead of returning a made-up id that later writes would attach to
         # the wrong account.
         raise AccountError(f"account {name} was inserted but cannot be read back")
+    return account_id, True
 
-    # AccountMgr::CreateAccount runs LOGIN_INS_REALM_CHARACTERS_INIT right
-    # after the insert. Reproduced verbatim; its `WHERE acctid IS NULL` makes it
-    # idempotent, so it is safe on a server that already has the rows.
-    sql.run_statement(
-        _ACCOUNTS_DB,
-        "INSERT INTO realmcharacters (realmid, acctid, numchars)"
-        " SELECT realmlist.id, account.id, 0 FROM realmlist, account"
-        " LEFT JOIN realmcharacters ON acctid=account.id WHERE acctid IS NULL",
-    )
 
-    if gm_level > NO_GM:
-        _grant_gm(sql, account_id, gm_level)
+def _ensure_gm(sql: SqlSeam, account_id: int, gm_level: int) -> int:
+    """Raise the account to `gm_level` if it is not there yet; return the level it holds.
 
-    return AccountResult(username=name, account_id=account_id, created=True, gm_level=gm_level)
+    Reading the current level first is what makes `gm_level` a floor rather than
+    an assignment, and it is also what makes a repeated call cheap: the retry
+    that finishes a half-applied create writes the row, the one after that sees
+    the level and writes nothing.
+    """
+    current = _gm_level(sql, account_id)
+    if gm_level <= current:
+        return current
+    logger.info(f"granting GM level {gm_level} to account {account_id}")
+    _grant_gm(sql, account_id, gm_level)
+    return gm_level
 
 
 def _grant_gm(sql: SqlSeam, account_id: int, gm_level: int) -> None:
     """Write the `account_access` row (`LOGIN_INS_ACCOUNT_ACCESS`), for every realm.
 
     `ON DUPLICATE KEY UPDATE` rather than a plain insert because the primary key
-    is `(id, RealmID)`: on the retry path an account can already carry a row,
-    and the caller asked for a level, not for an error.
+    is `(id, RealmID)` and `_ensure_gm()` reaches here for accounts that already
+    hold a LOWER level — promoting 1 to 3 hits that key, and the caller asked
+    for a level, not for an error. (When this was written on 2026-08-23 it
+    justified itself with a "retry path" that no call could reach; the
+    convergence fix in `create_account()` is what made the branch real.)
     """
-    sql.run_statement(
-        _ACCOUNTS_DB,
+    _run(
+        sql,
         f"INSERT INTO account_access (id, gmlevel, RealmID)"
         f" VALUES ({account_id}, {gm_level}, {ALL_REALMS})"
         f" ON DUPLICATE KEY UPDATE gmlevel = {gm_level}",
+        f"grant GM level {gm_level} to account {account_id}",
     )
 
 
@@ -363,24 +416,50 @@ def _account_id(sql: SqlSeam, username: str) -> int | None:
     anything could ask.
     """
     literal = _text_literal(username)
-    rows = _rows(sql.query(_ACCOUNTS_DB, f"SELECT id FROM account WHERE username = {literal}"))
+    rows = _query_rows(
+        sql,
+        f"SELECT id FROM account WHERE username = {literal}",
+        f"look up account {username}",
+    )
     return int(rows[0]) if rows else None
 
 
 def _gm_level(sql: SqlSeam, account_id: int) -> int:
     """The account's GM level for all realms, or `NO_GM` when it has no `account_access` row."""
-    rows = _rows(
-        sql.query(
-            _ACCOUNTS_DB,
-            f"SELECT gmlevel FROM account_access WHERE id = {account_id}"
-            f" AND RealmID = {ALL_REALMS}",
-        )
+    rows = _query_rows(
+        sql,
+        f"SELECT gmlevel FROM account_access WHERE id = {account_id} AND RealmID = {ALL_REALMS}",
+        f"read the GM level of account {account_id}",
     )
     return int(rows[0]) if rows else NO_GM
 
 
-def _rows(output: str) -> list[str]:
-    """The non-empty lines of a `--skip-column-names` result."""
+def _run(sql: SqlSeam, statement: str, what: str) -> None:
+    """Run one statement, in this module's failure vocabulary rather than the seam's.
+
+    Every call into `SqlSeam` from this module goes through here, through
+    `_query_rows()`, or through the insert in `_account_row()` (which needs its
+    own handler for the race). That is what makes `create_account()`'s `Raises:`
+    block exhaustive instead of aspirational.
+    """
+    try:
+        sql.run_statement(_ACCOUNTS_DB, statement)
+    except ApplyError as exc:
+        raise AccountError(f"could not {what}: {exc}") from exc
+
+
+def _query_rows(sql: SqlSeam, statement: str, what: str) -> list[str]:
+    """The non-empty lines of a `--skip-column-names` result, or `AccountError`.
+
+    A query that failed must never arrive here as an empty result: `no rows`
+    means "this username is free" to `_account_id()`, so a database that is
+    merely unreachable would read as a green light to insert. `DockerSql.query`
+    checks the exit code for exactly that reason; this converts what it raises.
+    """
+    try:
+        output = sql.query(_ACCOUNTS_DB, statement)
+    except ApplyError as exc:
+        raise AccountError(f"could not {what}: {exc}") from exc
     return [line.strip() for line in output.splitlines() if line.strip()]
 
 

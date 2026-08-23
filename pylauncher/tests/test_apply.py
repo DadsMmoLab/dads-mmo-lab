@@ -286,6 +286,77 @@ def test_docker_sql_keeps_the_password_and_the_sql_out_of_argv(
     assert isinstance(env, dict) and env["MYSQL_PWD"] == "hunter2"  # value only in the env
 
 
+def test_docker_sql_query_keeps_the_password_and_the_sql_out_of_argv_as_well(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The read half gets the same argv guarantee as the write half.
+
+    `query()` adds two client flags and changes nothing else: the statement
+    still goes over stdin and the root password still lives only in the
+    environment. None of that was pinned when the method landed, so moving the
+    statement into `-e <sql>` — putting a statement that can carry a password
+    into world-readable argv — left the whole suite green (review, 2026-08-23).
+
+    `--batch` fixes the separator to a tab whether or not the client thinks it
+    has a terminal, and `--skip-column-names` drops the header; the account
+    module reads the result as one value per line, so both are load-bearing.
+    """
+    import subprocess
+
+    seen: list[list[str]] = []
+    kwargs_seen: list[dict[str, object]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        kwargs_seen.append(kwargs)
+        return subprocess.CompletedProcess(argv, 0, "12401\n", "a warning on stderr")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    rows = DockerSql("ac-database", "hunter2").query(
+        "auth", "SELECT id FROM account WHERE username = _utf8mb4 X'4142'"
+    )
+    assert seen == [
+        [
+            "docker",
+            "exec",
+            "-i",
+            "-e",
+            "MYSQL_PWD",
+            "ac-database",
+            "mysql",
+            "-uroot",
+            "--batch",
+            "--skip-column-names",
+            "acore_auth",
+        ]
+    ]
+    assert rows == "12401\n"  # stdout: the rows are the answer, stderr is not
+    assert kwargs_seen[0]["input"] == "SELECT id FROM account WHERE username = _utf8mb4 X'4142'"
+    env = kwargs_seen[0]["env"]
+    assert isinstance(env, dict) and env["MYSQL_PWD"] == "hunter2"
+    assert "hunter2" not in " ".join(seen[0])
+
+
+def test_a_query_that_failed_raises_instead_of_looking_like_an_empty_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreachable database must not read as "no rows".
+
+    `accounts._account_id()` treats an empty result as "this username is free"
+    and goes on to insert, so a `query()` that swallowed the exit code would
+    turn a broken database into a silent duplicate-account attempt. The check
+    was there from the start and nothing held it there (review, 2026-08-23).
+    """
+    import subprocess
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 1, "", "ERROR 2013 (HY000): Lost connection")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(ApplyError, match="Lost connection"):
+        DockerSql("ac-database", "hunter2").query("auth", "SELECT id FROM account")
+
+
 def test_runner_git_sparse_clone_sequence(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A keg clone is init/remote/sparseCheckout/pull --depth=1, not a plain clone."""
     import subprocess

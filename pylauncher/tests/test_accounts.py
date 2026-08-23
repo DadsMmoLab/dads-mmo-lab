@@ -19,8 +19,8 @@ import logging
 
 import pytest
 
-from yulon.apply import ApplyError
-from yulon.controller_wow_wotlk import accounts
+from yulon.apply import ApplyError, DockerSql
+from yulon.controller_wow_wotlk import accounts, docker_ctl
 from yulon.manifest import Db
 
 # (username as typed, password as typed, server-written salt, server-written verifier)
@@ -44,7 +44,17 @@ PASSWORD = "Passw0rd!Mix"
 
 
 class _FakeSql:
-    """A `SqlSeam` that records statements and answers lookups from a tiny table."""
+    """A `SqlSeam` that records statements and answers lookups from a tiny table.
+
+    It keeps the two schema facts the module actually leans on: `account` is
+    keyed by the folded username, and `account_access`'s primary key is
+    `(id, RealmID)` — so a plain second INSERT for the same account is an error
+    here exactly as MySQL makes it one.
+
+    `fail_on` is a statement prefix that raises `failure` instead of running,
+    which is how a database that dies part way through a multi-statement create
+    is reproduced; `query_error` is the same for the read half (Docker down).
+    """
 
     def __init__(self, accounts_table: dict[str, int] | None = None) -> None:
         self.statements: list[tuple[str, str]] = []
@@ -52,20 +62,27 @@ class _FakeSql:
         self.table: dict[str, int] = dict(accounts_table or {})
         self.access: dict[int, int] = {}
         self.next_id = 12401
-        self.insert_error: ApplyError | None = None
-        self.on_insert: object = None
+        self.fail_on: str | None = None
+        self.failure = ApplyError("SQL failed (inline → acore_auth): Lost connection")
+        self.query_error: ApplyError | None = None
 
     def run_statement(self, db: Db, statement: str) -> None:
         self.statements.append((db, statement))
+        if self.fail_on is not None and statement.startswith(self.fail_on):
+            raise self.failure
         if statement.startswith("INSERT INTO account ("):
-            if self.insert_error is not None:
-                raise self.insert_error
-            name = _folded_name_in(statement)
-            self.table[name] = self.next_id
+            self.table[_folded_name_in(statement)] = self.next_id
             self.next_id += 1
+        elif statement.startswith("INSERT INTO account_access"):
+            account_id, level = _access_values_in(statement)
+            if account_id in self.access and "ON DUPLICATE KEY UPDATE" not in statement:
+                raise ApplyError("SQL failed (inline → acore_auth): Duplicate entry")
+            self.access[account_id] = level
 
     def query(self, db: Db, statement: str) -> str:
         self.queries.append((db, statement))
+        if self.query_error is not None:
+            raise self.query_error
         if statement.startswith("SELECT id FROM account"):
             name = _folded_name_in(statement)
             found = self.table.get(name)
@@ -78,9 +95,19 @@ class _FakeSql:
 
 
 def _folded_name_in(statement: str) -> str:
-    """Pull the username back out of a `CONVERT(X'…' USING utf8mb4)` literal."""
+    """Pull the username back out of an `_utf8mb4 X'…'` literal.
+
+    (Said `CONVERT(X'…' USING utf8mb4)` until 2026-08-23 — the spelling the
+    collation fix removed, and never what the code emitted.)
+    """
     hex_body = statement.split("X'", 1)[1].split("'", 1)[0]
     return bytes.fromhex(hex_body).decode()
+
+
+def _access_values_in(statement: str) -> tuple[int, int]:
+    """`(id, gmlevel)` out of an `INSERT INTO account_access … VALUES (…)`."""
+    account_id, level, _realm = statement.split("VALUES (", 1)[1].split(")", 1)[0].split(",")
+    return int(account_id), int(level)
 
 
 # ------------------------------------------------------- the byte-exact gate
@@ -189,9 +216,26 @@ def test_creating_an_account_writes_the_row_the_server_would_have_written() -> N
 
     insert = _one_statement(sql, "INSERT INTO account (")
     assert "expansion, reg_mail, email, joindate" in insert
-    assert f" {accounts.EXPANSION}, '', '', NOW())" in insert
     # The stored name is the folded one, carried as a hex literal.
     assert f"X'{b'NEWBIE'.hex().upper()}'" in insert
+
+
+def test_the_row_is_written_for_wotlk_and_not_for_whatever_the_schema_defaults_to() -> None:
+    """`expansion = 2` is WotLK, and nothing else in the suite defends it.
+
+    0 is vanilla: such an account exists, authenticates, and then cannot use a
+    single WotLK zone, class or race — the "looks fine, is wrong" failure the
+    whole module is built to avoid. 2 is what `AccountMgr::CreateAccount` passes
+    from `CONFIG_EXPANSION`, what the live server's `Expansion = 2` config says,
+    and what both server-written rows carried.
+
+    Pinned to the literal, because this assertion used to interpolate
+    `accounts.EXPANSION` and so could not fail (review, 2026-08-23).
+    """
+    assert accounts.EXPANSION == 2
+    sql = _FakeSql()
+    accounts.create_account(sql, "Wotlk", PASSWORD)
+    assert " 2, '', '', NOW())" in _one_statement(sql, "INSERT INTO account (")
 
 
 def test_creating_an_account_also_seeds_the_realm_character_counter() -> None:
@@ -211,11 +255,18 @@ def test_a_new_account_gets_no_gm_powers_unless_they_were_asked_for() -> None:
 
 
 def test_an_explicit_gm_level_writes_the_access_row_for_every_realm() -> None:
+    """`RealmID = -1` is "every realm", as `account set gmlevel <name> 3 -1` asks for.
+
+    The literal, not `accounts.ALL_REALMS`: the assertion used to rebuild its
+    expectation from the constant it was testing (review, 2026-08-23).
+    """
+    assert accounts.ALL_REALMS == -1
     sql = _FakeSql()
     result = accounts.create_account(sql, "Admin", PASSWORD, gm_level=3)
     assert result.gm_level == 3
     access = _one_statement(sql, "INSERT INTO account_access")
-    assert f"VALUES ({result.account_id}, 3, {accounts.ALL_REALMS})" in access
+    assert f"VALUES ({result.account_id}, 3, -1)" in access
+    assert sql.access == {result.account_id: 3}
 
 
 def test_a_gm_level_the_server_has_no_meaning_for_is_refused() -> None:
@@ -236,7 +287,9 @@ def test_an_existing_username_is_reported_not_raised() -> None:
     assert result.created is False  # how the caller tells this from a failure
     assert result.account_id == 7
     assert result.gm_level == 2
-    assert sql.statements == [], "an existing account must not be overwritten"
+    assert not [
+        s for _, s in sql.statements if s.startswith("INSERT INTO account (")
+    ], "an existing account keeps its salt and verifier, or its password stops working"
 
 
 def test_an_existing_username_is_matched_regardless_of_the_case_it_was_typed_in() -> None:
@@ -252,7 +305,8 @@ def test_losing_a_race_for_the_username_is_reported_as_already_existing() -> Non
     localised.
     """
     sql = _FakeSql()
-    sql.insert_error = ApplyError("SQL failed (inline → acore_auth): Duplicate entry")
+    sql.fail_on = "INSERT INTO account ("
+    sql.failure = ApplyError("SQL failed (inline → acore_auth): Duplicate entry")
 
     def _appear() -> None:
         sql.table["RACED"] = 99
@@ -272,7 +326,8 @@ def test_losing_a_race_for_the_username_is_reported_as_already_existing() -> Non
 
 def test_an_insert_that_fails_for_any_other_reason_is_an_error_not_a_silent_success() -> None:
     sql = _FakeSql()
-    sql.insert_error = ApplyError("SQL failed (inline → acore_auth): table is read only")
+    sql.fail_on = "INSERT INTO account ("
+    sql.failure = ApplyError("SQL failed (inline → acore_auth): table is read only")
     with pytest.raises(accounts.AccountError, match="could not create account NOPE"):
         accounts.create_account(sql, "Nope", PASSWORD)
 
@@ -286,6 +341,110 @@ def test_a_row_that_cannot_be_read_back_after_a_successful_insert_is_an_error() 
 
     with pytest.raises(accounts.AccountError, match="cannot be read back"):
         accounts.create_account(_Amnesiac(), "Ghost", PASSWORD)
+
+
+# ------------------------------------------------- finishing a half-done create
+
+
+def test_a_call_that_dies_after_the_account_row_is_finished_by_the_next_one() -> None:
+    """There is no transaction: each statement is its own `docker exec`.
+
+    So the `account` row is committed before the GM grant is even attempted, and
+    a dropped connection in between is a state only a retry can repair. Until
+    2026-08-23 the retry took the already-exists early return and wrote nothing,
+    so the level the caller asked for was never granted and, with no other code
+    path in the module that raises one, never could be (review, 2026-08-23).
+    """
+    sql = _FakeSql()
+    sql.fail_on = "INSERT INTO account_access"
+    with pytest.raises(accounts.AccountError, match="could not grant GM level 3"):
+        accounts.create_account(sql, "Admin", PASSWORD, gm_level=3)
+    assert sql.table == {"ADMIN": 12401}, "the account row is committed and stays"
+    assert sql.access == {}, "and the grant it was supposed to carry is missing"
+
+    sql.fail_on = None  # the database comes back; the user tries the same thing again
+    again = accounts.create_account(sql, "Admin", PASSWORD, gm_level=3)
+    assert again.created is False  # the row was already there
+    assert again.account_id == 12401
+    assert again.gm_level == 3  # ... and the missing grant is made
+    assert sql.access == {12401: 3}
+
+
+def test_an_account_the_console_already_made_still_gets_the_gm_level_asked_for() -> None:
+    """The bootstrap admin's account may exist before this module ever runs.
+
+    `controller_view` still creates accounts over the worldserver console where
+    there is a pty, and the server's own `account create` grants nothing — so
+    "the bootstrap admin passes `gm_level=3` explicitly" only works if an
+    existing account can still be raised. It could not before 2026-08-23.
+    """
+    sql = _FakeSql({"ADMIN": 42})
+    result = accounts.create_account(sql, "Admin", PASSWORD, gm_level=3)
+    assert result.created is False
+    assert result.gm_level == 3
+    assert sql.access == {42: 3}
+
+
+def test_raising_the_level_of_an_account_that_already_has_a_row_updates_it() -> None:
+    """`account_access`'s primary key is `(id, RealmID)`, so a plain INSERT would fail.
+
+    That is what `ON DUPLICATE KEY UPDATE` is for, and it now defends a branch
+    that a call can actually reach: promoting a moderator to administrator hits
+    the key. (Dropping the clause left the whole suite green before 2026-08-23,
+    because nothing reached it — review, 2026-08-23.)
+    """
+    sql = _FakeSql({"MOD": 7})
+    sql.access[7] = 1
+    result = accounts.create_account(sql, "Mod", PASSWORD, gm_level=3)
+    assert result.gm_level == 3
+    assert sql.access == {7: 3}
+
+
+def test_asking_for_less_than_the_account_already_holds_takes_nothing_away() -> None:
+    """`gm_level` is a floor, not an assignment.
+
+    Otherwise the default `NO_GM` would demote the administrator the moment
+    anyone re-ran a create for their own account.
+    """
+    sql = _FakeSql({"BOSS": 7})
+    sql.access[7] = 3
+    result = accounts.create_account(sql, "Boss", PASSWORD, gm_level=1)
+    assert result.gm_level == 3
+    assert not [s for _, s in sql.statements if "account_access" in s]
+
+
+def test_the_realm_character_counters_are_seeded_on_the_already_exists_path_too() -> None:
+    """The other half of a create that can be interrupted after the account row.
+
+    `WHERE acctid IS NULL` is what makes running it again safe, and running it
+    again is the only way the missing counter row ever appears.
+    """
+    sql = _FakeSql({"HALFDONE": 7})
+    accounts.create_account(sql, "Halfdone", PASSWORD)
+    assert "WHERE acctid IS NULL" in _one_statement(sql, "INSERT INTO realmcharacters")
+
+
+def test_a_database_that_cannot_be_reached_raises_the_type_the_docstring_names() -> None:
+    """`AccountError` is the only type `create_account()` documents, so it is the only one.
+
+    Docker not running is the likeliest failure there is, and it used to come
+    out as a bare `ApplyError` from the pre-check query — a type no caller was
+    told to catch (review, 2026-08-23). The insert must not happen either: an
+    unreachable database is not evidence that the name is free.
+    """
+    sql = _FakeSql()
+    sql.query_error = ApplyError("Docker Desktop does not seem to be installed")
+    with pytest.raises(accounts.AccountError, match="Docker Desktop"):
+        accounts.create_account(sql, "Nodocker", PASSWORD)
+    assert sql.statements == []
+
+
+def test_a_realmcharacters_failure_is_reported_in_this_modules_vocabulary_too() -> None:
+    """Every statement, not just the first — that was the shape of the leak."""
+    sql = _FakeSql()
+    sql.fail_on = "INSERT INTO realmcharacters"
+    with pytest.raises(accounts.AccountError, match="could not seed the realm character counters"):
+        accounts.create_account(sql, "Counters", PASSWORD)
 
 
 # ----------------------------------------------------------- no password echo
@@ -395,6 +554,19 @@ def test_accounts_are_written_to_the_auth_database() -> None:
     sql = _FakeSql()
     accounts.create_account(sql, "Whichdb", PASSWORD, gm_level=1)
     assert {db for db, _ in sql.statements + sql.queries} == {"auth"}
+
+
+def test_the_account_seam_reaches_the_same_container_the_module_applier_does() -> None:
+    """One connection story per controller, not a second one growing beside it.
+
+    `sql_for()` has no caller yet — the UI still creates accounts over the
+    console — so this is what stops it drifting away from `modules.applier()`
+    before the wiring pass arrives (review, 2026-08-23).
+    """
+    seam = accounts.sql_for("hunter2")
+    assert isinstance(seam, DockerSql)
+    assert seam.db_container == docker_ctl.SPEC.db
+    assert seam.root_password == "hunter2"
 
 
 def _one_statement(sql: _FakeSql, prefix: str) -> str:

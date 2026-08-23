@@ -104,6 +104,16 @@ class DockerSql:
         `--skip-column-names` because every caller wants values, not a header,
         and `--batch` so the separator is a tab whether or not the client
         decided it was talking to a terminal.
+
+        The exit code is checked for the same reason `run_statement()` checks
+        it, and one more: a reader cannot tell "no rows" from "the query never
+        ran". `accounts._account_id()` reads no rows as "this username is free"
+        and inserts, so a `query()` that returned "" on failure would turn an
+        unreachable database into a green light to write.
+
+        Raises:
+            ApplyError: no docker CLI (from `_mysql()`), or `mysql` exited
+                non-zero.
         """
         proc = self._mysql(db, statement=statement, extra=("--batch", "--skip-column-names"))
         _check_sql(proc, f"query → {DB_NAMES[db]}")
