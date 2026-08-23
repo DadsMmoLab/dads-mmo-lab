@@ -93,8 +93,29 @@ class DockerSql:
         proc = self._mysql(db, statement=statement)
         _check_sql(proc, f"inline → {DB_NAMES[db]}")
 
+    def query(self, db: Db, statement: str) -> str:
+        """Run one SELECT and return its rows, tab-separated, one per line.
+
+        `run_statement()` discards stdout, which is right for the applier — it
+        only ever asserts a step succeeded. Account creation genuinely has to
+        read (does this username exist, and what id did it get), so this is the
+        read half of the same seam rather than a second one beside it.
+
+        `--skip-column-names` because every caller wants values, not a header,
+        and `--batch` so the separator is a tab whether or not the client
+        decided it was talking to a terminal.
+        """
+        proc = self._mysql(db, statement=statement, extra=("--batch", "--skip-column-names"))
+        _check_sql(proc, f"query → {DB_NAMES[db]}")
+        return proc.stdout
+
     def _mysql(
-        self, db: Db, *, stdin: IO[bytes] | None = None, statement: str | None = None
+        self,
+        db: Db,
+        *,
+        stdin: IO[bytes] | None = None,
+        statement: str | None = None,
+        extra: tuple[str, ...] = (),
     ) -> subprocess.CompletedProcess[str]:
         """Run one `docker exec ... mysql`, with the missing-CLI guards in one place.
 
@@ -116,7 +137,7 @@ class DockerSql:
                 (the `OSError` here). The second used to surface as a bare
                 `[WinError 2]` (review, 2026-08-23).
         """
-        argv = self._argv(db)
+        argv = self._argv(db, extra=extra)
         try:
             return subprocess.run(
                 argv,
@@ -146,8 +167,12 @@ class DockerSql:
         env["MYSQL_PWD"] = self.root_password
         return env
 
-    def _argv(self, db: Db) -> list[str]:
+    def _argv(self, db: Db, *, extra: tuple[str, ...] = ()) -> list[str]:
         """`docker exec ... mysql <db>`, with the CLI name this host can start.
+
+        `extra` carries client flags that only one caller wants (`query()`'s
+        output formatting). It defaults to empty so the write path's argv is
+        byte-identical to what it was before the read path existed.
 
         Raises:
             ApplyError: no docker CLI here. A manifest apply runs straight
@@ -167,6 +192,7 @@ class DockerSql:
             self.db_container,
             "mysql",
             "-uroot",
+            *extra,
             DB_NAMES[db],
         ]
 
