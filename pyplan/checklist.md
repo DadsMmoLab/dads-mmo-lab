@@ -177,6 +177,29 @@
 
 ## Cross-cutting
 
+### Privilege transparency: where we stand against the rule (audited 2026-08-24)
+
+Baerthe's binding rule (`roadmap.md`, Phase 6 preamble, commit `7390e885`) is that no install path
+adds the user to the `docker` group or writes a passwordless `sudo` rule without explicit informed
+consent, and that a `sudoers.d`/`NOPASSWD` docker rule must never be written at all. Audited
+immediately after it landed:
+
+- **WotLK (`install-wow-wotlk-ubuntu.sh`, `-fedora.sh`) — compliant.** `docker_group_consent()`
+  gates every `usermod -aG docker`, and version 1.4.3 removed the `/etc/sudoers.d/docker-nopasswd`
+  write with the reasoning recorded in the script header: membership already *is* root, so the rule
+  was attack surface with no benefit.
+- **TBC, Vanilla and Tortoise — NOT compliant.** `install-wow-tbc.sh:248`,
+  `install-wow-vanilla.sh:262` and `install-tortoise-wow-wsl.sh:226` each run
+  `sudo usermod -aG docker "$USER"` with no consent gate and no warning. These are the Phase 7
+  games and the scripts are bugfix-only until Phase 7 retires them — but a silent privilege
+  escalation is a bugfix, not a feature, and all three ship in `catalog.json` today. **Open.**
+- **The native engine (6.2) — does not escalate, and does not yet consent either.** Nothing in
+  `yulon/` writes a sudoers rule, joins a group or chmods the socket (grepped: the only hit is a
+  comment in `installer.py` recording why the old rule was removed). But the roadmap now makes
+  explicit consent part of 6.2's definition of done, recorded in *preflight*, and
+  `catalog/preflight.py` has no consent step. **Open, and it belongs to 6.2 rather than to a later
+  clean-up.**
+
 ### Two things the first button-driven install found (2026-08-24)
 
 **1. A first-run race in AzerothCore's own compose file, and a message that sends the user the
