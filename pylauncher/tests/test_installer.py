@@ -8,6 +8,7 @@ so no Docker, network, or two-hour build is involved.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from collections.abc import Iterator
@@ -148,6 +149,40 @@ def test_installer_runs_the_entry_script_through_interact(tmp_path: Path) -> Non
     assert calls[0]["command"] == ["bash", str(script)]
     assert calls[0]["cwd"] == script.parent
     assert callable(calls[0]["respond"])
+
+
+def test_a_cancelled_run_is_not_logged_as_a_finished_install(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`interact()` returns on cancel instead of raising, so `run()` fell through to success.
+
+    The app log is the file a user pastes into a bug report, and it said
+    "install of wow-wotlk finished" for an install stopped 2.3 GB into the
+    source clone (install gate, 2026-08-23).
+    """
+    import threading
+
+    entry = load_catalog().get("wow-wotlk")
+    script = tmp_path / entry.install.script
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/bin/bash\n", encoding="utf-8")
+    cancel = threading.Event()
+
+    def interact(command: list[str], **kwargs: object) -> Iterator[str]:
+        yield "cloning"
+        cancel.set()  # the Stop button, mid-stream
+
+    installer = _installer(
+        entry,
+        installers_root=tmp_path,
+        docker_check=lambda: True,
+        interact=interact,  # type: ignore[arg-type]
+    )
+    with caplog.at_level("INFO", logger="yulon.catalog.installer"):
+        assert list(installer.run(InstallOptions(), cancel=cancel)) == ["cloning"]
+    said = [record.message for record in caplog.records]
+    assert any("was cancelled" in message for message in said), said
+    assert not any("finished" in message for message in said), said
 
 
 @pytest.mark.parametrize(
@@ -427,6 +462,49 @@ def test_the_consent_rule_wins_over_the_yes_no_catch_all() -> None:
     consent = next(i for i, p in enumerate(patterns) if "docker group" in p)
     catch_all = next(i for i, p in enumerate(patterns) if p == r"\(y/n\)")
     assert consent < catch_all
+
+
+def _shipped_question(script_name: str, needle: str) -> str:
+    """The exact line `ask_yes_no` prints for a question in a SHIPPED script.
+
+    Read out of the file rather than transcribed here. A rule that is only ever
+    matched against a copy of the wording keeps passing on the day the script
+    is reworded — which is the day the catch-all quietly takes the question
+    back.
+    """
+    from yulon import resources
+
+    text = (resources.installers_dir() / "wow-wotlk" / script_name).read_text(encoding="utf-8")
+    found = re.search(rf'ask_yes_no "([^"]*{needle}[^"]*)"', text)
+    assert found, f"{script_name} no longer asks anything containing {needle!r}"
+    return f"{found.group(1)} (y/n): "  # exactly what ask_yes_no() echoes
+
+
+def test_removing_the_users_own_docker_is_declined_rather_than_assumed() -> None:
+    """The Ubuntu script offers to `snap remove docker`; the catch-all said yes.
+
+    That takes away a Docker the user installed themselves, and every container
+    and volume on it, because the installer cannot drive snap Docker. Declining
+    costs an exit carrying the script's own instruction to remove it by hand.
+    """
+    prompt = _shipped_question("install-wow-wotlk-ubuntu.sh", "snap Docker")
+    assert make_responder(InstallOptions())(prompt) == "n"
+
+
+def test_rebooting_the_machine_is_put_to_the_user_not_answered_by_the_catch_all() -> None:
+    """Immutable Fedora's rpm-ostree path reboots 10 s after a yes.
+
+    The catch-all answered "y" — so a Bazzite user pressing Install had their
+    machine rebooted from inside the launcher, unasked. "n" is not the answer
+    either: the script then exits 0 having installed nothing.
+    """
+    prompt = _shipped_question("install-wow-wotlk-fedora.sh", "rpm-ostree")
+    asked: list[str] = []
+    respond = make_responder(InstallOptions(), ask=lambda prompt: (asked.append(prompt), "y")[1])
+    assert respond(prompt) == "y"
+    assert asked == [prompt.strip()], "the reboot was decided without asking"
+    # And with no dialog to ask through (the CLI harness) it is declined.
+    assert make_responder(InstallOptions())(prompt) == "n"
 
 
 def test_the_shipped_installers_no_longer_write_a_passwordless_sudo_rule() -> None:

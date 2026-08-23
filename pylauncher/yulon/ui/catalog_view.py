@@ -32,6 +32,7 @@ from yulon.catalog.catalog import Catalog, CatalogEntry
 from yulon.catalog.installer import (
     Installer,
     InstallOptions,
+    cancelled_install_message,
     platform_names,
     unsupported_platform_message,
 )
@@ -270,6 +271,21 @@ class CatalogView(QWidget):
         game_id, server_dir, client_dir = self._current
         self._current = None
         self._set_buttons_enabled(True)
+        if self._log.cancelled:
+            # A cancelled install reaches here as a SUCCESS: `runner.interact()`
+            # returns rather than raising when its cancel event is set, so the
+            # generator ends normally and `ok` is True. Driven through this very
+            # button against the real script and stopped during the source clone,
+            # that pinned a compose project name into a half-cloned folder and
+            # emitted `installed`, which `main.py` writes into `state.json` and
+            # turns into a permanent tab — an install the user had explicitly
+            # cancelled, and on a run stopped earlier still, a directory that did
+            # not exist at all (install gate, 2026-08-23).
+            note = cancelled_install_message(self._catalog.get(game_id).name, server_dir)
+            logger.info(f"install of {game_id} was cancelled; nothing remembered")
+            QMessageBox.information(self, "Install cancelled", note)
+            self.install_finished.emit(game_id, False, note)
+            return
         if not ok:
             QMessageBox.warning(self, "Install failed", message)
         self.install_finished.emit(game_id, ok, message)
