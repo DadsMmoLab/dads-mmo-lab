@@ -22,6 +22,7 @@ looking for. One test has to earn its answer from the real stack.
 from __future__ import annotations
 
 import ast
+import hashlib
 import http.server
 import ssl
 import subprocess
@@ -51,6 +52,47 @@ MEASURED_TLS_FAILURE = (
 # installed on the runner. The file's own header says how it was generated. It is
 # a fixture, not a secret — the test's whole point is that trusting it FAILS.
 SELF_SIGNED_PEM = Path(__file__).parent / "data" / "self-signed-localhost.pem"
+
+
+def _pem_fingerprints(pem: str) -> set[str]:
+    """DER SHA-256 of every CERTIFICATE block in `pem`, ignoring keys and comments."""
+    fingerprints: set[str] = set()
+    block: list[str] = []
+    for line in pem.splitlines(keepends=True):
+        if "BEGIN CERTIFICATE" in line:
+            block = [line]
+        elif block:
+            block.append(line)
+            if "END CERTIFICATE" in line:
+                der = ssl.PEM_cert_to_DER_cert("".join(block))
+                fingerprints.add(hashlib.sha256(der).hexdigest())
+                block = []
+    return fingerprints
+
+
+def _fingerprints(context: ssl.SSLContext) -> set[str]:
+    """DER SHA-256 of every CA certificate a context trusts.
+
+    Identity, not a count: "121 roots" and "58 roots" say nothing about whether
+    the 58 are among the 121, which is the question this file has to answer.
+    """
+    return {hashlib.sha256(der).hexdigest() for der in context.get_ca_certs(binary_form=True)}
+
+
+def _certificates_only(pem: str) -> str:
+    """`pem` with everything that is not a CERTIFICATE block stripped out.
+
+    The fixture file carries its private key and a header comment; a CA file
+    handed to `load_verify_locations()` should be certificates and nothing else.
+    """
+    out: list[str] = []
+    keep = False
+    for line in pem.splitlines(keepends=True):
+        keep = keep or "BEGIN CERTIFICATE" in line
+        if keep:
+            out.append(line)
+        keep = keep and "END CERTIFICATE" not in line
+    return "".join(out)
 
 
 @pytest.fixture(autouse=True)
@@ -382,43 +424,118 @@ def test_the_context_is_always_verifying_with_and_without_certifi(
         assert context.check_hostname is True
 
 
-def test_the_context_loads_certifis_bundle_when_it_is_importable(
+def test_the_context_loads_certifis_bundle_on_top_of_the_os_store(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """certifi's path is handed to the context, not merely imported and ignored.
+    """certifi's file is handed to the context, and it ADDS roots rather than replacing them.
 
-    Proven by pointing a stand-in certifi at a file that does not exist: only a
-    context that actually loads `certifi.where()` can fail on it.
+    A stand-in certifi pointing at a one-certificate PEM: the context has to come
+    back with the OS store's CA count plus that one. Only a context that actually
+    reads `certifi.where()` gets the +1, and only one that loaded the OS roots
+    first keeps the rest.
     """
+    single = tmp_path / "one-root.pem"
+    single.write_text(
+        _certificates_only(SELF_SIGNED_PEM.read_text(encoding="ascii")), encoding="ascii"
+    )
     fake = types.ModuleType("certifi")
-    missing = tmp_path / "no-such-cacert.pem"
-    fake.where = lambda: str(missing)  # type: ignore[attr-defined]
+    fake.where = lambda: str(single)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "certifi", fake)
 
-    with pytest.raises(OSError):
-        platform.verify_context()
+    os_only = ssl.create_default_context().cert_store_stats()["x509_ca"]
+    context = platform.verify_context()
+
+    assert context.cert_store_stats()["x509_ca"] == os_only + 1
+
+
+def test_an_unreadable_certifi_bundle_falls_back_to_the_os_store_instead_of_raising(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A packaging fault must not surface to the user as "you are offline".
+
+    `verify_context()` used to raise when certifi imported but its bundle did
+    not open, and `detect_public_ip()` calls it inside a `except (OSError,
+    ValueError)` loop — so a PyInstaller build that failed to collect
+    `cacert.pem` reported itself as having no network (review finding,
+    2026-08-23). The OS store alone is a narrower root set but still a fully
+    verifying one, so degrading to it keeps the app working and truthful.
+    """
+    fake = types.ModuleType("certifi")
+    fake.where = lambda: str(tmp_path / "no-such-cacert.pem")  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "certifi", fake)
+
+    context = platform.verify_context()
+
+    assert context.verify_mode is ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+    assert context.cert_store_stats() == ssl.create_default_context().cert_store_stats()
+
+
+def test_the_os_roots_survive_certifi_being_added_to_them() -> None:
+    """The regression test for a swap that read like a widening.
+
+    `create_default_context(cafile=...)` takes the cafile arm and never calls
+    `load_default_certs()`, so passing certifi there REPLACED the OS store. On
+    this box that dropped 33 of its 58 roots — DigiCert Global Root CA and
+    Baltimore CyberTrust Root among them — and, structurally, every root an
+    administrator installed: the corporate TLS-inspecting proxy and internal-CA
+    cases, both of which fail silently (a manifest refresh falls back to the
+    bundled tree, the update banner just never appears). Compared by DER
+    SHA-256 rather than by count, because a count going up says nothing about
+    which certificates went away (review finding, 2026-08-23).
+    """
+    os_roots = _fingerprints(ssl.create_default_context())
+    ours = _fingerprints(platform.verify_context())
+
+    assert os_roots, "no OS roots to compare against; this box cannot answer the question"
+    assert os_roots <= ours, (
+        f"{len(os_roots - ours)} OS root(s) are no longer trusted: certifi replaced the OS "
+        "store instead of widening it"
+    )
 
 
 def test_the_real_certifi_bundle_has_the_roots_the_os_store_was_missing() -> None:
     """certifi is a declared requirement; the point of shipping it is the root count.
 
     The fresh Windows box had 18 CA certs and could not build a chain to Amazon
-    Root CA 1. Mozilla's bundle carries well over a hundred, including that one.
+    Root CA 1. Mozilla's bundle carries well over a hundred, including that one,
+    and every one of them is in the context on top of whatever the OS already
+    trusted.
     """
     import certifi
 
-    context = platform.verify_context()
     assert Path(certifi.where()).exists()
-    assert context.cert_store_stats()["x509_ca"] > 100
+    ours = _fingerprints(platform.verify_context())
+
+    assert platform.verify_context().cert_store_stats()["x509_ca"] > 100
+    assert _pem_fingerprints(Path(certifi.where()).read_text(encoding="ascii")) <= ours
+
+
+def test_adding_certifi_relaxes_nothing_the_default_context_had_set() -> None:
+    """The widening must not be a downgrade wearing a wider hat.
+
+    `load_verify_locations()` is documented to touch the store only, so every
+    other knob has to still read exactly as `create_default_context()` left it —
+    asserted rather than assumed, because this is the function that decides
+    whether an elevated installer is trusted.
+    """
+    default = ssl.create_default_context()
+    ours = platform.verify_context()
+
+    assert ours.verify_mode is default.verify_mode is ssl.CERT_REQUIRED
+    assert ours.check_hostname is default.check_hostname is True
+    assert ours.verify_flags == default.verify_flags
+    assert ours.options == default.options
+    assert ours.minimum_version == default.minimum_version
 
 
 def test_the_context_is_built_once_and_shared() -> None:
     """Not a micro-optimization: a refresh GETs 45 manifest files, one `urlopen` each.
 
-    Loading certifi's roots was measured at 198 ms per context on this dev box
-    (15 ms for the bare OS default), so building one per call would put ~8.9 s
-    of certificate parsing into a manifest refresh. An `ssl.SSLContext` holds no
-    per-connection state, so one is shared.
+    Assembling the union was measured at 211 ms per context on this dev box
+    (14 ms for the OS store alone, 193 ms for certifi alone), so building one per
+    call would put ~9.5 s of certificate parsing into a manifest refresh. An
+    `ssl.SSLContext` holds no per-connection state, so one is shared.
     """
     assert platform.verify_context() is platform.verify_context()
 

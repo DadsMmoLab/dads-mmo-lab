@@ -640,10 +640,13 @@ def docker_engine_commands(pm: PackageManager, *, steamos: bool, user: str) -> l
 #      so it sees the roots OpenSSL cannot — and it sees an enterprise root
 #      installed by a TLS-intercepting proxy, which a bundled CA file
 #      structurally cannot. It also brings resume and retry for the 629 MB.
-#   2. `urllib` against certifi's Mozilla bundle when certifi is importable
-#      (`requirements.txt` ships it), else the OS default. In-process, portable,
-#      and the backstop for a box with no curl (Windows before 1803) or a curl
-#      that will not run.
+#   2. `urllib` against the OS root store WITH certifi's Mozilla bundle added on
+#      top (`requirements.txt` ships certifi); the OS store alone when certifi is
+#      not importable or its bundle cannot be read. In-process, portable, and the
+#      backstop for a box with no curl (Windows before 1803) or a curl that will
+#      not run. Keeping the OS roots in the set is what preserves the
+#      enterprise-root case in step 1 for this transport too — see
+#      `verify_context()`.
 #
 # There is no third step. Verification is never turned off here: an unverified
 # download of an executable that is about to be run with elevation is a
@@ -663,7 +666,6 @@ _CURL_VERIFY_EXITS = frozenset({60, 77})
 # rest of the budget is for an injected opener that wraps again, and the bound
 # itself is what makes a self-referential chain terminate.
 _REASON_UNWRAP_LIMIT = 4
-
 
 _CURL_ARGS: tuple[str, ...] = (
     "--fail",
@@ -756,15 +758,38 @@ def _os_curl() -> Path | None:
 
 @functools.lru_cache(maxsize=1)
 def verify_context() -> ssl.SSLContext:
-    """A verifying TLS context with the widest root set we can honestly assemble.
+    """A verifying TLS context trusting the OS root store AND certifi's — the union, not one.
 
-    `ssl.create_default_context()` already means verify + check hostname; what it
-    does not come with on a fresh Windows install is a COMPLETE root set. certifi
-    ships Mozilla's, which is where the missing Amazon Root CA 1 actually lives,
-    so it is used whenever it is importable. When it is not — a dev checkout that
-    skipped `pip install -r requirements.txt` — the OS default is used unchanged:
-    fewer roots, still fully verified. Nothing here relaxes verification, and
-    there is no branch that can.
+    `ssl.create_default_context()` already means verify + check hostname, and on
+    its own it loads the OS roots. What it cannot fix is that OpenSSL only ever
+    reads a SNAPSHOT of the Windows store while Windows materializes most roots
+    on demand through CryptoAPI: the fresh Windows 11 box the block above was
+    written for had 18 of them and could not chain desktop.docker.com to Amazon
+    Root CA 1. certifi (Mozilla's bundle) carries the ones that are missing.
+
+    Correcting the first version of this function (review finding, 2026-08-23):
+    it built the context as `create_default_context(cafile=certifi.where())`,
+    which does not WIDEN the OS store — given a `cafile`, `create_default_context()`
+    takes that arm and never calls `load_default_certs()`, so the result trusted
+    certifi's roots and nothing else. Measured here: the OS store holds 58 CA
+    certs, certifi 2026.07.22 holds 121, and 33 of the 58 are absent from certifi
+    (DigiCert Global Root CA and Baltimore CyberTrust Root among them) — as is,
+    by construction, every root an administrator installed, which is how a
+    corporate TLS-inspecting proxy or an internal CA is trusted at all. Loading
+    the OS store first and calling `load_verify_locations()` afterwards ADDS to
+    it instead of replacing it: 154 CA certs, with both sets contained in the
+    result.
+
+    An unreadable certifi bundle degrades to the OS store rather than raising.
+    Raising would turn a packaging fault — `cacert.pem` not collected into the
+    PyInstaller build — into "could not determine the public IP (offline?)", the
+    exact misdiagnosis the rest of this section exists to remove. The OS store
+    alone still verifies every connection; it is the narrower failure, and the
+    log line says which one happened.
+
+    Nothing here relaxes verification, and there is no branch that can: every
+    path returns a `create_default_context()` result with roots added to it and
+    no other setting touched.
 
     Public, and imported by `manifest_store` and `update`, because the root-store
     gap is a fact about the OS this process runs on — the same thing `detect()`
@@ -774,20 +799,29 @@ def verify_context() -> ssl.SSLContext:
     context its own module would only move the measurements above away from the
     `download_verified()` code they were taken for.
 
-    Cached because parsing certifi's 121 roots is not free: measured on this dev
-    box, `create_default_context(cafile=certifi.where())` costs 198 ms against
-    15 ms for the OS default. One `urlopen` per manifest file means a full
-    refresh of the WotLK tree is 45 GETs, so building a context per call would
-    have added ~8.9 s to it. Sharing one context across connections is the
+    Cached because assembling it is not free: measured on this dev box, 14 ms for
+    the OS store alone, 193 ms for certifi alone and 211 ms for the union of the
+    two. One `urlopen` per manifest file means a full refresh of the WotLK tree
+    is 45 GETs, so building a context per call would have put ~9.5 s of
+    certificate parsing into it. Sharing one context across connections is the
     normal way to use `ssl` — a context holds no per-connection state — and the
     root set it reads cannot change inside one run of the app.
     """
+    context = ssl.create_default_context()
     try:
         import certifi
     except ImportError:
-        logger.debug("certifi is not importable; using the OS default root store")
-        return ssl.create_default_context()
-    return ssl.create_default_context(cafile=certifi.where())
+        logger.debug("certifi is not importable; using the OS root store alone")
+        return context
+    try:
+        context.load_verify_locations(cafile=certifi.where())
+    except OSError as exc:
+        logger.warning(
+            f"certifi's bundle at {certifi.where()} could not be read ({exc}); continuing with "
+            "the OS root store alone. Connections are still fully verified, but a host whose "
+            "root this machine has not materialized will fail to verify."
+        )
+    return context
 
 
 def _open_url(request: urllib.request.Request) -> HttpResponse:
@@ -906,7 +940,7 @@ def download_verified(
 ) -> Path:
     """Download `url` to `dest` over a verified connection, or fail loudly.
 
-    Tries the OS-shipped curl first and `urllib` (certifi bundle) second; the
+    Tries the OS-shipped curl first and `urllib` (OS roots + certifi) second; the
     long comment above this function says why that order, and why there is no
     third attempt. Raises `DownloadError` — an `OSError`, so existing callers
     keep reporting it as a skipped step — with both transports' messages and
