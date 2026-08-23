@@ -158,12 +158,48 @@ def test_backup_rejects_an_empty_dump_that_exited_zero(tmp_path: Path) -> None:
         backup(tmp_path, mysql, running=running(DB), now=AT)
 
 
-def test_a_rejected_dump_never_leaves_a_file_that_looks_like_a_backup(tmp_path: Path) -> None:
-    """The name is applied last, to bytes that already verified — nothing part-written keeps it."""
+def test_a_dump_that_fails_verification_is_deleted_rather_than_kept(tmp_path: Path) -> None:
+    """Bytes that did not verify are not a backup, and are not left lying about as one."""
     mysql = FakeMysql(("acore_world",), body=b"-- MySQL dump 10.13\nINSERT INTO t VALUES (1);\n")
     with pytest.raises(MaintenanceError):
         backup(tmp_path, mysql, running=running(DB), now=AT)
     assert list(backups_dir(tmp_path).iterdir()) == []
+
+
+def test_a_dump_only_takes_a_backups_name_after_it_has_verified(tmp_path: Path) -> None:
+    """While it is being written it is a `.partial`; the rename is the last step."""
+
+    class Watches(FakeMysql):
+        seen = ""
+
+        def dump_into(self, database: str, sink: IO[bytes]) -> None:
+            Watches.seen = Path(sink.name).name
+            super().dump_into(database, sink)
+
+    report = backup(tmp_path, Watches(("acore_world",)), running=running(DB), now=AT)
+    assert Watches.seen == "20260823_143005_acore_world.sql.partial"
+    assert report.dumps[0].path.name == "20260823_143005_acore_world.sql"
+
+
+def test_a_dump_killed_part_way_leaves_nothing_wearing_a_backups_name(tmp_path: Path) -> None:
+    """No `except` runs when the process is killed, so the naming has to be what saves it.
+
+    This is the case the guide's `> ~/wow-backup-$(date).sql` cannot survive: the
+    shell makes the file before mysqldump writes a byte, so an interrupted dump
+    leaves a truncated file called a backup.
+    """
+
+    class Killed(FakeMysql):
+        def dump_into(self, database: str, sink: IO[bytes]) -> None:
+            sink.write(good_dump(database)[:40])
+            raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        backup(tmp_path, Killed(("acore_world",)), running=running(DB), now=AT)
+    assert list(backups_dir(tmp_path).glob("*.sql")) == []
+    assert [p.name for p in backups_dir(tmp_path).iterdir()] == [
+        "20260823_143005_acore_world.sql.partial"
+    ]
 
 
 def test_a_failed_backup_names_what_it_did_and_did_not_write(tmp_path: Path) -> None:
