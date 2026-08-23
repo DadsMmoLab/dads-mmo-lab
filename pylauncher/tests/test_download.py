@@ -95,6 +95,19 @@ def _certificates_only(pem: str) -> str:
     return "".join(out)
 
 
+def _clear_tls_memo() -> None:
+    """Drop `verify_context()`'s memo, tolerating there not being one.
+
+    `getattr` rather than a bare call because this fixture must not be what
+    reports a lost `@lru_cache` (review finding, 2026-08-23): calling
+    `cache_clear()` unconditionally turned that into 25 collection errors in an
+    autouse fixture, which points the reader at the fixture instead of at
+    `test_the_context_is_built_once_and_shared`, the test that can say what
+    sharing is for.
+    """
+    getattr(platform.verify_context, "cache_clear", lambda: None)()
+
+
 @pytest.fixture(autouse=True)
 def _fresh_tls_context() -> Iterator[None]:
     """`verify_context()` is memoized; these tests swap certifi out from under it.
@@ -102,9 +115,9 @@ def _fresh_tls_context() -> Iterator[None]:
     Without this, whichever test ran first would decide the context every later
     test sees — including the one asserting certifi's root count.
     """
-    platform.verify_context.cache_clear()
+    _clear_tls_memo()
     yield
-    platform.verify_context.cache_clear()
+    _clear_tls_memo()
 
 
 class _FakeResponse:
@@ -536,7 +549,15 @@ def test_the_context_is_built_once_and_shared() -> None:
     (14 ms for the OS store alone, 193 ms for certifi alone), so building one per
     call would put ~9.5 s of certificate parsing into a manifest refresh. An
     `ssl.SSLContext` holds no per-connection state, so one is shared.
+
+    The memo is asserted before the identity check so that removing the
+    `@lru_cache` fails HERE, saying what it cost, rather than as an error inside
+    the autouse fixture that clears it (review finding, 2026-08-23).
     """
+    assert hasattr(platform.verify_context, "cache_clear"), (
+        "verify_context() lost its @lru_cache: every urlopen now reparses the root set, "
+        "~211 ms each, 45 of them in one manifest refresh"
+    )
     assert platform.verify_context() is platform.verify_context()
 
 
