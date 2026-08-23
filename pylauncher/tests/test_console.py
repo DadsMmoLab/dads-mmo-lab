@@ -4,7 +4,11 @@ The worldserver container runs with `tty: true`, so docker refuses to attach
 unless its stdin is a terminal — the app therefore opens a pty and writes the
 command to the master end (live-verified on Linux, 2026-08-21). Windows has no
 pty, so `send_command()` refuses with an explanation instead of a raw docker
-error; the behaviour tests below only run where a pty exists.
+error; the transport tests below only run where a pty exists.
+
+The parsing tests do not, and their fixtures are byte-exact captures from the
+real playerbots worldserver on yulon-ubuntu, 2026-08-23 — the live gate that
+found what they pin (`console._reply_lines()`).
 """
 
 from __future__ import annotations
@@ -115,6 +119,71 @@ def test_send_command_wraps_popen_failure(caplog: pytest.LogCaptureFixture) -> N
     assert any("no docker" in r.getMessage() for r in caplog.records), (
         "the real error was swallowed; an ACL or AV block would be indistinguishable "
         "from Docker not being installed"
+    )
+
+
+# ------------------------------------------- cutting the answer out of the window
+# Every byte string below was captured from the real playerbots worldserver on
+# yulon-ubuntu, 2026-08-23 (1843 characters in world), through a spy on
+# `_reply_lines()`. Before the fix these three windows returned 2, 5 and 1
+# lines respectively where the true answers are 1, 1 and 1.
+
+
+def _reply(stdout: bytes, command: str) -> tuple[str, ...]:
+    """Parse `stdout` the way `send_command()`'s reader thread and parser do.
+
+    Not routed through `send_command()`, deliberately: that path needs a pty and
+    would skip on Windows, and these three cases are about how an answer is cut
+    out of a window — behaviour that is identical on every platform and that
+    nobody would ever watch fail if the tests only ran on Linux. The one line
+    borrowed from the reader thread is its `rstrip`, so the fixtures can stay
+    byte-exact captures rather than hand-typed line lists.
+    """
+    pumped = [raw.decode("utf-8", errors="replace").rstrip("\r\n") for raw in io.BytesIO(stdout)]
+    return console._reply_lines(pumped, command)
+
+
+def test_the_reply_ends_where_the_console_prints_its_prompt_again() -> None:
+    """A busy server writes its own log into the same window; that is not the answer."""
+    captured = (
+        b"\x1b[0mgm list\r\n"
+        b"\x1b[?2004l\r\x1b[?2004hAC> No gamemasters.\r\n"
+        b"AC> \x1b[36m[mod-city-bots] resetting stale city duel for Lareth (guid 9000012)\r\n"
+        b"\x1b[0m\x1b[36m[mod-city-bots] completed pending teleport for Caelvyn (guid 9000207)\r\n"
+    )
+    assert _reply(captured, "gm list") == ("No gamemasters.",)
+
+
+def test_log_lines_that_arrived_before_the_command_are_not_its_reply() -> None:
+    """Three of these five lines landed while docker was still attaching."""
+    captured = (
+        b"\x1b[0m\x1b[36m[mod-city-bots] all 5 legs refused for Jixlock toward poi 8\r\n"
+        b"\x1b[0m\x1b[36m[mod-city-bots] no walkable path for Jixlock to poi 8\r\n"
+        b"\x1b[0m\x1b[36m[mod-city-bots] completed pending teleport for Wesmere\r\n"
+        b"\x1b[0mflurbleblarg\r\n"
+        b"\x1b[?2004l\r\x1b[?2004hAC> Command 'flurbleblarg' does not exist\r\n"
+        b"AC> \x1b[36m[mod-city-bots] completed pending teleport for Selion\r\n"
+    )
+    assert _reply(captured, "flurbleblarg") == ("Command 'flurbleblarg' does not exist",)
+
+
+def test_a_window_with_no_prompt_hands_back_everything_it_saw() -> None:
+    """Docker's own failure never reaches a console, so it never carries a prompt.
+
+    Both lines were captured live: the first by pointing `send_command()` at a
+    container that does not exist, the second by pointing it at the real
+    worldserver right after `stop_staged()` brought it down — which is the case
+    a user actually hits, by pressing Send with the server stopped. Cutting
+    between prompts would find none and return nothing, turning the one line
+    that explains the failure into silence.
+    """
+    missing = b"Error response from daemon: No such container: yulon-no-such-container\r\n"
+    assert _reply(missing, "server info") == (
+        "Error response from daemon: No such container: yulon-no-such-container",
+    )
+    stopped = b"cannot attach to a stopped container, start it first\r\n"
+    assert _reply(stopped, "server info") == (
+        "cannot attach to a stopped container, start it first",
     )
 
 

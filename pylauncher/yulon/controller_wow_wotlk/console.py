@@ -1,13 +1,23 @@
 """Worldserver console access for WotLK: send a command over `docker attach`.
 
-AzerothCore's GM/account commands (`account create`, `account set gmlevel`,
-`.server info`) are typed at the worldserver's console. The container keeps
-that console on its stdin, so `docker attach` reaches it; `--sig-proxy=false`
-makes sure detaching never forwards a signal into the worldserver (the guide's
-"never press Ctrl+C" rule, enforced by the transport instead of the user).
-`send_command()` attaches, writes ONE command, collects what the server prints
-for a short window, detaches, and returns the lines — enough for the Phase 4
-accounts workflow without a live interactive session.
+AzerothCore's GM commands (`server info`, `gm list`, `lookup item ...`) are
+typed at the worldserver's console. The container keeps that console on its
+stdin, so `docker attach` reaches it; `--sig-proxy=false` makes sure detaching
+never forwards a signal into the worldserver (the guide's "never press Ctrl+C"
+rule, enforced by the transport instead of the user). `send_command()`
+attaches, writes ONE command, reads until the console prints its prompt again,
+detaches, and returns the answer. Account creation does NOT come through here —
+that is `accounts.py`'s SRP6 path, which needs no pty and works on Windows.
+
+**Live-gated on the Ubuntu VM against a real AzerothCore playerbots install,
+2026-08-23** (1843 characters in world, 1845 bots, ~40 attach/detach cycles):
+the worldserver kept the same PID and `RestartCount` 0 throughout, `server
+info` / `server motd` / `gm list` / `lookup item` / `account onlinelist` each
+answered, a rejected command came back as `Command 'flurbleblarg' does not
+exist` rather than as silence or an exception, and `docker.follow_logs()` still
+streamed after every detach. What the gate broke is recorded on
+`_reply_lines()`: a fixed time window on a busy server does not delimit an
+answer, and this one was handing back several times more log noise than reply.
 """
 
 from __future__ import annotations
@@ -24,10 +34,26 @@ from yulon.log import get_logger
 
 logger = get_logger(__name__)
 
-# How long docker needs to attach before the console is listening, and the
-# prompt the worldserver prints in front of every line it echoes.
 _ATTACH_SETTLE_SECONDS = 0.6
+"""How long docker gets to attach before the command is written.
+
+Kept, but no longer believed to be load-bearing. Measured on the Ubuntu VM
+against the live playerbots worldserver, 2026-08-23: settle values of 0.0,
+0.05, 0.2, 0.6 and 1.5 s each answered `gm list` 4 times out of 4. A write to
+the pty master sits in the terminal's buffer until something reads the slave,
+so being early costs nothing — which is why 0.0 s works. The sleep is a margin
+against a slower host and against `docker attach` printing an error before it
+ever reaches the console, not a fix for a race that was observed here.
+"""
+
 _PROMPT = "AC>"
+"""What AzerothCore's console prints when it is ready for the next command.
+
+Printed twice per command, which is what makes it a delimiter and not just
+noise to strip: once after the console reads the line (immediately in front of
+the first line of the answer) and once after the command finishes. See
+`_reply_lines()`.
+"""
 
 _DEFAULT_WINDOW_SECONDS = 3.0
 
@@ -38,7 +64,12 @@ class ConsoleError(RuntimeError):
 
 @dataclass(frozen=True)
 class ConsoleReply:
-    """What the worldserver printed in the window after a command was sent."""
+    """One command's answer, cut out of everything the console printed.
+
+    `lines` is what the console printed between its prompt and its next prompt
+    — not everything that arrived in the reply window. On a server with
+    playerbots running, those are very different things; see `_reply_lines()`.
+    """
 
     command: str
     lines: tuple[str, ...]
@@ -91,7 +122,27 @@ def send_command(
     window: float = _DEFAULT_WINDOW_SECONDS,
     popen: type[subprocess.Popen[bytes]] = subprocess.Popen,
 ) -> ConsoleReply:
-    """Send one console line to the worldserver and return what it printed within `window`."""
+    """Send one console line to the worldserver and return that command's answer.
+
+    `window` bounds how long the console is listened to, not what counts as the
+    reply — `_reply_lines()` cuts the answer out of the window using the
+    console's own prompt. A command whose output outlives the window is
+    truncated; nothing waits for it, because a detached attach client cannot ask
+    the console whether it has finished.
+
+    The detach is the part with teeth, and it was the point of the live gate.
+    Measured against the real playerbots worldserver on 2026-08-23: ~40
+    attach/detach cycles left the container's `State.Pid` at 69960,
+    `RestartCount` at 0 and `StartedAt` unchanged, `docker logs -f` still
+    streamed afterwards, and no `docker attach` client was left behind.
+
+    Raises:
+        ConsoleError: no pty on this platform, no docker CLI, or the pty could
+            not be written to. A command the *server* rejects is not an error
+            here — AzerothCore answers it (`Command 'x' does not exist`, or the
+            subcommand usage), and that answer is returned like any other.
+        ValueError: `command` is empty or carries more than one line.
+    """
     if any(ch in command.strip("\n") for ch in ("\n", "\r")) or not command.strip():
         raise ValueError("send_command() takes exactly one non-empty command line")
     logger.info(f"console → {container}: {command.split(' ', 2)[0:2]}")  # never log passwords
@@ -150,7 +201,10 @@ def send_command(
         raise ConsoleError(f"could not write to the worldserver console: {exc}") from exc
     time.sleep(window)
     # Detach without stopping the server. `docker attach` ignores SIGTERM here,
-    # so kill our client outright — the container is untouched either way.
+    # so kill our client outright — the container is untouched either way. Both
+    # halves were measured on the Ubuntu VM, 2026-08-23: an attach client sent
+    # SIGTERM was still alive two seconds later (`poll()` None) and only exited
+    # on SIGKILL, and the worldserver kept its PID through every cycle.
     _close_console(proc, master, reader)
     return ConsoleReply(command=command, lines=_reply_lines(out, command))
 
@@ -170,19 +224,62 @@ def _close_console(proc: subprocess.Popen[bytes], master: int, reader: threading
 
 
 def _reply_lines(raw: list[str], command: str) -> tuple[str, ...]:
-    """The console's answer: ANSI stripped, prompts and our own echo removed."""
+    """This command's answer: the lines between the console's prompt and its next one.
+
+    The window is a clock, and a clock does not know when an answer ends. This
+    used to return every line that arrived inside it, ANSI stripped and with our
+    own echo dropped, which reads correctly on an idle server and falls apart on
+    a populated one — the worldserver prints its own log to the same console.
+    Measured against the real playerbots install on 2026-08-23, in a 3-second
+    window: `gm list` came back as its one real line plus one unrelated
+    `[mod-city-bots]` line; `flurbleblarg` as one real line plus **four** noise
+    lines, three of which had arrived *before* the command was even sent;
+    `server info`'s nine lines arrived under six to forty-four lines of bot
+    logins. The Console tab then printed all of it a second time, because the
+    same panel is streaming `docker logs -f` alongside.
+
+    The delimiter is the console's own prompt, which the same measurement showed
+    is printed exactly twice per command and never in between — verified across
+    eight commands including `account onlinelist`, whose 1849-line window had
+    its two prompts at index 1 and index 1848. So the answer is everything after
+    the FIRST prompt and before the SECOND: leading noise falls before the
+    first, trailing noise after the second, and neither is claimed as a reply.
+
+    A window with no prompt at all is not parsed this way, because that is the
+    shape of a failure rather than of an answer: `docker attach` against a
+    missing container prints `Error response from daemon: No such container:
+    ...` and never reaches a console. Handing back nothing there would turn the
+    one message that explains the failure into silence, so an unprompted window
+    returns everything it saw, as before.
+
+    What it still cannot do: async output that lands *between* the two prompts
+    is inside the answer and stays there. That is much rarer than the head and
+    tail cases — those are the whole idle stretch of the window — and separating
+    it would need the worldserver to mark its own log lines, which it does not.
+    """
     sent = command.strip()
-    lines: list[str] = []
+    answer: list[str] = []
+    everything: list[str] = []
+    prompts = 0
     for line in raw:
         text = runner.strip_ansi(line).replace("\x1b", "").strip()
         while text.startswith(_PROMPT):
+            prompts += 1
             text = text[len(_PROMPT) :].lstrip()
         if not text or text == sent:
             continue
-        lines.append(text)
-    return tuple(lines)
+        everything.append(text)
+        if prompts == 1:
+            answer.append(text)
+    return tuple(answer) if prompts else tuple(everything)
 
 
 def attach(container: str = docker_ctl.SPEC.world) -> list[str]:
-    """The interactive attach argv for a terminal; Ctrl+P, Ctrl+Q detaches."""
+    """The interactive attach argv for a terminal; Ctrl+P, Ctrl+Q detaches.
+
+    No `--detach-keys` is passed, so that sequence is docker's default rather
+    than something this argv pins — a user who has set `detachKeys` in
+    `~/.docker/config.json` has their own. `send_command()` does not depend on
+    it either way: it detaches by killing its own client.
+    """
     return attach_argv(container)
