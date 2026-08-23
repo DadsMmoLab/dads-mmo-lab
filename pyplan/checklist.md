@@ -199,6 +199,19 @@
     Sectigo/USERTrust (present) — which is exactly why three hosts verified and one did not. Fixed with two
     transports, System32 `curl.exe` by absolute path (schannel, so it sees the on-demand roots *and*
     enterprise MITM roots) and `certifi` as the in-process backstop. Verification is never weakened.
+
+    **Two corrections to the in-process backstop, from an adversarial review against a real self-signed
+    server (2026-08-23).** (a) `create_default_context(cafile=certifi.where())` **replaces** the OS store
+    rather than widening it — it skips `load_default_certs()` whenever it is given a `cafile`. Measured
+    here: 58 OS CA certs, 121 in certifi, and 33 of the 58 absent from certifi, including every
+    administrator-installed root, i.e. exactly the enterprise-MITM case the curl transport was chosen for.
+    `verify_context()` now loads the OS store and adds certifi on top (154 roots, both sets contained), and
+    an unreadable certifi bundle degrades to the OS store instead of raising. (b) The "a bad certificate is
+    not 'offline'" fix was **inert**: `urlopen` never lets an `ssl.SSLCertVerificationError` escape, it
+    re-raises it inside `urllib.error.URLError`, so the predicate answered False for everything production
+    could raise. Every test that exercised the flag built the exception by hand, which is why it passed.
+    Both are fixed, with a test that runs the real `urllib` stack against a self-signed HTTPS server on
+    127.0.0.1 rather than constructing the failure.
   - The stale-PATH fix must read **both** registry hives, not `HKLM`. Measured: Docker Desktop had installed
     to `%LOCALAPPDATA%\Programs\DockerDesktop\resources\bin` and written the **user** PATH; `HKLM` named no
     docker directory at all, and `C:\Program Files\Docker\Docker\resources\bin` did not exist. Registry

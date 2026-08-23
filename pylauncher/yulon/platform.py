@@ -7,6 +7,7 @@ here while keeping the rest of the app 100% shared. See pyplan/README.md §3
 
 from __future__ import annotations
 
+import functools
 import importlib
 import os
 import shutil
@@ -249,24 +250,58 @@ def _windows_lan_ip_from_wsl() -> str | None:
     return ip or None
 
 
+@dataclass(frozen=True)
+class PublicIpResult:
+    """The public-IP probe's answer, plus whether it was TLS and not the network that failed.
+
+    This used to be a bare `str | None`, and `networking.plan()` renders a None
+    as "could not determine the public IP (offline?)". That is the one diagnosis
+    this probe must never guess at: on the fresh Windows 11 box the downloads
+    block below was written for, OpenSSL could not build a certificate chain
+    while the machine was perfectly online, so the report sent the user to look
+    at their router when the fix was Windows Update. The flag is what lets the
+    report tell those two apart.
+    """
+
+    address: str | None
+    verification_failed: bool = False
+
+
 def detect_public_ip(
     http_get: Callable[[str], str] | None = None, services: Iterable[str] = _PUBLIC_IP_SERVICES
-) -> str | None:
-    """The public IPv4 as seen from the internet (icanhazip/ipify), or None if offline."""
+) -> PublicIpResult:
+    """The public IPv4 as seen from the internet (icanhazip/ipify), and why it failed.
+
+    `verification_failed` is set when at least one service was reached and its
+    certificate could not be verified, and none of them answered — i.e. the
+    probe found a server and refused to trust it, which is a machine problem
+    with a different fix than having no route out at all.
+    """
     get = http_get if http_get is not None else _http_get_text
+    verification_failed = False
     for url in services:
         try:
             text = get(url).strip()
             IPv4Address(text)
-            return text
+            return PublicIpResult(text)
         except (OSError, ValueError) as exc:
+            verification_failed = verification_failed or (
+                isinstance(exc, OSError) and _is_verification_failure(exc)
+            )
             logger.debug(f"detect_public_ip() via {url} failed: {exc}")
-    return None
+    return PublicIpResult(None, verification_failed)
 
 
 def _http_get_text(url: str) -> str:
+    """A small GET as text, over the same verified TLS the installer download uses.
+
+    The context is not optional here even though nothing executable is fetched:
+    without it this call inherits OpenSSL's snapshot of the Windows root store
+    and fails on exactly the hosts `verify_context()` exists to cover — and
+    `detect_public_ip()` would report that as "offline".
+    """
     request = urllib.request.Request(url, headers={"User-Agent": "yulon"})
-    with urllib.request.urlopen(request, timeout=5.0) as resp:
+    with urllib.request.urlopen(request, timeout=5.0, context=verify_context()) as resp:
         return str(resp.read().decode("utf-8", errors="replace"))
 
 
@@ -326,11 +361,16 @@ _MANUAL_DOCKER_DESKTOP = (
     "Download and install Docker Desktop by hand: "
     "https://www.docker.com/products/docker-desktop/"
 )
-_MANUAL_ROOT_CERTS = (
-    "This machine could not verify the download server's certificate, usually because it is "
-    "missing a root certificate. On Windows, run Windows Update (it installs the current roots) "
-    "and try again. Yu'lon will not install software it could not verify."
+# The sentence that is true wherever a TLS check fails on a box like the one in
+# the downloads block below: the root store, not the network, is what broke, and
+# Windows Update is what fixes it. Shared (style-guide §4) so the installer's
+# manual step and the networking report cannot drift into two different answers.
+CERT_VERIFY_FIX = (
+    "This machine could not verify the server's certificate, usually because it is missing a "
+    "root certificate. On Windows, run Windows Update (it installs the current roots) and "
+    "try again."
 )
+_MANUAL_ROOT_CERTS = f"{CERT_VERIFY_FIX} Yu'lon will not install software it could not verify."
 _MANUAL_WSL = (
     "Open an Administrator PowerShell and run: wsl --install --no-distribution, then reboot."
 )
@@ -678,10 +718,13 @@ def docker_engine_commands(pm: PackageManager, *, steamos: bool, user: str) -> l
 #      so it sees the roots OpenSSL cannot — and it sees an enterprise root
 #      installed by a TLS-intercepting proxy, which a bundled CA file
 #      structurally cannot. It also brings resume and retry for the 629 MB.
-#   2. `urllib` against certifi's Mozilla bundle when certifi is importable
-#      (`requirements.txt` ships it), else the OS default. In-process, portable,
-#      and the backstop for a box with no curl (Windows before 1803) or a curl
-#      that will not run.
+#   2. `urllib` against the OS root store WITH certifi's Mozilla bundle added on
+#      top (`requirements.txt` ships certifi); the OS store alone when certifi is
+#      not importable or its bundle cannot be read. In-process, portable, and the
+#      backstop for a box with no curl (Windows before 1803) or a curl that will
+#      not run. Keeping the OS roots in the set is what preserves the
+#      enterprise-root case in step 1 for this transport too — see
+#      `verify_context()`.
 #
 # There is no third step. Verification is never turned off here: an unverified
 # download of an executable that is about to be run with elevation is a
@@ -696,6 +739,11 @@ _DOWNLOAD_CHUNK_BYTES = 1 << 20
 # network is down" — a distinction the user's next step depends on.
 _CURL_NO_RANGE_EXIT = 33
 _CURL_VERIFY_EXITS = frozenset({60, 77})
+
+# How far `_is_verification_failure()` follows `.reason`. urllib wraps once; the
+# rest of the budget is for an injected opener that wraps again, and the bound
+# itself is what makes a self-referential chain terminate.
+_REASON_UNWRAP_LIMIT = 4
 
 _CURL_ARGS: tuple[str, ...] = (
     "--fail",
@@ -786,28 +834,89 @@ def _os_curl() -> Path | None:
     return candidate if candidate.exists() else None
 
 
-def _verify_context() -> ssl.SSLContext:
-    """A verifying TLS context with the widest root set we can honestly assemble.
+@functools.lru_cache(maxsize=1)
+def verify_context() -> ssl.SSLContext:
+    """A verifying TLS context trusting the OS root store AND certifi's — the union, not one.
 
-    `ssl.create_default_context()` already means verify + check hostname; what it
-    does not come with on a fresh Windows install is a COMPLETE root set. certifi
-    ships Mozilla's, which is where the missing Amazon Root CA 1 actually lives,
-    so it is used whenever it is importable. When it is not — a dev checkout that
-    skipped `pip install -r requirements.txt` — the OS default is used unchanged:
-    fewer roots, still fully verified. Nothing here relaxes verification, and
-    there is no branch that can.
+    `ssl.create_default_context()` already means verify + check hostname, and on
+    its own it loads the OS roots. What it cannot fix is that OpenSSL only ever
+    reads a SNAPSHOT of the Windows store while Windows materializes most roots
+    on demand through CryptoAPI: the fresh Windows 11 box the block above was
+    written for had 18 of them and could not chain desktop.docker.com to Amazon
+    Root CA 1. certifi (Mozilla's bundle) carries the ones that are missing.
+
+    Correcting the first version of this function (review finding, 2026-08-23):
+    it built the context as `create_default_context(cafile=certifi.where())`,
+    which does not WIDEN the OS store — given a `cafile`, `create_default_context()`
+    takes that arm and never calls `load_default_certs()`, so the result trusted
+    certifi's roots and nothing else. Measured here: the OS store holds 58 CA
+    certs, certifi 2026.07.22 holds 121, and 33 of the 58 are absent from certifi
+    (DigiCert Global Root CA and Baltimore CyberTrust Root among them) — as is,
+    by construction, every root an administrator installed, which is how a
+    corporate TLS-inspecting proxy or an internal CA is trusted at all. Loading
+    the OS store first and calling `load_verify_locations()` afterwards ADDS to
+    it instead of replacing it: 154 CA certs, with both sets contained in the
+    result.
+
+    An unreadable certifi bundle degrades to the OS store rather than raising.
+    Raising would turn a packaging fault — `cacert.pem` not collected into the
+    PyInstaller build — into "could not determine the public IP (offline?)", the
+    exact misdiagnosis the rest of this section exists to remove. The OS store
+    alone still verifies every connection; it is the narrower failure, and the
+    log line says which one happened.
+
+    Nothing here relaxes verification, and there is no branch that can: every
+    path returns a `create_default_context()` result with roots added to it and
+    no other setting touched.
+
+    Public, and imported by `manifest_store` and `update`, because the root-store
+    gap is a fact about the OS this process runs on — the same thing `detect()`
+    and `config_dir()` are about — and every HTTPS call in the app has it. Both
+    of those modules already sit above this one in the import graph (this one
+    imports only `runner` and `log`), so there is no cycle to create; giving the
+    context its own module would only move the measurements above away from the
+    `download_verified()` code they were taken for.
+
+    Cached because assembling it is not free: measured on this dev box, 14 ms for
+    the OS store alone, 193 ms for certifi alone and 211 ms for the union of the
+    two. One `urlopen` per manifest file means a full refresh of the WotLK tree
+    is 45 GETs, so building a context per call would have put ~9.5 s of
+    certificate parsing into it. Sharing one context across connections is the
+    normal way to use `ssl` — a context holds no per-connection state — and the
+    root set it reads cannot change inside one run of the app.
     """
+    context = ssl.create_default_context()
     try:
         import certifi
     except ImportError:
-        logger.debug("certifi is not importable; using the OS default root store")
-        return ssl.create_default_context()
-    return ssl.create_default_context(cafile=certifi.where())
+        logger.debug("certifi is not importable; using the OS root store alone")
+        return context
+    try:
+        context.load_verify_locations(cafile=certifi.where())
+    except Exception as exc:
+        # Deliberately broader than OSError, and `where()` is inside the try for
+        # the same reason: locating the bundle can fail in ways that are not
+        # OSError. A frozen build whose certifi module spec is broken makes
+        # `importlib.resources.files("certifi")` raise AttributeError (measured).
+        # The caller that matters here is `detect_public_ip`, which catches only
+        # (OSError, ValueError) -- so anything else does not become a wrong
+        # diagnosis, it becomes an unhandled traceback out of `networking.plan()`,
+        # which is worse than the "offline?" lie this function exists to prevent.
+        # Degrading to the OS store is correct for every one of these failures:
+        # the context still verifies, it just knows fewer roots
+        # (review finding, 2026-08-23).
+        logger.warning(
+            "certifi's bundle could not be used (%s); continuing with the OS root store alone. "
+            "Connections are still fully verified, but a host whose root this machine has not "
+            "materialized will fail to verify.",
+            exc,
+        )
+    return context
 
 
 def _open_url(request: urllib.request.Request) -> HttpResponse:
-    """`urlopen` with the verifying context from `_verify_context()`."""
-    resp: HttpResponse = urllib.request.urlopen(request, timeout=60.0, context=_verify_context())
+    """`urlopen` with the verifying context from `verify_context()`."""
+    resp: HttpResponse = urllib.request.urlopen(request, timeout=60.0, context=verify_context())
     return resp
 
 
@@ -875,10 +984,43 @@ def _download_urllib(url: str, part: Path, open_url: UrlOpener) -> None:
 
 
 def _is_verification_failure(exc: OSError) -> bool:
-    """True when `exc` means 'could not verify the certificate', not 'could not connect'."""
-    if isinstance(exc, ssl.SSLCertVerificationError):
-        return True
-    return isinstance(exc, DownloadError) and exc.verification
+    """True when `exc` means 'could not verify the certificate', not 'could not connect'.
+
+    The `.reason` walk is the whole function, not padding (review finding,
+    2026-08-23): `urllib.request.urlopen` NEVER lets an
+    `ssl.SSLCertVerificationError` escape. `AbstractHTTPHandler.do_open` catches
+    the `OSError` the handshake raises and re-raises it as
+    `urllib.error.URLError(err)`, keeping the original in `.reason`. So the bare
+    `isinstance` check this shipped with answered False for every exception
+    `_http_get_text()` or `_download_urllib()` can raise, which left the
+    certificate branch of `networking.plan()` unreachable — it went on printing
+    "could not determine the public IP (offline?)" — and left `_MANUAL_ROOT_CERTS`
+    reachable only through `_download_curl`'s exit code, i.e. silent on a box
+    with no OS curl. Measured against a self-signed server on 127.0.0.1:
+    `URLError(SSLCertVerificationError(...))`, one level deep.
+
+    That `raise URLError(err)` is the only site in `urllib` that wraps an
+    arbitrary `OSError`, so the stdlib never nests deeper than one; the loop
+    rather than a single unwrap is for the `open_url`/`http_get` seams, which a
+    caller may wrap again, and it is bounded so a self-referential `.reason`
+    cannot spin.
+    """
+    current: BaseException = exc
+    # +1 because the limit counts HOPS, and the exception handed in has been
+    # followed zero times: without it a certificate error at the limit's own
+    # depth answers False and the constant overstates the code by one.
+    for _ in range(_REASON_UNWRAP_LIMIT + 1):
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return True
+        if isinstance(current, DownloadError) and current.verification:
+            return True
+        # `HTTPError.reason` is a str, and a plain OSError has no `.reason` at
+        # all; either way there is nothing further to unwrap.
+        reason = getattr(current, "reason", None)
+        if not isinstance(reason, BaseException):
+            return False
+        current = reason
+    return False
 
 
 def download_verified(
@@ -891,7 +1033,7 @@ def download_verified(
 ) -> Path:
     """Download `url` to `dest` over a verified connection, or fail loudly.
 
-    Tries the OS-shipped curl first and `urllib` (certifi bundle) second; the
+    Tries the OS-shipped curl first and `urllib` (OS roots + certifi) second; the
     long comment above this function says why that order, and why there is no
     third attempt. Raises `DownloadError` — an `OSError`, so existing callers
     keep reporting it as a skipped step — with both transports' messages and

@@ -8,7 +8,9 @@ command builders are checked against the guide's literal commands.
 
 from __future__ import annotations
 
+import ssl
 import subprocess
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -18,6 +20,10 @@ from yulon.catalog.catalog import load_catalog
 
 WOTLK = load_catalog().get("wow-wotlk")
 TORTOISE = load_catalog().get("wow-tortoise")
+
+# What the fresh Windows 11 box actually raised; test_download.py keeps the
+# verbatim message, this only needs the exception type.
+_CERT_ERROR = ssl.SSLCertVerificationError("unable to get local issuer certificate")
 
 
 def test_firewall_commands_match_the_guide() -> None:
@@ -85,14 +91,45 @@ def test_detect_firewall_prefers_netsh_on_windows_then_ufw_then_firewalld(
 
 def test_detect_public_ip_validates_and_falls_back() -> None:
     answers = {"https://a": "<html>oops</html>", "https://b": "98.24.105.7\n"}
-    assert platform.detect_public_ip(lambda u: answers[u], services=("https://a", "https://b")) == (
-        "98.24.105.7"
-    )
+    found = platform.detect_public_ip(lambda u: answers[u], services=("https://a", "https://b"))
+    assert found == platform.PublicIpResult("98.24.105.7", False)
 
     def offline(url: str) -> str:
         raise OSError("no network")
 
-    assert platform.detect_public_ip(offline, services=("https://a",)) is None
+    assert platform.detect_public_ip(offline, services=("https://a",)) == platform.PublicIpResult(
+        None, False
+    )
+
+
+@pytest.mark.parametrize(
+    "raised",
+    [urllib.error.URLError(_CERT_ERROR), _CERT_ERROR],
+    ids=["as urlopen raises it", "as a non-urllib seam might"],
+)
+def test_detect_public_ip_separates_a_bad_certificate_from_being_offline(
+    raised: OSError,
+) -> None:
+    """The failure that used to be invisible: reached the service, refused to trust it.
+
+    Both give address=None, and before this flag existed the networking report
+    told a machine with an incomplete root store that it was offline.
+
+    The first case is the one that matters: `urlopen` never lets an
+    `ssl.SSLCertVerificationError` out, it re-raises it inside a
+    `urllib.error.URLError`, and this test asserted only the bare shape — so it
+    stayed green while the production path could not reach the flag at all
+    (review finding, 2026-08-23). The shape is still hand-built here, because
+    what this file tests is `plan()`'s reaction to the flag; test_download.py
+    runs the same predicate against a real self-signed server so that no file
+    has to take the shape on trust.
+    """
+
+    def cannot_verify(url: str) -> str:
+        raise raised
+
+    probe = platform.detect_public_ip(cannot_verify, services=("https://a", "https://b"))
+    assert probe == platform.PublicIpResult(None, True)
 
 
 @pytest.mark.parametrize(
@@ -202,10 +239,35 @@ def test_missing_ips_make_the_plan_not_ready_with_clear_warnings() -> None:
         firewall="none",
         steamos=False,
         wsl=False,
-        detect_public=lambda: None,
+        detect_public=lambda: platform.PublicIpResult(None),
     )
     assert no_pub.ready is False and no_pub.realmlist_sql is None
-    assert any("public IP" in w for w in no_pub.warnings)
+    assert any("public IP" in w and "offline?" in w for w in no_pub.warnings)
+
+
+def test_an_unverifiable_lookup_is_not_reported_as_being_offline() -> None:
+    """The user-facing half of the defect: the report used to misdiagnose the machine.
+
+    A public-IP probe that failed its certificate check and one that found no
+    route both end with public_ip=None; only the first one is fixed by Windows
+    Update, and the report has to say which one happened or it sends the user to
+    the router for a root-store problem.
+    """
+    p = networking.plan(
+        WOTLK,
+        "internet",
+        lan_ip="192.168.1.25",
+        firewall="none",
+        steamos=False,
+        wsl=False,
+        detect_public=lambda: platform.PublicIpResult(None, verification_failed=True),
+    )
+    assert p.ready is False and p.realmlist_sql is None
+    cert = [w for w in p.warnings if "certificate" in w]
+    assert len(cert) == 1
+    assert "not the same as being offline" in cert[0]
+    assert platform.CERT_VERIFY_FIX in cert[0]
+    assert not any("offline?" in w for w in p.warnings)
 
 
 class _RecordingSql:
