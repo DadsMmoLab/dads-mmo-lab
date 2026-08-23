@@ -86,8 +86,14 @@ ASK_THE_USER = AskTheUser()
 
 Not a general escape hatch: a rule that opens a dialog is the shape that made
 the old prompt heuristic dangerous, so the bar is narrow and stated. A question
-qualifies only if it is matched EXACTLY, arrives as a whole line, and its two
-answers cost the user different things that the app cannot weigh for them.
+qualifies only if its two answers cost the user different things that the app
+cannot weigh for them, and only if its pattern pins the QUESTION rather than
+the subject — every rule here is an unanchored `re.search` over a line, first
+match wins, so "matches the words" and "matches the question" are not the same
+bar. In practice that means ending the pattern at the `(y/n)` suffix
+`ask_yes_no` prints, which is the one thing a warning paragraph about the same
+subject never carries (this used to claim an EXACT whole-line match, which
+nothing here enforces — review, 2026-08-23).
 
 Two clear it today. The installers' docker-group question: yes grants
 root-equivalent access silently — the precise thing upstream's 1.4.4 security
@@ -167,8 +173,18 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
     # remove it by hand ("Cannot continue with snap Docker"), which the 6.1
     # failure dialog now shows verbatim; saying yes costs data nobody agreed to
     # lose.
+    #
+    # Both carry the `(y/n)` suffix for the same reason the docker-group rule
+    # does: `respond()` is handed every complete line, and on a quiet partial
+    # line with no sudo marker it is handed the whole pending buffer. An
+    # unanchored `search` therefore matches a reworded warning paragraph, a
+    # summary echo, or a future script edit that prints the phrase for
+    # information — writing "n" into a child that is not reading (which
+    # desynchronises the next real prompt) or opening a modal dialog over
+    # ordinary build output. No such line exists in today's scripts; the fix is
+    # for the next rule someone adds by copying these (review, 2026-08-23).
     PromptRule(
-        r"Remove snap Docker",
+        r"Remove snap Docker.*\(y/n\)",
         "n",
         "would remove the user's own Docker install; the script says how to do it by hand",
     ),
@@ -180,7 +196,7 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
     # exact question, printed as a whole line, whose two answers cost the user
     # different things that only they can weigh.
     PromptRule(
-        r"Install Docker via rpm-ostree and reboot now",
+        r"Install Docker via rpm-ostree and reboot now.*\(y/n\)",
         ASK_THE_USER,
         "reboots the machine in 10s; neither answer is the app's to give",
     ),
@@ -248,15 +264,15 @@ def unsupported_platform_message(entry: CatalogEntry, platform_id: str) -> str:
 def cancelled_install_message(entry_name: str, server_dir: Path) -> str:
     """What Stop actually did, and what it did not (roadmap 6.5 "honest cancel copy").
 
-    Three things are easy to imply and all three are false. It is not an
-    install, so the app must not remember the folder — which it did until this
-    existed. Stopping undoes nothing and tidies nothing away. And terminating
-    the compose client does not stop a build that had started: BuildKit
-    finishes the step it is on inside the daemon. That last one is deliberate
-    rather than a wart — those layers are cached and are what makes a second
-    attempt cheap — so the copy says so, because a message implying an instant
-    halt is what sends someone to `docker builder prune` to tidy up, throwing
-    away the hours it would have saved (`phase6-decisions.md`).
+    Three things are easy to imply and all three are false. The app has not
+    remembered the folder — which it did until this existed. Stopping undoes
+    nothing and tidies nothing away. And terminating the compose client does not
+    stop a build that had started: BuildKit finishes the step it is on inside
+    the daemon. That last one is deliberate rather than a wart — those layers
+    are cached and are what makes a second attempt cheap — so the copy says so,
+    because a message implying an instant halt is what sends someone to `docker
+    builder prune` to tidy up, throwing away the hours it would have saved
+    (`phase6-decisions.md`).
 
     What it deliberately does NOT promise is that files are there. Both
     outcomes were measured on the same machine on the same day: cancelled after
@@ -264,16 +280,54 @@ def cancelled_install_message(entry_name: str, server_dir: Path) -> str:
     its own half-written target and the folder was gone. So the copy points at
     the folder and lets the user look, rather than asserting a state it cannot
     know (install gate, 2026-08-23).
+
+    The recovery advice is split on the compose file, because one sentence was
+    being used for two opposite situations and was wrong in the first. It used
+    to say "Press Install again and choose {server_dir} to carry on", which
+    walks a pre-build cancel straight back into the bug the cancel fix exists to
+    remove: the script's line 961 finds no built worldserver image, takes the
+    existing-folder branch, asks "Remove it and start fresh? (y/n):" — and
+    `PROMPT_RULES` answers "n", because `InstallOptions.reinstall` is False and
+    nothing in the GUI ever sets it. The script prints "Keeping existing install
+    — exiting." and exits 0, which the view reads as a SUCCESS: it pins a
+    compose project name into the half-cloned folder and remembers a server that
+    does not exist. Roadmap 6.5 item 1 (a staged, resumable install) is unbuilt,
+    so nothing here may promise resumption.
+
+    After the build the same sentence is correct — 961 finds the images and
+    genuinely skips the compile — and there Stop throws away work: a build the
+    app now refuses to remember, with containers left running and no tab able to
+    stop them. The app cannot tell the two apart at this moment without asking
+    Docker, and asking is not safe enough to decide on: without a pin, compose
+    derives the project from the folder's basename, so a second install in a
+    same-named folder answers for this one (see `docker.install_project()`). So
+    the copy names the evidence it does have — whether the source is on disk —
+    and gives the action for each case, including "Use existing…", which needs
+    only that compose file and was never mentioned (review, 2026-08-23).
     """
+    lead = (
+        f"Stop was pressed, so {entry_name} has NOT been remembered as an install and the app "
+        f"will not show a tab for it. Stopping undoes nothing and tidies nothing away — look "
+        f"in {server_dir} to see what the installer had got to (a download it was in the "
+        "middle of may have removed its own leftovers; anything already finished stays). If "
+        "the build had started, Docker keeps finishing the step it was on in the background — "
+        "that is deliberate, and the finished pieces are what make a second attempt much "
+        "faster, so do not clear Docker's build cache to tidy up."
+    )
+    if (server_dir / "docker-compose.yml").is_file():
+        return (
+            f"{lead} The source is there. If the build had already finished, the server may "
+            f'be built and even running: press "Use existing…", choose '
+            f"{server_dir}, and the app will manage it from a tab — nothing is lost. If the "
+            "build had not finished, pressing Install again will NOT carry on from where it "
+            "stopped: the installer finds the folder, offers to wipe it, and the app declines, "
+            f"so it exits having done nothing. Delete {server_dir} first in that case."
+        )
     return (
-        f"{entry_name} is NOT installed, and this folder has not been remembered as an "
-        f"install. Stopping undoes nothing and tidies nothing away — look in {server_dir} "
-        "to see what the installer had got to (a download it was in the middle of may have "
-        "removed its own leftovers; anything already finished stays). If the build had "
-        "started, Docker keeps finishing the step it was on in the background — that is "
-        "deliberate, and the finished pieces are what make a second attempt much faster, "
-        "so do not clear Docker's build cache to tidy up. Press Install again and choose "
-        f"{server_dir} to carry on, or delete that folder first to start over."
+        f"{lead} The installer had not got as far as writing a docker-compose.yml, so there "
+        "is nothing there for the app to manage and nothing to resume. Pressing Install again "
+        f"will not pick up where it stopped — delete {server_dir} if it still exists, then "
+        "start over."
     )
 
 
@@ -493,6 +547,10 @@ class Installer:
         self.preflight(opts, cancel=cancel)
         logger.info(f"installing {self.entry.id} via {self.script}")
         tail: deque[str] = deque(maxlen=_ERROR_TAIL_LINES)
+
+        def stopped() -> bool:
+            return cancel is not None and cancel.is_set()
+
         try:
             for line in self._interact(
                 ["bash", str(self.script)],
@@ -513,13 +571,12 @@ class Installer:
                 if text:
                     tail.append(text)
                 yield line
-            if cancel is not None and cancel.is_set():
+            if stopped():
                 # `interact()` RETURNS on cancel rather than raising, so this
                 # used to fall through to "install of wow-wotlk finished" — in
                 # the app log, which is the file a user pastes into a bug
                 # report, for an install they had just stopped 2.3 GB into a
                 # clone (install gate, 2026-08-23).
-                logger.info(f"install of {self.entry.id} was cancelled")
                 return
         except subprocess.CalledProcessError as exc:
             # Never just "exited with status N": the script's own last words are
@@ -529,6 +586,17 @@ class Installer:
             raise InstallerError(
                 f"{self.script.name} exited with status {exc.returncode}.{detail}"
             ) from exc
+        finally:
+            # In a `finally` because a cancel has two shapes and the other one
+            # never reaches the line above. `_StreamWorker.run()` breaks its
+            # loop on the first line that arrives AFTER Stop, and breaking drops
+            # the last reference to this generator — so CPython closes it and
+            # `GeneratorExit` is raised at the `yield`, which the `except` above
+            # does not catch. That shape left the app log with no ending line at
+            # all: "installing wow-wotlk via ..." and then nothing (review,
+            # 2026-08-23).
+            if stopped():
+                logger.info(f"install of {self.entry.id} was cancelled")
         logger.info(f"install of {self.entry.id} finished")
 
 

@@ -18,6 +18,7 @@ from collections.abc import Callable, Iterator
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
 
+from yulon import runner
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -53,6 +54,20 @@ class _StreamWorker(QObject):
             message = f"{type(exc).__name__}: {exc}"
             logger.warning(f"log panel job failed: {message}")
         self.finished.emit(ok, message)
+        # Emit first, then end our own thread's event loop from inside it.
+        # `finished` is also connected to `thread.quit`, but the QThread OBJECT
+        # lives in the main thread, so that connection is queued — and the one
+        # caller that most needs the join is `main._stop_background_threads()`,
+        # which runs after `app.exec()` has returned and then blocks in
+        # `wait()`. Nothing pumps the main thread's queue there, so `quit()` was
+        # never delivered, `wait(5000)` timed out (measured: `wait(3000)` ->
+        # False with the worker long finished) and Qt was torn down with the
+        # QThread still running — the 0xC0000409 abort that function's own
+        # docstring says it prevents. Called here it is direct, and the queued
+        # copy stays as it was (review, 2026-08-23).
+        thread = self.thread()
+        if thread is not None:
+            thread.quit()
 
     def request_stop(self) -> None:
         self._stop = True
@@ -102,7 +117,8 @@ class LogPanel(QWidget):
         set — so the worker reports `ok=True` and a message ("done"/"stopped")
         that a completed job could also produce. The panel is the only thing
         that knows the Stop button was pressed, so it is the thing that says
-        so. Reset by `run()`, so it always describes the current job.
+        so. Reset by `run()` and only ever set for a job that was running, so it
+        always describes the current job — see `stop()`.
         """
         return self._stop_requested
 
@@ -119,8 +135,27 @@ class LogPanel(QWidget):
         self._text.clear()
 
     def append(self, line: str) -> None:
-        """Append one line (thread-safe only from the UI thread; the worker uses signals)."""
-        self._text.appendPlainText(line)
+        """Append one line, without its terminal colour codes.
+
+        Stripped HERE rather than in each source, because every source has the
+        problem and none of them had the fix. `runner.interact()` yields the
+        install script's lines raw and says so, and `docker.follow_logs()`
+        streams the worldserver's own colour — confirmed in the real stream:
+        `\\x1b[36m` on every `[mod-city-bots]` line, plus bracketed-paste
+        `\\x1b[?2004h` around the console prompt. A QPlainTextEdit renders none
+        of that, so the Console tab showed the escape sequences themselves on
+        every coloured line, and the install panel would have too. The parser in
+        `console.py` strips separately and must keep doing so — it reads the
+        prompt out of the raw stream, long before anything is displayed
+        (review, 2026-08-23).
+
+        The stray-ESC removal is the second half: `strip_ansi()` only matches
+        CSI sequences, so an `ESC(B`-style charset switch leaves the ESC byte
+        behind, and that renders as a box glyph.
+
+        Thread-safe only from the UI thread; the worker reaches it by signal.
+        """
+        self._text.appendPlainText(runner.strip_ansi(line).replace("\x1b", ""))
 
     def run(
         self,
@@ -157,7 +192,17 @@ class LogPanel(QWidget):
 
     @Slot()
     def stop(self) -> None:
-        """Ask the running job to stop after its current line (and cancel a blocked one)."""
+        """Ask the running job to stop after its current line (and cancel a blocked one).
+
+        A no-op when nothing is running, which is not tidiness: `cancelled`
+        promises to describe the job, and `main._stop_background_threads()`
+        calls `stop()` on EVERY registered panel at exit with no running check.
+        Without the guard a panel that had finished its job cleanly ended the
+        session reporting `cancelled is True` beside a header reading "finished:
+        done" (review, 2026-08-23).
+        """
+        if not self.running:
+            return
         self._stop_requested = True
         if self._cancel is not None:
             self._cancel.set()
