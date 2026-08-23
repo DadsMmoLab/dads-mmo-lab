@@ -31,7 +31,7 @@ import threading
 import types
 import urllib.error
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -709,11 +709,50 @@ def test_the_update_check_verifies(monkeypatch: pytest.MonkeyPatch) -> None:
 # ------------------------------------------------------ what the user is told
 
 
+def _pretend_windows(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    which: Callable[..., str | None] = lambda *_a, **_k: None,
+) -> None:
+    """Fake a Windows host for `platform`, without faking one for the stdlib too.
+
+    `platform.sys` IS the `sys` module, so setting `sys.platform` to "win32"
+    changes it for every module in the process — including `shutil`, whose
+    `which()` then takes its win32 branch and calls
+    `_winapi.NeedCurrentDirectoryForExePath`. On Linux `_winapi` is None, so that
+    raises AttributeError from inside the stdlib and the test dies somewhere it
+    never meant to go.
+
+    This stayed invisible for a reason worth recording: `_win_path_needs_curdir`
+    did not exist before Python 3.12, and CI pinned 3.11 — so the suite passed
+    there and failed on any box running a 3.12+ interpreter, which
+    `pyplan/README.md` §2 supports and says so. Measured on Ubuntu 24.04 /
+    Python 3.12.3, 2026-08-23; the CI matrix now covers a second version so this
+    class of thing cannot hide the same way again.
+
+    Stubbing `platform._which` — the single seam over `shutil.which` — is what
+    keeps the fake inside the module under test.
+
+    `_windows_docker_bins` is stubbed for a second, independent reason found the
+    same day: `_windows_docker_programs()` stats the real filesystem for
+    `docker.exe` no matter what `which` seam `ensure_docker()` was handed, so on
+    a Windows box that HAS Docker these tests resolved an absolute path, the
+    canned `run` stopped recognising `["docker", "info"]`, and `ensure_docker()`
+    returned "daemon already reachable" before reaching the code under test.
+    They passed only because `docker` also happened to be on the developer's
+    PATH. "Pretend this is Windows" has to mean a Windows box with nothing
+    installed on it, or the assertion is about the host rather than the code.
+    """
+    monkeypatch.setattr(platform.sys, "platform", "win32")
+    monkeypatch.setattr(platform, "_which", which)
+    monkeypatch.setattr(platform, "_windows_docker_bins", tuple)
+
+
 def test_a_windows_install_that_cannot_verify_names_the_certificate_step(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The user gets the fixable cause, not just 'go download it yourself'."""
-    monkeypatch.setattr(platform.sys, "platform", "win32")
+    _pretend_windows(monkeypatch)
     monkeypatch.setattr(platform, "config_dir", lambda: tmp_path)
 
     def refuse(url: str, dest: Path) -> Path:
@@ -737,7 +776,7 @@ def test_a_windows_install_that_cannot_verify_names_the_certificate_step(
 def test_a_download_that_merely_failed_does_not_blame_certificates(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(platform.sys, "platform", "win32")
+    _pretend_windows(monkeypatch)
     monkeypatch.setattr(platform, "config_dir", lambda: tmp_path)
 
     def refuse(url: str, dest: Path) -> Path:
@@ -760,7 +799,7 @@ def test_the_os_curl_is_taken_by_absolute_path_not_from_path(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A curl.exe earlier on PATH must not get to decide how an installer is verified."""
-    monkeypatch.setattr(platform.sys, "platform", "win32")
+    _pretend_windows(monkeypatch)
     monkeypatch.setenv("SystemRoot", str(tmp_path))
     assert platform._os_curl() is None  # nothing there yet
 
