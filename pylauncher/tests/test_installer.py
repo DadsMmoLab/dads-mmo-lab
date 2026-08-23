@@ -652,3 +652,40 @@ def test_the_gate_sees_a_docker_that_is_only_on_the_registry_path(
     gate = Installer(load_catalog().get("wow-wotlk"), installers_root=tmp_path)._docker_check
     assert gate() is True
     assert tried == ["docker", exe]
+
+
+def test_no_installer_escalates_privileges_without_asking() -> None:
+    """Roadmap Phase 6 preamble: no silent escalation of host privileges.
+
+    Adding a user to the `docker` group is a root-equivalent grant — `docker run
+    -v /:/mnt --rm -it alpine chroot /mnt sh` edits any file on the host — so
+    every script has to ask first. An audit on 2026-08-24 found three that did
+    not: TBC, Vanilla and Tortoise each ran `usermod -aG docker` with no consent
+    and no warning, having been written before the rule existed.
+
+    A grep rather than a run, because these scripts install operating-system
+    packages and cannot be executed in a test. It is worth having anyway: the
+    failure it catches is a line silently reappearing in a 2000-line shell
+    script, which is exactly what nobody re-reads.
+    """
+    from yulon import resources
+
+    scripts = sorted(resources.installers_dir().rglob("install-*.sh"))
+    assert len(scripts) >= 5, f"expected the catalog's installers, found {scripts}"
+
+    ungated: list[str] = []
+    sudoers: list[str] = []
+    for script in scripts:
+        for number, line in enumerate(script.read_text(encoding="utf-8").splitlines(), 1):
+            bare = line.strip()
+            if bare.startswith("#"):
+                continue
+            if "usermod -aG docker" in bare and "docker_group_consent &&" not in bare:
+                ungated.append(f"{script.name}:{number}")
+            if "sudoers" in bare or "NOPASSWD" in bare:
+                sudoers.append(f"{script.name}:{number}")
+
+    assert not ungated, f"the docker group is joined without consent at: {ungated}"
+    # Forbidden outright, not merely gated: membership already is root, so the
+    # rule buys nothing and is pure attack surface.
+    assert not sudoers, f"a passwordless sudo rule is written at: {sudoers}"
