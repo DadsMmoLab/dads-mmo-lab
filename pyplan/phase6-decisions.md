@@ -361,3 +361,293 @@ renamed so the copy could not touch the original. What it settled:
 - The counterfactual for `--no-deps` — that without it `up` attaches to the database and never
   returns — is still an argument, not a measurement.
 
+## The native install engine (6.2) — designed 2026-08-23, before implementation
+
+> The build-from spec for `NativeInstaller`. Everything above this line decided *that* there is one
+> shared engine; this section decides what it is made of, where each piece lives, and which parts
+> of it nobody on this side of the project can verify. The short version of that last part: every
+> macOS-specific claim below is unverified until Baerthe runs it on a real Mac, and the section
+> ends with the exact list.
+
+### What lives where
+
+The engine is three new modules under `catalog/`, small additions to three existing shared
+modules, and data. Nothing else moves.
+
+| piece | lives in | why there |
+|---|---|---|
+| `NativeInstaller` — stage engine, state file, resume, the `run(options, cancel) -> Iterator[str]` contract | `yulon/catalog/native.py` | it orchestrates one catalog entry's install, which is `catalog/`'s charter; `installer.py` keeps the script path and gains only the dispatch factory |
+| compose generation — entry + identity → three file texts + `.env` text | `yulon/catalog/composegen.py` | pure functions, no subprocess, testable byte-for-byte; the *content* comes from template data (below), never from Python conditionals |
+| preflight — gather facts, apply floors, produce a typed report | `yulon/catalog/preflight.py` | it reads per-game floors from catalog data and machine facts from `platform.py`/`docker.py`; neither of those may know the other's half |
+| compose templates + defaults | `catalog/installers/wow-wotlk/native/` | data, not code (style-guide §3); 6.0 made this directory the one clean home and 6.2 was told to grow it |
+| floors, dispatch fields, clone depths | `catalog.json` | per-game facts: a different game compiles at a different cost |
+| `keep_awake()`, `docker_desktop_data_root()`, `vm_resources()`, `server_dir_problem()` | `yulon/platform.py` | per-OS knowledge with zero game knowledge — exactly its charter |
+| `bind_mount_ok()`, `build_staged()`, `run_one_shot()`; `cancel`/`merge_stderr` on `run_attached()` | `yulon/docker.py` | docker argv construction stays here so no caller can mis-spell the `-f` discipline; everything game-specific is passed in, per the `ContainerSpec` rule |
+| `merge_stderr: bool = False` on `stream()` | `yulon/runner.py` | the one runner change the engine needs; see "streaming the build" |
+| `probe`/`reset` seams for the import stage | supplied by the caller | they are per-game (`controller_wow_wotlk/repair.py`); `catalog/` must not import a controller package, and the view already assembles per-game seams for the Server tab |
+
+`docker.py` still never learns a game's container names or ports — the engine passes the entry's
+`ContainerSpec` and file lists in, the same shape `repair_import()` already takes. `ui/` still
+never builds a docker argv: `catalog_view.py`'s only change is calling a factory instead of a
+constructor.
+
+### Dispatch, and the contract that keeps the UI unchanged
+
+`Install` gains `script_platforms: tuple[PlatformId, ...]`, **defaulting to `platforms`** so every
+existing catalog entry keeps meaning exactly what it said. The rules, in order:
+
+1. platform not in `platforms` → the 6.1 refusal, unchanged;
+2. platform in `script_platforms` → today's `Installer` (the bash path), unchanged;
+3. platform in `platforms` but not `script_platforms` → `NativeInstaller`.
+
+The decision is made in one place: `installer_for(entry, ...)` in `catalog/installer.py`, returning
+either class behind a shared `Protocol` (`preflight(options, cancel)`, `run(options, *, cancel,
+ask) -> Iterator[str]`). `NativeInstaller` accepts `ask` and never uses it: nothing on the native
+path may prompt — Docker Desktop is already provisioned by 5.1, there is no `sudo`, and a step that
+turns out to need interaction is a design failure to fix, not a dialog to add. WotLK's entry
+becomes `platforms: ["linux","macos","windows"]`, `script_platforms: ["linux"]`.
+
+An `install.native` block joins the entry — floors and the template directory — and the engine
+refuses, honestly, to run an entry whose platform dispatches native but whose `native` block is
+missing. `Source` gains `depth: int | None = 1`; the core repo sets `"depth": null` in
+`catalog.json` because AzerothCore's `genrev.cmake` reads the revision out of git history and a
+shallow clone hands a three-hour build the wrong answer (`rust-prior-art.md` §1). This puts the
+existing `CloneSpec.depth` docstring's warning into data, where the style guide says it belongs.
+
+### Compose generation: three files, one `.env`
+
+Straight from `rust-prior-art.md` §2, because every row of that table is an incident report:
+
+| file | may hold | may never hold |
+|---|---|---|
+| `docker-compose.yml` | `name:`, services, `container_name:`, image tags, **all** `ports:`, binds, volumes, `depends_on`, healthchecks, `stdin_open`/`tty`/`stop_grace_period` | `build:` blocks |
+| `docker-compose.override.yml` | runtime `AC_*` env, the `./modules` mount | anything structural — the future config system rewrites this file and its YAML writer keeps nothing it does not understand |
+| `docker-compose.build.yml` | `build:` blocks only, each with an explicit `dockerfile:` and per-service `target:` | anything auto-loaded behavior depends on |
+| `.env` | merged, non-default keys only (the DB root password among them) | the project name — see identity, below |
+
+**The `ports:` trap is a hard rule with a test.** Compose CONCATENATES `ports:` across files — a
+port added in the override does not replace the base's, it publishes both. So `ports:` appears in
+exactly one file, and a unit test asserts the rendered override and build files contain no `ports:`
+key at any depth. Same discipline for the build trap: a bare `docker compose build` in that
+directory builds NOTHING and exits 0, because naming any `-f` disables auto-loading — so
+`docker.build_staged()` is the only builder, it always passes `-f base -f override -f build`, and
+`up` stays bare. The explicit `dockerfile:` is not optional politeness: omitting it killed the
+Rust launcher's first real build after five green stages of unit tests against a fake docker.
+
+Template facts carried over: MySQL published on `127.0.0.1` only; SOAP loopback-pinned via the
+interpolation default (`${DOCKER_SOAP_EXTERNAL_PORT:-127.0.0.1:7878}:7878`); the auth port
+unpinned; worldserver `stdin_open: true, tty: true` (the console transport needs the tty) and
+`stop_grace_period: 5m` — which our own measurement now confirms rather than inherits
+(`STOP_GRACE_SECONDS = 300`, three shutdowns at ~2000 characters, worst 90.7 s); the client-data
+init downloads with `curl --retry 30 --continue-at -` plus `unzip -t`, because upstream's
+downloader truncates and restarts at byte zero on a flaky link.
+
+**Where the template content comes from — this is not optional.** The implementer derives the
+base file from `docker compose config` run against the proven Linux install on yulon-ubuntu, then
+diffs it against prior art's template facts, and writes the result into
+`catalog/installers/wow-wotlk/native/`. Inventing service definitions from memory is how the
+`acore_playerbots`/`AC_PLAYERBOTS_DATABASE_INFO` gap above happened — the generated compose must
+give the one-shot that variable, and this is the moment the gap gets closed. It also resolves this
+file's open question about bind mounts: we generate the compose, so the bind list is ours, and the
+templates must not bind the source tree into any runtime container. What survives of that question
+is only the build-context upload cost, which stays a number to record at each first gate.
+
+### Identity: the generated `name:` retires the `.env` pin
+
+The base file carries `name: yulon-<game>-<install8>`, where `install8` is the first 8 hex digits
+of SHA-256 of the server dir's absolute path. This is the answer to "carry into 6.2" above: the
+identity lives in the file the engine itself generates and owns, `pin_project_name()` is never
+called on the native path, and `install_project()` needs no change — `compose_project_name()`
+already reads `name:` out of the files. A moved folder keeps working because the name travels in
+the file. Volumes are project-scoped (the live gates saw `wow-server-playerbots_ac-database`), so
+per-install project names give each install its own database volume for free.
+
+**Container names stay `ac-*`, deliberately.** Dropping `container_name:` would give compose-derived
+per-project names and dissolve the whole shared-names ownership problem — and it is still the wrong
+move now, for the same reason named volumes were rejected: it would make a native install
+structurally different from every Linux install in the wild, and it would break every path that
+addresses `ac-worldserver` by name (console attach, repair, status, the archived guides,
+`wow-manage.sh` parity). That migration is real, cross-platform, and deferred on purpose. The known
+limits therefore remain known limits: a *copied* folder's base file claims the original's project
+(the state file's path-hashed `install_id` refuses a copied dir at install/resume time, and the
+lifecycle keeps the loud daemon conflict), and a second install of the same game still collides on
+container names with the daemon's own error.
+
+### Preflight — every check, its threshold, and who measured it
+
+`preflight.py` gathers facts and returns a typed report of refusals, warnings, and *unchecked*
+items — the tri-state discipline is a rule: an unreadable measurement is reported as "unchecked —
+that is not a pass", never as a pass and never as a refusal. A stopped Docker Desktop prints
+zeroes, so nothing reads a resource number without confirming the engine actually spoke.
+
+| check | threshold | action | provenance |
+|---|---|---|---|
+| Docker daemon answers (after one `ensure_docker()` attempt) | — | refuse, non-overridable | everything below fabricates zeroes without it |
+| VM RAM (`docker info` MemTotal — the VM's, not the host's) | < 6 GB refuse, < 8 GB warn | refuse | inherited: Rust measured 2 GB per compiler job; below 6 the OOM killer SIGKILLs a compiler and the symptom is "dies at the same low % every retry" with a bare `Killed`. Hard refusal per the open question above, now closed: leaning yes became yes — a false refusal costs one settings change, a declined warning costs three hours |
+| CPU-vs-RAM | warn when `ncpu+1 > floor(mem/2GB)`, naming the exact CPU count to set | warn | inherited: upstream's Dockerfile hardcodes `-j $(nproc+1)` inside the RUN, so no build-arg can change it |
+| Docker data-root free space | < 40 GB refuse, < 60 GB warn | refuse | inherited. On macOS/Windows `/var/lib/docker` is INSIDE the VM — measuring the host answers for the wrong drive, so the root resolves from Docker Desktop's settings JSON; on macOS that resolution is fresh and unverified (list below), and until the Mac gate proves it, macOS reports this check as *unchecked* rather than guessing |
+| server-dir free space | < 8 GB refuse, < 15 GB warn | refuse | inherited: checkout 2.4 GB but clone PEAK ~3.7 GB, measured in Rust |
+| data root and server dir on the same volume | floors ADD (48 / 75 GB) | refuse/warn as above | inherited |
+| bind-mount probe: `docker run --rm -v <server_dir>:/probe <git image> ls /probe` | bounded 30 s | refuse, with the file-sharing explanation | grafted-in above; the 5 s figure there assumed a pulled image — the probe uses the `alpine/git` image the clone stages need anyway, and 30 s covers its first pull, matching prior art's bound for probes against a wedged dockerd |
+| `server_dir_problem()` | OneDrive/iCloud-synced, UNC, mapped drive | refuse, with the reason | grafted-in; layered on top of the probe, not instead of it — the probe cannot be wrong, the path rules explain *why* |
+| port conflict (`port_conflicts_for(spec)` + socket probe) | any listener on the entry's ports | refuse — before the build, not after | grafted-in; the socket half refuses only on `AddrInUse`, because Hyper-V/WSL reserved ranges and permission errors would hard-refuse a server that would have started (rust-prior-art §4) |
+
+Every numeric floor above is **inherited, none is measured by this project**. That is stated here
+so the first live gates know their job: record the actual peak RAM, the actual data-root growth,
+and the actual context-transfer time (Windows 9p and macOS VirtioFS both unmeasured), and replace
+this table's provenance column with measurements.
+
+There is no git check: the engine clones through `git.ContainerGit`, whose docstring already makes
+the argument — macOS and Windows require Docker Desktop anyway, so a containerized git removes the
+second prerequisite instead of adding one. It also deletes three of §4's Windows traps at the root:
+no `git.exe` discovery, no `core.autocrlf` (Linux git in the container never writes CRLF), no
+Git-for-Windows curl. The HTTP/2 large-clone reset may still exist in the container image's own
+curl, so the clone passes `-c http.version=HTTP/1.1` anyway — one flag of insurance, checked at the
+gate. Clones retry 3x for transport resets, as prior art did.
+
+### The stages, by name
+
+    preflight, guard, clone-core, clone-modules, generate-compose, build, client-data, import, up, ready
+
+State file `.yulon-install.json` in the server dir: `{version, game_id, install_id, completed[],
+last_error, updated_unix}`, `install_id` = SHA-256 of the ABSOLUTE server dir path — a state file
+copied into another directory is refused, which is the engine's answer to the copied-folder hole.
+The rules, each of which cost the Rust launcher an evening:
+
+- **`preflight` and `guard` are never recorded complete.** A guard that a resume skips is not a
+  guard. `up` and `ready` are never recorded either: a resume always ends by actually starting and
+  verifying the server, and both are cheap re-runs.
+- **The state file is a HINT; every stage re-checks disk evidence.** clone stages: `.git` exists
+  and `git remote get-url origin` matches the catalog source (an existing valid clone gets
+  fetch+reset via the seam's own update path; a directory with the wrong remote is refused by
+  name, never deleted). build: `compose -f… images -q` non-empty. generate-compose: see below.
+  The Rust incident this rule exists for: an `is_done` short-circuit let a dropped-in state file
+  make generate-compose rewrite a real server's compose file and orphan its character volumes.
+- **`generate-compose` rewrites only files carrying the engine's own first-line marker comment**,
+  and refuses to overwrite compose files it did not write. Idempotent by content.
+- **Failure mid-stage records nothing** — the stage re-runs. `last_error` is only written when the
+  state file already exists, and `guard` treats a directory containing only our state file as
+  empty, so the state file can never become the non-empty dir that blocks its own retry.
+- **`guard` is the claim on the chosen directory**, distinct from `preflight`'s machine facts:
+  the dir is empty, or ours (state file's `install_id` matches this path); no container wearing
+  the entry's names belongs to a foreign project (the remedy named is Remove, which exists).
+
+**The `import` stage is where today's live gates paid off**, and it reuses `repair_import()`'s
+pieces rather than restating them — the run+verify core is extracted into a helper both call, and
+only the refusals differ, because an installer and a repair answer different questions:
+
+- probe says `absent` → run the one-shot (attached, `--no-deps`, exactly the gated argv);
+- probe says `partial` → `reset_unfinished()` first, then run. This is the lesson written in blood
+  above: re-running the one-shot over a half-written schema *reported success in 28 s and left the
+  schema permanently unimportable*. The engine is always constructed with the reset seam on the
+  native path — unlike the repair button, an installer with no reset would strand exactly the
+  interrupted install a resumable engine exists for;
+- probe says `imported`, or `populated` with `complete` → skip. A resume must not touch a finished
+  import, and `populated` alone is not failure — mod-city-bots seeds 400 accounts through the same
+  one-shot (measured above);
+- probe says `unreadable` → refuse; an unanswerable database is not an empty one.
+
+After the run, the same post-check as `repair_import()`: `imported`, or `populated` with
+`complete`. Cancel during this stage terminates the compose client while the one-shot keeps
+running in the daemon; that is fine *because* the resume re-probes — whatever the importer managed
+lands in one of the four branches above.
+
+Cancel generally: checked between stages and inside every streamed loop; abandoning
+`runner.stream()` terminates the child (compose client) and BuildKit keeps finishing its current
+step in the daemon — desirable, the work lands in the layer cache. The cancel copy must say so
+("finishing the current build step in the background; already-built work is kept") and never imply
+an instant halt, or users `docker builder prune` away the thing that makes resume cheap.
+
+### Streaming the build — the one `runner.py` change
+
+`runner.stream()`'s contract yields stderr only after the child exits, and BuildKit writes ALL
+progress to stderr. That exact pairing is why an entire candidate approach was rejected above as
+"a blank log panel for three hours". The fix is one parameter: `stream(..., merge_stderr=False)`
+sets `stderr=subprocess.STDOUT` at `Popen` when true, `run_attached()` passes it through, and the
+build runs with `--progress plain` (deterministic non-tty output, no ANSI spinner to strip). No
+other runner change; `interact()` and the pty path are untouched — the native engine never prompts.
+
+Two Windows notes that belong to the engine rather than to 6.3's provisioning list: `runner.py`
+spawns with no `creationflags` today, so every subprocess on native Windows flashes a console over
+the UI unless `CREATE_NO_WINDOW` is added (rust-prior-art §4) — an implementation item, verified at
+the 6.3 gate; and the engine never calls `wsl.exe` (Docker Desktop owns its backend), so the
+CR-strip and UTF-16 traps apply only if that ever changes.
+
+### `keep_awake()` — what it can honestly promise
+
+A context manager in `platform.py`, held from `build` through `ready`. macOS: spawn
+`caffeinate -dims -w <our pid>` — a child that dies with us, no cleanup path to forget. Windows:
+`SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` via ctypes, set and cleared on the
+same thread because the assertion is per-thread — which means the worker thread running the
+install, and the context manager asserts it is not called on the GUI thread. Linux: a no-op for
+Phase 6 (the script path is unchanged; `systemd-inhibit` waits for the 6.5 Linux gate).
+
+**The roadmap's sentence overpromises, and this design narrows it out loud rather than silently.**
+"A dad closing the lid mid-compile must not suspend the Docker Desktop VM" is not deliverable by
+any sleep assertion: on a laptop, closing the lid forces sleep regardless of `caffeinate` (absent
+external display + power) and regardless of `SetThreadExecutionState` (the lid action is a power
+setting the app must not rewrite). What `keep_awake()` delivers is that an *idle* machine never
+dozes off mid-compile — which is the case that actually eats a four-hour build. The lid case is UI
+copy: the install view says to leave the lid open, plainly, before the build starts. If the roadmap
+line is re-read as a requirement rather than a wish, this is the flag.
+
+### Readiness
+
+Nothing new. `wait_db_healthy_for()` and `wait_ready_for()` already exist, already poll
+`StartedAt` and read logs `--since` that timestamp (never `--tail` — the marker prints once and
+scrolls out of any tail window on a busy playerbots boot, hit independently by Rust and by Yu'lon
+on the same day), and already drain their pipes on a bounded probe. The engine calls them.
+
+### What is genuinely unknown about macOS — Baerthe's list
+
+Nothing below can be verified by anyone on this project without a Mac. Each item is written as a
+claim to check, not a fact:
+
+1. **Docker Desktop's settings JSON.** Believed to be
+   `~/Library/Group Containers/group.com.docker/settings-store.json` on current Docker Desktop
+   (`settings.json` on older), keys `DataFolder`/`dataFolder`/`diskPath`, absent meaning the
+   default `~/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw`. Until the gate
+   confirms the path, the keys, and what "free space" even means against a sparse `Docker.raw`
+   (host free on that volume vs VM allocation minus used), the macOS data-root check reports
+   *unchecked* — it does not guess.
+2. **`caffeinate`.** Assumed present on every macOS (it ships with the OS) and assumed `-dims`
+   holds the right assertion set for a Docker Desktop VM. Neither assumption has been executed.
+3. **Apple silicon vs amd64.** Building from source on arm64 should produce arm64 images natively
+   and just work — but only if every base image in the generated compose (`mysql`, the build
+   image) publishes an arm64 manifest, and any amd64-only image means Rosetta/QEMU emulation with
+   unknown compile-time cost or qemu faults. The first Mac gate records `docker version`'s
+   architecture and each image's platform before anyone writes arch-specific code.
+4. **File sharing.** `/Users` is believed shared by default, making the bind-mount probe pass for
+   any home-dir install; the probe is the check either way — that is why it exists.
+5. **VirtioFS build-context and bind-mount performance.** No number exists. Record it at the gate,
+   separately from compile time, as the Windows twin of the 9p note above.
+6. **The per-application firewall and Gatekeeper.** The servers listen inside the VM, so the
+   firewall prompt (if any) should attach to Docker Desktop's own binary, not ours — believed, not
+   known. Gatekeeper affects launching the unsigned `.dmg` app, not the engine. Both belong to 6.5
+   (networking, packaging), and are listed here so nobody claims the install gate covered them.
+
+The 6.2 Definition of done itself — a working WotLK server on a real Mac, zero shell interaction,
+clean resume after a mid-build cancel, clean second install to a different directory — is by
+construction unverifiable until that machine runs it.
+
+### What the implementer should NOT build yet
+
+- **No step DSL, no per-game step data.** The stage list is a fixed Python tuple that is exactly
+  WotLK. TBC and Vanilla need client-data extraction and a separate DB repo; generalizing now,
+  with one example, is the wrong bet — restated from the risks above because it is the likeliest
+  scope creep.
+- **No Linux flip.** `script_platforms: ["linux"]` stays; the scripts are bugfix-only; the
+  side-by-side gate behind `YULON_NATIVE_INSTALL=1` is a 6.5 item.
+- **No named volumes for server data, no `container_name:` removal** — both rejected above, both
+  for the same reason: a structural difference between platforms makes bug reports untriageable.
+- **No ninja `[1803/1808]` percentage bar.** Prior art has the parsing rules when wanted; a blank
+  console was the defect, a progress number is polish. Plain streamed BuildKit output ships first.
+- **No `.dockerignore`** until someone checks whether AzerothCore ships its own AND a gate proves
+  the build does not read git metadata from the context — it would otherwise fight the
+  full-depth-clone decision.
+- **No SRP6/account creation, no SOAP autosetup inside the engine.** That is 6.5 item 4's own
+  path, with its own byte-exactness gate.
+- **No macOS firewall work.** 6.5 item 7, undesigned, and listed there as such.
+- **No new Docker Desktop start/provision logic.** `ensure_docker()` owns it; preflight calls it
+  once and refuses honestly if it cannot deliver.
+
