@@ -257,6 +257,37 @@
   protocol for the harness: 0 ready, 3 reboot required (`wsl --install` forces one on a box with no
   WSL), 2 needs a human. Also a support diagnostic. `main.py` had no tests before it.
 
+- **How the clean-box run has to be driven (measured on the Win11 VM, 2026-08-23).** A plain `ssh`
+  exec cannot do it, for two independent reasons. (1) An ssh session is **SessionId 0**, and Windows
+  OpenSSH kills the whole descendant process tree when the ssh command returns — a fire-and-forget
+  `Start-Process 'Docker Desktop.exe'` brings the daemon up in 17.3 s and then it dies with the ssh
+  call. (2) `docker pull` from session 0 **always** fails with "A specified logon session does not
+  exist", because the credential helper is DPAPI-bound to the interactive logon; redirecting
+  `DOCKER_CONFIG` with `credsStore` removed does *not* work (fails in 0.1 s, measured). So the
+  payload runs in interactive session 1 via `Register-ScheduledTask` +
+  `New-ScheduledTaskPrincipal -LogonType Interactive` — **not** `schtasks /Create /TR`, which strips
+  the quotes off a spaced exe path and leaves a task with Last Result -2147024894 that silently
+  launches nothing. That session exists at boot only because the box has `AutoAdminLogon`; without
+  it an interactive task stays queued forever, silently. A UAC prompt raised from that session
+  appears on the console and a human clicks it — the run is automatic except that one click, and
+  stubbing UAC out would make it prove less.
+
+- **The clean box is a checkpoint, not a scarce one-shot.** `yulon-win11` has `clean-ssh` (fallback)
+  and `clean-debloated` (the test baseline: ssh-ready, debloated, autologon on, **no Docker, no WSL,
+  no real Python** — `python` on PATH is only the stock 0-byte Store alias stub, which is why the
+  harness ships a PyInstaller bundle rather than running the repo). Restoring is cheap and
+  repeatable, so the run can be repeated as often as the fixes need. Toolkit on the Hyper-V host at
+  `C:\Users\PK\claude\debloat\`, with a verifier that refuses to let a half-applied debloat become
+  the baseline.
+
+- **Run the suite on a second OS and a second Python before believing it (2026-08-23).** CI pinned
+  Python 3.11 on Linux and was green while the suite was red on every 3.12+ Linux box — `shutil.which`
+  grew a `_winapi` call in 3.12, and tests that set `sys.platform = "win32"` change it for the whole
+  stdlib, not just the module under test. Hardening that fake then exposed a second bug in the same
+  tests: `_windows_docker_programs()` stats the real filesystem regardless of the injected `which`
+  seam, so on a Windows box with Docker installed those tests were asserting about the host. CI now
+  runs 3.11 and 3.13.
+
 - **First launch of Docker Desktop is gated behind modal dialogs — a headless start waits forever.** The
   installer was run with `--accept-license` and Docker Desktop *still* showed license acceptance and an
   onboarding walkthrough; a human had to click both before the engine would boot. The state lands in
