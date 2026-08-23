@@ -70,6 +70,11 @@ rather than a permission slip:
   statement and has no other trace. A safety dump of what is about to be
   overwritten is taken first and named in that marker, which is the only thing
   that makes the half state recoverable.
+* that marker is evidence about the databases whose copies it points at, and
+  about nothing else. A restore skips the safety dump for exactly those
+  databases an earlier marker already holds a usable copy of, and dumps every
+  other database it is about to overwrite. Until 2026-08-23 the decision was
+  made once for all of them, by asking whether the marker file existed.
 
 **Not implemented, deliberately:** compression (see `_dump_argv()`), pruning old
 backups (deleting a user's backups is destructive, nobody asked for it, and
@@ -89,7 +94,7 @@ import os
 import re
 import subprocess
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import IO, Protocol
@@ -199,7 +204,11 @@ class DockerMysql:
     """
 
     db_container: str
-    root_password: str
+    root_password: str = field(repr=False)
+    """Kept out of the generated `repr` because everything else here already
+    keeps it out of argv, out of log lines and off disk, and a default `repr`
+    would put it back — in a pytest assertion diff, a logged object, or a
+    traceback frame dump in a UI error handler (review, 2026-08-23)."""
 
     def databases(self) -> tuple[str, ...]:
         proc = self._exec(
@@ -514,8 +523,11 @@ def verify_dump(path: Path, database: str | None = None) -> int:
     gigabytes.
 
     Args:
-        database: If given, the head must also name it — proof this is the dump
-            that was just asked for and not a stale file under the same name.
+        database: If given, a `USE`/`CREATE DATABASE` line in the head must name
+            it — proof this is the dump that was just asked for and not a stale
+            file under the same name. Read as a whole identifier, not searched
+            for as a substring: until 2026-08-23 this was `database in head`,
+            which accepted a dump of `acore_worldxyz` as one of `acore_world`.
 
     Raises:
         MaintenanceError: naming the check that failed.
@@ -537,7 +549,7 @@ def verify_dump(path: Path, database: str | None = None) -> int:
             f"{path.name} stops before mysqldump's end marker, so the dump was cut short "
             f"({size} bytes written). Restoring it would load part of a database."
         )
-    if database is not None and database.encode("utf-8") not in head:
+    if database is not None and database not in _databases_named_in_bytes(head):
         raise MaintenanceError(
             f"{path.name} does not name {database}; it is a dump of something else"
         )
@@ -569,6 +581,15 @@ class InterruptedRestore:
     safety_backup: tuple[Path, ...]
     started_at: str
 
+    readable: bool = True
+    """False when the marker was there but could not be parsed.
+
+    Such a marker is evidence that a restore was in flight and evidence of
+    nothing else — no database, no safety copy — so it must not be read as
+    cover for anything. Not part of `as_json()`: it describes how the file was
+    read, not what it says.
+    """
+
     def as_json(self) -> str:
         return json.dumps(
             {
@@ -596,9 +617,11 @@ class RestorePlan:
     refusals: tuple[str, ...] = ()
     interrupted: InterruptedRestore | None = None
     """A previous restore that never finished. Not a refusal — running this one
-    is how that state is escaped — but the caller has to know the databases are
-    already part-overwritten, and that the safety copy worth keeping is that
-    restore's, not one taken now."""
+    is how that state is escaped — but the caller has to know the databases IT
+    names are already part-overwritten, and that for those the safety copy worth
+    keeping is that restore's, not one taken now. It says nothing about any
+    other database: `restore()` still dumps everything it is about to overwrite
+    that this marker does not already hold a usable copy of."""
 
     @property
     def allowed(self) -> bool:
@@ -648,9 +671,10 @@ def interrupted_restore(server_dir: Path) -> InterruptedRestore | None:
         # The marker exists and cannot be read, which still means a restore was
         # in flight. Saying "none" here would be the one wrong answer.
         logger.warning(f"unreadable restore marker at {marker}: {exc}")
-        return InterruptedRestore(marker, Path(), (), (), "")
+        return InterruptedRestore(marker, Path(), (), (), "", readable=False)
     if not isinstance(raw, dict):
-        return InterruptedRestore(marker, Path(), (), (), "")
+        logger.warning(f"restore marker at {marker} is not an object; it names nothing")
+        return InterruptedRestore(marker, Path(), (), (), "", readable=False)
     return InterruptedRestore(
         marker=marker,
         backup=Path(str(raw.get("backup", ""))),
@@ -763,10 +787,13 @@ def restore(
     if this raises or the process dies, `interrupted_restore()` reports what was
     in flight and where the safety copy is.
 
-    A plan carrying an `interrupted` marker does NOT get a fresh safety dump:
-    the databases are already part-overwritten, so dumping them now would
-    capture the mess and the pointer to the last good copy would be lost. That
-    marker's `safety_backup` is carried forward instead.
+    A database an `interrupted` marker already holds a usable copy of does NOT
+    get a fresh safety dump: it is already part-overwritten, so dumping it now
+    would capture the mess and the pointer to the last good copy would be lost.
+    That copy is carried forward instead. Every other database this restore
+    overwrites is dumped, including when the marker cannot be parsed at all —
+    such a marker names no database and stands in for nothing. Until 2026-08-23
+    the presence of any marker file suppressed the dump for every database.
 
     Raises:
         MaintenanceError: the confirmation does not match, the plan no longer
@@ -794,20 +821,30 @@ def restore(
     # would take a fresh safety dump of a database another restore had already
     # part-overwritten — capturing the mess and losing the pointer to the last
     # good copy, which is the exact accident the carry-forward exists to stop.
-    if fresh.interrupted is not None:
+    earlier = fresh.interrupted
+    if earlier is not None and not earlier.readable:
         logger.warning(
-            f"a previous restore of {fresh.interrupted.backup.name} never finished; keeping its "
-            "safety copy rather than dumping a half-restored database over it"
+            f"the restore marker at {earlier.marker} cannot be read, so it names neither a "
+            "database nor a safety copy. A copy of everything this restore overwrites is being "
+            "taken — it may itself be a copy of a part-restored database, and it is still the "
+            "only copy there would otherwise be."
         )
-        safety: tuple[Path, ...] = fresh.interrupted.safety_backup
-    else:
-        safety = _safety_backup(plan, mysql, spec=spec, running=running, now=now)
+    kept = _usable_copies(earlier)
+    safety = _safety_backup(plan, mysql, kept, spec=spec, running=running, now=now)
+    unresolved = _still_unresolved(earlier, plan, kept)
 
+    # The record carries what this restore is doing AND whatever an earlier
+    # interrupted restore left unresolved that this one does not cover. The
+    # marker is the only place either fact is written down, so a record naming
+    # this restore alone would erase the evidence that some other database is
+    # still half-applied (review, 2026-08-23).
     record = InterruptedRestore(
         marker=marker,
         backup=plan.backup,
-        databases=plan.databases,
-        safety_backup=safety,
+        databases=plan.databases + (unresolved.databases if unresolved else ()),
+        safety_backup=tuple(
+            dict.fromkeys(safety + (unresolved.safety_backup if unresolved else ()))
+        ),
         started_at=(now or datetime.now()).isoformat(timespec="seconds"),
     )
     _write_marker(record)
@@ -821,39 +858,126 @@ def restore(
             f"are now in an unknown state — {marker} records it, and the copy taken beforehand is "
             f"{', '.join(str(p) for p in safety) or 'missing (none was taken)'}."
         ) from exc
-    marker.unlink(missing_ok=True)
+    if unresolved is None:
+        marker.unlink(missing_ok=True)
+    else:
+        # This restore finished; the earlier one it did not cover has not, so
+        # the marker shrinks to what is still unfinished instead of vanishing.
+        _write_marker(unresolved)
+        logger.warning(
+            f"{', '.join(unresolved.databases)} were left part-restored by an earlier restore "
+            f"that this one does not put right; {marker} still records them"
+        )
     logger.info(f"restored {', '.join(plan.databases)} from {plan.backup}")
     return RestoreReport(backup=plan.backup, databases=plan.databases, safety_backup=safety)
+
+
+def _usable_copies(earlier: InterruptedRestore | None) -> dict[str, Path]:
+    """Which databases an interrupted restore's safety copies can still restore.
+
+    Keyed by the database each file is a dump OF, read out of the file rather
+    than taken from the marker's word for it: the marker is evidence about the
+    databases its copies actually hold and about nothing else. `verify_dump()`
+    answers all three questions that matter in one head-and-tail read — the file
+    is still there, it is a complete dump, and it is that database's — so a copy
+    the user has since deleted, or one that was cut short, stops counting as
+    cover and the database it named is dumped afresh. Before 2026-08-23 nothing
+    was checked: the marker file existing was the whole test, and a restore
+    could report a safety copy that was not on disk.
+
+    A file holding several databases counts only for the ones its head names,
+    because a head read is all that is proved here. Being wrong in that
+    direction costs one extra safety dump.
+    """
+    if earlier is None:
+        return {}
+    covers: dict[str, Path] = {}
+    for path in earlier.safety_backup:
+        try:
+            verify_dump(path)
+            head = _read_edge(path, 0)
+        except (MaintenanceError, OSError) as exc:
+            logger.warning(
+                f"the safety copy an interrupted restore recorded at {path} cannot be used "
+                f"({exc}), so it does not stand in for a fresh one"
+            )
+            continue
+        for name in _databases_named_in_bytes(head):
+            covers.setdefault(name, path)
+    return covers
 
 
 def _safety_backup(
     plan: RestorePlan,
     mysql: MysqlDocker,
+    kept: dict[str, Path],
     *,
     spec: docker.ContainerSpec,
     running: RunningNames | None,
     now: datetime | None,
 ) -> tuple[Path, ...]:
-    """Dump what is about to be overwritten, so the restore is undoable.
+    """A copy of every database this restore will overwrite, so it is undoable.
 
     Only the schemas the restore will touch, and only those that exist — a
     backup file for a database this server does not have yet is creating
     something, not replacing it, and there is nothing to save.
+
+    `kept` is what an interrupted restore's copies still cover
+    (`_usable_copies()`). A database in there is deliberately NOT dumped again:
+    it is part-overwritten already, so a dump now would capture the mess and the
+    pointer to the last good copy would be lost. Every other database is dumped,
+    whatever else that marker says. Until 2026-08-23 this was decided once for
+    all of them, on the existence of the marker file, so a marker about
+    `acore_world` sent `acore_characters` under with no copy of it anywhere.
     """
     present = set(server_databases(mysql))
     at_risk = [name for name in plan.databases if name in present]
-    if not at_risk:
-        return ()
-    report = backup(
-        plan.server_dir,
-        mysql,
-        only=at_risk,
-        label="pre-restore",
-        spec=spec,
-        running=running,
-        now=now,
+    covered = {name: kept[name] for name in at_risk if name in kept}
+    for name, path in covered.items():
+        logger.warning(
+            f"{name} was left part-restored by an earlier restore; keeping its safety copy "
+            f"{path.name} rather than dumping a half-restored database over it"
+        )
+    to_dump = [name for name in at_risk if name not in covered]
+    if to_dump:
+        report = backup(
+            plan.server_dir,
+            mysql,
+            only=to_dump,
+            label="pre-restore",
+            spec=spec,
+            running=running,
+            now=now,
+        )
+        covered.update({dump.database: dump.path for dump in report.dumps})
+    return tuple(covered[name] for name in at_risk)
+
+
+def _still_unresolved(
+    earlier: InterruptedRestore | None, plan: RestorePlan, kept: dict[str, Path]
+) -> InterruptedRestore | None:
+    """What of an earlier interrupted restore this one does not put right.
+
+    Restoring `acore_characters` says nothing about an `acore_world` some
+    earlier restore left half-applied, so unlinking the marker once this one
+    succeeds would erase the only record that `acore_world` is broken — and a
+    half-overwritten database looks like a working server until somebody logs
+    in. What this restore does not cover is written back instead (review,
+    2026-08-23).
+    """
+    if earlier is None:
+        return None
+    covered = set(plan.databases)
+    remaining = tuple(name for name in earlier.databases if name not in covered)
+    if not remaining:
+        return None
+    return InterruptedRestore(
+        marker=earlier.marker,
+        backup=earlier.backup,
+        databases=remaining,
+        safety_backup=tuple(dict.fromkeys(kept[name] for name in remaining if name in kept)),
+        started_at=earlier.started_at,
     )
-    return tuple(dump.path for dump in report.dumps)
 
 
 def _write_marker(record: InterruptedRestore) -> None:
@@ -894,14 +1018,28 @@ def _databases_named_in(path: Path) -> tuple[str, ...]:
             if not chunk:
                 break
             data = carry + chunk
-            for pattern in (_USE_LINE, _CREATE_DB_LINE):
-                for match in pattern.finditer(data):
-                    name = match.group(1).decode("utf-8", "replace")
-                    if name not in seen:
-                        seen.add(name)
-                        found.append(name)
+            for name in _databases_named_in_bytes(data):
+                if name not in seen:
+                    seen.add(name)
+                    found.append(name)
             carry = data[-_SCAN_OVERLAP:]
     return tuple(found)
+
+
+def _databases_named_in_bytes(data: bytes) -> list[str]:
+    """Every schema a `USE`/`CREATE DATABASE` line in `data` names, first use first.
+
+    One reading of "which database is this", used by the whole-file scan above
+    and by `verify_dump()`'s identity check, so the two cannot drift into
+    disagreeing about what naming a database means.
+    """
+    found: list[str] = []
+    for pattern in (_USE_LINE, _CREATE_DB_LINE):
+        for match in pattern.finditer(data):
+            name = match.group(1).decode("utf-8", "replace")
+            if name not in found:
+                found.append(name)
+    return found
 
 
 def _census(running: RunningNames | None) -> set[str]:
@@ -912,7 +1050,13 @@ def _census(running: RunningNames | None) -> set[str]:
     and "Docker did not say" must never read as "nothing is running" (that
     mistake is written up in `docker._refuse_without_an_identity()`).
     """
-    source = running if running is not None else docker.status
+    # `docker_ctl.status`, not `docker.status`: this package re-exports the
+    # shared operations so its callers have one entry point, and reaching past
+    # that from inside the package would make the rule advice rather than
+    # practice (style guide §3/§4; review, 2026-08-23). The two names below are
+    # a type and an exception rather than operations, and `docker_ctl` does not
+    # re-export those.
+    source = running if running is not None else docker_ctl.status
     try:
         return set(source())
     except docker.DockerCommandError as exc:

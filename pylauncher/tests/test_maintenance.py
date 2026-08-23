@@ -78,6 +78,33 @@ def a_backup_of(tmp_path: Path, *databases: str, name: str = "backup.sql") -> Pa
     return path
 
 
+def an_earlier_copy_of(server_dir: Path, database: str, *, body: bytes | None = None) -> Path:
+    """A `pre-restore` copy in the backups dir, as an earlier restore would have left it."""
+    path = backups_dir(server_dir) / f"20260823_120000_pre-restore_{database}.sql"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(good_dump(database) if body is None else body)
+    return path
+
+
+def a_marker(
+    server_dir: Path, *, backup: Path, databases: tuple[str, ...], safety: tuple[Path, ...]
+) -> Path:
+    """The marker an interrupted restore of `databases` would have left behind."""
+    marker = maintenance.marker_path(server_dir)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(
+        maintenance.InterruptedRestore(
+            marker=marker,
+            backup=backup,
+            databases=databases,
+            safety_backup=safety,
+            started_at="2026-08-23T12:00:00",
+        ).as_json(),
+        encoding="utf-8",
+    )
+    return marker
+
+
 # ------------------------------------------------------------------ backup
 
 
@@ -452,6 +479,197 @@ def test_a_restore_into_a_database_that_does_not_exist_yet_takes_no_safety_copy(
     assert mysql.dumped == []
 
 
+def test_a_marker_about_one_database_is_no_cover_for_another(tmp_path: Path) -> None:
+    """The safety dump is decided per database, not by whether a marker file exists.
+
+    An interrupted restore of `acore_world` says nothing about `acore_characters`,
+    which is healthy and about to be overwritten. Until 2026-08-23 the marker's
+    mere existence suppressed the dump for every database and the report then
+    named that world dump as this restore's safety copy: characters went under
+    with no copy of it anywhere (review, 2026-08-23).
+    """
+    mysql = FakeMysql(("acore_auth", "acore_characters", "acore_world"))
+    world_copy = an_earlier_copy_of(tmp_path, "acore_world")
+    a_marker(
+        tmp_path,
+        backup=tmp_path / "world.sql",
+        databases=("acore_world",),
+        safety=(world_copy,),
+    )
+
+    chars = a_backup_of(tmp_path, "acore_characters", name="chars.sql")
+    plan = plan_restore(chars, tmp_path, running=running(DB))
+    report = restore(plan, mysql, confirm=plan.token, running=running(DB), now=AT)
+
+    assert mysql.dumped == ["acore_characters"]
+    assert [p.name for p in report.safety_backup] == [
+        "20260823_143005_pre-restore_acore_characters.sql"
+    ]
+
+
+def test_a_marker_covers_only_the_databases_it_names_of_the_ones_being_overwritten(
+    tmp_path: Path,
+) -> None:
+    """The mixed case: one database is part-restored, the other is not."""
+    mysql = FakeMysql(("acore_characters", "acore_world"))
+    world_copy = an_earlier_copy_of(tmp_path, "acore_world")
+    a_marker(
+        tmp_path,
+        backup=tmp_path / "world.sql",
+        databases=("acore_world",),
+        safety=(world_copy,),
+    )
+
+    both = a_backup_of(tmp_path, "acore_world", "acore_characters", name="both.sql")
+    plan = plan_restore(both, tmp_path, running=running(DB))
+    report = restore(plan, mysql, confirm=plan.token, running=running(DB), now=AT)
+
+    assert mysql.dumped == ["acore_characters"], "the half-restored world was dumped over"
+    assert [p.name for p in report.safety_backup] == [
+        world_copy.name,
+        "20260823_143005_pre-restore_acore_characters.sql",
+    ]
+
+
+def test_a_restore_that_does_not_finish_an_earlier_one_keeps_its_marker(tmp_path: Path) -> None:
+    """Restoring characters does not make a half-applied world whole, or forgettable.
+
+    The marker is the only record that `acore_world` is half-overwritten, and a
+    half-overwritten database looks like a working server until somebody logs
+    in. Unlinking it here because *this* restore finished would destroy that
+    record (review, 2026-08-23).
+    """
+    mysql = FakeMysql(("acore_characters", "acore_world"))
+    world_copy = an_earlier_copy_of(tmp_path, "acore_world")
+    a_marker(
+        tmp_path,
+        backup=tmp_path / "world.sql",
+        databases=("acore_world",),
+        safety=(world_copy,),
+    )
+
+    chars = a_backup_of(tmp_path, "acore_characters", name="chars.sql")
+    plan = plan_restore(chars, tmp_path, running=running(DB))
+    restore(plan, mysql, confirm=plan.token, running=running(DB), now=AT)
+
+    left = interrupted_restore(tmp_path)
+    assert left is not None, "the record that acore_world is half-restored was destroyed"
+    assert left.databases == ("acore_world",)
+    assert left.safety_backup == (world_copy,)
+
+
+@pytest.mark.parametrize("body", ["not json at all", "{}", "[]", ""])
+def test_a_marker_that_cannot_be_read_stands_in_for_no_safety_copy(
+    tmp_path: Path, body: str
+) -> None:
+    """It is evidence a restore was in flight and evidence of nothing else.
+
+    A corrupt, empty or foreign file at the marker path used to buy the restore
+    out of taking any safety copy at all — no dump, an empty `safety_backup`,
+    and no refusal saying the undo path had been skipped (review, 2026-08-23).
+    """
+    mysql = FakeMysql(("acore_world",))
+    marker = maintenance.marker_path(tmp_path)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(body, encoding="utf-8")
+
+    path = a_backup_of(tmp_path, "acore_world")
+    plan = plan_restore(path, tmp_path, running=running(DB))
+    report = restore(plan, mysql, confirm=plan.token, running=running(DB), now=AT)
+
+    assert mysql.dumped == ["acore_world"]
+    assert [p.name for p in report.safety_backup] == ["20260823_143005_pre-restore_acore_world.sql"]
+    assert all(p.is_file() for p in report.safety_backup)
+
+
+def test_a_marker_that_could_not_be_parsed_says_so_rather_than_reading_as_empty(
+    tmp_path: Path,
+) -> None:
+    """ "A restore was in flight" and "a restore of acore_world was" are different answers.
+
+    The unparseable case used to be a record indistinguishable from a real one
+    with empty fields, which is how it came to read as a restore that had
+    already taken a safety copy of nothing (review, 2026-08-23).
+    """
+    marker = maintenance.marker_path(tmp_path)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("not json at all", encoding="utf-8")
+    unreadable = interrupted_restore(tmp_path)
+    assert unreadable is not None and unreadable.readable is False
+
+    a_marker(
+        tmp_path,
+        backup=tmp_path / "world.sql",
+        databases=("acore_world",),
+        safety=(an_earlier_copy_of(tmp_path, "acore_world"),),
+    )
+    parsed = interrupted_restore(tmp_path)
+    assert parsed is not None and parsed.readable is True
+
+
+@pytest.mark.parametrize("state", ["deleted", "truncated"])
+def test_a_carried_forward_safety_copy_that_is_not_there_is_not_reported_as_one(
+    tmp_path: Path, state: str
+) -> None:
+    """The report names the undo path at the one moment the user needs it to be real.
+
+    A path was taken from the marker verbatim and never checked, so a copy the
+    user had since deleted — or one that was itself cut short — was reported as
+    this restore's safety copy (review, 2026-08-23).
+    """
+    mysql = FakeMysql(("acore_world",))
+    if state == "deleted":
+        gone = backups_dir(tmp_path) / "deleted_by_the_user.sql"
+        gone.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        gone = an_earlier_copy_of(
+            tmp_path, "acore_world", body=good_dump("acore_world").split(b"-- Dump completed")[0]
+        )
+    path = a_backup_of(tmp_path, "acore_world")
+    a_marker(tmp_path, backup=path, databases=("acore_world",), safety=(gone,))
+
+    plan = plan_restore(path, tmp_path, running=running(DB))
+    report = restore(plan, mysql, confirm=plan.token, running=running(DB), now=AT)
+
+    assert mysql.dumped == ["acore_world"], "no copy was taken and none existed"
+    assert [(p.name, p.is_file()) for p in report.safety_backup] == [
+        ("20260823_143005_pre-restore_acore_world.sql", True)
+    ]
+
+
+def test_a_restore_that_cannot_write_its_marker_changes_nothing(tmp_path: Path) -> None:
+    """Not best-effort: a restore nobody could tell had been interrupted must not start.
+
+    Nothing is mocked here — the marker path is made a directory, so the real
+    `os.replace` fails the way a read-only or full disk would. Only the
+    docstring claimed this; deleting the raise left the suite green (review,
+    2026-08-23).
+    """
+    mysql = FakeMysql(("acore_world",))
+    path = a_backup_of(tmp_path, "acore_world")
+    plan = plan_restore(path, tmp_path, running=running(DB))
+    maintenance.marker_path(tmp_path).mkdir(parents=True)
+
+    with pytest.raises(MaintenanceError, match="could not write"):
+        restore(plan, mysql, confirm=plan.token, running=running(DB), now=AT)
+    assert mysql.loaded == []
+
+
+def test_verify_dump_rejects_a_database_whose_name_merely_contains_the_wanted_one(
+    tmp_path: Path,
+) -> None:
+    """`acore_worldxyz` is not `acore_world`, and a substring test cannot tell.
+
+    The name is read out of the head's `USE`/`CREATE DATABASE` line as a whole
+    identifier; `database.encode() in head` accepted this file (review,
+    2026-08-23). `_usable_copies()` now leans on this check to decide whether a
+    carried-forward safety copy really is the database it is standing in for.
+    """
+    path = a_backup_of(tmp_path, "acore_worldxyz")
+    with pytest.raises(MaintenanceError, match="does not name acore_world"):
+        verify_dump(path, "acore_world")
+
+
 # ------------------------------------------------------- the docker command
 
 
@@ -540,3 +758,55 @@ def test_a_missing_docker_cli_is_reported_as_a_maintenance_error(
     monkeypatch.setattr(platform, "_which", lambda name, path=None: None)
     with pytest.raises(MaintenanceError, match="Docker could not be found"):
         DockerMysql(DB, "hunter2").databases()
+
+
+# The shape `platform.docker_program()` caches: a real path, on no PATH here.
+OFF_PATH_EXE = r"C:\Users\pk\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
+
+
+def test_a_resolved_docker_that_has_since_gone_is_reported_the_same_way(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The other way to have no Docker, on all three of `DockerMysql`'s calls.
+
+    `docker_program()` remembers a hit for the life of the process, so a Docker
+    Desktop that updates or uninstalls itself while the launcher is open leaves
+    that pinned path aimed at a file that is gone. `subprocess` reports it as
+    `OSError`, which without this guard reaches the user as a bare `[WinError 2]`
+    while `docker.start()` in the same session says "Docker could not be found".
+    `apply.DockerSql._mysql()` carries the identical guard and the identical
+    test (`test_docker_sql_says_the_same_thing_when_a_resolved_docker_has_gone`,
+    written for the 2026-08-23 review); the copy here shipped with the docstring
+    and without the test, and deleting the conversion left the suite green
+    (review, 2026-08-23).
+    """
+    from yulon import platform
+
+    monkeypatch.setattr(platform, "_resolved_docker_cli", OFF_PATH_EXE)
+
+    def gone(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        raise FileNotFoundError(2, "The system cannot find the file specified", OFF_PATH_EXE)
+
+    monkeypatch.setattr(subprocess, "run", gone)
+    mysql = DockerMysql(DB, "hunter2")
+    with pytest.raises(MaintenanceError, match="Docker could not be found"):
+        mysql.databases()
+    with (tmp_path / "out.sql").open("wb") as sink:
+        with pytest.raises(MaintenanceError, match="Docker could not be found"):
+            mysql.dump_into("acore_world", sink)
+    with a_backup_of(tmp_path, "acore_world").open("rb") as source:
+        with pytest.raises(MaintenanceError, match="Docker could not be found"):
+            mysql.load_from(source)
+
+
+def test_the_root_password_is_not_in_the_repr() -> None:
+    """The one channel argv, stderr, the logs and the temp files all keep it out of.
+
+    A frozen dataclass reprs every field by default, and this object is about to
+    be handed to a worker thread: a pytest assertion diff, a logged object or a
+    traceback frame dump in a UI error handler would each print the password
+    (review, 2026-08-23).
+    """
+    mysql = DockerMysql(DB, "hunter2")
+    assert "hunter2" not in repr(mysql)
+    assert mysql.root_password == "hunter2", "still readable where it is actually needed"
