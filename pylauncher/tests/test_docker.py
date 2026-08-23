@@ -1240,3 +1240,266 @@ def test_the_unpinned_remedy_warns_about_the_copy_case(tmp_path: Path) -> None:
     message = docker._stranger_message(((SPEC.world, "install-b"),), "ours", tmp_path)
     assert "not copied" in message
     assert "take down the other server" in message
+
+
+# ------------------------------------------------- naming the docker CLI
+# Windows hands a process its environment once. Docker Desktop's installer adds
+# `resources\bin` to the PATH in the REGISTRY, which the launcher that just ran
+# that installer is never handed — so `platform.docker_programs()` was added to
+# find the binary anyway, and until 2026-08-23 nothing in this module used it.
+# Provisioning succeeded and the next `docker compose up` still died with
+# `[WinError 2] The system cannot find the file specified`.
+
+OFF_PATH_EXE = r"C:\Users\pk\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
+
+
+@pytest.fixture
+def off_path_docker(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """A host where docker is reachable only by absolute path; records every argv."""
+    monkeypatch.setattr(docker.platform, "_resolved_docker_cli", OFF_PATH_EXE)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+        calls.append(cmd)
+        return _completed(stdout="running\tsomewhen")
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    return calls
+
+
+@pytest.fixture
+def no_docker(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """A host with no docker CLI at all; records anything that still reached `runner`."""
+    monkeypatch.setattr(docker.platform, "_resolved_docker_cli", None)
+    monkeypatch.setattr(docker.platform, "docker_programs", lambda: ("docker",))
+    monkeypatch.setattr(docker.platform, "_which", lambda name, path=None: None)
+    escaped: list[list[str]] = []
+
+    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+        escaped.append(cmd)
+        raise AssertionError(f"spawned {cmd[0]} on a host that has no docker")
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    return escaped
+
+
+def test_every_command_is_built_with_the_resolved_cli(off_path_docker: list[list[str]]) -> None:
+    """The regression. Every one of these used to hardcode `docker` as argv[0].
+
+    Covered in one test rather than seven because this is one mistake made
+    nine times; seven separate tests would let the tenth site be written
+    without one.
+    """
+    server_dir = Path("/tmp/wow")
+    docker.start(server_dir)  # through _run()
+    docker.compose_project_name(server_dir)
+    docker.container_project(SPEC.world)
+    docker._run_docker_stop(SPEC.world)
+    docker.health(SPEC.world)
+    docker.container_state(SPEC.world)
+    docker._logs(SPEC.world)
+    assert off_path_docker, "nothing ran"
+    assert all(cmd[0] == OFF_PATH_EXE for cmd in off_path_docker), off_path_docker
+    # ...and nothing else moved: the command each site sends is unchanged.
+    assert [cmd[1:3] for cmd in off_path_docker] == [
+        ["compose", "up"],
+        ["compose", "config"],
+        ["inspect", SPEC.world],
+        ["stop", SPEC.world],
+        ["inspect", SPEC.world],
+        ["inspect", SPEC.world],
+        ["logs", SPEC.world],
+    ]
+
+
+def test_stop_staged_reaches_compose_through_the_resolved_cli(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`compose stop` ends a play session; it must not be the one site left behind.
+
+    Its own fake, keyed on `cmd[1:]` rather than `cmd[:3]`, because that is the
+    point: the shared `_stop_runner()` above dispatches on a literal `docker`
+    at argv[0] and so cannot see this at all.
+    """
+    monkeypatch.setattr(docker.platform, "_resolved_docker_cli", OFF_PATH_EXE)
+    calls: list[list[str]] = []
+    live = {SPEC.db, SPEC.auth, SPEC.world}
+
+    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+        calls.append(cmd)
+        rest = cmd[1:]
+        if rest[:3] == ["compose", "config", "--format"]:
+            return _completed(stdout='{"name": "ours"}')
+        if rest[:2] == ["compose", "stop"]:
+            live.clear()
+            return _completed()
+        if rest[0] == "inspect":
+            return _completed(stdout="ours" + chr(10))
+        if rest[0] == "ps":
+            return _completed(stdout="".join(n + chr(10) for n in sorted(live)))
+        return _completed()
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    assert docker.stop_staged(SPEC, tmp_path) is True
+    assert ["compose", "stop"] in [cmd[1:3] for cmd in calls]
+    assert all(cmd[0] == OFF_PATH_EXE for cmd in calls), calls
+
+
+def test_follow_logs_streams_from_the_resolved_cli(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Console tab's log source goes through `runner.stream`, not `runner.run`.
+
+    Which is why it is the easiest of the nine to miss: a search for
+    `runner.run(["docker"` does not find it.
+    """
+    monkeypatch.setattr(docker.platform, "_resolved_docker_cli", OFF_PATH_EXE)
+    seen: list[list[str]] = []
+
+    def fake_stream(cmd: list[str], cwd: Path | None = None):
+        seen.append(cmd)
+        return iter(["a line"])
+
+    monkeypatch.setattr(docker.runner, "stream", fake_stream)
+    assert list(docker.follow_logs("ac-worldserver", tail=5)) == ["a line"]
+    assert seen == [[OFF_PATH_EXE, "logs", "-f", "--tail", "5", "ac-worldserver"]]
+
+
+def test_a_host_without_docker_is_told_so_not_shown_a_winerror(
+    no_docker: list[list[str]], tmp_path: Path
+) -> None:
+    """An unresolvable CLI must never reach the UI as `FileNotFoundError`.
+
+    The degrading callers keep the shape they already have — a missing CLI
+    arrives as a failed `CompletedProcess`, exactly as a timeout does — and the
+    ones that raise carry a sentence the user can act on.
+    """
+    assert docker.health("ac-worldserver") == "unknown"
+    assert docker.container_state("ac-worldserver") == docker.ContainerState()
+    assert docker._logs("ac-worldserver") == ""
+    assert docker.compose_project_name(Path("/tmp/wow")) is None
+    assert docker.container_project("ac-worldserver") == docker.UNREADABLE
+
+    with pytest.raises(docker.DockerCommandError) as raised:
+        docker.start(Path("/tmp/wow"))
+    assert "Docker could not be found" in str(raised.value)
+    assert "Docker Desktop" in str(raised.value)
+
+    with pytest.raises(docker.DockerCommandError, match="Docker could not be found"):
+        list(docker.follow_logs("ac-worldserver"))
+
+    # Stop was the entry point this list did not cover, and the one that got it
+    # wrong: it degraded to "your install has no COMPOSE_PROJECT_NAME pinned",
+    # which blames the install for the absence of Docker (review, 2026-08-23).
+    with pytest.raises(docker.DockerCommandError, match="Docker could not be found"):
+        docker.stop_staged(SPEC, tmp_path)
+    (tmp_path / ".env").write_text("COMPOSE_PROJECT_NAME=wow\n", encoding="utf-8")
+    with pytest.raises(docker.DockerCommandError, match="Docker could not be found"):
+        docker.stop_staged(SPEC, tmp_path)
+
+    assert no_docker == [], "a command was spawned on a host with no docker binary"
+
+
+def test_a_stop_with_no_docker_does_not_blame_the_install(
+    no_docker: list[list[str]], tmp_path: Path
+) -> None:
+    """The pin is irrelevant when there is no Docker, so Stop must not raise it.
+
+    Separate from the sweep above because "says the right sentence" and "says
+    only the right sentence" are different claims, and it was the second that
+    failed: the old message named `COMPOSE_PROJECT_NAME` and the install's own
+    folder, sending a user whose machine has no Docker on it to go and edit a
+    `.env` file.
+    """
+    with pytest.raises(docker.DockerCommandError) as raised:
+        docker.stop_staged(SPEC, tmp_path)
+    said = str(raised.value)
+    assert docker.PROJECT_NAME_VAR not in said, said
+    assert str(tmp_path) not in said, said
+    assert "could not ask Docker what is running" not in said, said
+
+
+def test_a_docker_uninstalled_mid_run_reads_as_missing_docker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one case the cache cannot follow: the pinned path stops existing.
+
+    `docker_program()` keeps a hit for the life of the process, so uninstalling
+    Docker while the launcher is open leaves it aimed at a deleted
+    `docker.exe`. `subprocess` reports that as `OSError`, and the user still
+    has to get the sentence rather than the errno.
+    """
+    monkeypatch.setattr(docker.platform, "_resolved_docker_cli", OFF_PATH_EXE)
+
+    def gone(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+        raise FileNotFoundError(2, "The system cannot find the file specified")
+
+    monkeypatch.setattr(docker.runner, "run", gone)
+    assert docker.health("ac-worldserver") == "unknown"
+    with pytest.raises(docker.DockerCommandError, match="Docker could not be found"):
+        docker.start(Path("/tmp/wow"))
+
+    def gone_stream(cmd: list[str], cwd: Path | None = None):
+        raise FileNotFoundError(2, "The system cannot find the file specified")
+        yield  # pragma: no cover - a generator that only ever raises
+
+    monkeypatch.setattr(docker.runner, "stream", gone_stream)
+    with pytest.raises(docker.DockerCommandError, match="Docker could not be found"):
+        list(docker.follow_logs("ac-worldserver"))
+
+
+def test_the_polls_say_why_and_stop_when_this_host_has_no_docker_cli(
+    no_docker: list[list[str]], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A missing CLI must not turn a hard, instant failure into a silent spin.
+
+    Before this, `_status_safe()` degraded "there is no Docker on this machine"
+    exactly as it degrades a daemon hiccup, so `wait_ready()` polled out its
+    full 480s default and emitted nothing above DEBUG the whole time. Measured
+    at the time: `wait_ready('a','w','h',1,timeout=1.0,interval=0.1)` returned
+    False after 1.00s, 10 polls, zero records at WARNING or above.
+
+    The grace window is shortened here, not removed. Giving up on the first
+    miss is the other wrong answer — `docker_program()` deliberately never
+    caches one so that Docker arriving mid-run is picked up — so both loops are
+    also asserted to have polled more than once.
+    """
+    monkeypatch.setattr(docker, "_CLI_MISSING_GRACE_SECONDS", 0.2)
+    for label, poll in (
+        ("wait_ready()", lambda: docker.wait_ready("a", "w", "h", 1, timeout=60.0, interval=0.02)),
+        ("wait_db_healthy()", lambda: docker.wait_db_healthy("db", timeout=60.0, interval=0.02)),
+    ):
+        caplog.clear()
+        with caplog.at_level("DEBUG", logger="yulon.docker"):
+            assert poll() is False
+        loud = [r.getMessage() for r in caplog.records if r.levelno >= 30]
+        assert len(loud) == 2, f"{label}: expected one cause + one give-up, got {loud}"
+        assert "Docker could not be found" in loud[0], loud[0]
+        assert "Giving up" in loud[1], loud[1]
+        assert all(label in line for line in loud), loud
+        waited = [r for r in caplog.records if "still no docker CLI" in r.getMessage()]
+        assert waited, f"{label}: gave up on the first miss; a mid-run install is now locked out"
+    assert no_docker == [], "a command was spawned on a host with no docker binary"
+
+
+def test_a_readiness_poll_still_rides_out_a_docker_that_only_stumbles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The degradation the missing-CLI change must not have taken away.
+
+    `_status_safe()` turning a failed `docker ps` into None is what keeps a
+    daemon restart mid-start from ending the wait. Only `DockerCliMissingError`
+    is exempt from that, and this is the test that says so — without it, "stop
+    swallowing the missing CLI" could quietly become "stop swallowing anything".
+    """
+    stumbles = iter([True, False])
+
+    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+        if cmd[1] == "ps":
+            if next(stumbles):
+                return _completed(returncode=1, stderr="Cannot connect to the Docker daemon")
+            return _completed(stdout="ac-authserver\nac-worldserver\n")
+        if cmd[1] == "inspect":
+            return _completed(stdout="running\t2026-08-23T00:00:00Z")
+        return _completed(stdout="realm.example:3724 ready...")
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    assert docker.wait_ready(SPEC.auth, SPEC.world, "realm.example", 3724, 5.0, 0.01) is True

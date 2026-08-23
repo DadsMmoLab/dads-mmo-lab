@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from yulon import runner
+from yulon import platform, runner
 from yulon.catalog import installer as installer_module
 from yulon.catalog.catalog import load_catalog
 from yulon.catalog.installer import (
@@ -444,3 +444,46 @@ def test_the_shipped_installers_no_longer_write_a_passwordless_sudo_rule() -> No
         text = script.read_text(encoding="utf-8", errors="replace")
         assert "sudo tee /etc/sudoers.d/docker-nopasswd" not in text, script.name
         assert "docker_group_consent" in text, f"{script.name} is behind upstream 1.4.4"
+
+
+# --------------------------------------------------------- one docker probe, not two
+# `installer.docker_available()` was `runner.run(["docker", "info"])` — a second
+# copy of `platform.docker_ready()` (style-guide §4) that never learned about
+# `docker_programs()`. So `preflight()` could refuse an install with "Docker
+# isn't available" on the exact Windows box where `ensure_docker()` had, seconds
+# earlier, proved that it was.
+
+
+def test_the_install_gate_and_the_provisioner_ask_the_same_question() -> None:
+    """One function, so the two can no longer disagree — the duplicate is gone."""
+    import inspect
+
+    assert not hasattr(installer_module, "docker_available")
+    default = inspect.signature(Installer.__init__).parameters["docker_check"].default
+    assert default is platform.docker_ready
+
+
+def test_the_gate_sees_a_docker_that_is_only_on_the_registry_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The whole point of collapsing them: the gate now tries the off-PATH exe too.
+
+    Modelled as the real Windows failure — the plain name cannot be started at
+    all, only the absolute path answers — with no `docker_check` override, so
+    the default the constructor picked is what is under test.
+    """
+    exe = r"C:\Users\pk\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
+    monkeypatch.setattr(platform.sys, "platform", "win32")
+    monkeypatch.setattr(platform, "_windows_docker_programs", lambda: (exe,))
+    tried: list[str] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        tried.append(argv[0])
+        if argv[0] == "docker":
+            raise FileNotFoundError(2, "The system cannot find the file specified")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    gate = Installer(load_catalog().get("wow-wotlk"), installers_root=tmp_path)._docker_check
+    assert gate() is True
+    assert tried == ["docker", exe]

@@ -47,6 +47,11 @@ class _OffPathWhich:
     The bare lookup answers None — that is the defect, and what the launcher's
     own process sees after Docker Desktop's installer has run. A lookup handed
     an explicit search path finds it, exactly as the real `shutil.which` does.
+
+    A lookup of the absolute path answers itself, also as the real one does:
+    `shutil.which` treats a name containing a separator as a direct existence
+    check and ignores PATH entirely. `docker_program()` relies on that to
+    confirm a candidate before pinning it.
     """
 
     def __init__(self, bin_dir: str = DOCKER_BIN_DIR, installed: bool = True) -> None:
@@ -54,7 +59,11 @@ class _OffPathWhich:
         self.installed = installed
 
     def __call__(self, name: str, path: str | None = None) -> str | None:
-        if name != "docker" or path is None or not self.installed:
+        if not self.installed:
+            return None
+        if name == DOCKER_EXE:
+            return DOCKER_EXE
+        if name != "docker" or path is None:
             return None
         return DOCKER_EXE if self.bin_dir in path else None
 
@@ -462,6 +471,99 @@ def test_a_candidate_that_cannot_be_started_is_not_the_answer(
 
     assert platform.docker_ready(run) is True
     assert tried == ["docker", DOCKER_EXE]
+
+
+# ------------------------------------------------- picking ONE of the candidates
+# `docker_programs()` answers "everything worth trying". Every argv in the app
+# needs exactly one name, and until 2026-08-23 every one of them hardcoded
+# `docker` — so provisioning could find the CLI and the very next
+# `docker compose up` still could not.
+
+
+def _unresolved(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Undo conftest's pin, so the real resolution runs."""
+    monkeypatch.setattr(platform, "_resolved_docker_cli", None)
+
+
+def test_docker_program_picks_the_exe_the_live_path_cannot_see(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The plain name is skipped because it resolves nowhere — the absolute path wins."""
+    _unresolved(monkeypatch)
+    monkeypatch.setattr(platform.sys, "platform", "win32")
+    monkeypatch.setattr(platform, "_which", _OffPathWhich())
+    monkeypatch.setattr(platform, "_registry_search_path", lambda: DOCKER_BIN_DIR)
+    assert platform.docker_program() == DOCKER_EXE
+
+
+def test_a_healthy_machine_still_gets_the_plain_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing changes where `docker` already works — no absolute path in any argv."""
+    _unresolved(monkeypatch)
+    monkeypatch.setattr(platform.sys, "platform", "win32")
+    monkeypatch.setattr(platform, "_which", lambda name, path=None: r"C:\bin\docker.exe")
+    assert platform.docker_program() == "docker"
+
+
+def test_a_host_with_no_docker_at_all_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    """None, not a hopeful `"docker"` that becomes a WinError 2 two lines later."""
+    _unresolved(monkeypatch)
+    monkeypatch.setattr(platform.sys, "platform", "linux")
+    monkeypatch.setattr(platform, "_which", lambda name, path=None: None)
+    assert platform.docker_program() is None
+
+
+def test_the_answer_is_resolved_once_and_then_costs_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`wait_ready()` issues ~1200 docker commands; resolution must not be in that loop.
+
+    Measured on Windows 11 (2026-08-23): `docker_programs()` costs 7.5ms with
+    docker on PATH and 14.7ms without, and the second case logs a line each
+    time. Across one 8-minute `wait_ready()` that is ~18s of PATH scanning and
+    1200 identical log entries, for an answer that cannot have changed.
+
+    The first resolution walks the PATH twice, not once, and that is left
+    alone: `docker_programs()` asks whether the plain name resolves in order to
+    decide whether to go hunting, and `docker_program()` asks again to decide
+    whether to *use* it. 15ms, once per process, is not worth collapsing two
+    readable functions into one.
+    """
+    _unresolved(monkeypatch)
+    monkeypatch.setattr(platform.sys, "platform", "win32")
+    lookups: list[str] = []
+
+    def _which(name: str, path: str | None = None) -> str | None:
+        lookups.append(name)
+        return r"C:\bin\docker.exe"
+
+    monkeypatch.setattr(platform, "_which", _which)
+    first = platform.docker_program()
+    assert lookups == ["docker", "docker"]  # the two walks of the one resolution
+    for _ in range(50):
+        assert platform.docker_program() == first
+    assert lookups == ["docker", "docker"], "the PATH was walked for an answer already known"
+
+
+def test_a_miss_is_never_cached_so_an_install_mid_run_is_picked_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scenario that created this defect: Docker arrives WHILE the app is running.
+
+    `ensure_docker()` downloads and silently installs Docker Desktop, and the
+    installer writes its `resources\\bin` to the registry PATH — which this
+    already-running process will never be handed. If "no docker" were cached,
+    the launcher would be pinned to that answer for the rest of its life and a
+    first run still could not finish unattended.
+    """
+    _unresolved(monkeypatch)
+    monkeypatch.setattr(platform.sys, "platform", "win32")
+    which = _OffPathWhich(installed=False)
+    monkeypatch.setattr(platform, "_which", which)
+    monkeypatch.setattr(platform, "_registry_search_path", lambda: DOCKER_BIN_DIR)
+
+    assert platform.docker_program() is None
+    which.installed = True  # the silent installer has just finished
+    assert platform.docker_program() == DOCKER_EXE
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="reads the real Windows registry")
