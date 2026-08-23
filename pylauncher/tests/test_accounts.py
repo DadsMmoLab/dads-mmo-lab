@@ -47,9 +47,16 @@ class _FakeSql:
     """A `SqlSeam` that records statements and answers lookups from a tiny table.
 
     It keeps the two schema facts the module actually leans on: `account` is
-    keyed by the folded username, and `account_access`'s primary key is
-    `(id, RealmID)` — so a plain second INSERT for the same account is an error
-    here exactly as MySQL makes it one.
+    keyed by the folded username, and `account_access` rejects a second plain
+    INSERT for an account that already has a row, exactly as MySQL's
+    `(id, RealmID)` primary key does.
+
+    It keys `access` by account id ALONE, so what it really models is a primary
+    key of `(id)`. That is indistinguishable here — every write this module
+    makes uses `RealmID = ALL_REALMS` — and it still kills the
+    ON-DUPLICATE-KEY mutation, so the test is sound; but a future test that
+    writes a second realm would find the fake stricter than the database
+    (review, 2026-08-23).
 
     `fail_on` is a statement prefix that raises `failure` instead of running,
     which is how a database that dies part way through a multi-statement create
@@ -581,3 +588,22 @@ def _verifier_from_credentials(credentials: str, salt: bytes) -> str:
     inner = hashlib.sha1(credentials.encode()).digest()
     x = int.from_bytes(hashlib.sha1(salt + inner).digest(), "little")
     return pow(accounts.GENERATOR, x, accounts.MODULUS).to_bytes(32, "little").hex().upper()
+
+
+def test_a_lookup_that_answers_with_something_that_is_not_a_number_is_an_account_error() -> None:
+    """`int(rows[0])` was the last way another exception type could leave here.
+
+    `create_account`'s `Raises:` block promises `AccountError` is the only type
+    a caller has to handle. The seam reports success by EXIT CODE, so a query
+    that exits 0 having printed something that is not a number — a warning MySQL
+    chose to put on stdout, a schema that is not the one assumed — reached
+    `int()` and raised `ValueError` straight past that promise. The contract was
+    made true rather than softened (review, 2026-08-23).
+    """
+
+    class _Garbled(_FakeSql):
+        def query(self, db: Db, statement: str) -> str:
+            return "Warning: mysql had an opinion\n"
+
+    with pytest.raises(accounts.AccountError, match="expected a number"):
+        accounts.create_account(_Garbled(), "caitlin", PASSWORD)

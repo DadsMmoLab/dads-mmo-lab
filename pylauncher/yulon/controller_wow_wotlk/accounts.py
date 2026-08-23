@@ -313,14 +313,21 @@ def create_account(
     account_id, created = _account_row(sql, name, password)
     # AccountMgr::CreateAccount runs LOGIN_INS_REALM_CHARACTERS_INIT right after
     # the insert. Reproduced verbatim; its `WHERE acctid IS NULL` makes it
-    # idempotent, which is what lets it run on the already-exists path too and
-    # repair an account whose counters never got written.
+    # idempotent, which is what lets it run on the already-exists path too.
+    #
+    # It is SERVER-WIDE, not scoped to this account: the SELECT joins every row
+    # of `account` and seeds a counter for any account on the box that lacks
+    # one. That is upstream's behaviour and worth keeping — it repairs accounts
+    # the console path left without counters — but an earlier version of this
+    # comment and of the failure text below described it as being about `name`
+    # alone, which would send someone debugging the wrong account
+    # (review, 2026-08-23).
     _run(
         sql,
         "INSERT INTO realmcharacters (realmid, acctid, numchars)"
         " SELECT realmlist.id, account.id, 0 FROM realmlist, account"
         " LEFT JOIN realmcharacters ON acctid=account.id WHERE acctid IS NULL",
-        f"seed the realm character counters for {name}",
+        "seed the realm character counters for every account missing them",
     )
     level = _ensure_gm(sql, account_id, gm_level)
     return AccountResult(username=name, account_id=account_id, created=created, gm_level=level)
@@ -408,6 +415,25 @@ def _grant_gm(sql: SqlSeam, account_id: int, gm_level: int) -> None:
     )
 
 
+def _one_int(rows: list[str], what: str) -> int | None:
+    """The single integer a one-column query returned, or None if it returned none.
+
+    `int(rows[0])` was the last way a type other than `AccountError` could leave
+    this module, which `create_account`'s `Raises:` block promises is the only
+    one a caller has to handle. The seam reports success by exit code, so a
+    query that exits 0 having printed something that is not a number — a warning
+    MySQL chose to put on stdout, a schema that is not what we assume — raised
+    `ValueError` straight past that promise. Making the code keep the contract
+    is better than weakening the sentence (review, 2026-08-23).
+    """
+    if not rows:
+        return None
+    try:
+        return int(rows[0])
+    except ValueError as exc:
+        raise AccountError(f"could not {what}: expected a number, got {rows[0]!r}") from exc
+
+
 def _account_id(sql: SqlSeam, username: str) -> int | None:
     """The id of `username`, or `None` — AzerothCore's `AccountMgr::GetId()`.
 
@@ -421,7 +447,7 @@ def _account_id(sql: SqlSeam, username: str) -> int | None:
         f"SELECT id FROM account WHERE username = {literal}",
         f"look up account {username}",
     )
-    return int(rows[0]) if rows else None
+    return _one_int(rows, f"look up account {username}")
 
 
 def _gm_level(sql: SqlSeam, account_id: int) -> int:
@@ -431,7 +457,8 @@ def _gm_level(sql: SqlSeam, account_id: int) -> int:
         f"SELECT gmlevel FROM account_access WHERE id = {account_id} AND RealmID = {ALL_REALMS}",
         f"read the GM level of account {account_id}",
     )
-    return int(rows[0]) if rows else NO_GM
+    level = _one_int(rows, f"read the GM level of account {account_id}")
+    return NO_GM if level is None else level
 
 
 def _run(sql: SqlSeam, statement: str, what: str) -> None:
