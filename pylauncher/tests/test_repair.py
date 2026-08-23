@@ -7,7 +7,9 @@ schema names, and `mysql --batch --skip-column-names` as tab-separated lines.
 
 from __future__ import annotations
 
-from yulon.apply import ApplyError
+import pytest
+
+from yulon.apply import DB_NAMES, ApplyError
 from yulon.controller_wow_wotlk import repair
 from yulon.controller_wow_wotlk.maintenance import CORE_DATABASES, MaintenanceError
 from yulon.manifest import Db
@@ -18,16 +20,27 @@ AUTH, CHARACTERS, WORLD = CORE_DATABASES
 class _Mysql:
     """`MysqlDocker`'s `databases()`, which is all the probe asks of it."""
 
-    def __init__(self, *schemas: str, fails: str = "") -> None:
+    def __init__(self, *schemas: str, fails: str = "", stubborn: bool = False) -> None:
         self.schemas = schemas
         self.fails = fails
         self.asked = 0
+        self.stubborn = stubborn
 
     def databases(self) -> tuple[str, ...]:
         self.asked += 1
         if self.fails:
             raise MaintenanceError(self.fails)
         return ("information_schema", "mysql", *self.schemas)
+
+    def drop(self, name: str) -> None:
+        """What the server does when `_Sql` runs a DROP, unless `stubborn`.
+
+        `stubborn` models the drop that reports nothing and changes nothing —
+        the case `reset_unfinished()` has to catch, because reporting a clear
+        that did not happen sends the import at the same wall again.
+        """
+        if not self.stubborn:
+            self.schemas = tuple(s for s in self.schemas if s != name)
 
     def dump_into(self, database: str, sink: object) -> None:  # pragma: no cover - unused
         raise AssertionError("the probe must never dump")
@@ -45,11 +58,30 @@ class _Sql:
         counts: dict[str, int] | None = None,
         *,
         fails: str = "",
+        server: object = None,
     ) -> None:
         self.tables = tables or {}
         self.counts = counts or {}
         self.fails = fails
         self.asked: list[tuple[Db, str]] = []
+        self.statements: list[tuple[Db, str]] = []
+        # The `_Mysql` on the other end of the same server, when a test needs a
+        # DROP to be visible to `databases()` as well as to the table listing.
+        self.server = server
+
+    def run_statement(self, db: Db, statement: str) -> None:
+        """Record it, and make a DROP actually drop.
+
+        A fake that accepted `DROP DATABASE` and changed nothing would let
+        `reset_unfinished()`'s own post-check pass on a clear that never
+        happened — which is the one thing that check exists to catch.
+        """
+        self.statements.append((db, statement))
+        if statement.startswith("DROP DATABASE"):
+            name = statement.split("`")[1]
+            self.tables.pop(name, None)
+            if self.server is not None:
+                self.server.drop(name)
 
     def query(self, db: Db, statement: str) -> str:
         self.asked.append((db, statement))
@@ -134,7 +166,7 @@ def test_an_import_that_stopped_part_way_reads_as_partial() -> None:
     sql = _Sql(tables={AUTH: _done("account"), CHARACTERS: [], WORLD: _full_world()})
     state = repair.import_state(sql, _Mysql(AUTH, CHARACTERS, WORLD))
     assert state.state == "partial", state
-    assert state.repairable is False, "a half-written schema must not offer a re-import"
+    assert state.repairable is True, "a half-written schema has a repair now: reset then import"
     assert CHARACTERS in state.detail
 
 
@@ -268,7 +300,61 @@ def test_a_schema_with_tables_but_no_updater_record_is_not_finished() -> None:
         _Mysql(AUTH, CHARACTERS, WORLD),
     )
     assert barely_started.state == "partial", barely_started
-    assert barely_started.repairable is False, "a half-written schema offered a re-import"
+    assert barely_started.repairable is True, "the repair was not offered"
     assert barely_started.complete is False
     assert "3 tables" in barely_started.detail, barely_started.detail
     assert WORLD in barely_started.detail
+
+
+def test_reset_unfinished_drops_only_the_unfinished_schemas() -> None:
+    """A finished schema is work the import already did; dropping it wastes an hour."""
+    mysql = _Mysql(AUTH, CHARACTERS, WORLD)
+    sql = _Sql(
+        tables={AUTH: _done("account"), CHARACTERS: _done("characters"), WORLD: ["a", "b", "c"]},
+        server=mysql,
+    )
+    dropped = repair.reset_unfinished(sql, mysql)
+    assert dropped == (WORLD,), dropped
+    assert [s for _, s in sql.statements] == [f"DROP DATABASE `{WORLD}`;"], sql.statements
+
+
+def test_reset_unfinished_refuses_a_database_with_player_data() -> None:
+    """The second guard on the only path in this package that destroys anything.
+
+    `repair_import()` already refuses `populated` before it gets here. This one
+    exists so that guard survives someone reordering the caller, which is a
+    cheaper thing to protect against than a lost realm.
+    """
+    sql = _Sql(
+        tables={AUTH: _done("account"), CHARACTERS: _done("characters"), WORLD: ["a"]},
+        counts={f"{AUTH}.account": 12},
+    )
+    with pytest.raises(RuntimeError, match="player data"):
+        repair.reset_unfinished(sql, _Mysql(AUTH, CHARACTERS, WORLD))
+    assert sql.statements == [], "something was dropped anyway"
+
+
+def test_reset_unfinished_drops_through_the_schema_it_is_dropping() -> None:
+    """There may be no survivor to route through, so it must not need one.
+
+    `DockerSql` connects *to* a database. When every schema is unfinished there
+    is nothing left to connect to except the schemas being dropped — which MySQL
+    allows, since the connection simply loses its default database.
+    """
+    mysql = _Mysql(AUTH, CHARACTERS, WORLD)
+    sql = _Sql(tables={AUTH: ["account"], CHARACTERS: ["characters"], WORLD: ["a"]}, server=mysql)
+    dropped = repair.reset_unfinished(sql, mysql)
+    assert set(dropped) == {AUTH, CHARACTERS, WORLD}, dropped
+    for db, statement in sql.statements:
+        assert DB_NAMES[db] in statement, (db, statement)
+
+
+def test_reset_unfinished_says_so_when_a_drop_did_not_take() -> None:
+    """Reporting a clear that did not happen sends the import at the same wall again."""
+    stubborn = _Mysql(AUTH, CHARACTERS, WORLD, stubborn=True)
+    sql = _Sql(
+        tables={AUTH: _done("account"), CHARACTERS: _done("characters"), WORLD: ["a"]},
+        server=stubborn,
+    )
+    with pytest.raises(MaintenanceError, match="could not be dropped"):
+        repair.reset_unfinished(sql, stubborn)

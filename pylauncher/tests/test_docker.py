@@ -2455,9 +2455,94 @@ def test_repair_import_refuses_a_half_written_schema_and_says_why(
         "partial", "acore_world has 3 tables but no import record, so it was never finished"
     )
     with pytest.raises(docker.DockerCommandError) as caught:
+        # No `reset`: nothing can hand the importer an empty schema, so there is
+        # nothing safe to do.
         docker.repair_import(SPEC, Path("/tmp/wow"), _probe(half_written))
 
     said = str(caught.value)
     assert "cannot finish the job" in said, said
     assert "install again" in said, "no way out was offered"
     assert not any(c[:3] == ["docker", "compose", "up"] for c in calls), "the import was run"
+
+
+def test_repair_import_clears_the_half_written_schemas_before_re_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one thing that makes a `partial` repair work, and the order it must happen in.
+
+    An empty schema is the only input AzerothCore's importer treats as work to
+    do. Re-running over a schema that already exists leaves it permanently
+    unimportable, so the drop has to happen BEFORE the one-shot, not as a
+    cleanup afterwards.
+    """
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db})
+    ran_import_before_the_clear: list[bool] = []
+
+    def reset() -> tuple[str, ...]:
+        ran_import_before_the_clear.append(
+            any(c[:4] == ["docker", "compose", "up", "--no-deps"] for c in calls)
+        )
+        return ("acore_world",)
+
+    half = docker.ImportState("partial", "acore_world has 3 tables but no import record")
+    assert docker.repair_import(SPEC, Path("/tmp/wow"), _probe(half, IMPORTED), reset=reset) is True
+
+    assert ran_import_before_the_clear == [False], "the import ran before the clear"
+    assert any(c[:4] == ["docker", "compose", "up", "--no-deps"] for c in calls), "no import ran"
+
+
+def test_repair_import_will_not_run_the_import_if_the_clear_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed drop leaves the schema exactly as unimportable as before.
+
+    Running the one-shot anyway is the specific mistake that made this state
+    unrecoverable in the first place, so a `reset` that raises stops everything.
+    The seam belongs to the per-game package and may raise its own types, so
+    this is caught broadly and re-raised as the error the caller contracted for.
+    """
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db})
+
+    def reset() -> tuple[str, ...]:
+        raise RuntimeError("mysql said no")
+
+    half = docker.ImportState("partial", "acore_world has 3 tables but no import record")
+    with pytest.raises(docker.DockerCommandError, match="could not be cleared"):
+        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(half), reset=reset)
+    assert not any(c[:4] == ["docker", "compose", "up", "--no-deps"] for c in calls)
+
+
+def test_repair_import_will_not_run_the_import_if_the_clear_found_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ "Unfinished" and "nothing to clear" cannot both be true, so something is wrong.
+
+    Most likely the probe and the reset disagree about what finished means. The
+    one thing that must not follow is the one-shot running over the schemas the
+    probe just called half-written.
+    """
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db})
+    half = docker.ImportState("partial", "acore_world has 3 tables but no import record")
+    with pytest.raises(docker.DockerCommandError, match="nothing was found to clear"):
+        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(half), reset=lambda: ())
+    assert not any(c[:4] == ["docker", "compose", "up", "--no-deps"] for c in calls)
+
+
+def test_an_absent_database_is_never_cleared(monkeypatch: pytest.MonkeyPatch) -> None:
+    """There is nothing to drop, and dropping is the one thing here that destroys."""
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db})
+    cleared: list[int] = []
+
+    def reset() -> tuple[str, ...]:
+        cleared.append(1)
+        return ("acore_world",)
+
+    assert (
+        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, IMPORTED), reset=reset)
+        is True
+    )
+    assert cleared == [], "an absent database was dropped"

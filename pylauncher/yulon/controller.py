@@ -83,6 +83,7 @@ class Controller:
         server_dir: Path,
         *,
         import_probe: docker.ImportProbe | None = None,
+        reset_unfinished: docker.ResetUnfinished | None = None,
     ) -> None:
         self.spec = spec
         self.server_dir = server_dir
@@ -91,6 +92,9 @@ class Controller:
         # this class may know (style-guide §3). A controller built without one
         # simply never offers the repair — see `import_state()`.
         self.import_probe = import_probe
+        # Optional, and separate from the probe: without it `repair_import()`
+        # refuses a half-written database instead of making it unimportable.
+        self.reset_unfinished = reset_unfinished
 
     # -- queries ---------------------------------------------------------
 
@@ -242,7 +246,13 @@ class Controller:
                 "this game cannot be asked what state its databases are in, so its import will "
                 "not be re-run — an import that cannot be checked afterwards is a guess."
             )
-        return docker.repair_import(self.spec, self.server_dir, self.import_probe, output=output)
+        return docker.repair_import(
+            self.spec,
+            self.server_dir,
+            self.import_probe,
+            reset=self.reset_unfinished,
+            output=output,
+        )
 
     # -- polling ---------------------------------------------------------
 

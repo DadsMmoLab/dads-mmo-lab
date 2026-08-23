@@ -105,9 +105,22 @@ IMPORT_MARKERS: tuple[str, ...] = ("updates", "updates_include")
 
 
 class SqlQuery(Protocol):
-    """The read-only slice of `apply.DockerSql` this module needs."""
+    """The read-only slice of `apply.DockerSql` the probe needs."""
 
     def query(self, db: Db, statement: str) -> str: ...
+
+
+class SqlWrite(Protocol):
+    """The read+write slice `reset_unfinished()` needs, and nothing else does.
+
+    Declared separately from `SqlQuery` on purpose. The probe is handed the
+    read-only protocol so no edit to it can turn a question into a change; the
+    one function here that must write says so in its own signature.
+    """
+
+    def query(self, db: Db, statement: str) -> str: ...
+
+    def run_statement(self, db: Db, statement: str) -> None: ...
 
 
 def import_state(sql: SqlQuery, mysql: MysqlDocker) -> docker.ImportState:
@@ -133,28 +146,11 @@ def import_state(sql: SqlQuery, mysql: MysqlDocker) -> docker.ImportState:
             "absent", f"none of {', '.join(CORE_DATABASES)} exists on this server yet"
         )
 
-    # Routed through a schema that exists, though the query itself reads
-    # `information_schema`, which is always there.
     through = _DB_KEYS[present[0]]
-    schemas = ", ".join(f"'{name}'" for name in CORE_DATABASES)
     try:
-        listing = sql.query(
-            through,
-            "SELECT table_schema, table_name FROM information_schema.tables "
-            f"WHERE table_schema IN ({schemas});",
-        )
+        tables = _tables_in(sql, through)
     except ApplyError as exc:
         return docker.ImportState("unreadable", str(exc))
-    # Every table name, not just a count, because the same answer has to settle
-    # "how much of this schema is there" and "does the table holding player data
-    # exist" — and a second round trip to `docker exec` costs about 0.3s. A full
-    # WotLK world schema is roughly 1500 rows of two short columns.
-    tables: dict[str, set[str]] = {name: set() for name in CORE_DATABASES}
-    for line in listing.splitlines():
-        schema, _, table = line.strip().partition("\t")
-        if schema in tables and table:
-            tables[schema].add(table)
-
     populated = _player_data(sql, through, tables)
     if populated is None:
         return docker.ImportState(
@@ -194,6 +190,102 @@ def import_state(sql: SqlQuery, mysql: MysqlDocker) -> docker.ImportState:
             "absent", f"{_holds(bare)} no tables at all, so the import never ran"
         )
     return docker.ImportState("partial", _unfinished_detail(unfinished, tables))
+
+
+def _tables_in(sql: SqlQuery, through: Db) -> dict[str, set[str]]:
+    """Every table name in each core schema, in one query.
+
+    Names and not counts, because the same answer has to settle three questions
+    — how much of this schema is there, does the table holding player data
+    exist, and has the updater been through it — and a second round trip to
+    `docker exec` costs about 0.3s. A full WotLK world schema is roughly 1500
+    rows of two short columns.
+
+    Routed through a schema the caller has already established exists; the query
+    itself reads `information_schema`, which is always there.
+    """
+    schemas = ", ".join(f"'{name}'" for name in CORE_DATABASES)
+    listing = sql.query(
+        through,
+        "SELECT table_schema, table_name FROM information_schema.tables "
+        f"WHERE table_schema IN ({schemas});",
+    )
+    tables: dict[str, set[str]] = {name: set() for name in CORE_DATABASES}
+    for line in listing.splitlines():
+        schema, _, table = line.strip().partition("\t")
+        if schema in tables and table:
+            tables[schema].add(table)
+    return tables
+
+
+def reset_unfinished(sql: SqlWrite, mysql: MysqlDocker) -> tuple[str, ...]:
+    """Drop the schemas an import left half-written, so it can write them again.
+
+    The whole reason this exists, measured on yulon-ubuntu 2026-08-23: running
+    `ac-db-import` a second time over a schema that already exists does not
+    finish it. AzerothCore skips the base data for a database it finds present,
+    creates its `updates` bookkeeping and seeds it with every known SQL file
+    marked as applied — `acore_world` went from 3 tables to 5 while
+    `acore_world.updates` gained 2671 rows, after which no run would ever apply
+    those files again. An empty schema is the only input the importer treats as
+    work to do, so the repair has to hand it one.
+
+    Only the unfinished schemas, and only ones that exist. A finished schema is
+    left alone: dropping `acore_auth` because `acore_world` is broken would
+    throw away work the import had already done, and the importer skips a
+    schema that is already complete anyway.
+
+    Refuses on player data, and asks again here rather than trusting the caller.
+    `repair_import()` has already refused `populated` before reaching this, but
+    the check costs three `docker exec`s and this is the only function in the
+    package that destroys anything — a guard that exists twice on the path to a
+    `DROP DATABASE` is a guard that survives someone reordering the caller.
+
+    Returns:
+        The schemas dropped, in the order they were dropped. Empty if there was
+        nothing unfinished, which is not an error.
+
+    Raises:
+        MaintenanceError: the databases could not be listed, or a schema was
+            still there after being dropped.
+        ApplyError: a `DROP DATABASE` was refused by the server.
+        RuntimeError: there is player data, so nothing was dropped. Deliberately
+            not one of the two above: this is not a transport failure, it is a
+            refusal, and a caller that swallows connection errors must not
+            swallow this.
+    """
+    state = import_state(sql, mysql)
+    if state.state == "populated":
+        raise RuntimeError(
+            f"this install holds player data ({state.detail}), so nothing was dropped."
+        )
+    if state.state == "unreadable":
+        raise MaintenanceError(
+            f"the databases could not be asked what state they are in ({state.detail}), so "
+            "nothing was dropped."
+        )
+
+    existing = mysql.databases()
+    present = [name for name in CORE_DATABASES if name in existing]
+    if not present:
+        return ()
+    listing = _tables_in(sql, _DB_KEYS[present[0]])
+    doomed = [name for name in present if not set(IMPORT_MARKERS) <= listing[name]]
+    for name in doomed:
+        # Routed through the schema being dropped, which MySQL allows — the
+        # connection simply loses its default database, and `docker exec` opens
+        # a new client per statement anyway. Routing through a survivor would
+        # work until the run where every schema is unfinished and there is no
+        # survivor to route through.
+        logger.warning(f"dropping {name}: it was left half-written by an interrupted import")
+        sql.run_statement(_DB_KEYS[name], f"DROP DATABASE `{name}`;")
+
+    left = [name for name in doomed if name in mysql.databases()]
+    if left:
+        raise MaintenanceError(
+            f"{', '.join(left)} could not be dropped, so the import was not re-run."
+        )
+    return tuple(doomed)
 
 
 def _unfinished_detail(unfinished: list[str], tables: dict[str, set[str]]) -> str:

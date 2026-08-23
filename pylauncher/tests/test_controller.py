@@ -297,6 +297,7 @@ def test_repair_import_hands_the_output_sink_through_to_docker(
         server_dir: Path,
         probe: docker.ImportProbe,
         *,
+        reset: docker.ResetUnfinished | None = None,
         output: docker.OutputSink | None = None,
         db_timeout: float = 1.0,
     ) -> bool:

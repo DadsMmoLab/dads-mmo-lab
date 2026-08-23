@@ -104,6 +104,9 @@ class ControllerServices:
             import_probe=(
                 (lambda: wotlk_repair.import_state(sql, mysql)) if spec.import_service else None
             ),
+            reset_unfinished=(
+                (lambda: wotlk_repair.reset_unfinished(sql, mysql)) if spec.import_service else None
+            ),
         )
         return cls(
             controller=controller,
