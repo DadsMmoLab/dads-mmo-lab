@@ -675,6 +675,44 @@ def remove_staged(spec: ContainerSpec, server_dir: Path) -> bool:
     return True
 
 
+STOP_GRACE_SECONDS = 300
+"""Seconds a container gets between SIGTERM and the SIGKILL that follows it.
+
+Docker's own default is 10, and 10 was measured killing a live save: a plain
+`docker compose stop` against the populated worldserver on yulon-ubuntu came
+back with exit code 137 (2026-08-23).
+
+Measured on that box the same day — AzerothCore + playerbots, 1980 characters
+online — two shutdowns run under a grace so long it could not bind
+(`docker stop --timeout 900`) took **90.7s** and **73.4s**, both exit 0. A
+third, run through `stop_staged()` itself with this constant in force, stopped
+the whole project in **58.3s** with all three containers exit 0 and none of
+them removed. So the same server, at the same population, varies by more than
+half a minute between runs; the value has to cover the bad run.
+
+Almost all of it is one phase. After `Halting process...` and `Logging out all
+bots...` the worldserver logs `Closing down DatabasePool 'acore_characters'.
+Waiting for 7662 queries to finish...` and then spends 86s, 69s and 52s in the
+three samples draining that character save queue — 7400-7700 queued saves at
+90-145 a second. The other two containers are nowhere near the constraint:
+ac-authserver stopped in 0.22s and ac-database in 1.4s.
+
+300 is therefore about 3.3x the worst thing seen. The margin is deliberately
+generous and deliberately asymmetric. The queue depth scales with population
+and drains at whatever the disk gives, so a larger realm or a slower disk moves
+the number — while the only cost of an over-long grace is that a genuinely hung
+server takes longer to give up, and the cost of being 30s short is a player's
+characters rolled back to their last save. It happens to agree with the
+`stop_grace_period: 5m` the earlier Rust launcher wrote into its generated
+compose file (`pyplan/rust-prior-art.md` §2); that is now a confirmed number
+rather than an inherited one.
+
+This is the CLI grace on the stop path, not compose's `stop_grace_period` key.
+The key belongs to the install engine that generates compose files, which this
+repo does not do yet.
+"""
+
+
 def _run_docker_stop(container: str) -> None:
     """`docker stop <container>`, blocking until that one container has exited.
 
@@ -685,10 +723,16 @@ def _run_docker_stop(container: str) -> None:
     SIGTERM for 6s. A single-container stop blocks until that container is gone,
     which is what makes "world before the database" real rather than decorative.
 
+    The grace is `STOP_GRACE_SECONDS`, not Docker's 10-second default, for the
+    reason recorded there: at 10s the populated worldserver is SIGKILLed while
+    it is still writing character saves. This path is the fallback, so it is the
+    one that runs for an install whose compose files cannot be read — exactly
+    the install least able to survive losing a save queue.
+
     A container that has vanished since it was listed is not an error: the goal
     state is "not running", and it is already there.
     """
-    proc = _docker(["stop", container])
+    proc = _docker(["stop", "--timeout", str(STOP_GRACE_SECONDS), container])
     if proc.returncode == 0:
         return
     if "No such container" in proc.stderr:
@@ -836,6 +880,12 @@ def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
     6.19s for three containers where the *first* traps SIGTERM for 6s), so a
     multi-name call cannot express "world before the database".
 
+    Both paths ask for `STOP_GRACE_SECONDS` instead of taking Docker's
+    10-second default, which was measured SIGKILLing a populated worldserver
+    while it was still flushing its character save queue. A Stop can therefore
+    take minutes rather than seconds, and every caller of this runs it off the
+    GUI thread already.
+
     Either way the result is verified rather than assumed. A zero exit from
     `compose stop` only means compose had nothing to complain about — it says
     so even for a project where nothing was running, and even where the
@@ -906,7 +956,11 @@ def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
     # are services too — and an install interrupted during the multi-GB client
     # data download leaves one of those running. Skipping the command told the
     # user "nothing was running" while the download carried on (review).
-    proc = _docker(["compose", "stop"], cwd=server_dir)
+    # `--timeout`, because compose's default is Docker's 10s and that was
+    # measured SIGKILLing a populated worldserver mid-save (see
+    # `STOP_GRACE_SECONDS`). It is per container, not for the whole project, and
+    # only the worldserver ever comes close to using it.
+    proc = _docker(["compose", "stop", "--timeout", str(STOP_GRACE_SECONDS)], cwd=server_dir)
     if proc.returncode != 0:
         logger.warning(f"compose stop failed ({proc.stderr.strip()}); stopping containers by name")
     if not before.ours:
