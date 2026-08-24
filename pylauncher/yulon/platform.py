@@ -1540,21 +1540,59 @@ def ensure_docker(
         logger.info("ensure_docker(): daemon already reachable")
         return ProvisionReport(current, done=("docker already running",), docker_ready=True)
     if current == "linux":
-        # SUDO_USER first: under `sudo yulon` every other source says "root",
-        # and this name is now read out in a dialog offering to give that
-        # account root-equivalent access. It was invisible while the join was
-        # silent; making the question visible made the wrong answer visible too.
-        who = (
-            user
-            or os.environ.get("SUDO_USER")
-            or os.environ.get("USER")
-            or os.environ.get("USERNAME")
-            or "deck"
+        return _ensure_docker_linux(
+            do, which, dry_run, _linux_user(user), wait_seconds, cancel, ask
         )
-        return _ensure_docker_linux(do, which, dry_run, who, wait_seconds, cancel, ask)
     if current == "windows":
         return _ensure_docker_windows(do, which, download, dry_run, wait_seconds, cancel)
     return _ensure_docker_macos(do, download, dry_run, wait_seconds, cancel)
+
+
+def _linux_user(explicit: str | None) -> str:
+    """Whose name goes in the consent dialog, and whose account gets the group.
+
+    `SUDO_USER` names the INVOKER, and that is only the right answer when this
+    process is actually running as root — which is the `sudo yulon` case it was
+    added for. Under `sudo -u alice yulon` the process runs as **alice** while
+    `SUDO_USER` says **bob**: the old chain offered bob root-equivalent access
+    he never asked for, joined an account that is not the one making the docker
+    calls, and left alice still unable to use Docker. Group membership is
+    evaluated against the calling process's own credentials, so that join was
+    both wrong and useless.
+
+    So `SUDO_USER` is trusted only behind an effective-uid check, and the
+    process's real identity is preferred over any environment variable — the
+    environment is what an escalation tool rewrites, `geteuid()` is not.
+    `DOAS_USER` is read in the same breath because `doas` exports it and
+    otherwise a `doas yulon` lands on "root" the same way (unverified from
+    this side — no `doas` box here; a claim to check).
+
+    Found by a review that held it after the author had held it as too narrow:
+    the `doas` half needs a tool this audience does not use, the `sudo -u` half
+    needs nothing at all (2026-08-24).
+    """
+    if explicit:
+        return explicit
+    geteuid = getattr(os, "geteuid", None)
+    euid = geteuid() if geteuid is not None else None
+    if euid == 0:
+        for named_by in ("SUDO_USER", "DOAS_USER"):
+            invoker = os.environ.get(named_by)
+            if invoker:
+                return invoker
+    if euid is not None:
+        try:
+            import pwd
+
+            # `str()` and the ignore because mypy runs on Windows here, where
+            # the POSIX stub is not resolvable — the guard above is what makes
+            # the call safe at runtime, not the type checker.
+            return str(pwd.getpwuid(euid).pw_name)  # type: ignore[attr-defined]
+        except (ImportError, KeyError):
+            logger.info(f"no passwd entry for uid {euid}; falling back to the environment")
+    # `deck` last: it is the SteamOS default this project targets, and a wrong
+    # guess here is a name in a question rather than an action.
+    return os.environ.get("USER") or os.environ.get("USERNAME") or "deck"
 
 
 def _ensure_docker_linux(

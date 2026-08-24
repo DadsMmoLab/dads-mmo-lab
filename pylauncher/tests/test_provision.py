@@ -984,9 +984,13 @@ def test_sudo_user_names_the_person_not_root(monkeypatch: pytest.MonkeyPatch) ->
     """Under `sudo yulon`, the dialog must not offer to make root a docker user.
 
     Invisible while the join was silent; making the question visible made the
-    wrong name visible too.
+    wrong name visible too. `os.geteuid` is monkeypatched rather than read,
+    because it does not exist on the Windows box this suite also runs on, and a
+    test whose answer depends on the host OS is a trap this project has already
+    been caught by once.
     """
     _linux(monkeypatch)
+    monkeypatch.setattr(platform.os, "geteuid", lambda: 0, raising=False)
     monkeypatch.setenv("SUDO_USER", "pk")
     monkeypatch.setenv("USER", "root")
     asked: list[str] = []
@@ -997,6 +1001,97 @@ def test_sudo_user_names_the_person_not_root(monkeypatch: pytest.MonkeyPatch) ->
 
     platform.ensure_docker(run=_Run(), which=_which("apt-get"), wait_seconds=0.0, ask=decline)
     assert asked and "'pk'" in asked[0] and "'root'" not in asked[0]
+
+
+def test_sudo_u_someone_else_names_the_account_that_will_run_docker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`sudo -u alice yulon`: the process IS alice, and SUDO_USER says bob.
+
+    The old chain read `SUDO_USER` unconditionally, so it offered bob
+    root-equivalent access he never asked for, joined an account that is not
+    the one making the docker calls, and left alice unable to use Docker
+    anyway — membership is evaluated against the calling process's own
+    credentials, so that join was wrong AND useless.
+
+    Trusting `SUDO_USER` only at euid 0 is the whole fix: the environment is
+    what an escalation tool rewrites, `geteuid()` is not. Held by four
+    reviewers after the author had held it as too narrow — the `doas` half
+    needs a tool this audience lacks, this half needs nothing (2026-08-24).
+    """
+    import sys as _sys
+    import types
+
+    _linux(monkeypatch)
+    monkeypatch.setattr(platform.os, "geteuid", lambda: 1001, raising=False)
+    monkeypatch.setenv("SUDO_USER", "bob")
+    monkeypatch.setenv("USER", "bob")
+
+    passwd = types.ModuleType("pwd")
+    passwd.getpwuid = lambda uid: types.SimpleNamespace(pw_name="alice")  # type: ignore[attr-defined]
+    monkeypatch.setitem(_sys.modules, "pwd", passwd)
+
+    run = _Run()
+    asked: list[str] = []
+
+    def grant(question: str) -> str:
+        asked.append(question)
+        return "y"
+
+    platform.ensure_docker(run=run, which=_which("apt-get"), wait_seconds=0.0, ask=grant)
+
+    assert asked and "'alice'" in asked[0] and "'bob'" not in asked[0]
+    assert _joins_the_docker_group(run.calls) == [
+        ["sudo", "-n", "usermod", "-aG", "docker", "alice"]
+    ]
+
+
+def test_doas_is_read_where_sudo_user_is(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`doas` exports DOAS_USER, so a doas launch lands on root without it.
+
+    Unverified from this side — nobody here has a `doas` box — so it is a claim
+    to check rather than a measured fact. It costs one token in a tuple either
+    way, which is why it is in rather than deferred.
+    """
+    _linux(monkeypatch)
+    monkeypatch.setattr(platform.os, "geteuid", lambda: 0, raising=False)
+    monkeypatch.delenv("SUDO_USER", raising=False)
+    monkeypatch.setenv("DOAS_USER", "pk")
+    monkeypatch.setenv("USER", "root")
+    asked: list[str] = []
+
+    def decline(question: str) -> str:
+        asked.append(question)
+        return "n"
+
+    platform.ensure_docker(run=_Run(), which=_which("apt-get"), wait_seconds=0.0, ask=decline)
+    assert asked and "'pk'" in asked[0]
+
+
+def test_the_default_runner_reads_the_machine_in_a_language_we_chose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The locale pin had no test, so deleting it left the suite green.
+
+    Every other test here injects its own runner, so the default lambda — the
+    only thing that carries `LC_ALL` — was never exercised. Without it, sudo's
+    "a password is required" is translated and the password case falls into the
+    generic bucket for everyone outside an English locale.
+    """
+    _linux(monkeypatch)
+    seen: list[object] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(kwargs.get("env"))
+        return subprocess.CompletedProcess(argv, 1, "", "")
+
+    monkeypatch.setattr(platform.runner, "run", fake_run)
+    platform.ensure_docker(which=_which("apt-get"), user="pk", wait_seconds=0.0)
+
+    envs = [e for e in seen if isinstance(e, dict)]
+    assert envs, "the default runner passed no environment at all"
+    assert envs[0]["LC_ALL"] == "C"
+    assert envs[0]["LANGUAGE"] == ""
 
 
 class _Refuses(_Run):
