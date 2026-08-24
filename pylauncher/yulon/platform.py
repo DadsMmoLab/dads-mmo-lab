@@ -1197,10 +1197,22 @@ def _ensure_docker_linux(
         f"Log out and back in (or run `newgrp docker`) so {user} can use Docker without sudo."
     ]
     if skipped and not dry_run:
-        failed = "; ".join(s.split(":")[0] for s in skipped)
-        manual.insert(
-            0, f"Some steps needed a password; run them in a terminal with sudo: {failed}"
-        )
+        # A skip is reported by its real cause, not by the likeliest one. `sudo
+        # -n` announces the password case itself ("a password is required"),
+        # and `_run_steps` keeps that stderr in the record — so the two have
+        # always been distinguishable and the guess was never needed. Measured
+        # in a container on yulon-ubuntu (2026-08-24): `systemctl` was simply
+        # absent, and the user was told to re-run it in a terminal with sudo,
+        # which fails identically.
+        password = [s for s in skipped if "password" in s.lower()]
+        other = [s for s in skipped if s not in password]
+        if other:
+            manual.insert(0, "Some steps did not run: " + "; ".join(other))
+        if password:
+            failed = "; ".join(s.split(":")[0] for s in password)
+            manual.insert(
+                0, f"Some steps needed a password; run them in a terminal with sudo: {failed}"
+            )
     return ProvisionReport("linux", tuple(done), tuple(skipped), tuple(manual), False, ready)
 
 

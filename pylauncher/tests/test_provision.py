@@ -717,3 +717,52 @@ def test_starting_docker_desktop_survives_an_apostrophe_in_the_install_path(
     assert "O''Brien Games" in command  # doubled, i.e. it cannot end the string early
     assert command.endswith(f"{platform.DOCKER_DESKTOP_EXE}'")
     assert str(exe) in command.replace("''", "'")
+
+
+def test_linux_does_not_blame_a_password_for_a_failure_that_was_not_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A skipped step is reported by its real cause, not by the likeliest one.
+
+    Measured in a throwaway `ubuntu:24.04` container on yulon-ubuntu
+    (2026-08-24): `systemctl enable --now docker` failed with `sudo: systemctl:
+    command not found`, and the report told the user "Some steps needed a
+    password; run them in a terminal with sudo: systemctl enable --now docker"
+    — advice that fails the same way, for a machine where nothing was wrong
+    with sudo at all. Every skip was being attributed to a password because a
+    password is what usually causes one.
+
+    `sudo -n` says so itself when that is the cause ("a password is required"),
+    so the two are distinguishable and the guess was never needed.
+    """
+
+    class _RunWithStderr(_Run):
+        def __init__(self, stderr_for: dict[str, str]) -> None:
+            super().__init__()
+            self.stderr_for = stderr_for
+
+        def __call__(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
+            self.calls.append(argv)
+            if argv[:2] == ["docker", "info"]:
+                return subprocess.CompletedProcess(argv, self.docker_rc, "", "")
+            said = self.stderr_for.get(" ".join(argv))
+            if said is not None:
+                return subprocess.CompletedProcess(argv, 1, "", said)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(platform.sys, "platform", "linux")
+    monkeypatch.setattr(platform, "is_steamos", lambda: False)
+    report = platform.ensure_docker(
+        run=_RunWithStderr(
+            {"sudo -n systemctl enable --now docker": "sudo: systemctl: command not found"}
+        ),
+        which=lambda n: "/usr/bin/apt-get" if n == "apt-get" else None,
+        user="dad",
+        wait_seconds=0.0,
+    )
+
+    assert any("systemctl" in s for s in report.skipped)
+    assert not [m for m in report.manual_steps if "password" in m], report.manual_steps
+    assert any(
+        "systemctl enable --now docker" in m for m in report.manual_steps
+    ), report.manual_steps
