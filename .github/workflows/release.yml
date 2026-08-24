@@ -45,6 +45,23 @@ jobs:
 
       - run: pip install -r requirements.txt pyinstaller
 
+      # PYINSTALLER BUNDLES WHAT IT FINDS ON THE BUILDER, so a library missing
+      # from the runner is a library missing from the artifact. Qt 6.5+ needs
+      # libxcb-cursor0 to load its `xcb` platform plugin, ubuntu-latest does not
+      # ship it, and the v0.6.5 AppImage therefore dumped core on every X11
+      # desktop with:
+      #
+      #   qt.qpa.plugin: From 6.5.0, xcb-cursor0 or libxcb-cursor0 is needed to
+      #   load the Qt xcb platform plugin ... This application failed to start
+      #
+      # Ubuntu's own desktop defaults to Wayland, which is why it went unnoticed.
+      # Measured 2026-08-24: same commit, 6 bundled libxcb* on the runner vs 14
+      # on a machine that had the package - i.e. the artifact was not
+      # reproducible either.
+      - name: Qt runtime libraries the bundle must carry
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libxcb-cursor0
+
       - name: Build with PyInstaller
         run: pyinstaller build/pylauncher.spec --noconfirm --clean
 
@@ -87,7 +104,15 @@ jobs:
           cp "$APPDIR/yulon.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/yulon.png"
           curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool
-          ARCH=x86_64 ./appimagetool "$APPDIR" "Yulon-${GITHUB_REF_NAME}-x86_64.AppImage"
+          # A STATICALLY LINKED RUNTIME, so the AppImage needs no FUSE on the
+          # user's machine. The default runtime shells out to `fusermount`, and
+          # a clean Arch install has neither fuse2 nor fuse3 - the artifact did
+          # not start at all there, with "No suitable fusermount binary found on
+          # the $PATH" and nothing else (measured 2026-08-24). Fedora happened to
+          # be fine because it ships fuse3; that is luck, not a contract.
+          curl -fsSL -o runtime-x86_64             https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64
+          chmod +x runtime-x86_64
+          ARCH=x86_64 ./appimagetool --runtime-file runtime-x86_64             "$APPDIR" "Yulon-${GITHUB_REF_NAME}-x86_64.AppImage"
           mkdir -p release && mv Yulon-*.AppImage release/
 
       # -------------------------------------------------------- Windows

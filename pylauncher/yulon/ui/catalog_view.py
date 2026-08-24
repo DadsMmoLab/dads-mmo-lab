@@ -53,8 +53,43 @@ what it got — the two have the same `run()`.
 DirPicker = Callable[[QWidget, str, Path | None], Path | None]
 
 
+def _existing_ancestor(start: Path | None) -> Path | None:
+    """The nearest directory at or above `start` that actually exists.
+
+    `getExistingDirectory()` opens on a path that does not exist by showing its
+    PARENT with the missing name typed into the field - where `Choose` is
+    disabled, because the name names nothing, and Enter answers "Directory not
+    found. Please verify the correct directory name was given."
+
+    That is a dead end on the first install, and it is the one every new user
+    meets: the suggestion is `~/wow-server-playerbots`, which by definition does
+    not exist yet. The app proposed a folder and then refused its own proposal;
+    the only way forward was the New Folder button, which nothing pointed at.
+    Measured on a clean Arch box, 2026-08-24.
+
+    Walking up is the fix rather than creating the directory: a picker that
+    makes a folder as a side effect leaves an empty one behind when the user
+    cancels, and this one is opened before anything has been agreed to.
+
+    `parents` rather than a `while` loop that follows `.parent`, because that
+    loop cannot terminate on its own: `Path('Q:/gone').parent` is `Q:/` and
+    `Path('Q:/').parent` is `Q:/` again, so an unmounted drive letter spins
+    forever. A guard against that is a guard someone can delete - mutation
+    testing removed it and the suite HUNG rather than failed, which is a test
+    that reports a defect by never finishing. `parents` is finite by
+    construction, so there is nothing left to guard.
+    """
+    if start is None:
+        return None
+    for candidate in (start, *start.parents):
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
 def _qt_dir_picker(parent: QWidget, title: str, start: Path | None) -> Path | None:
-    chosen = QFileDialog.getExistingDirectory(parent, title, str(start) if start else "")
+    opens_at = _existing_ancestor(start)
+    chosen = QFileDialog.getExistingDirectory(parent, title, str(opens_at) if opens_at else "")
     return Path(chosen) if chosen else None
 
 
@@ -226,7 +261,11 @@ class CatalogView(QWidget):
             return False
         server_dir = self._pick_dir(
             self,
-            f"Where should {entry.name} be installed?",
+            # The suggested name moved into the title when the picker stopped
+            # opening on a path that does not exist - the dialog can no longer
+            # pre-fill it, so this is where the user is told what to make.
+            f"Where should {entry.name} be installed? "
+            f"(suggested: a new folder called {entry.install.default_server_dir})",
             self._home / entry.install.default_server_dir,
         )
         if server_dir is None:

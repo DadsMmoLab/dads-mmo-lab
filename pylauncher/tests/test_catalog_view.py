@@ -15,6 +15,7 @@ from tests.conftest import process_events
 from yulon import runner
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.installer import Installer, InstallOptions
+from yulon.ui import catalog_view
 from yulon.ui.catalog_view import CatalogView
 from yulon.ui.widgets.log_panel import LogPanel
 
@@ -432,3 +433,45 @@ def test_unlocking_after_a_job_never_re_enables_a_gated_tile(qapp: object, tmp_p
     assert view.button_for("wow-wotlk").isEnabled() is True  # unlocked after the job
     assert view.button_for("wow-tbc").isEnabled() is False  # STILL gated
     assert view.existing_button_for("wow-tbc").isEnabled() is True  # never gated
+
+
+def test_the_picker_opens_somewhere_that_exists(tmp_path: Path) -> None:
+    """The first install's suggested folder does not exist, and that was a dead end.
+
+    `QFileDialog.getExistingDirectory()` handed a missing path opens its PARENT
+    with the missing name typed in, `Choose` disabled, and Enter answering
+    "Directory not found." The app suggested `~/wow-server-playerbots` and then
+    refused its own suggestion — measured on a clean Arch box, 2026-08-24, where
+    it is the first thing a new user meets.
+
+    Asserted on the helper rather than through Qt because what went wrong is the
+    PATH handed to the dialog, not the dialog: driving a real modal here would
+    test PySide6's behaviour on this machine and hide the argument that caused
+    it.
+    """
+    missing = tmp_path / "wow-server-playerbots"
+    assert not missing.exists()
+    assert catalog_view._existing_ancestor(missing) == tmp_path
+
+    # Several levels of missing still land on something real.
+    assert catalog_view._existing_ancestor(missing / "a" / "b" / "c") == tmp_path
+
+    # An existing directory is returned unchanged - "Use existing..." must still
+    # open IN the install, not one above it.
+    missing.mkdir()
+    assert catalog_view._existing_ancestor(missing) == missing
+
+
+def test_the_picker_gives_up_rather_than_looping_on_a_root_that_is_not_there() -> None:
+    """Walking up has to terminate even when nothing on the way exists.
+
+    `Path('/nonexistent').parent` is `/`, and `Path('/').parent` is `/` again —
+    a walk that only checks `is_dir()` spins forever on a machine where the root
+    of the given path is not mounted (a stale drive letter on Windows is the
+    realistic case). The loop stops when the parent stops changing.
+    """
+    from pathlib import PureWindowsPath
+
+    weird = Path(PureWindowsPath("Q:/gone/deeper").as_posix())
+    got = catalog_view._existing_ancestor(weird)
+    assert got is None or got.is_dir()
