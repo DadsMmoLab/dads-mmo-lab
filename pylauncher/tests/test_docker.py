@@ -2857,3 +2857,33 @@ def test_a_directory_that_cannot_be_looked_into_is_unchecked_not_a_pass(
     monkeypatch.setattr(Path, "iterdir", refuse)
     assert docker._first_populated_ancestor(tmp_path) is None
     assert docker.bind_mount_ok(tmp_path / "wow", "alpine/git") is None
+
+
+def test_a_missing_image_is_told_apart_from_a_daemon_that_will_not_talk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both spellings of "no such image", because only one of them was measured.
+
+    `"Error response from daemon: No such image: <ref>"` is what Docker 29.1.3
+    actually said, and is quoted in `pyplan/checklist.md`. The `"not found"`
+    half of the match is belt-and-braces for a wording this project has not
+    seen, and it had no test at all (review, 2026-08-24). Both must answer
+    False — "that image is not here" — while anything else answers None, and
+    the difference matters because False and None differ by a multi-hour build
+    only in the log line, never in the action.
+    """
+    for said in (
+        "Error response from daemon: No such image: yulon.local/x:t",
+        "Error: No such image: yulon.local/x:t",
+        "Error response from daemon: image not found",
+    ):
+        monkeypatch.setattr(
+            docker.runner, "run", lambda *a, s=said, **k: _completed(returncode=1, stderr=s)
+        )
+        assert docker.images_built(REFS) is False, said
+
+    for said in ("permission denied while trying to connect", "context deadline exceeded", ""):
+        monkeypatch.setattr(
+            docker.runner, "run", lambda *a, s=said, **k: _completed(returncode=1, stderr=s)
+        )
+        assert docker.images_built(REFS) is None, said

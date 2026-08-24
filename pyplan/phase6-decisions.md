@@ -559,7 +559,7 @@ The rules, each of which cost the Rust launcher an evening:
 - **The state file is a HINT; every stage re-checks disk evidence.** clone stages: `.git` exists
   and `git remote get-url origin` matches the catalog source (an existing valid clone gets
   fetch+reset via the seam's own update path; a directory with the wrong remote is refused by
-  name, never deleted). build: `compose -f… images -q` non-empty. generate-compose: see below.
+  name, never deleted). build: every one of this install's image references exists, asked of the daemon with `docker image inspect` — NOT `compose images -q`, which answers for created containers and so answered nothing in the built-but-not-yet-up window every resume asks in (measured 2026-08-24). generate-compose: see below.
   The Rust incident this rule exists for: an `is_done` short-circuit let a dropped-in state file
   make generate-compose rewrite a real server's compose file and orphan its character volumes.
 - **`generate-compose` rewrites only files carrying the engine's own first-line marker comment**,

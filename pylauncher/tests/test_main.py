@@ -197,3 +197,26 @@ def test_the_report_line_survives_a_console_that_cannot_spell_the_step_text(
     line.encode("cp1252")  # the whole assertion: this is what raised
     payload = json.loads(line[len("YULON_PROVISION_JSON ") :])
     assert payload["done"] == [step], "the escaping lost or changed the step text"
+
+
+def test_headless_provisioning_never_hands_over_a_prompter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--provision` has nobody to ask, and that has to be the mechanism, not a hope.
+
+    `main.py`'s docstring and the payload comment both claim headless on Linux
+    always answers "not-asked". Every test here replaced `ensure_docker`
+    wholesale with a stub whose report defaults `docker_group` to
+    "not-applicable", so the claim was asserted in prose in two files and
+    verified in neither: a regression that passed a live prompter here would
+    not have failed anything (review, 2026-08-24).
+    """
+    seen: list[dict[str, Any]] = []
+
+    def _provision(**kwargs: Any) -> platform.ProvisionReport:
+        seen.append(kwargs)
+        return _report(docker_ready=True)
+
+    monkeypatch.setattr(main.platform, "ensure_docker", _provision)
+    assert main.provision_headless() == main.PROVISION_READY
+    assert seen and seen[0].get("ask") is None

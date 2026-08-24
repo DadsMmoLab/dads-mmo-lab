@@ -1006,3 +1006,34 @@ def test_a_stage_failure_is_not_swallowed_by_the_keep_awake_wrapper(tmp_path: Pa
     rec = Recorder(images=False, build_result=docker.AttachedRun(2, ("compiler died",)))
     with pytest.raises(InstallerError, match="compiler died"):
         install(rec, tmp_path / "wow")
+
+
+def test_the_native_engine_never_hands_a_prompter_to_provisioning(tmp_path: Path) -> None:
+    """The one thing keeping a native Linux entry from escalating silently.
+
+    `native.py`'s module docstring argues that "nothing on this path may
+    prompt" is structural rather than a fact about today's catalog: the engine
+    calls `ensure_docker()` itself, and on Linux that call CAN join the docker
+    group, so the safety comes from passing no prompter down — with nobody to
+    ask, `ensure_docker()` declines.
+
+    That invariant was enforced by nothing but a human reading the source. The
+    script path got a pinning test for its half the same day; this side, which
+    the docstring itself says is one `catalog.json` key away from mattering,
+    did not (review, 2026-08-24).
+    """
+    seen: list[dict[str, object]] = []
+
+    def provision(**kwargs: object) -> platform.ProvisionReport:
+        seen.append(dict(kwargs))
+        return platform.ProvisionReport("linux", docker_ready=True)
+
+    def prompter(_question: str) -> str:
+        raise AssertionError("the native path asked the user something")
+
+    rec = Recorder()
+    installer = engine(rec, docker_ready=lambda: False, ensure_docker=provision)
+    installer.preflight(InstallOptions(server_dir=tmp_path / "srv"), ask=prompter)
+
+    assert seen, "ensure_docker was never reached"
+    assert seen[0].get("ask") is None

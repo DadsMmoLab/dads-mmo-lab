@@ -353,3 +353,47 @@ def test_the_generated_stack_configures_the_bot_population(tmp_path: Path) -> No
     assert ENTRY.install.native is not None
     assert ENTRY.install.native.world_env["AC_AI_PLAYERBOT_MIN_RANDOM_BOTS"] == "1600"
     assert 'AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES: "1"' in plan.override
+
+
+def test_the_image_refs_match_the_services_the_build_overlay_actually_builds(
+    tmp_path: Path,
+) -> None:
+    """`BUILT_SERVICES` is a third copy of four strings, and nothing cross-checked it.
+
+    The same four names live in `build.yml.tmpl`'s `target:` lines, in
+    `base.yml.tmpl`'s `image:` refs, and in `BUILT_SERVICES`. They agree today.
+    Nothing enforced it: rename a `target:` without touching the tuple and
+    `images_built()` asks the daemon for a reference that will never exist, so
+    it answers False forever and every resume re-runs the multi-hour build —
+    permanently, silently, with a green suite. That is precisely the bug the
+    per-reference rewrite was written to fix, reintroduced through the one seam
+    nothing checked (review, 2026-08-24).
+
+    Derived from the rendered files rather than restated, so the assertion
+    cannot drift the way the tuple did.
+    """
+    plan = render(tmp_path / "wow")
+    refs = composegen.built_image_refs(tmp_path / "wow", platform_id=lambda: "linux")
+
+    built_targets = set(re.findall(r"^\s*target:\s*(\S+)\s*$", plan.build, re.MULTILINE))
+    assert built_targets == set(composegen.BUILT_SERVICES), (
+        built_targets,
+        composegen.BUILT_SERVICES,
+    )
+
+    # And every reference the engine will ask the daemon about is exactly an
+    # And every reference the engine will ask the daemon about is exactly an
+    # image the base file names, so a rename in either place fails here.
+    #
+    # The base file spells the tag as compose interpolation
+    # (`${IMAGE_TAG:-native-abc}`) and `built_image_refs()` produces the
+    # resolved default, so the DEFAULT is what is compared. That is also the
+    # coupling this test documents: an `.env` that set `IMAGE_TAG` would make
+    # the built image and the reference the engine asks about disagree, and
+    # nothing today writes one — see `built_image_refs()`.
+    interpolated = re.compile(r"\$\{IMAGE_TAG:-([^}]+)\}")
+    base_images = {
+        interpolated.sub(lambda m: m.group(1), image)
+        for image in re.findall(r"^\s*image:\s*(\S+)\s*$", plan.base, re.MULTILINE)
+    }
+    assert set(refs) <= base_images, (set(refs) - base_images, base_images)

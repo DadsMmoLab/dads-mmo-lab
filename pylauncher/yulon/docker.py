@@ -2196,11 +2196,9 @@ def images_built(refs: Sequence[str]) -> bool | None:
     """
     if not refs:
         return None
-    found = 0
     for ref in refs:
         proc = _docker(["image", "inspect", "--format", "{{.Id}}", ref])
         if proc.returncode == 0 and proc.stdout.strip():
-            found += 1
             continue
         # `docker image inspect` exits non-zero for "no such image", which is an
         # answer, and for a daemon that will not talk, which is not. They are
@@ -2211,7 +2209,10 @@ def images_built(refs: Sequence[str]) -> bool | None:
             return False
         logger.warning(f"could not ask whether {ref} exists: {proc.stderr.strip()}")
         return None
-    return found == len(refs)
+    # Every reference answered, or the loop returned. The counter this used to
+    # compare against `len(refs)` could only ever equal it here, which read as
+    # if a partial count could reach this line (review, 2026-08-24).
+    return True
 
 
 def bind_mount_ok(

@@ -739,11 +739,17 @@ class NativeInstaller:
     ) -> Iterator[str]:
         """Compile the server. Hours, and the one stage whose output is worth watching.
 
-        The state file alone never skips this: `compose images -q` is asked,
-        and only an answer of "there are images" plus a recorded build counts.
-        A daemon that will not answer is not "no images" — it is unknown, and
-        an unknown re-runs the build, which is slow and safe rather than fast
-        and wrong.
+        The state file alone never skips this: the daemon is asked whether this
+        install's image references exist, and only "they all do" plus a
+        recorded build counts. A daemon that will not answer is not "no images"
+        — it is unknown, and an unknown re-runs the build, which is slow and
+        safe rather than fast and wrong.
+
+        It used to ask `compose images -q`, which cannot answer the question:
+        compose enumerates the images of a project's CREATED CONTAINERS, so in
+        the built-but-not-yet-up window this runs in it returned nothing and
+        every resume re-ran the compile (measured 2026-08-24; see
+        `docker.images_built()`).
         """
         built = self._seams.images_built(
             composegen.built_image_refs(server_dir, platform_id=self._seams.platform_id)

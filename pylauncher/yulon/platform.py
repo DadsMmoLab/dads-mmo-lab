@@ -706,9 +706,32 @@ question asked the same way. `test_prompt.py` pins the first of those.
 
 DOCKER_GROUP_DECLINED_STEP = (
     "You said no to joining the docker group, so Yu'lon cannot use Docker on this machine "
-    "yet. Docker Engine is installed; to change your mind later: "
+    "yet. To change your mind later: sudo usermod -aG docker {user}, then log out and back in."
+)
+"""What declining costs. It used to add "Docker Engine is installed" — unconditionally.
+
+That is a claim about a command that may not have run: on a box where `sudo -n`
+has no ticket, every package step lands in `skipped` and the report then
+contradicted itself inside one tuple, promising an installed engine two lines
+under "Some steps needed a password". The engine's fate is reported by the
+steps themselves, which is the only place that knows it (review, 2026-08-24).
+"""
+
+DOCKER_GROUP_JOIN_FAILED_STEP = (
+    "You said yes, but adding {user} to the docker group did not work — see the step above for "
+    "why. Until it does, Yu'lon cannot use Docker here. To do it yourself: "
     "sudo usermod -aG docker {user}, then log out and back in."
 )
+"""Consent is not the same event as the join succeeding, and the report must not merge them.
+
+`usermod` runs under `sudo -n` exactly like the package steps, and fails for
+the same reasons: no cached ticket by the time it runs, a sudoers rule scoped
+to `apt-get` but not `usermod`, or no `docker` group because the engine install
+itself failed. The old code printed "log out and back in, then click Install
+again" on the strength of the ANSWER, so a user whose join had failed was told
+to log out, log back in, click Install, and meet the identical failure with no
+explanation (review, 2026-08-24).
+"""
 
 DOCKER_GROUP_UNASKED_STEP = (
     "Skipped joining the docker group: it grants root-equivalent access, and with nobody to "
@@ -1234,6 +1257,31 @@ def _wait_docker_ready(
     return docker_ready(run)
 
 
+def _c_locale_env() -> dict[str, str]:
+    """This process's environment with the messages locale pinned to C.
+
+    Provisioning classifies a skipped step by reading `sudo`'s own stderr for
+    "a password is required", and `sudo` is gettext-translated: on a Danish
+    desktop it says "adgangskode", on a German one "Passwort". Without this the
+    password case falls into the generic bucket for everyone outside an English
+    locale, and they are handed a raw exit code instead of the one instruction
+    that would fix it.
+
+    This codebase already knew: `ui/widgets/prompt.py`'s `_NOT_SECRET` regex was
+    rewritten into a deny-list for exactly this reason, and its comment lists
+    the same translations. Pinning the child's locale is the other half of that
+    lesson — read a machine's answer in a language you chose, not the one it
+    happens to be set to (review, 2026-08-24).
+
+    `LC_ALL` rather than `LANG`, because `LC_ALL` overrides every category and
+    a user with `LC_MESSAGES` set would otherwise still get translated text.
+    """
+    env = dict(os.environ)
+    env["LC_ALL"] = "C"
+    env["LANGUAGE"] = ""
+    return env
+
+
 def _run_steps(
     do: RunCmd, commands: list[list[str]], *, sudo: bool, dry_run: bool
 ) -> tuple[list[str], list[str]]:
@@ -1283,7 +1331,9 @@ def ensure_docker(
     lists every step as skipped so the UI can show the plan. `cancel`, when set,
     interrupts the ready-poll early (the poll still returns the latest check).
     """
-    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv))
+    # The default runner pins the messages locale — see `_c_locale_env()`. An
+    # injected `run` is the caller's business and is left alone.
+    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv, env=_c_locale_env()))
     current = detect()
     if docker_ready(do):
         logger.info("ensure_docker(): daemon already reachable")
@@ -1341,12 +1391,14 @@ def _ensure_docker_linux(
 
     commands = docker_engine_commands(pm, steamos=is_steamos())
     done, skipped = _run_steps(do, commands, sudo=True, dry_run=dry_run)
+    joined_ok = False
     if consent == "granted":
         # The one place this argv is built. `docker_engine_commands()` no
         # longer contains it, so there is no ungated path to it at all.
         joined, refused = _run_steps(
             do, [["usermod", "-aG", "docker", user]], sudo=True, dry_run=dry_run
         )
+        joined_ok = bool(joined) and not refused
         done, skipped = [*done, *joined], [*skipped, *refused]
     elif dry_run:
         skipped.append(f"(dry run) usermod -aG docker {user} (asks first)")
@@ -1354,8 +1406,14 @@ def _ensure_docker_linux(
     ready = False if dry_run else _wait_docker_ready(do, min(wait_seconds, 30.0), 2.0, cancel)
 
     manual: list[str] = []
-    if consent in ("granted", "already-member"):
+    # Keyed on what HAPPENED, not on what was agreed to. `consent` answers the
+    # question; whether the command that follows it worked is a separate fact,
+    # and telling a user to log out and back in because they said yes — when
+    # the join failed — sends them round a loop that ends in the same failure.
+    if consent == "already-member" or joined_ok:
         manual.append(DOCKER_GROUP_RELOGIN_STEP.format(user=user))
+    elif consent == "granted":
+        manual.append(DOCKER_GROUP_JOIN_FAILED_STEP.format(user=user))
     elif consent == "declined":
         manual.append(DOCKER_GROUP_DECLINED_STEP.format(user=user))
     elif consent == "not-asked":

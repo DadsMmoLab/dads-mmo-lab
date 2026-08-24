@@ -997,3 +997,75 @@ def test_sudo_user_names_the_person_not_root(monkeypatch: pytest.MonkeyPatch) ->
 
     platform.ensure_docker(run=_Run(), which=_which("apt-get"), wait_seconds=0.0, ask=decline)
     assert asked and "'pk'" in asked[0] and "'root'" not in asked[0]
+
+
+class _Refuses(_Run):
+    """`_Run`, but the commands whose joined argv contains `fails` come back non-zero."""
+
+    def __init__(self, fails: str, stderr: str = "sudo: a password is required") -> None:
+        super().__init__()
+        self.fails = fails
+        self.stderr = stderr
+
+    def __call__(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
+        self.calls.append(argv)
+        if argv[:2] == ["docker", "info"]:
+            return subprocess.CompletedProcess(argv, self.docker_rc, "", "")
+        if argv[0] == "id":
+            return subprocess.CompletedProcess(argv, 0, "pk sudo", "")
+        if self.fails in " ".join(argv):
+            return subprocess.CompletedProcess(argv, 1, "", self.stderr)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+
+def test_a_yes_whose_join_failed_is_not_reported_as_a_join(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Consent is one event; the command that follows it succeeding is another.
+
+    `usermod` runs under `sudo -n` exactly like the package steps and fails for
+    the same reasons — no cached ticket by the time it runs, a sudoers rule
+    scoped to `apt-get` but not `usermod`, or no `docker` group at all because
+    the engine install itself failed. The report used to print "log out and
+    back in ... then click Install again" on the strength of the ANSWER, so a
+    user whose join had failed was sent round a loop ending in the identical
+    failure with nothing explaining it.
+
+    No test could see this because every fake in this file answers 0 to
+    everything after `docker info` (review, 2026-08-24).
+    """
+    _linux(monkeypatch)
+    run = _Refuses("usermod")
+    report = platform.ensure_docker(
+        run=run, which=_which("apt-get"), user="pk", wait_seconds=0.0, ask=lambda _q: "y"
+    )
+
+    assert report.docker_group == "granted"  # they did say yes, and that is recorded
+    assert any("usermod" in s for s in report.skipped)
+    # ...but nothing may claim the group was joined.
+    assert not [m for m in report.manual_steps if "Log out and back in" in m]
+    assert any("did not work" in m for m in report.manual_steps)
+
+
+def test_declining_does_not_promise_an_engine_that_was_never_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ "Docker Engine is installed" was printed whether or not it was.
+
+    On a box where `sudo -n` has no ticket every package step lands in
+    `skipped`, and the report contradicted itself inside one tuple: "Some steps
+    needed a password" two lines above "Docker Engine is installed". The
+    engine's fate is reported by the steps, which is the only place that knows
+    it.
+    """
+    _linux(monkeypatch)
+    run = _Refuses("apt-get")
+    report = platform.ensure_docker(
+        run=run, which=_which("apt-get"), user="pk", wait_seconds=0.0, ask=lambda _q: "n"
+    )
+
+    assert report.docker_group == "declined"
+    assert any("needed a password" in m for m in report.manual_steps)
+    assert not [m for m in report.manual_steps if "Docker Engine is installed" in m]
+    # The decline itself is still explained, and still says how to change it.
+    assert any("You said no" in m and "usermod -aG docker pk" in m for m in report.manual_steps)

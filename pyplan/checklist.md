@@ -14,7 +14,7 @@
 - [x] 0.2 Add a CI lint/type/test job (`ci.yml`, separate from `release.yml`)
 - [x] 0.3 Resolve remaining naming debt (lowercase filenames, valid `snake_case` package dirs)
 - [x] 0.4 Pin an AzerothCore compose fixture for integration tests
-- [x] 0.5 Write a minimal contributor/dev-setup doc (`development.md`)
+- [x] 0.5 Write a minimal contributor/dev-setup doc (`pyplan/contribution.md`)
 - [x] 0.6 Establish a shared logging convention
 
 ---
@@ -451,9 +451,13 @@ volumes are not named like a script install's, which matters to anyone reading `
 during support — and to any future path that looks a volume up by name rather than by project.
 
 **What this does not prove.** That the generated stack builds, starts, or serves a client.
-`docker compose config` resolves a file; it does not run one. Three of the five first-gate items
-remain: `images -q` against a built-but-never-started project, a folder outside Docker Desktop's
-file-sharing list, and `compose up -d --no-deps <db>` against images this engine built.
+`docker compose config` resolves a file; it does not run one. (This sentence listed THREE
+remaining first-gate items when it was written, including `images -q` — which the section above
+it settled eight minutes later. Two remain: a folder outside Docker Desktop's file-sharing list,
+attempted since and still open for want of a Hyper-V box or a Mac, and `compose up -d --no-deps
+<db>` against images this engine built. Corrected after a review caught the file disagreeing with
+itself — the same defect class the freshness pass had just claimed to eliminate, reintroduced by
+two commits written after it.)
 
 ### Two things the first button-driven install found (2026-08-24)
 
