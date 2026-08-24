@@ -41,8 +41,20 @@ jobs:
       - name: black (format check)
         run: python -m black --check .
 
-      - name: mypy (types)
+      # Three platforms, because a POSIX-only or Windows-only import is red on
+      # whichever platform it was not written for, and one run can only ever
+      # see one of them. `pwd` shipped twice in one day - once needing a
+      # `type: ignore` (green on the Windows box it was written on, red here)
+      # and once without one (green here, red for every Windows developer).
+      # Neither could be caught by a checker that runs Linux only.
+      - name: mypy (types, this platform)
         run: python -m mypy yulon main.py
+
+      - name: mypy (types, as Windows)
+        run: python -m mypy --platform win32 yulon main.py
+
+      - name: mypy (types, as macOS)
+        run: python -m mypy --platform darwin yulon main.py
 
       - name: pytest (tests)
         run: python -m pytest -q
