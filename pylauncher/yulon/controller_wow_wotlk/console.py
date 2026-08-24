@@ -200,8 +200,12 @@ def send_command(
     except OSError as exc:
         os.close(master)
         os.close(slave)
-        # The fourth module that has to say this — `DOCKER_CLI_MISSING_HELP`'s own
-        # docstring names all four. `attach_argv()` above covers the never-resolved
+        # One of the modules that has to say this; `DOCKER_CLI_MISSING_HELP`'s
+        # own docstring names them all. Deliberately not "the Nth" any more — it
+        # said "the fourth" until a fifth module started raising it and nothing
+        # noticed, which is what a positional count in a comment is for.
+        #
+        # `attach_argv()` above covers the never-resolved
         # case; this covers the pinned-then-removed one, where argv[0] is an
         # absolute path that has since gone (a Docker Desktop uninstall or in-place
         # upgrade mid-session), which used to surface as a bare [Errno 2].

@@ -138,7 +138,13 @@ def is_steamos() -> bool:
 
 
 def detect_firewall(which: Callable[[str], str | None] | None = None) -> FirewallBackend:
-    """Which firewall tool this host uses: netsh (Windows), ufw, firewalld, or none."""
+    """Which firewall tool this host uses: netsh (Windows), alf (macOS), ufw, firewalld, or none.
+
+    `alf` is in that list because leaving it out of this sentence is the same
+    mistake as leaving it out of the code: answering "none" for a Mac is what
+    told a Mac user about ufw. A one-line summary that enumerates the answers
+    has to enumerate all of them.
+    """
     if detect() == "windows":
         return "netsh"
     if detect() == "macos":
@@ -823,9 +829,19 @@ DOCKER_CLI_MISSING_HELP = (
 )
 """What to tell the user when `docker_program()` comes back empty.
 
-One sentence, one home. Four modules have to say it — `docker`, `console`,
-`git` and `apply` — and each raises its own error type, so the wording is the
-only part they can share (style-guide §4). Saying it at all is the point: a
+One sentence, one home. Each module that has to say it raises its own error
+type, so the wording is the only part they can share (style-guide §4).
+
+Modules that raise it: `apply`, `console`, `docker`, `git`, `maintenance`.
+
+That line is checked, not trusted. It read "Four modules … `docker`, `console`,
+`git` and `apply`" for as long as it took `maintenance` to start raising this
+and nobody to notice, and `console.py` carried a matching "the fourth module
+that has to say this" comment that went wrong with it (audit, 2026-08-24). A
+comment that enumerates code goes stale in silence, so `test_platform.py` asks
+the package which modules reference this constant and compares the two as
+sets — a module that joins and a module that leaves both fail it. The count
+word is gone on purpose: a number is one more thing to keep true. Saying it at all is the point: a
 launcher that cannot find the CLI used to fail with `FileNotFoundError:
 [WinError 2] The system cannot find the file specified`, which names neither
 docker nor anything the user can act on.
@@ -947,7 +963,7 @@ DOCKER_GROUP_QUESTION = (
     "\n"
     "Add '{user}' to the docker group (grants root-equivalent access)? (y/n): "
 )
-"""The consent question, whose last line matches the five bash scripts' wording.
+"""The consent question, whose last line matches the six bash scripts' wording.
 
 The `(y/n)` is load-bearing twice over. `ui.widgets.prompt.is_secret()` reads
 it to leave the answer field unmasked — without it the consent answer arrives
@@ -1706,7 +1722,7 @@ def _ensure_docker_linux(
     )
 
     manual: list[str] = []
-    if outcome in ("already-member", "granted"):
+    if outcome == "granted":
         manual.append(DOCKER_GROUP_RELOGIN_STEP.format(user=user))
     elif outcome == "join-failed":
         manual.append(DOCKER_GROUP_JOIN_FAILED_STEP.format(user=user))
@@ -1745,9 +1761,14 @@ def _settle_docker_group(
 ) -> DockerGroupOutcome:
     """Decide the docker-group question without running anything privileged.
 
-    Every branch that is not a deliberate yes is a no, and each keeps its own
-    name because the four are different events to a person reading a report:
-    already a member, nobody to ask, cancelled, or asked and declined.
+    Every branch that is not a deliberate yes is a no. Four events, and
+    deliberately THREE names for them: `already-member`, `declined`, and
+    `not-asked` — which covers a cancelled run, a dry run and a run with nobody
+    to ask alike, because all three mean the same thing to someone reading a
+    report: the question was never put. (This docstring claimed four names for
+    four events until an audit read the branches, 2026-08-24. `granted` and
+    `join-failed` are the two yes-shaped outcomes and belong to the caller, not
+    to this function.)
 
     A cancelled run never opens a dialog. A `dry_run` never opens one either —
     it exists to show a plan, and a plan that interrogates the user is not one.

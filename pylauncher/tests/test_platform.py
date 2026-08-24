@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 import threading
 from pathlib import Path
@@ -275,3 +276,46 @@ def test_keep_awake_on_windows_is_taken_on_a_worker_thread() -> None:
     worker.start()
     worker.join()
     assert outcome == ["held"]
+
+
+def test_the_missing_cli_help_names_every_module_that_raises_it() -> None:
+    """The docstring enumerates its callers, so the enumeration is asked of the package.
+
+    `DOCKER_CLI_MISSING_HELP` is one sentence with several homes: each module
+    that cannot find the Docker CLI raises its own error type carrying this
+    text, and the constant's docstring names them so a reader can reach them all
+    from one place. That list said "Four modules" for as long as it took
+    `maintenance` to start raising it and nobody to notice, and `console.py`
+    carried a "the fourth module that has to say this" comment that went wrong
+    with it (audit, 2026-08-24).
+
+    SET equality, not "each name appears somewhere". The first version of this
+    test asked whether each module's name occurred in the docstring at all, and
+    a mutation that deleted `maintenance` from the LIST survived it — the same
+    word was still there in the prose sentence explaining the fix. A test that a
+    passing sentence can satisfy by accident is not a test. Comparing sets also
+    catches the other direction, a module that stops raising it and is left
+    named.
+
+    Modules are found by reading source, not by importing: importing them all
+    would drag PySide6 in, and the question is about references in the tree.
+    """
+    package = Path(platform.__file__).parent
+    raisers = {
+        path.stem
+        for path in package.rglob("*.py")
+        if path.name != "platform.py"
+        and "DOCKER_CLI_MISSING_HELP" in path.read_text(encoding="utf-8")
+    }
+    assert raisers, "nothing references the constant — this test is measuring the wrong thing"
+
+    # A constant carries no `__doc__`, so the sentence is read from source too.
+    source = (package / "platform.py").read_text(encoding="utf-8")
+    marker = "Modules that raise it: "
+    line = source[source.index(marker) + len(marker) :].splitlines()[0]
+    named = set(re.findall(r"`([a-z_]+)`", line))
+
+    assert named == raisers, (
+        f"the constant's docstring names {sorted(named)} but {sorted(raisers)} raise it; "
+        f"missing {sorted(raisers - named)}, stale {sorted(named - raisers)}"
+    )

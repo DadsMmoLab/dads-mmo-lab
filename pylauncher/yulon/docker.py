@@ -641,9 +641,9 @@ def remove_staged(spec: ContainerSpec, server_dir: Path) -> bool:
 
     WHAT THIS DOES NOT DO, because it is the whole reason the action is safe:
     it never removes a volume. The database lives in a named volume
-    (`${DOCKER_VOL_DB:-ac-database}:/var/lib/mysql`) and the client data in
-    another, so `compose down` WITHOUT `-v` leaves every character exactly where
-    it was. `-v` is the flag that would turn this into data loss, and a test
+    (`db-data:/var/lib/mysql` in an install this engine generated) and the
+    client data in another, so `compose down` WITHOUT `-v` leaves every
+    character exactly where it was. `-v` is the flag that would turn this into data loss, and a test
     asserts the argv never grows one.
 
     It also no longer costs the next start its database. An earlier version of
@@ -770,9 +770,12 @@ characters rolled back to their last save. It happens to agree with the
 compose file (`pyplan/rust-prior-art.md` §2); that is now a confirmed number
 rather than an inherited one.
 
-This is the CLI grace on the stop path, not compose's `stop_grace_period` key.
-The key belongs to the install engine that generates compose files, which this
-repo does not do yet.
+This is the CLI grace on the stop path. The compose `stop_grace_period` key is
+the same 300 seconds, and the install engine now writes it: see
+`catalog/installers/wow-wotlk/native/base.yml.tmpl`, whose comment points back
+at this constant. The two are meant to agree, and nothing enforces that they do
+— they are read by different tools in different processes, so the only thing
+holding them together is that both cite the same three measured shutdowns.
 """
 
 

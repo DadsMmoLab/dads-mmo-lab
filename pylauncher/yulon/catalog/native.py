@@ -914,8 +914,9 @@ class NativeInstaller:
     def _ready(self, server_dir: Path) -> Iterator[str]:
         """Wait until the database is healthy and both servers have said they are up.
 
-        Nothing new: `wait_db_healthy_for()` and `wait_ready_for()` already poll
-        `StartedAt` and read `logs --since` that timestamp rather than `--tail`
+        Nothing new: `wait_db_healthy_for()` polls the container's health
+        status and reads no logs at all, and `wait_ready_for()` already polls
+        `StartedAt` and reads `logs --since` that timestamp rather than `--tail`
         — the marker prints once and scrolls out of any tail window on a busy
         playerbots boot, which this project and the Rust launcher hit
         independently on the same day.

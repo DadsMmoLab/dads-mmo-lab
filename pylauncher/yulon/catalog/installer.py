@@ -212,8 +212,9 @@ def make_responder(
 ) -> runner.Responder:
     """Build the `runner.Responder` that answers prompts per `rules` for `options`.
 
-    `ask` is consulted only for a rule whose answer is `ASK_THE_USER` — one rule,
-    matching one exact question, for the reason given there. Without an `ask`
+    `ask` is consulted only for a rule whose answer is `ASK_THE_USER` — two of
+    them today, each pinned to its question by an unanchored `re.search`, not by
+    the whole-line match this used to claim, for the reason given there. Without an `ask`
     (the CLI harness), such a prompt is DECLINED: refusing a privilege change is
     recoverable and visible, granting one silently is neither.
     """
@@ -483,8 +484,11 @@ class Installer:
         """Everything that must be true before a single line of the script runs.
 
         Raises `InstallerError` (script missing, client dir required but not
-        given) or `DockerUnavailableError` (no daemon and provisioning not yet
-        implemented — roadmap 3.3's graceful failure). `cancel`, when set, is
+        given) or `DockerUnavailableError` — which no longer means "provisioning
+        is unbuilt". This method CALLS `platform.ensure_docker()` when no daemon
+        answers, and raises only when what came back cannot be used yet: a
+        reboot is required, or the daemon still does not answer on a re-check.
+        The report's manual steps ride the message (roadmap 3.3 → 5.1). `cancel`, when set, is
         passed through to Docker provisioning so its ready-poll can be
         interrupted (a stop mid-provision must not leave a worker sleeping).
 
