@@ -382,18 +382,20 @@ def test_the_image_refs_match_the_services_the_build_overlay_actually_builds(
     )
 
     # And every reference the engine will ask the daemon about is exactly an
-    # And every reference the engine will ask the daemon about is exactly an
     # image the base file names, so a rename in either place fails here.
     #
-    # The base file spells the tag as compose interpolation
-    # (`${IMAGE_TAG:-native-abc}`) and `built_image_refs()` produces the
-    # resolved default, so the DEFAULT is what is compared. That is also the
-    # coupling this test documents: an `.env` that set `IMAGE_TAG` would make
-    # the built image and the reference the engine asks about disagree, and
-    # nothing today writes one — see `built_image_refs()`.
-    interpolated = re.compile(r"\$\{IMAGE_TAG:-([^}]+)\}")
-    base_images = {
-        interpolated.sub(lambda m: m.group(1), image)
-        for image in re.findall(r"^\s*image:\s*(\S+)\s*$", plan.base, re.MULTILINE)
-    }
+    # The tag used to be spelled as compose interpolation
+    # (`${IMAGE_TAG:-native-abc}`), and this test resolved it before comparing —
+    # which DOCUMENTED a coupling rather than closing it. An `.env` that set
+    # `IMAGE_TAG` would retag the build while `built_image_refs()` went on
+    # asking the daemon about the derived default, so `images_built()` would
+    # answer "not built" forever and every resume would re-run a multi-hour
+    # compile: the same defect that had just been measured and fixed from the
+    # other direction. All five reviewers refused "documented in a test" as the
+    # disposition. Nothing ever wrote that key — `composegen.py` substitutes
+    # `{{IMAGE_TAG}}` at generation time and no code path puts it in `.env` — so
+    # the wrapper was indirection with no writer, and it is gone. The
+    # comparison is literal now, and the second assertion keeps it gone.
+    base_images = set(re.findall(r"^\s*image:\s*(\S+)\s*$", plan.base, re.MULTILINE))
     assert set(refs) <= base_images, (set(refs) - base_images, base_images)
+    assert "${IMAGE_TAG" not in plan.base, "the interpolation wrapper came back"

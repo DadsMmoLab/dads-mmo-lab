@@ -628,18 +628,29 @@ class ProvisionError(RuntimeError):
     """Provisioning hit something it cannot work around (message is user-readable)."""
 
 
-DockerGroupOutcome = Literal["granted", "declined", "not-asked", "already-member", "not-applicable"]
+DockerGroupOutcome = Literal[
+    "granted", "join-failed", "declined", "not-asked", "already-member", "not-applicable"
+]
 """What happened to the docker-group question on this run.
 
-Five values rather than a bool because the four ways of *not* joining are not
+Six values rather than a bool because the five ways of *not* joining are not
 the same event and must not read as one: the user said no, nobody was there to
-ask, they were already a member, or this platform has no such group at all.
-Only `granted` and `already-member` mean the user can drive Docker afterwards,
-and only those two may print the log-out-and-back-in line.
+ask, they were already a member, this platform has no such group at all — or
+they said yes and the `usermod` that followed did not run. Only `granted` and
+`already-member` mean the user can drive Docker afterwards, and only those two
+may print the log-out-and-back-in line.
+
+`join-failed` was the sixth, added late. The field used to carry the CONSENT
+answer, so a yes whose `usermod` was refused for want of a sudo ticket was
+recorded as `granted` — a support JSON saying the user is in the docker group
+when they are not, which is precisely the "a way of not joining reads as
+joining" failure the five values existed to prevent, reintroduced one layer up.
+The manual steps had always drawn the distinction; only the machine-readable
+field did not (review residual, 2026-08-24).
 
 This field is the artifact roadmap 6.2's definition of done means by "the
 preflight records explicit consent" — it rides `--provision`'s support JSON,
-so what was asked and answered is legible from a bug report.
+so what was asked, answered and then actually done is legible from a bug report.
 """
 
 
@@ -927,7 +938,7 @@ DOCKER_GROUP_QUESTION = (
     "\n"
     "If you say yes: you'll need to log out and back in once before it takes effect, "
     "then click Install again.\n"
-    "If you say no: Docker Engine is still set up, but Yu'lon runs docker directly "
+    "If you say no: Yu'lon still installs Docker Engine, but it runs docker directly "
     "(never through sudo), so it cannot install or manage a server here until you join "
     "the group yourself: sudo usermod -aG docker {user}, then log out and back in.\n"
     "\n"
@@ -1684,18 +1695,24 @@ def _ensure_docker_linux(
 
     ready = False if dry_run else _wait_docker_ready(do, min(wait_seconds, 30.0), 2.0, cancel)
 
+    # What HAPPENED, not what was agreed to. `consent` answers the question;
+    # whether the command that follows it worked is a separate fact, and telling
+    # a user to log out and back in because they said yes — when the join failed
+    # — sends them round a loop that ends in the same failure. The report now
+    # carries this rather than `consent`, so the support JSON cannot claim a
+    # membership the machine does not have.
+    outcome: DockerGroupOutcome = (
+        "join-failed" if consent == "granted" and not joined_ok else consent
+    )
+
     manual: list[str] = []
-    # Keyed on what HAPPENED, not on what was agreed to. `consent` answers the
-    # question; whether the command that follows it worked is a separate fact,
-    # and telling a user to log out and back in because they said yes — when
-    # the join failed — sends them round a loop that ends in the same failure.
-    if consent == "already-member" or joined_ok:
+    if outcome in ("already-member", "granted"):
         manual.append(DOCKER_GROUP_RELOGIN_STEP.format(user=user))
-    elif consent == "granted":
+    elif outcome == "join-failed":
         manual.append(DOCKER_GROUP_JOIN_FAILED_STEP.format(user=user))
-    elif consent == "declined":
+    elif outcome == "declined":
         manual.append(DOCKER_GROUP_DECLINED_STEP.format(user=user))
-    elif consent == "not-asked":
+    elif outcome == "not-asked":
         manual.append(DOCKER_GROUP_UNASKED_STEP.format(user=user))
     if skipped and not dry_run:
         # A skip is reported by its real cause, not by the likeliest one. `sudo
@@ -1715,7 +1732,7 @@ def _ensure_docker_linux(
                 0, f"Some steps needed a password; run them in a terminal with sudo: {failed}"
             )
     return ProvisionReport(
-        "linux", tuple(done), tuple(skipped), tuple(manual), False, ready, consent
+        "linux", tuple(done), tuple(skipped), tuple(manual), False, ready, outcome
     )
 
 

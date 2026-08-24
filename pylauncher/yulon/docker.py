@@ -2195,6 +2195,13 @@ def images_built(refs: Sequence[str]) -> bool | None:
     game (`composegen.built_image_refs()` is where they come from).
     """
     if not refs:
+        # NOT vacuous truth. "All zero of them exist" is formally True and would
+        # be the worst possible answer here: an empty tuple means the CALLER
+        # could not work out what this install builds, and reporting "built" for
+        # that skips the build stage entirely and starts a server with no
+        # binaries. `None` sends it back to the caller as the unanswerable
+        # question it is. Held by a review seat that wanted the reasoning next
+        # to the branch rather than only in a transcript (2026-08-24).
         return None
     for ref in refs:
         proc = _docker(["image", "inspect", "--format", "{{.Id}}", ref])

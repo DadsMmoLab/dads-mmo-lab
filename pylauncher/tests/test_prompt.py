@@ -815,7 +815,7 @@ def test_the_docker_group_question_reaches_a_real_dialog_unmasked(qapp: object) 
     # And what saying NO costs, which is the half a user weighing the question
     # actually needs: the engine is still installed, but the launcher cannot
     # drive it until they join the group themselves.
-    assert "Docker Engine is still set up" in shown
+    assert "Yu'lon still installs Docker Engine" in shown
     assert "sudo usermod -aG docker pk" in shown
 
 

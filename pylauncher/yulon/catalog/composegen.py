@@ -89,14 +89,21 @@ booting a plausible-looking wrong server.
 # without the second the bots never log in.
 #
 # The Linux installer's own override also pins AC_AI_PLAYERBOT_MIN/MAX_RANDOM_
-# BOTS to 1600/2000. Those are deliberately NOT here. An env key SHADOWS the
-# matching row in playerbots.conf, so writing them at install time takes the
-# setting away from the module/settings surface that is supposed to own it —
-# and 2000 random bots is a tuning choice made for a desktop, on a path whose
-# preflight exists because the machine may be a laptop. The module's own
-# defaults are the honest starting point. Flagged for the first live gate: if
-# the gate finds a Mac install needs them to behave like the Linux one, they
-# belong in `catalog.json` as data, not here.
+# BOTS to 1600/2000, and this comment used to argue at length that they should
+# stay out. They did not stay out — the compose diff against the proven install
+# (2026-08-24) found that a native install would otherwise take mod-playerbots'
+# defaults and hand the same user a different world from the same button, and
+# they now ship in `catalog.json`'s `install.native.world_env`. Corrected after
+# a sweep found this text still arguing the opposite of what the code does.
+#
+# The argument was not wrong, only outranked, and the part still worth keeping
+# is the cost: an env key SHADOWS the matching row in playerbots.conf, so a
+# settings surface that edits that file will appear to do nothing until this
+# key is removed. That is why the numbers are DATA in `catalog.json` and not a
+# constant here — a per-game value a person may want different, style-guide §3.
+# What is still unmeasured is whether 2000 bots fits the laptop this path's
+# preflight exists for; the first live gate owes an RSS reading at that
+# population, and until it has one the number is inherited, not earned.
 DEFAULT_WORLD_ENV: Mapping[str, str] = {
     "AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES": "1",
     "AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN": "1",

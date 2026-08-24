@@ -1128,6 +1128,14 @@ def test_a_yes_whose_join_failed_is_not_reported_as_a_join(
 
     No test could see this because every fake in this file answers 0 to
     everything after `docker info` (review, 2026-08-24).
+
+    This test used to assert `docker_group == "granted"` here, on the reasoning
+    that the user did say yes and that is what was recorded. It pinned the
+    residual the same review's follow-up found: the manual steps drew the
+    distinction, the machine-readable field did not, and a support JSON reading
+    `granted` says the user is in the docker group when they are not. The yes
+    is still recorded — it is half of the value's name — but the field answers
+    "what happened", which is the question its own docstring says it answers.
     """
     _linux(monkeypatch)
     run = _Refuses("usermod")
@@ -1135,7 +1143,7 @@ def test_a_yes_whose_join_failed_is_not_reported_as_a_join(
         run=run, which=_which("apt-get"), user="pk", wait_seconds=0.0, ask=lambda _q: "y"
     )
 
-    assert report.docker_group == "granted"  # they did say yes, and that is recorded
+    assert report.docker_group == "join-failed"  # the yes is in the name; the join is not
     assert any("usermod" in s for s in report.skipped)
     # ...but nothing may claim the group was joined.
     assert not [m for m in report.manual_steps if "Log out and back in" in m]

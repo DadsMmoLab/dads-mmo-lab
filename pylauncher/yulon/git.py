@@ -429,6 +429,26 @@ class ContainerGit:
         when this moved off the literal `docker`, so the second still reached
         the user as `[WinError 2] The system cannot find the file specified`
         (review, 2026-08-23) — the exact failure the change was made to end.
+
+        `_LINE_ENDING_ARGS` and `_HTTP_VERSION_ARGS` are applied to EVERY
+        invocation this method makes, including the two that touch no network
+        and no working tree — `remote get-url origin` and `is_unmodified()`'s
+        `status --porcelain`. That is deliberate: one argv shape means there is
+        no second spelling for a future command to be added to and forget, and
+        the HTTP pin is simply inert without a network call.
+
+        The line-ending half is not inert, and a review seat was right to say
+        so. Forcing `core.autocrlf=false core.eol=lf` at `status` time is
+        correct for a checkout THIS code cloned, because those are the same
+        flags it was cloned under. Against a FOREIGN checkout — one the user
+        already had, cloned with `autocrlf=true` so its files sit on disk with
+        CRLF — the same flags make git compare unconverted bytes and report
+        every such file as modified. `is_unmodified()` then answers False and
+        `generate-compose` REFUSES, which is the safe direction (too strict,
+        never overwriting), and it is unreachable today because every checkout
+        the app asks about is one it made. It stops being unreachable the day
+        an existing install can be attached, and that is the day to give the
+        local calls their own argv.
         """
         program = platform.docker_program()
         if program is None:

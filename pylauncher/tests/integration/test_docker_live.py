@@ -267,7 +267,9 @@ def test_a_stop_never_writes_an_identity_the_folder_could_carry_away(
     assert not (throwaway_project / ".env").exists()
 
 
-def test_the_bind_mount_probe_actually_works_against_a_real_daemon(tmp_path: Path) -> None:
+def test_the_bind_mount_probe_actually_works_against_a_real_daemon(
+    tmp_path: Path, require_docker: None
+) -> None:
     """The probe must run the image it was given, and no unit test can check that.
 
     This exists because of a defect that shipped and that the unit tests could
@@ -293,6 +295,17 @@ def test_the_bind_mount_probe_actually_works_against_a_real_daemon(tmp_path: Pat
     a drive the WSL2 VM does not mount — exit 0 with an empty listing, which is
     the behaviour the comparison logic exists for — and is recorded in
     `pyplan/checklist.md` rather than asserted here.
+
+    `require_docker` is in the signature for a reason it went without for a
+    day. Every other test in this file takes `throwaway_project`, which chains
+    to that gate; this one needs no compose project, so it quietly opted out of
+    the promise this suite's `conftest` makes in its own docstring — "every
+    test here is skipped (not failed) when `docker info` cannot reach a
+    daemon". It was written and proven on a box where the daemon was up, so
+    nothing showed. On a laptop with Docker Desktop installed but stopped, the
+    probe returns False, the assertion fails, and the default `pytest` run is
+    RED for a reason that has nothing to do with the code (found 2026-08-24 by
+    running the suite on this machine).
     """
     from yulon import git
 

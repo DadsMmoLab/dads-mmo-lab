@@ -20,6 +20,20 @@
 # install, which is what `pyplan/phase6-decisions.md` asks for and what no agent
 # without that box can do; the first gate does that diff before trusting this.
 #
+# THE IMAGE TAG IS WRITTEN IN, NOT INTERPOLATED. Every other host-visible
+# value here is spelled `${VAR:-default}` because something WRITES that
+# variable: the port-conflict remedy appends `DOCKER_DB_EXTERNAL_PORT=13306`
+# to `.env`, a SOAP setup writes the whole SOAP binding. Nothing writes
+# `IMAGE_TAG` — `composegen.py` substitutes `{{IMAGE_TAG}}` at generation time
+# and no code path puts that key in `.env`. The wrapper it used to carry was
+# therefore indirection with no writer and exactly one effect: a hand-edited
+# `.env` would retag the build while `built_image_refs()` kept asking the
+# daemon about the derived default, so `images_built()` would answer "not
+# built" forever and every resume would re-run a multi-hour compile — the same
+# defect that was just measured and fixed from the other direction. Five
+# reviewers refused to leave that documented in a test and called for it to be
+# closed; this is the close (2026-08-24).
+#
 # CONTAINER NAMES ARE A CONTRACT, and they are deliberately the same `ac-*`
 # names every Linux install in the wild carries: the console attach, the repair
 # button, the backup `docker exec ac-database mysqldump` and every archived
@@ -63,13 +77,33 @@ services:
       # `Can't connect to MySQL server on 'ac-database:3306' (111)` 0.3 s after
       # compose called the database healthy, and the socket/TCP split was the
       # inferred cause. It did NOT reproduce: 10 fresh-volume runs on
-      # yulon-ubuntu — 5 with upstream's spelling, 5 with this one, using this
-      # exact healthcheck, `depends_on: service_healthy`, and a second
-      # container connecting to `ac-database:3306` — all connected first try.
-      # See `pyplan/checklist.md`. What those runs DO establish is that this
-      # spelling goes healthy in the same time as upstream's (17.1-18.2 s), so
-      # it is a strictly stronger condition at no measured cost, which is the
-      # only claim made for it here.
+      # yulon-ubuntu — 5 with upstream's spelling, 5 with `-h 127.0.0.1
+      # --protocol=TCP`, `depends_on: service_healthy`, and a second container
+      # connecting to `ac-database:3306` — all connected first try.
+      #
+      # READ THAT COUNT CAREFULLY: those 10 runs predate this line. They tested
+      # `-h 127.0.0.1`, which is what shipped before the review above. The
+      # spelling now here was verified separately and once — a probe project
+      # with this exact `test:`, `depends_on: service_healthy`, and a second
+      # container that connected on the first try. So the timing claim below
+      # (healthy in the same 17.1-18.2 s as upstream's) is measured of the
+      # loopback spelling, and inherited by this one on the argument that
+      # neither changes when the server starts listening, not on a rerun.
+      # Corrected after a doc-truth sweep found this comment claiming the 10
+      # runs used "this exact healthcheck" when they used the older one.
+      # See `pyplan/checklist.md`.
+      #
+      # ONE COUPLING, WORTH KNOWING BEFORE YOU HARDEN THIS SERVICE. Root over
+      # TCP works only because the official image's entrypoint defaults
+      # `MYSQL_ROOT_HOST` to `%` and so creates `root@%` — verified on a fresh
+      # volume, 2026-08-24: `SELECT CURRENT_USER()` over TCP returns `root@%`,
+      # and the entrypoint's own guard is `[ -n "$MYSQL_ROOT_HOST" ] && [
+      # "$MYSQL_ROOT_HOST" != 'localhost' ]`. A review seat predicted this
+      # probe could NEVER authenticate for want of that variable; the evidence
+      # refuted it. But the refutation names the tripwire: adding
+      # `MYSQL_ROOT_HOST: localhost` here — a plausible hardening — deletes
+      # `root@%`, and this healthcheck then never passes, so every waiter hangs
+      # on a database that is running and fine.
       test: "/usr/bin/mysql -h ac-database --protocol=TCP --user=root --password=$$MYSQL_ROOT_PASSWORD --execute \"SHOW DATABASES;\""
       interval: 5s
       timeout: 10s
@@ -77,7 +111,7 @@ services:
 
   ac-db-import:
     container_name: ac-db-import
-    image: {{IMAGE_PREFIX}}db-import:${IMAGE_TAG:-{{IMAGE_TAG}}}
+    image: {{IMAGE_PREFIX}}db-import:{{IMAGE_TAG}}
     networks: [ac-network]
     environment:
       AC_DATA_DIR: "/azerothcore/env/dist/data"
@@ -102,7 +136,7 @@ services:
 
   ac-client-data-init:
     container_name: ac-client-data-init
-    image: {{IMAGE_PREFIX}}client-data:${IMAGE_TAG:-{{IMAGE_TAG}}}
+    image: {{IMAGE_PREFIX}}client-data:{{IMAGE_TAG}}
     volumes:
       - client-data:/azerothcore/env/dist/data
     # UPSTREAM'S DOWNLOADER CANNOT RESUME, so a flaky link never finishes:
@@ -164,7 +198,7 @@ services:
 
   ac-authserver:
     container_name: ac-authserver
-    image: {{IMAGE_PREFIX}}authserver:${IMAGE_TAG:-{{IMAGE_TAG}}}
+    image: {{IMAGE_PREFIX}}authserver:{{IMAGE_TAG}}
     networks: [ac-network]
     tty: true
     restart: unless-stopped
@@ -187,7 +221,7 @@ services:
 
   ac-worldserver:
     container_name: ac-worldserver
-    image: {{IMAGE_PREFIX}}worldserver:${IMAGE_TAG:-{{IMAGE_TAG}}}
+    image: {{IMAGE_PREFIX}}worldserver:{{IMAGE_TAG}}
     networks: [ac-network]
     # stdin + tty keep the worldserver CONSOLE attachable: the Console tab
     # drives it with `docker attach --sig-proxy=false`, and losing either turns
