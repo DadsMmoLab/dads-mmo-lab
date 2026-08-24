@@ -362,22 +362,19 @@ def _cpu_check(facts: Facts) -> Check:
 def _space_check(
     what: str, free: int | None, refuse_gb: float, warn_gb: float, facts: Facts
 ) -> Check:
+    # On macOS, "Docker's disk" is the HOST volume holding the sparse VM image,
+    # and host free space is an upper bound on what the VM can still grow into —
+    # the VM can fill at its own cap while the host has room to spare. So a low
+    # reading is a safe refusal (the VM certainly has no more than the host
+    # does), but an ample reading proves nothing about the cap and must never
+    # become a pass. See `_space_check_macos_bounded()`.
+    if what == "Docker's disk" and facts.platform_id == "macos":
+        return _space_check_macos_bounded(free, refuse_gb, warn_gb, facts)
     if free is None:
-        detail = f"the free space on {what} could not be measured — that is not a pass"
-        if what == "Docker's disk" and facts.platform_id == "macos":
-            # Named rather than folded into the generic case: on macOS this is
-            # not a transient failure, it is a thing nobody on this project can
-            # verify. Docker Desktop's settings path, its keys, and what "free"
-            # even means against a sparse Docker.raw are all unconfirmed
-            # (phase6-decisions, "Baerthe's list" item 1).
-            detail = (
-                "on macOS this app cannot yet tell how much room Docker's disk image has — "
-                "that is not a pass"
-            )
         return Check(
             f"free space on {what}",
             "unchecked",
-            detail,
+            f"the free space on {what} could not be measured — that is not a pass",
             f"Make sure there is at least {warn_gb:.0f} GB free before starting a long build.",
         )
     gigabytes = free / GIB
@@ -399,6 +396,58 @@ def _space_check(
             f"{gigabytes:.0f} GB free; {warn_gb:.0f} GB is the comfortable figure{note}",
         )
     return Check(f"free space on {what}", "pass", f"{gigabytes:.0f} GB free")
+
+
+def _space_check_macos_bounded(
+    free: int | None, refuse_gb: float, warn_gb: float, facts: Facts
+) -> Check:
+    """The macOS-host case of `_space_check`: refuse-when-low, but never a pass.
+
+    What is measured here is free space on the volume holding Docker Desktop's
+    sparse `Docker.raw`, not the room *inside* the Linux VM. The VM's own disk
+    is capped near 64 GB by default and can fill up while the host has hundreds
+    of gigabytes free, so an ample host reading is evidence of nothing. The
+    tri-state discipline that governs this whole module forbids rounding that
+    to a pass, and the alternative — inventing "the VM is full" from a host
+    number — is the fabricated refusal it was written to prevent.
+
+    So below the refuse floor is a real refusal, below the warn floor a real
+    warning, and anything more comfortable is `unchecked`: the build may fit,
+    and it may hit the VM's cap, and only a Mac gate measuring the actual
+    virtual-disk state can say which.
+    """
+    if free is None:
+        return Check(
+            "free space on Docker's disk",
+            "unchecked",
+            "on macOS the free space of the volume holding Docker's disk image could not be "
+            "measured — that is not a pass",
+            f"Make sure the drive has at least {warn_gb:.0f} GB free, and that Docker's "
+            "virtual disk is not near its size cap, before a long build.",
+        )
+    gigabytes = free / GIB
+    if gigabytes < refuse_gb:
+        return Check(
+            "free space on Docker's disk",
+            "refuse",
+            f"{gigabytes:.0f} GB free on the drive, and the install needs {refuse_gb:.0f} GB",
+            "Free some space, or install to a drive that has room, then try again.",
+        )
+    if gigabytes < warn_gb:
+        return Check(
+            "free space on Docker's disk",
+            "warn",
+            f"{gigabytes:.0f} GB free on the drive; {warn_gb:.0f} GB is the comfortable figure",
+        )
+    return Check(
+        "free space on Docker's disk",
+        "unchecked",
+        f"{gigabytes:.0f} GB free on the HOST drive — plentiful, but Docker's Linux VM caps "
+        "its own disk near 64 GB by default and can fill while the host has room to spare, "
+        "so this is not a pass",
+        "If the build runs out of space, raise Docker's virtual-disk size in Docker Desktop "
+        "before restarting.",
+    )
 
 
 def _folder_check(facts: Facts, server_dir: Path) -> Check:

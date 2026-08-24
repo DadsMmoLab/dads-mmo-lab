@@ -271,6 +271,106 @@ def test_macos_plan_downloads_dmg_and_copies_the_app(
     assert run.calls == [["docker", "info"]]
 
 
+def test_macos_provisioning_never_escalates_privileges(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The macOS install path emits no sudo, no group join and no sudoers write.
+
+    Roadmap 6.4.3 says to assert the privilege-transparency rule on the emitted
+    argv through the run seam. The macOS branch is the one the rule is *easiest*
+    to satisfy — Docker Desktop manages its own access and nobody here touches a
+    Unix group — so this is less about catching a likely bug than about never
+    having to wonder: each command this path runs is spelled below, and each is
+    a non-`sudo`, non-escalating `hdiutil`/`cp`/`open`.
+
+    Run NON-dry so the commands actually execute through the `_Run` seam and the
+    assertion sees the real argv, not the "(dry run) …" placeholders. The
+    Docker.app existence check is pinned false so a Docker-equipped developer
+    box does not silently take the "already installed" short circuit and stop
+    asserting anything; the ready-poll is zeroed and the download faked.
+    """
+    monkeypatch.setattr(platform.sys, "platform", "darwin")
+    monkeypatch.setattr(platform, "config_dir", lambda: tmp_path)
+    monkeypatch.setattr(platform.Path, "exists", lambda self: False)
+    run = _Run()
+    report = platform.ensure_docker(
+        run=run, download=lambda u, d: d, wait_seconds=0.0, dry_run=False
+    )
+    assert report.platform == "macos"
+
+    text = [" ".join(argv) for argv in run.calls]
+    assert not [c for c in text if c.startswith("sudo")], text
+    assert not _joins_the_docker_group(run.calls), run.calls
+    assert not [c for c in text if "sudoers" in c or "NOPASSWD" in c], text
+    assert not [c for c in text if "chmod" in c and "docker.sock" in c], text
+    # The commands that DID run are the harmless, fixed macOS set.
+    assert any("hdiutil attach" in c for c in text), text
+    assert any("cp -R /Volumes/YulonDocker/Docker.app /Applications/" in c for c in text)
+    assert any("open -a Docker" in c for c in text)
+
+
+def test_windows_provisioning_never_escalates_privileges(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The Windows install path writes no sudoers rule and joins no group (6.4.3).
+
+    The privilege-transparency rule's Unix vocabulary — the `docker` group, a
+    `sudoers.d`/`NOPASSWD` rule, `chmod 666` on the socket — has no Windows
+    counterpart, so some of this is vacuous, which is itself the point: a third
+    platform satisfies the rule by construction, and pinning it means a future
+    contributor who ports a `docker-group`-style step to the Windows path cannot
+    do it silently. The one elevation Windows DOES use, `Start-Process -Verb
+    RunAs`, is the interactive UAC prompt the user clicks, not silent host
+    escalation — and it is asserted present, so the test exercises the real
+    install rather than the already-installed short circuit.
+
+    Run NON-dry so the argv is seen, with the same fake as
+    `test_windows_provisioning_finishes_without_a_manual_step`.
+    """
+    monkeypatch.setattr(platform.sys, "platform", "win32")
+    monkeypatch.setattr(platform, "config_dir", lambda: tmp_path)
+    desktop_exe = _default_install(monkeypatch, tmp_path / "pf")
+    which = _OffPathWhich(installed=False)
+    monkeypatch.setattr(platform, "_which", which)
+    monkeypatch.setattr(platform, "_registry_search_path", lambda: DOCKER_BIN_DIR)
+
+    class _WinRun(_Run):
+        def __init__(self) -> None:
+            super().__init__()
+            self.engine_up = False
+
+        def __call__(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
+            self.calls.append(argv)
+            shown = " ".join(argv)
+            if "--accept-license" in shown:
+                which.installed = True
+            if f"Start-Process {platform._ps_quote(desktop_exe)}" in shown:
+                self.engine_up = True
+            if argv[1:] == ["info"]:
+                ready = self.engine_up and argv[0] == DOCKER_EXE
+                return subprocess.CompletedProcess(argv, 0 if ready else 1, "", "")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+    run = _WinRun()
+    report = platform.ensure_docker(
+        run=run, which=lambda n: None, download=lambda u, d: d, wait_seconds=1.0
+    )
+    assert report.platform == "windows"
+    assert report.docker_ready is True and report.ok
+
+    text = [" ".join(argv) for argv in run.calls]
+    # No Unix privilege escalation survives on this path, ever.
+    assert not [c for c in text if c.startswith("sudo")], text
+    assert not _joins_the_docker_group(run.calls), run.calls
+    assert not [c for c in text if "sudoers" in c or "NOPASSWD" in c], text
+    assert not [c for c in text if "chmod" in c and "docker.sock" in c], text
+    # The one elevation Windows uses is the interactive UAC prompt, present and
+    # explicit — the install actually went through the elevated path, so the
+    # no-silent-escalation assertions above are about a run that would have
+    # escalated there had a group-join been bolted on.
+    assert any("-Verb RunAs" in c for c in text), text
+
+
 def test_ensure_wsl2_is_a_noop_off_windows(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(platform.sys, "platform", "linux")
     report = platform.ensure_wsl2(run=_Run(docker_rc=0))

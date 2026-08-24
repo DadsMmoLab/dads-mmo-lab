@@ -11,7 +11,7 @@ import pytest
 
 from yulon import runner
 from yulon.catalog.installer import bash_available
-from yulon.runner import run, stream
+from yulon.runner import creationflags, run, stream
 
 # Not just `which bash`: on Windows that finds the Store alias for WSL, which fails
 # with execvpe(/bin/bash) when no distro is installed (Windows test VM, 2026-08-21).
@@ -25,6 +25,24 @@ def _python_cmd(script: str) -> list[str]:
     import sys
 
     return [sys.executable, "-c", script]
+
+
+def test_creationflags_no_window_on_windows_zero_elsewhere(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`CREATE_NO_WINDOW` on native Windows, 0 off it — the console-flash guard (6.3).
+
+    The one place to ask, so a flag applied to some spawn sites but not others
+    cannot leave a window that flashes anyway. `sys.platform` is monkeypatched,
+    not the stdlib, so the `subprocess.CREATE_NO_WINDOW` attribute (which does
+    not exist on POSIX) is only consulted behind the platform check.
+    """
+    monkeypatch.setattr(runner.sys, "platform", "win32")
+    monkeypatch.setattr(runner.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    assert creationflags() == 0x08000000
+
+    monkeypatch.setattr(runner.sys, "platform", "linux")
+    assert creationflags() == 0
 
 
 def test_run_captures_stdout() -> None:

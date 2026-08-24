@@ -23,7 +23,8 @@
       "install": {
         "platforms": [
           "linux",
-          "macos"
+          "macos",
+          "windows"
         ],
         "script_platforms": [
           "linux"

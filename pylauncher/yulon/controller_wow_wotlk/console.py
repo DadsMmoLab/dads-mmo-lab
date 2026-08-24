@@ -196,6 +196,7 @@ def send_command(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             bufsize=0,
+            creationflags=runner.creationflags(),
         )
     except OSError as exc:
         os.close(master)

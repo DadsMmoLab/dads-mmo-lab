@@ -26,9 +26,16 @@ SERVER_DIR = Path("/home/pk/wow")
 
 
 def facts(**overrides: object) -> preflight.Facts:
-    """A machine that passes everything, minus whatever the test breaks."""
+    """A machine that passes everything, minus whatever the test breaks.
+
+    `platform_id` is `linux` here, not `macos`, deliberately: on Linux the
+    Docker data root is a real host directory, so an ample free-space reading
+    is a genuine pass. macOS is the odd one out — its data root is a sparse VM
+    image behind a cap, so the same reading there is `unchecked` (never a pass),
+    and the tests that care about that say `platform_id="macos"` explicitly.
+    """
     base = dict(
-        platform_id="macos",
+        platform_id="linux",
         docker_ready=True,
         vm=platform_module.VmResources(memory_bytes=16 * GIB, cpus=4),
         data_root=Path("/var/lib/docker"),
@@ -115,17 +122,40 @@ def test_the_floors_add_when_both_needs_are_on_one_volume() -> None:
 
 
 def test_a_macos_data_root_that_cannot_be_resolved_says_so_in_its_own_words() -> None:
-    """Unverifiable without a Mac, so it reports unchecked rather than guessing.
-
-    Docker Desktop's settings path, its keys, and what "free space" even means
-    against a sparse `Docker.raw` are all unconfirmed by this project.
-    """
+    """When the host free space cannot be measured, it reports unchecked rather than guessing."""
     report = preflight.evaluate(
         ENTRY, SERVER_DIR, facts(platform_id="macos", data_root=None, data_root_free=None)
     )
     unchecked = [check for check in report.unchecked() if "Docker's disk" in check.name]
     assert unchecked and "on macOS" in unchecked[0].detail
     assert report.ok()
+
+
+def test_a_macos_host_that_has_plenty_of_room_is_still_unchecked_not_a_pass() -> None:
+    """Host free space is an upper bound on the sparse VM's room, not a guarantee.
+
+    Docker Desktop's `Docker.raw` is capped near 64 GB by default and fills
+    while the host has hundreds of gigabytes free, so an ample host reading
+    proves nothing about the build fitting. The whole design rests on it: a
+    false pass here costs the same failed build the tri-state discipline
+    exists to prevent.
+    """
+    report = preflight.evaluate(
+        ENTRY, SERVER_DIR, facts(platform_id="macos", data_root_free=200 * GIB)
+    )
+    assert verdict(report, "free space on Docker's disk") == "unchecked"
+    assert report.ok()
+    said = [check for check in report.unchecked() if "Docker's disk" in check.name][0]
+    assert "not a pass" in said.detail
+
+
+def test_a_macos_host_below_the_floor_is_still_a_refusal() -> None:
+    """Refuse-when-low stays a refusal: the VM certainly has no more than the host does."""
+    report = preflight.evaluate(
+        ENTRY, SERVER_DIR, facts(platform_id="macos", data_root_free=10 * GIB)
+    )
+    assert verdict(report, "free space on Docker's disk") == "refuse"
+    assert not report.ok()
 
 
 def test_a_folder_docker_cannot_see_is_refused_before_anything_is_written() -> None:

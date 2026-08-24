@@ -19,6 +19,7 @@ import os
 import queue
 import re
 import subprocess
+import sys
 import threading
 from collections.abc import Callable, Generator, Iterator, Mapping
 from pathlib import Path
@@ -35,6 +36,38 @@ _SHUTDOWN_TIMEOUT_SECONDS = 5.0
 def _cwd_arg(cwd: Path | None) -> str | None:
     """Convert an optional Path working dir to the str `subprocess` expects."""
     return str(cwd) if cwd is not None else None
+
+
+def creationflags() -> int:
+    """`CREATE_NO_WINDOW` on native Windows, 0 elsewhere (roadmap 6.3).
+
+    Every subprocess this module spawns is a console-less utility (git, docker
+    compose, mysql, curl), and native Windows gives each a console window by
+    default — a window that flashes over the launcher UI on every one of the
+    dozen short-lived commands a single server action runs, and that a user can
+    close while the build it belongs to is still running (`rust-prior-art.md`
+    §4, "spawn with CREATE_NO_WINDOW or consoles flash over the UI").
+
+    Public (not `_`-prefixed) because the three spawn sites that do not go through
+    this module's `run()`/`stream()`/`interact()` — `apply.py`'s SQL runner,
+    `maintenance.py`'s `docker exec`, and `console.py`'s `docker attach` client
+    (`popen=subprocess.Popen`) — must apply the same flag, and a flag applied to
+    some spawn sites but not others is a window that flashes anyway. `console.py`'s
+    attach is POSIX-only by `pty_supported()`, so the flag is inert there today;
+    it is carried anyway so the one place that *can* add a Windows console does
+    not silently become the exception. The same reason `git.CONTAINER_GIT_IMAGE`
+    is public: a value that must be shared exactly rather than re-derived.
+
+    Fetched off `subprocess` at call time rather than imported at module scope,
+    because `CREATE_NO_WINDOW` exists only on Windows and this module is
+    type-checked for POSIX too — the same reason `pty_supported()` does not name
+    `openpty` directly. `sys.platform` is checked, not `hasattr`, so a future
+    stdlib flag rename cannot silently turn a no-window child into a windowed
+    one without this branch noticing.
+    """
+    if sys.platform != "win32":
+        return 0
+    return int(getattr(subprocess, "CREATE_NO_WINDOW"))  # noqa: B009 - Windows-only attribute
 
 
 def stream(
@@ -90,6 +123,7 @@ def stream(
         text=True,
         encoding="utf-8",
         errors="replace",
+        creationflags=creationflags(),
     )
     stderr_lines: list[str] = []
 
@@ -181,6 +215,7 @@ def run(
             errors="replace",
             check=False,
             timeout=timeout,
+            creationflags=creationflags(),
         )
     except subprocess.TimeoutExpired as exc:
         logger.warning(f"{command[0]} did not answer within {timeout}s; giving up")
@@ -379,6 +414,7 @@ def interact(
                 stderr=subprocess.STDOUT,
                 env=dict(env) if env is not None else None,
                 bufsize=0,
+                creationflags=creationflags(),
             )
     except BaseException:
         for fd in (master, slave):

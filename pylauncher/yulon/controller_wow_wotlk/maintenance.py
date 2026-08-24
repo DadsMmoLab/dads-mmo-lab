@@ -99,7 +99,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import IO, Protocol
 
-from yulon import docker, platform
+from yulon import docker, platform, runner
 from yulon.apply import DB_NAMES, mysql_env
 from yulon.controller_wow_wotlk import docker_ctl
 from yulon.log import get_logger
@@ -337,6 +337,7 @@ class DockerMysql:
                 stderr=subprocess.PIPE,
                 check=False,
                 env=mysql_env(self.root_password),
+                creationflags=runner.creationflags(),
             )
         except OSError as exc:
             logger.warning(f"{argv[0]} could not be started: {exc}")

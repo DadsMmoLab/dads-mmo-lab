@@ -141,18 +141,28 @@ def test_vm_resources_reports_nothing_rather_than_a_fabricated_zero(
     assert platform.vm_resources(lambda _argv: answer) is None
 
 
-def test_the_docker_data_root_is_unknown_on_macos_rather_than_guessed(
-    monkeypatch: pytest.MonkeyPatch,
+def test_the_macos_data_root_prefers_the_settings_store_and_falls_back_to_docker_raw(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Nobody on this project can verify the path, the keys, or what "free" means there.
+    """Docker Desktop's `diskPath` wins; absent, the documented default `Docker.raw`.
 
-    Docker Desktop's data lives in a sparse `Docker.raw`, and "free space"
-    against it could mean the host volume's free space or the image's
-    allocation minus its use. A guess would produce a confident number that
-    could refuse a Mac with plenty of room.
+    The fallback path is believed, not measured — it is read only as a target
+    for the host free-space probe, and a miss is reported *unchecked*, never as
+    a refusal. The settings keys themselves are read defensively, exactly like
+    the Windows branch: an unreadable file falls through to the default.
     """
     monkeypatch.setattr(platform, "detect", lambda: "macos")
-    assert platform.docker_desktop_data_root() is None
+    monkeypatch.setattr(platform.Path, "home", lambda: Path("/Users/deck"))
+
+    store = tmp_path / "settings-store.json"
+    store.write_text('{"diskPath": "/Volumes/Big/docker-data"}', encoding="utf-8")
+    monkeypatch.setattr(platform, "docker_desktop_settings_file", lambda: store)
+    assert platform.docker_desktop_data_root() == Path("/Volumes/Big/docker-data")
+
+    store.write_text("{ not json", encoding="utf-8")
+    assert platform.docker_desktop_data_root() == Path(
+        "/Users/deck/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw"
+    )
 
 
 def test_the_docker_data_root_on_linux_is_the_host_directory(

@@ -2261,8 +2261,11 @@ def docker_desktop_settings_file() -> Path | None:
 
     macOS: `~/Library/Group Containers/group.com.docker/settings-store.json` is
     what the design believes, and believing is not knowing (phase6-decisions,
-    "Baerthe's list" item 1). Returned so the Mac gate can check it against a
-    real install; `docker_desktop_data_root()` deliberately does NOT use it yet.
+    "Baerthe's list" item 1). It is now *the* input to `docker_desktop_data_root()`'s
+    macOS branch (read defensively, falling back to the default `Docker.raw`
+    when the file or its keys say nothing) — so the "returns None rather than
+    guessed" state is gone, replaced by "resolves, but owes the gate a
+    measurement of what 'free space' means against a sparse image".
 
     Linux: None. There is no Docker Desktop settings store on the path this
     project supports there — the engine is the host's own.
@@ -2284,8 +2287,33 @@ def docker_desktop_settings_file() -> Path | None:
     return None
 
 
+_MACOS_DOCKER_RAW = (
+    "Library",
+    "Containers",
+    "com.docker.docker",
+    "Data",
+    "vms",
+    "0",
+    "data",
+    "Docker.raw",
+)
+"""macOS's default Docker Desktop data file: the sparse disk backing the Linux VM.
+
+Named in `rust-prior-art.md` §4 as one of the three macOS facts the earlier
+Rust launcher never implemented ("written fresh"). Believed, not measured by
+this project: there is no Mac with Docker Desktop on this side. It is read
+only as a fallback target for `preflight`'s free-space measurement, and a miss
+is reported as *unchecked*, never as a refusal.
+"""
+
+
+def _macos_default_data_root() -> Path:
+    """Docker Desktop's default sparse VM disk on macOS, whether or not it exists yet."""
+    return Path.home().joinpath(*_MACOS_DOCKER_RAW)
+
+
 def docker_desktop_data_root() -> Path | None:
-    """The directory whose free space decides whether the build fits. None = unknown.
+    """The path whose free space decides whether the build fits. None = unknown.
 
     This is NOT the server directory. On Windows and macOS the images and the
     build cache live inside the Linux VM's disk, so measuring the folder the
@@ -2296,18 +2324,25 @@ def docker_desktop_data_root() -> Path | None:
     * Windows: the `dataFolder`/`diskPath` in Docker Desktop's settings store,
       falling back to `%LOCALAPPDATA%\\Docker\\wsl` — the WSL2 backend's default
       home for `docker_data`. Believed, not measured on a real box.
-    * macOS: **None, deliberately.** Two things are unverified at once — the
-      settings path and its keys, and what "free space" even means against a
-      sparse `Docker.raw` (host free space on that volume, or the VM's
-      allocation minus what it has used). Guessing would produce a confident
-      number that could refuse a Mac with plenty of room, so preflight reports
-      *unchecked* until the first Mac gate replaces this with a measurement.
+    * macOS: the settings store's `diskPath`/`DataFolder`, falling back to
+      Docker Desktop's default sparse disk (`Docker.raw`). `preflight` measures
+      HOST free space on the volume holding that file — the answer to "can the
+      sparse image keep growing", which is the failure a long build actually
+      hits. The VM's own *allocation* (the virtual-disk cap that can fill with
+      host room to spare) is a different number this app cannot read yet, and
+      remains the open question behind the `unchecked` marker until the first
+      Mac gate measures it. Both the path and its keys are documented rather
+      than observed by this project, so they are read defensively and a miss
+      falls through to the default instead of refusing a Mac with plenty of
+      room.
     """
     here = detect()
     if here == "linux":
         return Path("/var/lib/docker")
     if here == "macos":
-        return None
+        store = docker_desktop_settings_file()
+        configured = _settings_data_folder(store) if store is not None else None
+        return configured if configured is not None else _macos_default_data_root()
     store = docker_desktop_settings_file()
     configured = _settings_data_folder(store) if store is not None else None
     if configured is not None:
@@ -2499,7 +2534,12 @@ def keep_awake(
 
 def _spawn_detached(argv: list[str]) -> subprocess.Popen[bytes]:
     """Start a helper process we do not read from and will terminate ourselves."""
-    return subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return subprocess.Popen(
+        argv,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=runner.creationflags(),
+    )
 
 
 _ES_CONTINUOUS = 0x80000000

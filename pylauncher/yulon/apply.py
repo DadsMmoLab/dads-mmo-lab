@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Literal, Protocol
 
-from yulon import platform
+from yulon import platform, runner
 from yulon.git import CloneSpec, Git, GitError, RunnerGit
 from yulon.log import get_logger
 from yulon.manifest import Db, Deploy, Manifest, ManifestType, Patch, SqlStep, When
@@ -184,6 +184,7 @@ class DockerSql:
                 errors="replace",
                 check=False,
                 env=self._env(),
+                creationflags=runner.creationflags(),
             )
         except OSError as exc:
             # Logged with the real errno first, the way `docker._docker()` does, so a

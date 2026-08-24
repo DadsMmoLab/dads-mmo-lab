@@ -472,7 +472,14 @@ either class behind a shared `Protocol` (`preflight(options, cancel)`, `run(opti
 ask) -> Iterator[str]`). `NativeInstaller` accepts `ask` and never uses it: nothing on the native
 path may prompt — Docker Desktop is already provisioned by 5.1, there is no `sudo`, and a step that
 turns out to need interaction is a design failure to fix, not a dialog to add. WotLK's entry
-becomes `platforms: ["linux","macos"]`, `script_platforms: ["linux"]`. (`"windows"` was in the plan here and is NOT in `catalog.json`: it belongs to 6.3, which has not started, so Windows still takes the 6.1 refusal. Corrected 2026-08-24 — this file said three platforms in two places while the data said two.)
+became `platforms: ["linux","macos"]`, `script_platforms: ["linux"]` when 6.2 landed. (`"windows"`
+was in the plan here and was NOT in `catalog.json` at that point: it belonged to 6.3, which had not
+started, so Windows took the 6.1 refusal. Corrected 2026-08-24 — this file said three platforms in
+two places while the data said two.) **Superseded 2026-08-24 by 6.3 itself**: the entry is now
+`platforms: ["linux","macos","windows"]`, `script_platforms: ["linux"]` unchanged, so a Windows
+click now dispatches to `NativeInstaller` too. This is the code-side half of 6.3 only — see
+`pyplan/checklist.md`'s 6.3 line for what that does and does not settle; the clean-box live gate
+has not run.
 
 An `install.native` block joins the entry — floors and the template directory — and the engine
 refuses, honestly, to run an entry whose platform dispatches native but whose `native` block is
@@ -559,7 +566,7 @@ zeroes, so nothing reads a resource number without confirming the engine actuall
 | Docker daemon answers (after one `ensure_docker()` attempt) | — | refuse, non-overridable | everything below fabricates zeroes without it |
 | VM RAM (`docker info` MemTotal — the VM's, not the host's) | < 6 GB refuse, < 8 GB warn | refuse | inherited: Rust measured 2 GB per compiler job; below 6 the OOM killer SIGKILLs a compiler and the symptom is "dies at the same low % every retry" with a bare `Killed`. Hard refusal per the open question above, now closed: leaning yes became yes — a false refusal costs one settings change, a declined warning costs three hours |
 | CPU-vs-RAM | warn when `ncpu+1 > floor(mem/2GB)`, naming the exact CPU count to set | warn | inherited: upstream's Dockerfile hardcodes `-j $(nproc+1)` inside the RUN, so no build-arg can change it |
-| Docker data-root free space | < 40 GB refuse, < 60 GB warn | refuse | inherited. On macOS/Windows `/var/lib/docker` is INSIDE the VM — measuring the host answers for the wrong drive, so the root resolves from Docker Desktop's settings JSON; on macOS that resolution is fresh and unverified (list below), and until the Mac gate proves it, macOS reports this check as *unchecked* rather than guessing |
+| Docker data-root free space | < 40 GB refuse, < 60 GB warn | refuse | inherited. On macOS/Windows `/var/lib/docker` is INSIDE the VM — measuring the host answers for the wrong drive, so the root resolves from Docker Desktop's settings JSON. **Corrected by Phase A (2026-08-24):** on macOS the root now resolves to the settings store's `diskPath`/`DataFolder`, falling back to `Docker.raw`, so a low host reading is a real refusal; but because host free space is an upper bound on the sparse VM's room, an ample reading reports *unchecked* (never a pass) rather than guessing — a false pass is the doomed build the tri-state rule exists to prevent |
 | server-dir free space | < 8 GB refuse, < 15 GB warn | refuse | inherited: checkout 2.4 GB but clone PEAK ~3.7 GB, measured in Rust |
 | data root and server dir on the same volume | floors ADD (48 / 75 GB) | refuse/warn as above | inherited |
 | bind-mount probe: `docker run --rm --entrypoint ls -v <nearest populated ancestor>:/probe:ro <git image> -A /probe` | bounded 30 s | refuse, with the file-sharing explanation | grafted-in above; the probe pulls `git.CONTAINER_GIT_IMAGE` — the exact **digest** the clone stages pull, since a tag is a different image reference and asking for `alpine/git` cost a second, unpinned pull. **Corrected during implementation:** the exit code of `ls` cannot see the failure this exists for, because an unshared folder mounts as an EMPTY directory and `ls` on an empty directory exits 0 — and the chosen folder is empty at preflight time by construction. The probe therefore mounts the nearest ancestor that has entries and checks the container sees entries too; an ancestor's answer is the chosen folder's, and it also stops `-v` creating the directory before `guard` has claimed it |
@@ -724,12 +731,25 @@ claim to check, not a fact:
 1. **Docker Desktop's settings JSON.** Believed to be
    `~/Library/Group Containers/group.com.docker/settings-store.json` on current Docker Desktop
    (`settings.json` on older), keys `DataFolder`/`dataFolder`/`diskPath`, absent meaning the
-   default `~/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw`. Until the gate
-   confirms the path, the keys, and what "free space" even means against a sparse `Docker.raw`
-   (host free on that volume vs VM allocation minus used), the macOS data-root check reports
-   *unchecked* — it does not guess.
+   default `~/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw`. **The READING
+   side is no longer "returns None" — Phase A (2026-08-24) made `docker_desktop_data_root()`
+   resolve the settings store and fall back to `Docker.raw`, unit-tested through the
+   file-read seam. What is STILL unverified on a real Docker-equipped Mac is the three facts the
+   gate was always going to have to record: that the path and keys are exactly these, and what
+   "free space" means against a sparse `Docker.raw` (host free on that volume vs VM allocation
+   minus used). Because that last question is unanswered, the macOS data-root check deliberately
+   became ONE-SIDED rather than a pass: below the refuse floor is a refusal (the VM certainly
+   has no more than the host), below the warn floor a warning, and *ample* host space reports
+   *unchecked* — host free space is an upper bound on the sparse VM's room, and a false pass
+   here is the doomed build the tri-state rule exists to prevent. So the honest end state is
+   "refuses correctly, never false-passes, still owes the gate one number" — not "guesses".
 2. **`caffeinate`.** Assumed present on every macOS (it ships with the OS) and assumed `-dims`
-   holds the right assertion set for a Docker Desktop VM. Neither assumption has been executed.
+   holds the right assertion set for a Docker Desktop VM. The ARGV and cleanup are now pinned by
+   test (`test_platform.py`'s macOS branch asserts the exact `caffeinate -dims -w <pid>` and its
+   `terminate()`, and the refuse-to-start fallback), so the code can no longer drift silently —
+   but neither assumption has been EXECUTED on a real Mac, and `platform.keep_awake()`'s docstring
+   still flags that the roadmap's "closing the lid won't suspend" wording over-promises. The gate
+   still owes the live confirmation.
 3. **Apple silicon vs amd64.** Building from source on arm64 should produce arm64 images natively
    and just work — but only if every base image in the generated compose (`mysql`, the build
    image) publishes an arm64 manifest, and any amd64-only image means Rosetta/QEMU emulation with

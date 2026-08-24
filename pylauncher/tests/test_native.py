@@ -251,12 +251,14 @@ def install(rec: Recorder, server_dir: Path, **overrides: object) -> list[str]:
 
 
 def test_the_platform_decides_which_engine_installs_and_linux_keeps_the_script() -> None:
-    """One place decides, from `catalog.json` data (roadmap 6.2)."""
+    """One place decides, from `catalog.json` data (roadmap 6.2/6.3)."""
     assert isinstance(installer_for(ENTRY, platform_id=lambda: "linux"), Installer)
     assert isinstance(installer_for(ENTRY, platform_id=lambda: "macos"), native.NativeInstaller)
-    # An entry with no macOS path at all still gets the 6.1 refusal, from the
-    # script installer, which is the one place that words it.
+    assert isinstance(installer_for(ENTRY, platform_id=lambda: "windows"), native.NativeInstaller)
+    # An entry with no macOS/Windows path at all still gets the 6.1 refusal, from
+    # the script installer, which is the one place that words it.
     assert isinstance(installer_for(TBC, platform_id=lambda: "macos"), Installer)
+    assert isinstance(installer_for(TBC, platform_id=lambda: "windows"), Installer)
 
 
 def test_script_platforms_defaults_to_platforms_so_old_entries_mean_what_they_said() -> None:
@@ -267,8 +269,11 @@ def test_script_platforms_defaults_to_platforms_so_old_entries_mean_what_they_sa
     # And a platform the entry does not support is never "native" — that is the
     # honest 6.1 refusal, not an engine that starts and then fails.
     assert TBC.install.is_native("macos") is False
+    assert TBC.install.is_native("windows") is False
     assert ENTRY.install.is_native("macos") is True
+    assert ENTRY.install.is_native("windows") is True
     assert ENTRY.install.uses_script("linux") is True
+    assert ENTRY.install.uses_script("windows") is False
 
 
 def test_the_unsupported_platform_refusal_still_comes_first(tmp_path: Path) -> None:
@@ -287,12 +292,19 @@ def test_every_seam_defaults_to_the_real_function_it_stands_in_for() -> None:
     into starting the database two different ways.
     """
     real = native.Seams()
+    assert real.platform_id is platform.detect
     assert real.start_db is docker.start_database
     assert real.container_exists is docker.container_exists
     assert real.container_project is docker.container_project
     assert real.images_built is docker.images_built
     assert real.one_shot is docker.run_one_shot
     assert real.gather is preflight.gather
+    # `ensure_docker` is the one seam whose REAL default escalates on Linux, so
+    # the engine not calling it (or calling a fake) is what the macOS path's
+    # "no sudo" claim ultimately rests on. Pin that the default really is the
+    # provisioning function, so a future refactor silently swapping it out
+    # cannot look like a no-op.
+    assert real.ensure_docker is platform.ensure_docker
     assert real.file_unmodified(Path("/nowhere-at-all"), "docker-compose.yml") is None
 
 
