@@ -294,6 +294,61 @@ immediately after it landed:
   That needs a fresh non-member user on a box with no Docker, which is why the seam gates used
   containers: `pk` is already in the group on both Linux VMs.
 
+### The compose diff against the proven install (2026-08-24) — blocker 2 of the first-gate list
+
+`phase6-decisions.md` asks for this twice ("Diff the generated files against `docker compose
+config` on the proven yulon-ubuntu install — already asked for above, still not done") and it is
+the second item on "What the first gate must run before this engine is trusted". Run now, and it
+found something.
+
+**Method.** `composegen.render()` for a throwaway directory, written out, then `docker compose
+config --format json` over both it and `~/wow-server-playerbots` — compose's own resolved view
+rather than a text diff of templates — compared service by service on image, container name,
+ports, `depends_on`, restart, environment keys, volumes, healthcheck, `stop_grace_period`, `tty`
+and `stdin_open`. Read-only; nothing was started and the real install was only read.
+
+**What matched.** All five services, by name (`ac-database`, `ac-db-import`, `ac-authserver`,
+`ac-worldserver`, `ac-client-data-init`); every `container_name`; every published port; every
+`depends_on` edge; `restart`; the healthcheck's presence; `tty`/`stdin_open` on the worldserver.
+The build overlay parses and names `apps/docker/Dockerfile` for all four buildable services and
+none for the database. So the shape of the thing is right, which is the part that was never
+checked.
+
+**Differences that are the design, not defects.** The image prefix and per-install tag
+(`yulon.local/ac-wotlk-worldserver:native-5c09ea72` vs `acore/ac-wotlk-worldserver:master`) —
+that is the collision fix. The project name (`yulon-wow-wotlk-5c09ea72` vs the folder basename).
+`stop_grace_period: 5m0s`, which the proven install does not have at all and which our own
+measurement earned. And `AC_PLAYERBOTS_DATABASE_INFO` on `ac-db-import`, which the repair gate
+recorded as missing and the generated file **does** supply — that gap is closed on the native
+path and remains open on the script path.
+
+**The defect it found.** `AC_AI_PLAYERBOT_MIN_RANDOM_BOTS` and `AC_AI_PLAYERBOT_MAX_RANDOM_BOTS`
+are absent from `DEFAULT_WORLD_ENV`. The proven install carries 1600 and 2000, written by the
+Linux installer script; a native install would have taken mod-playerbots' own defaults instead.
+Not a crash — a user on macOS and a user on Linux quietly getting different worlds from the same
+button, which is the class of difference this project rejected named volumes to avoid. Fixed with
+the proven install's own values, pinned by a test.
+
+**Eight other environment differences were deliberately NOT carried over, after checking rather
+than assuming.** `AC_CCACHE`, `CTYPE`, `CSCRIPTS`, `DATAPATH`, `USER_CONF_PATH` and the three
+empty `AC_RESTARTER_*` appear on the proven install's runtime services because upstream's compose
+file sets them for build and run alike. The image's `entrypoint.sh` reads none of them — it uses
+`CONF_DIR`, `LOGS_DIR` and `ACORE_COMPONENT`, and the image sets `ACORE_COMPONENT=worldserver`
+itself along with `AC_FORCE_CREATE_DB`, `AC_UPDATES_ENABLE_DATABASES`, `AC_DISABLE_INTERACTIVE`
+and `AC_CLOSE_IDLE_CONNECTIONS`. Worth stating because `entrypoint.sh` runs under `set -euo
+pipefail`, so an *unset* variable it referenced would abort where an empty one would not — the
+reason to read the script instead of reasoning about it.
+
+**Recorded, not fixed:** the volume names differ (`db-data` and `client-data` vs `ac-database`
+and `ac-client-data`). Both are project-scoped so nothing collides, but a native install's
+volumes are not named like a script install's, which matters to anyone reading `docker volume ls`
+during support — and to any future path that looks a volume up by name rather than by project.
+
+**What this does not prove.** That the generated stack builds, starts, or serves a client.
+`docker compose config` resolves a file; it does not run one. Three of the five first-gate items
+remain: `images -q` against a built-but-never-started project, a folder outside Docker Desktop's
+file-sharing list, and `compose up -d --no-deps <db>` against images this engine built.
+
 ### Two things the first button-driven install found (2026-08-24)
 
 **1. A first-run failure whose diagnosis did not survive being tested, and a message that sends

@@ -100,6 +100,23 @@ booting a plausible-looking wrong server.
 DEFAULT_WORLD_ENV: Mapping[str, str] = {
     "AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES": "1",
     "AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN": "1",
+    # The bot population, which the Linux installer script configures and this
+    # engine did not. Found 2026-08-24 by the diff the design asked for and
+    # nobody had run: `docker compose config` on the proven yulon-ubuntu
+    # install against what `render()` produces. Without these a native install
+    # silently takes mod-playerbots' own defaults, so "installed on macOS" and
+    # "installed on Linux" would give the same user two different worlds.
+    #
+    # The values are the proven install's, read off it rather than chosen.
+    # Every other environment difference that diff turned up — `AC_CCACHE`,
+    # `CTYPE`, `CSCRIPTS`, `DATAPATH`, `USER_CONF_PATH` and the three empty
+    # `AC_RESTARTER_*` — is deliberately NOT carried over: they are build-time
+    # settings upstream's compose file keeps on the runtime services too, and
+    # the image's `entrypoint.sh` reads none of them (it uses `CONF_DIR`,
+    # `LOGS_DIR` and `ACORE_COMPONENT`, and the image sets `ACORE_COMPONENT`
+    # itself). Checked in the image rather than assumed.
+    "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS": "1600",
+    "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS": "2000",
 }
 
 # Characters that cannot be spliced into the templates safely, whatever the

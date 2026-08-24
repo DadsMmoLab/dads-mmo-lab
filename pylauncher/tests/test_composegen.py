@@ -322,3 +322,17 @@ def test_the_database_healthcheck_asserts_the_thing_its_waiters_need(tmp_path: P
     healthcheck = next(line for line in plan.base.splitlines() if line.strip().startswith("test:"))
     assert "--protocol=TCP" in healthcheck
     assert "-h 127.0.0.1" in healthcheck
+
+
+def test_the_generated_stack_configures_the_bot_population(tmp_path: Path) -> None:
+    """A native install must not quietly give a different world than a script one.
+
+    The Linux installer script sets the playerbot population; the engine's
+    defaults did not, so a macOS install would have taken mod-playerbots' own.
+    Found by diffing `docker compose config` on the proven yulon-ubuntu install
+    against what `render()` produces — the check `phase6-decisions.md` asks for
+    and which had never been run.
+    """
+    plan = render(tmp_path / "wow")
+    assert 'AC_AI_PLAYERBOT_MIN_RANDOM_BOTS: "1600"' in plan.override
+    assert 'AC_AI_PLAYERBOT_MAX_RANDOM_BOTS: "2000"' in plan.override

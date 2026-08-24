@@ -714,8 +714,15 @@ the function. These are the checks nobody here can perform, in the order they wo
    nothing on a fresh clone. It follows from the file being tracked and untouched, and
    `is_unmodified()` keeps the refusal when git says anything else or cannot answer — so the
    remaining risk is that the rule is too strict, not that it overwrites something.
-2. **Diff the generated files against `docker compose config` on the proven yulon-ubuntu install**
-   (already asked for above, still not done).
+2. ~~**Diff the generated files against `docker compose config` on the proven yulon-ubuntu
+   install.**~~ **Run 2026-08-24, and it found one defect.** Every service, container name, port,
+   `depends_on` edge and healthcheck matched; the build overlay parses and names its dockerfile
+   for all four buildable services. Missing were `AC_AI_PLAYERBOT_MIN_RANDOM_BOTS` and
+   `AC_AI_PLAYERBOT_MAX_RANDOM_BOTS`, so a native install would have taken mod-playerbots'
+   defaults rather than the 1600/2000 the Linux script configures — the same user getting two
+   different worlds from one button. Fixed. Eight other environment differences were checked
+   against the image's `entrypoint.sh` and deliberately not carried over; details in
+   `checklist.md`. This proves the file resolves, not that it builds or runs.
 3. **`docker compose -f… images -q` against a project that has been built but never started.**
    `images_built()` is documented as a hint precisely because compose v2 enumerates the images of
    created CONTAINERS; if it answers empty here, every resume re-runs the build.
