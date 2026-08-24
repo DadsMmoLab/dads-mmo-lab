@@ -102,7 +102,13 @@ def config_dir() -> Path:
 # detection and the WSL2 port proxy live HERE, once, as shared behavior; the
 # port numbers come from catalog.json (data), never from this module.
 
-FirewallBackend = Literal["ufw", "firewalld", "netsh", "none"]
+FirewallBackend = Literal["ufw", "firewalld", "netsh", "alf", "none"]
+"""Which firewall tool a host uses. `alf` is macOS's Application Firewall.
+
+A closed Literal on purpose: adding a member makes mypy point at every site
+that does not handle it, which is how a Mac stopped silently falling into
+`none` and being told about ufw and firewalld.
+"""
 
 _PUBLIC_IP_SERVICES: tuple[str, ...] = ("https://icanhazip.com", "https://api.ipify.org")
 _CGNAT = IPv4Network("100.64.0.0/10")
@@ -135,12 +141,200 @@ def detect_firewall(which: Callable[[str], str | None] | None = None) -> Firewal
     """Which firewall tool this host uses: netsh (Windows), ufw, firewalld, or none."""
     if detect() == "windows":
         return "netsh"
+    if detect() == "macos":
+        # It ships with macOS, so the question is never "is a tool present" but
+        # "what is it set to" — which is 's job, not this
+        # one's. Answering "none" here is what told a Mac user about ufw.
+        return "alf"
     find = which if which is not None else _which
     if find("ufw"):
         return "ufw"
     if find("firewall-cmd"):
         return "firewalld"
     return "none"
+
+
+# ------------------------------------------------------- the macOS firewall
+# macOS's firewall is a different KIND of thing, and the difference decides the
+# whole design: the Application Firewall is per-APPLICATION, not per-port. Its
+# configuration profile schema has no port or protocol key at all, so "open TCP
+# 3724" cannot be expressed. The layer that could express it is `pf`, which
+# Apple documents as not-API (TN3165) and which no third-party app should be
+# editing. And every mutation of either needs root, which the macOS install
+# path deliberately does not have.
+#
+# Then the part that settles it: the binary the firewall evaluates for a
+# published container port is **Docker Desktop's**, not ours. The server
+# listens inside Docker's Linux VM; what accepts a LAN player's connection on
+# the host is `com.docker.backend`. Allow-listing Yu'lon would be theatre.
+#
+# So `firewall_commands("alf", ...)` returning `[]` is the correct answer, not
+# a gap, and what macOS needs instead is an honest read of the state. Every
+# claim in this section is inherited from documentation rather than measured —
+# nobody on this project has a Mac — and `pyplan/checklist.md` carries the list
+# of checks that settle each one.
+
+_SOCKETFILTERFW = Path("/usr/libexec/ApplicationFirewall/socketfilterfw")
+"""The Application Firewall's CLI. A fixed system path, never on PATH."""
+
+_DOCKER_BACKEND = Path("/Applications/Docker.app/Contents/MacOS/com.docker.backend")
+"""The binary that actually receives a player's connection on a Mac.
+
+Docker Desktop's host-side listener: the container publishes into the VM, and
+this process holds the socket on the host. Which is why the firewall question
+for a Mac is "is Docker allowed", never "is Yu'lon allowed". The path is a
+claim to check — see the macOS checks in `pyplan/checklist.md`.
+"""
+
+AlfAppStatus = Literal["allowed", "blocked", "unlisted"]
+
+
+@dataclass(frozen=True)
+class AlfState:
+    """What the macOS Application Firewall reports. `None` always means "unreadable".
+
+    Three independent reads, so one failing does not poison the others, and
+    `None` is never rounded to either neighbour — the same tri-state rule
+    `preflight.py` holds itself to. Apple exposes no supported API for
+    observing this state; the `socketfilterfw` getters are the only channel,
+    and each can fail on its own.
+    """
+
+    enabled: bool | None = None
+    block_all: bool | None = None
+    docker_backend: AlfAppStatus | None = None
+
+    def describe(self) -> str:
+        """One status line for the Networking tab. Lives here: it is a platform fact.
+
+        Not in `ui/` (no business logic in a view) and not in `networking.py`
+        (which names no OS-specific tooling). Every unread field says so out
+        loud rather than reading as a pass.
+        """
+        if self.enabled is None:
+            return (
+                "macOS firewall: unchecked — could not read the firewall state. "
+                "Unchecked is not a pass."
+            )
+        if not self.enabled:
+            return "macOS firewall: off — nothing is being blocked, no rule is needed."
+        if self.block_all:
+            return (
+                "macOS firewall: on and set to block ALL incoming connections — the per-app "
+                "allow list is ignored."
+            )
+        unread = "" if self.block_all is not None else ' (could not read the "block all" setting)'
+        if self.docker_backend == "allowed":
+            return (
+                "macOS firewall: on — Docker Desktop (com.docker.backend) is allowed to receive "
+                "incoming connections." + unread
+            )
+        if self.docker_backend == "blocked":
+            return (
+                "macOS firewall: on — Docker Desktop (com.docker.backend) is BLOCKED from "
+                "receiving incoming connections." + unread
+            )
+        if self.docker_backend == "unlisted":
+            return (
+                "macOS firewall: on — Docker Desktop is not in the allow list yet; macOS will "
+                "decide the first time the server listens." + unread
+            )
+        return (
+            "macOS firewall: on — could not read whether Docker Desktop is allowed "
+            "(unchecked — not a pass)." + unread
+        )
+
+
+def _alf_read(do: RunCmd, *args: str) -> str | None:
+    """One `socketfilterfw` getter's stdout, lowercased, or None if it could not be read.
+
+    The getters need no privilege and never prompt, which is what makes probing
+    safe on a path that has no sudo. Anything unexpected — a non-zero exit, an
+    `OSError`, a binary that is not there — is `None` rather than a guess.
+    """
+    try:
+        proc = do([str(_SOCKETFILTERFW), *args])
+    except OSError as exc:
+        logger.info(f"could not run socketfilterfw {' '.join(args)}: {exc}")
+        return None
+    if proc.returncode != 0:
+        logger.info(f"socketfilterfw {' '.join(args)} exited {proc.returncode}")
+        return None
+    return proc.stdout.strip().lower()
+
+
+def detect_alf_state(run: RunCmd | None = None, docker_backend: Path | None = None) -> AlfState:
+    """Read the macOS firewall, unprivileged and without prompting for anything.
+
+    Read-only on purpose. Every setter needs root; this path has no sudo, and a
+    GUI-launched process has no cached sudo timestamp, so `sudo -n` would fail
+    every single time and a password prompt is forbidden here. Where a root
+    action genuinely helps, `alf_unblock_commands()` produces the command for
+    the user to run.
+
+    Off macOS — and on a Mac with no `socketfilterfw` — this answers all-`None`
+    without spawning anything, which is also what makes it safe to call from
+    the test box.
+    """
+    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv))
+    app = docker_backend if docker_backend is not None else _DOCKER_BACKEND
+    if not _SOCKETFILTERFW.is_file():
+        return AlfState()
+
+    state = _alf_read(do, "--getglobalstate")
+    enabled = None if state is None else ("state = 1" in state or "state = 2" in state)
+
+    blocked_all: bool | None = None
+    said = _alf_read(do, "--getblockall")
+    if said is not None:
+        blocked_all = "disabled" not in said
+
+    status: AlfAppStatus | None = None
+    app_said = _alf_read(do, "--getappblocked", str(app))
+    if app_said is not None:
+        # Order matters: "not blocked" contains "blocked", so the negative
+        # readings are tested first or every allowed app reads as blocked.
+        if "not part of the firewall" in app_said:
+            status = "unlisted"
+        elif "not blocked" in app_said or "permitted" in app_said:
+            status = "allowed"
+        elif "blocked" in app_said:
+            status = "blocked"
+    return AlfState(enabled=enabled, block_all=blocked_all, docker_backend=status)
+
+
+def alf_unblock_commands(app: Path | None = None) -> list[list[str]]:
+    """The root-only argv that lets `app` through the macOS firewall — to SHOW, not to run.
+
+    `networking.apply()` never executes this. Mutating the Application Firewall
+    needs a password this path will not ask for, and `socketfilterfw`'s writes
+    have their own history of being ignored under management policy — so even a
+    zero exit could not honestly be reported as done. The user runs it.
+    """
+    return [[str(_SOCKETFILTERFW), "--unblockapp", str(app or _DOCKER_BACKEND)]]
+
+
+@dataclass(frozen=True)
+class ElevationPolicy:
+    """How `networking.apply()` elevates one backend's commands, and what to say if it cannot."""
+
+    prefix: tuple[str, ...] = ()
+    retry_hint: str = ""
+
+
+def elevation_policy(backend: FirewallBackend) -> ElevationPolicy:
+    """Per-backend elevation, so a new backend cannot inherit the wrong advice.
+
+    This replaced a two-branch `linux` boolean whose else-branch told everyone
+    who was not on ufw/firewalld to "run it in an Administrator PowerShell" —
+    which a Mac user would have been told the moment `alf` existed. `alf` and
+    `none` emit no commands at all, so an empty hint is the honest one.
+    """
+    if backend in ("ufw", "firewalld"):
+        return ElevationPolicy(("sudo", "-n"), " with sudo")
+    if backend == "netsh":
+        return ElevationPolicy((), " in an Administrator PowerShell")
+    return ElevationPolicy()
 
 
 def _which(name: str, path: str | None = None) -> str | None:
@@ -165,6 +359,13 @@ def firewall_commands(
     and relocked after, exactly like the guide.
     """
     ports = list(ports)
+    if backend == "alf":
+        # No port vocabulary exists in the macOS Application Firewall, the
+        # binary it evaluates is Docker Desktop's rather than ours, and every
+        # mutation needs a root this path will not ask for. `[]` is the
+        # honest answer; `networking.plan()` reports the firewall's STATE
+        # instead.
+        return []
     if backend == "netsh":
         return [
             [

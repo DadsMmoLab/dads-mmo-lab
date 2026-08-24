@@ -49,6 +49,13 @@ class NetworkPlan:
     client_realmlist: str | None
     manual_steps: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    firewall_state: platform.AlfState | None = None
+    """Probed only for the `alf` backend; None everywhere else.
+
+    macOS has no port rules to plan, so what a Mac gets instead of a command
+    list is the firewall's actual state — see `platform.AlfState`. Defaulted,
+    so every existing construction and test is untouched.
+    """
 
     @property
     def ready(self) -> bool:
@@ -91,6 +98,61 @@ def _sql_literal(ip: str) -> str:
     return ip
 
 
+def _alf_notes(state: platform.AlfState) -> tuple[list[str], list[str]]:
+    """(warnings, manual steps) for a macOS firewall state. Never a command to run.
+
+    The split follows what the user can act on: a warning is something wrong
+    with the machine's configuration that stops players connecting, a manual
+    step is a thing only they can do. Nothing here is automatable — every
+    mutation needs root, and this path does not ask for passwords.
+
+    An off firewall and a working one produce neither: the status line on the
+    plan is the whole truth, and inventing advice for a machine that is fine is
+    how a networking screen teaches people to ignore it.
+    """
+    warnings: list[str] = []
+    manual: list[str] = []
+    if state.enabled is None:
+        manual.append(
+            "Yu'lon could not read the macOS firewall state, so it is reported as unchecked "
+            "rather than OK. Check it yourself in System Settings -> Network -> Firewall. If it "
+            'is on and players cannot connect, set "Docker" to "Allow incoming connections" '
+            "under Options."
+        )
+        return warnings, manual
+    if not state.enabled:
+        return warnings, manual
+    if state.block_all:
+        warnings.append(
+            'the firewall is set to "Block all incoming connections": the allow list is ignored, '
+            "so players cannot reach the server no matter what is allowed. To host, turn that "
+            "off yourself in System Settings -> Network -> Firewall -> Options - it is a "
+            "security choice Yu'lon will not make for you."
+        )
+        return warnings, manual
+    if state.docker_backend == "blocked":
+        command = " ".join(["sudo", *platform.alf_unblock_commands()[0]])
+        manual.append(
+            "The macOS firewall is blocking Docker Desktop, which is the program that actually "
+            "receives player connections - the server listens inside Docker's VM, so allowing "
+            "Yu'lon itself would change nothing. Yu'lon never asks for your password, so run "
+            f"this yourself and then plan again: {command}"
+        )
+    elif state.docker_backend == "unlisted":
+        manual.append(
+            'macOS may ask about "Docker" the first time the server listens with the firewall '
+            "on - click Allow. Signed apps are normally allowed automatically; if players still "
+            "cannot connect, check System Settings -> Network -> Firewall -> Options."
+        )
+    elif state.docker_backend is None:
+        warnings.append(
+            "the firewall is on but whether Docker Desktop is allowed could not be read "
+            '(unchecked). If players cannot connect, set "Docker" to "Allow incoming '
+            'connections" in System Settings -> Network -> Firewall -> Options.'
+        )
+    return warnings, manual
+
+
 def plan(
     entry: CatalogEntry,
     mode: Mode,
@@ -104,6 +166,7 @@ def plan(
     rule_prefix: str = "Yulon",
     detect_lan: Callable[[], str | None] = platform.detect_lan_ip,
     detect_public: Callable[[], platform.PublicIpResult] = platform.detect_public_ip,
+    detect_alf: Callable[[], platform.AlfState] = platform.detect_alf_state,
 ) -> NetworkPlan:
     """Compute the plan for `mode`. Detection seams default to the real platform probes."""
     ports = (entry.ports.auth, entry.ports.world)
@@ -123,7 +186,15 @@ def plan(
     fw_cmds = platform.firewall_commands(
         backend, ports, rule_prefix=rule_prefix, steamos=on_steamos
     )
-    if backend == "none":
+    alf_state: platform.AlfState | None = None
+    if backend == "alf":
+        # macOS gets a state, not a command list: its firewall is
+        # per-application and has no port vocabulary at all.
+        alf_state = detect_alf()
+        alf_warnings, alf_manual = _alf_notes(alf_state)
+        warnings.extend(alf_warnings)
+        manual.extend(alf_manual)
+    elif backend == "none":
         manual.append(
             "No supported firewall tool (ufw/firewalld) was found; if a firewall is active, "
             f"allow inbound TCP {', '.join(map(str, ports))} by hand."
@@ -139,7 +210,14 @@ def plan(
                 + (
                     " (a WSL2 portproxy is added as a stopgap)."
                     if in_wsl or backend == "netsh"
-                    else "."
+                    else (
+                        " On Docker Desktop for Mac a loopback binding you did not ask for "
+                        "usually means its port-binding setting is local-only; change it back "
+                        "in Docker Desktop's settings and recreate the stack. No firewall "
+                        "change can fix a loopback binding."
+                        if backend == "alf"
+                        else "."
+                    )
                 )
             )
             if (in_wsl or backend == "netsh") and lan:
@@ -208,6 +286,7 @@ def plan(
         client_realmlist=client_realmlist,
         manual_steps=tuple(manual),
         warnings=tuple(warnings),
+        firewall_state=alf_state,
     )
 
 
@@ -231,12 +310,16 @@ def apply(
     do = run if run is not None else (lambda argv: runner.run(argv))
     done: list[str] = []
     skipped: list[str] = []
-    linux = network_plan.firewall in ("ufw", "firewalld")
+    # Per-backend rather than a linux/not-linux boolean: the else-branch of that
+    # boolean told everyone who was not on ufw or firewalld to retry "in an
+    # Administrator PowerShell", which a Mac user would have been handed the
+    # moment `alf` existed.
+    policy = platform.elevation_policy(network_plan.firewall)
 
     for cmd in network_plan.firewall_commands + network_plan.portproxy_commands:
         argv = list(cmd)
-        if linux and elevate:
-            argv = ["sudo", "-n", *argv]
+        if policy.prefix and elevate:
+            argv = [*policy.prefix, *argv]
         try:
             proc = do(argv)
         except OSError as exc:
@@ -247,7 +330,7 @@ def apply(
         else:
             skipped.append(
                 f"{' '.join(cmd)}: exit {proc.returncode} {proc.stderr.strip()} — run it by hand"
-                + (" with sudo" if linux else " in an Administrator PowerShell")
+                + policy.retry_hint
             )
 
     restart = False
