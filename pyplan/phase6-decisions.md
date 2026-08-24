@@ -730,9 +730,16 @@ the function. These are the checks nobody here can perform, in the order they wo
    re-run the compile. `images_built()` now asks the daemon by image reference instead
    (`composegen.built_image_refs()` + `docker image inspect`), proven live in the same window.
    Details in `checklist.md`.
-4. **A folder outside Docker Desktop's file-sharing list.** The bind-mount probe's whole premise is
-   that Docker mounts such a folder as EMPTY rather than failing the run — inherited from the Rust
-   launcher, never executed here. Confirm both what Docker does and that the probe reports it.
+4. **A folder outside Docker Desktop's file-sharing list.** *Attempted on yulon-win11 2026-08-24
+   and still open* — that box runs the WSL2 backend, which mounts the whole of `C:` through one
+   unfiltered 9p share and has no per-directory list to violate, so this case needs a
+   Hyper-V-backend box or a Mac. The attempt paid anyway. Against a substitute with the same
+   observable (a mounted ISO the VM does not map) Docker **did** present the source as an empty
+   directory and exit 0 — confirming the inherited premise on Windows, and confirming that an
+   exit-code-only probe would have called it a pass. And the run found that `bind_mount_ok()`
+   passed `ls` after the image name while the pinned image's entrypoint is `git`, so the probe
+   answered False for every folder and preflight refused **every native install on every
+   platform**. Fixed, with a live test that no unit test could replace; see `checklist.md`.
 5. **`compose up -d --no-deps <db>` on a brand-new install**, i.e. the `start-db` stage against
    images this engine just built rather than the existing install the repair gate used.
 

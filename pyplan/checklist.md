@@ -294,6 +294,69 @@ immediately after it landed:
   That needs a fresh non-member user on a box with no Docker, which is why the seam gates used
   containers: `pk` is already in the group on both Linux VMs.
 
+### The bind-mount probe refused every install, on every platform (found and fixed 2026-08-24)
+
+The Windows file-sharing gate — first-gate blocker 4, asking whether Docker Desktop mounts an
+unshared folder as EMPTY rather than failing — could not be run as written on `yulon-win11`, and
+found something worse on the way.
+
+**Why the gate itself was unrunnable there, which is a result and not a failure.** Docker Desktop
+4.87.0 on the WSL2 backend has no per-directory file-sharing list to violate.
+`%APPDATA%\Docker\settings-store.json` carries no file-sharing key at all, `locked-directories`
+is `{}`, and inside the VM `/proc/mounts` shows **one 9p/drvfs mount for the whole of `C:\`** with
+no filter. Measured rather than inferred: `C:\ProgramData` — never in any default share list —
+listed 15 entries from a container. Only `C:` is mounted; `D:` and `E:` are not mounted at all.
+So that blocker needs a Hyper-V-backend box or a Mac, and stays open.
+
+**The inherited premise is nevertheless correct on Windows**, established against a substitute
+with the same observable: `D:\` is a mounted ISO the VM does not map. `docker run -v "D:\:/probe:ro"
+… -A /probe` **exited 0 with an empty listing**. An exit-code-only probe would have printed
+`[pass]`. The 2026-08-23 correction — compare the container's listing against the host's, mount
+the nearest populated ancestor — is vindicated by measurement. One counter-case worth keeping: a
+`subst` drive failed LOUDLY instead (exit 125, `mkdir Y:\shared: The system cannot find the path
+specified`), so both branches are real and `bind_mount_ok()` handles each.
+
+**The defect.** `bind_mount_ok()` ran
+`docker run --rm -v <mount>:/probe:ro <image> ls -A /probe`. The probe image is
+`git.CONTAINER_GIT_IMAGE` — deliberately, so the probe pulls the exact digest the clone stages
+pull instead of a second unpinned image — and `alpine/git`'s **ENTRYPOINT is `git`**. So it ran
+`git ls -A /probe`, which exits 1 with `git: 'ls' is not a git command`, which the function read
+as "Docker cannot see that folder", which `preflight` turns into a refusal that
+`native.py::_preflight_lines` raises on with no override.
+
+**The native install engine could not install anything, anywhere.** Not Windows-specific: the
+image's entrypoint is the image's, and it reproduces identically on Linux —
+`docker run --rm -v /tmp/bmprobe:/probe:ro <pinned> ls -A /probe` → exit 1, and the same run with
+`--entrypoint ls` → the two files. The refusal also sent a WSL2 user to a Docker Desktop settings
+page that does not exist for them.
+
+**Why the tests could not see it.** `test_the_bind_mount_probe_mounts_the_folder_and_tells_no_from
+_no_answer` asserted the exact argv **including `"ls"`** — it pinned the broken command — while a
+monkeypatched `runner.run` returned a canned `CompletedProcess` that can never learn the image has
+an entrypoint. The argv was exactly what its author intended; the defect lives **between** the
+argv and the image's metadata, and neither half is wrong in isolation. This is the same shape as
+the `start_staged`/`stop_staged` seam defect already recorded above.
+
+It is also easy to see how it survived a reading: `git.py`'s `ContainerGit` uses the *same image*
+correctly, building argv that begin `clone` / `fetch` / `status` precisely because the entrypoint
+is `git`. Next to that, `ls` looks plausible. Those two are the only `docker run` argv sites in
+the package, and the other one is fine.
+
+**Fixed** to `docker run --rm --entrypoint ls -v <mount>:/probe:ro <image> -A /probe`, verified
+live on both boxes. On Windows the fixed probe answers True for a shared folder, True for a folder
+at the root of `C:` outside any user directory, and **False for `D:\` through the intended branch**
+("a container saw D:\ as empty although the host sees files in it"), not the error branch.
+
+**The guard is a live test, because no unit test can hold both halves.**
+`tests/integration/test_docker_live.py` gained one that runs the real probe against a real daemon;
+it self-skips without Docker like the rest of that suite. Proven RED then GREEN on yulon-ubuntu:
+reverting to the shipped argv fails it with `git: 'ls' is not a git command` in the output,
+restoring the fix passes. The unit test keeps its argv assertion, now with the reason `--entrypoint`
+is load-bearing written next to it.
+
+**What this says about the other first-gate items.** Three of the five have now been run and two
+of those found real defects (`images -q`, and this). The remaining unrun ones are not paperwork.
+
 ### `images_built()` could never have answered yes — blocker 3, confirmed and fixed (2026-08-24)
 
 Third item on the first-gate list: "`docker compose -f… images -q` against a project that has

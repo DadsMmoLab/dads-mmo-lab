@@ -265,3 +265,41 @@ def test_a_stop_never_writes_an_identity_the_folder_could_carry_away(
 
     assert docker.pinned_project_name(throwaway_project) is None
     assert not (throwaway_project / ".env").exists()
+
+
+def test_the_bind_mount_probe_actually_works_against_a_real_daemon(tmp_path: Path) -> None:
+    """The probe must run the image it was given, and no unit test can check that.
+
+    This exists because of a defect that shipped and that the unit tests could
+    not see. `bind_mount_ok()` passed `ls -A /probe` after the image name, and
+    the probe image is the pinned `alpine/git` — chosen deliberately so the
+    probe pulls the same digest the clone stages pull instead of a second
+    image — whose ENTRYPOINT is `git`. So the probe ran `git ls -A /probe`,
+    exited 1 with "'ls' is not a git command", and the function read that as
+    "Docker cannot see this folder". `preflight` turns that into a refusal, so
+    **every native install on every platform was refused** (found on
+    yulon-win11 2026-08-24 by a gate asking a different question, then
+    reproduced on Linux — it was never Windows-specific).
+
+    The unit test asserted the argv, and the argv was exactly what the author
+    intended; the defect lived between the argv and the image's metadata, which
+    a monkeypatched `runner.run` returning a canned success can never know.
+    Only a real daemon holds both halves. That is the whole reason this file
+    exists, so the probe belongs in it.
+
+    Deliberately NOT asserting the negative case (an unshared folder reporting
+    False): Docker Engine on Linux shares the whole filesystem, so there is no
+    unshared folder to point at here. That half was measured on Windows against
+    a drive the WSL2 VM does not mount — exit 0 with an empty listing, which is
+    the behaviour the comparison logic exists for — and is recorded in
+    `pyplan/checklist.md` rather than asserted here.
+    """
+    from yulon import git
+
+    (tmp_path / "alpha.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "bravo.txt").write_text("y", encoding="utf-8")
+    chosen = tmp_path / "wow-server"  # not created: the probe walks up to tmp_path
+
+    assert docker.bind_mount_ok(chosen, git.CONTAINER_GIT_IMAGE) is True
+    # `-v <missing>:/probe` would have Docker create it; the probe must not.
+    assert not chosen.exists()

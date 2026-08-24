@@ -2260,8 +2260,18 @@ def bind_mount_ok(
     # `:ro`, because the mount is now an ANCESTOR of the chosen folder and that
     # is routinely the user's home directory. The probe only lists; the clone
     # stage is the thing that needs write access, and it gets its own mount.
+    # `--entrypoint ls`, and it is not optional. The probe image is
+    # `git.CONTAINER_GIT_IMAGE` — deliberately, so this pulls the exact digest
+    # the clone stages pull rather than a second image — and `alpine/git`'s
+    # ENTRYPOINT is `git`. Passing `ls -A /probe` after the image name therefore
+    # ran `git ls -A /probe`, which exits 1 with "'ls' is not a git command",
+    # which this function read as "Docker cannot see that folder" and preflight
+    # turned into a refusal. **Every native install, on every platform, was
+    # refused** (found by the Windows file-sharing gate 2026-08-24, then
+    # reproduced on Linux — it was never Windows-specific).
     proc = _docker(
-        ["run", "--rm", "-v", f"{mount}:/probe:ro", image, "ls", "-A", "/probe"], timeout=timeout
+        ["run", "--rm", "--entrypoint", "ls", "-v", f"{mount}:/probe:ro", image, "-A", "/probe"],
+        timeout=timeout,
     )
     if _cli_missing(proc):
         return None

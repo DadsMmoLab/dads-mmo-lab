@@ -2790,12 +2790,23 @@ def test_the_bind_mount_probe_mounts_the_folder_and_tells_no_from_no_answer(
         "docker",
         "run",
         "--rm",
+        # LOAD-BEARING, and its absence is the defect this test failed to catch
+        # for as long as it existed. The probe image is the pinned `alpine/git`
+        # — deliberately, so the probe pulls the digest the clone stages pull
+        # rather than a second image — and that image's ENTRYPOINT is `git`. So
+        # `<image> ls -A /probe` ran `git ls -A /probe`, exited 1 with "'ls' is
+        # not a git command", and `bind_mount_ok()` read that as "Docker cannot
+        # see this folder". Preflight refused EVERY native install on EVERY
+        # platform, and this assertion pinned the broken argv while a
+        # monkeypatched runner returned a canned success that could never know
+        # the image had an entrypoint. Found live, not here (2026-08-24).
+        "--entrypoint",
+        "ls",
         "-v",
         # Read-only: that ancestor is routinely the user's home directory, and
         # listing it is all this asks.
         f"{tmp_path}:/probe:ro",
         "alpine/git",
-        "ls",
         "-A",
         "/probe",
     ]
