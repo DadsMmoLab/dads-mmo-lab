@@ -1649,11 +1649,23 @@ def _linux_user(explicit: str | None) -> str:
                 return invoker
     if euid is not None:
         try:
-            import pwd
-
-            # `str()` because mypy runs on Windows here, where the POSIX stub
-            # is not resolvable — the guard above is what makes the call safe
-            # at runtime, not the type checker.
+            # Imported dynamically for the same reason `_registry_search_path()`
+            # imports `winreg` that way, and the reason `runner.open_pty()`
+            # fetches `os.openpty` that way: the module is POSIX-only and this
+            # file is type-checked for BOTH platforms.
+            #
+            # THE TWO OBVIOUS SPELLINGS ARE EACH RED WHERE THE OTHER IS GREEN.
+            # `import pwd` + a direct call is `Module has no attribute
+            # "getpwuid"` on Windows, where the stub does not resolve. Adding
+            # `# type: ignore[attr-defined]` fixes that and is then an
+            # `unused-ignore` error on Linux, where it does — `pyproject.toml`
+            # sets `warn_unused_ignores = true`. This project is developed on
+            # Windows and its CI runs Linux, so each spelling passes for its
+            # author and fails for everyone else; both have now shipped and
+            # both have been reverted (2026-08-24). A dynamic import is `Any`,
+            # so neither checker has anything to say, and `str()` is what keeps
+            # the promise this signature makes.
+            pwd = importlib.import_module("pwd")
             return str(pwd.getpwuid(euid).pw_name)
         except (ImportError, KeyError):
             logger.info(f"no passwd entry for uid {euid}; falling back to the environment")
