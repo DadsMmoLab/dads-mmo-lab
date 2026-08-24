@@ -2701,18 +2701,67 @@ def test_a_cancelled_run_is_not_reported_as_a_failed_one(
     assert run.returncode not in (0, 1)  # never mistakable for a real exit status
 
 
+REFS = ("yulon.local/ac-wotlk-worldserver:native-abc", "yulon.local/ac-wotlk-authserver:native-abc")
+
+
 def test_images_built_says_unknown_rather_than_no_when_docker_will_not_answer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`None` is not `False`: a resume must not conclude "nothing is built" from silence."""
+    """`None` is not `False`: a resume must not conclude "nothing is built" from silence.
+
+    The two non-zero cases are not the same event and the difference is hours:
+    "no such image" is an answer, and a daemon that will not talk is not.
+    """
     monkeypatch.setattr(
-        docker.runner, "run", lambda *a, **k: _completed(returncode=1, stderr="no such file")
+        docker.runner, "run", lambda *a, **k: _completed(returncode=1, stderr="permission denied")
     )
-    assert docker.images_built(Path("/tmp/wow"), ("docker-compose.yml",)) is None
-    monkeypatch.setattr(docker.runner, "run", lambda *a, **k: _completed(stdout="sha256:abc\n"))
-    assert docker.images_built(Path("/tmp/wow"), ("docker-compose.yml",)) is True
-    monkeypatch.setattr(docker.runner, "run", lambda *a, **k: _completed(stdout="\n"))
-    assert docker.images_built(Path("/tmp/wow"), ("docker-compose.yml",)) is False
+    assert docker.images_built(REFS) is None
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        lambda *a, **k: _completed(returncode=1, stderr="Error: No such image: x"),
+    )
+    assert docker.images_built(REFS) is False
+    monkeypatch.setattr(docker.runner, "run", lambda *a, **k: _completed(stdout="sha256:abc"))
+    assert docker.images_built(REFS) is True
+    assert docker.images_built(()) is None
+
+
+def test_images_built_asks_the_daemon_by_reference_not_compose_by_project(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compose cannot answer "has this been built?", so it is no longer asked.
+
+    Measured on yulon-ubuntu (Docker 29.1.3, Compose 2.40.3, 2026-08-24): after
+    a successful `compose -f base -f override -f build build`, `compose images
+    -q` returned nothing — both bare and with the same `-f` set — and only
+    began answering once containers existed (`compose create` was enough; `up`
+    was not needed). Compose enumerates the images of a project's CREATED
+    CONTAINERS. That window is exactly the one a resume asks in, so every
+    resume re-ran the compile.
+    """
+    seen: list[list[str]] = []
+
+    def record(argv: list[str], **_kwargs: object) -> object:
+        seen.append(argv)
+        return _completed(stdout="sha256:abc")
+
+    monkeypatch.setattr(docker.runner, "run", record)
+    assert docker.images_built(REFS) is True
+    assert [a[1:] for a in seen] == [
+        ["image", "inspect", "--format", "{{.Id}}", REFS[0]],
+        ["image", "inspect", "--format", "{{.Id}}", REFS[1]],
+    ]
+    assert not [a for a in seen if "compose" in a]
+
+
+def test_a_partial_build_is_not_a_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Three images of four is not "built" — starting on it means a missing binary."""
+    answers = iter(
+        [_completed(stdout="sha256:abc"), _completed(returncode=1, stderr="No such image")]
+    )
+    monkeypatch.setattr(docker.runner, "run", lambda *a, **k: next(answers))
+    assert docker.images_built(REFS) is False
 
 
 def test_the_bind_mount_probe_mounts_the_folder_and_tells_no_from_no_answer(

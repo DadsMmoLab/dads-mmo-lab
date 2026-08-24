@@ -195,7 +195,7 @@ class Recorder:
             clone=clone,
             remote_url=lambda dest: self.remotes.get(dest),
             file_unmodified=self.file_unmodified,
-            images_built=lambda server_dir, files: self.images,
+            images_built=lambda refs: self.images,
             build=build,
             one_shot=one_shot,
             verify_import=verify,

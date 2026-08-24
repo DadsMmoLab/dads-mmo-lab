@@ -294,6 +294,49 @@ immediately after it landed:
   That needs a fresh non-member user on a box with no Docker, which is why the seam gates used
   containers: `pk` is already in the group on both Linux VMs.
 
+### `images_built()` could never have answered yes — blocker 3, confirmed and fixed (2026-08-24)
+
+Third item on the first-gate list: "`docker compose -f… images -q` against a project that has
+been built but never started. `images_built()` is documented as a hint precisely because compose
+v2 enumerates the images of created CONTAINERS; if it answers empty here, every resume re-runs
+the build." Asked, and the answer is the bad one.
+
+**Measured on yulon-ubuntu, Docker 29.1.3 / Compose 2.40.3.** A four-file project shaped like the
+engine's own — base, override, never-auto-loaded build overlay — with a two-line busybox image in
+place of a 30-minute one, because the question is about compose's behaviour and not about
+AzerothCore:
+
+| state | `compose images -q` |
+|---|---|
+| after `compose -f base -f override -f build build` succeeded, no containers | **nothing**, both bare and with the same `-f` set |
+| after `compose create` (containers made, never started) | 2 ids |
+| after `compose up -d` | 2 ids |
+
+So the answer turns on containers existing, not on images existing — and "built, no containers
+yet" is the entire window a resume asks in. `images_built()` returned False for every finished
+build, `_build()` re-ran the compile every time, and the state file's recorded `build` could never
+take effect. BuildKit's cache would have made it cheap in wall-clock and it would still have been
+wrong: the engine would have reported hours of work it did not need to do, on the stage the whole
+resume design exists for.
+
+**The same run confirmed the other half of the `-f` discipline**: a bare `docker compose build` in
+that directory exited 0 and built nothing, leaving zero images on the host. That trap is inherited
+from `rust-prior-art.md` §2 and had never been executed here either.
+
+**Fixed by asking the daemon instead of asking compose.** `docker.images_built(refs)` now takes
+image references and runs `docker image inspect --format {{.Id}}` on each;
+`composegen.built_image_refs()` supplies them, since `docker.py` may not know a game's images.
+ALL of them must exist, not any — a build that produced three of four is not a build, and skipping
+it starts a server missing a binary. The two non-zero exits are told apart rather than merged,
+because the difference is hours: `No such image` is an answer (False), and a daemon that will not
+talk is not (None). Proven live in the same window that defeated the old question: `compose images
+-q` empty, `image inspect` two real `sha256:` ids, and a never-built reference answering
+`Error response from daemon: No such image:` — the string the code matches on.
+
+**What is still not proven:** that this holds for a real AzerothCore build. The behaviour under
+test is compose's, and a busybox image exercises it exactly, but the engine's four images come
+from a multi-stage Dockerfile with `target:` per service and nobody has watched those get built.
+
 ### The compose diff against the proven install (2026-08-24) — blocker 2 of the first-gate list
 
 `phase6-decisions.md` asks for this twice ("Diff the generated files against `docker compose

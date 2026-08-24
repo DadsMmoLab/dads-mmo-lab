@@ -2167,38 +2167,51 @@ def build_staged(
     return run_attached(argv, server_dir, sink=sink, cancel=cancel, merge_stderr=True)
 
 
-def images_built(server_dir: Path, compose_files: Sequence[str]) -> bool | None:
-    """Has this install's build already produced images? None = could not ask.
+def images_built(refs: Sequence[str]) -> bool | None:
+    """Do all of `refs` exist on this daemon? None = could not ask.
 
-    A hint that can contradict the state file's "built", for the install
-    engine's `build` stage (rust-prior-art §1). The same `-f` discipline as
-    `build_staged()` applies, since the build overlay is where the built stages'
-    image refs come from.
+    Disk evidence for the install engine's `build` stage (rust-prior-art §1),
+    and it asks the daemon about image references rather than asking compose
+    about a project — because compose cannot answer this question.
 
-    **Not the disk evidence it was once documented as, and the difference is on
-    the first gate's list.** Compose v2's `images` enumerates the images of the
-    project's CREATED CONTAINERS, not of its service definitions — so in the
-    exact window this is asked in (build finished, `up` not yet run) it very
-    likely answers empty and a resume re-runs `compose build` (review,
-    2026-08-23). That direction is safe rather than wrong — BuildKit's cache
-    makes the re-run cheap and a false "built" would start a server with no
-    binaries — but nobody here has watched it answer, and the gate's job is to
-    run `compose images -q` against a built project with no containers and
-    record what it says.
+    **Measured on yulon-ubuntu, Docker 29.1.3 / Compose 2.40.3 (2026-08-24),
+    which is why this no longer runs `compose images -q`.** After a successful
+    `compose -f base -f override -f build build`, `compose images -q` returned
+    NOTHING, both bare and with the same `-f` set; it began answering only once
+    containers existed (`compose create` sufficed, `up` was not needed). Compose
+    enumerates the images of a project's CREATED CONTAINERS, not of its service
+    definitions. The window it answered wrongly in — built, no containers yet —
+    is precisely the window a resume asks in, so every resume re-ran the
+    compile. The old docstring predicted this and asked the first gate to
+    record it; it did.
+
+    ALL of them, not any: a build that produced three of four images is not a
+    finished build, and skipping it would start a server missing a binary.
 
     `None` is not `False`. A resume that cannot ask must not conclude "nothing
-    is built" and spend four hours proving itself wrong, and it must not
-    conclude "built" either; the caller decides.
+    is built" and spend hours proving itself wrong, and must not conclude
+    "built" either; the caller decides. `refs` is passed in rather than derived
+    here for the reason every game-specific value is — `docker.py` knows no
+    game (`composegen.built_image_refs()` is where they come from).
     """
-    argv = ["compose"]
-    for name in compose_files:
-        argv += ["-f", name]
-    argv += ["images", "-q"]
-    proc = _docker(argv, cwd=server_dir)
-    if proc.returncode != 0:
-        logger.warning(f"could not list built images in {server_dir}: {proc.stderr.strip()}")
+    if not refs:
         return None
-    return any(line.strip() for line in proc.stdout.splitlines())
+    found = 0
+    for ref in refs:
+        proc = _docker(["image", "inspect", "--format", "{{.Id}}", ref])
+        if proc.returncode == 0 and proc.stdout.strip():
+            found += 1
+            continue
+        # `docker image inspect` exits non-zero for "no such image", which is an
+        # answer, and for a daemon that will not talk, which is not. They are
+        # told apart by what the daemon said, because guessing either way is the
+        # expensive mistake this function exists to avoid.
+        said = proc.stderr.strip().lower()
+        if "no such image" in said or "not found" in said:
+            return False
+        logger.warning(f"could not ask whether {ref} exists: {proc.stderr.strip()}")
+        return None
+    return found == len(refs)
 
 
 def bind_mount_ok(

@@ -273,7 +273,7 @@ class Seams:
     clone: Callable[[git.CloneSpec], None] = field(default_factory=lambda: git.ContainerGit().clone)
     remote_url: Callable[[Path], str | None] | None = None
     file_unmodified: Callable[[Path, str], bool | None] = _git_file_unmodified
-    images_built: Callable[[Path, Sequence[str]], bool | None] = docker.images_built
+    images_built: Callable[[Sequence[str]], bool | None] = docker.images_built
     build: Callable[..., docker.AttachedRun] = docker.build_staged
     one_shot: Callable[..., docker.AttachedRun] = docker.run_one_shot
     verify_import: Callable[..., docker.ImportState] = docker.verify_import
@@ -745,7 +745,9 @@ class NativeInstaller:
         an unknown re-runs the build, which is slow and safe rather than fast
         and wrong.
         """
-        built = self._seams.images_built(server_dir, composegen.COMPOSE_FILES)
+        built = self._seams.images_built(
+            composegen.built_image_refs(server_dir, platform_id=self._seams.platform_id)
+        )
         if state.has("build") and built:
             yield "The server is already built; skipping the compile."
             return

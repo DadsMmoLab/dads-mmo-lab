@@ -723,9 +723,13 @@ the function. These are the checks nobody here can perform, in the order they wo
    different worlds from one button. Fixed. Eight other environment differences were checked
    against the image's `entrypoint.sh` and deliberately not carried over; details in
    `checklist.md`. This proves the file resolves, not that it builds or runs.
-3. **`docker compose -f… images -q` against a project that has been built but never started.**
-   `images_built()` is documented as a hint precisely because compose v2 enumerates the images of
-   created CONTAINERS; if it answers empty here, every resume re-runs the build.
+3. ~~**`docker compose -f… images -q` against a project that has been built but never
+   started.**~~ **Run 2026-08-24: it answers EMPTY, and the fear was right.** Compose starts
+   answering only once containers exist (`compose create` is enough), so in the
+   built-but-not-yet-up window — the only window a resume asks in — every resume would have
+   re-run the compile. `images_built()` now asks the daemon by image reference instead
+   (`composegen.built_image_refs()` + `docker image inspect`), proven live in the same window.
+   Details in `checklist.md`.
 4. **A folder outside Docker Desktop's file-sharing list.** The bind-mount probe's whole premise is
    that Docker mounts such a folder as EMPTY rather than failing the run — inherited from the Rust
    launcher, never executed here. Confirm both what Docker does and that the probe reports it.

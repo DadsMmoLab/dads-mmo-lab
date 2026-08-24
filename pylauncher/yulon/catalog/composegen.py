@@ -181,6 +181,42 @@ def project_name(
     return f"yulon-{_slug(game_id)}-{install_id(server_dir, platform_id=platform_id)}"
 
 
+BUILT_SERVICES: tuple[str, ...] = (
+    "worldserver",
+    "authserver",
+    "db-import",
+    "client-data",
+)
+"""The image suffixes the build overlay produces, in the base file's spelling.
+
+Kept beside the prefix and the tag because the three together are the only
+description of what a finished build leaves behind, and `docker.images_built()`
+now has to ask about them by name — see `built_image_refs()`.
+"""
+
+
+def built_image_refs(
+    server_dir: Path, *, platform_id: Callable[[], str] = platform.detect
+) -> tuple[str, ...]:
+    """The image references this install's build produces, fully qualified.
+
+    Needed because "has this been built?" cannot be asked of compose. Measured
+    on yulon-ubuntu (Docker 29.1.3, Compose 2.40.3, 2026-08-24): after a
+    successful `compose -f… build`, `compose images -q` returns **nothing** —
+    both bare and with the same `-f` set — and only starts answering once
+    containers exist (`compose create` is enough; `up` is not required). Compose
+    enumerates the images of a project's CREATED CONTAINERS, not of its service
+    definitions, exactly as `images_built()`'s docstring feared.
+
+    That window — built, no containers yet — is the whole window a resume asks
+    in, so the old question answered "not built" for every finished build and a
+    resume re-ran the compile. Cheap in BuildKit cache terms and still wrong:
+    the engine would have reported hours of work it did not need to do.
+    """
+    tag = image_tag(server_dir, platform_id=platform_id)
+    return tuple(f"{DEFAULT_IMAGE_PREFIX}{name}:{tag}" for name in BUILT_SERVICES)
+
+
 def image_tag(server_dir: Path, *, platform_id: Callable[[], str] = platform.detect) -> str:
     """Default tag for images built for this install, so two builds cannot overwrite each other."""
     return f"native-{install_id(server_dir, platform_id=platform_id)}"
