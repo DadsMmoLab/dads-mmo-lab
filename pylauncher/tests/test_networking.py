@@ -476,10 +476,66 @@ def test_a_working_mac_firewall_produces_no_advice_at_all(_on_a_mac: None) -> No
 
 
 def test_a_mac_is_never_told_to_open_an_administrator_powershell() -> None:
-    """The retry hint used to be a two-branch boolean whose else-branch was Windows advice."""
+    """The retry hint used to be a two-branch boolean whose else-branch was Windows advice.
+
+    `none` sits with `netsh`, not with `alf`, and the distinction is not
+    cosmetic: `none` is what a WSL2 distro with no ufw or firewall-cmd detects
+    as, and the loopback path still queues `netsh` portproxy commands for it.
+    Grouping it with `alf` dropped the privilege hint from exactly those — a
+    regression the old boolean got right by accident, caught in review of the
+    commit that introduced it.
+    """
     assert platform.elevation_policy("ufw") == platform.ElevationPolicy(
         ("sudo", "-n"), " with sudo"
     )
-    assert platform.elevation_policy("netsh").retry_hint == " in an Administrator PowerShell"
-    for quiet in ("alf", "none"):
-        assert platform.elevation_policy(quiet) == platform.ElevationPolicy()
+    for windows_ish in ("netsh", "none"):
+        assert (
+            platform.elevation_policy(windows_ish).retry_hint == " in an Administrator PowerShell"
+        )
+    assert platform.elevation_policy("alf") == platform.ElevationPolicy()
+
+
+@pytest.mark.parametrize("flag", ["--getglobalstate", "--getblockall"])
+def test_a_getter_that_answers_something_unrecognised_is_unchecked(
+    _on_a_mac: None, flag: str
+) -> None:
+    """ "The command succeeded" is not "the output was recognised", and merging them lies.
+
+    `enabled` was `"state = 1" in said or "state = 2" in said`, so ANY wording
+    the parser did not expect — a future macOS phrasing, an unanticipated
+    locale — answered False, and `describe()` then said "off, nothing is being
+    blocked, no rule is needed" about a machine that may be blocking every
+    player. Worst outcome the design has, and it contradicted `AlfState`'s own
+    docstring. Nothing tested it, because every case fed to the parser sat
+    clearly on one side or the other (review, 2026-08-24).
+    """
+    alf = _Alf(state="State = 1", block="disabled", app="not blocked")
+    alf.answers[flag] = "Firewall is in some state macOS has not documented"
+    state = platform.detect_alf_state(run=alf)
+
+    field = state.enabled if flag == "--getglobalstate" else state.block_all
+    assert field is None, (flag, state)
+    if flag == "--getglobalstate":
+        # And it must not read as a machine that is fine.
+        assert "unchecked" in state.describe() and "not a pass" in state.describe()
+
+
+def test_a_mac_is_told_what_a_loopback_binding_actually_means(_on_a_mac: None) -> None:
+    """No firewall change fixes a 127.0.0.1 binding, so the macOS copy must not imply one.
+
+    The branch was wired and reachable and nothing exercised it: every other
+    `alf` test passes no bindings at all (review, 2026-08-24).
+    """
+    plan = networking.plan(
+        WOTLK,
+        "lan",
+        lan_ip="192.168.1.5",
+        firewall="alf",
+        bindings={WOTLK.ports.auth: "127.0.0.1", WOTLK.ports.world: "0.0.0.0"},
+        detect_alf=lambda: platform.AlfState(True, False, "allowed"),
+    )
+    loopback = [w for w in plan.warnings if "127.0.0.1" in w]
+    assert loopback, plan.warnings
+    assert "No firewall change can fix a loopback binding" in loopback[0]
+    assert "portproxy" not in loopback[0]  # that is the WSL remedy, not a Mac one
+    assert plan.portproxy_commands == ()

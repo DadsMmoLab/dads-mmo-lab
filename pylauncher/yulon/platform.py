@@ -142,9 +142,10 @@ def detect_firewall(which: Callable[[str], str | None] | None = None) -> Firewal
     if detect() == "windows":
         return "netsh"
     if detect() == "macos":
-        # It ships with macOS, so the question is never "is a tool present" but
-        # "what is it set to" — which is 's job, not this
-        # one's. Answering "none" here is what told a Mac user about ufw.
+        # It ships with macOS, so the question is never "is a tool present"
+        # but "what is it set to" — which is `detect_alf_state()`'s job,
+        # not this one's. Answering "none" here is what told a Mac user about
+        # ufw.
         return "alf"
     find = which if which is not None else _which
     if find("ufw"):
@@ -263,6 +264,24 @@ def _alf_read(do: RunCmd, *args: str) -> str | None:
     return proc.stdout.strip().lower()
 
 
+def _alf_flag(said: str | None, *, yes: tuple[str, ...], no: tuple[str, ...]) -> bool | None:
+    """Three answers from one getter: True, False, or "that is not a reading".
+
+    The negative patterns are tested FIRST, because macOS's wordings nest —
+    "disabled" is a substring of nothing here, but "blocked" is a substring of
+    "not blocked" one function down, and the same class of trap is one wording
+    change away in either of these. Anything matching neither is `None`.
+    """
+    if said is None:
+        return None
+    if any(pattern in said for pattern in no):
+        return False
+    if any(pattern in said for pattern in yes):
+        return True
+    logger.info(f"socketfilterfw said something unrecognised: {said!r}")
+    return None
+
+
 def detect_alf_state(run: RunCmd | None = None, docker_backend: Path | None = None) -> AlfState:
     """Read the macOS firewall, unprivileged and without prompting for anything.
 
@@ -276,18 +295,33 @@ def detect_alf_state(run: RunCmd | None = None, docker_backend: Path | None = No
     without spawning anything, which is also what makes it safe to call from
     the test box.
     """
-    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv))
+    # Bounded, like every other probe in this module. `runner.run()`'s own
+    # docstring says the callers that need a timeout are the ones running on a
+    # GUI thread, and this is a public function anyone can call synchronously —
+    # today's only caller happens to be on a worker thread, which is the
+    # caller's property, not this function's (review, 2026-08-24).
+    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv, timeout=5.0))
     app = docker_backend if docker_backend is not None else _DOCKER_BACKEND
     if not _SOCKETFILTERFW.is_file():
         return AlfState()
 
-    state = _alf_read(do, "--getglobalstate")
-    enabled = None if state is None else ("state = 1" in state or "state = 2" in state)
-
-    blocked_all: bool | None = None
-    said = _alf_read(do, "--getblockall")
-    if said is not None:
-        blocked_all = "disabled" not in said
+    # Each field is matched three ways, not two. "The command succeeded" is not
+    # the same as "the output was recognised", and collapsing them is how a
+    # firewall that is ON reads as OFF: `enabled` used to be
+    # `"state = 1" in said or "state = 2" in said`, so ANY unrecognised wording
+    # — a future macOS phrasing, an unanticipated locale — answered False, and
+    # `describe()` then said "off, nothing is being blocked, no rule is needed"
+    # about a machine that may be blocking every player. That is the worst
+    # outcome this design has, and it contradicted `AlfState`'s own docstring
+    # two lines above it (review of this commit, 2026-08-24).
+    enabled = _alf_flag(
+        _alf_read(do, "--getglobalstate"), yes=("state = 1", "state = 2"), no=("state = 0",)
+    )
+    blocked_all = _alf_flag(
+        _alf_read(do, "--getblockall"),
+        yes=("enabled", "block all non-essential"),
+        no=("disabled",),
+    )
 
     status: AlfAppStatus | None = None
     app_said = _alf_read(do, "--getappblocked", str(app))
@@ -332,7 +366,13 @@ def elevation_policy(backend: FirewallBackend) -> ElevationPolicy:
     """
     if backend in ("ufw", "firewalld"):
         return ElevationPolicy(("sudo", "-n"), " with sudo")
-    if backend == "netsh":
+    if backend in ("netsh", "none"):
+        # `none` belongs HERE, not with `alf`. It emits no firewall commands,
+        # but it is the backend a WSL2 distro with no ufw/firewall-cmd gets —
+        # and the loopback path still queues `netsh` portproxy commands for it.
+        # Grouping it with `alf` dropped the privilege hint from exactly those,
+        # which the old `linux`-boolean got right by accident (review of this
+        # commit, 2026-08-24).
         return ElevationPolicy((), " in an Administrator PowerShell")
     return ElevationPolicy()
 
