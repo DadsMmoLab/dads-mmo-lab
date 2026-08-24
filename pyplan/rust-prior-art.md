@@ -47,6 +47,12 @@ Rules that cost someone an evening each:
 - The state file is a HINT; every stage re-checks disk evidence (clone → `.git` + `git remote get-url origin`;
   build → `docker compose images -q` non-empty). An `is_done` short-circuit once let a dropped-in state file
   make generate-compose rewrite a real server's compose file and orphan its character volumes.
+  **The rule holds; its build clause does not, and this project measured that.** `compose images -q`
+  enumerates the images of a project's CREATED CONTAINERS, so after a successful build with no
+  containers yet — the only window a resume asks in — it returns nothing (yulon-ubuntu, Docker
+  29.1.3 / Compose 2.40.3, 2026-08-24). Carried back to `rust-main` as written it would re-run every
+  build; the Python engine asks the daemon by image reference instead (`docker image inspect`, one
+  per `composegen.built_image_refs()`). Take the correction with the rule.
 - Failure mid-stage records nothing (the stage re-runs); `last_error` is only written into a dir that already
   has content, or the state file itself becomes the non-empty dir that blocks the retry.
 - Resume rests on the state file + BuildKit's layer cache; it is not process suspension.

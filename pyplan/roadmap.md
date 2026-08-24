@@ -297,8 +297,8 @@ GUI only.
 ### 5.3 GitHub Actions release matrix
 
 1. Complete `.github/workflows/release.yml`: `ubuntu-latest` → `.AppImage` (via `appimagetool`),
-   `windows-latest` → `.exe`, `macos-latest` → `.dmg`. **[style]** — never attempt local
-   cross-builds (README §8).
+   `windows-latest` → a zipped one-dir build (`yulon.exe` plus its runtime files),
+   `macos-latest` → `.dmg`. **[style]** — never attempt local cross-builds (README §8).
 2. _Definition of done:_ `git push` of a `v*` tag produces all three artifacts automatically.
 
 ### 5.4 Application self-update check (README §10)
@@ -352,11 +352,11 @@ automatically.
 > engine must not reintroduce it. Incident history lives in `pyplan/checklist.md` (Cross-cutting).
 ### 6.0 Rehome the install scripts (prerequisite refactor)
 
-> Before any macOS/Windows installer is added, the installers need a real home: today the
-> executable `install-*.sh` scripts (and their sourced helpers) live mixed in with the
-> human-facing guides under `archive/guides/<game>/`. Move them into a dedicated
-> `catalog/installers/` area so `catalog.json` and the packaging spec point at one clean,
-> data-only location that 6.2/6.3 will grow with per-platform variants.
+> Before any macOS/Windows installer is added, the installers need a real home: the executable
+> `install-*.sh` scripts (and their sourced helpers) sat mixed in with the human-facing guides
+> under `archive/guides/<game>/`. Move them into a dedicated `catalog/installers/` area so
+> `catalog.json` and the packaging spec point at one clean, data-only location that 6.2/6.3
+> will grow with per-platform variants.
 
 1. Move the executable install scripts (plus the sourced helpers `dml-start.sh`, `wow-manage.sh`)
    out of `archive/guides/<game>/` into `pylauncher/catalog/installers/<game>/`, parallel to
@@ -535,8 +535,7 @@ automatically.
 7. **Networking auto-setup (README §13, full `WoW-Wotlk-NETWORKING.md` scope).** LAN *and*
    internet-play, item-for-item against the guide, on all three platforms:
    - firewall open (`ufw` / `firewalld` on Linux; `netsh` + Windows "Private" network check on
-     Windows; **macOS's firewall path must actually be designed and implemented** — currently
-     unverified/undesigned, see Cross-cutting gap);
+     Windows; on macOS the `alf` backend is built and has never run on a Mac — **gate it here**);
    - WSL2 `netsh interface portproxy` when compose ports are `127.0.0.1`-bound;
    - local IP (LAN) and public IP (internet) detection, incl. WSL2 reading the Windows host
      address, never the `172.x` guest;

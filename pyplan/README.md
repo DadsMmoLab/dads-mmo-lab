@@ -261,7 +261,9 @@ serves all four families (`type`: `module` | `ale` | `mod` | `keg`) — the prim
 set (`source`, `build`, `sql`, `conf`, `deploy`, `patches`, `client`, `server_dbc`, `npcs`,
 `prompts`, `notes`); unknown keys are rejected, ids/game are lowercase kebab slugs, and `source.repo`
 must be a GitHub `owner/name` slug or an `https://` URL on an allow-listed forge (§3a). Every
-field except `id`/`name`/`type`/`game` is optional, so a simple module stays short:
+field except `id`/`name`/`type`/`game` is optional — plus `source`, which `module`, `ale` and
+`keg` items all require, and `source.sparse_path`, which a `keg` also requires — so a simple
+module stays short:
 
 ```json
 {
@@ -377,7 +379,7 @@ The app needs a per-OS location to persist its own state — remembered server i
 
 Existing docs are explicit: **"Only run ONE server at a time — they share the same ports"** (`WoW-WotLK-CONTROLS-1.md`). The Controller must enforce this instead of silently reproducing the shell version's foot-gun:
 
-- Before starting a server, the Controller checks whether another managed install is already running (via `docker_ctl.status()` across all known installs) and whether the required ports (e.g. 3724, 8085) are free.
+- Before starting a server, the Controller checks whether the required ports (e.g. 3724, 8085) are free. It is one **global** scan of running containers for anything publishing them — so it also catches containers with nothing to do with Yu'lon — with this install's own three excluded by name. It does NOT enumerate other managed installs; this line said it did, and `port_conflicts()`'s own docstring says it "has no concept of which install a container belongs to".
 - If a conflict is found, the UI blocks the "Start" action and clearly tells the user which install is already running and needs to be stopped first — no raw port-in-use errors surfaced from Docker.
 - This check belongs in the shared `docker_ctl.py` / `runner.py` layer (Phase 1) so every per-game controller inherits it for free, rather than each `controller_<acronym>/` reimplementing the check.
 

@@ -71,7 +71,10 @@ python -m yulon.catalog.installer wow-wotlk --server-dir ~/wow-server-playerbots
 python -m yulon.catalog.installer wow-tbc --client-dir ~/Games/WoWTBC   # games that need a client folder
 ```
 
-Needs a reachable Docker daemon (otherwise it stops with the Phase 3.3 message), and cached or
+Needs Docker — but no longer a *reachable* one to begin with: when no daemon answers, preflight
+runs the real provisioner (`platform.ensure_docker()`) and refuses only if what comes back still
+cannot be used, needing a reboot or a manual install. The Phase 3.3 placeholder message this
+used to name is not emitted anywhere any more. Cached or
 passwordless sudo — the wrapped scripts still start with `sudo -v`. The **app** no longer needs
 that (roadmap 6.1.5 runs the script on a pty and answers the password through a dialog), but this
 CLI harness has no dialog to answer with, so the old requirement stands here.

@@ -21,7 +21,8 @@
    whoever is listening decide what to do. See §5.
 4. **Never refer to a game by its full/trademarked name — acronyms only.** Never "Warcraft",
    always "WoW". Never "RuneScape", always "RS". See §6.
-5. **All filenames are lowercase.** No exceptions.
+5. **All filenames are lowercase**, except the conventional uppercase documents at a
+   directory root and tool-mandated names. See §6a.
 6. **Python is fully typed.** Despite Python being dynamically typed by default, this codebase
    treats it as statically typed: every function signature, variable where it isn't obvious, and
    class attribute is annotated, and CI enforces it with a type checker. Untyped/`Any`-typed code
@@ -212,15 +213,21 @@ async) and lets the caller decide what happens next.
   for a new user's benefit. Even then, default to the acronym after first mention on a given
   screen.
 - When adding a new game to the catalog, pick its acronym convention (check for existing community
-  convention first — e.g. RS for RuneScape is already used in this repo's `guides/runescape/`) and
+  convention first — e.g. RS for RuneScape is already used in this repo's `archive/guides/runescape/`) and
   use it consistently across manifest `game` values, directory names, and container name prefixes.
 - Rationale: keeps the codebase, logs, and filenames neutral of trademarked terms, and keeps
   naming short and consistent with how the community already refers to these servers.
 
 ### 6a. Filenames — always lowercase
 
-**Every filename in this repository, without exception, is lowercase.** This includes Python
-modules, JSON manifests, markdown docs, and directories.
+**Every filename in this repository is lowercase**, with one carve-out named below. This
+includes Python modules, JSON manifests, markdown docs, and directories.
+
+The carve-out is the conventional uppercase document at a directory root — `README.md`,
+`CONTRIBUTING.md`, `DISCLAIMER.md`, `LICENSE-AGPL` — which every tool that renders a repo
+looks for by that exact name. This section said "without exception" while six such files
+were tracked, three of them `README.md`; a rule the tree does not obey teaches a reader to
+discount the rule, which is worse than the exception (2026-08-24).
 
 - `catalog_view.py`, not `Catalog_view.py`
 - `controller_wow_wotlk/`, not `Controller-WoW-WotLK/`
