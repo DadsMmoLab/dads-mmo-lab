@@ -336,7 +336,7 @@ class DockerMysql:
                 stdout=stdout if stdout is not None else subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=False,
-                env=mysql_env(self.root_password),
+                env=runner.child_env(mysql_env(self.root_password)),
                 creationflags=runner.creationflags(),
             )
         except OSError as exc:
