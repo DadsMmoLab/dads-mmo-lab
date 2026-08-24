@@ -2538,6 +2538,12 @@ def _spawn_detached(argv: list[str]) -> subprocess.Popen[bytes]:
         argv,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        # Sanitised like every other spawn: this one starts `systemd-inhibit`
+        # or `caffeinate`, and a frozen launcher that hands them its own
+        # libraries gets a keep-awake that silently never starts. Missed on the
+        # first pass of the library-path fix precisely because it is the one
+        # spawn site not in `runner` and not named in `creationflags()`'s list.
+        env=runner.child_env(),
         creationflags=runner.creationflags(),
     )
 
