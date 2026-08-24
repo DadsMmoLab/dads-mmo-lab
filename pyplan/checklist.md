@@ -272,11 +272,27 @@ immediately after it landed:
   two tests in the file — the first run's evidence described tests that were not the ones being
   graded, so it was thrown away rather than reported.)
 
-  **Still open, and it is the reason 6.2's box stays unticked:** the GUI half. Every gate above
-  drove the seam directly, so what is proven is that the mechanism asks and obeys — not that a
-  dialog appears on screen at the right moment with the right text. That needs a fresh non-member
-  user on a box with no Docker, which is why the gates used containers: `pk` is already in the
-  group on both Linux VMs.
+  **The GUI half is now gated too, offscreen (2026-08-24).** The chain was verified end to end —
+  `catalog_view.py` passes `ask=prompter.ask` into `run()`, which forwards it to `preflight()`,
+  which is where `ensure_docker()` is called; that middle hop is the one this change added, and
+  without it the prompter reached the script and never the escalation. A test then drives the real
+  `InputPrompter` against the real question on a worker thread, finds the modal dialog Qt actually
+  opened, reads the text off its labels and answers it. Six mutations die against it: the question
+  losing its `(y/n)` (which silently turns the answer into a **password box**, so a user typing
+  `y` sees a dot and concludes the launcher wants their password), the dialog never opening, and
+  each of the four things the copy has to say — that the group is full root access, the concrete
+  thing that lets someone do, what saying yes costs, and what saying no costs. Two earlier
+  attempts at those copy mutations SURVIVED and were the useful ones: the first anchored on a
+  phrase that also appears in the other branch, the second removed only the first of several
+  adjacent string literals, so the phrase stayed in the source. Both were fixed rather than
+  reported.
+
+  **Still open, and it is the reason 6.2's box stays unticked:** nobody has seen this on a real
+  screen, during a real install, on a machine where the answer matters. Offscreen Qt renders the
+  widgets but not the moment — whether the dialog lands before or after the log panel has said
+  anything, and whether a user who has just clicked Install understands why they are being asked.
+  That needs a fresh non-member user on a box with no Docker, which is why the seam gates used
+  containers: `pk` is already in the group on both Linux VMs.
 
 ### Two things the first button-driven install found (2026-08-24)
 
