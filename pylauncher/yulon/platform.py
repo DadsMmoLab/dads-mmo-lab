@@ -1651,10 +1651,10 @@ def _linux_user(explicit: str | None) -> str:
         try:
             import pwd
 
-            # `str()` and the ignore because mypy runs on Windows here, where
-            # the POSIX stub is not resolvable — the guard above is what makes
-            # the call safe at runtime, not the type checker.
-            return str(pwd.getpwuid(euid).pw_name)  # type: ignore[attr-defined]
+            # `str()` because mypy runs on Windows here, where the POSIX stub
+            # is not resolvable — the guard above is what makes the call safe
+            # at runtime, not the type checker.
+            return str(pwd.getpwuid(euid).pw_name)
         except (ImportError, KeyError):
             logger.info(f"no passwd entry for uid {euid}; falling back to the environment")
     # `deck` last: it is the SteamOS default this project targets, and a wrong
