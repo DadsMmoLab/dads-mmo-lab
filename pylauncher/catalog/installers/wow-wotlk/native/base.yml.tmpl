@@ -45,7 +45,25 @@ services:
       - db-data:/var/lib/mysql
     restart: unless-stopped
     healthcheck:
-      test: "/usr/bin/mysql --user=root --password=$$MYSQL_ROOT_PASSWORD --execute \"SHOW DATABASES;\""
+      # `--protocol=TCP`, which upstream's copy of this healthcheck does not
+      # have. Without it the probe rides the unix socket, so "healthy" means
+      # "a local client can log in" — while every consumer of this condition
+      # (`ac-db-import`, the world and auth servers, the launcher's own
+      # maintenance path) reaches the database over TCP from another
+      # container. The gate should assert the thing the waiters need.
+      #
+      # This is NOT a reproduced fix. The install of 2026-08-24 died with
+      # `Can't connect to MySQL server on 'ac-database:3306' (111)` 0.3 s after
+      # compose called the database healthy, and the socket/TCP split was the
+      # inferred cause. It did NOT reproduce: 10 fresh-volume runs on
+      # yulon-ubuntu — 5 with upstream's spelling, 5 with this one, using this
+      # exact healthcheck, `depends_on: service_healthy`, and a second
+      # container connecting to `ac-database:3306` — all connected first try.
+      # See `pyplan/checklist.md`. What those runs DO establish is that this
+      # spelling goes healthy in the same time as upstream's (17.1-18.2 s), so
+      # it is a strictly stronger condition at no measured cost, which is the
+      # only claim made for it here.
+      test: "/usr/bin/mysql -h 127.0.0.1 --protocol=TCP --user=root --password=$$MYSQL_ROOT_PASSWORD --execute \"SHOW DATABASES;\""
       interval: 5s
       timeout: 10s
       retries: 40

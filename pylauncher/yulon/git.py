@@ -63,6 +63,32 @@ _LINE_ENDING_CONFIG = [
     "core.eol=lf",
 ]
 
+# HTTP/1.1 for the transport, in both forms, for the same reason the line-ending
+# settings are in both: the wrapper form covers this invocation, the persisted
+# form covers every later fetch against the clone.
+#
+# Measured, not inherited: `git clone` of `azerothcore-wotlk` (224k objects) on
+# real Windows died with `fetch-pack: invalid index-pack output` /
+# `unexpected disconnect while reading sideband packet`, and the same clone over
+# HTTP/1.1 succeeded (2026-08-22, `pyplan/checklist.md`). The Rust launcher hit
+# the same wall from the other side — a 1.3 GB clone over HTTP/2 dying with
+# `curl 92 CANCEL (err 8)`, presenting as `early EOF`, which killed a real
+# install at 9% (`rust-prior-art.md` §4).
+#
+# It is applied to the containerized git too, even though the measurement was
+# Git for Windows: the failure is in the HTTP/2 conversation and the container's
+# curl speaks it as readily. One flag of insurance on a step that costs 2.4 GB
+# to retry.
+#
+# **`http.postBuffer=524288000` is deliberately NOT here**, though it was in the
+# measured fix. The two were changed together, so nothing separates which one
+# worked, and a half-gigabyte buffer is a widely-copied setting with a real cost
+# and no mechanism connecting it to this failure. If HTTP/1.1 alone proves
+# insufficient at a gate, that is the moment to add it — with that evidence.
+_HTTP_VERSION_ARGS = ["-c", "http.version=HTTP/1.1"]
+_HTTP_VERSION_CONFIG = ["--config", "http.version=HTTP/1.1"]
+
+
 # Pinned by digest, not by tag. This image is handed a writable bind mount of
 # the destination directory, so "whatever :latest resolves to today" is a
 # third party with write access to a user's install. The tag is kept alongside
@@ -219,8 +245,10 @@ class RunnerGit:
             argv = [
                 "git",
                 *_LINE_ENDING_ARGS,
+                *_HTTP_VERSION_ARGS,
                 "clone",
                 *_LINE_ENDING_CONFIG,
+                *_HTTP_VERSION_CONFIG,
                 *_depth_args(spec.depth),
             ]
             if spec.branch:
@@ -261,7 +289,10 @@ class RunnerGit:
         this repository if it was cloned by an older build of this launcher.
         """
         ref = spec.branch or "HEAD"
-        _run_git(["git", *_LINE_ENDING_ARGS, "fetch", "origin", ref], cwd=spec.dest)
+        _run_git(
+            ["git", *_LINE_ENDING_ARGS, *_HTTP_VERSION_ARGS, "fetch", "origin", ref],
+            cwd=spec.dest,
+        )
         _run_git(["git", *_LINE_ENDING_ARGS, "reset", "--hard", "FETCH_HEAD"], cwd=spec.dest)
 
 
@@ -340,7 +371,12 @@ class ContainerGit:
         if spec.dest.exists():
             shutil.rmtree(spec.dest)
         spec.dest.mkdir(parents=True, exist_ok=True)
-        argv = ["clone", *_LINE_ENDING_CONFIG, *_depth_args(spec.depth)]
+        argv = [
+            "clone",
+            *_LINE_ENDING_CONFIG,
+            *_HTTP_VERSION_CONFIG,
+            *_depth_args(spec.depth),
+        ]
         if spec.branch:
             argv += ["--branch", spec.branch]
         if spec.sparse_path is not None:
@@ -398,6 +434,7 @@ class ContainerGit:
             *self._user_args(),
             self.image,
             *_LINE_ENDING_ARGS,
+            *_HTTP_VERSION_ARGS,
             *git_args,
         ]
         try:

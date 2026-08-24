@@ -26,7 +26,7 @@ Two catalog fields do the dispatching:
 | `install.script_platforms` | where the *bash script* is the mechanism |
 
 Anything in `platforms` but not in `script_platforms` runs the native engine. Phase 6 lands WotLK
-as `platforms: ["linux","macos","windows"]`, `script_platforms: ["linux"]` — so **Linux takes zero
+as `platforms: ["linux","macos"]`, `script_platforms: ["linux"]` — so **Linux takes zero
 new code paths**, and TBC/Vanilla/Tortoise stay Linux-only per the roadmap's scope gate.
 
 `NativeInstaller.run(options, cancel) -> Iterator[str]` keeps the same contract as today's
@@ -405,7 +405,7 @@ either class behind a shared `Protocol` (`preflight(options, cancel)`, `run(opti
 ask) -> Iterator[str]`). `NativeInstaller` accepts `ask` and never uses it: nothing on the native
 path may prompt — Docker Desktop is already provisioned by 5.1, there is no `sudo`, and a step that
 turns out to need interaction is a design failure to fix, not a dialog to add. WotLK's entry
-becomes `platforms: ["linux","macos","windows"]`, `script_platforms: ["linux"]`.
+becomes `platforms: ["linux","macos"]`, `script_platforms: ["linux"]`. (`"windows"` was in the plan here and is NOT in `catalog.json`: it belongs to 6.3, which has not started, so Windows still takes the 6.1 refusal. Corrected 2026-08-24 — this file said three platforms in two places while the data said two.)
 
 An `install.native` block joins the entry — floors and the template directory — and the engine
 refuses, honestly, to run an entry whose platform dispatches native but whose `native` block is
@@ -464,8 +464,7 @@ is only the build-context upload cost, which stays a number to record at each fi
 
 The base file carries `name: yulon-<game>-<install8>`, where `install8` is the first 8 hex digits
 of SHA-256 of the server dir's absolute path. This is the answer to "carry into 6.2" above: the
-identity lives in the file the engine itself generates and owns, `pin_project_name()` is never
-called on the native path, and `install_project()` needs no change — `compose_project_name()`
+identity lives in the file the engine itself generates and owns. (**This said `pin_project_name()` is never called on the native path, and that is false** — `catalog_view.py` pins on install-finished and the view is engine-blind, so a native install is pinned like any other. Harmless today, because `compose_project_name()` reads the generated `name:` and the pin agrees with it; retiring the pin on this path is unbuilt work, not a property to rely on. Corrected 2026-08-24.) and `install_project()` needs no change — `compose_project_name()`
 already reads `name:` out of the files. A moved folder keeps working because the name travels in
 the file. Volumes are project-scoped (the live gates saw `wow-server-playerbots_ac-database`), so
 per-install project names give each install its own database volume for free.
@@ -511,7 +510,7 @@ second prerequisite instead of adding one. It also deletes three of §4's Window
 no `git.exe` discovery, no `core.autocrlf` (Linux git in the container never writes CRLF), no
 Git-for-Windows curl. The HTTP/2 large-clone reset may still exist in the container image's own
 curl, so the clone passes `-c http.version=HTTP/1.1` anyway — one flag of insurance, checked at the
-gate. Clones retry 3x for transport resets, as prior art did.
+gate. **Both halves of that sentence were written as if built and neither was, until 2026-08-24.** The flag now exists, in the wrapper form on every network invocation and the `--config` form persisted into the clone, so the update path cannot renegotiate HTTP/2 on a repository that already cost 2.4 GB (`git.py`, pinned by a test). `http.postBuffer=524288000` was in the measured Windows fix and is deliberately NOT added: the two were changed together, nothing separates which one worked, and it is a widely-copied setting with a real cost and no mechanism connecting it to this failure. **Clones still do NOT retry** — prior art retried 3x for transport resets and this project does not; that is unbuilt work, not a described behaviour.
 
 ### The stages, by name
 
@@ -724,3 +723,91 @@ the function. These are the checks nobody here can perform, in the order they wo
 - **No new Docker Desktop start/provision logic.** `ensure_docker()` owns it; preflight calls it
   once and refuses honestly if it cannot deliver.
 
+---
+
+## Four decisions that were made and not recorded here (written down 2026-08-24)
+
+This file's job is to hold the *why* so a reviewer can challenge the reasoning rather than only
+the commits. Four decisions were taken in code and argued in code comments, which means they were
+reviewable only by whoever opened that file. A doc-freshness pass over all of `pyplan/` found
+them; they are recorded now, with what is settled and what is not.
+
+### Where the docker-group consent lives — and a conflict flagged rather than resolved quietly
+
+**Decided: the ask seam lives with the escalation, in `platform.ensure_docker(ask=...)`.** Not in
+`catalog/preflight.py`.
+
+`roadmap.md` 6.2 says "privilege consent belongs in preflight, not after the fact", and 6.2's
+definition of done asks that "the preflight records explicit consent for the docker-group join".
+That is satisfied, but by a different shape than the words suggest, so the divergence is stated
+rather than glossed: the question is asked *during* preflight — both `Installer.preflight()` and
+the native engine's preflight stage make exactly one `ensure_docker()` call, and that call now
+asks before it runs anything privileged — and the outcome is recorded on
+`ProvisionReport.docker_group`. `preflight.py` itself grows no consent `Check`.
+
+Why not a `Check` in `preflight.py`, which is the more literal reading:
+
+- **The question and the escalation must not be separable.** A `Check` produces a verdict that
+  some later caller has to honour; a seam means the only code that can join the group is the code
+  that just asked. The literal reading needs a `join_docker_group: bool` travelling from preflight
+  to provisioning, and any future caller can assert a consent it never obtained.
+- **It would break this file's own fence.** "No new Docker Desktop start/provision logic —
+  `ensure_docker()` owns it; preflight calls it once and refuses honestly if it cannot deliver."
+  Settling consent inside preflight puts provisioning policy back into preflight, in *both*
+  engines, which is also the DRY violation the style guide forbids.
+- **The payoff lands on an unreachable path.** The value of a `Check` is the user seeing one
+  coherent list of what the install needs. Preflight only runs the native engine's checks on the
+  native path, and no shipped catalog entry dispatches native on Linux — which is the only
+  platform with a docker group at all.
+
+**Flagged, per `roadmap.md`'s precedence rule** (README wins on what, style-guide on how, roadmap
+on order; flag a conflict rather than silently picking): if the roadmap meant a literal preflight
+`Check`, this is the divergence to overrule. The rule it exists to serve — never escalate without
+informed consent — is met either way, and is now argued on the emitted argv by a parametrized
+test plus eight mutations.
+
+**Also settled, and it is the opposite of what the sentence above it says:** this file states
+that nothing on the native path may prompt "because Docker Desktop is already provisioned and
+there is no `sudo`". That was only ever true because `catalog.json` happens not to dispatch any
+entry natively on Linux. The engine calls `ensure_docker()` itself, and on Linux that call can
+escalate. The native path now passes no `ask` down, so declining is structural rather than a
+consequence of today's data.
+
+### Image tags are per-install, and that closes an open item
+
+**Decided in code, unrecorded until now:** `composegen.DEFAULT_IMAGE_PREFIX` is
+`yulon.local/ac-wotlk-` and `image_tag()` derives a per-install tag from the server directory.
+
+`checklist.md` recorded, after the 2026-08-24 install re-pointed `acore/ac-wotlk-*:master` at
+binaries from a different checkout and silently upgraded a working server, that this was "worth a
+decision in `phase6-decisions.md` before 6.2 generates compose files that build". The decision was
+already taken — it is `rust-prior-art.md` §2's answer, adopted whole: a per-install tag so two
+installs cannot collide, and a prefix with a dot in it so Docker treats `yulon.local` as a
+registry host that can never resolve to Docker Hub and accidentally pull someone else's image.
+
+**Still open, and not the same problem:** the Linux *script* path — where the incident actually
+happened — still builds `acore/ac-wotlk-*:master`. That is upstream's compose file, the scripts
+are bugfix-only, and nothing in the app guards it. A second install of the same game on one Linux
+box still silently upgrades the first.
+
+### The database healthcheck asserts what its waiters need
+
+**Decided: the generated base file's healthcheck carries `-h 127.0.0.1 --protocol=TCP`**, which
+upstream's does not.
+
+Not because the first-run race was confirmed — it was not. See `checklist.md`: the socket/TCP
+mechanism did not reproduce in 10 fresh-volume runs, and the diagnosis is downgraded to a
+hypothesis that an idle box could not test. The change stands on its own smaller claim: every
+waiter on `condition: service_healthy` reaches the database over TCP from another container, so a
+probe that proves only "a client inside the container can log in" is asserting the wrong thing.
+The runs establish that it goes healthy in the same time as upstream's spelling (17.1-18.2 s), so
+it is a strictly stronger condition at no measured cost.
+
+### `SUDO_USER` decides whose name goes in the question
+
+**Decided:** `ensure_docker()` resolves the user as `SUDO_USER` → `USER` → `USERNAME` → `deck`.
+
+It used to skip `SUDO_USER`, so under `sudo yulon` every remaining source says `root` — and the
+consent dialog would have offered to add **root** to the docker group, then done it. Invisible
+while the join was silent; user-visible the moment the name went into a question. The `deck`
+fallback stays: it is the SteamOS default this project targets.

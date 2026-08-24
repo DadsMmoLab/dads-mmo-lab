@@ -305,3 +305,20 @@ def test_write_dotenv_is_atomic_and_leaves_no_temporary_file(tmp_path: Path) -> 
     path = composegen.write_dotenv(tmp_path, {"DB_ROOT_PASSWORD": "hunter2"})
     assert path.read_text(encoding="utf-8").endswith("DB_ROOT_PASSWORD=hunter2\n")
     assert [p.name for p in tmp_path.iterdir()] == [composegen.DOTENV_FILE]
+
+
+def test_the_database_healthcheck_asserts_the_thing_its_waiters_need(tmp_path: Path) -> None:
+    """Health must mean "reachable over TCP", because that is how it is reached.
+
+    Upstream's healthcheck has no `-h`, so it rides the unix socket and proves
+    only that a client INSIDE the container can log in. Every waiter on
+    `condition: service_healthy` — the import one-shot, both servers — connects
+    to `ac-database:3306` from a different container.
+
+    Pinned rather than left to review because it is one word in a string in a
+    template, and its absence is invisible until a first-ever install.
+    """
+    plan = render(tmp_path / "wow")
+    healthcheck = next(line for line in plan.base.splitlines() if line.strip().startswith("test:"))
+    assert "--protocol=TCP" in healthcheck
+    assert "-h 127.0.0.1" in healthcheck

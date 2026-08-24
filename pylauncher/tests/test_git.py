@@ -88,7 +88,20 @@ def test_update_of_an_existing_clone_fetches_and_resets(
     (dest / ".git").mkdir(parents=True)
     git.RunnerGit().clone(git.CloneSpec(url="https://example/mod.git", dest=dest, branch="master"))
     assert seen == [
-        ["git", "-c", "core.autocrlf=false", "-c", "core.eol=lf", "fetch", "origin", "master"],
+        # `fetch` talks to the network, so it carries the HTTP/1.1 insurance;
+        # `reset` is local and does not.
+        [
+            "git",
+            "-c",
+            "core.autocrlf=false",
+            "-c",
+            "core.eol=lf",
+            "-c",
+            "http.version=HTTP/1.1",
+            "fetch",
+            "origin",
+            "master",
+        ],
         ["git", "-c", "core.autocrlf=false", "-c", "core.eol=lf", "reset", "--hard", "FETCH_HEAD"],
     ]
 
@@ -333,3 +346,26 @@ def test_container_git_says_the_same_thing_when_a_resolved_docker_has_gone(
         git.ContainerGit().clone(
             git.CloneSpec(url="https://example/core.git", dest=tmp_path / "core")
         )
+
+
+def test_a_large_clone_is_pinned_to_http_1_1_on_the_wire_and_in_the_repo(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """The measured 224k-object failure, and the reason it must persist.
+
+    A clone of AzerothCore over HTTP/2 died on real Windows with
+    `unexpected disconnect while reading sideband packet`, and the Rust
+    launcher lost a 1.3 GB clone at 9% to the same conversation. The flag has
+    to be in BOTH forms for the same reason `core.autocrlf` is: `git -c` covers
+    only the invocation it is on, so without `--config` the next `fetch` on the
+    update path negotiates HTTP/2 again and the failure returns — on a clone
+    that already cost 2.4 GB.
+    """
+    git.RunnerGit().clone(
+        git.CloneSpec(url="https://example/core.git", dest=tmp_path / "core", depth=None)
+    )
+    argv = seen[0]
+    assert "-c" in argv and "http.version=HTTP/1.1" in argv
+    assert argv[argv.index("--config") :].count("http.version=HTTP/1.1") == 1
+    # The wrapper form comes before the subcommand, the persisted form after.
+    assert argv.index("clone") < argv.index("--config")
