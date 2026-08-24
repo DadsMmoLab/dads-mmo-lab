@@ -473,7 +473,13 @@ class Installer:
         env.setdefault("NEEDRESTART_SUSPEND", "yulon")
         return env
 
-    def preflight(self, options: InstallOptions, cancel: threading.Event | None = None) -> None:
+    def preflight(
+        self,
+        options: InstallOptions,
+        cancel: threading.Event | None = None,
+        *,
+        ask: runner.Prompter | None = None,
+    ) -> None:
         """Everything that must be true before a single line of the script runs.
 
         Raises `InstallerError` (script missing, client dir required but not
@@ -481,6 +487,14 @@ class Installer:
         implemented — roadmap 3.3's graceful failure). `cancel`, when set, is
         passed through to Docker provisioning so its ready-poll can be
         interrupted (a stop mid-provision must not leave a worker sleeping).
+
+        `ask` reaches Docker provisioning for one question: whether to join the
+        docker group, which is root-equivalent. It has to arrive here rather
+        than only in `run()`, because provisioning happens HERE — before the
+        script starts. That ordering is why the scripts' own consent gate could
+        never fire on the machine it was written for: `ensure_docker()` had
+        already joined the group, so the script found the user a member and
+        never asked (found 2026-08-24).
         """
         here = self._platform_id()
         if not self.entry.install.supports(here):
@@ -501,7 +515,7 @@ class Installer:
         if options.client_dir is not None and not options.client_dir.is_dir():
             raise InstallerError(f"client folder does not exist: {options.client_dir}")
         if not self._docker_check():
-            report = self._ensure_docker(cancel=cancel)
+            report = self._ensure_docker(cancel=cancel, ask=ask)
             if report.reboot_required:
                 raise DockerUnavailableError(
                     "Docker's prerequisites were installed but a reboot is needed first. "
@@ -545,7 +559,7 @@ class Installer:
         Setting `cancel` interrupts the script (see `runner.interact()`).
         """
         opts = options or InstallOptions()
-        self.preflight(opts, cancel=cancel)
+        self.preflight(opts, cancel=cancel, ask=ask)
         logger.info(f"installing {self.entry.id} via {self.script}")
         tail: deque[str] = deque(maxlen=_ERROR_TAIL_LINES)
 
@@ -609,7 +623,13 @@ class InstallEngine(Protocol):
     runner needed no changes for roadmap 6.2.
     """
 
-    def preflight(self, options: InstallOptions, cancel: threading.Event | None = None) -> None: ...
+    def preflight(
+        self,
+        options: InstallOptions,
+        cancel: threading.Event | None = None,
+        *,
+        ask: runner.Prompter | None = None,
+    ) -> None: ...
 
     def run(
         self,

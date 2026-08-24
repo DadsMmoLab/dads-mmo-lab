@@ -201,6 +201,11 @@ def provision_headless() -> int:
       3  a reboot is required first (`wsl --install` forces one on a box with no
          WSL), so nothing after it can be judged yet; reboot and run again
       2  not ready, and what remains needs a human
+
+    On Linux, 2 is the *expected* outcome rather than a fault: there is nobody
+    here to ask about joining the docker group, and the app never makes a
+    root-equivalent change with nobody asked, so the engine is installed and
+    the one step only the user may take is printed for them to run.
     """
     # The same defect's other half: the human-readable lines below put that same
     # step text through `logging`, and a cp1252 stream cannot encode it either.
@@ -223,6 +228,12 @@ def provision_headless() -> int:
         "reboot_required": report.reboot_required,
         "docker_ready": report.docker_ready,
         "ok": report.ok,
+        # What happened to the docker-group question. Headless has nobody to
+        # ask, so on Linux this is always "not-asked" and the exact command is
+        # in `manual_steps` — which makes exit 2 the expected outcome of a
+        # clean Linux provision, not a failure. Support reads this line to tell
+        # "the user declined root-equivalent access" apart from "it broke".
+        "docker_group": str(report.docker_group),
         # Which docker CLI this process resolved, or null. On a clean Windows box
         # this is the single most useful line in the report: it is the difference
         # between "the installer ran" and "the process that ran it can now use

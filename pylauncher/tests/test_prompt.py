@@ -30,7 +30,7 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import process_events
-from yulon import runner
+from yulon import platform, runner
 from yulon.catalog.installer import Installer
 from yulon.ui.widgets.log_panel import LogPanel
 from yulon.ui.widgets.prompt import InputPrompter, is_secret, tidy
@@ -54,6 +54,17 @@ def test_a_password_prompt_is_recognised_as_secret() -> None:
     assert is_secret("Please enter your PIN:") is True
     assert is_secret("Install path:") is False
     assert is_secret("Continue anyway? (y/n)") is False
+
+
+def test_the_docker_group_question_is_not_a_password_box() -> None:
+    """The consent answer is a yes/no, and must be typed in the clear.
+
+    It hangs on the literal `(y/n)` surviving copy edits, so it is pinned here
+    rather than left to a reviewer noticing: reword that last line and the
+    question silently becomes a masked field, where a user typing `y` sees a
+    dot and reasonably concludes the app wants their password.
+    """
+    assert is_secret(platform.DOCKER_GROUP_QUESTION.format(user="pk")) is False
 
 
 def test_a_prompt_is_shown_whole() -> None:

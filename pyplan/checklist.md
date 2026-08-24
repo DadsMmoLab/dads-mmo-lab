@@ -188,17 +188,81 @@ immediately after it landed:
   gates every `usermod -aG docker`, and version 1.4.3 removed the `/etc/sudoers.d/docker-nopasswd`
   write with the reasoning recorded in the script header: membership already *is* root, so the rule
   was attack surface with no benefit.
-- **TBC, Vanilla and Tortoise — NOT compliant.** `install-wow-tbc.sh:248`,
-  `install-wow-vanilla.sh:262` and `install-tortoise-wow-wsl.sh:226` each run
-  `sudo usermod -aG docker "$USER"` with no consent gate and no warning. These are the Phase 7
-  games and the scripts are bugfix-only until Phase 7 retires them — but a silent privilege
-  escalation is a bugfix, not a feature, and all three ship in `catalog.json` today. **Open.**
-- **The native engine (6.2) — does not escalate, and does not yet consent either.** Nothing in
-  `yulon/` writes a sudoers rule, joins a group or chmods the socket (grepped: the only hit is a
-  comment in `installer.py` recording why the old rule was removed). But the roadmap now makes
-  explicit consent part of 6.2's definition of done, recorded in *preflight*, and
-  `catalog/preflight.py` has no consent step. **Open, and it belongs to 6.2 rather than to a later
-  clean-up.**
+- **TBC, Vanilla and Tortoise — were NOT compliant, fixed 2026-08-24 (`0064b76b`).**
+  `install-wow-tbc.sh`, `install-wow-vanilla.sh` and `install-tortoise-wow-wsl.sh` each ran
+  `sudo usermod -aG docker "$USER"` with no consent gate and no warning, having been written
+  before the rule existed. WotLK's `docker_group_consent()` was ported into all three verbatim
+  rather than reworded — it was reviewed once already and says the two things a game-server
+  audience will not infer, and three scripts saying it three ways would be three things to keep
+  true. All 10 `usermod` call sites across the five scripts are now gated, and
+  `test_no_installer_escalates_privileges_without_asking` fails on any non-comment
+  `usermod -aG docker` that is not preceded by `docker_group_consent &&`, or on any `sudoers`
+  /`NOPASSWD` line at all.
+- **The native engine and every other Python path — the audit above was WRONG, and the bug it
+  missed was the live one. Fixed 2026-08-24.** "Nothing in `yulon/` joins a group (grepped)" was
+  false: the grep looked for the string `usermod -aG docker`, and `platform.py` spells the same
+  command as a list — `["usermod", "-aG", "docker", user]`, returned by
+  `docker_engine_commands()` and run under `sudo -n` by `_ensure_docker_linux()`. A negative
+  audit result deserves more scepticism than a positive one; "we found nothing" is also what a
+  wrong query returns. `roadmap.md` 6.4.3 had already prescribed the right technique — assert the
+  rule **on the emitted argv through the run seam** — and the audit used a text search instead.
+
+  It was reachable from all three callers of `ensure_docker()`: `main.py --provision`,
+  `Installer.preflight()`, and `NativeInstaller`'s own preflight stage. And the ordering made it
+  worse than an oversight: `Installer.preflight()` runs `ensure_docker()` **before** the bash
+  script starts, so on any passwordless-sudo box — which is both of this project's Linux test
+  VMs, and the SteamOS-shaped machine the code defaults its user name to — the launcher joined
+  the group first and the script's own consent gate then found the user already a member and
+  never asked. **The gate added to the scripts hours earlier could not fire on the machine it was
+  written for.** It went unnoticed because every box this has ever run on already had Docker, and
+  `ensure_docker()` returns early when a daemon answers.
+
+  **Proven, not argued, in a throwaway `ubuntu:24.04` container on yulon-ubuntu** (a real
+  `apt-get`, a real `sudo`, a real `usermod`; the container is the clean Linux box nobody has
+  spare): `dad` went from groups `['dad']` to `['dad', 'docker']` with `was_anyone_asked: false`.
+
+  The fix follows the shape the codebase already had for this: `ensure_docker(ask=...)` takes the
+  same `runner.Prompter` seam the script path uses, and **with nobody to ask, a privilege change
+  is declined** — `make_responder()`'s rule, applied at the layer that actually escalates. The
+  argv now exists in exactly one place, inside the consent branch, so there is no second
+  construction site a gate could be added to and then forgotten; `docker_engine_commands()` lost
+  its `user` parameter so putting it back is a signature change rather than a one-line append.
+  Consent is settled **before the first privileged command**, which is what the roadmap asks for
+  and also puts the dialog in front of someone who just clicked Install rather than four minutes
+  into an `apt-get`. `ProvisionReport.docker_group` records the outcome as one of five values —
+  granted / declined / not-asked / already-member / not-applicable — because the four ways of not
+  joining are different events and must not read as one; it rides `--provision`'s support JSON.
+
+  Three things the fix had to get right that the design pass caught and the first draft did not.
+  (1) **A granted join does not complete the install**: `usermod` does not change a running
+  process's supplementary groups, so `docker_ready()` stays false for the rest of that run either
+  way. The copy says "log out and back in once, then click Install again" instead of implying an
+  install that cannot start. (2) **The re-login line is now conditional** — it used to print
+  unconditionally, including on the two paths where no group change happened at all. (3) **Under
+  `sudo yulon` the dialog would have offered to make `root` a docker user**, because the user
+  resolution never consulted `SUDO_USER`; invisible while the join was silent, user-visible the
+  moment the name went into a question.
+
+  **Declining the group is not declining Docker.** The engine still installs; what the user keeps
+  is the choice about their own machine.
+
+  **Live-gated the same day, in the same container shape as the "before" run**, three users and
+  three answers: no prompter → not asked, groups unchanged; "no" → asked once, declined, groups
+  unchanged, engine still installed; "yes" → asked once, exactly one
+  `sudo -n usermod -aG docker saidyes`, group joined, re-login advice shown. `id -nG` confirmed
+  each independently of the app's own report. 751 tests green; **8 mutations, all died** —
+  consent defaulting to granted, the argv put back in the engine plan, the join moved outside the
+  gate, a dismissed dialog read as yes, the question asked after the fact, membership matched as
+  a substring, the command spelled `gpasswd`, and the prompter dropped on the way to
+  provisioning. (The mutation run was repeated after a bad splice left two shadowing copies of
+  two tests in the file — the first run's evidence described tests that were not the ones being
+  graded, so it was thrown away rather than reported.)
+
+  **Still open, and it is the reason 6.2's box stays unticked:** the GUI half. Every gate above
+  drove the seam directly, so what is proven is that the mechanism asks and obeys — not that a
+  dialog appears on screen at the right moment with the right text. That needs a fresh non-member
+  user on a box with no Docker, which is why the gates used containers: `pk` is already in the
+  group on both Linux VMs.
 
 ### Two things the first button-driven install found (2026-08-24)
 

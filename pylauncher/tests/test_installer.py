@@ -343,6 +343,50 @@ def test_installer_fails_gracefully_without_docker(tmp_path: Path) -> None:
         rebooter.preflight(InstallOptions())
 
 
+def test_the_prompter_reaches_provisioning_and_not_only_the_script(tmp_path: Path) -> None:
+    """The consent question is asked by the thing that escalates, which runs first.
+
+    `run()` has held the live prompter all along and dropped it one line before
+    `preflight()` — where `ensure_docker()` is called. So on a passwordless-sudo
+    box the launcher joined the docker group before the script started, and the
+    script's own `docker_group_consent()` then found the user already a member
+    and never asked. Nobody was asked anything, by either half.
+
+    This pins the delivery rather than the wording: whatever the dialog says,
+    the seam that can escalate has to be able to reach it.
+    """
+    entry = load_catalog().get("wow-wotlk")
+    script = tmp_path / entry.install.script
+    script.parent.mkdir(parents=True)
+    script.write_text("", encoding="utf-8")
+    seen: list[object] = []
+    from yulon.platform import ProvisionReport
+
+    def _provision(**kwargs: object) -> ProvisionReport:
+        seen.append(kwargs.get("ask"))
+        return ProvisionReport("linux", docker_ready=True)
+
+    def _prompter(_question: str) -> str:
+        return "n"
+
+    installer = _installer(
+        entry,
+        installers_root=tmp_path,
+        docker_check=lambda: False,
+        ensure_docker=_provision,
+        interact=_fake_interact([]),  # type: ignore[arg-type]
+    )
+    list(installer.run(InstallOptions(server_dir=tmp_path / "srv"), ask=_prompter))
+    assert seen == [_prompter]
+
+    # And with no prompter it arrives as None rather than being omitted, so the
+    # decline is a decision the provisioning path makes, not an accident of
+    # keyword defaults it never sees.
+    seen.clear()
+    list(installer.run(InstallOptions(server_dir=tmp_path / "srv")))
+    assert seen == [None]
+
+
 def test_installer_requires_the_client_dir_when_the_script_asks_for_it(tmp_path: Path) -> None:
     """README §3a: the app never fetches a client; games that need one refuse to start without."""
     entry = load_catalog().get("wow-tbc")

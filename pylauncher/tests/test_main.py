@@ -109,7 +109,12 @@ def test_the_report_is_one_parseable_line_on_stdout(
         "docker_ready",
         "ok",
         "docker_cli",
+        "docker_group",
     }
+    # The consent outcome is part of the support payload: it is what tells
+    # "the user declined root-equivalent access" apart from "provisioning
+    # broke", and headless can only ever report the former.
+    assert payload["docker_group"] == "not-applicable"
 
 
 def test_an_unresolvable_docker_cli_is_reported_as_null(

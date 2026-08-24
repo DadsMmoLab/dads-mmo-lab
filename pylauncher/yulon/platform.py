@@ -387,6 +387,21 @@ class ProvisionError(RuntimeError):
     """Provisioning hit something it cannot work around (message is user-readable)."""
 
 
+DockerGroupOutcome = Literal["granted", "declined", "not-asked", "already-member", "not-applicable"]
+"""What happened to the docker-group question on this run.
+
+Five values rather than a bool because the four ways of *not* joining are not
+the same event and must not read as one: the user said no, nobody was there to
+ask, they were already a member, or this platform has no such group at all.
+Only `granted` and `already-member` mean the user can drive Docker afterwards,
+and only those two may print the log-out-and-back-in line.
+
+This field is the artifact roadmap 6.2's definition of done means by "the
+preflight records explicit consent" — it rides `--provision`'s support JSON,
+so what was asked and answered is legible from a bug report.
+"""
+
+
 @dataclass(frozen=True)
 class ProvisionReport:
     """What `ensure_docker()` / `ensure_wsl2()` did, and what is still needed."""
@@ -397,6 +412,7 @@ class ProvisionReport:
     manual_steps: tuple[str, ...] = ()
     reboot_required: bool = False
     docker_ready: bool = False
+    docker_group: DockerGroupOutcome = "not-applicable"
 
     @property
     def ok(self) -> bool:
@@ -647,6 +663,105 @@ def docker_ready(run: RunCmd | None = None) -> bool:
     return False
 
 
+# ------------------------------------------------------- the docker group ask
+# Joining the `docker` group is the one thing provisioning does that changes
+# what the machine can be made to do: membership is root-equivalent, because
+# `docker run -v /:/mnt --rm -it alpine chroot /mnt sh` edits any file on the
+# host. The roadmap's Phase 6 preamble makes it a consented step on every
+# install path. It was not one here until 2026-08-24: `_ensure_docker_linux()`
+# ran it under `sudo -n` among the package steps, so on any passwordless-sudo
+# box — which is both of this project's own Linux test VMs — the launcher
+# granted itself root before the installer script got as far as its own polite
+# question, and that question then found the user already a member and never
+# asked. Proven in a throwaway ubuntu:24.04 container: `dad` went from groups
+# `['dad']` to `['dad', 'docker']` with nobody asked.
+
+DOCKER_GROUP_QUESTION = (
+    "Yu'lon can add '{user}' to the docker group, so it can use Docker without asking "
+    "for your password every time.\n"
+    "\n"
+    "Heads up: membership in the docker group is effectively full root access on this "
+    "machine. A docker user can, for example, mount your entire disk inside a container "
+    "and change any file.\n"
+    "\n"
+    "If you say yes: you'll need to log out and back in once before it takes effect, "
+    "then click Install again.\n"
+    "If you say no: Docker Engine is still set up, but Yu'lon runs docker directly "
+    "(never through sudo), so it cannot install or manage a server here until you join "
+    "the group yourself: sudo usermod -aG docker {user}, then log out and back in.\n"
+    "\n"
+    "Yu'lon never creates passwordless sudo rules and never changes the docker socket's "
+    "permissions.\n"
+    "\n"
+    "Add '{user}' to the docker group (grants root-equivalent access)? (y/n): "
+)
+"""The consent question, whose last line matches the five bash scripts' wording.
+
+The `(y/n)` is load-bearing twice over. `ui.widgets.prompt.is_secret()` reads
+it to leave the answer field unmasked — without it the consent answer arrives
+as a password box — and it is the same token the installers' own
+`docker_group_consent()` prints, so a user who meets both questions meets one
+question asked the same way. `test_prompt.py` pins the first of those.
+"""
+
+DOCKER_GROUP_DECLINED_STEP = (
+    "You said no to joining the docker group, so Yu'lon cannot use Docker on this machine "
+    "yet. Docker Engine is installed; to change your mind later: "
+    "sudo usermod -aG docker {user}, then log out and back in."
+)
+
+DOCKER_GROUP_UNASKED_STEP = (
+    "Skipped joining the docker group: it grants root-equivalent access, and with nobody to "
+    "ask Yu'lon never makes that change. To do it yourself: sudo usermod -aG docker {user}, "
+    "then log out and back in."
+)
+
+DOCKER_GROUP_RELOGIN_STEP = (
+    "Log out and back in (or run `newgrp docker`) so {user} can use Docker without sudo, "
+    "then click Install again."
+)
+"""Shown only where it is true: after a join that ran, or for an existing member.
+
+It used to be unconditional, which made it advice on the two paths where no
+group change had happened at all. The second half of the sentence is not
+padding either: `usermod` does not change a running process's supplementary
+groups, so `docker_ready()` stays false for the rest of this run even when the
+answer was yes. Saying otherwise would promise an install that cannot start.
+"""
+
+
+def _explicit_yes(reply: str | None) -> bool:
+    """Only a deliberate yes is consent. A dismissed dialog is not.
+
+    The same reading `make_responder()` applies to the installers' version of
+    this question, deliberately written the same way here: silence, an empty
+    string and a closed dialog all mean no, because refusing a privilege change
+    is recoverable and visible while granting one by accident is neither.
+    """
+    return reply is not None and reply.strip().lower() in ("y", "yes")
+
+
+def _docker_group_member(do: RunCmd, user: str) -> bool:
+    """Is `user` already in the `docker` group? False when it cannot be asked.
+
+    Exact token match, not a substring: a machine with a `dockerd` or
+    `docker-users` group must not read as a member and skip the question.
+
+    Unreadable answers False, so an unaskable machine is asked rather than
+    assumed — the safe direction, since the cost of a redundant question is a
+    click and the cost of a wrong skip is a silent escalation. `id` needs no
+    privilege, so this never goes through sudo.
+    """
+    try:
+        proc = do(["id", "-nG", user])
+    except OSError as exc:
+        logger.info(f"could not read {user}'s groups: {exc}")
+        return False
+    if proc.returncode != 0:
+        return False
+    return "docker" in proc.stdout.split()
+
+
 def linux_package_manager(
     which: Callable[[str], str | None] | None = None,
 ) -> PackageManager | None:
@@ -663,8 +778,16 @@ def linux_package_manager(
     return None
 
 
-def docker_engine_commands(pm: PackageManager, *, steamos: bool, user: str) -> list[list[str]]:
-    """The (sudo-less) commands that install + enable Docker Engine via `pm` for `user`."""
+def docker_engine_commands(pm: PackageManager, *, steamos: bool) -> list[list[str]]:
+    """The (sudo-less) commands that install + enable Docker Engine via `pm`.
+
+    **The docker-group join is deliberately not in this list**, and putting it
+    back is not a one-line append: it would need `user` again, which is why the
+    parameter is gone. The argv that grants root-equivalent access is built in
+    exactly one place — inside `_ensure_docker_linux()`'s consent branch — so
+    there is no second construction site that a gate could be added to and then
+    forgotten. It lived here, ungated, from 5.1 until 2026-08-24.
+    """
     install: list[list[str]]
     if pm == "pacman":
         install = [["pacman", "-Sy", "--noconfirm", "docker", "docker-compose"]]
@@ -681,11 +804,7 @@ def docker_engine_commands(pm: PackageManager, *, steamos: bool, user: str) -> l
         install = [["dnf", "-y", "install", "moby-engine", "docker-compose"]]
     else:
         install = [["zypper", "--non-interactive", "install", "docker", "docker-compose"]]
-    return [
-        *install,
-        ["systemctl", "enable", "--now", "docker"],
-        ["usermod", "-aG", "docker", user],
-    ]
+    return [*install, ["systemctl", "enable", "--now", "docker"]]
 
 
 # ------------------------------------------------------------------ downloads
@@ -1147,12 +1266,16 @@ def ensure_docker(
     user: str | None = None,
     wait_seconds: float = _DOCKER_READY_TIMEOUT_SECONDS,
     cancel: threading.Event | None = None,
+    ask: runner.Prompter | None = None,
 ) -> ProvisionReport:
     """Make sure a Docker daemon is reachable, installing what the OS needs (README §3b).
 
     Linux: Docker Engine through the distro package manager (under `sudo -n`; a
     password-needing sudo is a reported skip with the commands to paste). The
-    docker group change needs a re-login — reported, never hidden. Windows:
+    docker-group join is asked for through `ask` BEFORE anything privileged
+    runs, and declined whenever there is nobody to ask; the answer is on the
+    report as `docker_group`. Windows and macOS ignore `ask` — Docker Desktop
+    manages its own access there and neither path touches a Unix group. Windows:
     WSL2 (`ensure_wsl2()`) then Docker Desktop (download + silent install,
     elevated), then start it at wherever `find_docker_desktop()` says it is.
     macOS: Docker Desktop (download .dmg, copy Docker.app, open it).
@@ -1166,8 +1289,18 @@ def ensure_docker(
         logger.info("ensure_docker(): daemon already reachable")
         return ProvisionReport(current, done=("docker already running",), docker_ready=True)
     if current == "linux":
-        who = user or os.environ.get("USER") or os.environ.get("USERNAME") or "deck"
-        return _ensure_docker_linux(do, which, dry_run, who, wait_seconds, cancel)
+        # SUDO_USER first: under `sudo yulon` every other source says "root",
+        # and this name is now read out in a dialog offering to give that
+        # account root-equivalent access. It was invisible while the join was
+        # silent; making the question visible made the wrong answer visible too.
+        who = (
+            user
+            or os.environ.get("SUDO_USER")
+            or os.environ.get("USER")
+            or os.environ.get("USERNAME")
+            or "deck"
+        )
+        return _ensure_docker_linux(do, which, dry_run, who, wait_seconds, cancel, ask)
     if current == "windows":
         return _ensure_docker_windows(do, which, download, dry_run, wait_seconds, cancel)
     return _ensure_docker_macos(do, download, dry_run, wait_seconds, cancel)
@@ -1180,7 +1313,20 @@ def _ensure_docker_linux(
     user: str,
     wait_seconds: float,
     cancel: threading.Event | None = None,
+    ask: runner.Prompter | None = None,
 ) -> ProvisionReport:
+    """Install Docker Engine, and join the docker group only if asked and told yes.
+
+    The order matters and is the whole fix. Consent is settled BEFORE the first
+    privileged command, not after the package install: the roadmap requires the
+    question "before any docker-group join or privileged provisioning step",
+    and asking first also puts the dialog in front of someone who just clicked
+    Install rather than several minutes into an `apt-get`.
+
+    Declining the group is not declining Docker. The engine is installed either
+    way — that is the disclosed part of "the app installs everything" — and
+    what the user keeps is the choice about their own machine's security.
+    """
     pm = linux_package_manager(which)
     if pm is None:
         return ProvisionReport(
@@ -1190,12 +1336,30 @@ def _ensure_docker_linux(
                 "Engine by hand: https://docs.docker.com/engine/install/",
             ),
         )
-    commands = docker_engine_commands(pm, steamos=is_steamos(), user=user)
+
+    consent = _settle_docker_group(do, user, dry_run, cancel, ask)
+
+    commands = docker_engine_commands(pm, steamos=is_steamos())
     done, skipped = _run_steps(do, commands, sudo=True, dry_run=dry_run)
+    if consent == "granted":
+        # The one place this argv is built. `docker_engine_commands()` no
+        # longer contains it, so there is no ungated path to it at all.
+        joined, refused = _run_steps(
+            do, [["usermod", "-aG", "docker", user]], sudo=True, dry_run=dry_run
+        )
+        done, skipped = [*done, *joined], [*skipped, *refused]
+    elif dry_run:
+        skipped.append(f"(dry run) usermod -aG docker {user} (asks first)")
+
     ready = False if dry_run else _wait_docker_ready(do, min(wait_seconds, 30.0), 2.0, cancel)
-    manual = [
-        f"Log out and back in (or run `newgrp docker`) so {user} can use Docker without sudo."
-    ]
+
+    manual: list[str] = []
+    if consent in ("granted", "already-member"):
+        manual.append(DOCKER_GROUP_RELOGIN_STEP.format(user=user))
+    elif consent == "declined":
+        manual.append(DOCKER_GROUP_DECLINED_STEP.format(user=user))
+    elif consent == "not-asked":
+        manual.append(DOCKER_GROUP_UNASKED_STEP.format(user=user))
     if skipped and not dry_run:
         # A skip is reported by its real cause, not by the likeliest one. `sudo
         # -n` announces the password case itself ("a password is required"),
@@ -1213,7 +1377,38 @@ def _ensure_docker_linux(
             manual.insert(
                 0, f"Some steps needed a password; run them in a terminal with sudo: {failed}"
             )
-    return ProvisionReport("linux", tuple(done), tuple(skipped), tuple(manual), False, ready)
+    return ProvisionReport(
+        "linux", tuple(done), tuple(skipped), tuple(manual), False, ready, consent
+    )
+
+
+def _settle_docker_group(
+    do: RunCmd,
+    user: str,
+    dry_run: bool,
+    cancel: threading.Event | None,
+    ask: runner.Prompter | None,
+) -> DockerGroupOutcome:
+    """Decide the docker-group question without running anything privileged.
+
+    Every branch that is not a deliberate yes is a no, and each keeps its own
+    name because the four are different events to a person reading a report:
+    already a member, nobody to ask, cancelled, or asked and declined.
+
+    A cancelled run never opens a dialog. A `dry_run` never opens one either —
+    it exists to show a plan, and a plan that interrogates the user is not one.
+    """
+    if dry_run or (cancel is not None and cancel.is_set()):
+        # `dry_run` shows a plan, so it runs nothing at all — not even the
+        # harmless `id`. A cancelled run does not open a dialog either.
+        return "not-asked"
+    if _docker_group_member(do, user):
+        return "already-member"
+    if ask is None:
+        return "not-asked"
+    answer = _explicit_yes(ask(DOCKER_GROUP_QUESTION.format(user=user)))
+    logger.info(f"docker group consent for {user}: {'granted' if answer else 'declined'}")
+    return "granted" if answer else "declined"
 
 
 def _ps_quote(value: object) -> str:

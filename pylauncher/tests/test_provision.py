@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -114,21 +116,26 @@ def test_already_running_docker_short_circuits(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_linux_engine_plan_per_package_manager() -> None:
-    assert platform.docker_engine_commands("pacman", steamos=True, user="deck") == [
+    assert platform.docker_engine_commands("pacman", steamos=True) == [
         ["steamos-readonly", "disable"],
         ["pacman", "-Sy", "--noconfirm", "docker", "docker-compose"],
         ["steamos-readonly", "enable"],
         ["systemctl", "enable", "--now", "docker"],
-        ["usermod", "-aG", "docker", "deck"],
     ]
-    apt = platform.docker_engine_commands("apt", steamos=False, user="pk")
+    apt = platform.docker_engine_commands("apt", steamos=False)
     assert apt[0] == ["apt-get", "update"] and "docker.io" in apt[1]
     assert "docker-buildx" in apt[1]  # compose build needs BuildKit; docker.io lacks it
-    assert platform.docker_engine_commands("dnf", steamos=False, user="u")[0][:3] == [
+    assert platform.docker_engine_commands("dnf", steamos=False)[0][:3] == [
         "dnf",
         "-y",
         "install",
     ]
+    # The group join is not in any plan, on purpose: the argv exists only
+    # inside the consent branch, so there is no ungated construction site.
+    for pm in ("pacman", "apt", "dnf", "zypper"):
+        for steamos in (True, False):
+            plan = platform.docker_engine_commands(pm, steamos=steamos)
+            assert not [c for c in plan if "usermod" in c], (pm, steamos, plan)
     assert platform.linux_package_manager(
         lambda n: "/usr/bin/apt-get" if n == "apt-get" else None
     ) == ("apt")
@@ -148,10 +155,17 @@ def test_linux_runs_under_sudo_n_and_reports_password_needs(
         wait_seconds=0.0,
     )
     assert report.platform == "linux"
-    assert run.calls[1] == ["sudo", "-n", "apt-get", "update"]
+    # `id -nG` comes first and needs no privilege: whether the user is already
+    # a member is settled before anything runs under sudo.
+    assert run.calls[1] == ["id", "-nG", "pk"]
+    assert run.calls[2] == ["sudo", "-n", "apt-get", "update"]
     assert any(s.startswith("apt-get update: exit 1") for s in report.skipped)
     assert any("needed a password" in m for m in report.manual_steps)
-    assert any("Log out and back in" in m for m in report.manual_steps)
+    # No prompter, so nothing was asked and nothing was joined — the re-login
+    # advice would be false here, and used to be printed unconditionally.
+    assert report.docker_group == "not-asked"
+    assert not [m for m in report.manual_steps if "Log out and back in" in m]
+    assert any("Skipped joining the docker group" in m for m in report.manual_steps)
     assert report.docker_ready is False and report.ok is False
 
 
@@ -766,3 +780,220 @@ def test_linux_does_not_blame_a_password_for_a_failure_that_was_not_one(
     assert any(
         "systemctl enable --now docker" in m for m in report.manual_steps
     ), report.manual_steps
+
+
+# Every spelling of "put this user in the docker group". The audit that wrote
+# "the native engine does not escalate" into the checklist grepped for the
+# string `usermod -aG docker`, which platform.py has never contained — it
+# builds the same command as a list. So the net is cast over argv ELEMENTS,
+# and over the three commands that can do it, not the one that did.
+_GROUP_JOINERS = ("usermod", "gpasswd", "adduser")
+
+
+def _joins_the_docker_group(calls: list[list[str]]) -> list[list[str]]:
+    return [
+        argv
+        for argv in calls
+        if "docker" in argv and any(joiner in argv for joiner in _GROUP_JOINERS)
+    ]
+
+
+def _linux(monkeypatch: pytest.MonkeyPatch, steamos: bool = False) -> None:
+    monkeypatch.setattr(platform.sys, "platform", "linux")
+    monkeypatch.setattr(platform, "is_steamos", lambda: steamos)
+
+
+def _which(tool: str) -> Callable[[str], str | None]:
+    return lambda n: f"/usr/bin/{tool}" if n == tool else None
+
+
+class _WithGroups(_Run):
+    """`_Run`, but `id -nG` answers with a real group list."""
+
+    def __init__(self, groups: str) -> None:
+        super().__init__()
+        self.groups = groups
+
+    def __call__(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
+        self.calls.append(argv)
+        if argv[:2] == ["docker", "info"]:
+            return subprocess.CompletedProcess(argv, self.docker_rc, "", "")
+        if argv[0] == "id":
+            return subprocess.CompletedProcess(argv, 0, self.groups, "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+
+@pytest.mark.parametrize(
+    ("tool", "steamos"),
+    [("pacman", True), ("pacman", False), ("apt-get", False), ("dnf", False), ("zypper", False)],
+)
+def test_linux_never_joins_the_docker_group_without_consent(
+    monkeypatch: pytest.MonkeyPatch, tool: str, steamos: bool
+) -> None:
+    """Roadmap 6.4.3, asserted where it says to assert it: on the emitted argv.
+
+    Adding a user to the `docker` group is a root-equivalent grant — `docker
+    run -v /:/mnt --rm -it alpine chroot /mnt sh` edits any file on the host —
+    so the Phase 6 preamble makes it a consented step on *every* install path,
+    not only in the bash scripts.
+
+    This is the Python half of `test_installer.py`'s script invariant, and it
+    exists because that one could not have found this: the audit that wrote
+    "the native engine does not escalate" into `pyplan/checklist.md` grepped
+    for the string `usermod -aG docker`, which `platform.py` never contains —
+    it spells the same command as a list. So the assertion is made against the
+    argv the seam actually receives, which no spelling can hide from, over
+    every package manager rather than only the one this developer's box has.
+
+    Nothing here is asked, because nothing here can ask: `ensure_docker()` is
+    given no consent seam. The codebase's rule for that case is already
+    settled in `make_responder()` — with nobody to ask, a privilege change is
+    declined, because refusing one is recoverable and visible while granting
+    one silently is neither.
+    """
+    _linux(monkeypatch, steamos=steamos)
+    run = _Run()
+    report = platform.ensure_docker(run=run, which=_which(tool), user="pk", wait_seconds=0.0)
+
+    assert not _joins_the_docker_group(run.calls), run.calls
+    assert report.docker_group == "not-asked"
+
+    # Forbidden outright rather than merely gated, on this path too: membership
+    # already is root, so a NOPASSWD rule buys nothing and is pure attack
+    # surface. Same for widening the socket, which grants it to everyone.
+    text = [" ".join(argv) for argv in run.calls]
+    assert not [c for c in text if "sudoers" in c or "NOPASSWD" in c], text
+    assert not [c for c in text if "chmod" in c and "docker.sock" in c], text
+
+
+def test_linux_asks_before_it_escalates_and_joins_only_on_yes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A yes joins the group exactly once, and the question came first.
+
+    The order is the defect this closes, not a detail. `Installer.preflight()`
+    calls `ensure_docker()` before the bash script runs, so the old code
+    granted the group and the script's own `docker_group_consent()` then found
+    the user already a member and never asked. One question, asked before
+    anything privileged runs, is the whole shape.
+    """
+    _linux(monkeypatch)
+    asked: list[str] = []
+
+    def say_yes(question: str) -> str:
+        asked.append(question)
+        return "y"
+
+    run = _Run()
+    report = platform.ensure_docker(
+        run=run, which=_which("apt-get"), user="pk", wait_seconds=0.0, ask=say_yes
+    )
+
+    joins = _joins_the_docker_group(run.calls)
+    assert joins == [["sudo", "-n", "usermod", "-aG", "docker", "pk"]]
+    assert report.docker_group == "granted"
+
+    # Asked once, before the group was joined, and the question says what it costs.
+    assert len(asked) == 1
+    assert run.calls.index(joins[0]) > run.calls.index(["id", "-nG", "pk"])
+    assert "root" in asked[0] and "pk" in asked[0]
+    assert any("Log out and back in" in m for m in report.manual_steps)
+
+
+@pytest.mark.parametrize("reply", [None, "", "   ", "n", "no", "nope", "yeah", "1"])
+def test_linux_treats_anything_but_a_deliberate_yes_as_no(
+    monkeypatch: pytest.MonkeyPatch, reply: str | None
+) -> None:
+    """A dismissed dialog is not consent, and neither is an ambiguous answer.
+
+    The same reading `make_responder()` applies to the installers' version of
+    this question. `yeah` and `1` are in the list because a helpful widening of
+    `_explicit_yes()` is exactly the mutation this must catch.
+    """
+    _linux(monkeypatch)
+    run = _Run()
+    report = platform.ensure_docker(
+        run=run, which=_which("apt-get"), user="pk", wait_seconds=0.0, ask=lambda _q: reply
+    )
+
+    assert not _joins_the_docker_group(run.calls), run.calls
+    assert report.docker_group == "declined"
+    assert any("You said no" in m for m in report.manual_steps)
+    assert not [m for m in report.manual_steps if "Log out and back in" in m]
+    # Declining the GROUP is not declining DOCKER: the engine still installs.
+    assert any("apt-get" in step for step in report.done)
+
+
+def test_linux_does_not_ask_a_user_who_is_already_a_member(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An existing member is not asked, and `dockerd` is not `docker`."""
+    _linux(monkeypatch)
+
+    def never(_question: str) -> str:
+        raise AssertionError("an existing member was asked anyway")
+
+    run = _WithGroups("pk sudo docker")
+    report = platform.ensure_docker(
+        run=run, which=_which("apt-get"), user="pk", wait_seconds=0.0, ask=never
+    )
+    assert report.docker_group == "already-member"
+    assert not _joins_the_docker_group(run.calls), run.calls
+
+    # A neighbouring group name must not read as membership, or the question is
+    # skipped on a machine that never granted anything.
+    asked: list[str] = []
+
+    def decline(question: str) -> str:
+        asked.append(question)
+        return "n"
+
+    near = _WithGroups("pk sudo dockerd docker-users")
+    platform.ensure_docker(
+        run=near, which=_which("apt-get"), user="pk", wait_seconds=0.0, ask=decline
+    )
+    assert len(asked) == 1
+
+
+def test_linux_never_opens_a_dialog_for_a_plan_or_a_cancelled_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`dry_run` shows a plan and a cancelled run is over: neither may ask."""
+    _linux(monkeypatch)
+
+    def never(_question: str) -> str:
+        raise AssertionError("a dry run or a cancelled run asked the user something")
+
+    run = _Run()
+    plan = platform.ensure_docker(
+        run=run, which=_which("apt-get"), user="pk", dry_run=True, ask=never
+    )
+    assert run.calls == [["docker", "info"]]  # not even the harmless `id`
+    assert plan.docker_group == "not-asked"
+    assert any("(asks first)" in s for s in plan.skipped)
+
+    stop = threading.Event()
+    stop.set()
+    stopped = platform.ensure_docker(
+        run=_Run(), which=_which("apt-get"), user="pk", wait_seconds=0.0, cancel=stop, ask=never
+    )
+    assert stopped.docker_group == "not-asked"
+
+
+def test_sudo_user_names_the_person_not_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Under `sudo yulon`, the dialog must not offer to make root a docker user.
+
+    Invisible while the join was silent; making the question visible made the
+    wrong name visible too.
+    """
+    _linux(monkeypatch)
+    monkeypatch.setenv("SUDO_USER", "pk")
+    monkeypatch.setenv("USER", "root")
+    asked: list[str] = []
+
+    def decline(question: str) -> str:
+        asked.append(question)
+        return "n"
+
+    platform.ensure_docker(run=_Run(), which=_which("apt-get"), wait_seconds=0.0, ask=decline)
+    assert asked and "'pk'" in asked[0] and "'root'" not in asked[0]

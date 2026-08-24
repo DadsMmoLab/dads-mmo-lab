@@ -28,9 +28,16 @@ careful than its length suggests:
 * A failure mid-stage records nothing, so the stage re-runs.
 
 **Nothing on this path may prompt.** `ask` is accepted to match the contract
-and never used: there is no `sudo` here and Docker Desktop is already
-provisioned, so a step that turns out to need an answer is a design failure to
+and never used: a step that turns out to need an answer is a design failure to
 fix rather than a dialog to add.
+
+That is now structural rather than a claim about data. This engine calls
+`ensure_docker()` itself, and on Linux that call CAN escalate — so "there is no
+`sudo` here" was only true because `catalog.json` happens not to dispatch any
+entry natively on Linux, which is one JSON key away from being false. Passing
+no `ask` down makes the consent seam decline by default, so a future Linux
+native entry fails honestly ("nobody to ask") instead of joining the docker
+group behind the user's back.
 
 **Verified where, exactly.** Everything here is unit-tested against seams and
 NONE of it has been run against a real daemon by this project — there is no Mac
@@ -51,7 +58,7 @@ from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from yulon import docker, git, platform, resources
+from yulon import docker, git, platform, resources, runner
 from yulon.catalog import composegen, preflight
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.installer import (
@@ -314,13 +321,23 @@ class NativeInstaller:
             return options.server_dir
         return Path.home() / self.entry.install.default_server_dir
 
-    def preflight(self, options: InstallOptions, cancel: threading.Event | None = None) -> None:
+    def preflight(
+        self,
+        options: InstallOptions,
+        cancel: threading.Event | None = None,
+        *,
+        ask: runner.Prompter | None = None,
+    ) -> None:
         """Everything that must be true before anything is written. Raises, or returns.
 
         Same signature as `Installer.preflight()` so the two are
         interchangeable. Docker provisioning is attempted exactly once before
         the machine facts are gathered, because every number below it is
         fabricated without a daemon.
+
+        `ask` is accepted for that interchangeability and deliberately NOT
+        forwarded — see the module docstring on why declining by default is the
+        native path's rule rather than a consequence of today's catalog data.
         """
         for _ in self._preflight_lines(options, cancel):
             pass
@@ -330,7 +347,7 @@ class NativeInstaller:
         options: InstallOptions | None = None,
         *,
         cancel: threading.Event | None = None,
-        ask: object = None,
+        ask: runner.Prompter | None = None,
     ) -> Iterator[str]:
         """Run the install, yielding output live. Resumes whatever a previous run finished.
 
