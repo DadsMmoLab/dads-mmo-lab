@@ -104,16 +104,23 @@ jobs:
           cp "$APPDIR/yulon.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/yulon.png"
           curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool
-          # A STATICALLY LINKED RUNTIME, so the AppImage needs no FUSE on the
-          # user's machine. The default runtime shells out to `fusermount`, and
-          # a clean Arch install has neither fuse2 nor fuse3 - the artifact did
-          # not start at all there, with "No suitable fusermount binary found on
-          # the $PATH" and nothing else (measured 2026-08-24). Fedora happened to
-          # be fine because it ships fuse3; that is luck, not a contract.
-          curl -fsSL -o runtime-x86_64             https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64
-          chmod +x runtime-x86_64
-          ARCH=x86_64 ./appimagetool --runtime-file runtime-x86_64             "$APPDIR" "Yulon-${GITHUB_REF_NAME}-x86_64.AppImage"
+          ARCH=x86_64 ./appimagetool "$APPDIR" "Yulon-${GITHUB_REF_NAME}-x86_64.AppImage"
           mkdir -p release && mv Yulon-*.AppImage release/
+
+          # A PLAIN TARBALL BESIDE THE APPIMAGE, because an AppImage cannot run
+          # without FUSE and there is no packaging trick that removes that.
+          #
+          # A statically linked runtime was tried first and does NOT fix it,
+          # measured on a clean Arch box 2026-08-25: static linking removes the
+          # libfuse LIBRARY dependency, but mounting still shells out to the
+          # `fusermount3` setuid helper, so the artifact died exactly as before
+          # with "No suitable fusermount binary found on the $PATH". Arch ships
+          # neither fuse2 nor fuse3 by default; Fedora is fine only because it
+          # ships fuse3, which is luck rather than a contract.
+          #
+          # So the honest answer is a second artifact rather than a cleverer
+          # first one: untar it and run ./yulon.
+          tar -czf "release/Yulon-${GITHUB_REF_NAME}-x86_64.tar.gz" -C dist yulon
 
       # -------------------------------------------------------- Windows
       - name: Package Windows zip
