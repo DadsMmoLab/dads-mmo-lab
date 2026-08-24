@@ -5,6 +5,30 @@
 
 ---
 
+## Document map (where each planning doc lives)
+
+There are **three `README.md`s**, each with a distinct audience, plus three `pyplan/` companions with a deliberate division of labour:
+
+| File | Role |
+|---|---|
+| `README.md` (repo root) | Project landing page — license, ethos, and the guide index. |
+| `pyplan/README.md` (this file) | **The design doc**: *what* to build and *why*. Precedence on architecture. |
+| `pylauncher/README.md` | **User-facing**: what the shipped app does under the hood. |
+| `pyplan/style-guide.md` | **The code rules**: *how* to write it. Precedence on style. |
+| `pyplan/roadmap.md` | **The execution plan**: *what order* to do it in. Clean plan only — no decisions or notes. |
+| `pyplan/phase6-decisions.md` | **The decisions log ("why")**: reasoning, rejections, incident history. |
+| `pyplan/checklist.md` | **The checkable progress tracker**: completed `[x]` / pending `[ ]` items per phase. |
+
+**Precedence (restated once, here and in the other two):** `README.md` wins on *what/why*;
+`style-guide.md` wins on *how*; `roadmap.md` wins on *order*. If they conflict, flag it — don't
+silently pick one.
+
+The division that matters most for drift control: **avoid putting a decision in the roadmap, avoid
+putting narrative in the checklist, and avoid putting status in the design doc.** When content
+starts to migrate, move it to the column above it, not into a fourth place.
+
+---
+
 ## 1. Problem Statement
 
 Dad's MMO Lab currently ships installers and managers as **Bash scripts** (`install-wow-wotlk.sh`, `wow-manage.sh`, `dml-start.sh`) and **PowerShell scripts** (`Install-DML.ps1`). This works for developers but is hostile to the target audience ("dad-friendly", zero Linux knowledge). This in turn has caused a lot of issues for our users and headaches for us. The scope of the project has moved beyond simple scripting to a full-fledged desktop application.
@@ -29,7 +53,7 @@ Goals:
 | UI toolkit | **PySide6 (Qt)** | Avoids the "ugly Python GUI" (Tkinter) reputation; native widgets, QSS styling, cross-platform. |
 | Packaging | **PyInstaller** | De-facto standard; one binary per platform. Can be setup with GH Actions for automated builds. |
 | CI | **GitHub Actions build matrix** | Required because PyInstaller cannot cross-compile — each platform builds on its own runner. |
-| Docker interaction | **Docker CLI via `subprocess`** (Docker SDK later) | 100% parity with existing scripts; `docker compose` semantics preserved. |
+| Docker interaction | **Docker CLI via `subprocess`** (not the Docker SDK — see style-guide §7) | 100% parity with existing scripts; `docker compose` semantics preserved. |
 | Module & ALE catalog (for WotLK) | **JSON manifests** fetched from GitHub | Makes the controller extensible without code changes. |
 | Modification Catalog (all servers) | **JSON manifests** fetched from GitHub | Makes the controller extensible without code changes. Focus on simple database and GM commands that can be run to modify the server. |
 
@@ -49,12 +73,11 @@ There is **no native-Windows or native-macOS way** to run these containers. Ther
 **Promise to users:** "Click install." — the app hides Docker/WSL/virtualization entirely.
 **Reality to engineers:** the virtualization layer cannot be removed on Windows/macOS; it is only *hidden*.
 
-**Runtime strategy (decided):** use **Docker Desktop** as the container runtime on **both**
-Windows and macOS. It is materially easier than managing the VMs directly — Docker Desktop
-already owns the Linux VM (macOS) and the WSL2 backend (Windows), so the app only has to
-provision Docker Desktop (and WSL2 on Windows) and drive `docker compose` against it. We do not
-build a bespoke VM/WSL2 manager, and we do not reimplement installers natively just to avoid
-Docker Desktop — the kernel constraint above is satisfied by Docker Desktop itself.
+**Runtime strategy:** use **Docker Desktop** as the container runtime on **both** Windows and
+macOS — it already owns the Linux VM (macOS) and the WSL2 backend (Windows), so the app only
+provisions Docker Desktop and drives `docker compose` against it. The kernel constraint is
+satisfied by Docker Desktop itself; no bespoke VM/WSL2 manager is built. (Full rationale in
+`pyplan/phase6-decisions.md`.)
 
 This means each installer carries platform-specific "ensure a Linux container environment exists" logic, but the **application code remains 100% shared**.
 
@@ -148,10 +171,10 @@ pylauncher/
 │   │   ├── __init__.py
 │   │   ├── catalog.json          # the four v1 servers: emulator sources, install script, containers, ports, DBs, client (Phase 3.1)
 │   │   ├── catalog.py            # typed Catalog/CatalogEntry models + load_catalog(); entry.container_spec() feeds the controller
-│   │   ├── installer.py          # Phase 3a orchestrator: answers the install-*.sh prompts via runner.interact, streams output; graceful DockerUnavailableError (3.2/3.3)
-│   │   ├── native.py             # the native install engine: same contract as Installer, no shell script; staged + resumable, macOS today and Windows next (6.2/6.3)
-│   │   ├── preflight.py          # gather() the machine's facts, pure evaluate() against catalog.json's floors → refuse / warn / unchecked / pass (6.2)
-│   │   └── composegen.py         # pure generation of the three compose files + .env keys from catalog/installers/<game>/native/ templates (6.2)
+│   │   ├── installer.py          # Phase 3.2 orchestrator: answers the install-*.sh prompts via runner.interact, streams output; graceful DockerUnavailableError (3.2/3.3)
+│   │   ├── native.py             # the native install engine: same contract as Installer, no shell script; staged + resumable, macOS today and Windows next (Phase 6.2/6.3)
+│   │   ├── preflight.py          # gather() the machine's facts, pure evaluate() against catalog.json's floors → refuse / warn / unchecked / pass (Phase 6.2)
+│   │   └── composegen.py         # pure generation of the three compose files + .env keys from catalog/installers/<game>/native/ templates (Phase 6.2)
 │   ├── controller_wow_wotlk/     # each server has its own controller package for siloing
 │   │   ├── __init__.py
 │   │   ├── controller.py         # WotlkController(Controller) — supplies SPEC, inherits the rest (Phase 1.4)
@@ -159,30 +182,30 @@ pylauncher/
 │   │   ├── console.py            # attach to worldserver console
 │   │   ├── maintenance.py        # cache clear, backups, SQL changes
 │   │   ├── modules.py            # binds the shared store/fetcher/applier to WotLK (game id, bundled dir, DB container)
-│   │   ├── accounts.py           # writes the SRP6 registration row through DockerSql — the one account path that works on all three platforms (6.5)
-│   │   └── repair.py             # answers docker.ImportProbe: does this install's database look imported? (6.5 repair / re-import)
+│   │   ├── accounts.py           # writes the SRP6 registration row through DockerSql — the one account path that works on all three platforms (Phase 6.5)
+│   │   └── repair.py             # answers docker.ImportProbe: does this install's database look imported? (Phase 6.5 repair / re-import)
 │   ├── controller.py             # base Controller: ContainerSpec + server dir, start guarded by §12 (Phase 1.4)
 │   ├── runner.py                 # subprocess streaming (stream/run) + interact(): answer prompts of an interactive child (shared by all)
 │   ├── docker.py                 # shared Docker lifecycle + port-conflict check (shared)
-│   ├── git.py                    # clone/update git sources: RunnerGit (the host's git) or ContainerGit (git in a container, for hosts without one) (6.2)
+│   ├── git.py                    # clone/update git sources: RunnerGit (the host's git) or ContainerGit (git in a container, for hosts without one) (Phase 6.2)
 │   ├── platform.py               # OS detection, config_dir, §13 helpers (firewall/IP/portproxy/CGNAT) + 5.1 provisioning: ensure_docker()/ensure_wsl2() → ProvisionReport (Docker Engine via pacman/apt/dnf/zypper, WSL2 + Docker Desktop on Windows, Docker Desktop on macOS; dry_run plans)
 │   ├── networking.py             # §13 orchestration: plan() (pure) + apply() for LAN/internet play, realmlist UPDATE, router-step prompts, client realmlist writer (Phase 3.4)
 │   ├── log.py                    # shared logging convention (get_logger/configure — Phase 0.6)
 │   ├── state.py                  # per-user app state (state.json under config_dir: remembered installs) (Phase 4)
-│   ├── resources.py              # bundle_root/manifests_dir/installers_dir for source checkouts AND PyInstaller builds (5.2, 6.0)
+│   ├── resources.py              # bundle_root/manifests_dir/installers_dir for source checkouts AND PyInstaller builds (Phase 5.2, 6.0)
 │   ├── update.py                 # GitHub Releases version check → UpdateCheck; check + notify only (Phase 5.4)
 │   ├── manifest.py               # the manifest schema: pydantic models + repo allow-list (Phase 2.1)
 │   ├── manifest_store.py         # load manifests from a tree + refresh from GitHub with ETags (Phase 2.3)
 │   ├── apply.py                  # declarative apply engine: manifest → install/configure/remove steps (Phase 2.3)
 │   └── ui/
 │       ├── __init__.py
-│       ├── catalog_view.py       # tiles from catalog.json; Install → folder prompts → Installer streamed into the LogPanel (4.2)
-│       ├── controller_view.py    # per-install tabs Server/Console/Modules/Networking over ControllerServices seams (4.3)
+│       ├── catalog_view.py       # tiles from catalog.json; Install → folder prompts → Installer streamed into the LogPanel (Phase 4.2)
+│       ├── controller_view.py    # per-install tabs Server/Console/Modules/Networking over ControllerServices seams (Phase 4.3)
 │       └── widgets/
 │           ├── __init__.py
-│           ├── log_panel.py      # streaming log output widget: QThread worker → line/finished signals (4.1)
+│           ├── log_panel.py      # streaming log output widget: QThread worker → line/finished signals (Phase 4.1)
 │           ├── job.py            # ThreadedJobRunner: one-shot background jobs, so a long service call never runs on the GUI thread
-│           └── prompt.py         # asks the user for a line a subprocess wants (sudo's password): worker → GUI thread → back (6.1.5)
+│           └── prompt.py         # asks the user for a line a subprocess wants (sudo's password): worker → GUI thread → back (Phase 6.1.5)
 ├── catalog/                      # data the app EXECUTES (roadmap 6.0; archive/guides is for humans)
 │   └── installers/               # install-*.sh per game + the helpers they ship (dml-start.sh, wow-manage.sh)
 │       ├── wow-wotlk/            # install-wow-wotlk{,-ubuntu,-fedora}.sh, dml-start.sh, wow-manage.sh
@@ -215,18 +238,18 @@ pylauncher/
 │   ├── conftest.py               # offscreen QApplication fixture (QT_QPA_PLATFORM=offscreen) for the UI tests
 │   ├── test_state.py             # covers yulon/state.py
 │   ├── test_console.py           # covers controller_wow_wotlk/console.py (docker attach transport, fake Popen)
-│   ├── test_log_panel.py         # covers ui/widgets/log_panel.py (4.1)
-│   ├── test_catalog_view.py      # covers ui/catalog_view.py (4.2)
-│   ├── test_controller_view.py   # covers ui/controller_view.py (4.3)
+│   ├── test_log_panel.py         # covers ui/widgets/log_panel.py (Phase 4.1)
+│   ├── test_catalog_view.py      # covers ui/catalog_view.py (Phase 4.2)
+│   ├── test_controller_view.py   # covers ui/controller_view.py (Phase 4.3)
 │   ├── test_resources.py         # covers yulon/resources.py (source + frozen layouts)
-│   ├── test_update.py            # covers yulon/update.py (5.4)
-│   ├── test_provision.py         # covers platform.ensure_docker/ensure_wsl2 plans per OS through seams (5.1)
+│   ├── test_update.py            # covers yulon/update.py (Phase 5.4)
+│   ├── test_provision.py         # covers platform.ensure_docker/ensure_wsl2 plans per OS through seams (Phase 5.1)
 │   └── integration/              # live-Docker suite, marked `integration`, self-skipping without a daemon (Phase 1.5)
 │       ├── conftest.py           # docker gate + throwaway busybox compose project shaped like an install
 │       ├── test_docker_live.py   # real compose up/healthy/ready/status/conflict-guard/down
 │       └── test_wotlk_live.py    # WotlkController vs the AzerothCore fixture; opt-in via YULON_WOTLK_SERVER_DIR
-├── main.py                       # wires logging → config_dir, update banner (5.4), Catalog tab + one ControllerView tab per remembered install; YULON_SMOKE_TEST=1 builds the window and exits
-├── README.md                     # user-facing: what the app installs under the hood (WSL/VM hidden, not removed), unsigned builds, updates (5.1.2)
+├── main.py                       # wires logging → config_dir, update banner (Phase 5.4), Catalog tab + one ControllerView tab per remembered install; YULON_SMOKE_TEST=1 builds the window and exits
+├── README.md                     # user-facing: what the app installs under the hood (WSL/VM hidden, not removed), unsigned builds, updates (Phase 5.1.2)
 ├── requirements.txt
 ├── requirements-dev.txt          # pytest, mypy, black, ruff — `>=` floors, not pinned versions
 ├── pyproject.toml                # black/ruff/mypy/pytest config
@@ -340,10 +363,9 @@ servers and before the v1 Alpha, each owing its own step and definition of done 
 - **Item database + in-game mail** — separate later milestone.
 - **Teleport / GM in-game tools** — later.
 - **Full native reimplementation of installers on Linux** — Linux keeps wrapping the existing bash
-  scripts. Off Linux this is no longer out of scope: Phase 6.2's native install engine
-  (`yulon/catalog/native.py`, `preflight.py`, `composegen.py`) installs with no shell script at
-  all, and WotLK's `catalog.json` entry already lists `macos` in `install.platforms`. It is
-  written but has not been run against a real daemon on macOS or Windows (`roadmap.md` 6.2/6.3).
+  scripts (the native install engine covers macOS/Windows). WotLK's `catalog.json` entry already
+  lists `macos` in `install.platforms` (`roadmap.md` §6.2/6.3); the native engine is written but
+  has not been run against a real daemon on macOS or Windows.
 - **Code signing / notarization** — accept OS gatekeeper warnings for v1; revisit later (see §8).
 
 ---

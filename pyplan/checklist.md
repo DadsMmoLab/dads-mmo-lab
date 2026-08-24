@@ -42,7 +42,7 @@
 ## Phase 3 — Catalog (catalog + installer)
 
 - [x] 3.1 `catalog.json` — game list
-- [x] 3.2 `installer.py` — orchestration (Phase 3a: shells out to existing scripts) — **live Linux run passed 2026-08-21 on a fresh Ubuntu 24.04 VM (see Cross-cutting → Phase 3 live gate)**
+- [x] 3.2 `installer.py` — orchestration (shells out to existing scripts) — **live Linux run passed 2026-08-21 on a fresh Ubuntu 24.04 VM (see Cross-cutting → Phase 3 live gate)**
 - [x] 3.3 Silent Docker/WSL provisioning stubs wired in (graceful failure until Phase 5)
 - [x] 3.4 Networking auto-setup (LAN + internet play; firewall helpers, realmlist updater, router-step prompts) — README §13
 - [x] **Phase 3 exit criteria met** (verified via CLI/test harness — no UI yet): `python -m yulon.catalog.installer wow-wotlk --server-dir ~/wow-server-playerbots` on a fresh Ubuntu 24.04 VM (12 vCPU, Docker provided by `ensure_docker()`) answered every prompt, built AzerothCore + playerbots (~11 min compile), and ended with `install of wow-wotlk finished` and all three containers up (2026-08-21 00:27)
@@ -60,11 +60,11 @@
 
 ## Phase 5 — Windows/macOS provisioning + packaging
 
-- [x] 5.1 Silent Docker Desktop / WSL2 provisioning + doc update — Linux path verified for real on a fresh Ubuntu 24.04 VM (2026-08-20); the Windows detection/short-circuit/plan paths verified on a real Windows 11 box (2026-08-21). The silent Docker Desktop **install** was then proven on a third, Docker-free box (`yulon-win11`, 2026-08-23) — with the caveats Cross-cutting records: the elevation succeeded partly because that session's token was already elevated on a box with non-default UAC, and first launch still needed two manual clicks. macOS has no machine at all. (This line said the install was "still unverified (both test machines already had Docker)" for a day after the run that disproved it, while pointing the reader at the section that disproves it.)
+- [x] 5.1 Silent Docker Desktop / WSL2 provisioning + doc update — Linux path verified for real on a fresh Ubuntu 24.04 VM (2026-08-20); the Windows detection/short-circuit/plan paths verified on a real Windows 11 box (2026-08-21). The silent Docker Desktop **install** was then proven on a third, Docker-free box (`yulon-win11`, 2026-08-23) — with the caveats Cross-cutting records: the elevation succeeded partly because that session's token was already elevated on a box with non-default UAC, and first launch still needed two manual clicks. macOS has no machine on this side of the project (Baerthe runs the macOS gates — see Phase 6).
 - [x] 5.2 PyInstaller specs finalized (local `pyinstaller build/pylauncher.spec` builds `build/dist/yulon/`; bundles manifests/, catalog.json and the install scripts; `YULON_SMOKE_TEST=1` runs the frozen exe headless)
 - [x] 5.3 GitHub Actions release matrix complete — `ci.yml` + `release.yml` now live at the repo root `.github/workflows/` (2026-08-21), which is the only path GitHub reads; both run with `working-directory: pylauncher`. Neither upstream branch had a root `.github/`, so nothing was overwritten. The release job still only proves itself on a `v*` tag.
 - [x] 5.4 Application self-update check (README §10)
-- [x] **Phase 5 exit criteria met** (README §7: a push produces all three platform artifacts automatically) — proven 2026-08-21 by a throwaway `v*` tag on the fork: [run 32433417980](https://github.com/pjerra/dads-mmo-lab/actions/runs/32433417980), three runners green, artifacts `yulon-AppImage` (74 MB), `yulon-exe` (52 MB), `yulon-dmg` (42 MB), each also attached to the Release by `action-gh-release`; the tag and Release were deleted afterwards (they were a test), the run keeps its artifacts until 2026-11-19. The two artifacts we can run were then run — AppImage on Ubuntu 24.04, and the frozen `yulon.exe` out of the release zip on Windows 11 — both logging `window built, exiting 0`, which also makes 5.2 verified on real Windows from the shipped artifact rather than a local build. `ci.yml` is green on every push (run 32432706579). The `.dmg` is CI-built only — no Mac exists on this project, so it is unverified beyond building (Phase 6.5 item 9 covers it).
+- [x] **Phase 5 exit criteria met** (README §7: a push produces all three platform artifacts automatically) — proven 2026-08-21 by a throwaway `v*` tag on the fork: [run 32433417980](https://github.com/pjerra/dads-mmo-lab/actions/runs/32433417980), three runners green, artifacts `yulon-AppImage` (74 MB), `yulon-exe` (52 MB), `yulon-dmg` (42 MB), each also attached to the Release by `action-gh-release`; the tag and Release were deleted afterwards (they were a test), the run keeps its artifacts until 2026-11-19. The two artifacts we can run were then run — AppImage on Ubuntu 24.04, and the frozen `yulon.exe` out of the release zip on Windows 11 — both logging `window built, exiting 0`, which also makes 5.2 verified on real Windows from the shipped artifact rather than a local build. `ci.yml` is green on every push (run 32432706579). The `.dmg` is CI-built only — no Mac on this side of the project, so it is unverified beyond building (Phase 6.5 item 9 covers it).
 
 ---
 
@@ -91,10 +91,8 @@
 > his run is written down here the way the Linux and Windows runs are: what machine, what version,
 > what was observed, and what failed on the way.
 >
-> **One precondition runs through all of them, and it changed under this section without it
-> being updated (corrected 2026-08-24).** This used to say the app cannot install on macOS,
-> because every catalog entry declared `install.platforms: ["linux"]` and the Install button was
-> disabled with the reason on the tile. **That is no longer true.** WotLK now declares
+> **One precondition runs through all of them, and it changed under this section**
+> (corrected 2026-08-24). WotLK now declares
 > `platforms: ["linux", "macos"]` with `script_platforms: ["linux"]` and an `install.native`
 > block (`catalog.json`, since `5c697798`), so **on a Mac the Install button is live**, and it
 > dispatches to `NativeInstaller` — the 6.2 engine, which has never been run against a real
@@ -113,8 +111,7 @@
 > **What is deliberately NOT asked for yet:** the macOS firewall's *apply* half — `networking.py`'s
 > `alf` branch reads the Application Firewall's state and reports manual steps, but nothing
 > mutates it, because every change needs root and this path never asks for a password — and
-> 6.4's live install gate. (This said "unimplemented — `networking.py` has no macOS branch"
-> for the 41 minutes between the checklist's last edit and `d376b5d7`, and for a day after.) Adding boxes for those would be asking him to
+> 6.4's live install gate. Adding boxes for those would be asking him to
 > test our intentions. The install path itself is no longer in that list — it is built; what it
 > has never been is *run*.
 
@@ -142,7 +139,7 @@
   - [ ] Account creation (`CREATE-ACCOUNTS.md`/`CONTROLS-1.md`): SRP6-over-`DockerSql` (SOAP cannot bootstrap the first account) — byte-exact against a server-written verifier, no password echo, "already exists" handled, all three platforms. **Module and UI wiring landed 2026-08-23**, and the byte-exactness was verified against accounts a real server wrote (same salt in, same verifier out, non-ASCII passwords included). Unticked because macOS has not been exercised; Linux and Windows have (see the box below)
     - [x] **Windows (2026-08-23)** — created through the real `accounts.create_account()` over `DockerSql` against Docker Desktop; a second create of the same name reported "already exists" without duplicating the row; non-ASCII password round-tripped; gm level written
     - [ ] **macOS (Baerthe)** — create an account through the Accounts tab, log into the game with it, and confirm a second create of the same name reports "already exists" without duplicating the row. Byte-exactness is settled by the Linux run; this box is the `DockerSql` seam behaving the same way through Docker Desktop
-  - [ ] Maintenance (`CONTROLS-1.md`): cache clear, DB backup/restore, SQL changes — `maintenance.py` implemented, rebuild/restart wiring done, all three platforms. **Backup/restore and the UI landed 2026-08-23**: restore is plan-then-apply, with every refusal shown at once, the button armed only by an allowed plan, and the slot refusing again regardless of the button. Cache-clear is deliberately NOT implemented, with the evidence in the module docstring. Unticked because macOS has not been exercised — Linux and Windows have. The Linux backup/restore round trip WAS run against a live server on 2026-08-23 (four schemas, a 292.2 MB `acore_world` dump, the restored value read back, a wrong token refused) — this line said "none of it has been run against a live server on any platform yet" for several hours after that stopped being true, which a review caught
+  - [ ] Maintenance (`CONTROLS-1.md`): cache clear, DB backup/restore, SQL changes — `maintenance.py` implemented, rebuild/restart wiring done, all three platforms. **Backup/restore and the UI landed 2026-08-23**: restore is plan-then-apply, with every refusal shown at once, the button armed only by an allowed plan, and the slot refusing again regardless of the button. Cache-clear is deliberately NOT implemented, with the evidence in the module docstring. Unticked because macOS has not been exercised — Linux and Windows have. The Linux backup/restore round trip WAS run against a live server on 2026-08-23 (four schemas, a 292.2 MB `acore_world` dump, the restored value read back, a wrong token refused)
     - [x] **Windows (2026-08-23)** — backup and restore round trip against the live server, wrong token refused. **This gate found what the Linux one had missed**: a restore is a MERGE, not a replacement. A marker table created in `acore_world` after the backup was still there after a full 306 MB restore of that schema — 313 tables where the backup held 312 — because mysqldump emits `DROP TABLE IF EXISTS` per table and no `DROP DATABASE`. Not platform-specific: the Linux gate checked that the restored value read back, not that nothing extra survived. Behaviour deliberately unchanged (`--add-drop-database` would make a part-way failure leave nothing at all, which breaks the `interrupted_restore()` + safety-copy recovery), and the argv is now pinned so the flag cannot be added without meeting that argument. Three user-facing claims were corrected on 2026-08-24: the README said "replaces", `_safety_backup()` promised an undo, and the Maintenance tab warned "Every character on the server is replaced" on EVERY allowed plan with no check that `acore_characters` was in it
     - [ ] **macOS (Baerthe)** — back up a populated server, restore it, and confirm the wrong-token refusal still refuses. Worth watching: the backup moves multi-hundred-MB dumps through a bind mount, which is where Docker Desktop for Mac is slowest and where a timeout that is comfortable on Linux may not be
   - [ ] Modules/mods: install/remove via the applier + rebuild/restart; manifest store GitHub refresh + bundled fallback
@@ -367,8 +364,7 @@ restoring the fix passes. The unit test keeps its argv assertion, now with the r
 is load-bearing written next to it.
 
 **What this says about the other first-gate items.** Three of the five have now been run and **all three**
-found real defects — the missing `AC_AI_PLAYERBOT_*` values, `images -q`, and this. (Said "two of those" until a sweep
-counted them: the compose diff's own section two hundred lines up is headed "The defect it found.")
+found real defects — the missing `AC_AI_PLAYERBOT_*` values, `images -q`, and this.
 The remaining unrun ones are not paperwork.
 
 **Running is not answering, and the tally lives in one place now.** This item — a folder outside
@@ -457,8 +453,8 @@ the proven install's own values — but **not in `DEFAULT_WORLD_ENV`, which is w
 above locate the defect**. An adversarial review pointed out that a per-game number in a module
 constant is what style-guide §3 forbids, and that one machine's 2000 bots is no default for every
 machine, so 1600/2000 live in `catalog.json`'s `install.native.world_env` and a test now forbids
-them in `DEFAULT_WORLD_ENV`. Following this record to the constant, as it read for a day, found
-the fix absent and the module's own comment reading as if nothing had been configured.
+them in `DEFAULT_WORLD_ENV`. The values live in `catalog.json`'s
+`install.native.world_env`, and a test now forbids them in `DEFAULT_WORLD_ENV`.
 
 **Where the numbers come from, stated once.** They are ONE desktop's, copied so that a native
 install and a script install agree — never measured for RAM on anything. The first live gate
@@ -487,10 +483,7 @@ remaining first-gate items when it was written, including `images -q` — which 
 it settled eight minutes later. **Three remain**, per the tally in `phase6-decisions.md`: item 1's
 `git status --porcelain` half, a folder outside Docker Desktop's file-sharing list — attempted
 since and still open for want of a Hyper-V box or a Mac — and `compose up -d --no-deps <db>`
-against images this engine built. Corrected once after a review caught the file disagreeing with
-itself, and again after a sweep caught the correction disagreeing with the tally a hundred lines
-above it — the same defect class each time, and each time reintroduced by the fix for the last
-one. The count is kept in one file now, and both mentions here point at it.)
+against images this engine built. The count is kept in one file now, and both mentions here point at it.)
 
 ### Two things the first button-driven install found (2026-08-24)
 
@@ -537,8 +530,7 @@ not "the probe proves it". Conceded, and changed to `-h ac-database`, verified o
 probe project carrying that exact `test:` with a second container that connected first try.
 **So the 17.1-18.2 s timing above is measured of the loopback spelling and inherited by the shipped
 one**, on the argument that neither changes when the server starts listening. Nobody has re-run
-the ten. The template's comment claimed those runs used "this exact healthcheck" until a sweep
-read both (2026-08-24); it now says which spelling was under test.
+the ten.
 
 **One coupling the round turned up and nobody wrote down.** A review seat predicted this probe
 could never authenticate at all: nothing sets `MYSQL_ROOT_HOST`, and MySQL treats `'localhost'`
@@ -678,11 +670,10 @@ that build.
 
 - **What the three Windows provisioning fixes actually close, and what they do not.** They are 6.3
   prerequisites landed early, not live-defect fixes: no `catalog.json` entry lists `windows`
-  — WotLK is `["linux", "macos"]` since 6.2 and the other three are `platforms: ["linux"]`,
-  which is why this said "every entry is `["linux"]`" until a sweep read the file — and
+  — WotLK is `["linux", "macos"]` since 6.2 and the other three are `platforms: ["linux"]` — and
   `Installer.preflight()` raises `UnsupportedPlatformError` before
   `ensure_docker()` is reached — in BOTH preflights now, `Installer`'s and `NativeInstaller`'s, which is
-  two gates rather than the one this said — so on Windows the provisioning chain is not
+  two gates rather than one — so on Windows the provisioning chain is not
   reachable through the app at all. Live on Windows today, and therefore genuinely fixed now:
   attach-to-existing-install → Start, Stop, `docker logs -f`, and the `docker exec … mysql` behind a
   module apply and the realmlist UPDATE. **Not** the Console tab's `docker attach` — `send_command()`

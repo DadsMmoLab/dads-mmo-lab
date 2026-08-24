@@ -64,7 +64,7 @@ pip install -r requirements-dev.txt
 python main.py
 ```
 
-## Installing a server from the CLI (Phase 3a harness)
+## Installing a server from the CLI (Phase 3 harness)
 
 ```bash
 python -m yulon.catalog.installer wow-wotlk --server-dir ~/wow-server-playerbots

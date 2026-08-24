@@ -1,8 +1,9 @@
 # Yu'lon Roadmap
+## Do *not* modify this document unless you are explicitly tasked to do so. It is the execution companion to `README.md` and `style-guide.md`, and it is the authority on *what order* to execute the plan in.
 
 > **Audience:** humans and LLM coding agents. This file is the _execution_ companion to
 > `pyplan/README.md` (the design doc) and `pyplan/style-guide.md` (the code rules). It breaks the
-> README's five phases into concrete, ordered, checkable steps.
+> plan into concrete, ordered, checkable steps, by phase (Phases 0–9).
 >
 > **Precedence:** `README.md` wins on _what_ to build and _why_; `style-guide.md` wins on _how_ to
 > write it; this file wins on _what order to do it in_. If they conflict, flag it — don't silently
@@ -187,7 +188,7 @@ code changes needed to add a module.
 2. _Definition of done:_ the four v1 servers are described in the catalog (WotLK fully first;
    the other three follow the same `game`-id + metadata shape).
 
-### 3.2 `installer.py` — orchestration (Phase 3a)
+### 3.2 `installer.py` — orchestration
 
 1. Implement the install orchestrator that shells out to the existing `install-*.sh` scripts via
    `runner.py`, streaming output to the UI later. **[style]** — separation of concerns: the
@@ -316,40 +317,10 @@ automatically.
 
 ## Phase 6 — Cross-platform install paths (macOS + native Windows)
 
-> **Not one of README's design phases** (it is README §9's deferred "Phase 3b": the native
-> reimplementation of installers). Raised to its own phase because the macOS pre-alpha run made
-> the gap concrete: **all four v1 installers are Linux-only bash scripts** gated on
-> `[[ "$OSTYPE" == "linux-gnu"* ]]` and hard-coupled to `pacman`/`systemctl`/`sudo`, so on macOS
-> (`darwin*`) and native Windows they fail fast with "Requires Linux (SteamOS)" — _before_ the
-> Docker provisioning the app already does can help. The app must either run these servers
-> cross-platform or refuse to offer them off Linux.
->
-> **Runtime strategy (decided):** use **Docker Desktop** as the container runtime on _both_
-> Windows and macOS. It is materially easier than managing the VMs directly — Docker Desktop
-> already owns the Linux VM (macOS) and the WSL2 backend (Windows), so the app just provisions
-> Docker Desktop (which 5.1 already does) and drives `docker compose` against it. We do **not**
-> build a bespoke VM/WSL2 manager, and we do **not** reimplement installers natively just to
-> avoid Docker Desktop — the Linux kernel constraint is satisfied by Docker Desktop itself.
->
-> **Scope gate (decided): WotLK first, exclusively.** Phase 6 targets **WoW WotLK only** — it is
-> the one v1 server with a full controller (`controller_wow_wotlk/`), so it is the one place
-> "100% working coverage" is achievable and checkable end-to-end right now. 6.0's script rehome
-> may touch all four games mechanically (it is a path move, not a feature), but 6.1–6.5's actual
-> gating/installer/feature work targets WotLK only. **TBC, Vanilla, and Tortoise's own
-> cross-platform install paths and controllers are explicitly out of scope for Phase 6 — they are
-> Phase 7.** Phase 7 must not start until Phase 6's WotLK exit criteria (6.5) are fully met on
-> Linux, macOS, and native Windows.
-> **Privilege transparency (decided): no silent escalation of host privileges.** Every install
-> path — the Linux bash scripts (bugfix-only until Phase 7 retires them), the native engine
-> (6.2/6.3), and `ensure_docker()`'s provisioning — must honor one binding rule: **never add the
-> user to the `docker` group, and never write a passwordless `sudo` rule, without the user's
-> explicit, informed consent.** Two facts a game-server audience won't infer on its own: (1)
-> `docker`-group membership **is** root — `docker run -v /:/mnt --rm -it alpine chroot /mnt sh`
-> edits any host file, so there is no privilege boundary to protect; (2) a `NOPASSWD` docker rule
-> is therefore **redundant** (pure attack surface, no benefit) and must never be written. The
-> first-generation `install-*.sh` scripts did exactly this — `enable_docker_sudo_wrapper()` wrote
-> `/etc/sudoers.d/docker-nopasswd` behind `|| true`, so it could fail undetectably — and the native
-> engine must not reintroduce it. Incident history lives in `pyplan/checklist.md` (Cross-cutting).
+> Native (no shell script) install engine for macOS and native Windows, driven by `catalog.json`
+> dispatch — see `pyplan/phase6-decisions.md` for the rationale (scope gate: **WotLK only**;
+> runtime: Docker Desktop; binding rule: no silent privilege escalation). Linux keeps its proven
+> bash script for this phase (bugfix-only).
 ### 6.0 Rehome the install scripts (prerequisite refactor)
 
 > Before any macOS/Windows installer is added, the installers need a real home: the executable
@@ -398,9 +369,8 @@ automatically.
    - _Definition of done:_ a script that reads a line from stdin (or a real `sudo` step) causes
      the log panel to stop on that line, present a prompt dialog, and forward the typed value
      back to the process; the stream then advances on the next line instead of deadlocking,
-     EOF-ing the prompt, or erroring "no tty". Verified once on Linux (real `sudo`). macOS and
-     Windows have no script variants to verify — they dispatch to the native engine, which may
-     not prompt.
+     EOF-ing the prompt, or erroring "no tty". macOS and Windows have no script variants to
+     verify here — they dispatch to the native engine, which does not prompt.
 
 ### 6.2 macOS install path — the shared native install engine
 
@@ -695,6 +665,7 @@ polished, consistent UI/UX across Linux, macOS, and native Windows.
 
 - My Party / bot group builder, item database + in-game mail, teleport/GM in-game tools
   (README §9).
-- Full native reimplementation of installers — Phase 3a wraps existing scripts; 3b is later.
+- Full native reimplementation of installers on Linux — Phase 6 wraps existing scripts on Linux;
+  the native engine covers macOS/Windows.
 - Code signing / notarization — accept OS gatekeeper warnings for v1 (README §8–9).
 - In-place auto-update — check + notify only for v1 (README §10).

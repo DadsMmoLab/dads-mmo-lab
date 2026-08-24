@@ -32,6 +32,58 @@ new code paths**, and TBC/Vanilla/Tortoise stay Linux-only per the roadmap's sco
 `NativeInstaller.run(options, cancel) -> Iterator[str]` keeps the same contract as today's
 `Installer.run()`, so the catalog view, log panel and job runner need no changes.
 
+---
+
+## Scope, runtime, and privilege decisions (moved from `roadmap.md`, 2026-08-24)
+
+Four decisions used to live in `roadmap.md`'s Phase 6 preamble. Moved here because the roadmap is a
+clean plan (style-guide §9), not a decision log; this page is where the *why* belongs.
+
+### Why Phase 6 is its own phase
+
+Phase 6 is not one of README's design phases — it is README §9's deferred "full native
+reimplementation of installers" (the former "Phase 3b"), now its own phase. It was raised to its
+own phase because the macOS pre-alpha run
+made the gap concrete: **all four v1 installers are Linux-only bash scripts** gated on
+`[[ "$OSTYPE" == "linux-gnu"* ]]` and hard-coupled to `pacman`/`systemctl`/`sudo`, so on macOS
+(`darwin*`) and native Windows they fail fast with "Requires Linux (SteamOS)" — *before* the Docker
+provisioning the app already does can help. The app must either run these servers cross-platform or
+refuse to offer them off Linux.
+
+### Runtime strategy
+
+Use **Docker Desktop** as the container runtime on **both** Windows and macOS. It is materially
+easier than managing the VMs directly — Docker Desktop already owns the Linux VM (macOS) and the
+WSL2 backend (Windows), so the app just provisions Docker Desktop (which 5.1 already does) and
+drives `docker compose` against it. We do **not** build a bespoke VM/WSL2 manager, and we do
+**not** reimplement installers natively just to avoid Docker Desktop — the Linux kernel constraint
+is satisfied by Docker Desktop itself. (Also summarised in `README.md` §3, the canonical copy.)
+
+### Scope gate — WotLK first, exclusively
+
+Phase 6 targets **WoW WotLK only** — it is the one v1 server with a full controller
+(`controller_wow_wotlk/`), so it is the one place "100% working coverage" is achievable and
+checkable end-to-end right now. 6.0's script rehome may touch all four games mechanically (it is a
+path move, not a feature), but 6.1–6.5's actual gating/installer/feature work targets WotLK only.
+**TBC, Vanilla, and Tortoise's own cross-platform install paths and controllers are explicitly out
+of scope for Phase 6 — they are Phase 7.** Phase 7 must not start until Phase 6's WotLK exit
+criteria (6.5) are fully met on Linux, macOS, and native Windows.
+
+### Privilege transparency — no silent escalation of host privileges
+
+Every install path — the Linux bash scripts (bugfix-only until Phase 7 retires them), the native
+engine (6.2/6.3), and `ensure_docker()`'s provisioning — must honor one binding rule: **never add
+the user to the `docker` group, and never write a passwordless `sudo` rule, without the user's
+explicit, informed consent.** Two facts a game-server audience won't infer on its own: (1)
+`docker`-group membership **is** root — `docker run -v /:/mnt --rm -it alpine chroot /mnt sh` edits
+any host file, so there is no privilege boundary to protect; (2) a `NOPASSWD` docker rule is
+therefore **redundant** (pure attack surface, no benefit) and must never be written. The
+first-generation `install-*.sh` scripts did exactly this — `enable_docker_sudo_wrapper()` wrote
+`/etc/sudoers.d/docker-nopasswd` behind `|| true`, so it could fail undetectably — and the native
+engine must not reintroduce it. Incident history lives in `pyplan/checklist.md` (Cross-cutting).
+
+---
+
 ## Why, and what was rejected
 
 **Per-platform script variants (macOS bash + Windows PowerShell) — rejected.** All four designs

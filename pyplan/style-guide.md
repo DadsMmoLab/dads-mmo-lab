@@ -198,6 +198,7 @@ async) and lets the caller decide what happens next.
 | Never write | Always write |
 |---|---|
 | Warcraft, World of Warcraft | **WoW** |
+| Vanilla WoW (classic 1.12) | **WoW Vanilla** (`wow-vanilla`) |
 | RuneScape | **RS** |
 | MapleStory | **MS** |
 | Mu Online | **MU** |
