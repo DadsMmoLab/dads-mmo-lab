@@ -16,7 +16,7 @@
 
 ## How to read this roadmap
 
-- Each phase maps 1:1 to `README.md` §7.
+- This file is the authority on phase order and exit criteria; `README.md` §7 points back here.
 - Steps are ordered; a step is **done** only when its "Definition of done" is met.
 - Steps marked **[style]** carry a specific style-guide obligation that must be satisfied before
   the step is considered complete.
@@ -34,9 +34,9 @@
 
 > Not in the README's phase list, but required before Phase 1 code lands cleanly.
 
-1. **Pin the toolchain.** Add `requirements-dev.txt` with `pytest`, `mypy` (or `pyright`), `black`,
-   and `ruff`, pinned to exact versions. **[style]** — style-guide §2 requires a static type
-   checker in CI from Phase 1 onward.
+1. **Declare the dev toolchain.** Add `requirements-dev.txt` with `pytest`, `mypy` (or `pyright`),
+   `black`, and `ruff`, at floor versions (`>=`). **[style]** — style-guide §2 requires a static
+   type checker in CI from Phase 1 onward.
    - _Definition of done:_ `pip install -r requirements-dev.txt` succeeds on a clean venv.
 2. **Add a CI lint/type/test job** (separate from the release matrix in `release.yml`). It runs
    `ruff`, `mypy`/`pyright`, and `pytest` on every push/PR.
@@ -97,17 +97,18 @@ the scaffold on disk), but its `start`/`stop`/`status`/port-conflict logic is im
 in a shared `yulon/docker.py` module that each per-game `docker_ctl.py` re-exports — the
 _behavior_ is shared and DRY (README §12); the _file_ stays per-game (README §5, style-guide §3).
 
-1. Implement the shared `start(server_dir)`, `stop(server_dir)`, `status()`, `health(container)`
-   behavior (used by every per-game `docker_ctl.py`) by shelling out to the `docker` CLI via
-   `runner.py`. **[style]** — no Docker SDK; `docker compose` semantics preserved (README §2).
+1. Implement the shared `start(server_dir)`, `stop_staged(spec, server_dir)`, `status()`,
+   `health(container)` behavior (used by every per-game `docker_ctl.py`) by shelling out to the
+   `docker` CLI via `runner.py`. **[style]** — no Docker SDK; `docker compose` semantics
+   preserved (README §2).
 2. Port the polling logic from `dml-start.sh` (`_wait_db_healthy`, `_wait_ready`) into typed
    helpers with timeouts.
 3. Implement the **single-instance / port-conflict check** once, in this shared module
    (README §12). **[style]** — DRY: this must be used by every per-game controller, never
    reimplemented.
-4. _Definition of done:_ `start()`/`stop()`/`status()` work against a real running AzerothCore
-   compose project (per the Phase 0.4 fixture); the port-conflict check correctly blocks a second
-   start.
+4. _Definition of done:_ `start()`/`stop_staged()`/`status()` work against a real running
+   AzerothCore compose project (per the Phase 0.4 fixture); the port-conflict check correctly
+   blocks a second start.
 
 ### 1.4 Base controller abstraction
 
@@ -129,7 +130,7 @@ _behavior_ is shared and DRY (README §12); the _file_ stays per-game (README §
 3. _Definition of done:_ mocked suite passes in CI without Docker; integration suite passes on a
    machine with Docker.
 
-**Phase 1 exit criteria (README §7):** `docker.start()`/`stop()`/`status()` (via the WotLK
+**Phase 1 exit criteria:** `docker.start()`/`stop_staged()`/`status()` (via the WotLK
 `docker_ctl.py` re-exports) work against a running AzerothCore compose project, and the mocked
 `pytest` suite passes in CI without Docker.
 
@@ -169,7 +170,7 @@ _behavior_ is shared and DRY (README §12); the _file_ stays per-game (README §
 3. _Definition of done:_ loading a valid manifest yields a typed model; an invalid `repo` is
    rejected.
 
-**Phase 2 exit criteria (README §7):** module list and config nuances fully expressed as JSON; no
+**Phase 2 exit criteria:** module list and config nuances fully expressed as JSON; no
 code changes needed to add a module.
 
 ---
@@ -226,7 +227,7 @@ code changes needed to add a module.
 4. _Definition of done:_ LAN mode completes end-to-end with no shell; internet mode detects a
    missing forward/CGNAT block and reports a clear, actionable message.
 
-**Phase 3 exit criteria (README §7, with the caveat above):** one-game install completes with
+**Phase 3 exit criteria (with the caveat above):** one-game install completes with
 zero shell interaction _at the orchestration layer_, verified on at least one platform that
 already has Docker installed. The literal "click install" end-user experience is only exercisable
 once Phase 4's `catalog_view.py` exists.
@@ -263,7 +264,7 @@ once Phase 4's `catalog_view.py` exists.
    to §3.4's helpers via the controller; no `netsh`/`ufw` shelling in the view (§3/§5).
 4. _Definition of done:_ full start/stop/logs/accounts/module-toggle workflow via GUI only.
 
-**Phase 4 exit criteria (README §7):** full start/stop/logs/accounts/module-toggle workflow via
+**Phase 4 exit criteria:** full start/stop/logs/accounts/module-toggle workflow via
 GUI only.
 
 ---
@@ -296,34 +297,32 @@ GUI only.
 ### 5.3 GitHub Actions release matrix
 
 1. Complete `.github/workflows/release.yml`: `ubuntu-latest` → `.AppImage` (via `appimagetool`),
-   `windows-latest` → `.exe`, `macos-latest` → `.dmg`. **[style]** — never attempt local
-   cross-builds (README §8).
+   `windows-latest` → a zipped one-dir build (`yulon.exe` plus its runtime files),
+   `macos-latest` → `.dmg`. **[style]** — never attempt local cross-builds (README §8).
 2. _Definition of done:_ `git push` of a `v*` tag produces all three artifacts automatically.
 
 ### 5.4 Application self-update check (README §10)
 
 1. Implement the GitHub Releases version check (compare running `__version__` against the latest
-   tag) and a non-blocking notify banner/dialog with a download link, per README §10 and §14
-   Next Action 6. **v1 scope is check + notify only** — no auto-download/auto-replace.
+   tag) and a non-blocking notify banner/dialog with a download link, per README §10.
+   **v1 scope is check + notify only** — no auto-download/auto-replace.
 2. _Definition of done:_ running an old build against a newer published release shows the notify
    banner; running the latest build shows nothing.
 
-**Phase 5 exit criteria (README §7):** `git push` produces all three platform artifacts
+**Phase 5 exit criteria:** `git push` produces all three platform artifacts
 automatically.
 
 ---
 
 ## Phase 6 — Cross-platform install paths (macOS + native Windows)
 
-> **Not in README §7's phase list** (it is README §9's deferred "Phase 3b": the native
+> **Not one of README's design phases** (it is README §9's deferred "Phase 3b": the native
 > reimplementation of installers). Raised to its own phase because the macOS pre-alpha run made
 > the gap concrete: **all four v1 installers are Linux-only bash scripts** gated on
 > `[[ "$OSTYPE" == "linux-gnu"* ]]` and hard-coupled to `pacman`/`systemctl`/`sudo`, so on macOS
 > (`darwin*`) and native Windows they fail fast with "Requires Linux (SteamOS)" — _before_ the
-> Docker provisioning the app already does can help. This is the "install start but console shows
-> nothing" failure: the script streams a few banner lines, exits 1, and the Catalog surfaces a
-> bare "install failed". The app must either run these servers cross-platform or refuse to offer
-> them off Linux.
+> Docker provisioning the app already does can help. The app must either run these servers
+> cross-platform or refuse to offer them off Linux.
 >
 > **Runtime strategy (decided):** use **Docker Desktop** as the container runtime on _both_
 > Windows and macOS. It is materially easier than managing the VMs directly — Docker Desktop
@@ -353,11 +352,11 @@ automatically.
 > engine must not reintroduce it. Incident history lives in `pyplan/checklist.md` (Cross-cutting).
 ### 6.0 Rehome the install scripts (prerequisite refactor)
 
-> Before any macOS/Windows installer is added, the installers need a real home: today the
-> executable `install-*.sh` scripts (and their sourced helpers) live mixed in with the
-> human-facing guides under `archive/guides/<game>/`. Move them into a dedicated
-> `catalog/installers/` area so `catalog.json` and the packaging spec point at one clean,
-> data-only location that 6.2/6.3 will grow with per-platform variants.
+> Before any macOS/Windows installer is added, the installers need a real home: the executable
+> `install-*.sh` scripts (and their sourced helpers) sat mixed in with the human-facing guides
+> under `archive/guides/<game>/`. Move them into a dedicated `catalog/installers/` area so
+> `catalog.json` and the packaging spec point at one clean, data-only location that 6.2/6.3
+> will grow with per-platform variants.
 
 1. Move the executable install scripts (plus the sourced helpers `dml-start.sh`, `wow-manage.sh`)
    out of `archive/guides/<game>/` into `pylauncher/catalog/installers/<game>/`, parallel to
@@ -366,7 +365,7 @@ automatically.
    truth (§4).
 2. Update `catalog.json` `install.script` / `install.script_variants` for all four games (and the
    `apt`/`dnf` WotLK variants) to the new paths.
-3. Update `build/pylauncher.spec`'s `script_globs` (and `resources.repo_root()` resolution if
+3. Update `build/pylauncher.spec`'s `datas` (and `resources.installers_dir()` resolution if
    needed) so the frozen bundle still finds the scripts under `catalog/installers/**`.
 4. Update tests that pin the old `archive/guides/...` paths (`test_catalog.py`'s script-existence
    pins; `test_installer.py`'s `script_for` table).
@@ -394,14 +393,14 @@ automatically.
    hang), then forward it to the subprocess's stdin and resume streaming. **[style]** — the
    stdin write lives in `runner.py` (core), driven by the view via call-down/signal-up; the view
    never shells out and never touches the subprocess handle directly (§3/§5). This is distinct
-   from 6.2/6.3 moving off `sudo`: the Linux path (and any script that prompts) still needs it,
-   and 6.2/6.3 (Docker Desktop, no `sudo`) must still handle any non-`sudo` prompts they emit
-   through the same shared input path.
+   from 6.2/6.3 moving off `sudo`: the Linux path (and any script that prompts) still needs it;
+   6.2/6.3 dispatch to the native engine instead, which may not prompt at all.
    - _Definition of done:_ a script that reads a line from stdin (or a real `sudo` step) causes
      the log panel to stop on that line, present a prompt dialog, and forward the typed value
      back to the process; the stream then advances on the next line instead of deadlocking,
-     EOF-ing the prompt, or erroring "no tty". Verified once on Linux (real `sudo`) and once
-     against the macOS/Windows installer variants' own prompts via the shared path.
+     EOF-ing the prompt, or erroring "no tty". Verified once on Linux (real `sudo`). macOS and
+     Windows have no script variants to verify — they dispatch to the native engine, which may
+     not prompt.
 
 ### 6.2 macOS install path — the shared native install engine
 
@@ -409,9 +408,9 @@ automatically.
 > Python install engine**, not per-platform script variants — dispatched by `catalog.json` data:
 > `install.platforms` = where the entry is installable at all (drives the 6.1 refusal),
 > `install.script_platforms` = where the *bash script* is the mechanism; anything in `platforms`
-> but not `script_platforms` runs the native engine. WotLK lands `platforms: ["linux","macos",
-> "windows"]`, `script_platforms: ["linux"]`, so **Linux takes zero new code paths**. Runtime is
-> Docker Desktop on both non-Linux platforms (already provisioned by 5.1); no `pacman`/
+> but not `script_platforms` runs the native engine. WotLK lands `platforms: ["linux","macos"]`
+> (6.3 adds `"windows"`), `script_platforms: ["linux"]`, so **Linux takes zero new code paths**.
+> Runtime is Docker Desktop on both non-Linux platforms (already provisioned by 5.1); no `pacman`/
 > `systemctl`/`sudo`, no manual VM management.
 
 1. Implement `NativeInstaller` (in `catalog/installer.py` or a sibling) with the **exact contract
@@ -428,8 +427,9 @@ automatically.
    and worldserver `stdin_open`/`tty`/`stop_grace_period` per prior-art §2.
 3. **Preflight — refuse, don't warn** (`rust-prior-art.md` §3): RAM 2 GB/job (refuse < 6 GB, warn
    < 8 GB), Docker data-root refuse < 40 GB, games-dir refuse < 8 GB, CPU-vs-RAM advisory, the
-   5-second bind-mount probe, `server_dir_problem()` (OneDrive/iCloud/UNC/mapped-drive), and the
-   port-conflict check *before* the build. Privilege consent belongs in preflight, not after the
+   30-second bind-mount probe (against the nearest populated ancestor, with the pinned git image
+   the clone stages already pull), `server_dir_problem()` (OneDrive/iCloud/UNC/mapped-drive), and
+   the port-conflict check *before* the build. Privilege consent belongs in preflight, not after the
    fact: before any `docker`-group join or privileged provisioning step, name the change, state
    plainly that group membership == root (with the `-v /:/mnt` chroot example), and require an
    explicit opt-in; never write a `sudoers.d`/`NOPASSWD` docker rule and never `chmod 666` the
@@ -464,11 +464,11 @@ automatically.
    == `C:/Users/x` == `/mnt/c/…`); strip `\r` from anything crossing `wsl.exe`; container names
    global per engine (ownership = project-name *or* working-dir match); port probe refuses only on
    `AddrInUse`; spawn with `CREATE_NO_WINDOW`.
-3. **Fix *before* 6.3 can pass** — the three Windows provisioning defects recorded in
-   Cross-cutting (installer-download TLS cert failure; `Start-Process 'Docker Desktop'` resolving
-   nowhere; PATH not re-read so `docker_ready()` can never succeed on the first run), plus the
-   nested-virtualization gate and the `which()`/`wsl.exe` UTF-16 traps. A clean-box run is the only
-   evidence that counts — the baseline VM is no longer clean.
+3. **Drive 6.3 from a restored clean box**, never one that has already run a provisioning pass —
+   `yulon-win11`'s `clean-debloated` checkpoint. The three Windows provisioning defects, the
+   nested-virtualization gate and the `which()`/`wsl.exe` UTF-16 traps are fixed and the
+   provisioning chain is proven there; what remains unproven is the native install engine driven
+   through it.
 4. _Definition of done:_ the native engine completes a working WotLK server on a real, clean
    Windows 11 machine (no Linux distro, no pre-existing Docker/WSL), zero shell interaction, with
    the same resume and second-install checks as 6.2.
@@ -476,8 +476,8 @@ automatically.
 ### 6.4 Tests & gates
 
 1. Unit-test the platform gating (6.1) through the `platform.detect()` seam, and the macOS/Windows
-   script resolution (6.2/6.3) through `catalog.json` — no real macOS/Windows machine needed for
-   the mocked suite.
+   engine dispatch (6.2/6.3) through `catalog.json`'s `platforms`/`script_platforms` — no real
+   macOS/Windows machine needed for the mocked suite.
 2. Live-gate 6.2 on a real macOS machine and 6.3 on a real Windows 11 machine (both currently
    unverified — the whole point of this phase), **WotLK only** (per the scope gate above).
 3. Assert the privilege-transparency rule structurally: a test fails if any install/provision path
@@ -501,32 +501,20 @@ automatically.
    live-gated, not just unit-tested, on all three platforms.
 2. **Server lifecycle (README §12).** Start/stop/status/health polling, and the single-instance
    port-conflict guard, all correct on each platform's `docker compose` (native Linux Engine,
-   Docker Desktop's macOS VM, Docker Desktop's WSL2 backend on Windows). This item also closes the
-   four lifecycle follow-ups from the staged start/stop review (Cross-cutting), each a real
-   coverage gap, not polish:
-   - **A deliberate "Stop and remove containers" action** on the Server tab, wired to
-     `docker.stop()` — nothing can remove a container today, so a second install of the same game
-     to a new directory dies with `Conflict. The container name is already in use`, and a wedge
-     container survives every Stop/Start.
-   - **Rename `docker_ctl.py`'s `stop` export** (to `teardown`, or make the compose primitives
-     private) so the next contributor adding restart-after-module-apply doesn't silently reinstate
-     the import re-run by reaching for the shorter, button-named one.
-   - **A deliberate "repair / re-import" action** — an install interrupted *after* containers were
-     created but *before* the import finished now comes up against an unimported DB on Start, with
-     a warning about what it overwrites; the installer stays the only healthy-path importer.
-   - **Measure the `stop_grace_period`** against a populated server (1600–2000 playerbots) before
-     picking a value — the 10-second SIGTERM grace is likely too short and SIGKILLs a live save;
-     do not guess a number.
+   Docker Desktop's macOS VM, Docker Desktop's WSL2 backend on Windows). The Stop-and-remove action
+   (`docker.remove_staged()`, exported as `docker_ctl.remove`), the repair / re-import action
+   (`docker.repair_import()`) and the measured 300-second stop grace
+   (`docker.STOP_GRACE_SECONDS`, matching the generated compose's `stop_grace_period: 5m`) are
+   built; live-gate them here too.
 3. **Console (live GM).** `controller_wow_wotlk/console.py`'s `docker attach --sig-proxy=false`
    pty transport is POSIX-only by design. **Account creation no longer depends on it** — the
    SOAP-based path was shown to rest on a false premise (SOAP cannot create the account SOAP needs;
    `phase6-decisions.md` + Cross-cutting), so account creation is the SRP6-over-`DockerSql` path in
    item 4 on every platform. What remains for the console itself is *live GM commands*:
    attach/detach safely (Ctrl+P/Ctrl+Q, never Ctrl+C) and the `CONTROLS-2.md` GM surface, on
-   Linux/macOS where a pty exists. The Windows "no interactive GM console" gap is a smaller,
-   separately tracked item — either land an argued exception to style-guide §7 (attach over the
-   engine API instead of the `docker attach` client) or explicitly re-scope it; it is never left
-   silently broken.
+   Linux/macOS where a pty exists. The Windows "no interactive GM console" gap is re-scoped, not
+   left silently broken: where there is no pty, Send and the command box are disabled with the
+   reason on the tab, and log-follow stays enabled. Gate that state on Windows.
 4. **Account creation (`CREATE-ACCOUNTS.md` / `CONTROLS-1.md`).** Compute AzerothCore's SRP6
    registration values (`x = SHA1(salt || SHA1(UPPER(user) ":" UPPER(pass)))`, `verifier = 7^x mod
    N`, little-endian, zero-padded to 32 bytes) and insert through the existing `DockerSql` seam —
@@ -535,10 +523,10 @@ automatically.
    handle "account already exists," and prove byte-exactness against a verifier the server itself
    wrote. This is the one page the WotLK README calls out as "bookmark and share with family," so
    it is a first-class coverage item.
-5. **Maintenance (`CONTROLS-1.md`).** Cache clear, database backup and restore, and any SQL
-   changes. **This is the known hole:** `controller_wow_wotlk/maintenance.py` is still a
-   placeholder (Phase 4 record), and the rebuild/restart wiring is a follow-up — these must be
-   implemented (not stubbed) and live-gated on all three platforms before Phase 6 exits.
+5. **Maintenance (`CONTROLS-1.md`).** Database backup and restore, and any SQL changes, live-gated
+   on all three platforms before Phase 6 exits. There is no server-side cache to clear — see
+   `maintenance.py`'s docstring for what "cache clear" refers to and where each half belongs.
+   **Still to build:** the rebuild/restart wiring the module applier reports as needed.
 6. **Modules/mods (Phase 2/4.3).** Install/remove through the shared applier, and the manifest
    store's GitHub refresh with the bundled-copy fallback, work identically on all three platforms
    (path handling via `pathlib.Path` should make this "just work," but it must be _verified_, not
@@ -547,8 +535,7 @@ automatically.
 7. **Networking auto-setup (README §13, full `WoW-Wotlk-NETWORKING.md` scope).** LAN *and*
    internet-play, item-for-item against the guide, on all three platforms:
    - firewall open (`ufw` / `firewalld` on Linux; `netsh` + Windows "Private" network check on
-     Windows; **macOS's firewall path must actually be designed and implemented** — currently
-     unverified/undesigned, see Cross-cutting gap);
+     Windows; on macOS the `alf` backend is built and has never run on a Mac — **gate it here**);
    - WSL2 `netsh interface portproxy` when compose ports are `127.0.0.1`-bound;
    - local IP (LAN) and public IP (internet) detection, incl. WSL2 reading the Windows host
      address, never the `172.x` guest;
@@ -648,9 +635,10 @@ fully met.**
 >     manifests/applier in Phase 2/4.3; this is parity, not greenfield).
 >   - **Steam integration** — add the server + WoW client to the user's Steam library automatically.
 >   - **Auto-shutdown on WoW close** — stop the server when the game client exits.
-> - **Hypeer Launcher** — NOT referenced anywhere in this repo (no file, doc, or prior note). Its
->   scope is genuinely **unknown/TBD**: identify what it is, which of its features are in demand,
->   and whether they belong in Yu'lon, before any planning. Do not invent a feature list for it.
+> - **Hypeer Launcher** — this project's own Rust/Tauri launcher, on the `rust-main` branch of
+>   this repository. Its shipped feature list is `docs/FEATURES.md` there, distilled in
+>   `pyplan/rust-prior-art.md` §7. Scope it as a **delta** against what Phases 4/5 already ship,
+>   not a re-port.
 >
 > **Ordering rule:** Phase 8 must not begin until Phase 7 exits (all four v1 servers at full
 > coverage). When Phase 8 is scoped it must be broken down with the same numbered-step /
@@ -660,7 +648,7 @@ fully met.**
 > *expansion*, so each must earn its own step + DoD rather than ride along on Phase 7's servers.
 
 **Phase 8 exit criteria:** TBD — to be defined when this phase is scoped, after Phase 7 exits and
-after "Hypeer Launcher" has been identified and its in-scope features enumerated.
+after the `rust-main` feature delta has been enumerated.
 
 ---
 

@@ -29,9 +29,10 @@ CATALOG = load_catalog()
 class _FakeInstaller(Installer):
     """An `Installer` whose run() is a canned stream; preflight is a no-op."""
 
-    def __init__(self, entry: CatalogEntry, lines: list[str]) -> None:
+    def __init__(self, entry: CatalogEntry, lines: list[str], *, installs: bool = True) -> None:
         super().__init__(entry, docker_check=lambda: True)
         self.lines = lines
+        self.installs = installs
         self.ran_with: list[InstallOptions] = []
         self.cancels: list[threading.Event | None] = []
         self.asks: list[object] = []
@@ -47,10 +48,47 @@ class _FakeInstaller(Installer):
         cancel: threading.Event | None = None,
         ask: object = None,
     ) -> Iterator[str]:
-        self.ran_with.append(options or InstallOptions())
+        opts = options or InstallOptions()
+        self.ran_with.append(opts)
         self.cancels.append(cancel)
         self.asks.append(ask)
         yield from self.lines
+        # A real install leaves a `docker-compose.yml` in the server dir: it
+        # comes out of the clone, and it is the one artefact every install of
+        # every game has. `installs=False` models the OTHER way these scripts
+        # exit 0 — "Keeping existing install — exiting." — which the view must
+        # not read as a finished install.
+        if self.installs and opts.server_dir is not None:
+            opts.server_dir.mkdir(parents=True, exist_ok=True)
+            (opts.server_dir / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+
+
+class _CancellableInstaller(Installer):
+    """Shaped like the real thing under cancel: it yields, then RETURNS — never raises.
+
+    That is what `runner.interact()` does when its cancel event is set, and it
+    is the whole difficulty: from anywhere downstream a stopped install looks
+    exactly like a finished one.
+    """
+
+    def __init__(self, entry: CatalogEntry) -> None:
+        super().__init__(entry, docker_check=lambda: True)
+        self.streaming = threading.Event()
+
+    def preflight(self, options: InstallOptions, cancel: threading.Event | None = None) -> None:
+        return None
+
+    def run(
+        self,
+        options: InstallOptions | None = None,
+        *,
+        cancel: threading.Event | None = None,
+        ask: object = None,
+    ) -> Iterator[str]:
+        yield "cloning"
+        self.streaming.set()
+        while cancel is not None and not cancel.is_set():
+            time.sleep(0.005)
 
 
 def _wait(panel: LogPanel, timeout: float = 5.0) -> None:
@@ -197,10 +235,130 @@ def test_use_existing_cancel_emits_nothing(qapp: object) -> None:
     assert got == []
 
 
+def test_a_script_that_exits_0_without_installing_is_not_remembered(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exit 0 is not proof of an install, and the scripts have a path that proves it.
+
+    Press Install on a folder a previous attempt left behind: line 961 finds no
+    built worldserver image, the existing-folder branch asks "Remove it and
+    start fresh? (y/n):", and `PROMPT_RULES` answers "n" because nothing in the
+    GUI ever sets `reinstall`. The script prints "Keeping existing install —
+    exiting." and exits 0. That used to pin a compose project name into the
+    folder and grow a permanent tab for a server that was never built — and the
+    pin is inherited by any copy of the folder, so Stop in the copy can stop the
+    original's server (review, 2026-08-23).
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    ran: list[list[str]] = []
+    monkeypatch.setattr(
+        runner, "run", lambda cmd, cwd=None, timeout=None: ran.append(cmd) or _completed()  # type: ignore[func-returns-value]
+    )
+    warned: list[str] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))  # type: ignore[attr-defined]
+
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, ["Keeping existing install - exiting."], installs=False),
+        panel,
+        pick_dir=lambda *_: tmp_path,
+        home=tmp_path,
+        platform_id=lambda: "linux",
+    )
+    events: list[str] = []
+    view.install_finished.connect(lambda g, ok, m: events.append(f"finished:{ok}"))
+    view.installed.connect(lambda g, s, c: events.append("installed"))
+
+    assert view.start_install(CATALOG.get("wow-wotlk")) is True
+    _wait(panel)
+
+    assert events == ["finished:False"], "an install that never happened was registered"
+    assert not (tmp_path / ".env").exists(), "a folder with no install was pinned"
+    assert ran == [], f"the pin shelled out to {ran}"
+    assert warned and "docker-compose.yml" in warned[0]
+
+
+def test_a_cancelled_install_is_not_remembered_and_says_what_it_left(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stopping an install must not register it (roadmap 6.5, "honest cancel copy").
+
+    Driven through this button against the real install script on Ubuntu and
+    stopped during the source clone, this path reported `ok=True` with the
+    message "done", wrote a `COMPOSE_PROJECT_NAME` pin into the half-cloned
+    folder, emitted `installed` — which `main.py` saves into `state.json` and
+    turns into a permanent tab — and showed no message at all about the 2.3 GB
+    it had left behind (install gate, 2026-08-23). On a run stopped earlier
+    still, the folder it registered did not exist.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    ran: list[list[str]] = []
+    monkeypatch.setattr(
+        runner, "run", lambda cmd, cwd=None, timeout=None: ran.append(cmd) or _completed()  # type: ignore[func-returns-value]
+    )
+    told: list[tuple[str, str]] = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: told.append((a[1], a[2])))  # type: ignore[attr-defined]
+    warned: list[str] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))  # type: ignore[attr-defined]
+
+    panel = LogPanel()
+    made: list[_CancellableInstaller] = []
+
+    def factory(entry: CatalogEntry) -> Installer:
+        inst = _CancellableInstaller(entry)
+        made.append(inst)
+        return inst
+
+    view = CatalogView(
+        CATALOG,
+        factory,
+        panel,
+        pick_dir=lambda *_: tmp_path,
+        home=tmp_path,
+        platform_id=lambda: "linux",
+    )
+    events: list[tuple[str, ...]] = []
+    view.install_finished.connect(lambda g, ok, m: events.append(("finished", g, str(ok), m)))
+    view.installed.connect(lambda g, s, c: events.append(("installed", g, str(s), str(c))))
+
+    assert view.start_install(CATALOG.get("wow-wotlk")) is True
+    deadline = time.monotonic() + 5.0
+    while not made[0].streaming.is_set() and time.monotonic() < deadline:
+        process_events(10)
+    panel.stop()
+    _wait(panel)
+
+    assert [event[0] for event in events] == ["finished"], "a cancelled install was registered"
+    assert events[0][2] == "False"
+    assert not (tmp_path / ".env").exists(), "a cancelled install pinned a compose project"
+    assert ran == [], f"a cancelled install shelled out to {ran}"
+    assert warned == [], "cancelling is not a failure"
+    assert told and told[0][0] == "Install cancelled"
+    # The copy has to carry three things, and the folder is the one a user acts on.
+    assert str(tmp_path) in told[0][1]
+    assert "NOT been remembered as an install" in told[0][1]
+    assert "build cache" in told[0][1]
+    # And it must not send them back into the bug this test exists for: pressing
+    # Install again on a folder with no built images answers "n" to "Remove it
+    # and start fresh?" and exits 0, which is a false registration.
+    assert "carry on" not in told[0][1], "the cancel copy still promises a resume"
+    assert told[0][1] == events[0][3]
+    assert panel.status_text() == "cancelled"
+    assert view.button_for("wow-wotlk").isEnabled() is True  # and the tiles come back
+
+
 def test_unsupported_platform_is_said_on_the_tile_and_refused_before_any_prompt(
     qapp: object, monkeypatch: object
 ) -> None:
-    """Roadmap 6.1: no folder dialog, no subprocess — just an honest message."""
+    """Roadmap 6.1: no folder dialog, no subprocess — just an honest message.
+
+    Asked of TBC rather than WotLK since 6.2 made WotLK installable on macOS
+    through the native engine. The tile gate is unchanged; the entry that
+    demonstrates it moved.
+    """
     from PySide6.QtWidgets import QMessageBox
 
     panel = LogPanel()
@@ -222,12 +380,15 @@ def test_unsupported_platform_is_said_on_the_tile_and_refused_before_any_prompt(
     finished: list[tuple[str, bool, str]] = []
     view.install_finished.connect(lambda g, ok, m: finished.append((g, ok, m)))
 
-    assert view.button_for("wow-wotlk").isEnabled() is False  # said on the tile
-    assert view.start_install(CATALOG.get("wow-wotlk")) is False
+    assert view.button_for("wow-tbc").isEnabled() is False  # said on the tile
+    assert view.start_install(CATALOG.get("wow-tbc")) is False
     assert prompted == []  # never asked where to install it
     assert shown and "cannot be installed on macOS" in shown[0]
-    assert finished == [("wow-wotlk", False, shown[0])]
+    assert finished == [("wow-tbc", False, shown[0])]
     assert panel.running is False
+    # And the entry that DID gain a macOS path is offered rather than gated,
+    # which is the other half of the same rule.
+    assert view.button_for("wow-wotlk").isEnabled() is True
 
 
 def test_supported_platform_keeps_the_install_button(qapp: object) -> None:

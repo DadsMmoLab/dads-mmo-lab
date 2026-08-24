@@ -330,3 +330,212 @@ def test_write_client_realmlist_retail_and_repack_layouts(tmp_path: Path) -> Non
     fresh.mkdir()
     out3 = networking.write_client_realmlist(fresh, "1.2.3.4")
     assert out3 == fresh / "Data" / "enUS" / "realmlist.wtf"
+
+
+# --------------------------------------------------------- the macOS firewall
+# Every one of these runs the real parsing against the strings `socketfilterfw`
+# is documented to print. None of it has been run on a Mac — the checks that
+# would settle each string are listed in `pyplan/checklist.md`, and until
+# somebody runs them these tests pin our READING of the documentation, not the
+# documentation's agreement with macOS.
+
+
+class _Alf:
+    """A fake `socketfilterfw` answering each getter with a canned line."""
+
+    def __init__(self, state: str = "State = 1", block: str = "disabled", app: str = "") -> None:
+        self.answers = {"--getglobalstate": state, "--getblockall": block, "--getappblocked": app}
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
+        self.calls.append(argv)
+        for flag, said in self.answers.items():
+            if flag in argv:
+                rc = 1 if said is None else 0
+                return subprocess.CompletedProcess(argv, rc, said or "", "")
+        return subprocess.CompletedProcess(argv, 1, "", "unexpected")
+
+
+@pytest.fixture
+def _on_a_mac(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A machine where `socketfilterfw` exists. Any real file will do as the stand-in.
+
+    The probe gates on the tool being present before it spawns anything, so the
+    constant is pointed at a file that is there rather than the Path object
+    being patched — instance attributes on `Path` are read-only.
+    """
+    monkeypatch.setattr(platform.sys, "platform", "darwin")
+    monkeypatch.setattr(platform, "_SOCKETFILTERFW", Path(platform.__file__))
+
+
+def test_macos_gets_its_own_backend_and_no_port_commands(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Mac used to fall into "none" and be told to install ufw.
+
+    And `alf` emits no commands, which is the correct output rather than a gap:
+    the macOS Application Firewall is per-application and has no port
+    vocabulary, so "open TCP 3724" cannot be expressed in it at all.
+    """
+    monkeypatch.setattr(platform.sys, "platform", "darwin")
+    assert platform.detect_firewall() == "alf"
+    assert platform.firewall_commands("alf", (3724, 8085), rule_prefix="X") == []
+
+
+@pytest.mark.parametrize(
+    ("state", "block", "app", "expect"),
+    [
+        ("State = 0", "disabled", "", "off — nothing is being blocked"),
+        (
+            "State = 1",
+            "disabled",
+            "com.docker.backend is not blocked",
+            "is allowed to receive incoming",
+        ),
+        ("State = 2", "disabled", "not part of the firewall", "not in the allow list yet"),
+        ("State = 1", "disabled", "com.docker.backend is blocked", "is BLOCKED from receiving"),
+        ("State = 1", "block all non-essential", "", "block ALL incoming"),
+    ],
+)
+def test_the_firewall_state_reads_back_as_the_line_a_person_sees(
+    _on_a_mac: None, state: str, block: str, app: str, expect: str
+) -> None:
+    """Each documented output maps to one status line, and "not blocked" is not "blocked".
+
+    That last one is the trap: `"blocked" in "not blocked"` is True, so the
+    negative readings have to be tested first or every allowed app reads as
+    blocked — which would tell a working machine it is broken.
+    """
+    said = platform.detect_alf_state(run=_Alf(state, block, app)).describe()
+    assert expect in said, said
+
+
+def test_an_unreadable_firewall_is_unchecked_and_says_so(_on_a_mac: None) -> None:
+    """Three independent reads, and `None` is never rounded to either neighbour."""
+    blind = _Alf()
+    blind.answers["--getglobalstate"] = None  # type: ignore[assignment]
+    state = platform.detect_alf_state(run=blind)
+    assert state.enabled is None
+    said = state.describe()
+    assert "unchecked" in said and "not a pass" in said
+
+
+def test_off_macos_the_probe_spawns_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No `socketfilterfw`, no subprocess — which is also what makes this safe to unit-test."""
+    monkeypatch.setattr(platform, "_SOCKETFILTERFW", Path("/definitely/not/here/socketfilterfw"))
+
+    def _never(_argv: list[str]) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("the macOS firewall probe ran something off macOS")
+
+    assert platform.detect_alf_state(run=_never) == platform.AlfState()
+
+
+def test_the_unblock_command_is_produced_to_show_never_to_run() -> None:
+    """It needs root, and this path does not ask for passwords — so the user runs it.
+
+    The app named is Docker Desktop's backend, not ours: the server listens
+    inside Docker's VM and `com.docker.backend` is what holds the host socket,
+    so allow-listing Yu'lon would be theatre.
+    """
+    (argv,) = platform.alf_unblock_commands()
+    assert argv[0].endswith("socketfilterfw")
+    assert argv[1] == "--unblockapp"
+    assert argv[2].endswith("com.docker.backend")
+
+    plan = networking.plan(
+        WOTLK,
+        "lan",
+        lan_ip="192.168.1.5",
+        firewall="alf",
+        detect_alf=lambda: platform.AlfState(True, False, "blocked"),
+    )
+    assert plan.firewall_commands == ()  # nothing to run, ever
+    assert any("run this yourself" in m and "--unblockapp" in m for m in plan.manual_steps)
+
+
+def test_block_all_says_the_allow_list_cannot_help(_on_a_mac: None) -> None:
+    """A per-app allowance is a dead letter under "block all", so the copy must not offer one."""
+    plan = networking.plan(
+        WOTLK,
+        "lan",
+        lan_ip="192.168.1.5",
+        firewall="alf",
+        detect_alf=lambda: platform.AlfState(True, True, "allowed"),
+    )
+    assert any("no matter what is allowed" in w for w in plan.warnings)
+    assert not [m for m in plan.manual_steps if "--unblockapp" in m]
+
+
+def test_a_working_mac_firewall_produces_no_advice_at_all(_on_a_mac: None) -> None:
+    """Inventing a step for a machine that is fine is how a screen teaches people to ignore it."""
+    for state in (platform.AlfState(False, None, None), platform.AlfState(True, False, "allowed")):
+        plan = networking.plan(
+            WOTLK, "lan", lan_ip="192.168.1.5", firewall="alf", detect_alf=lambda s=state: s
+        )
+        assert plan.warnings == ()
+        assert not [m for m in plan.manual_steps if "firewall" in m.lower()]
+        assert plan.firewall_state is not None
+
+
+def test_a_mac_is_never_told_to_open_an_administrator_powershell() -> None:
+    """The retry hint used to be a two-branch boolean whose else-branch was Windows advice.
+
+    `none` sits with `netsh`, not with `alf`, and the distinction is not
+    cosmetic: `none` is what a WSL2 distro with no ufw or firewall-cmd detects
+    as, and the loopback path still queues `netsh` portproxy commands for it.
+    Grouping it with `alf` dropped the privilege hint from exactly those — a
+    regression the old boolean got right by accident, caught in review of the
+    commit that introduced it.
+    """
+    assert platform.elevation_policy("ufw") == platform.ElevationPolicy(
+        ("sudo", "-n"), " with sudo"
+    )
+    for windows_ish in ("netsh", "none"):
+        assert (
+            platform.elevation_policy(windows_ish).retry_hint == " in an Administrator PowerShell"
+        )
+    assert platform.elevation_policy("alf") == platform.ElevationPolicy()
+
+
+@pytest.mark.parametrize("flag", ["--getglobalstate", "--getblockall"])
+def test_a_getter_that_answers_something_unrecognised_is_unchecked(
+    _on_a_mac: None, flag: str
+) -> None:
+    """ "The command succeeded" is not "the output was recognised", and merging them lies.
+
+    `enabled` was `"state = 1" in said or "state = 2" in said`, so ANY wording
+    the parser did not expect — a future macOS phrasing, an unanticipated
+    locale — answered False, and `describe()` then said "off, nothing is being
+    blocked, no rule is needed" about a machine that may be blocking every
+    player. Worst outcome the design has, and it contradicted `AlfState`'s own
+    docstring. Nothing tested it, because every case fed to the parser sat
+    clearly on one side or the other (review, 2026-08-24).
+    """
+    alf = _Alf(state="State = 1", block="disabled", app="not blocked")
+    alf.answers[flag] = "Firewall is in some state macOS has not documented"
+    state = platform.detect_alf_state(run=alf)
+
+    field = state.enabled if flag == "--getglobalstate" else state.block_all
+    assert field is None, (flag, state)
+    if flag == "--getglobalstate":
+        # And it must not read as a machine that is fine.
+        assert "unchecked" in state.describe() and "not a pass" in state.describe()
+
+
+def test_a_mac_is_told_what_a_loopback_binding_actually_means(_on_a_mac: None) -> None:
+    """No firewall change fixes a 127.0.0.1 binding, so the macOS copy must not imply one.
+
+    The branch was wired and reachable and nothing exercised it: every other
+    `alf` test passes no bindings at all (review, 2026-08-24).
+    """
+    plan = networking.plan(
+        WOTLK,
+        "lan",
+        lan_ip="192.168.1.5",
+        firewall="alf",
+        bindings={WOTLK.ports.auth: "127.0.0.1", WOTLK.ports.world: "0.0.0.0"},
+        detect_alf=lambda: platform.AlfState(True, False, "allowed"),
+    )
+    loopback = [w for w in plan.warnings if "127.0.0.1" in w]
+    assert loopback, plan.warnings
+    assert "No firewall change can fix a loopback binding" in loopback[0]
+    assert "portproxy" not in loopback[0]  # that is the WSL remedy, not a Mac one
+    assert plan.portproxy_commands == ()

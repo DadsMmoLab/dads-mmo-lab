@@ -7,7 +7,12 @@
 > valuably, it records the incidents that produced each decision. This page is the distillation, so
 > nobody has to read Rust to benefit from it.
 >
-> **How to use it.** Phase 6 (macOS + native Windows install paths) can lift sections 1-5 almost
+> **How to use it.** Phase 6 (macOS + native Windows install paths) has now lifted most of
+> sections 1-5: `catalog/native.py` (§1), `catalog/composegen.py` (§2), `catalog/preflight.py`
+> (§3) and `controller_wow_wotlk/accounts.py` (§5). §4 is partial — `platform.py` has the
+> `docker.exe` discovery and `git.py` the `core.autocrlf` and `http.version` pins, but nothing
+> spawns with `CREATE_NO_WINDOW` and 6.3's native Windows path is unfinished, so what is left of
+> it still lifts almost
 > directly — the native installer exists precisely because the bash installers could not run off
 > Linux. Phase 8 (feature parity with The Lab) is where the *bulk* of that codebase gets ported;
 > section 7 lists what is waiting there. Nothing here is a mandate: it is evidence, with file:line
@@ -16,7 +21,11 @@
 > **Provenance.** Extracted 2026-08-21 by reading `origin/rust-main`. Line numbers refer to that
 > branch; read any file with `git show origin/rust-main:<path>`. Two of its lessons were confirmed
 > independently by Yu'lon on the same day (the `docker logs --tail` ready-marker miss, and
-> `docker attach` refusing a non-TTY stdin), which is the main reason to trust the rest.
+> `docker attach` refusing a non-TTY stdin), which is the main reason to trust the rest. A third
+> was confirmed by measurement on 2026-08-23: §2's `stop_grace_period: 5m`. Against a populated
+> server (1980 characters online) the worldserver took 90.7 s, 73.4 s and 58.3 s to shut down
+> across three runs, and Docker's 10 s default SIGKILLed it, so Yu'lon's `STOP_GRACE_SECONDS` is
+> 300 (`pylauncher/yulon/docker.py:741`).
 
 ---
 
@@ -38,6 +47,12 @@ Rules that cost someone an evening each:
 - The state file is a HINT; every stage re-checks disk evidence (clone → `.git` + `git remote get-url origin`;
   build → `docker compose images -q` non-empty). An `is_done` short-circuit once let a dropped-in state file
   make generate-compose rewrite a real server's compose file and orphan its character volumes.
+  **The rule holds; its build clause does not, and this project measured that.** `compose images -q`
+  enumerates the images of a project's CREATED CONTAINERS, so after a successful build with no
+  containers yet — the only window a resume asks in — it returns nothing (yulon-ubuntu, Docker
+  29.1.3 / Compose 2.40.3, 2026-08-24). Carried back to `rust-main` as written it would re-run every
+  build; the Python engine asks the daemon by image reference instead (`docker image inspect`, one
+  per `composegen.built_image_refs()`). Take the correction with the rule.
 - Failure mid-stage records nothing (the stage re-runs); `last_error` is only written into a dir that already
   has content, or the state file itself becomes the non-empty dir that blocks the retry.
 - Resume rests on the state file + BuildKit's layer cache; it is not process suspension.
@@ -115,7 +130,7 @@ Omitting `dockerfile:` killed the first real build after five green stages — e
 - **macOS has NO counterpart in the Rust code** — `/Applications/Docker.app/Contents/Resources/bin/docker`,
   Homebrew paths, and `~/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw` must be written fresh.
 
-## 5. First GM account with no console (solves Yu'lon's Windows console gap)
+## 5. First GM account with no console (lifted into `controller_wow_wotlk/accounts.py`, `859541e6`)
 
 A fresh AzerothCore has zero accounts; SOAP needs a GM-3 account; **SOAP cannot create the account SOAP needs**;
 and `docker attach` refuses piped stdin against a TTY container (and never returns without the tty). The
@@ -136,7 +151,11 @@ re-create.
 
 SRP6 (srp6.rs): `x = SHA1(salt || SHA1(UPPER(user) ":" UPPER(pass)))`, `v = g^x mod N`, `g = 7`, 32-byte
 protocol `N`, **little-endian throughout**, verifier zero-padded to exactly 32 bytes. Each of those four details
-silently produces a well-formed verifier that never authenticates. Prove it in Python against one row
+silently produces a well-formed verifier that never authenticates. A fifth, found when this was
+written in Python: `UPPER` is AzerothCore's `Utf8ToUpperOnlyLatin`, which uppercases ASCII `a-z`
+and nothing else — `str.upper()` also folds `é`, `ß` and Cyrillic, so the two diverge on any
+non-ASCII password (`controller_wow_wotlk/accounts.py`'s `fold()`; its `Café1234` vector comes
+out `78719A8A…` under `str.upper()`). Prove it in Python against one row
 AzerothCore itself wrote.
 
 ## 6. What does not transfer
@@ -155,7 +174,10 @@ reconcile before pinning.
 The same workspace already implements most of what Phase 8 lists, each with its own recorded
 lessons. Worth reading when that phase opens, in rough order of value:
 
-- **Backups** — `backup.rs` (streamed `create`, plus `list`/`validate`/`delete`) and `restore.rs`
+- **Backups** — **not waiting: shipped in Phase 6** as `controller_wow_wotlk/maintenance.py`
+  (`da5e024d`, proven against a real server at `3c946825`), covering backup and restore both.
+  Still worth reading against it: `backup.rs` (streamed `create`, plus
+  `list`/`validate`/`delete`) and `restore.rs`
   (the one sanctioned whole-DB overwrite path, with a safety net taken first).
 - **Module tuning** — `registry.rs` (embedded static registries) + `tuning.rs`: curated switches
   first, then every key the module's own `.conf.dist` knows, with the author's comments inline.
@@ -165,8 +187,11 @@ lessons. Worth reading when that phase opens, in rough order of value:
   with an empty log (that destroyed the evidence twice during a real incident).
 - **Module lifecycle** — `modmgr.rs` (install/update/remove) and `moduletail.rs` (commits-behind
   check → per-module update → rebuild-required flag, conf-activate, place-npc, client-patch).
-- **Quality-of-life** — `watch.rs` (auto-stop when the game exits, as a pure state machine so it is
-  exhaustively testable), `power.rs` (keep-awake while the server is up), `single_instance.rs` (a
+- **Quality-of-life** — all five live under `launcher/src-tauri/src/`, not the `crates/` workspace
+  the rest of this page cites: `watch.rs` (auto-stop when the game exits, as a pure state machine
+  so it is
+  exhaustively testable), `power.rs` (keep-awake while the server is up — partly lifted already as
+  `platform.keep_awake()`: macOS and Windows, a no-op on Linux), `single_instance.rs` (a
   dependency-free guard: binding a fixed loopback port is atomic), `realmlist.rs` (checks BOTH
   `realmlist.wtf` and the `Config.wtf` `SET realmList` fallback the client actually uses),
   `autostart.rs`.

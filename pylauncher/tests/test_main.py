@@ -109,7 +109,12 @@ def test_the_report_is_one_parseable_line_on_stdout(
         "docker_ready",
         "ok",
         "docker_cli",
+        "docker_group",
     }
+    # The consent outcome is part of the support payload: it is what tells
+    # "the user declined root-equivalent access" apart from "provisioning
+    # broke", and headless can only ever report the former.
+    assert payload["docker_group"] == "not-applicable"
 
 
 def test_an_unresolvable_docker_cli_is_reported_as_null(
@@ -162,3 +167,56 @@ def test_main_takes_the_headless_path_without_building_a_window(
     monkeypatch.setattr(main, "build_window", _boom)
     monkeypatch.setattr(main.platform, "ensure_docker", lambda **_k: _report(docker_ready=True))
     assert main.main() == 0
+
+
+def test_the_report_line_survives_a_console_that_cannot_spell_the_step_text(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """This crashed a real clean-Windows run, at the moment it reported success.
+
+    `platform`'s own step text contains an arrow, and the harness runs the frozen
+    app as `yulon.exe --provision > log 2>&1`, which gives a cp1252 stdout. The
+    first version of this function passed `ensure_ascii=False` for prettier
+    output and died with UnicodeEncodeError right here -- after the run had
+    already spent a 659 MB download (clean-box run, 2026-08-23).
+
+    So the marked line has to be encodable by the narrowest console encoding it
+    can plausibly meet, and the escaping has to be lossless: a harness that reads
+    a mangled path is no better off than one that reads nothing.
+    """
+    step = r"downloaded the installer → C:\Users\pk\x.exe"
+    monkeypatch.setattr(
+        main.platform,
+        "ensure_docker",
+        lambda **_k: _report(done=(step,), docker_ready=True),
+    )
+    main.provision_headless()
+    line = next(
+        ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("YULON_PROVISION_JSON ")
+    )
+    line.encode("cp1252")  # the whole assertion: this is what raised
+    payload = json.loads(line[len("YULON_PROVISION_JSON ") :])
+    assert payload["done"] == [step], "the escaping lost or changed the step text"
+
+
+def test_headless_provisioning_never_hands_over_a_prompter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--provision` has nobody to ask, and that has to be the mechanism, not a hope.
+
+    `main.py`'s docstring and the payload comment both claim headless on Linux
+    always answers "not-asked". Every test here replaced `ensure_docker`
+    wholesale with a stub whose report defaults `docker_group` to
+    "not-applicable", so the claim was asserted in prose in two files and
+    verified in neither: a regression that passed a live prompter here would
+    not have failed anything (review, 2026-08-24).
+    """
+    seen: list[dict[str, Any]] = []
+
+    def _provision(**kwargs: Any) -> platform.ProvisionReport:
+        seen.append(kwargs)
+        return _report(docker_ready=True)
+
+    monkeypatch.setattr(main.platform, "ensure_docker", _provision)
+    assert main.provision_headless() == main.PROVISION_READY
+    assert seen and seen[0].get("ask") is None

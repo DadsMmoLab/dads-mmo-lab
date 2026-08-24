@@ -63,15 +63,52 @@ _LINE_ENDING_CONFIG = [
     "core.eol=lf",
 ]
 
+# HTTP/1.1 for the transport, in both forms, for the same reason the line-ending
+# settings are in both: the wrapper form covers this invocation, the persisted
+# form covers every later fetch against the clone.
+#
+# Measured, not inherited: `git clone` of `azerothcore-wotlk` (224k objects) on
+# real Windows died with `fetch-pack: invalid index-pack output` /
+# `unexpected disconnect while reading sideband packet`, and the same clone over
+# HTTP/1.1 succeeded (2026-08-22, `pyplan/checklist.md`). The Rust launcher hit
+# the same wall from the other side — a 1.3 GB clone over HTTP/2 dying with
+# `curl 92 CANCEL (err 8)`, presenting as `early EOF`, which killed a real
+# install at 9% (`rust-prior-art.md` §4).
+#
+# It is applied to the containerized git too, even though the measurement was
+# Git for Windows: the failure is in the HTTP/2 conversation and the container's
+# curl speaks it as readily. One flag of insurance on a step that costs 2.4 GB
+# to retry.
+#
+# **`http.postBuffer=524288000` is deliberately NOT here**, though it was in the
+# measured fix. The two were changed together, so nothing separates which one
+# worked, and a half-gigabyte buffer is a widely-copied setting with a real cost
+# and no mechanism connecting it to this failure. If HTTP/1.1 alone proves
+# insufficient at a gate, that is the moment to add it — with that evidence.
+_HTTP_VERSION_ARGS = ["-c", "http.version=HTTP/1.1"]
+_HTTP_VERSION_CONFIG = ["--config", "http.version=HTTP/1.1"]
+
+
 # Pinned by digest, not by tag. This image is handed a writable bind mount of
 # the destination directory, so "whatever :latest resolves to today" is a
 # third party with write access to a user's install. The tag is kept alongside
 # for readability; the digest is what docker actually resolves.
 # Resolved 2026-08-22 by pulling alpine/git:2.49.1 (git version 2.49.1) and
 # reading back its RepoDigest; re-resolve the same way when bumping.
-_CONTAINER_GIT_IMAGE = (
+CONTAINER_GIT_IMAGE = (
     "alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26"
 )
+"""Public because preflight's bind-mount probe has to run THIS reference.
+
+A tag and a digest are two different image references to Docker. A probe that
+asked for `alpine/git` pulled a second, unpinned image and bind-mounted the
+user's chosen directory into whatever `:latest` resolved to that day, while the
+clone stage that followed pulled the digest below (review, 2026-08-23).
+Exporting the pinned value is what makes preflight's "the probe costs one pull
+that was going to happen anyway" true rather than merely written.
+"""
+
+_CONTAINER_GIT_IMAGE = CONTAINER_GIT_IMAGE
 
 MISSING_GIT_HELP = {
     "linux": "Install git with your package manager (e.g. `sudo apt install git`) and try again.",
@@ -114,6 +151,13 @@ class Git(Protocol):
     """Clone/update seam. Implementations raise `GitError` on failure."""
 
     def clone(self, spec: CloneSpec) -> None: ...
+
+
+# `remote_url()` is deliberately NOT on that Protocol. `apply.py` — the only
+# other user of this seam — never asks the question, and widening a Protocol
+# breaks every fake that implements it for a capability the fake's caller does
+# not use. The install engine asks for the concrete implementation's method
+# through its own seam instead (roadmap 6.2).
 
 
 def _depth_args(depth: int | None) -> list[str]:
@@ -173,6 +217,23 @@ def _run_git(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedPr
 class RunnerGit:
     """`Git` over the host's `git` CLI, through `yulon.runner`."""
 
+    def remote_url(self, dest: Path) -> str | None:
+        """What `origin` points at in the checkout at `dest`, or None if it cannot be read.
+
+        The disk evidence behind the install engine's clone stages: a state
+        file claiming the clone is done is a hint, and this is the thing that
+        can contradict it. `None` means "not a checkout, or git would not say"
+        — never "no remote", because the caller's next move on a `None` is to
+        clone, and doing that over somebody else's checkout is what the check
+        exists to prevent.
+        """
+        try:
+            proc = _run_git(["git", "remote", "get-url", "origin"], cwd=dest)
+        except GitError as exc:
+            logger.debug(f"could not read origin in {dest}: {exc}")
+            return None
+        return proc.stdout.strip() or None
+
     def clone(self, spec: CloneSpec) -> None:
         if (spec.dest / ".git").is_dir():
             self._update(spec)
@@ -184,8 +245,10 @@ class RunnerGit:
             argv = [
                 "git",
                 *_LINE_ENDING_ARGS,
+                *_HTTP_VERSION_ARGS,
                 "clone",
                 *_LINE_ENDING_CONFIG,
+                *_HTTP_VERSION_CONFIG,
                 *_depth_args(spec.depth),
             ]
             if spec.branch:
@@ -203,11 +266,25 @@ class RunnerGit:
         _run_git(["git", "config", "core.sparseCheckout", "true"], cwd=dest)
         _run_git(["git", "config", "core.autocrlf", "false"], cwd=dest)
         _run_git(["git", "config", "core.eol", "lf"], cwd=dest)
+        # The transport policy, persisted here for the same reason the two
+        # above are: this path builds its repository by hand, so it inherits
+        # nothing from `clone --config`. It was missed when the HTTP/1.1 flag
+        # landed — this function persisted the line-ending policy and not the
+        # transport one, so a sparse clone kept exactly the HTTP/2 failure the
+        # flag exists to prevent (adversarial review, 2026-08-24).
+        _run_git(["git", "config", "http.version", "HTTP/1.1"], cwd=dest)
         (dest / ".git" / "info").mkdir(parents=True, exist_ok=True)
         (dest / ".git" / "info" / "sparse-checkout").write_text(
             spec.sparse_path.rstrip("/") + "/\n", encoding="utf-8", newline="\n"
         )
-        pull = ["git", "pull", *_pull_depth_args(spec.depth), "origin", spec.branch or "HEAD"]
+        pull = [
+            "git",
+            *_HTTP_VERSION_ARGS,
+            "pull",
+            *_pull_depth_args(spec.depth),
+            "origin",
+            spec.branch or "HEAD",
+        ]
         _run_git(pull, cwd=dest)
 
     def _update(self, spec: CloneSpec) -> None:
@@ -226,7 +303,10 @@ class RunnerGit:
         this repository if it was cloned by an older build of this launcher.
         """
         ref = spec.branch or "HEAD"
-        _run_git(["git", *_LINE_ENDING_ARGS, "fetch", "origin", ref], cwd=spec.dest)
+        _run_git(
+            ["git", *_LINE_ENDING_ARGS, *_HTTP_VERSION_ARGS, "fetch", "origin", ref],
+            cwd=spec.dest,
+        )
         _run_git(["git", *_LINE_ENDING_ARGS, "reset", "--hard", "FETCH_HEAD"], cwd=spec.dest)
 
 
@@ -253,6 +333,48 @@ class ContainerGit:
 
     image: str = _CONTAINER_GIT_IMAGE
 
+    def remote_url(self, dest: Path) -> str | None:
+        """`git remote get-url origin` in the checkout at `dest`; see `RunnerGit.remote_url()`.
+
+        Containerized like every other git call here, for the same reason: the
+        machine this class exists for may have no git at all, and a question
+        that needs one would put the second prerequisite straight back.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = self._capture(dest, ["remote", "get-url", "origin"])
+        except GitError as exc:
+            logger.debug(f"could not read origin in {dest}: {exc}")
+            return None
+        return proc.stdout.strip() or None
+
+    def is_unmodified(self, dest: Path, relative_path: str) -> bool | None:
+        """Is `relative_path` exactly what this checkout's HEAD committed? None = cannot ask.
+
+        One question, `git status --porcelain -- <path>`, and the three answers
+        it distinguishes are the three that matter: no output means the path is
+        tracked and matches the index and working tree; `?? path` means it is
+        untracked; ` M path` (or any other code) means it was changed. So an
+        empty answer — and only an empty answer — proves that replacing the file
+        destroys nothing, because `git checkout -- <path>` restores it byte for
+        byte.
+
+        `None` when git could not be asked at all, which callers must fail
+        closed on: "we could not check" is not "it is safe to overwrite".
+
+        Deliberately NOT on the `Git` Protocol, for the same reason
+        `remote_url()` is not — see the comment there.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = self._capture(dest, ["status", "--porcelain", "--", relative_path])
+        except GitError as exc:
+            logger.debug(f"could not ask git about {relative_path} in {dest}: {exc}")
+            return None
+        return not proc.stdout.strip()
+
     def clone(self, spec: CloneSpec) -> None:
         if (spec.dest / ".git").is_dir():
             self._run(
@@ -263,7 +385,12 @@ class ContainerGit:
         if spec.dest.exists():
             shutil.rmtree(spec.dest)
         spec.dest.mkdir(parents=True, exist_ok=True)
-        argv = ["clone", *_LINE_ENDING_CONFIG, *_depth_args(spec.depth)]
+        argv = [
+            "clone",
+            *_LINE_ENDING_CONFIG,
+            *_HTTP_VERSION_CONFIG,
+            *_depth_args(spec.depth),
+        ]
         if spec.branch:
             argv += ["--branch", spec.branch]
         if spec.sparse_path is not None:
@@ -282,6 +409,10 @@ class ContainerGit:
             self._run(spec, ["sparse-checkout", "set", "--no-cone", spec.sparse_path.rstrip("/")])
 
     def _run(self, spec: CloneSpec, git_args: list[str]) -> None:
+        """One containerized `git` invocation against this spec's destination."""
+        self._capture(spec.dest, git_args)
+
+    def _capture(self, dest: Path, git_args: list[str]) -> subprocess.CompletedProcess[str]:
         """One containerized `git` invocation, or `GitError` if it fails.
 
         argv[0] comes from `platform.docker_program()` for the reason spelled
@@ -298,6 +429,26 @@ class ContainerGit:
         when this moved off the literal `docker`, so the second still reached
         the user as `[WinError 2] The system cannot find the file specified`
         (review, 2026-08-23) — the exact failure the change was made to end.
+
+        `_LINE_ENDING_ARGS` and `_HTTP_VERSION_ARGS` are applied to EVERY
+        invocation this method makes, including the two that touch no network
+        and no working tree — `remote get-url origin` and `is_unmodified()`'s
+        `status --porcelain`. That is deliberate: one argv shape means there is
+        no second spelling for a future command to be added to and forget, and
+        the HTTP pin is simply inert without a network call.
+
+        The line-ending half is not inert, and a review seat was right to say
+        so. Forcing `core.autocrlf=false core.eol=lf` at `status` time is
+        correct for a checkout THIS code cloned, because those are the same
+        flags it was cloned under. Against a FOREIGN checkout — one the user
+        already had, cloned with `autocrlf=true` so its files sit on disk with
+        CRLF — the same flags make git compare unconverted bytes and report
+        every such file as modified. `is_unmodified()` then answers False and
+        `generate-compose` REFUSES, which is the safe direction (too strict,
+        never overwriting), and it is unreachable today because every checkout
+        the app asks about is one it made. It stops being unreachable the day
+        an existing install can be attached, and that is the day to give the
+        local calls their own argv.
         """
         program = platform.docker_program()
         if program is None:
@@ -307,7 +458,7 @@ class ContainerGit:
             "run",
             "--rm",
             "-v",
-            f"{spec.dest}:/git",
+            f"{dest}:/git",
             # State the working directory rather than inheriting the image's.
             # `image` is a public field, so an override would otherwise clone
             # into the wrong place — silently, since `.` would resolve
@@ -317,6 +468,7 @@ class ContainerGit:
             *self._user_args(),
             self.image,
             *_LINE_ENDING_ARGS,
+            *_HTTP_VERSION_ARGS,
             *git_args,
         ]
         try:
@@ -330,6 +482,7 @@ class ContainerGit:
             raise GitError(platform.DOCKER_CLI_MISSING_HELP) from exc
         if proc.returncode != 0:
             raise GitError(f"containerized git {' '.join(git_args)} failed: {proc.stderr.strip()}")
+        return proc
 
     @staticmethod
     def _user_args() -> list[str]:

@@ -77,9 +77,24 @@ class Controller:
     the subclass should reimplement it (style-guide §4).
     """
 
-    def __init__(self, spec: docker.ContainerSpec, server_dir: Path) -> None:
+    def __init__(
+        self,
+        spec: docker.ContainerSpec,
+        server_dir: Path,
+        *,
+        import_probe: docker.ImportProbe | None = None,
+        reset_unfinished: docker.ResetUnfinished | None = None,
+    ) -> None:
         self.spec = spec
         self.server_dir = server_dir
+        # Composed, not inherited, and optional: asking a database what state it
+        # is in needs a SQL client and per-game schema names, neither of which
+        # this class may know (style-guide §3). A controller built without one
+        # simply never offers the repair — see `import_state()`.
+        self.import_probe = import_probe
+        # Optional, and separate from the probe: without it `repair_import()`
+        # refuses a half-written database instead of making it unimportable.
+        self.reset_unfinished = reset_unfinished
 
     # -- queries ---------------------------------------------------------
 
@@ -162,11 +177,17 @@ class Controller:
     def stop(self) -> bool:
         """Stop the install, keeping its containers so the next start is staged.
 
-        Uses `docker.stop_staged()`. Stopping with `docker compose down` would
-        remove the containers, and `start()` would then have nothing to start by
-        name — putting the very next start back on `compose up -d` and re-running
-        the one-shot database import. Teardown that really should remove the
-        containers calls `docker.stop()` directly.
+        Uses `docker.stop_staged()`, which keeps the containers so the next
+        start reuses them instead of recreating them.
+
+        An earlier version of this docstring said removing them would put the
+        next start "back on `compose up -d` and re-running the one-shot database
+        import". That has not been true since `start_staged()` began naming its
+        three services explicitly: it selects `db auth world` with `--no-deps`,
+        so compose cannot reach `ac-db-import` even when the containers are
+        gone. Keeping them is now a matter of speed, not of safety, and saying
+        otherwise made the safe action look dangerous (2026-08-23). Teardown
+        that really should remove them is `remove()`.
 
         Returns:
             True if something of this install was running and is now down, False
@@ -174,6 +195,64 @@ class Controller:
             said the same thing either way (review, 2026-08-22).
         """
         return docker.stop_staged(self.spec, self.server_dir)
+
+    def remove(self) -> bool:
+        """Stop the install and remove its containers, keeping every volume.
+
+        The deliberate teardown for a project that needs recreating rather than
+        restarting. Characters are not at risk: the database is a named volume
+        and `docker.remove_staged()` never passes `-v`.
+
+        Returns:
+            True if this install had containers and they are now gone, False if
+            there was nothing of it to remove.
+        """
+        return docker.remove_staged(self.spec, self.server_dir)
+
+    def import_state(self) -> docker.ImportState:
+        """Ask this install's databases whether the one-shot import ever finished.
+
+        Never raises: a probe that cannot reach the database answers
+        `unreadable`, and so does a controller built without one. The caller is
+        a five-second status path and a button's visibility, and neither has
+        anywhere useful to put an exception — while `unreadable` is not
+        `repairable`, so the destructive action stays hidden either way.
+        """
+        if self.import_probe is None:
+            return docker.ImportState(
+                "unreadable", "this game has no way to ask its databases what state they are in"
+            )
+        return self.import_probe()
+
+    def repair_import(self, output: docker.OutputSink | None = None) -> bool:
+        """Re-run the one-shot database import. Only for an install broken before it ran.
+
+        See `docker.repair_import()` for every refusal, in particular the one
+        that matters: a database holding accounts or characters is never
+        re-imported, however many times the button is pressed.
+
+        `output` receives the import's own lines as they arrive, which is the
+        only thing that distinguishes a 30-minute import from a hang. It is
+        called on the thread this runs on — a worker thread in the app — so a
+        caller in the UI layer hands in something that can cross threads rather
+        than something that touches a widget.
+
+        Raises:
+            docker.DockerCommandError: any of those refusals, or an import that
+                ran and left the databases exactly as unimported as they were.
+        """
+        if self.import_probe is None:
+            raise docker.DockerCommandError(
+                "this game cannot be asked what state its databases are in, so its import will "
+                "not be re-run — an import that cannot be checked afterwards is a guess."
+            )
+        return docker.repair_import(
+            self.spec,
+            self.server_dir,
+            self.import_probe,
+            reset=self.reset_unfinished,
+            output=output,
+        )
 
     # -- polling ---------------------------------------------------------
 

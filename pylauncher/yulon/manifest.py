@@ -58,6 +58,16 @@ class Source(_Strict):
     sparse_path: str | None = Field(
         default=None, description="Subdirectory to sparse-checkout (kegs inside a larger repo)."
     )
+    depth: int | None = Field(
+        default=1,
+        gt=0,
+        description=(
+            "Shallow-clone depth, or null for a full clone. Data because the warning in "
+            "`git.CloneSpec` is a per-source fact: AzerothCore's core repo must say null, since "
+            "its `genrev.cmake` reads the revision out of git history and a shallow clone hands "
+            "a three-hour build the wrong answer."
+        ),
+    )
 
     @field_validator("repo")
     @classmethod

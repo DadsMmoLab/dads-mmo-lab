@@ -30,8 +30,9 @@ from PySide6.QtWidgets import (
 from yulon import docker, platform
 from yulon.catalog.catalog import Catalog, CatalogEntry
 from yulon.catalog.installer import (
-    Installer,
+    InstallEngine,
     InstallOptions,
+    cancelled_install_message,
     platform_names,
     unsupported_platform_message,
 )
@@ -41,7 +42,14 @@ from yulon.ui.widgets.prompt import InputPrompter
 
 logger = get_logger(__name__)
 
-InstallerFactory = Callable[[CatalogEntry], Installer]
+InstallerFactory = Callable[[CatalogEntry], InstallEngine]
+"""What builds the engine for one entry.
+
+The Protocol rather than the `Installer` class since roadmap 6.2: an entry may
+now be installed by the bash script or by the native engine, `installer_for()`
+decides which from `catalog.json` data, and this view is deliberately not told
+what it got — the two have the same `run()`.
+"""
 DirPicker = Callable[[QWidget, str, Path | None], Path | None]
 
 
@@ -270,6 +278,43 @@ class CatalogView(QWidget):
         game_id, server_dir, client_dir = self._current
         self._current = None
         self._set_buttons_enabled(True)
+        if self._log.cancelled:
+            # A cancelled install reaches here as a SUCCESS: `runner.interact()`
+            # returns rather than raising when its cancel event is set, so the
+            # generator ends normally and `ok` is True. Driven through this very
+            # button against the real script and stopped during the source clone,
+            # that pinned a compose project name into a half-cloned folder and
+            # emitted `installed`, which `main.py` writes into `state.json` and
+            # turns into a permanent tab — an install the user had explicitly
+            # cancelled, and on a run stopped earlier still, a directory that did
+            # not exist at all (install gate, 2026-08-23).
+            note = cancelled_install_message(self._catalog.get(game_id).name, server_dir)
+            logger.info(f"install of {game_id} was cancelled; nothing remembered")
+            QMessageBox.information(self, "Install cancelled", note)
+            self.install_finished.emit(game_id, False, note)
+            return
+        if ok and not (server_dir / "docker-compose.yml").is_file():
+            # A clean exit is not proof of an install. The scripts exit 0 for
+            # "Keeping existing install — exiting." too, which is what a user
+            # gets by pressing Install a second time on a folder the previous
+            # attempt left behind: `PROMPT_RULES` answers "n" to "Remove it and
+            # start fresh?" because nothing in the GUI ever sets `reinstall`.
+            # That used to pin a compose project name into a half-cloned folder
+            # and grow a permanent tab for a server that was never built — and
+            # the pin is the part with teeth, since `docker.py` records that an
+            # install-time pin is inherited by any copy of the folder, so Stop
+            # in the copy can stop the original's server. The check is the one
+            # `attach_existing()` makes, deliberately: the compose file is the
+            # single thing every install of every game has (review, 2026-08-23).
+            ok = False
+            message = (
+                f"The installer exited without error, but {server_dir} has no "
+                "docker-compose.yml — so there is nothing installed there to remember. "
+                "That is what the scripts do when they find an existing folder and are "
+                "told not to replace it: delete the folder and install again, or pick a "
+                "different one."
+            )
+            logger.info(f"{game_id} exited 0 with no compose file in {server_dir}; not remembered")
         if not ok:
             QMessageBox.warning(self, "Install failed", message)
         self.install_finished.emit(game_id, ok, message)

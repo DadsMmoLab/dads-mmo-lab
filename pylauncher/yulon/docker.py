@@ -19,10 +19,14 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 import time
-from collections.abc import Iterator
+from collections import deque
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from yulon import platform, runner
 from yulon.log import get_logger
@@ -79,6 +83,16 @@ class ContainerSpec:
     ports: tuple[int, ...]
     services: tuple[str, ...] = ()
 
+    import_service: str = ""
+    """The one-shot compose service that populates the databases, if the game has one.
+
+    Named here rather than deduced, and empty for a game that has not said.
+    `compose_services()` exists to keep this service *out* of every ordinary
+    start; `repair_import()` is the only thing allowed to select it, and it
+    refuses outright when this is empty rather than guessing at a service name
+    and running whatever happens to answer to it.
+    """
+
     def compose_services(self) -> tuple[str, ...]:
         """The long-running compose services, in dependency order (db first).
 
@@ -88,6 +102,15 @@ class ContainerSpec:
         """
         return self.services or (self.db, self.auth, self.world)
 
+
+CANCELLED_RETURNCODE = -1
+"""What `run_attached()` reports when the caller's cancel token stopped the read.
+
+Negative on purpose: a real process exit status is 0-255, and Python already
+spells "killed by signal N" as `-N`, so no docker command can produce this by
+exiting. A caller must not read it as a failure of the thing being run — the
+build step or the one-shot is still finishing inside the daemon.
+"""
 
 _CLI_MISSING_RETURNCODE = 127
 """What a shell reports for "command not found", and what `_docker()` returns.
@@ -310,13 +333,40 @@ def pinned_project_name(server_dir: Path) -> str | None:
       is, so it can only be stripped outside them;
     * surrounding single or double quotes are removed, and only a matched pair;
     * an empty assignment UNSETS it (compose falls back to the basename), so it
-      cannot leave an earlier value standing.
+      cannot leave an earlier value standing;
+    * a **UTF-8 byte-order mark** in front of the first line is not part of the
+      first variable's name — see `utf-8-sig` below.
+
+    `utf-8-sig`, not `utf-8`, and this one was found on Windows rather than
+    reasoned about. `_stranger_message()` tells the user in as many words to add
+    `COMPOSE_PROJECT_NAME=<x>` to this file, and on Windows the tools they have
+    to hand put a BOM in front of it: PowerShell 5.1's `Set-Content -Encoding
+    utf8` writes `EF BB BF`, and Notepad's "UTF-8 with BOM" does the same.
+    Decoded as plain `utf-8` that becomes a leading `\\ufeff` on the first line,
+    so `startswith("COMPOSE_PROJECT_NAME=")` is False and the pin is invisible.
+
+    What makes it a defect rather than a quirk is that **compose reads the same
+    file and does not agree**. Measured on Windows 11 / Docker 29.7.2
+    (2026-08-23): with a BOM'd `.env`, `docker compose config` reports the
+    project as `bomtest` while this function reported `None`. The two then
+    disagree about which project this install is, which is the exact condition
+    `install_project()` exists to prevent — and the fallback that hides it,
+    asking compose, is unavailable in the one case this function exists for (an
+    install whose compose files cannot be read). It also made `pin_project_name()`
+    believe nothing was pinned and append a SECOND assignment, where compose's
+    last-one-wins then silently overrides whatever the user had set.
+
+    `utf-8-sig` strips a BOM if there is one and is byte-for-byte `utf-8` if
+    there is not, so nothing else changes. A UTF-16 `.env` — what PowerShell's
+    bare `>` and `Out-File` write — is deliberately NOT handled: compose cannot
+    read one either, so that file is broken for both of us and guessing at an
+    encoding here would be the app inventing an agreement that does not exist.
     """
     env_path = server_dir / ".env"
     if not env_path.is_file():
         return None
     try:
-        text = env_path.read_text(encoding="utf-8", errors="replace")
+        text = env_path.read_text(encoding="utf-8-sig", errors="replace")
     except OSError:
         return None
     found: str | None = None
@@ -560,16 +610,640 @@ def start_staged(spec: ContainerSpec, server_dir: Path) -> bool:
     return True
 
 
-def stop(server_dir: Path) -> None:
-    """Take the compose project in `server_dir` down, REMOVING its containers.
+def _project_containers(project: str) -> list[str] | None:
+    """Every container compose stamped with `project`, running or exited.
 
-    This is the teardown path (uninstall, or recovering from a broken project).
-    For the stop half of a normal start/stop cycle use `stop_staged()`: removing
-    the containers here is what forces the next start back onto `compose up -d`,
-    and with it the one-shot database import.
+    `container_exists()` cannot answer this: AzerothCore pins container names
+    GLOBALLY (`ac-worldserver`, not `<project>-worldserver`), so a name search
+    finds a second install's container and calls it ours. Filtering on the
+    project label is the only way to ask about this install, and `-a` is what
+    makes it about existence rather than about running.
+
+    Returns None when Docker could not be asked, which callers must not read as
+    "nothing is there".
     """
-    logger.debug(f"stop() called: server_dir={server_dir}")
-    _run(["compose", "down"], cwd=server_dir)
+    proc = _docker(
+        ["ps", "-a", "--filter", f"label={PROJECT_LABEL}={project}", "--format", "{{.Names}}"]
+    )
+    if proc.returncode != 0:
+        logger.warning(f"could not list containers for project {project}: {proc.stderr.strip()}")
+        return None
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def remove_staged(spec: ContainerSpec, server_dir: Path) -> bool:
+    """Stop this install and REMOVE its containers. Volumes are never touched.
+
+    The deliberate teardown, for a project that needs recreating rather than
+    restarting: a container wedged in a state `compose up` will not fix, a
+    compose change that needs a fresh container, or clearing the way before an
+    install is deleted by hand.
+
+    WHAT THIS DOES NOT DO, because it is the whole reason the action is safe:
+    it never removes a volume. The database lives in a named volume
+    (`db-data:/var/lib/mysql` in an install this engine generated) and the
+    client data in another, so `compose down` WITHOUT `-v` leaves every
+    character exactly where it was. `-v` is the flag that would turn this into data loss, and a test
+    asserts the argv never grows one.
+
+    It also no longer costs the next start its database. An earlier version of
+    this module warned that removing containers "forces the next start back onto
+    `compose up -d`, and with it the one-shot database import" — that stopped
+    being true when `start_staged()` began naming its three services explicitly.
+    It selects `db auth world` and `--no-deps`, so compose cannot reach
+    `ac-db-import` whether the containers are missing or not, and it recreates
+    what is gone. The warning outlived the danger (2026-08-23).
+
+    Ownership is proved the same way `stop_staged()` proves it, and refuses the
+    same way, so the two actions cannot disagree about whose containers these
+    are. `compose down` is project-scoped and would not touch a stranger anyway,
+    but a census that cannot establish ownership means something is wrong with
+    this install, and acting confidently on it is how the wrong server gets torn
+    down.
+
+    Returns:
+        True if this install had containers and they are now gone; False if
+        there was nothing of it to remove. Not `compose down`'s exit code, which
+        is 0 for a project that never existed.
+
+    Raises:
+        DockerCommandError: Ownership could not be established, or containers of
+            this install are still there afterwards.
+    """
+    logger.debug(f"remove_staged() called: server_dir={server_dir}")
+    project = install_project(spec, server_dir)
+    if project is None:
+        _refuse_without_an_identity(spec, server_dir, "Nothing was removed.")
+        return False
+
+    # The same look-before-touching census as the stop path, for the same
+    # reason: a refusal has to happen before the command, not after it.
+    running = _running(spec, project)
+    if running.unreadable:
+        raise DockerCommandError(
+            f"Docker would not say which project owns {', '.join(running.unreadable)}, so this "
+            f"install in {server_dir} cannot prove those containers are its own. Nothing was "
+            "removed."
+        )
+    if running.strangers:
+        raise DockerCommandError(_stranger_message(running.strangers, project, server_dir))
+
+    before = _project_containers(project)
+    if before is None:
+        raise DockerCommandError(
+            "could not ask Docker which containers this install has, so nothing was removed"
+        )
+    if not before:
+        logger.info("remove_staged(): this install has no containers")
+        return False
+
+    # `down` and not `rm`: it walks the project's own depends_on graph in
+    # reverse, so the servers close their database connections before the
+    # database goes. `--remove-orphans` clears services dropped from the compose
+    # file, which are exactly the leftovers that make a project need recreating.
+    # No `-v`, ever.
+    # The grace matters here as much as it does on the stop path, and it was
+    # missed the first time round: this button is offered on a RUNNING server,
+    # under copy that says the characters are not affected. At Docker's 10s
+    # default that copy is false for a populated realm — the worldserver is
+    # SIGKILLed mid-drain and the save queue is what is lost, not the containers
+    # (review, 2026-08-23; the measurement is under `STOP_GRACE_SECONDS`).
+    proc = _docker(
+        ["compose", "down", "-t", str(STOP_GRACE_SECONDS), "--remove-orphans"], cwd=server_dir
+    )
+    if proc.returncode != 0:
+        logger.warning(f"compose down failed ({proc.stderr.strip()}); removing by name")
+
+    after = _project_containers(project)
+    if after is None:
+        raise DockerCommandError(
+            "the containers were asked to go, but Docker will no longer say what this install "
+            "has, so the removal cannot be confirmed. Check with `docker ps -a`."
+        )
+    if after:
+        # Only names the census already proved carry this project's label.
+        logger.warning(f"compose down left {after}; removing by name")
+        for name in after:
+            # Stopped with the full grace BEFORE it is removed. `rm -f` is a
+            # SIGKILL with no grace at all, so leaving it as the only fallback
+            # left a hard-kill path reachable from the same button whose copy
+            # promises the characters survive (review, 2026-08-23).
+            _run_docker_stop(name)
+            _docker(["rm", "-f", name])
+        after = _project_containers(project) or []
+    if after:
+        raise DockerCommandError(f"still present after remove: {', '.join(after)}")
+
+    logger.info(f"remove_staged(): removed {len(before)} container(s); volumes untouched")
+    return True
+
+
+STOP_GRACE_SECONDS = 300
+"""Seconds a container gets between SIGTERM and the SIGKILL that follows it.
+
+Docker's own default is 10, and 10 was measured killing a live save: a plain
+`docker compose stop` against the populated worldserver on yulon-ubuntu came
+back with exit code 137 (2026-08-23).
+
+Measured on that box the same day — AzerothCore + playerbots, 1980 characters
+online — two shutdowns run under a grace so long it could not bind
+(`docker stop --timeout 900`) took **90.7s** and **73.4s**, both exit 0. A
+third, run through `stop_staged()` itself with this constant in force, stopped
+the whole project in **58.3s** with all three containers exit 0 and none of
+them removed. So the same server, at the same population, varies by more than
+half a minute between runs; the value has to cover the bad run.
+
+Almost all of it is one phase. After `Halting process...` and `Logging out all
+bots...` the worldserver logs `Closing down DatabasePool 'acore_characters'.
+Waiting for 7662 queries to finish...` and then spends 86s, 69s and 52s in the
+three samples draining that character save queue — 7400-7700 queued saves at
+90-145 a second. The other two containers are nowhere near the constraint:
+ac-authserver stopped in 0.22s and ac-database in 1.4s.
+
+300 is therefore about 3.3x the worst thing seen. The margin is deliberately
+generous and deliberately asymmetric. The queue depth scales with population
+and drains at whatever the disk gives, so a larger realm or a slower disk moves
+the number — while the only cost of an over-long grace is that a genuinely hung
+server takes longer to give up, and the cost of being 30s short is a player's
+characters rolled back to their last save. It happens to agree with the
+`stop_grace_period: 5m` the earlier Rust launcher wrote into its generated
+compose file (`pyplan/rust-prior-art.md` §2); that is now a confirmed number
+rather than an inherited one.
+
+This is the CLI grace on the stop path. The compose `stop_grace_period` key is
+the same 300 seconds, and the install engine now writes it: see
+`catalog/installers/wow-wotlk/native/base.yml.tmpl`, whose comment points back
+at this constant. The two are meant to agree, and nothing enforces that they do
+— they are read by different tools in different processes, so the only thing
+holding them together is that both cite the same three measured shutdowns.
+"""
+
+
+DatabaseImport = Literal["absent", "partial", "imported", "populated", "unreadable"]
+"""What a probe found in the databases the one-shot import is supposed to fill.
+
+* `absent` — nothing of the schema set is there. Never imported.
+* `partial` — some of it is there and some is not. An import that stopped.
+* `imported` — all of it is there, and nobody has played on it yet.
+* `populated` — there are accounts or characters. Possibly somebody's server.
+* `unreadable` — the database could not be asked, so nothing is established.
+
+The line that matters is between `populated` and everything else: it is drawn
+on player data, not on completeness, because player data is the thing whose loss
+cannot be undone. A half-imported database that somehow holds characters is
+`populated` and is refused, even though the import really did stop half-way.
+
+`populated` does NOT mean "somebody played here", and calling it that was
+wrong until a live import said so (yulon-ubuntu, 2026-08-23). The one-shot
+applies every module's `data/sql/db-auth` and `db-characters` updates as well
+as AzerothCore's own, so a module is free to seed rows: a first-ever import of
+an install carrying mod-city-bots came out of the box with 400 accounts and 400
+characters, none of them a person's. The state is still refused, because
+nothing here can tell a seeded row from a made one and the fail-closed answer
+is the only safe one — but a caller must read it as "there is data that a
+re-import would destroy", not as "this server has been played on".
+"""
+
+
+@dataclass(frozen=True)
+class ImportState:
+    """One probe's answer, with the sentence that produced it.
+
+    `detail` is carried rather than recomputed by the caller because the probe
+    is the only thing that knows *why* — which schema was missing, how many
+    accounts were found — and a refusal that cannot say why is a refusal the
+    user has no way to act on.
+    """
+
+    state: DatabaseImport
+    detail: str = ""
+    complete: bool = False
+    """Whether every schema the import is supposed to fill actually has tables.
+
+    Separate from `state` because the two answer different questions and only
+    one of them is about danger. `populated` short-circuits the moment a single
+    row exists, precisely so a database with player data in it is refused before
+    anything is written — which means it says nothing at all about whether the
+    schemas are finished. That is fine for the refusal and useless for the
+    post-check, which needs to know whether the one-shot did its job.
+
+    A review found the hole this closes: an import that applies a module's
+    `db-auth` updates (mod-city-bots seeds 400 accounts) and then dies on the
+    world schema leaves `populated` with `acore_world` empty. Reading only the
+    state, the action reported that as a finished repair, hid its own button,
+    and left the user with a broken server and a success message.
+
+    Defaults False so a probe that does not compute it cannot claim completeness
+    by omission.
+    """
+
+    @property
+    def repairable(self) -> bool:
+        """True only where re-running the import can put something right.
+
+        `partial` is here only because `repair_import()` can be handed a
+        `reset` that drops the half-written schemas before the one-shot runs.
+        Without one it must not be, and a live gate is why. Re-running
+        `ac-db-import` over a schema that already exists does NOT finish it:
+        AzerothCore skips the base dump for a database that is already there,
+        creates its `updates` bookkeeping, and seeds it with every known SQL
+        file marked as applied. Measured on yulon-ubuntu, 2026-08-23 — an import
+        killed 19 seconds in left `acore_world` with 3 tables of 316, and
+        re-running the one-shot took it to 5 tables and **2671 rows in
+        `acore_world.updates`**, after which no run would ever apply those files
+        again. The action did not merely fail to repair the state it was built
+        for, it destroyed the only route out of it. `repair_import()` still
+        refuses `partial` outright when no `reset` is supplied, which is what
+        makes this property safe to widen.
+
+        Deliberately false for `unreadable` too. An unanswerable database is not
+        an empty one — the same fail-closed rule `_refuse_without_an_identity()`
+        applies to ownership — and offering a destructive button on the strength
+        of a question nobody answered is how it gets pressed by accident.
+        """
+        return self.state in ("absent", "partial")
+
+
+ResetUnfinished = Callable[[], tuple[str, ...]]
+"""Drops the schemas an interrupted import left half-written; returns their names.
+
+A second seam rather than a wider `ImportProbe`, for the same reason the probe
+is read-only: this module must not know that a schema is called `acore_world`
+(style-guide §3), and the one thing on this path that destroys data should be
+the one thing whose type says it writes. The per-game module owns both.
+
+Optional. Given none, `repair_import()` refuses a `partial` database rather than
+making it worse — see `ImportState.repairable`.
+"""
+
+ImportProbe = Callable[[], ImportState]
+"""Asks the install's databases what state they are in.
+
+A seam, because this module must not know what a schema is called or which
+table holds an account (style-guide §3) — those are per-game facts, and the
+per-game module owns them. See `controller_wow_wotlk/repair.py`.
+"""
+
+
+OutputSink = Callable[[str], None]
+"""Where a long-running docker command's output goes, one line at a time.
+
+Called on whatever thread is running the command — which for every caller in
+this app is a worker thread, never the GUI thread. A sink that writes into a
+widget directly is therefore the bug this seam exists to make avoidable, not
+the use it exists for: the UI hands in something that can cross a thread
+boundary (`ui/widgets/job.py`'s `LineRelay`), and `run_attached()` never learns
+what happens at the far end.
+"""
+
+
+def repair_import(
+    spec: ContainerSpec,
+    server_dir: Path,
+    probe: ImportProbe,
+    *,
+    reset: ResetUnfinished | None = None,
+    output: OutputSink | None = None,
+    db_timeout: float = _DB_HEALTHY_TIMEOUT_SECONDS,
+) -> bool:
+    """Re-run this install's one-shot database import. For a BROKEN install only.
+
+    The installer is the only thing that runs the import on a healthy path, and
+    `start_staged()` exists precisely so an ordinary Start can never reach it.
+    This is the repair for the one state that leaves behind: an install
+    interrupted *after* its containers were created but *before* the import
+    finished, whose Start now brings a worldserver up against empty schemas and
+    fails in a way that explains nothing.
+
+    It refuses far more often than it acts, and the refusals are the feature:
+
+    * no `spec.import_service` — this game never said which service imports, and
+      guessing a service name is guessing which container gets run;
+    * ownership cannot be established, or containers wearing our names belong to
+      another compose project. Identical to `remove_staged()`/`stop_staged()`, so
+      the three cannot disagree about whose install this is;
+    * an authserver or worldserver of this install is running. A live worldserver
+      holds character state in memory, and the import writes underneath it;
+    * the probe says the database holds player data. **This is the refusal that
+      matters.** Re-importing over a populated database destroys characters, and
+      it is not offered a second time for a user who asks twice — the way back
+      from a bad database is Restore, which exists, and which was live-gated
+      against a real 386 MB backup. On an install whose modules seed accounts
+      this is also the refusal a *finished* repair leaves behind — pressing
+      again lands here rather than on "already imported", which is a worse
+      sentence for that case and still the right answer, since nothing can
+      prove the rows are not a person's (see `DatabaseImport`);
+    * the probe says the import already completed, or could not be asked at all.
+
+    Two commands, both naming their service explicitly:
+
+    1. `compose up -d --no-deps <db>`, only when the database is not already
+       running. The import has to have somewhere to write, and the probe has to
+       have something to ask — and a user cannot reach "database up, servers
+       down" with the buttons this app has, since Start starts all three and
+       Stop stops all three. Naming the database by hand is narrower than
+       dropping `--no-deps` and letting compose's dependency graph decide what
+       else comes up, which this repo has never measured.
+    2. `compose up --no-deps <import_service>`, attached. `--no-deps` is what
+       makes attached mode terminate: the one-shot is then the only container
+       compose brings up, so `up` returns when it exits. Without it, `up` would
+       also attach to the database and wait for a container that never stops.
+
+    The exit code of that second command is not the answer, for the same reason
+    `remove_staged()` does not believe `compose down`'s: the probe is run again
+    afterwards, and only a database that is no longer repairable counts.
+
+    **Live-gated on yulon-ubuntu, 2026-08-23**, against a copy of a real
+    AzerothCore + playerbots + city-bots install on a brand-new empty volume,
+    Docker 29.1.3. Three things this docstring had asserted without a daemon:
+
+    * *Attached `up` terminates.* It does, and so does the detached database
+      start. One whole call took 209.0s against a one-shot container that ran
+      208.0s, so `up` came back within about a second of the import exiting.
+      The database half: 23s from `compose up -d --no-deps <db>` to healthy on
+      a brand-new volume, and 7.1s start-to-refusal on an existing container.
+      "A full import takes several minutes", which is what the button says, is
+      the right order of magnitude — 215s and 208s for two full imports.
+    * *`compose up` re-runs a one-shot whose container already exists and has
+      exited.* It does, with no `--force-recreate`. The same `rt-ac-db-import`
+      container went `StartedAt 16:59:10 → 17:05:06`, `FinishedAt 17:02:45 →
+      17:08:34`, exit 0 both times, and the second run refilled three schemas
+      that had been `DROP DATABASE`d in between.
+    * *A finished import leaves `acore_auth.account` empty.* **False**, and
+      this is what the post-check below had to change for — see the comment
+      there.
+
+    `output`, when given, receives each line of the import's STDOUT as it prints
+    it. Not every line: `runner.stream()` withholds stderr until the child has
+    exited and then yields it in one block, so anything the one-shot writes
+    there — compose's own `Container ... Created/Started` progress among it —
+    arrives at the end rather than live. That is the same trade `follow_logs()`
+    makes and it is what keeps a full pipe from deadlocking the child, but a
+    caller putting these lines on screen should not promise the user more than
+    it delivers (review, 2026-08-23). What is guaranteed is:
+    see `run_attached()`, which is what turned that second command from a
+    10-30 minute silence into something a caller can show. It is called on
+    whatever thread is running this, so a UI sink has to be one that can cross
+    threads. Passing nothing changes nothing except that the lines are dropped
+    instead of forwarded; they are retained and reported either way.
+
+    **This cannot be cancelled, deliberately.** There is no cancel token here
+    and the UI offers no Stop, because the only way to abandon a running
+    `compose up` is to terminate it — which stops `ac-db-import` part-way
+    through writing schemas. That is a recoverable state (the probe reads it as
+    `partial` and this action is offered again), but it is not one to hand a
+    user a button for while the alternative is waiting.
+
+    Returns:
+        True once the probe says the import finished — every schema filled,
+        whether or not the run also seeded rows of its own.
+
+    Raises:
+        DockerCommandError: any of the refusals above, the database never became
+            healthy, or the import ran and the databases still read as `absent`,
+            `partial` or `unreadable`.
+    """
+    logger.debug(f"repair_import() called: server_dir={server_dir}")
+    service = spec.import_service
+    if not service:
+        raise DockerCommandError(
+            "this game does not say which compose service imports its databases, so there is "
+            "nothing to re-run. Nothing was changed."
+        )
+
+    project = install_project(spec, server_dir)
+    if project is None:
+        _refuse_without_an_identity(spec, server_dir, "The import was not re-run.")
+        raise DockerCommandError(
+            f"the install in {server_dir} cannot say which compose project it is — its compose "
+            f"files are unreadable and no {PROJECT_NAME_VAR} is pinned — so the import was not "
+            "re-run. Running it against the wrong project would overwrite the wrong database."
+        )
+
+    running = _running(spec, project)
+    if running.unreadable:
+        raise DockerCommandError(
+            f"Docker would not say which project owns {', '.join(running.unreadable)}, so this "
+            f"install in {server_dir} cannot prove those containers are its own. The import was "
+            "not re-run."
+        )
+    if running.strangers:
+        raise DockerCommandError(_stranger_message(running.strangers, project, server_dir))
+    servers = [name for name in (spec.world, spec.auth) if name in running.ours]
+    if servers:
+        verb = "is" if len(servers) == 1 else "are"
+        raise DockerCommandError(
+            f"{', '.join(servers)} {verb} running. The import rewrites the databases underneath "
+            "them, and a running worldserver holds characters in memory and saves them back over "
+            "whatever it finds. Press Stop first, then try again."
+        )
+
+    start_database(spec, server_dir, timeout=db_timeout, because="nothing was imported")
+
+    before = probe()
+    logger.info(f"repair_import(): the databases read as {before.state} — {before.detail}")
+    if before.state == "populated":
+        raise DockerCommandError(
+            f"this install's databases hold player data ({before.detail}). Re-running the import "
+            "would overwrite it, so it was not run. If the database is damaged, restore the last "
+            "backup from the Maintenance tab instead — that is the path that keeps characters."
+        )
+    if before.state == "imported":
+        raise DockerCommandError(
+            f"the import has already completed ({before.detail}), so there is nothing to repair. "
+            "If the server still will not start, its logs are where the reason is."
+        )
+    if before.state == "partial":
+        # Re-running the one-shot over a half-written schema is not a no-op, it
+        # is destructive — see `ImportState.repairable` for the measurement. The
+        # only thing that makes it work is handing the importer an EMPTY schema,
+        # which is what `reset` does; without one this refuses rather than
+        # leaving the install permanently unimportable.
+        if reset is None:
+            raise DockerCommandError(
+                f"this install's import stopped part-way ({before.detail}), and re-running it "
+                "cannot finish the job: AzerothCore skips the base data for a database that "
+                "already exists, so the import would record every remaining file as applied and "
+                "leave the schema permanently unfinished. Nothing was run. Remove this install's "
+                "containers and database volume, then install again."
+            )
+        logger.warning(f"repair_import(): clearing the half-written schemas ({before.detail})")
+        try:
+            dropped = reset()
+        except Exception as exc:
+            # Deliberately broad, and re-raised as this module's own error. The
+            # seam belongs to the per-game package and may raise its own types;
+            # what a caller here has contracted for is `DockerCommandError`, and
+            # a failure to clear must not reach the user as a failed import.
+            raise DockerCommandError(
+                "the half-written databases could not be cleared, so the import was not re-run "
+                f"and nothing else was changed: {exc}"
+            ) from exc
+        if not dropped:
+            raise DockerCommandError(
+                f"the databases read as unfinished ({before.detail}), but nothing was found to "
+                "clear, so the import was not re-run. Nothing was changed."
+            )
+        logger.warning(f"repair_import(): dropped {', '.join(dropped)}; re-running the import")
+    if not before.repairable:
+        raise DockerCommandError(
+            f"the databases could not be asked what state they are in ({before.detail}), so the "
+            "import was not re-run. Nothing can be established about them either way."
+        )
+
+    logger.warning(f"repair_import(): `compose up --no-deps {service}` in {server_dir}")
+    run = run_one_shot(service, server_dir, sink=output)
+    verify_import(probe, service, server_dir, run)
+    return True
+
+
+def start_database(
+    spec: ContainerSpec,
+    server_dir: Path,
+    *,
+    timeout: float = _DB_HEALTHY_TIMEOUT_SECONDS,
+    because: str = "nothing was run",
+) -> None:
+    """Start this install's database alone and wait for it to report healthy.
+
+    Shared by `repair_import()` and by the native install engine's `start-db`
+    stage (roadmap 6.2) so the two cannot drift, and byte-identical to the argv
+    live-gated on yulon-ubuntu 2026-08-23 (23s from this call to healthy on a
+    brand-new volume; 7.1s when the container already existed).
+
+    Both callers need it for the same reason and it is not optional for either:
+    the import one-shot runs with `--no-deps`, so compose will NOT bring up the
+    database the `depends_on: service_healthy` edge names, and the import PROBE
+    is a `docker exec ac-database mysql …` that answers `unreadable` when there
+    is no such container. An install that skipped this refused itself at the
+    import stage after a multi-hour build (review, 2026-08-23).
+
+    Does nothing when the database container is already running, which is the
+    ordinary case on a resume.
+
+    `because` completes the sentence a timeout raises with, so a repair and an
+    install each say what was not done.
+
+    Raises:
+        DockerCommandError: compose would not start it, or it never became
+            healthy inside `timeout`.
+    """
+    if spec.db in set(status()):
+        return
+    # Started rather than demanded, because Stop takes the database down with
+    # everything else — a user who followed the repair refusals would otherwise
+    # have no way back to a state that action accepts.
+    logger.info(f"start_database(): starting {spec.db} alone")
+    # `compose_services()[0]`, not `spec.db`: compose takes SERVICE names and
+    # `spec.db` is a CONTAINER name. They are equal for AzerothCore and
+    # `ContainerSpec` exists precisely so a game whose compose file disagrees
+    # can say so — reaching past it here would have made that promise false
+    # for the first such game (review, 2026-08-23).
+    _run(["compose", "up", "-d", "--no-deps", spec.compose_services()[0]], cwd=server_dir)
+    if not wait_db_healthy(spec.db, timeout=timeout):
+        raise DockerCommandError(
+            f"{spec.db} did not report healthy within {timeout:.0f}s, so {because}. "
+            f"`docker compose logs {spec.db}` in {server_dir} will say why."
+        )
+
+
+def run_one_shot(
+    service: str,
+    server_dir: Path,
+    *,
+    sink: OutputSink | None = None,
+    cancel: threading.Event | None = None,
+) -> AttachedRun:
+    """Run one compose one-shot service attached, and return what it left behind.
+
+    Byte-identical argv to the version live-gated against a real AzerothCore
+    import on yulon-ubuntu (2026-08-23) — `--no-deps` is what makes an attached
+    `up` terminate, because the one-shot is then the only container compose
+    brings up. It is shared by the repair button and by the native install
+    engine's `import`/`client-data` stages (roadmap 6.2) so the two can never
+    drift into running different commands for the same job.
+
+    The exit status is returned rather than raised for the reason
+    `repair_import()` records: a one-shot that failed part-way and one that
+    failed having done nothing exit alike, and only a probe of the result can
+    tell them apart.
+    """
+    run = run_attached(
+        ["compose", "up", "--no-deps", service], server_dir, sink=sink, cancel=cancel
+    )
+    if run.returncode != 0:
+        # Not raised here. See above — the probe is the only thing that can
+        # tell the two failures apart, so this only makes sure the reason is in
+        # the log.
+        logger.warning(f"{service} exited {run.returncode}: {last_words(run.tail)}")
+    return run
+
+
+def verify_import(
+    probe: ImportProbe, service: str, server_dir: Path, run: AttachedRun
+) -> ImportState:
+    """Ask the databases whether the one-shot actually finished; raise if not.
+
+    The post-check both the repair button and the install engine use, so
+    "finished" means one thing in this codebase. Its two accepting answers are
+    `imported`, and `populated` *with* `complete` — the second because an
+    AzerothCore import applies every module's own `db-auth`/`db-characters`
+    updates and a module is free to seed rows (measured: a first-ever import
+    carrying mod-city-bots came out with 400 accounts and 400 characters,
+    yulon-ubuntu 2026-08-23), and the `complete` half because `populated` alone
+    reports an import that seeded rows and then died on the world schema as a
+    success (review, 2026-08-23).
+
+    Safe only because of the order the callers keep: `populated` is refused
+    *before* the one-shot runs, so a database that is populated afterwards was
+    populated by the run that just happened.
+
+    Raises:
+        DockerCommandError: the databases do not read as finished.
+    """
+    after = probe()
+    # `populated` counts as success, and finding that out took a live import.
+    # An AzerothCore import is not only AzerothCore's SQL: every module in the
+    # tree gets its own `data/sql/db-auth` and `db-characters` updates applied
+    # by the same one-shot, and a module is free to seed rows. Measured on
+    # yulon-ubuntu, 2026-08-23: a first-ever import of an install carrying
+    # mod-city-bots finished exit 0 with all three schemas full AND 400 rows in
+    # `acore_auth.account` plus 400 in `acore_characters.characters`, every one
+    # of them written by that module's own update files. Against `!= "imported"`
+    # this raised "Nothing is imported that was not imported before" over an
+    # import that had just done everything — the action reporting failure for
+    # its own success, on the servers this project actually ships.
+    #
+    # But `populated` on its own is not enough, and a review caught that after
+    # the gate had run. The probe answers `populated` the instant one row
+    # exists, before it has looked at whether the schemas are finished — which
+    # is right for the refusal and useless here. An import that applies the
+    # module's `db-auth` updates and then dies on the world schema is
+    # `populated` with `acore_world` empty, and this reported it as a finished
+    # repair. So the post-check reads `complete` too, which is the question it
+    # was actually asking all along.
+    if after.state == "imported" or (after.state == "populated" and after.complete):
+        pass
+    elif after.state == "populated":
+        # Rows but not every schema: the one-shot got far enough to apply a
+        # module's `db-auth` updates and then died. Reading the state alone
+        # called this a finished repair, hid the button, and left the user a
+        # broken server with a success message (review, 2026-08-23).
+        raise DockerCommandError(
+            f"{service} ran and wrote some rows, but did not finish: {after.detail}. The "
+            f"databases are in a half-imported state. Its last words were: "
+            f"{last_words(run.tail)}. `docker compose logs {service}` in {server_dir} has the "
+            "rest of what it printed."
+        )
+    else:
+        raise DockerCommandError(
+            f"{service} ran, but the databases still read as {after.state} ({after.detail}). "
+            f"Nothing is imported that was not imported before. Its last words were: "
+            f"{last_words(run.tail)}. `docker compose logs {service}` in {server_dir} has the "
+            "rest of what it printed."
+        )
+    logger.info(f"{service} finished; the databases now read as {after.state}")
+    return after
 
 
 def _run_docker_stop(container: str) -> None:
@@ -582,10 +1256,22 @@ def _run_docker_stop(container: str) -> None:
     SIGTERM for 6s. A single-container stop blocks until that container is gone,
     which is what makes "world before the database" real rather than decorative.
 
+    The grace is `STOP_GRACE_SECONDS`, not Docker's 10-second default, for the
+    reason recorded there: at 10s the populated worldserver is SIGKILLed while
+    it is still writing character saves. This path is the fallback, so it is the
+    one that runs for an install whose compose files cannot be read — exactly
+    the install least able to survive losing a save queue.
+
     A container that has vanished since it was listed is not an error: the goal
     state is "not running", and it is already there.
     """
-    proc = _docker(["stop", container])
+    # `-t` and not `--timeout`. Docker renamed the long form: through 27.x the
+    # flag is spelled `-t, --time`, and `--timeout` only became valid in CLI
+    # 28.0.0 (docker/cli#5485). The short form has meant the same thing across
+    # every version this project can meet, so it is the only spelling that is
+    # safe here — `--timeout` would exit 125 with `unknown flag` on any older
+    # daemon, turning a working by-name stop into a hard failure (review).
+    proc = _docker(["stop", "-t", str(STOP_GRACE_SECONDS), container])
     if proc.returncode == 0:
         return
     if "No such container" in proc.stderr:
@@ -594,7 +1280,9 @@ def _run_docker_stop(container: str) -> None:
     raise DockerCommandError(f"docker stop {container} failed: {proc.stderr.strip()}")
 
 
-def _refuse_without_an_identity(spec: ContainerSpec, server_dir: Path) -> None:
+def _refuse_without_an_identity(
+    spec: ContainerSpec, server_dir: Path, nothing_was: str = "Nothing was stopped."
+) -> None:
     """Raise if anything is running under our names while we cannot name our project.
 
     Returns quietly when nothing of the sort is up: there is simply nothing to
@@ -620,7 +1308,7 @@ def _refuse_without_an_identity(spec: ContainerSpec, server_dir: Path) -> None:
         raise DockerCommandError(
             f"could not ask Docker what is running, and the install in {server_dir} has no "
             f"{PROJECT_NAME_VAR} pinned either, so nothing about it can be established. "
-            "Nothing was stopped."
+            f"{nothing_was}"
         )
     named = {line.strip() for line in listed}
     up = [name for name in (spec.world, spec.auth, spec.db) if name in named]
@@ -630,7 +1318,7 @@ def _refuse_without_an_identity(spec: ContainerSpec, server_dir: Path) -> None:
     raise DockerCommandError(
         f"cannot tell which containers belong to the install in {server_dir}: its compose files "
         "are unreadable and no COMPOSE_PROJECT_NAME is pinned, while "
-        f"{', '.join(up)} are running. Nothing was stopped."
+        f"{', '.join(up)} are running. {nothing_was}"
     )
 
 
@@ -733,6 +1421,12 @@ def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
     6.19s for three containers where the *first* traps SIGTERM for 6s), so a
     multi-name call cannot express "world before the database".
 
+    Both paths ask for `STOP_GRACE_SECONDS` instead of taking Docker's
+    10-second default, which was measured SIGKILLing a populated worldserver
+    while it was still flushing its character save queue. A Stop can therefore
+    take minutes rather than seconds, and every caller of this runs it off the
+    GUI thread already.
+
     Either way the result is verified rather than assumed. A zero exit from
     `compose stop` only means compose had nothing to complain about — it says
     so even for a project where nothing was running, and even where the
@@ -803,7 +1497,14 @@ def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
     # are services too — and an install interrupted during the multi-GB client
     # data download leaves one of those running. Skipping the command told the
     # user "nothing was running" while the download carried on (review).
-    proc = _docker(["compose", "stop"], cwd=server_dir)
+    # `--timeout`, because compose's default is Docker's 10s and that was
+    # measured SIGKILLing a populated worldserver mid-save (see
+    # `STOP_GRACE_SECONDS`). It is per container, not for the whole project, and
+    # only the worldserver ever comes close to using it.
+    # `-t` for the same reason as `_run_docker_stop()`; compose has always
+    # accepted the short form, and spelling the two call sites alike means a
+    # future reader does not have to know which CLI they are looking at.
+    proc = _docker(["compose", "stop", "-t", str(STOP_GRACE_SECONDS)], cwd=server_dir)
     if proc.returncode != 0:
         logger.warning(f"compose stop failed ({proc.stderr.strip()}); stopping containers by name")
     if not before.ours:
@@ -1195,6 +1896,28 @@ def port_conflicts_for(spec: ContainerSpec) -> list[str]:
     return port_conflicts(spec.ports)
 
 
+def foreign_port_conflicts(spec: ContainerSpec, project: str) -> list[str]:
+    """`port_conflicts_for()` minus the containers belonging to `project`.
+
+    The global scan cannot answer "is this MY server?", and a caller that
+    refuses on its raw answer refuses its own install. That is not theoretical:
+    the native engine's preflight re-runs on every resume, so once `up` had
+    started the three containers — which carry `restart: unless-stopped` — the
+    next attempt was told "ac-authserver, ac-worldserver already publish the
+    ports this server needs. Stop that server first (or remove its containers)",
+    naming the containers of the install being finished (review, 2026-08-23).
+
+    Ownership is decided the way `_running()` decides it: the compose project
+    label, which is the only proof there is. A container Docker will not answer
+    for is NOT filtered out — an unreadable owner is not proof of ownership, and
+    the caller refusing is the fail-closed direction here.
+    """
+    conflicts = port_conflicts(spec.ports)
+    if not conflicts:
+        return []
+    return [name for name in conflicts if container_project(name) != project]
+
+
 def published_bindings() -> dict[int, str]:
     """Host address each published port is bound to, parsed from `docker ps` (`{{.Ports}}`).
 
@@ -1244,3 +1967,359 @@ def follow_logs(container: str, tail: int = 200) -> Iterator[str]:
         # have to end at the same sentence, or the panel shows a WinError for
         # one kind of missing docker and an explanation for the other.
         raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP) from exc
+
+
+KEEP_OUTPUT_LINES = 200
+"""How many of a streamed command's output lines are kept for the failure text.
+
+A bound rather than a buffer, and the number is chosen for what has to survive
+rather than for what looks generous. `runner.stream()` yields all of stdout as
+it arrives and then every line of stderr in one block at the end, so the LAST
+lines are the ones that explain a failure — which is the whole reason anything
+is retained at all.
+
+The alternative, keeping everything, is what this replaces: a full AzerothCore
+import runs 10-30 minutes and prints a line per SQL file, and the previous
+version held all of it in one string inside a GUI process that may then stay
+open for days. Unbounded growth driven by how long somebody's import took is a
+defect of its own, and one that gets worse on exactly the slow machine whose
+import is worth watching.
+
+200 lines is roughly 20 KB. What it costs: the middle of a failed import is
+gone from this process. It is not gone from Docker — `docker compose logs
+<service>` still has all of it, and the failure message says so.
+"""
+
+_LAST_WORDS_LINES = 5
+_LAST_WORDS_CHARS = 400
+"""How much of the retained tail goes into a message a user reads.
+
+The retained tail is for the log; a `QLabel` on the Server tab is for one
+paragraph. Five lines capped at 400 characters is enough to carry a mysql error
+and not enough to push the rest of the tab off screen.
+"""
+
+
+def last_words(tail: tuple[str, ...]) -> str:
+    """The end of a command's output, short enough to put inside a sentence.
+
+    Blank lines are dropped before the count, because a shell script's spacing
+    is exactly what a five-line window cannot afford to spend itself on.
+    """
+    said = [line.strip() for line in tail if line.strip()]
+    if not said:
+        return "it printed nothing at all"
+    text = " / ".join(said[-_LAST_WORDS_LINES:])
+    return text if len(text) <= _LAST_WORDS_CHARS else "…" + text[-_LAST_WORDS_CHARS:]
+
+
+@dataclass(frozen=True)
+class AttachedRun:
+    """What a streamed docker command left behind: its exit code and the end of its output."""
+
+    returncode: int
+    tail: tuple[str, ...] = ()
+
+
+def run_attached(
+    argv: list[str],
+    cwd: Path,
+    *,
+    sink: OutputSink | None = None,
+    keep: int = KEEP_OUTPUT_LINES,
+    cancel: threading.Event | None = None,
+    merge_stderr: bool = False,
+) -> AttachedRun:
+    """Run `docker <argv...>` attached, handing stdout lines to `sink` as they arrive.
+
+    The streaming counterpart to `_docker()`, and the second site in this module
+    that goes through `runner.stream()` rather than `runner.run()`. It lives
+    beside `follow_logs()` for the reason recorded there: no `ui/` module builds
+    a docker argv (style-guide §3), so a view that wants to show a command's
+    output asks for a sink rather than for a subprocess.
+
+    Why it exists: `_docker()` buffers a whole run into one string and returns
+    it at the end, which for the database import means 10-30 minutes in which
+    the caller has nothing to say and the user cannot tell a long job from a
+    hung one. The argv is unchanged by this — only the reading of it is.
+
+    Three deliberate differences from `runner.stream()`'s own contract:
+
+    * **The exit status is returned, never raised.** `stream()` raises
+      `CalledProcessError` once an exhausted generator finds a non-zero exit;
+      that would take the decision away from callers who must go on and check
+      something else (see `repair_import()`, where a one-shot that failed
+      part-way and one that failed having done nothing exit alike).
+    * **Only the last `keep` lines are retained** — see `KEEP_OUTPUT_LINES`.
+      The sink sees every line, though not all of them live — stdout arrives as
+      it is written and stderr in one block after the child exits. This process
+      remembers a bounded end of them.
+    * **A sink that raises is dropped, not propagated.** Letting it out would
+      abandon the generator mid-iteration, and `stream()` terminates the child
+      when that happens — so a widget deleted while an import was running would
+      kill the import. The first failure is logged and nothing is sent onward
+      after it.
+
+    A host with no docker CLI comes back as `_CLI_MISSING_RETURNCODE` carrying
+    `DOCKER_CLI_MISSING_HELP`, the same shape `_docker()` gives it, rather than
+    as an exception — the callers here already have to handle a failed run.
+
+    `cancel`, when set mid-run, stops reading and lets `runner.stream()`'s
+    generator-abandonment path terminate the compose client. The result comes
+    back as `CANCELLED_RETURNCODE`. What it does NOT do is stop work already
+    handed to the daemon: BuildKit finishes the build step it is on, and a
+    one-shot container keeps running to completion. That is desirable (the
+    layer cache keeps the work, and a resumed install re-probes the databases)
+    and it is the caller's job to say so, per stage — see
+    `native.BUILD_CANCEL_NOTE` and its neighbours. `repair_import()`
+    deliberately passes no cancel at all; see there.
+
+    `merge_stderr` is for the build, whose entire progress output is stderr;
+    see `runner.stream()`.
+    """
+    logger.debug(f"run_attached() called: argv={argv} cwd={cwd}")
+    tail: deque[str] = deque(maxlen=keep)
+    program = platform.docker_program()
+    if program is None:
+        logger.debug(f"no docker CLI on this host; not running: docker {' '.join(argv)}")
+        return AttachedRun(_CLI_MISSING_RETURNCODE, (platform.DOCKER_CLI_MISSING_HELP,))
+    live = sink
+    try:
+        # `closing`, not a bare `for`: leaving the loop early has to CLOSE the
+        # generator for `stream()`'s finally to terminate the child, and
+        # relying on the loop variable falling out of scope makes that depend
+        # on refcounting rather than on the code saying so.
+        with closing(runner.stream([program, *argv], cwd=cwd, merge_stderr=merge_stderr)) as lines:
+            for line in lines:
+                if cancel is not None and cancel.is_set():
+                    logger.warning(f"docker {' '.join(argv)} was cancelled; abandoning the client")
+                    return AttachedRun(CANCELLED_RETURNCODE, tuple(tail))
+                tail.append(line)
+                if live is not None:
+                    try:
+                        live(line)
+                    except Exception as exc:  # noqa: BLE001 - a dead sink must not kill the child
+                        logger.warning(f"the output sink stopped accepting lines: {exc}")
+                        live = None
+    except subprocess.CalledProcessError as exc:
+        return AttachedRun(exc.returncode, tuple(tail))
+    except OSError as exc:
+        # Docker uninstalled while the launcher is open, arriving from `Popen`;
+        # `follow_logs()` handles the same case one line above.
+        logger.warning(f"{program} could not be started: {exc}")
+        return AttachedRun(_CLI_MISSING_RETURNCODE, (platform.DOCKER_CLI_MISSING_HELP,))
+    return AttachedRun(0, tuple(tail))
+
+
+# ------------------------------------------------------------- the build
+
+_TIMEOUT_RETURNCODE = 124
+"""What `runner.run()` reports for a command that did not answer in time.
+
+Its own choice, borrowed from `timeout(1)`; named here so `bind_mount_ok()`
+can tell "Docker said no" from "Docker said nothing".
+"""
+
+BIND_PROBE_TIMEOUT_SECONDS = 30.0
+"""How long the bind-mount probe gets, first image pull included.
+
+Reconciles two numbers. `pyplan/rust-prior-art.md` §3 bounds probes at 30s
+because a wedged dockerd accepts the socket and never answers; the 5-second
+figure in roadmap 6.2 assumed the image was already pulled. The probe uses the
+same `alpine/git` image the clone stages need anyway, so on a first install the
+bound has to cover pulling it — a bound too short to pull under would report
+"your folder is not shared with Docker" for what is really a slow network.
+"""
+
+
+def build_staged(
+    server_dir: Path,
+    compose_files: Sequence[str],
+    *,
+    sink: OutputSink | None = None,
+    cancel: threading.Event | None = None,
+) -> AttachedRun:
+    """Build this install's images from the THREE compose files, streamed.
+
+    The only builder. `compose_files` must be the base, the override and the
+    build overlay, in that order, because of a trap that costs a whole install:
+    a bare `docker compose build` in a generated install's directory builds
+    NOTHING and exits 0 — the `build:` blocks live in a file compose never
+    auto-loads — and naming any `-f` at all disables auto-loading, so the base
+    and the override have to be listed too or the build loses the image tags
+    and runtime env it is meant to produce (`rust-prior-art.md` §2).
+    Centralising the argv here is what keeps a caller from spelling that
+    discipline a second, wrong way (style-guide §4).
+
+    `--progress plain` is deliberate: the default renders an ANSI progress
+    display for a terminal that is not there, and a log panel would show the
+    escape sequences instead of the build. Output is read with `merge_stderr`,
+    because BuildKit writes ALL of its progress to stderr and `runner.stream()`
+    otherwise withholds it until the child exits — which for a two-to-four-hour
+    compile is a blank panel for the entire build.
+
+    Unbounded on purpose (rust-prior-art §1: probes are bounded, builds are
+    not). Returns the run rather than raising, so the caller can tell a
+    cancellation from a failure.
+    """
+    argv = ["compose"]
+    for name in compose_files:
+        argv += ["-f", name]
+    argv += ["build", "--progress", "plain"]
+    logger.info(f"build_staged(): `docker {' '.join(argv)}` in {server_dir}")
+    return run_attached(argv, server_dir, sink=sink, cancel=cancel, merge_stderr=True)
+
+
+def images_built(refs: Sequence[str]) -> bool | None:
+    """Do all of `refs` exist on this daemon? None = could not ask.
+
+    Disk evidence for the install engine's `build` stage (rust-prior-art §1),
+    and it asks the daemon about image references rather than asking compose
+    about a project — because compose cannot answer this question.
+
+    **Measured on yulon-ubuntu, Docker 29.1.3 / Compose 2.40.3 (2026-08-24),
+    which is why this no longer runs `compose images -q`.** After a successful
+    `compose -f base -f override -f build build`, `compose images -q` returned
+    NOTHING, both bare and with the same `-f` set; it began answering only once
+    containers existed (`compose create` sufficed, `up` was not needed). Compose
+    enumerates the images of a project's CREATED CONTAINERS, not of its service
+    definitions. The window it answered wrongly in — built, no containers yet —
+    is precisely the window a resume asks in, so every resume re-ran the
+    compile. The old docstring predicted this and asked the first gate to
+    record it; it did.
+
+    ALL of them, not any: a build that produced three of four images is not a
+    finished build, and skipping it would start a server missing a binary.
+
+    `None` is not `False`. A resume that cannot ask must not conclude "nothing
+    is built" and spend hours proving itself wrong, and must not conclude
+    "built" either; the caller decides. `refs` is passed in rather than derived
+    here for the reason every game-specific value is — `docker.py` knows no
+    game (`composegen.built_image_refs()` is where they come from).
+    """
+    if not refs:
+        # NOT vacuous truth. "All zero of them exist" is formally True and would
+        # be the worst possible answer here: an empty tuple means the CALLER
+        # could not work out what this install builds, and reporting "built" for
+        # that skips the build stage entirely and starts a server with no
+        # binaries. `None` sends it back to the caller as the unanswerable
+        # question it is. Held by a review seat that wanted the reasoning next
+        # to the branch rather than only in a transcript (2026-08-24).
+        return None
+    for ref in refs:
+        proc = _docker(["image", "inspect", "--format", "{{.Id}}", ref])
+        if proc.returncode == 0 and proc.stdout.strip():
+            continue
+        # `docker image inspect` exits non-zero for "no such image", which is an
+        # answer, and for a daemon that will not talk, which is not. They are
+        # told apart by what the daemon said, because guessing either way is the
+        # expensive mistake this function exists to avoid.
+        said = proc.stderr.strip().lower()
+        if "no such image" in said or "not found" in said:
+            return False
+        logger.warning(f"could not ask whether {ref} exists: {proc.stderr.strip()}")
+        return None
+    # Every reference answered, or the loop returned. The counter this used to
+    # compare against `len(refs)` could only ever equal it here, which read as
+    # if a partial count could reach this line (review, 2026-08-24).
+    return True
+
+
+def bind_mount_ok(
+    server_dir: Path, image: str, *, timeout: float = BIND_PROBE_TIMEOUT_SECONDS
+) -> bool | None:
+    """Can a container actually see the chosen folder? None = could not ask.
+
+    Docker Desktop shares only the directories its file-sharing settings list.
+    A folder outside them mounts as an EMPTY directory rather than failing the
+    run, so the clone appears to succeed, the build gets an empty context, and
+    the first thing that reports the problem is a compile error hours later.
+
+    **The exit code of an `ls` cannot detect that**, and an earlier version of
+    this function claimed it could. `ls` on an empty directory exits 0, and the
+    server directory is empty or absent at preflight time by construction — so
+    against the silently-empty mount this exists for, the probe answered True
+    and preflight printed `[pass] sharing the folder with Docker` (review,
+    2026-08-23). What it can do is compare CONTENTS: mount a directory the host
+    can see files in, and check the container sees files too.
+
+    So the probe runs against the deepest ANCESTOR of `server_dir` that exists
+    and has entries in it, not against `server_dir`. Two reasons, both
+    load-bearing. Docker Desktop shares whole trees, so an ancestor's answer is
+    the chosen folder's answer; and `-v <server_dir>:/probe` on a folder that
+    does not exist yet makes Docker CREATE it, which put a directory on disk
+    before `guard` had claimed it.
+
+    `None` means the question could not be answered: no docker CLI, the daemon
+    did not reply inside `timeout`, or no ancestor with anything in it could be
+    found to compare against. That is preflight's *unchecked* tri-state, never a
+    pass and never a refusal — a caller that read it as False would refuse an
+    install that would have worked.
+
+    Unverified on macOS, and this is the check most in need of the first gate:
+    that Docker Desktop mounts an unshared folder as empty rather than failing
+    is inherited from the Rust launcher, and what a Mac actually does with an
+    unshared path is exactly what nobody here can run.
+    """
+    mount = _first_populated_ancestor(server_dir)
+    if mount is None:
+        logger.info(
+            f"nothing on the way up from {server_dir} had files in it, so a container's view of "
+            "it cannot be compared against the host's"
+        )
+        return None
+    # `:ro`, because the mount is now an ANCESTOR of the chosen folder and that
+    # is routinely the user's home directory. The probe only lists; the clone
+    # stage is the thing that needs write access, and it gets its own mount.
+    # `--entrypoint ls`, and it is not optional. The probe image is
+    # `git.CONTAINER_GIT_IMAGE` — deliberately, so this pulls the exact digest
+    # the clone stages pull rather than a second image — and `alpine/git`'s
+    # ENTRYPOINT is `git`. Passing `ls -A /probe` after the image name therefore
+    # ran `git ls -A /probe`, which exits 1 with "'ls' is not a git command",
+    # which this function read as "Docker cannot see that folder" and preflight
+    # turned into a refusal. **Every native install, on every platform, was
+    # refused** (found by the Windows file-sharing gate 2026-08-24, then
+    # reproduced on Linux — it was never Windows-specific).
+    proc = _docker(
+        ["run", "--rm", "--entrypoint", "ls", "-v", f"{mount}:/probe:ro", image, "-A", "/probe"],
+        timeout=timeout,
+    )
+    if _cli_missing(proc):
+        return None
+    # A non-zero exit is the daemon answering "no", which IS an answer — unless
+    # it never answered at all. `runner.run()` reports a timeout as 124 with the
+    # reason in stderr rather than raising, so that case has to be separated out
+    # or a wedged dockerd reaches the user as "your folder is not shared with
+    # Docker Desktop", which is a different fix entirely.
+    if proc.returncode == _TIMEOUT_RETURNCODE:
+        logger.warning(f"the bind-mount probe of {mount} did not answer within {timeout:.0f}s")
+        return None
+    if proc.returncode != 0:
+        logger.warning(f"the bind-mount probe of {mount} failed: {proc.stderr.strip()}")
+        return False
+    if any(line.strip() for line in proc.stdout.splitlines()):
+        return True
+    logger.warning(
+        f"a container saw {mount} as empty although the host sees files in it — Docker is not "
+        "sharing that folder"
+    )
+    return False
+
+
+def _first_populated_ancestor(path: Path) -> Path | None:
+    """The nearest directory at or above `path` that exists and is not empty.
+
+    The probe needs a host directory whose contents it can hold the container's
+    answer up against; an empty one proves nothing either way.
+    """
+    probe = path
+    while True:
+        try:
+            if probe.is_dir() and any(probe.iterdir()):
+                return probe
+        except OSError as exc:
+            logger.info(f"could not look inside {probe}: {exc}")
+            return None
+        if probe == probe.parent:
+            return None
+        probe = probe.parent

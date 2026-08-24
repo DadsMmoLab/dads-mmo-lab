@@ -22,6 +22,9 @@ Three rules make this work:
 
 `run_inline()` is the same contract executed synchronously — what the tests use
 so a click's effect is observable on the next line.
+
+`LineRelay` is the same three rules applied to a job that talks *while* it runs
+rather than only at the end.
 """
 
 from __future__ import annotations
@@ -103,6 +106,30 @@ class ThreadedJobRunner:
 def threaded_job_runner(parent: QObject) -> ThreadedJobRunner:
     """A `JobRunner` that runs each call on its own thread, parented to `parent`."""
     return ThreadedJobRunner(parent)
+
+
+class LineRelay(QObject):
+    """Carries a running job's output lines from its worker thread to a GUI slot.
+
+    `ThreadedJobRunner` above delivers one outcome at the end of a job. A job
+    that takes half an hour — the database import is the one this app has — has
+    to say something in between, and the only mechanism that crosses a thread
+    boundary correctly is a signal emitted on a `QObject` that lives on the GUI
+    thread. So the sink handed down into `docker.repair_import()` is
+    `emit_line`, which does nothing but emit; Qt queues the delivery and the
+    connected `@Slot(str)` runs where the widgets are.
+
+    Handing the view's own bound slot down instead would look identical and be
+    the bug: a plain Python call is a plain Python call, and the widget would be
+    written to from the worker thread. `LogPanel`'s `_StreamWorker` solved this
+    once already; this is the same solution for a job the panel does not own.
+    """
+
+    line = Signal(str)
+
+    def emit_line(self, text: str) -> None:
+        """Hand one line over. Safe to call from a worker thread — that is the point."""
+        self.line.emit(text)
 
 
 def run_inline(work: Work, on_done: OnDone, on_error: OnError) -> None:

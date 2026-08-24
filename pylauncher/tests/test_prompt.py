@@ -30,7 +30,7 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import process_events
-from yulon import runner
+from yulon import platform, runner
 from yulon.catalog.installer import Installer
 from yulon.ui.widgets.log_panel import LogPanel
 from yulon.ui.widgets.prompt import InputPrompter, is_secret, tidy
@@ -54,6 +54,17 @@ def test_a_password_prompt_is_recognised_as_secret() -> None:
     assert is_secret("Please enter your PIN:") is True
     assert is_secret("Install path:") is False
     assert is_secret("Continue anyway? (y/n)") is False
+
+
+def test_the_docker_group_question_is_not_a_password_box() -> None:
+    """The consent answer is a yes/no, and must be typed in the clear.
+
+    It hangs on the literal `(y/n)` surviving copy edits, so it is pinned here
+    rather than left to a reviewer noticing: reword that last line and the
+    question silently becomes a masked field, where a user typing `y` sees a
+    dot and reasonably concludes the app wants their password.
+    """
+    assert is_secret(platform.DOCKER_GROUP_QUESTION.format(user="pk")) is False
 
 
 def test_a_prompt_is_shown_whole() -> None:
@@ -724,3 +735,92 @@ def test_the_last_line_survives_a_child_that_exits_without_a_newline() -> None:
         )
     )
     assert any("FATAL: could not reach the database" in line for line in lines), lines
+
+
+def test_the_docker_group_question_reaches_a_real_dialog_unmasked(qapp: object) -> None:
+    """Drive the consent question the way a person meets it: as an actual dialog.
+
+    Everything else about the docker-group gate is proven at the seam — the argv
+    invariant, the eight mutations, and two container runs on yulon-ubuntu. None
+    of that shows a dialog on a screen, and the failure this closes is specific
+    and silent: `QInputDialog` decides the echo mode from `is_secret()`, so a
+    question that stops matching `(y/n)` becomes a password box, and the user
+    typing `y` sees a dot and reasonably concludes the launcher wants their
+    password.
+
+    So this runs the real `InputPrompter` against the real question, finds the
+    modal dialog Qt actually opened, reads the text off it, and answers it —
+    offscreen, but through the same widgets. `ask()` blocks on a worker thread,
+    exactly as it does during an install, so the watchdog has to drive the GUI
+    thread while it waits.
+    """
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication, QDialog, QLineEdit
+
+    from yulon import platform as plat
+    from yulon.ui.widgets.prompt import InputPrompter
+
+    prompter = InputPrompter()
+    question = plat.DOCKER_GROUP_QUESTION.format(user="pk")
+    seen: dict[str, object] = {}
+    answer: list[str | None] = []
+
+    def in_the_worker() -> None:
+        answer.append(prompter.ask(question))
+
+    worker = threading.Thread(target=in_the_worker, daemon=True)
+    worker.start()
+
+    def drive() -> None:
+        dialog = QApplication.activeModalWidget()
+        if not isinstance(dialog, QDialog):
+            return
+        field = dialog.findChild(QLineEdit)
+        assert field is not None
+        seen["echo"] = field.echoMode()
+        seen["shown"] = _dialog_text(dialog)
+        field.setText("y")
+        dialog.accept()
+        watchdog.stop()
+
+    watchdog = QTimer()
+    watchdog.setInterval(20)
+    watchdog.timeout.connect(drive)
+    watchdog.start()
+
+    deadline = time.monotonic() + 10.0
+    while worker.is_alive() and time.monotonic() < deadline:
+        QApplication.processEvents()
+    worker.join(timeout=2.0)
+    watchdog.stop()
+
+    assert not worker.is_alive(), "the consent dialog never appeared"
+    assert answer == ["y"], answer
+    # The field must be typed in the clear.
+    assert seen["echo"] == QLineEdit.EchoMode.Normal, seen["echo"]
+    # And the dialog must actually say the two things a user cannot infer.
+    shown = str(seen["shown"])
+    assert "'pk'" in shown
+    assert "never creates passwordless sudo rules" in shown
+    # Both halves of the warning, because they do different work and a rewrite
+    # can drop one without touching the other: the claim ("full root access")
+    # and the concrete thing it lets someone do, which is what makes it real to
+    # a reader who does not already know what the docker group is.
+    assert "full root access" in shown
+    assert "mount your entire disk" in shown
+    # The consequence of saying YES specifically. "log out and back in" is the
+    # wrong anchor for it — that phrase is in the no-branch too, so dropping it
+    # from the yes-branch left this assertion passing (caught by mutation).
+    assert "then click Install again" in shown
+    # And what saying NO costs, which is the half a user weighing the question
+    # actually needs: the engine is still installed, but the launcher cannot
+    # drive it until they join the group themselves.
+    assert "Yu'lon still installs Docker Engine" in shown
+    assert "sudo usermod -aG docker pk" in shown
+
+
+def _dialog_text(dialog: object) -> str:
+    """Every piece of text Qt is showing in `dialog`, joined."""
+    from PySide6.QtWidgets import QLabel
+
+    return " ".join(label.text() for label in dialog.findChildren(QLabel))

@@ -9,6 +9,7 @@ real AzerothCore compose project gets exercised.
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,8 @@ from yulon import docker
 from yulon.controller_wow_wotlk import docker_ctl
 
 SPEC = docker_ctl.SPEC
+_GRACE = str(docker.STOP_GRACE_SECONDS)
+"""The stop grace as it appears in argv, so an expected command reads like the real one."""
 
 
 def _completed(
@@ -38,7 +41,9 @@ def test_start_runs_compose_up(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
     cwds: list[Path | None] = []
 
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         calls.append(cmd)
         cwds.append(cwd)
         return _completed()
@@ -48,19 +53,6 @@ def test_start_runs_compose_up(monkeypatch: pytest.MonkeyPatch) -> None:
     docker.start(server_dir)
     assert calls == [["docker", "compose", "up", "-d"]]
     assert cwds == [server_dir]
-
-
-def test_stop_runs_compose_down(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`stop()` shells out to `docker compose down` in the server dir."""
-    calls: list[list[str]] = []
-
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
-        calls.append(cmd)
-        return _completed()
-
-    monkeypatch.setattr(docker.runner, "run", fake_run)
-    docker.stop(Path("/tmp/wow"))
-    assert calls == [["docker", "compose", "down"]]
 
 
 def test_start_raises_docker_command_error_on_failure(
@@ -156,7 +148,9 @@ def test_wait_ready_returns_true_once_markers_present(monkeypatch: pytest.Monkey
     """`wait_ready()` returns True once both containers are up with ready markers."""
     monkeypatch.setattr(docker.time, "sleep", lambda _seconds: None)
 
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         if cmd[:2] == ["docker", "ps"]:
             return _completed(0, "ac-authserver\nac-worldserver\n", "")
         if cmd[:2] == ["docker", "inspect"] and "{{.State.Status}}" in cmd[-1]:
@@ -188,7 +182,9 @@ def test_wait_ready_tolerates_transient_docker_ps_failure(
     monkeypatch.setattr(docker.time, "sleep", lambda _seconds: None)
     calls = {"ps": 0}
 
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         if cmd[:2] == ["docker", "ps"]:
             calls["ps"] += 1
             if calls["ps"] == 1:
@@ -223,7 +219,9 @@ def test_wait_db_healthy_for_uses_spec_db_container(monkeypatch: pytest.MonkeyPa
     """`wait_db_healthy_for()` reads the container name from the spec."""
     seen: list[str] = []
 
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         if cmd[:2] == ["docker", "inspect"]:
             seen.append(cmd[2])
             return _completed(0, "healthy", "")
@@ -244,6 +242,29 @@ def test_port_conflicts_for_uses_spec_ports(monkeypatch: pytest.MonkeyPatch) -> 
     )
     spec = docker.ContainerSpec(db="d", auth="a", world="w", ports=(9999,))
     assert docker.port_conflicts_for(spec) == ["other"]
+
+
+def test_foreign_port_conflicts_drops_our_own_containers_and_keeps_everything_else(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The global scan cannot tell "somebody else's server" from "mine, still running".
+
+    A caller that refuses on its raw answer refuses its own install on every
+    resume, which is what the native engine's preflight did (review,
+    2026-08-23). An UNREADABLE owner is deliberately kept: not knowing who owns
+    a container is not proof that we do.
+    """
+    labels = {"mine": "yulon-wow-wotlk-abc", "theirs": "some-other", "?": docker.UNREADABLE}
+    monkeypatch.setattr(docker, "port_conflicts", lambda _ports: list(labels))
+    monkeypatch.setattr(docker, "container_project", labels.get)
+    spec = docker.ContainerSpec(db="d", auth="a", world="w", ports=(9999,))
+    assert docker.foreign_port_conflicts(spec, "yulon-wow-wotlk-abc") == ["theirs", "?"]
+    # Nothing publishing the ports means nothing is asked about ownership either.
+    monkeypatch.setattr(docker, "port_conflicts", lambda _ports: [])
+    monkeypatch.setattr(
+        docker, "container_project", lambda _n: pytest.fail("asked who owns nothing")
+    )
+    assert docker.foreign_port_conflicts(spec, "yulon-wow-wotlk-abc") == []
 
 
 def test_docker_ctl_convenience_wrappers_delegate_to_spec(
@@ -291,7 +312,9 @@ def test_start_staged_names_the_services_so_compose_cannot_pick_the_import(
     calls: list[list[str]] = []
     cwds: list[Path | None] = []
 
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         calls.append(cmd)
         cwds.append(cwd)
         if cmd[:2] == ["docker", "ps"]:  # the post-start confirmation
@@ -434,7 +457,9 @@ def test_wait_ready_ignores_the_previous_runs_ready_marker(
     # What it returns for THIS run only: still loading.
     this_run = "starting up again\n>> Loaded 13567 Quest Offer Reward Locale Strings\n"
 
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         seen.append(cmd)
         if cmd[:2] == ["docker", "ps"]:
             return _completed(stdout=f"{SPEC.auth}\n{SPEC.world}\n")
@@ -464,7 +489,9 @@ def test_wait_ready_still_succeeds_when_this_run_is_actually_ready(
 ) -> None:
     """The scoping must not break the case it exists to make honest."""
 
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         if cmd[:2] == ["docker", "ps"]:
             return _completed(stdout=f"{SPEC.auth}\n{SPEC.world}\n")
         if cmd[:2] == ["docker", "inspect"]:
@@ -491,7 +518,9 @@ def test_logs_without_a_readable_start_time_falls_back_to_everything(
 ) -> None:
     """An unreadable start time must degrade to the old behaviour, not to silence."""
 
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         if cmd[:2] == ["docker", "inspect"]:
             return _completed(returncode=1, stderr="no such container")
         return _completed(stdout="everything\n")
@@ -556,7 +585,7 @@ def _stop_runner(
             return _completed(stdout="".join(n + "\n" for n in sorted(live)))
         if cmd[:2] == ["docker", "stop"]:
             if stop_really_works:
-                live.discard(cmd[2])
+                live.discard(cmd[-1])
             return _completed()
         return _completed()
 
@@ -572,8 +601,10 @@ def test_stop_staged_uses_compose_stop_so_the_containers_survive(
         docker.runner, "run", _stop_runner(calls, running={SPEC.db, SPEC.auth, SPEC.world})
     )
     assert docker.stop_staged(SPEC, Path("/tmp/wow")) is True
-    assert ["docker", "compose", "stop"] in calls
-    assert ["docker", "compose", "down"] not in calls
+    assert any(cmd[:3] == ["docker", "compose", "stop"] for cmd in calls)
+    assert not any(
+        cmd[:3] == ["docker", "compose", "down"] for cmd in calls
+    ), "a stop removed containers"
     assert not any(cmd[:2] == ["docker", "stop"] for cmd in calls), "did not trust compose stop"
 
 
@@ -592,7 +623,7 @@ def test_stop_staged_says_false_when_there_was_nothing_of_ours_to_stop(
     # `compose stop` still runs: the project also holds ac-db-import and
     # ac-client-data-init, and an interrupted install leaves one of those
     # downloading. What must NOT happen is a container stopped by name.
-    assert ["docker", "compose", "stop"] in calls
+    assert any(cmd[:3] == ["docker", "compose", "stop"] for cmd in calls)
     assert not any(cmd[:2] == ["docker", "stop"] for cmd in calls)
 
 
@@ -656,7 +687,9 @@ def test_stop_staged_gives_up_rather_than_guessing_when_ownership_is_unreadable(
     with pytest.raises(docker.DockerCommandError, match="would not say which project owns") as e:
         docker.stop_staged(SPEC, Path("/tmp/wow"))
     assert not any(cmd[:2] == ["docker", "stop"] for cmd in calls)
-    assert ["docker", "compose", "down"] not in calls
+    assert not any(
+        cmd[:3] == ["docker", "compose", "down"] for cmd in calls
+    ), "a stop removed containers"
     assert "another install" not in str(e.value) or "rather than" in str(e.value)
 
 
@@ -693,9 +726,9 @@ def test_stop_staged_finishes_the_job_when_compose_stopped_nothing(
     )
     assert docker.stop_staged(SPEC, Path("/tmp/moved-install")) is True
     assert [cmd for cmd in calls if cmd[:2] == ["docker", "stop"]] == [
-        ["docker", "stop", SPEC.world],
-        ["docker", "stop", SPEC.auth],
-        ["docker", "stop", SPEC.db],
+        ["docker", "stop", "-t", _GRACE, SPEC.world],
+        ["docker", "stop", "-t", _GRACE, SPEC.auth],
+        ["docker", "stop", "-t", _GRACE, SPEC.db],
     ]
 
 
@@ -729,9 +762,10 @@ def test_docker_stop_treats_a_vanished_container_as_already_stopped(
         if cmd[:2] == ["docker", "ps"]:
             return _completed(stdout="".join(n + "\n" for n in sorted(live)))
         if cmd[:2] == ["docker", "stop"]:
-            live.discard(cmd[2])
+            live.discard(cmd[-1])
             return _completed(
-                returncode=1, stderr="Error response from daemon: No such container: " + cmd[2]
+                returncode=1,
+                stderr="Error response from daemon: No such container: " + cmd[-1],
             )
         return _completed()
 
@@ -803,16 +837,16 @@ def test_stop_staged_reads_the_pin_when_compose_cannot_be_parsed(
         if cmd[:2] == ["docker", "ps"]:
             return _completed(stdout="".join(n + "\n" for n in sorted(live)))
         if cmd[:2] == ["docker", "stop"]:
-            live.discard(cmd[2])
+            live.discard(cmd[-1])
             return _completed()
         return _completed()
 
     monkeypatch.setattr(docker.runner, "run", fake_run)
     assert docker.stop_staged(SPEC, tmp_path) is True
     assert [cmd for cmd in calls if cmd[:2] == ["docker", "stop"]] == [
-        ["docker", "stop", SPEC.world],
-        ["docker", "stop", SPEC.auth],
-        ["docker", "stop", SPEC.db],
+        ["docker", "stop", "-t", _GRACE, SPEC.world],
+        ["docker", "stop", "-t", _GRACE, SPEC.auth],
+        ["docker", "stop", "-t", _GRACE, SPEC.db],
     ]
 
 
@@ -874,7 +908,7 @@ def test_stop_staged_reports_rather_than_guesses_when_a_moved_install_was_never_
         if cmd[:2] == ["docker", "ps"]:
             return _completed(stdout="".join(n + "\n" for n in sorted(live)))
         if cmd[:2] == ["docker", "stop"]:
-            live.discard(cmd[2])
+            live.discard(cmd[-1])
             return _completed()
         return _completed()
 
@@ -908,16 +942,16 @@ def test_stop_staged_stops_a_moved_install_that_WAS_pinned(
         if cmd[:2] == ["docker", "ps"]:
             return _completed(stdout="".join(n + "\n" for n in sorted(live)))
         if cmd[:2] == ["docker", "stop"]:
-            live.discard(cmd[2])
+            live.discard(cmd[-1])
             return _completed()
         return _completed()
 
     monkeypatch.setattr(docker.runner, "run", fake_run)
     assert docker.stop_staged(SPEC, tmp_path) is True
     assert [cmd for cmd in calls if cmd[:2] == ["docker", "stop"]] == [
-        ["docker", "stop", SPEC.world],
-        ["docker", "stop", SPEC.auth],
-        ["docker", "stop", SPEC.db],
+        ["docker", "stop", "-t", _GRACE, SPEC.world],
+        ["docker", "stop", "-t", _GRACE, SPEC.auth],
+        ["docker", "stop", "-t", _GRACE, SPEC.db],
     ]
     assert live == set()
 
@@ -1007,6 +1041,86 @@ def test_stop_staged_refuses_a_half_and_half_project(monkeypatch: pytest.MonkeyP
     named_as_strangers = message.split(" are running", 1)[0]
     assert SPEC.db not in named_as_strangers, "listed our own container among the strangers"
     assert "install-b" in message
+
+
+def test_the_stop_grace_covers_the_slowest_shutdown_ever_measured() -> None:
+    """Docker's 10-second default was measured killing a live save; this is the floor.
+
+    Two clean shutdowns of a populated worldserver on yulon-ubuntu (1980
+    characters online, AzerothCore + playerbots, 2026-08-23) took 90.7s and
+    73.4s under a grace long enough not to bind. A grace below the worse of
+    those two would have SIGKILLed the first one mid-save, which is exactly what
+    a 10-second `compose stop` did on that box the same day: exit 137.
+
+    The bound is the measurement, not the chosen value, so re-tuning the margin
+    stays possible without editing a test — dropping back towards Docker's
+    default does not.
+    """
+    assert docker.STOP_GRACE_SECONDS >= 91, "shorter than a shutdown we have actually watched"
+
+
+def test_compose_stop_asks_for_the_measured_grace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without `--timeout`, `compose stop` takes Docker's 10s and kills the save queue."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner, "run", _stop_runner(calls, running={SPEC.db, SPEC.auth, SPEC.world})
+    )
+    assert docker.stop_staged(SPEC, Path("/tmp/wow")) is True
+    stops = [cmd for cmd in calls if cmd[:3] == ["docker", "compose", "stop"]]
+    assert stops == [["docker", "compose", "stop", "-t", _GRACE]]
+
+
+def test_the_by_name_fallback_asks_for_the_measured_grace_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fallback is the path an unreadable-compose install stops on — the same server.
+
+    It is the easier one to leave on the 10-second default, since it is only
+    reached when `compose stop` could not run or stopped nothing, and it is
+    where the worldserver is stopped first and alone.
+    """
+    calls: list[list[str]] = []
+
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        return _completed()
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    docker._run_docker_stop(SPEC.world)
+    assert calls == [["docker", "stop", "-t", _GRACE, SPEC.world]]
+
+
+def test_the_stop_paths_impose_no_subprocess_deadline_of_their_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `runner.run()` timeout shorter than the grace would kill the CLI mid-shutdown.
+
+    `runner.run()` reports a timeout as a non-zero return code, so a deadline
+    here would not raise — `stop_staged()` would fall through to its by-name
+    fallback while the daemon was still stopping the same containers, and the
+    user would be told the stop could not be confirmed on a server that was
+    shutting down normally.
+    """
+    calls: list[list[str]] = []
+    # `compose_stop_matches=False` is the moved folder, so both stop paths run.
+    inner = _stop_runner(
+        calls, running={SPEC.db, SPEC.auth, SPEC.world}, compose_stop_matches=False
+    )
+    seen: list[float | None] = []
+
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        if cmd[:2] == ["docker", "stop"] or cmd[:3] == ["docker", "compose", "stop"]:
+            seen.append(timeout)
+        return inner(cmd, cwd, timeout)
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    docker.stop_staged(SPEC, Path("/tmp/moved-install"))
+    assert seen, "no stop command ran"
+    assert set(seen) == {None}, f"a stop carried a subprocess deadline: {seen}"
 
 
 def test_the_message_for_two_owners_offers_no_single_name_to_pin() -> None:
@@ -1138,7 +1252,9 @@ def test_wait_ready_is_not_fooled_by_a_container_in_restart_backoff(
     """
     monkeypatch.setattr(docker.time, "sleep", lambda _seconds: None)
 
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         if cmd[:2] == ["docker", "ps"]:
             return _completed(stdout=f"{SPEC.auth}\n{SPEC.world}\n")
         if cmd[:2] == ["docker", "inspect"]:
@@ -1230,6 +1346,47 @@ def test_export_is_accepted_with_a_tab_as_well_as_a_space(tmp_path: Path) -> Non
     assert docker.pinned_project_name(tmp_path) == "tabbed"
 
 
+def test_a_utf8_bom_does_not_hide_the_pin(tmp_path: Path) -> None:
+    """PowerShell writes a BOM; compose reads past it and this used not to.
+
+    `_stranger_message()` tells the user to add `COMPOSE_PROJECT_NAME=<x>` to
+    this file. On Windows the tools to hand put `EF BB BF` in front of it
+    (PowerShell 5.1's `Set-Content -Encoding utf8`, Notepad's "UTF-8 with BOM"),
+    and under a plain `utf-8` decode the first line began `\\ufeffCOMPOSE_...`,
+    so the pin was invisible.
+
+    That is a disagreement rather than a quirk, which is what makes it a bug:
+    measured on Windows 11 / Docker 29.7.2 (2026-08-23), `docker compose config`
+    read the very same file and reported the project as `bomtest` while this
+    function reported `None`. The fallback that hides it — asking compose — is
+    exactly what is unavailable in the case this function exists for.
+    """
+    (tmp_path / ".env").write_bytes(
+        b"\xef\xbb\xbfCOMPOSE_PROJECT_NAME=bomtest\r\n# written on Windows\r\n"
+    )
+    assert docker.pinned_project_name(tmp_path) == "bomtest"
+
+
+def test_a_utf8_bom_does_not_make_pinning_append_a_second_assignment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The BOM's second victim: a pin the app cannot see is a pin it writes over.
+
+    `pin_project_name()` asks `pinned_project_name()` first and returns early
+    when something is already pinned. Blind to the BOM'd line it wrote a second
+    `COMPOSE_PROJECT_NAME=` below it, and compose takes the LAST assignment — so
+    the app silently overrode the name the user had set, on the app's own
+    instructions.
+    """
+    (tmp_path / ".env").write_bytes(b"\xef\xbb\xbfCOMPOSE_PROJECT_NAME=the-users-name\r\n")
+    monkeypatch.setattr(docker, "compose_project_name", lambda _dir: "the-directory-basename")
+
+    assert docker.pin_project_name(tmp_path) is None
+    raw = (tmp_path / ".env").read_bytes()
+    assert raw.count(b"COMPOSE_PROJECT_NAME=") == 1, "the user's pin was written over"
+    assert docker.pinned_project_name(tmp_path) == "the-users-name"
+
+
 def test_the_unpinned_remedy_warns_about_the_copy_case(tmp_path: Path) -> None:
     """This is the common branch now, and following it literally on a copy is destructive.
 
@@ -1259,7 +1416,9 @@ def off_path_docker(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     monkeypatch.setattr(docker.platform, "_resolved_docker_cli", OFF_PATH_EXE)
     calls: list[list[str]] = []
 
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         calls.append(cmd)
         return _completed(stdout="running\tsomewhen")
 
@@ -1275,7 +1434,9 @@ def no_docker(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     monkeypatch.setattr(docker.platform, "_which", lambda name, path=None: None)
     escaped: list[list[str]] = []
 
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         escaped.append(cmd)
         raise AssertionError(f"spawned {cmd[0]} on a host that has no docker")
 
@@ -1301,14 +1462,20 @@ def test_every_command_is_built_with_the_resolved_cli(off_path_docker: list[list
     assert off_path_docker, "nothing ran"
     assert all(cmd[0] == OFF_PATH_EXE for cmd in off_path_docker), off_path_docker
     # ...and nothing else moved: the command each site sends is unchanged.
-    assert [cmd[1:3] for cmd in off_path_docker] == [
+    # The stop row is read whole rather than through the two-element slice the
+    # others use. Sliced, it became `["stop", "-t"]` when the grace arrived — a
+    # row that no longer asserted the container name reaches argv at all, unlike
+    # every one of its neighbours (review, 2026-08-23).
+    assert [cmd[1:3] for cmd in off_path_docker if cmd[1] != "stop"] == [
         ["compose", "up"],
         ["compose", "config"],
         ["inspect", SPEC.world],
-        ["stop", SPEC.world],
         ["inspect", SPEC.world],
         ["inspect", SPEC.world],
         ["logs", SPEC.world],
+    ]
+    assert [cmd[1:] for cmd in off_path_docker if cmd[1] == "stop"] == [
+        ["stop", "-t", _GRACE, SPEC.world]
     ]
 
 
@@ -1325,7 +1492,9 @@ def test_stop_staged_reaches_compose_through_the_resolved_cli(
     calls: list[list[str]] = []
     live = {SPEC.db, SPEC.auth, SPEC.world}
 
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         calls.append(cmd)
         rest = cmd[1:]
         if rest[:3] == ["compose", "config", "--format"]:
@@ -1492,7 +1661,9 @@ def test_a_readiness_poll_still_rides_out_a_docker_that_only_stumbles(
     """
     stumbles = iter([True, False])
 
-    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None):
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
         if cmd[1] == "ps":
             if next(stumbles):
                 return _completed(returncode=1, stderr="Cannot connect to the Docker daemon")
@@ -1503,3 +1674,1216 @@ def test_a_readiness_poll_still_rides_out_a_docker_that_only_stumbles(
 
     monkeypatch.setattr(docker.runner, "run", fake_run)
     assert docker.wait_ready(SPEC.auth, SPEC.world, "realm.example", 3724, 5.0, 0.01) is True
+
+
+# ------------------------------------------------- remove_staged (teardown)
+
+
+def _remove_runner(
+    calls: list[list[str]],
+    *,
+    present: set[str] | None = None,
+    running: set[str] | None = None,
+    owner: str | None = PROJECT,
+    owners: dict[str, str | None] | None = None,
+    inspect_fails: bool = False,
+    down_removes: bool = True,
+    list_fails: bool = False,
+    rm_works: bool = True,
+):
+    """A `runner.run` double for the teardown path.
+
+    `present` is what `docker ps -a --filter label=...` reports (existence);
+    `running` is what `docker ps` reports. They are separate because removal is
+    about the first and ownership refusals are about the second, and a container
+    can be stopped-but-present, which is the state this action exists for.
+    """
+    live = set() if running is None else set(running)
+    exists = set(present if present is not None else live)
+
+    def fake_run(cmd: list[str], cwd=None, timeout: float | None = None):
+        calls.append(cmd)
+        if cmd[:4] == ["docker", "compose", "config", "--format"]:
+            return _completed(stdout='{"name": "' + PROJECT + '"}')
+        if cmd[:3] == ["docker", "compose", "down"]:
+            if down_removes:
+                exists.clear()
+                live.clear()
+            return _completed()
+        if cmd[:2] == ["docker", "inspect"]:
+            if inspect_fails:
+                return _completed(returncode=1, stderr="Cannot connect to the Docker daemon")
+            who = owners.get(cmd[2], owner) if owners is not None else owner
+            return _completed(stdout="" if who is None else who + chr(10))
+        if cmd[:3] == ["docker", "ps", "-a"]:
+            if list_fails:
+                return _completed(returncode=1, stderr="Cannot connect to the Docker daemon")
+            return _completed(stdout="".join(n + "\n" for n in sorted(exists)))
+        if cmd[:2] == ["docker", "ps"]:
+            return _completed(stdout="".join(n + "\n" for n in sorted(live)))
+        if cmd[:3] == ["docker", "rm", "-f"]:
+            if rm_works:
+                exists.discard(cmd[3])
+            return _completed()
+        return _completed()
+
+    return fake_run
+
+
+def test_remove_staged_never_passes_a_flag_that_would_delete_a_volume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one mistake here is unrecoverable, so it is pinned rather than trusted.
+
+    The database is a named volume (`ac-database:/var/lib/mysql`), so
+    `compose down` keeps every character. `compose down -v` deletes them. There
+    is no legitimate reason for this argv to grow a `-v`, and a test is cheaper
+    than finding out.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _remove_runner(calls, present={SPEC.db, SPEC.world}))
+    assert docker.remove_staged(SPEC, Path("/tmp/wow")) is True
+
+    down = [cmd for cmd in calls if cmd[:3] == ["docker", "compose", "down"]]
+    assert down, "nothing was taken down"
+    assert "--remove-orphans" in down[0], down[0]
+    for cmd in calls:
+        assert "-v" not in cmd, cmd
+        assert "--volumes" not in cmd, cmd
+
+
+def test_remove_staged_asks_by_project_label_not_by_container_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AzerothCore pins container names globally, so a name search finds the neighbour.
+
+    `container_exists()` answers "is there an ac-worldserver", which is a
+    different question from "does THIS install still have containers" whenever
+    two installs of the same game exist.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _remove_runner(calls, present={SPEC.db}))
+    docker.remove_staged(SPEC, Path("/tmp/wow"))
+
+    listings = [c for c in calls if c[:3] == ["docker", "ps", "-a"]]
+    assert listings, "existence was never asked about"
+    for cmd in listings:
+        assert any(a.startswith("label=com.docker.compose.project=") for a in cmd), cmd
+
+
+def test_remove_staged_says_false_when_this_install_has_no_containers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`compose down` exits 0 for a project that never existed; that is not a removal."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _remove_runner(calls, present=set()))
+    assert docker.remove_staged(SPEC, Path("/tmp/wow")) is False
+    assert not any(c[:3] == ["docker", "compose", "down"] for c in calls), "nothing to take down"
+
+
+def test_remove_staged_will_not_remove_containers_it_cannot_prove_are_its_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same refusal as the stop path, so the two cannot disagree about ownership."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        _remove_runner(calls, running={SPEC.world}, owner="somebody-elses-server"),
+    )
+    with pytest.raises(docker.DockerCommandError, match="another install"):
+        docker.remove_staged(SPEC, Path("/tmp/wow"))
+    assert not any(c[:3] == ["docker", "compose", "down"] for c in calls)
+
+
+def test_remove_staged_gives_up_rather_than_guessing_when_ownership_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Docker refusing to answer is not the same as "not ours", and must not read as it."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner, "run", _remove_runner(calls, running={SPEC.world}, inspect_fails=True)
+    )
+    with pytest.raises(docker.DockerCommandError, match="cannot prove"):
+        docker.remove_staged(SPEC, Path("/tmp/wow"))
+    assert not any(c[:3] == ["docker", "compose", "down"] for c in calls)
+
+
+def test_remove_staged_finishes_the_job_when_compose_down_removed_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The moved-folder case: compose exits 0 having matched no container.
+
+    The by-name removal that follows is only reached for names the census has
+    already proved carry this project's label.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        _remove_runner(calls, present={SPEC.db, SPEC.world}, down_removes=False),
+    )
+    assert docker.remove_staged(SPEC, Path("/tmp/wow")) is True
+    removed = {c[3] for c in calls if c[:3] == ["docker", "rm", "-f"]}
+    assert removed == {SPEC.db, SPEC.world}
+
+
+def test_remove_staged_refuses_to_report_success_while_containers_remain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reporting a teardown that did not happen is how a stale install gets reused."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        _remove_runner(calls, present={SPEC.db}, down_removes=False, rm_works=False),
+    )
+    with pytest.raises(docker.DockerCommandError, match="still present"):
+        docker.remove_staged(SPEC, Path("/tmp/wow"))
+
+
+def test_remove_staged_will_not_claim_success_when_docker_stops_answering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unanswerable "what is left" is not an empty one."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner, "run", _remove_runner(calls, present={SPEC.db}, list_fails=True)
+    )
+    with pytest.raises(docker.DockerCommandError):
+        docker.remove_staged(SPEC, Path("/tmp/wow"))
+
+
+# ------------------------------------------- repair_import (the re-import)
+
+
+def _probe(*answers: docker.ImportState) -> Callable[[], docker.ImportState]:
+    """A probe that gives each answer in turn, repeating the last one forever.
+
+    Repeating matters: `repair_import()` asks before and again after, and a test
+    that supplied one answer would otherwise fail on the post-check for reasons
+    that have nothing to do with what it is testing.
+    """
+    remaining = list(answers)
+
+    def probe() -> docker.ImportState:
+        return remaining.pop(0) if len(remaining) > 1 else remaining[0]
+
+    return probe
+
+
+UNIMPORTED = docker.ImportState("absent", "acore_world holds no tables")
+IMPORTED = docker.ImportState("imported", "acore_world has 1103 tables")
+HAS_ROWS = docker.ImportState("populated", "651 rows in acore_auth.account")
+
+
+def _repair_doubles(
+    monkeypatch: pytest.MonkeyPatch,
+    calls: list[list[str]],
+    *,
+    running: set[str] | None = None,
+    owner: str | None = PROJECT,
+    inspect_fails: bool = False,
+    health: str = "healthy",
+    import_exit: int = 0,
+    import_output: Callable[[], Iterable[str]] = tuple,
+    cwds: list[Path | None] | None = None,
+) -> None:
+    """Fake BOTH `runner.run` and `runner.stream` for the repair path.
+
+    Two doubles rather than one because the import is the only command here that
+    streams: `repair_import()` reads it through `run_attached()`, so that it can
+    show its output while it runs, and everything else it asks Docker still goes
+    through `runner.run`. A test that patched only `run` would leave the import
+    talking to a real `docker` binary.
+
+    `running` is what `docker ps` reports before anything is done; a
+    `compose up -d --no-deps <db>` adds the database to it, which is how a test
+    can tell whether the database was started rather than merely demanded.
+    `import_output` is called for each run of the import and its lines are
+    yielded one at a time, so a test can prove they arrive rather than land in
+    one block at the end.
+    """
+    live = set() if running is None else set(running)
+
+    def fake_run(cmd: list[str], cwd=None, timeout: float | None = None):
+        calls.append(cmd)
+        if cmd[:4] == ["docker", "compose", "config", "--format"]:
+            return _completed(stdout='{"name": "' + PROJECT + '"}')
+        if cmd[:5] == ["docker", "compose", "up", "-d", "--no-deps"]:
+            live.update(cmd[5:])
+            return _completed()
+        if cmd[:2] == ["docker", "inspect"]:
+            if "Health" in cmd[-1]:
+                return _completed(stdout=health)
+            if inspect_fails:
+                return _completed(returncode=1, stderr="Cannot connect to the Docker daemon")
+            return _completed(stdout="" if owner is None else owner + chr(10))
+        if cmd[:2] == ["docker", "ps"]:
+            return _completed(stdout="".join(n + "\n" for n in sorted(live)))
+        return _completed()
+
+    def fake_stream(
+        cmd: list[str], cwd: Path | None = None, *, merge_stderr: bool = False
+    ) -> Iterator[str]:
+        calls.append(cmd)
+        if cwds is not None:
+            cwds.append(cwd)
+        yield from import_output()
+        if import_exit:
+            # What `runner.stream()` does at the end of a non-zero run, and the
+            # reason `run_attached()` catches rather than propagates it.
+            raise subprocess.CalledProcessError(import_exit, cmd)
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    monkeypatch.setattr(docker.runner, "stream", fake_stream)
+
+
+def test_repair_import_names_only_the_one_shot_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The whole point of the action is the services it does NOT select.
+
+    `docker compose up -d` with no arguments re-runs the import and everything
+    else, and `start_staged()` names three services precisely so an ordinary
+    start can never reach `ac-db-import`. This is the one caller allowed to
+    reach it, so it must reach nothing else: the import command names one
+    service, and `--no-deps` is what stops compose adding a second.
+    """
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db})
+    assert docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, IMPORTED)) is True
+
+    ups = [c for c in calls if c[:3] == ["docker", "compose", "up"]]
+    assert ups == [["docker", "compose", "up", "--no-deps", "ac-db-import"]], ups
+    for cmd in calls:
+        assert SPEC.world not in cmd, cmd
+        assert SPEC.auth not in cmd, cmd
+
+
+def test_repair_import_starts_the_database_it_needs_and_nothing_else(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stop takes the database down with everything else, so repair has to bring it back.
+
+    Without this the action is unreachable through the buttons this app has: it
+    refuses while the servers are running, and the only way to stop them also
+    stops the database it must ask and write to.
+    """
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running=set())
+    assert docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, IMPORTED)) is True
+
+    started = [c for c in calls if c[:5] == ["docker", "compose", "up", "-d", "--no-deps"]]
+    assert started == [["docker", "compose", "up", "-d", "--no-deps", SPEC.db]], started
+
+
+def test_repair_import_does_not_restart_a_database_that_is_already_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A running database is already the state this needs; recreating one is not free."""
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db})
+    docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, IMPORTED))
+    assert not any(c[:4] == ["docker", "compose", "up", "-d"] for c in calls)
+
+
+def test_repair_import_refuses_over_a_database_with_player_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refusal this whole action is built around, and it is not offered twice.
+
+    Re-importing over a populated database destroys characters, so a probe that
+    finds accounts ends the action — with the way back (Restore) named, because
+    that path exists and was live-gated against a real backup.
+    """
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db})
+    with pytest.raises(docker.DockerCommandError, match="restore the last backup") as raised:
+        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(HAS_ROWS))
+    assert "651 rows in acore_auth.account" in str(raised.value)
+    assert not any(c[:3] == ["docker", "compose", "up"] for c in calls), "it imported anyway"
+
+
+def test_repair_import_refuses_while_this_installs_servers_are_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live worldserver holds characters in memory and writes them back over the import."""
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db, SPEC.world})
+    with pytest.raises(docker.DockerCommandError, match="Press Stop first"):
+        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, IMPORTED))
+    assert not any(c[:3] == ["docker", "compose", "up"] for c in calls)
+
+
+def test_repair_import_will_not_run_against_containers_it_cannot_prove_are_its_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same ownership census as the stop and teardown paths, so the three agree."""
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db}, owner="somebody-elses-server")
+    with pytest.raises(docker.DockerCommandError, match="another install"):
+        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, IMPORTED))
+    assert not any(c[:3] == ["docker", "compose", "up"] for c in calls)
+
+    calls.clear()
+    _repair_doubles(monkeypatch, calls, running={SPEC.db}, inspect_fails=True)
+    with pytest.raises(docker.DockerCommandError, match="cannot prove"):
+        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, IMPORTED))
+    assert not any(c[:3] == ["docker", "compose", "up"] for c in calls)
+
+
+def test_repair_import_catches_an_import_that_exited_zero_having_done_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exit code is not the answer, exactly as it is not for `compose down`.
+
+    A one-shot that died part-way and one that never touched a table look
+    identical from outside, so the database is asked again instead, and only a
+    database that now reads as imported counts as a repair.
+    """
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db})
+    with pytest.raises(docker.DockerCommandError, match="still read as absent") as raised:
+        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED))
+    assert "ac-db-import" in str(raised.value), "did not say which logs to read"
+    assert ["docker", "compose", "up", "--no-deps", "ac-db-import"] in calls
+
+
+def test_repair_import_accepts_an_import_that_seeded_its_own_accounts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finished import can leave player data behind, and that is a repair, not a failure.
+
+    The live gate on yulon-ubuntu (2026-08-23) ran a first-ever import against
+    an empty volume on an install carrying mod-city-bots. It finished exit 0
+    with every schema full — and with 400 accounts and 400 characters the
+    module's own `db-auth`/`db-characters` update files had written. Demanding
+    `imported` from the second probe therefore failed the action over its own
+    success, and would have failed it on every install this project ships,
+    since the shipped ones carry modules.
+
+    Safe only because of the order this asserts around: `populated` is a refusal
+    *before* the one-shot runs, so a database populated afterwards was populated
+    by the run that just happened.
+    """
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db})
+    seeded = docker.ImportState(
+        "populated",
+        "400 rows in acore_auth.account, 400 rows in acore_characters.characters",
+        complete=True,
+    )
+    assert docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, seeded)) is True
+    assert ["docker", "compose", "up", "--no-deps", "ac-db-import"] in calls
+
+
+def test_repair_import_refuses_a_database_it_could_not_ask(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unanswerable database is not an empty one — the fail-closed rule again."""
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db})
+    unreadable = docker.ImportState("unreadable", "mysql: connection refused")
+    with pytest.raises(docker.DockerCommandError, match="could not be asked"):
+        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(unreadable))
+    assert not any(c[:3] == ["docker", "compose", "up"] for c in calls)
+
+
+def test_repair_import_declines_an_install_that_is_already_imported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing to repair is a refusal, not a no-op: the import would overwrite a good database."""
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db})
+    with pytest.raises(docker.DockerCommandError, match="already completed"):
+        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(IMPORTED))
+    assert not any(c[:3] == ["docker", "compose", "up"] for c in calls)
+
+
+def test_repair_import_refuses_a_game_that_never_named_an_import_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A guessed service name is a guess about which container gets run."""
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db})
+    spec = docker.ContainerSpec(db="a-db", auth="a-auth", world="a-world", ports=(1,))
+    with pytest.raises(docker.DockerCommandError, match="does not say which compose service"):
+        docker.repair_import(spec, Path("/tmp/wow"), _probe(UNIMPORTED, IMPORTED))
+    assert calls == [], "something was asked of Docker before the refusal"
+
+
+def test_repair_import_says_no_when_the_database_never_becomes_healthy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Importing into a database that has not come up writes into nothing."""
+    # The poll always sleeps once after its final check; without this the test
+    # spends the default two-second interval proving nothing.
+    monkeypatch.setattr(docker.time, "sleep", lambda _seconds: None)
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running=set(), health="starting")
+    with pytest.raises(docker.DockerCommandError, match="did not report healthy"):
+        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, IMPORTED), db_timeout=0.05)
+    assert not any(c[:4] == ["docker", "compose", "up", "--no-deps"] for c in calls)
+
+
+def test_repair_import_refuses_an_install_that_cannot_name_its_project(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With no identity there is no telling whose database would be overwritten."""
+    calls: list[list[str]] = []
+
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        if cmd[:3] == ["docker", "compose", "config"]:
+            return _completed(returncode=1, stderr="no configuration file provided")
+        return _completed()
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    with pytest.raises(docker.DockerCommandError, match="which compose project"):
+        docker.repair_import(SPEC, tmp_path, _probe(UNIMPORTED, IMPORTED))
+    assert not any(c[:3] == ["docker", "compose", "up"] for c in calls)
+
+
+# ---------------------------------- the import says what it is doing while it runs
+
+
+def _import_command(calls: list[list[str]]) -> list[list[str]]:
+    """Every `compose up` that was not the `-d` one that starts the database."""
+    return [c for c in calls if c[:3] == ["docker", "compose", "up"] and "-d" not in c]
+
+
+def test_showing_the_import_did_not_change_the_command_it_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The argv is what a live AzerothCore import was gated against; only the reading moved.
+
+    Both spellings of the call have to produce the same command, because the
+    sink is optional and the evidence is about `compose up --no-deps
+    ac-db-import` and nothing else — including that it still runs in the
+    install's own folder, which is what makes it that install's compose project.
+    """
+    server_dir = Path("/tmp/wow")
+    with_sink: list[list[str]] = []
+    cwds: list[Path | None] = []
+    _repair_doubles(monkeypatch, with_sink, running={SPEC.db}, cwds=cwds)
+    docker.repair_import(SPEC, server_dir, _probe(UNIMPORTED, IMPORTED), output=lambda _line: None)
+
+    without_sink: list[list[str]] = []
+    _repair_doubles(monkeypatch, without_sink, running={SPEC.db})
+    docker.repair_import(SPEC, server_dir, _probe(UNIMPORTED, IMPORTED))
+
+    expected = [["docker", "compose", "up", "--no-deps", "ac-db-import"]]
+    assert _import_command(with_sink) == expected
+    assert _import_command(without_sink) == expected
+    assert cwds == [server_dir], "the import ran somewhere other than the install"
+
+
+def test_the_imports_lines_reach_the_sink_as_it_prints_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live, not in one block at the end — the block at the end is the thing being replaced.
+
+    The generator records what the sink has already been given each time it is
+    resumed, which is the only way to tell "streamed" from "buffered and handed
+    over at the end" after the fact: a buffered implementation leaves every
+    snapshot empty and still ends with the same list.
+    """
+    seen: list[str] = []
+    snapshots: list[list[str]] = []
+    printed = ("applying acore_auth", "applying acore_characters", "applying acore_world")
+
+    def printing() -> Iterator[str]:
+        for line in printed:
+            yield line
+            snapshots.append(list(seen))
+
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db}, import_output=printing)
+    assert (
+        docker.repair_import(
+            SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, IMPORTED), output=seen.append
+        )
+        is True
+    )
+    assert seen == list(printed), "the sink did not see every line, in order"
+    assert snapshots == [list(printed[:1]), list(printed[:2]), list(printed)], snapshots
+
+
+def test_an_import_that_exited_non_zero_is_logged_and_the_database_asked_anyway(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Streaming must not turn the exit code into an exception.
+
+    `runner.stream()` raises `CalledProcessError` on a non-zero exit, and this
+    is the one caller that must not let it: a one-shot that failed part-way and
+    one that failed having done nothing exit alike, so the post-import probe is
+    the only thing that can tell them apart and it has to run either way.
+    """
+    calls: list[list[str]] = []
+    _repair_doubles(
+        monkeypatch,
+        calls,
+        running={SPEC.db},
+        import_exit=1,
+        import_output=lambda: ("ERROR 1045 (28000): Access denied for user 'root'",),
+    )
+    asked: list[int] = []
+
+    def probe() -> docker.ImportState:
+        asked.append(1)
+        return UNIMPORTED if len(asked) == 1 else IMPORTED
+
+    with caplog.at_level("DEBUG", logger="yulon.docker"):
+        assert docker.repair_import(SPEC, Path("/tmp/wow"), probe) is True
+    assert len(asked) == 2, "the post-import probe never ran"
+    said = [r.getMessage() for r in caplog.records if r.levelno >= 30]
+    assert any("exited 1" in m and "Access denied" in m for m in said), said
+
+
+def test_the_failure_text_of_a_broken_import_reaches_the_error_on_screen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`stream()` yields stderr in one block at the END, so the tail IS the explanation.
+
+    Without it the user gets "the databases still read as absent" and is sent to
+    a `docker compose logs` command to find out why — which is a fair pointer
+    and a poor answer when the reason was on screen a second ago.
+    """
+    calls: list[list[str]] = []
+    _repair_doubles(
+        monkeypatch,
+        calls,
+        running={SPEC.db},
+        import_exit=1,
+        import_output=lambda: (
+            "applying acore_auth",
+            "ERROR 1698 (28000): Access denied for user 'root'@'localhost'",
+        ),
+    )
+    with pytest.raises(docker.DockerCommandError) as raised:
+        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED))
+    said = str(raised.value)
+    assert "ERROR 1698" in said, said
+    assert "still read as absent" in said, "the state it is in stopped being said"
+
+
+def test_a_thirty_minute_import_is_not_kept_in_memory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sink sees everything; this process remembers a bounded end of it.
+
+    A full import prints a line per SQL file for 10-30 minutes, and this runs
+    inside a window that may then stay open for days. Keeping all of it would
+    replace one defect with another.
+    """
+    lines = [f"line {n}" for n in range(10_000)]
+    seen: list[str] = []
+
+    def fake_stream(
+        cmd: list[str], cwd: Path | None = None, *, merge_stderr: bool = False
+    ) -> Iterator[str]:
+        # A generator, not `iter(list)`: `run_attached()` closes what it is
+        # given so an early exit terminates the child, and a double that cannot
+        # be closed is not the thing being replaced.
+        yield from lines
+
+    monkeypatch.setattr(docker.runner, "stream", fake_stream)
+    run = docker.run_attached(
+        ["compose", "up", "--no-deps", "ac-db-import"],
+        Path("/tmp/wow"),
+        sink=seen.append,
+        keep=3,
+    )
+    assert seen == lines, "the sink was denied lines it was there to receive"
+    assert run.tail == ("line 9997", "line 9998", "line 9999")
+    assert run.returncode == 0
+
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db}, import_output=lambda: iter(lines))
+    with pytest.raises(docker.DockerCommandError) as raised:
+        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED))
+    said = str(raised.value)
+    assert "line 9999" in said and "line 0 " not in said, said
+    assert len(said) < 1000, f"a {len(said)}-character message for a QLabel"
+
+
+def test_a_sink_that_has_gone_away_cannot_kill_a_running_import(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A closed window must not stop a database import half-written.
+
+    Letting the sink's exception out abandons `stream()`'s generator, and
+    `stream()` terminates the child when that happens — so a `RuntimeError` from
+    a deleted widget would come out as an `ac-db-import` killed mid-write.
+    """
+    calls: list[list[str]] = []
+    _repair_doubles(
+        monkeypatch,
+        calls,
+        running={SPEC.db},
+        import_output=lambda: ("applying acore_auth", "applying acore_world", "done"),
+    )
+
+    def deleted(_line: str) -> None:
+        raise RuntimeError("Internal C++ object (LineRelay) already deleted.")
+
+    with caplog.at_level("DEBUG", logger="yulon.docker"):
+        assert (
+            docker.repair_import(
+                SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, IMPORTED), output=deleted
+            )
+            is True
+        )
+    complaints = [r for r in caplog.records if "output sink" in r.getMessage()]
+    assert len(complaints) == 1, "one dead sink was complained about once per line"
+
+
+# ------------------------------------------- what the review of 2026-08-23 found
+
+
+def test_no_stop_path_uses_a_flag_spelling_docker_only_learned_in_28(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--timeout` is a Docker CLI 28.0.0 spelling; `-t` has always worked.
+
+    Through 27.x the long form of this flag is `--time`, so `docker stop
+    --timeout 300 x` exits 125 with `unknown flag` on any older CLI — turning
+    the by-name fallback, which exists for installs that can least afford to
+    fail, into a hard error. The short form means the same thing on every
+    version this project can meet, so it is the only one that is safe to send.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner, "run", _stop_runner(calls, running={SPEC.db, SPEC.auth, SPEC.world})
+    )
+    docker.stop_staged(SPEC, Path("/tmp/wow"))
+    monkeypatch.setattr(docker.runner, "run", _remove_runner(calls, present={SPEC.db}))
+    docker.remove_staged(SPEC, Path("/tmp/wow"))
+
+    graced = [cmd for cmd in calls if _GRACE in cmd]
+    assert graced, "no command carried the grace at all"
+    for cmd in graced:
+        assert "-t" in cmd, cmd
+        assert "--timeout" not in cmd, cmd
+        assert "--time" not in cmd, cmd
+
+
+def test_the_teardown_gives_a_populated_server_the_same_grace_a_stop_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Remove is offered on a RUNNING server, under copy promising no data loss.
+
+    `compose down` at Docker's 10s default SIGKILLs a populated worldserver
+    mid-drain — measured — so the button whose armed text says the characters
+    are kept was the one path still able to lose them.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _remove_runner(calls, present={SPEC.db, SPEC.world}))
+    assert docker.remove_staged(SPEC, Path("/tmp/wow")) is True
+
+    down = [cmd for cmd in calls if cmd[:3] == ["docker", "compose", "down"]]
+    assert down == [["docker", "compose", "down", "-t", _GRACE, "--remove-orphans"]], down
+
+
+def test_the_teardowns_by_name_fallback_stops_before_it_removes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`docker rm -f` is a SIGKILL with no grace at all.
+
+    Putting the grace on `compose down` alone left a hard-kill path reachable
+    from the same button, in exactly the case that reaches it: a moved install
+    whose compose files no longer match, which is not a reason to lose a save
+    queue.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        _remove_runner(calls, present={SPEC.db, SPEC.world}, down_removes=False),
+    )
+    assert docker.remove_staged(SPEC, Path("/tmp/wow")) is True
+
+    order = [
+        cmd for cmd in calls if cmd[:2] == ["docker", "stop"] or cmd[:3] == ["docker", "rm", "-f"]
+    ]
+    for name in (SPEC.db, SPEC.world):
+        stopped = order.index(["docker", "stop", "-t", _GRACE, name])
+        removed = order.index(["docker", "rm", "-f", name])
+        assert stopped < removed, f"{name} was removed before it was stopped: {order}"
+
+
+def test_repair_starts_a_compose_service_not_a_container_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`compose up` takes SERVICE names; `spec.db` is a CONTAINER name.
+
+    They happen to be equal for AzerothCore, which is why reaching past
+    `compose_services()` looked harmless. `ContainerSpec` exists so a game whose
+    compose file names its services differently can say so, and this is the one
+    call that would have silently ignored it.
+    """
+    spec = docker.ContainerSpec(
+        db="pinned-db-container",
+        auth="pinned-auth-container",
+        world="pinned-world-container",
+        ports=(3724, 8085),
+        services=("db-service", "auth-service", "world-service"),
+        import_service="import-service",
+    )
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running=set())
+    assert docker.repair_import(spec, Path("/tmp/wow"), _probe(UNIMPORTED, IMPORTED)) is True
+
+    started = [c for c in calls if c[:5] == ["docker", "compose", "up", "-d", "--no-deps"]]
+    assert started == [["docker", "compose", "up", "-d", "--no-deps", "db-service"]], started
+
+
+def test_repair_asks_the_database_only_after_it_has_started_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The order is the whole justification for starting the database at all.
+
+    Both the probe and the import need a running database, so a probe asked
+    first would answer `unreadable` for the very install this action exists for
+    and refuse it. Nothing pinned that ordering, so moving the two lines was
+    free.
+    """
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running=set())
+
+    asked_after: list[bool] = []
+
+    def probe() -> docker.ImportState:
+        asked_after.append(
+            any(c[:5] == ["docker", "compose", "up", "-d", "--no-deps"] for c in calls)
+        )
+        return UNIMPORTED if len(asked_after) == 1 else IMPORTED
+
+    assert docker.repair_import(SPEC, Path("/tmp/wow"), probe) is True
+    assert asked_after[0] is True, "the database was probed before it was started"
+
+
+def test_repair_import_refuses_an_import_that_seeded_rows_and_then_died(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hole the widened post-check opened, closed.
+
+    Accepting `populated` was right — a finished import really does leave rows,
+    because every module's `db-auth` updates run in the same one-shot — but the
+    probe answers `populated` on the FIRST row it finds, before it has looked at
+    whether the schemas are finished. So an import that applies mod-city-bots'
+    400 accounts and then dies on the world schema reads exactly like a finished
+    one.
+
+    Reported as success, that hides the Repair button (the probe no longer says
+    `repairable`) and leaves the user a broken server, a success message, and no
+    way back. `complete` is what separates the two (review, 2026-08-23).
+    """
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db}, import_exit=1)
+    half_done = docker.ImportState(
+        "populated",
+        "400 rows in acore_auth.account, but acore_world holds no tables",
+        complete=False,
+    )
+    with pytest.raises(docker.DockerCommandError, match="did not finish"):
+        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, half_done))
+
+
+def test_a_probe_that_forgets_to_say_complete_cannot_claim_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`complete` defaults False so completeness is never claimed by omission.
+
+    `ImportProbe` is a seam any per-game module implements. One written against
+    the old two-field `ImportState` would answer `populated` with no third
+    argument, and a default of True would silently hand it the success path.
+    """
+    assert docker.ImportState("populated", "some rows").complete is False
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db})
+    with pytest.raises(docker.DockerCommandError, match="did not finish"):
+        docker.repair_import(
+            SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, docker.ImportState("populated", "rows"))
+        )
+
+
+def test_repair_import_refuses_a_half_written_schema_and_says_why(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-running the one-shot here is destructive, not useless, and that is the point.
+
+    Measured on yulon-ubuntu, 2026-08-23. An import killed 19 seconds in left
+    `acore_world` with 3 tables of 316. Re-running `ac-db-import` over it took
+    it to 5 tables and **2671 rows in `acore_world.updates`** — AzerothCore
+    skips the base data for a database that already exists, then records every
+    remaining SQL file as applied. The schema is unimportable from that moment
+    on: no later run will ever apply those files.
+
+    So the refusal is not tidiness. It is the difference between a user who can
+    still delete a volume and reinstall, and one who cannot.
+    """
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db})
+    half_written = docker.ImportState(
+        "partial", "acore_world has 3 tables but no import record, so it was never finished"
+    )
+    with pytest.raises(docker.DockerCommandError) as caught:
+        # No `reset`: nothing can hand the importer an empty schema, so there is
+        # nothing safe to do.
+        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(half_written))
+
+    said = str(caught.value)
+    assert "cannot finish the job" in said, said
+    assert "install again" in said, "no way out was offered"
+    assert not any(c[:3] == ["docker", "compose", "up"] for c in calls), "the import was run"
+
+
+def test_repair_import_clears_the_half_written_schemas_before_re_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one thing that makes a `partial` repair work, and the order it must happen in.
+
+    An empty schema is the only input AzerothCore's importer treats as work to
+    do. Re-running over a schema that already exists leaves it permanently
+    unimportable, so the drop has to happen BEFORE the one-shot, not as a
+    cleanup afterwards.
+    """
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db})
+    ran_import_before_the_clear: list[bool] = []
+
+    def reset() -> tuple[str, ...]:
+        ran_import_before_the_clear.append(
+            any(c[:4] == ["docker", "compose", "up", "--no-deps"] for c in calls)
+        )
+        return ("acore_world",)
+
+    half = docker.ImportState("partial", "acore_world has 3 tables but no import record")
+    assert docker.repair_import(SPEC, Path("/tmp/wow"), _probe(half, IMPORTED), reset=reset) is True
+
+    assert ran_import_before_the_clear == [False], "the import ran before the clear"
+    assert any(c[:4] == ["docker", "compose", "up", "--no-deps"] for c in calls), "no import ran"
+
+
+def test_repair_import_will_not_run_the_import_if_the_clear_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed drop leaves the schema exactly as unimportable as before.
+
+    Running the one-shot anyway is the specific mistake that made this state
+    unrecoverable in the first place, so a `reset` that raises stops everything.
+    The seam belongs to the per-game package and may raise its own types, so
+    this is caught broadly and re-raised as the error the caller contracted for.
+    """
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db})
+
+    def reset() -> tuple[str, ...]:
+        raise RuntimeError("mysql said no")
+
+    half = docker.ImportState("partial", "acore_world has 3 tables but no import record")
+    with pytest.raises(docker.DockerCommandError, match="could not be cleared"):
+        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(half), reset=reset)
+    assert not any(c[:4] == ["docker", "compose", "up", "--no-deps"] for c in calls)
+
+
+def test_repair_import_will_not_run_the_import_if_the_clear_found_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ "Unfinished" and "nothing to clear" cannot both be true, so something is wrong.
+
+    Most likely the probe and the reset disagree about what finished means. The
+    one thing that must not follow is the one-shot running over the schemas the
+    probe just called half-written.
+    """
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db})
+    half = docker.ImportState("partial", "acore_world has 3 tables but no import record")
+    with pytest.raises(docker.DockerCommandError, match="nothing was found to clear"):
+        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(half), reset=lambda: ())
+    assert not any(c[:4] == ["docker", "compose", "up", "--no-deps"] for c in calls)
+
+
+def test_an_absent_database_is_never_cleared(monkeypatch: pytest.MonkeyPatch) -> None:
+    """There is nothing to drop, and dropping is the one thing here that destroys."""
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db})
+    cleared: list[int] = []
+
+    def reset() -> tuple[str, ...]:
+        cleared.append(1)
+        return ("acore_world",)
+
+    assert (
+        docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, IMPORTED), reset=reset)
+        is True
+    )
+    assert cleared == [], "an absent database was dropped"
+
+
+# ------------------------------------------------- the build (roadmap 6.2)
+
+
+def _stream_double(
+    monkeypatch: pytest.MonkeyPatch, lines: Iterable[str]
+) -> tuple[list[list[str]], list[bool]]:
+    """Record what `run_attached()` asks `runner.stream()` to run, and how."""
+    seen: list[list[str]] = []
+    merged: list[bool] = []
+
+    def fake_stream(
+        cmd: list[str], cwd: Path | None = None, *, merge_stderr: bool = False
+    ) -> Iterator[str]:
+        seen.append(cmd)
+        merged.append(merge_stderr)
+        yield from lines
+
+    monkeypatch.setattr(docker.runner, "stream", fake_stream)
+    return seen, merged
+
+
+def test_build_staged_passes_all_three_compose_files_and_plain_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The trap: a bare `docker compose build` here builds NOTHING and exits 0.
+
+    The `build:` blocks live in a file compose never auto-loads, and naming any
+    `-f` disables auto-loading — so the base and the override have to be listed
+    too, or the build loses the image tags and env it is meant to produce.
+    """
+    seen, merged = _stream_double(monkeypatch, ["#1 [internal] load build definition"])
+    run = docker.build_staged(
+        Path("/tmp/wow"),
+        ("docker-compose.yml", "docker-compose.override.yml", "docker-compose.build.yml"),
+    )
+    assert seen == [
+        [
+            "docker",
+            "compose",
+            "-f",
+            "docker-compose.yml",
+            "-f",
+            "docker-compose.override.yml",
+            "-f",
+            "docker-compose.build.yml",
+            "build",
+            "--progress",
+            "plain",
+        ]
+    ]
+    # BuildKit writes ALL of its progress to stderr, which `stream()` otherwise
+    # withholds until the child exits — a blank log panel for the whole build.
+    assert merged == [True]
+    assert run.returncode == 0
+
+
+def test_run_one_shot_keeps_the_argv_that_was_live_gated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--no-deps` is what makes an attached `up` terminate. Byte-identical since the gate."""
+    seen, merged = _stream_double(monkeypatch, ["importing"])
+    docker.run_one_shot("ac-db-import", Path("/tmp/wow"))
+    assert seen == [["docker", "compose", "up", "--no-deps", "ac-db-import"]]
+    assert merged == [False]
+
+
+def test_a_cancelled_run_is_not_reported_as_a_failed_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stop and a failed build are different events; the exit code has to say which."""
+    _stream_double(monkeypatch, ["#5 2.1 building", "#5 4.0 still building"])
+    cancel = docker.threading.Event()
+    cancel.set()
+    run = docker.run_attached(["compose", "build"], Path("/tmp/wow"), cancel=cancel)
+    assert run.returncode == docker.CANCELLED_RETURNCODE
+    assert run.returncode not in (0, 1)  # never mistakable for a real exit status
+
+
+REFS = ("yulon.local/ac-wotlk-worldserver:native-abc", "yulon.local/ac-wotlk-authserver:native-abc")
+
+
+def test_images_built_says_unknown_rather_than_no_when_docker_will_not_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`None` is not `False`: a resume must not conclude "nothing is built" from silence.
+
+    The two non-zero cases are not the same event and the difference is hours:
+    "no such image" is an answer, and a daemon that will not talk is not.
+    """
+    monkeypatch.setattr(
+        docker.runner, "run", lambda *a, **k: _completed(returncode=1, stderr="permission denied")
+    )
+    assert docker.images_built(REFS) is None
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        lambda *a, **k: _completed(returncode=1, stderr="Error: No such image: x"),
+    )
+    assert docker.images_built(REFS) is False
+    monkeypatch.setattr(docker.runner, "run", lambda *a, **k: _completed(stdout="sha256:abc"))
+    assert docker.images_built(REFS) is True
+    assert docker.images_built(()) is None
+
+
+def test_images_built_asks_the_daemon_by_reference_not_compose_by_project(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compose cannot answer "has this been built?", so it is no longer asked.
+
+    Measured on yulon-ubuntu (Docker 29.1.3, Compose 2.40.3, 2026-08-24): after
+    a successful `compose -f base -f override -f build build`, `compose images
+    -q` returned nothing — both bare and with the same `-f` set — and only
+    began answering once containers existed (`compose create` was enough; `up`
+    was not needed). Compose enumerates the images of a project's CREATED
+    CONTAINERS. That window is exactly the one a resume asks in, so every
+    resume re-ran the compile.
+    """
+    seen: list[list[str]] = []
+
+    def record(argv: list[str], **_kwargs: object) -> object:
+        seen.append(argv)
+        return _completed(stdout="sha256:abc")
+
+    monkeypatch.setattr(docker.runner, "run", record)
+    assert docker.images_built(REFS) is True
+    assert [a[1:] for a in seen] == [
+        ["image", "inspect", "--format", "{{.Id}}", REFS[0]],
+        ["image", "inspect", "--format", "{{.Id}}", REFS[1]],
+    ]
+    assert not [a for a in seen if "compose" in a]
+
+
+def test_a_partial_build_is_not_a_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Three images of four is not "built" — starting on it means a missing binary."""
+    answers = iter(
+        [_completed(stdout="sha256:abc"), _completed(returncode=1, stderr="No such image")]
+    )
+    monkeypatch.setattr(docker.runner, "run", lambda *a, **k: next(answers))
+    assert docker.images_built(REFS) is False
+
+
+def test_the_bind_mount_probe_mounts_the_folder_and_tells_no_from_no_answer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A wedged daemon must not be reported as "your folder is not shared with Docker"."""
+    seen: list[list[str]] = []
+
+    def answer(
+        returncode: int, stdout: str = "", stderr: str = ""
+    ) -> Callable[..., subprocess.CompletedProcess[str]]:
+        def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            seen.append(argv)
+            return _completed(returncode=returncode, stdout=stdout, stderr=stderr)
+
+        return run
+
+    (tmp_path / "already-here.txt").write_text("x", encoding="utf-8")
+    server_dir = tmp_path / "wow"  # the folder the user picked; not created yet
+    monkeypatch.setattr(docker.runner, "run", answer(0, "already-here.txt\n"))
+    assert docker.bind_mount_ok(server_dir, "alpine/git") is True
+    # The mount source is the nearest ancestor that HAS something in it, not the
+    # chosen folder: `-v <missing>:/probe` makes Docker create the directory,
+    # and an empty directory's listing proves nothing either way.
+    assert seen[-1] == [
+        "docker",
+        "run",
+        "--rm",
+        # LOAD-BEARING, and its absence is the defect this test failed to catch
+        # for as long as it existed. The probe image is the pinned `alpine/git`
+        # — deliberately, so the probe pulls the digest the clone stages pull
+        # rather than a second image — and that image's ENTRYPOINT is `git`. So
+        # `<image> ls -A /probe` ran `git ls -A /probe`, exited 1 with "'ls' is
+        # not a git command", and `bind_mount_ok()` read that as "Docker cannot
+        # see this folder". Preflight refused EVERY native install on EVERY
+        # platform, and this assertion pinned the broken argv while a
+        # monkeypatched runner returned a canned success that could never know
+        # the image had an entrypoint. Found live, not here (2026-08-24).
+        "--entrypoint",
+        "ls",
+        "-v",
+        # Read-only: that ancestor is routinely the user's home directory, and
+        # listing it is all this asks.
+        f"{tmp_path}:/probe:ro",
+        "alpine/git",
+        "-A",
+        "/probe",
+    ]
+    assert not server_dir.exists()
+    monkeypatch.setattr(docker.runner, "run", answer(1, stderr="invalid mount config"))
+    assert docker.bind_mount_ok(server_dir, "alpine/git") is False
+    # 124 is what `runner.run()` reports for a command that never answered.
+    monkeypatch.setattr(docker.runner, "run", answer(124, stderr="timed out after 30.0s"))
+    assert docker.bind_mount_ok(server_dir, "alpine/git") is None
+
+
+def test_the_bind_mount_probe_catches_the_silently_empty_mount_it_exists_for(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The failure this check was written for, which its exit code could not see.
+
+    Docker Desktop mounts a folder outside its file-sharing list as an EMPTY
+    directory instead of failing the run. `ls` on an empty directory exits 0, so
+    a probe that read the exit code answered True for exactly the broken case
+    and preflight printed `[pass] sharing the folder with Docker` (review,
+    2026-08-23).
+    """
+    (tmp_path / "the-host-can-see-this").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(docker.runner, "run", lambda *a, **k: _completed(returncode=0, stdout="\n"))
+    assert docker.bind_mount_ok(tmp_path / "wow", "alpine/git") is False
+
+
+def test_the_probe_walks_up_to_a_directory_that_has_something_in_it(tmp_path: Path) -> None:
+    """An empty directory's listing proves nothing, so it is not what gets mounted."""
+    empty = tmp_path / "a" / "b"
+    empty.mkdir(parents=True)
+    # `b` is empty and `wow` does not exist, so the walk goes up to `a`, which
+    # holds `b`. A directory holding only an empty subdirectory still counts:
+    # the comparison needs a non-empty listing, not files.
+    assert docker._first_populated_ancestor(empty / "wow") == tmp_path / "a"
+    (empty / "something").write_text("x", encoding="utf-8")
+    assert docker._first_populated_ancestor(empty) == empty
+
+
+def test_a_directory_that_cannot_be_looked_into_is_unchecked_not_a_pass(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ "We could not tell" must never reach preflight as a shared folder."""
+
+    def refuse(_self: Path) -> object:
+        raise PermissionError("Operation not permitted")
+
+    monkeypatch.setattr(Path, "iterdir", refuse)
+    assert docker._first_populated_ancestor(tmp_path) is None
+    assert docker.bind_mount_ok(tmp_path / "wow", "alpine/git") is None
+
+
+def test_a_missing_image_is_told_apart_from_a_daemon_that_will_not_talk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both spellings of "no such image", because only one of them was measured.
+
+    `"Error response from daemon: No such image: <ref>"` is what Docker 29.1.3
+    actually said, and is quoted in `pyplan/checklist.md`. The `"not found"`
+    half of the match is belt-and-braces for a wording this project has not
+    seen, and it had no test at all (review, 2026-08-24). Both must answer
+    False — "that image is not here" — while anything else answers None, and
+    the difference matters because False and None differ by a multi-hour build
+    only in the log line, never in the action.
+    """
+    for said in (
+        "Error response from daemon: No such image: yulon.local/x:t",
+        "Error: No such image: yulon.local/x:t",
+        "Error response from daemon: image not found",
+    ):
+        monkeypatch.setattr(
+            docker.runner, "run", lambda *a, s=said, **k: _completed(returncode=1, stderr=s)
+        )
+        assert docker.images_built(REFS) is False, said
+
+    for said in ("permission denied while trying to connect", "context deadline exceeded", ""):
+        monkeypatch.setattr(
+            docker.runner, "run", lambda *a, s=said, **k: _completed(returncode=1, stderr=s)
+        )
+        assert docker.images_built(REFS) is None, said

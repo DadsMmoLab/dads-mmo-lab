@@ -33,7 +33,7 @@ Open an issue tagged `game-suggestion`. Include:
 
 1. **Open source emulators only.** No links to or instructions for obtaining copyrighted server binaries.
 2. **No game assets.** We never distribute client files or game data.
-3. **Personal use focus.** Guides are for offline, single-player setups. No public server setup guides.
+3. **Private use focus.** Guides are for servers you run for yourself and the people you invite — LAN and internet play with friends are shipped features (`pyplan/README.md` §13, `yulon/networking.py`). No guides for running a publicly advertised server.
 4. **Be kind.** This is a community for people who love old games. Keep it welcoming.
 
 ## Style Guide for Guides
@@ -71,7 +71,10 @@ python -m yulon.catalog.installer wow-wotlk --server-dir ~/wow-server-playerbots
 python -m yulon.catalog.installer wow-tbc --client-dir ~/Games/WoWTBC   # games that need a client folder
 ```
 
-Needs a reachable Docker daemon (otherwise it stops with the Phase 3.3 message), and cached or
+Needs Docker — but no longer a *reachable* one to begin with: when no daemon answers, preflight
+runs the real provisioner (`platform.ensure_docker()`) and refuses only if what comes back still
+cannot be used, needing a reboot or a manual install. The Phase 3.3 placeholder message this
+used to name is not emitted anywhere any more. Cached or
 passwordless sudo — the wrapped scripts still start with `sudo -v`. The **app** no longer needs
 that (roadmap 6.1.5 runs the script on a pty and answers the password through a dialog), but this
 CLI harness has no dialog to answer with, so the old requirement stands here.
@@ -79,6 +82,11 @@ CLI harness has no dialog to answer with, so the old requirement stands here.
 The harness also **declines** the installers' docker-group question, because there is nobody to
 ask: joining that group is a root-equivalent privilege change, and the app never makes one
 silently. Add yourself with `sudo usermod -aG docker "$USER"` if you want it.
+
+**This harness is the Linux bash-script path only.** `_main()` builds an `Installer` directly
+instead of asking `installer_for()`, so it never reaches the native engine. `wow-wotlk` now lists
+`macos` in `catalog.json`'s `install.platforms`, so on a Mac the platform check passes and the
+harness goes on to run the Linux install script. Use the app there.
 
 ## Building the desktop binary
 
@@ -115,6 +123,15 @@ built, stopped, and pointed at via an env var — it will start it, wait for `re
 ```bash
 YULON_WOTLK_SERVER_DIR=~/wow-server-playerbots pytest -m integration tests/integration
 # optional: YULON_WOTLK_REALM_ADDRESS=127.0.0.1 (dml-start.sh's DML_REALM_ADDRESS)
+```
+
+`test_accounts_live.py` writes real accounts into `acore_auth`, so it needs the WotLK database
+container **running**, named through its own env var:
+
+```bash
+YULON_WOTLK_DB_CONTAINER=ac-database pytest -m integration tests/integration
+# optional: YULON_WOTLK_DB_PASSWORD (default `password`) and YULON_WOTLK_WORLD_CONTAINER (default
+# `ac-worldserver`) — only the byte-exactness test needs a ready worldserver, and a pty
 ```
 
 ## Notes

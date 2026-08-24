@@ -21,7 +21,8 @@
    whoever is listening decide what to do. See §5.
 4. **Never refer to a game by its full/trademarked name — acronyms only.** Never "Warcraft",
    always "WoW". Never "RuneScape", always "RS". See §6.
-5. **All filenames are lowercase.** No exceptions.
+5. **All filenames are lowercase**, except the conventional uppercase documents at a
+   directory root and tool-mandated names. See §6a.
 6. **Python is fully typed.** Despite Python being dynamically typed by default, this codebase
    treats it as statically typed: every function signature, variable where it isn't obvious, and
    class attribute is annotated, and CI enforces it with a type checker. Untyped/`Any`-typed code
@@ -86,23 +87,32 @@ scripts it replaces.
 | Layer | Owns | Must never |
 |---|---|---|
 | `runner.py` | Running a subprocess and streaming its output | Know anything about Docker, games, or manifests |
+| `log.py` | The one logging setup: `get_logger()`, and `configure()` adding the stderr handler plus the rotating file under `config_dir()` | Decide what another module logs; be configured from anywhere but the entry point |
+| `git.py` | The game-agnostic clone/update seam — `RunnerGit` (the host's git) and `ContainerGit` (git inside a container, so macOS/Windows need no host git), with `core.autocrlf=false` and per-source depth pinned in one place | Know which source it is cloning or why; run anything that is not git |
 | `docker.py` | Shared, game-agnostic Docker lifecycle (start/stop/status/health/polling/port-conflict check) via `runner.py` | Know anything about a specific game's containers/ports — those are passed in by callers via `ContainerSpec` |
 | `controller.py` | The base `Controller`: composes one `ContainerSpec` + server dir, exposes start/stop/status/polling by delegating to `docker.py`, and applies the README §12 single-instance guard (refuse `start()` while a *foreign* container binds our ports) once for every game | Know anything about a specific game; reimplement `docker.py` behavior; read manifests (Phase 2.3 layers that on top) |
 | `manifest.py` | The manifest schema: pydantic models for every family, the `repo` allow-list, the JSON Schema export | Know how to *apply* a manifest (that is each controller's `modules.py`); hardcode any per-item data |
 | `manifest_store.py` | Reading one game's manifest tree (indexes + items) and mirroring it from GitHub with ETag revalidation | Know what any item does; apply anything |
 | `apply.py` | The shared apply engine: turns manifest primitives into install/configure/remove steps through small seams (`Git`, `SqlRunner`, `DbcCopier`); reports every skipped step | Contain per-item conditionals (that is manifest data); rebuild/restart/touch the Docker lifecycle itself (the controller decides) |
-| `platform.py` | OS detection, config dir paths, Docker/WSL provisioning, network auto-setup (LAN/internet-play firewall, IP detection, WSL2 portproxy — README §13) | Know anything about a specific game or module |
+| `platform.py` | OS detection, config dir paths, Docker/WSL provisioning, Docker Desktop discovery (`docker_program()`, `find_docker_desktop()`, `docker_desktop_data_root()`, `vm_resources()`), verified HTTPS downloads (`verify_context()`/`download_verified()`), `keep_awake()`, `server_dir_problem()`, network auto-setup (LAN/internet-play firewall, IP detection, WSL2 portproxy — README §13) | Know anything about a specific game or module |
 | `networking.py` | README §13 orchestration: `plan()` computes firewall/portproxy commands, the realmlist UPDATE and the router steps the app cannot do; `apply()` executes the automatable part (`sudo -n`, never a blocking prompt) and reports every skip with the command to paste | Hardcode ports or DB/table names (catalog data); contain UI; restart the server itself |
 | `state.py` | The per-user `state.json` (remembered installs) under `config_dir()` — typed, atomic write | Hold server data or anything a manifest/catalog already says |
-| `resources.py` | Where bundled files live: `bundle_root()`/`manifests_dir()`/`repo_root()` for a checkout and for a PyInstaller build (`sys._MEIPASS`) | Know about any specific file's contents |
+| `resources.py` | Where bundled files live: `bundle_root()`/`manifests_dir()`/`installers_dir()` for a checkout and for a PyInstaller build (`sys._MEIPASS`) | Know about any specific file's contents |
 | `update.py` | The GitHub Releases version check (`UpdateCheck`), check + notify only | Download or replace the running binary; block the UI |
 | `catalog/catalog.py` | Typed models for `catalog.json` (emulator sources, install script, containers, port table, DB names, client) + `load_catalog()` | Hardcode per-game values (they are `catalog.json` data); drive an install |
 | `catalog/installer.py` | Orchestrating an install (deps → clone → build → config) for *one* catalog entry | Contain UI code, or hardcode per-game logic that belongs in a manifest |
+| `catalog/native.py` | The native (no shell script) install engine: named, resumable stages behind the same `run()` contract as `Installer` | Prompt for anything; hardcode a game's compose text, floors or URLs |
+| `catalog/composegen.py` | Rendering the three compose files and the merged `.env` from templates plus one install identity — pure functions, no daemon | Run a subprocess; hold the template text itself (that is `catalog/installers/<game>/native/`) |
+| `catalog/preflight.py` | `gather()` (facts about this machine, through seams) and `evaluate()` (pure: facts + the entry's floors → refuse/warn/unchecked/pass) | Hold the numbers (they are `catalog.json`); round `unchecked` to either neighbour |
 | `controller_<acronym>/docker_ctl.py` | Holding *that one game's* `ContainerSpec` and re-exporting `docker.py`'s shared operations | Reimplement Docker lifecycle logic itself, reach into another game's controller, or contain UI code |
 | `controller_<acronym>/controller.py` | That game's `Controller` subclass — passes its `ContainerSpec` to the base and nothing else | Override the inherited lifecycle methods (if a game needs different behavior, extend `docker.py`/the base instead) |
 | `controller_<acronym>/console.py` | That game's worldserver console transport (`docker attach --sig-proxy=false`, one command in, the reply window out) | Contain UI; log passwords |
 | `controller_<acronym>/modules.py` | Binding the shared store/fetcher/applier to that game (game id, bundled manifest dir, refresh URL, DB container) | Hardcode module data that should live in `manifests/` JSON; reimplement loading or applying |
+| `controller_<acronym>/accounts.py` | That game's account creation — for WotLK, the SRP6 registration row written straight into `acore_auth` | Put a password anywhere it can be read back (argv, logs, exceptions, returned dataclasses); contain UI |
+| `controller_<acronym>/maintenance.py` | That game's database backup and restore: `backup()`, `verify_dump()`, `plan_restore()`/`restore()`, and the interrupted-restore marker | Restore without a plan taken first; hold lifecycle or game-agnostic Docker cleanup |
+| `controller_<acronym>/repair.py` | Answering `docker.ImportProbe` for that game: does this install's database look imported? | Let `docker.py` learn the schema names; claim more certainty than the tables give |
 | `ui/*_view.py` | Rendering widgets and wiring signals | Contain business logic, subprocess calls, or Docker calls directly — delegate to controller/catalog objects |
+| `ui/widgets/*.py` | Reusable widget mechanics: `job.py` (one-shot background jobs, off the GUI thread), `log_panel.py` (streaming output), `prompt.py` (asking the user one line on a subprocess's behalf) | Know which view is using them, or what the job it runs is for |
 
 **Rule of thumb:** if you're writing Docker-related code inside a `ui/` file, or UI-related code
 inside a `controller_*/` file, stop — that logic belongs in the other layer, connected by a
@@ -203,15 +213,21 @@ async) and lets the caller decide what happens next.
   for a new user's benefit. Even then, default to the acronym after first mention on a given
   screen.
 - When adding a new game to the catalog, pick its acronym convention (check for existing community
-  convention first — e.g. RS for RuneScape is already used in this repo's `guides/runescape/`) and
+  convention first — e.g. RS for RuneScape is already used in this repo's `archive/guides/runescape/`) and
   use it consistently across manifest `game` values, directory names, and container name prefixes.
 - Rationale: keeps the codebase, logs, and filenames neutral of trademarked terms, and keeps
   naming short and consistent with how the community already refers to these servers.
 
 ### 6a. Filenames — always lowercase
 
-**Every filename in this repository, without exception, is lowercase.** This includes Python
-modules, JSON manifests, markdown docs, and directories.
+**Every filename in this repository is lowercase**, with one carve-out named below. This
+includes Python modules, JSON manifests, markdown docs, and directories.
+
+The carve-out is the conventional uppercase document at a directory root — `README.md`,
+`CONTRIBUTING.md`, `DISCLAIMER.md`, `LICENSE-AGPL` — which every tool that renders a repo
+looks for by that exact name. This section said "without exception" while six such files
+were tracked, three of them `README.md`; a rule the tree does not obey teaches a reader to
+discount the rule, which is worse than the exception (2026-08-24).
 
 - `catalog_view.py`, not `Catalog_view.py`
 - `controller_wow_wotlk/`, not `Controller-WoW-WotLK/`
@@ -265,7 +281,8 @@ guide is a complete reference on its own:
   router steps (DHCP reservation, TCP port forwarding) the app **detects and prompts** for rather
   than silently failing. The per-OS firewall commands and the auth/world/db port table are shared
   `platform.py`-owned behavior + manifest data, never per-game copy-pasted.
-- **Packaging targets:** `.AppImage` (Linux, all distros), `.exe`/MSI (Windows), `.dmg` (macOS),
+- **Packaging targets:** `.AppImage` (Linux, all distros), a zipped one-dir bundle (Windows — not an
+  `.exe` or MSI: `.github/workflows/release.yml` runs `Compress-Archive` over `dist/yulon/`), `.dmg` (macOS),
   built via a GitHub Actions matrix since PyInstaller cannot cross-compile (`README.md` §4).
 - **Code signing/notarization is out of scope for v1** — unsigned-binary OS warnings are an
   accepted, documented tradeoff for now (`README.md` §8–9).

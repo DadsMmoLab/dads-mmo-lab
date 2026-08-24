@@ -88,7 +88,20 @@ def test_update_of_an_existing_clone_fetches_and_resets(
     (dest / ".git").mkdir(parents=True)
     git.RunnerGit().clone(git.CloneSpec(url="https://example/mod.git", dest=dest, branch="master"))
     assert seen == [
-        ["git", "-c", "core.autocrlf=false", "-c", "core.eol=lf", "fetch", "origin", "master"],
+        # `fetch` talks to the network, so it carries the HTTP/1.1 insurance;
+        # `reset` is local and does not.
+        [
+            "git",
+            "-c",
+            "core.autocrlf=false",
+            "-c",
+            "core.eol=lf",
+            "-c",
+            "http.version=HTTP/1.1",
+            "fetch",
+            "origin",
+            "master",
+        ],
         ["git", "-c", "core.autocrlf=false", "-c", "core.eol=lf", "reset", "--hard", "FETCH_HEAD"],
     ]
 
@@ -185,6 +198,41 @@ def test_container_git_mounts_the_destination_and_clones_into_it(
     assert argv[-2:] == ["https://example/core.git", "."]
     assert "--depth" not in argv
     assert "@sha256:" in " ".join(argv), "the image must be pinned by digest, not by a moving tag"
+
+
+def test_is_unmodified_tells_upstreams_own_file_from_one_somebody_edited(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """One question with three answers, and the install engine treats each differently.
+
+    `git status --porcelain -- <path>` prints nothing for a tracked file that
+    matches HEAD, `?? path` for an untracked one and ` M path` for a changed
+    one — so an empty answer, and only an empty answer, proves `git checkout`
+    can put the file back. That is what lets `generate-compose` replace the
+    `docker-compose.yml` the clone brought with it without ever touching one a
+    user wrote.
+    """
+    dest = tmp_path / "core"
+    (dest / ".git").mkdir(parents=True)
+    answers: list[subprocess.CompletedProcess[str]] = []
+    seen_argv: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen_argv.append(argv)
+        return answers.pop(0)
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    answers.append(_completed(stdout=""))
+    assert git.ContainerGit().is_unmodified(dest, "docker-compose.yml") is True
+    assert seen_argv[-1][-4:] == ["status", "--porcelain", "--", "docker-compose.yml"]
+    answers.append(_completed(stdout=" M docker-compose.yml\n"))
+    assert git.ContainerGit().is_unmodified(dest, "docker-compose.yml") is False
+    answers.append(_completed(stdout="?? docker-compose.yml\n"))
+    assert git.ContainerGit().is_unmodified(dest, "docker-compose.yml") is False
+    # A git that cannot be asked answers None, which callers must fail closed on.
+    answers.append(_completed(returncode=128, stderr="not a git repository"))
+    assert git.ContainerGit().is_unmodified(dest, "docker-compose.yml") is None
+    assert git.ContainerGit().is_unmodified(tmp_path / "not-a-checkout", "x") is None
 
 
 def test_both_git_implementations_check_out_the_same_sparse_tree(
@@ -298,3 +346,51 @@ def test_container_git_says_the_same_thing_when_a_resolved_docker_has_gone(
         git.ContainerGit().clone(
             git.CloneSpec(url="https://example/core.git", dest=tmp_path / "core")
         )
+
+
+def test_a_large_clone_is_pinned_to_http_1_1_on_the_wire_and_in_the_repo(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """The measured 224k-object failure, and the reason it must persist.
+
+    A clone of AzerothCore over HTTP/2 died on real Windows with
+    `unexpected disconnect while reading sideband packet`, and the Rust
+    launcher lost a 1.3 GB clone at 9% to the same conversation. The flag has
+    to be in BOTH forms for the same reason `core.autocrlf` is: `git -c` covers
+    only the invocation it is on, so without `--config` the next `fetch` on the
+    update path negotiates HTTP/2 again and the failure returns — on a clone
+    that already cost 2.4 GB.
+    """
+    git.RunnerGit().clone(
+        git.CloneSpec(url="https://example/core.git", dest=tmp_path / "core", depth=None)
+    )
+    argv = seen[0]
+    assert "-c" in argv and "http.version=HTTP/1.1" in argv
+    assert argv[argv.index("--config") :].count("http.version=HTTP/1.1") == 1
+    # The wrapper form comes before the subcommand, the persisted form after.
+    assert argv.index("clone") < argv.index("--config")
+
+
+def test_the_sparse_clone_path_carries_the_http_policy_too(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """Every network git operation gets HTTP/1.1, including the one built by hand.
+
+    `_sparse_clone()` does not run `git clone`; it inits a repository, writes
+    its config line by line and pulls. So it inherits nothing from
+    `clone --config`, and when the HTTP/1.1 flag landed it persisted the
+    line-ending policy and not the transport one — leaving the sparse path with
+    exactly the HTTP/2 failure the flag exists to prevent. Found by adversarial
+    review, not by this suite, which had only ever checked the two clone paths.
+    """
+    git.RunnerGit().clone(
+        git.CloneSpec(
+            url="https://example/guides.git",
+            dest=tmp_path / "guides",
+            sparse_path="guides/wow-wotlk",
+        )
+    )
+    assert ["git", "config", "http.version", "HTTP/1.1"] in seen
+    pull = next(argv for argv in seen if "pull" in argv)
+    assert "http.version=HTTP/1.1" in pull
+    assert pull.index("-c") < pull.index("pull")

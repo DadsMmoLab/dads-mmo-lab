@@ -17,7 +17,7 @@ import pytest
 from PySide6.QtCore import QObject, Slot
 
 from tests.conftest import process_events
-from yulon.ui.widgets.job import ThreadedJobRunner, run_inline
+from yulon.ui.widgets.job import LineRelay, ThreadedJobRunner, run_inline
 
 
 class _Receiver(QObject):
@@ -28,6 +28,7 @@ class _Receiver(QObject):
         self.results: list[object] = []
         self.errors: list[object] = []
         self.threads: list[int] = []
+        self.lines: list[str] = []
 
     @Slot(object)
     def done(self, result: object) -> None:
@@ -37,6 +38,11 @@ class _Receiver(QObject):
     @Slot(object)
     def failed(self, exc: object) -> None:
         self.errors.append(exc)
+        self.threads.append(threading.get_ident())
+
+    @Slot(str)
+    def line(self, text: str) -> None:
+        self.lines.append(text)
         self.threads.append(threading.get_ident())
 
 
@@ -86,6 +92,36 @@ def test_wait_joins_running_jobs(qapp: object) -> None:
     runner = ThreadedJobRunner(receiver)
     runner(lambda: time.sleep(0.2), receiver.done, receiver.failed)
     assert runner.wait(10_000) is True
+
+
+def test_a_line_relay_delivers_on_the_gui_thread_whoever_emits(qapp: object) -> None:
+    """The whole reason the import's output sink is a relay and not a bound slot.
+
+    `repair_import()` runs on a worker thread and calls its sink there. Handing
+    it a view's own `@Slot(str)` would look identical at the call site and be a
+    plain Python call — the widget written to from the wrong thread. Emitting a
+    signal on a QObject that lives on the GUI thread is the one mechanism that
+    crosses the boundary, and this pins that it really does: the line is emitted
+    from another thread and arrives on this one.
+    """
+    relay = LineRelay()
+    receiver = _Receiver()
+    relay.line.connect(receiver.line)
+
+    emitted_from: list[int] = []
+
+    def emit_from_a_worker() -> None:
+        emitted_from.append(threading.get_ident())
+        relay.emit_line("applying acore_world")
+
+    worker = threading.Thread(target=emit_from_a_worker)
+    worker.start()
+    worker.join()
+    _pump_until(lambda: receiver.lines)
+
+    assert emitted_from and emitted_from[0] != threading.get_ident(), "emitted on the GUI thread"
+    assert receiver.lines == ["applying acore_world"]
+    assert receiver.threads == [threading.get_ident()], "the slot ran on the emitting thread"
 
 
 def test_run_inline_has_the_same_contract() -> None:

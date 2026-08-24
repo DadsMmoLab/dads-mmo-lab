@@ -58,6 +58,24 @@ class ApplyError(RuntimeError):
     """A step failed in a way that must stop the run (missing template value, git failure, ...)."""
 
 
+def mysql_env(root_password: str) -> dict[str, str]:
+    """This process's environment plus `MYSQL_PWD`, so the password never enters argv.
+
+    `docker exec -e MYSQL_PWD` (no `=value`) forwards the variable from OUR
+    environment into the container, where the client reads it instead of
+    prompting. `-p<password>` would put the secret in a command line every local
+    process can read (`ps`, Task Manager, `/proc/<pid>/cmdline`).
+
+    Module-level rather than a `DockerSql` method because `maintenance.py` runs
+    `mysqldump`, not `mysql`, and so cannot reuse `DockerSql` itself — but the
+    one rule that must never be re-derived is how the password is handed over
+    (style-guide §4).
+    """
+    env = dict(os.environ)
+    env["MYSQL_PWD"] = root_password
+    return env
+
+
 # ------------------------------------------------------------------- seams
 
 
@@ -93,8 +111,39 @@ class DockerSql:
         proc = self._mysql(db, statement=statement)
         _check_sql(proc, f"inline → {DB_NAMES[db]}")
 
+    def query(self, db: Db, statement: str) -> str:
+        """Run one SELECT and return its rows, tab-separated, one per line.
+
+        `run_statement()` discards stdout, which is right for the applier — it
+        only ever asserts a step succeeded. Account creation genuinely has to
+        read (does this username exist, and what id did it get), so this is the
+        read half of the same seam rather than a second one beside it.
+
+        `--skip-column-names` because every caller wants values, not a header,
+        and `--batch` so the separator is a tab whether or not the client
+        decided it was talking to a terminal.
+
+        The exit code is checked for the same reason `run_statement()` checks
+        it, and one more: a reader cannot tell "no rows" from "the query never
+        ran". `accounts._account_id()` reads no rows as "this username is free"
+        and inserts, so a `query()` that returned "" on failure would turn an
+        unreachable database into a green light to write.
+
+        Raises:
+            ApplyError: no docker CLI (from `_mysql()`), or `mysql` exited
+                non-zero.
+        """
+        proc = self._mysql(db, statement=statement, extra=("--batch", "--skip-column-names"))
+        _check_sql(proc, f"query → {DB_NAMES[db]}")
+        return proc.stdout
+
     def _mysql(
-        self, db: Db, *, stdin: IO[bytes] | None = None, statement: str | None = None
+        self,
+        db: Db,
+        *,
+        stdin: IO[bytes] | None = None,
+        statement: str | None = None,
+        extra: tuple[str, ...] = (),
     ) -> subprocess.CompletedProcess[str]:
         """Run one `docker exec ... mysql`, with the missing-CLI guards in one place.
 
@@ -116,7 +165,7 @@ class DockerSql:
                 (the `OSError` here). The second used to surface as a bare
                 `[WinError 2]` (review, 2026-08-23).
         """
-        argv = self._argv(db)
+        argv = self._argv(db, extra=extra)
         try:
             return subprocess.run(
                 argv,
@@ -124,6 +173,15 @@ class DockerSql:
                 input=statement,
                 capture_output=True,
                 text=True,
+                # Not the default strict decode. `text=True` alone raises
+                # UnicodeDecodeError out of here on any byte mysql emits that is
+                # not UTF-8 -- a binary column selected as text, or a latin1
+                # error message -- and that type is neither `ApplyError` nor the
+                # `AccountError` that `accounts.create_account` documents as the
+                # only one a caller has to handle. `runner.py` already decodes
+                # this way. Found by a live query against a real server
+                # (2026-08-23).
+                errors="replace",
                 check=False,
                 env=self._env(),
             )
@@ -136,18 +194,14 @@ class DockerSql:
             raise ApplyError(platform.DOCKER_CLI_MISSING_HELP) from exc
 
     def _env(self) -> dict[str, str]:
-        """Our environment plus `MYSQL_PWD`, so the password never enters argv.
+        return mysql_env(self.root_password)
 
-        `docker exec` passes `-e MYSQL_PWD` through to the client inside the
-        container; `mysql` reads it instead of prompting. `-p<password>` would
-        put the secret in a command line every local process can read.
-        """
-        env = dict(os.environ)
-        env["MYSQL_PWD"] = self.root_password
-        return env
-
-    def _argv(self, db: Db) -> list[str]:
+    def _argv(self, db: Db, *, extra: tuple[str, ...] = ()) -> list[str]:
         """`docker exec ... mysql <db>`, with the CLI name this host can start.
+
+        `extra` carries client flags that only one caller wants (`query()`'s
+        output formatting). It defaults to empty so the write path's argv is
+        byte-identical to what it was before the read path existed.
 
         Raises:
             ApplyError: no docker CLI here. A manifest apply runs straight
@@ -167,6 +221,7 @@ class DockerSql:
             self.db_container,
             "mysql",
             "-uroot",
+            *extra,
             DB_NAMES[db],
         ]
 

@@ -1,3 +1,24 @@
 .DS_store
 .vscode
 .venv/
+
+# Generated trees that show up in `git status` on every branch, because they are
+# left on disk by whichever branch last built them.
+#
+# Deliberately NOT `launcher/` wholesale: that path is tracked on `rust-main`
+# (package.json, README.md, src-tauri sources), so ignoring the directory would
+# hide real code the moment anyone works there. Only the generated children are
+# listed. None of these paths has ever been tracked on any branch -- checked
+# with `git log --all -- <path>` before adding them.
+launcher/node_modules/
+launcher/build/
+launcher/src-tauri/gen/
+launcher/.svelte-kit/
+
+# Agent scratch space and per-machine settings. `worktrees/` is where isolated
+# agent checkouts live and runs to gigabytes; `settings.local.json` is local by
+# name and by nature. Anything under `.claude/` that IS meant to be shared --
+# agent or skill definitions, for instance -- stays trackable, which is why this
+# is not a blanket `.claude/`.
+.claude/worktrees/
+.claude/settings.local.json

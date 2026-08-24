@@ -9,32 +9,66 @@
       "emulator": {
         "name": "AzerothCore (mod-playerbots fork) + mod-playerbots",
         "sources": [
-          {"repo": "mod-playerbots/azerothcore-wotlk", "branch": "Playerbot"},
-          {"repo": "mod-playerbots/mod-playerbots", "branch": "master"}
+          {
+            "repo": "mod-playerbots/azerothcore-wotlk",
+            "branch": "Playerbot",
+            "depth": null
+          },
+          {
+            "repo": "mod-playerbots/mod-playerbots",
+            "branch": "master"
+          }
         ]
       },
       "install": {
-        "platforms": ["linux"],
+        "platforms": [
+          "linux",
+          "macos"
+        ],
+        "script_platforms": [
+          "linux"
+        ],
         "script": "wow-wotlk/install-wow-wotlk.sh",
         "script_variants": {
           "apt": "wow-wotlk/install-wow-wotlk-ubuntu.sh",
           "dnf": "wow-wotlk/install-wow-wotlk-fedora.sh"
         },
         "default_server_dir": "wow-server-playerbots",
-        "db_root_password": "password"
+        "db_root_password": "password",
+        "native": {
+          "templates": "wow-wotlk/native",
+          "world_env": {
+            "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS": "1600",
+            "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS": "2000"
+          }
+        }
       },
-      "containers": {"db": "ac-database", "auth": "ac-authserver", "world": "ac-worldserver"},
-      "ports": {"auth": 3724, "world": 8085, "db": 3306},
+      "containers": {
+        "db": "ac-database",
+        "auth": "ac-authserver",
+        "world": "ac-worldserver",
+        "db_import": "ac-db-import",
+        "client_data": "ac-client-data-init"
+      },
+      "ports": {
+        "auth": 3724,
+        "world": 8085,
+        "db": 3306
+      },
       "databases": {
         "auth": "acore_auth",
         "characters": "acore_characters",
         "world": "acore_world",
-        "extra": ["acore_playerbots"]
+        "extra": [
+          "acore_playerbots"
+        ]
       },
       "client": {
         "version": "3.3.5a",
         "build": 12340,
-        "notes": ["set realmlist 127.0.0.1 (or the host's LAN/public IP for other players)"]
+        "notes": [
+          "set realmlist 127.0.0.1 (or the host's LAN/public IP for other players)"
+        ]
       },
       "has_manifests": true
     },
@@ -46,30 +80,50 @@
       "emulator": {
         "name": "CMaNGOS mangos-tbc + cmangos/playerbots + tbc-db",
         "sources": [
-          {"repo": "cmangos/mangos-tbc"},
-          {"repo": "cmangos/playerbots"},
-          {"repo": "cmangos/tbc-db"}
+          {
+            "repo": "cmangos/mangos-tbc"
+          },
+          {
+            "repo": "cmangos/playerbots"
+          },
+          {
+            "repo": "cmangos/tbc-db"
+          }
         ]
       },
       "install": {
-        "platforms": ["linux"],
+        "platforms": [
+          "linux"
+        ],
         "script": "wow-tbc/install-wow-tbc.sh",
         "default_server_dir": "wow-tbc-server",
         "requires_client_dir": true,
         "db_root_password_file": ".db_password"
       },
-      "containers": {"db": "tbc-db", "auth": "tbc-realmd", "world": "tbc-mangosd"},
-      "ports": {"auth": 3724, "world": 8085, "db": 3306},
+      "containers": {
+        "db": "tbc-db",
+        "auth": "tbc-realmd",
+        "world": "tbc-mangosd"
+      },
+      "ports": {
+        "auth": 3724,
+        "world": 8085,
+        "db": 3306
+      },
       "databases": {
         "auth": "realmd",
         "characters": "characters",
         "world": "mangos",
-        "extra": ["logs"]
+        "extra": [
+          "logs"
+        ]
       },
       "client": {
         "version": "2.4.3",
         "build": 8606,
-        "notes": ["A Vanilla client is the wrong version — the installer checks for this."]
+        "notes": [
+          "A Vanilla client is the wrong version — the installer checks for this."
+        ]
       }
     },
     {
@@ -80,30 +134,50 @@
       "emulator": {
         "name": "CMaNGOS mangos-classic + cmangos/playerbots + classic-db",
         "sources": [
-          {"repo": "cmangos/mangos-classic"},
-          {"repo": "cmangos/playerbots"},
-          {"repo": "cmangos/classic-db"}
+          {
+            "repo": "cmangos/mangos-classic"
+          },
+          {
+            "repo": "cmangos/playerbots"
+          },
+          {
+            "repo": "cmangos/classic-db"
+          }
         ]
       },
       "install": {
-        "platforms": ["linux"],
+        "platforms": [
+          "linux"
+        ],
         "script": "wow-vanilla/install-wow-vanilla.sh",
         "default_server_dir": "wow-vanilla-server",
         "requires_client_dir": true,
         "db_root_password_file": ".db_password"
       },
-      "containers": {"db": "vanilla-db", "auth": "vanilla-realmd", "world": "vanilla-mangosd"},
-      "ports": {"auth": 3724, "world": 8085, "db": 3306},
+      "containers": {
+        "db": "vanilla-db",
+        "auth": "vanilla-realmd",
+        "world": "vanilla-mangosd"
+      },
+      "ports": {
+        "auth": 3724,
+        "world": 8085,
+        "db": 3306
+      },
       "databases": {
         "auth": "realmd",
         "characters": "characters",
         "world": "mangos",
-        "extra": ["logs"]
+        "extra": [
+          "logs"
+        ]
       },
       "client": {
         "version": "1.12.1",
         "build": 5875,
-        "notes": ["Community repacks (realmlist.wtf at top level, no locale folder) are detected and warned about."]
+        "notes": [
+          "Community repacks (realmlist.wtf at top level, no locale folder) are detected and warned about."
+        ]
       }
     },
     {
@@ -114,28 +188,48 @@
       "emulator": {
         "name": "Penqle/tortoise-wow (MaNGOS Zero fork)",
         "sources": [
-          {"repo": "Penqle/tortoise-wow"}
+          {
+            "repo": "Penqle/tortoise-wow"
+          }
         ]
       },
       "install": {
-        "platforms": ["linux"],
+        "platforms": [
+          "linux"
+        ],
         "script": "wow-tortoise/install-tortoise-wow-wsl.sh",
         "default_server_dir": "tortoise-wow-server",
         "requires_client_dir": true
       },
-      "containers": {"db": "tortoise-db", "auth": "tortoise-realmd", "world": "tortoise-mangosd"},
-      "ports": {"auth": 3724, "world": 8090, "db": 3306},
+      "containers": {
+        "db": "tortoise-db",
+        "auth": "tortoise-realmd",
+        "world": "tortoise-mangosd"
+      },
+      "ports": {
+        "auth": 3724,
+        "world": 8090,
+        "db": 3306
+      },
       "databases": {
         "auth": "tw_logon",
         "characters": "tw_char",
         "world": "tw_world",
-        "extra": ["tw_logs"]
+        "extra": [
+          "tw_logs"
+        ]
       },
-      "realmlist": {"table": "realmlist", "address_column": "address", "local_address_column": null},
+      "realmlist": {
+        "table": "realmlist",
+        "address_column": "address",
+        "local_address_column": null
+      },
       "client": {
         "version": "1.18.1",
         "build": 7272,
-        "notes": ["Only the custom Turtle-WoW 1.18.1 client (build 7272) works; any other build will not connect."]
+        "notes": [
+          "Only the custom Turtle-WoW 1.18.1 client (build 7272) works; any other build will not connect."
+        ]
       }
     }
   ]

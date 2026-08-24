@@ -25,8 +25,8 @@ def build_window() -> object:
     from PySide6.QtWidgets import QLabel, QMainWindow, QSplitter, QTabWidget, QVBoxLayout, QWidget
 
     from yulon import __version__
-    from yulon.catalog.catalog import load_catalog
-    from yulon.catalog.installer import Installer
+    from yulon.catalog.catalog import CatalogEntry, load_catalog
+    from yulon.catalog.installer import InstallEngine
     from yulon.state import KnownInstall, load_state, save_state
     from yulon.ui.catalog_view import CatalogView
     from yulon.ui.controller_view import ControllerServices, ControllerView
@@ -49,7 +49,39 @@ def build_window() -> object:
 
     log_panel = LogPanel()
     panels: list[LogPanel] = [log_panel]
-    catalog_view = CatalogView(catalog, lambda entry: Installer(entry), log_panel)
+
+    def make_installer(entry: CatalogEntry) -> InstallEngine:
+        """The engine for one entry: the bash script, or the native one (roadmap 6.2).
+
+        The per-game import seams are assembled HERE and passed down, the same
+        way `ControllerServices.for_wotlk()` assembles them for the Server tab:
+        `catalog/` must not import a controller package, and `repair.py` knows
+        the `acore_*` schema names that answer the question. Both are attached
+        only for an entry that names a one-shot import service, so a game whose
+        import is not a separate service never gets a probe that looks for
+        somebody else's schemas.
+        """
+        from yulon.apply import DockerSql
+        from yulon.catalog.installer import installer_for
+        from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
+        from yulon.controller_wow_wotlk import modules as wotlk_modules
+        from yulon.controller_wow_wotlk import repair as wotlk_repair
+
+        spec = entry.container_spec()
+        password = entry.install.db_root_password or wotlk_modules.DEFAULT_DB_ROOT_PASSWORD
+        sql = DockerSql(spec.db, password)
+        mysql = wotlk_maintenance.DockerMysql(spec.db, password)
+        return installer_for(
+            entry,
+            import_probe=(
+                (lambda: wotlk_repair.import_state(sql, mysql)) if spec.import_service else None
+            ),
+            reset_unfinished=(
+                (lambda: wotlk_repair.reset_unfinished(sql, mysql)) if spec.import_service else None
+            ),
+        )
+
+    catalog_view = CatalogView(catalog, make_installer, log_panel)
     splitter = QSplitter()
     splitter.addWidget(catalog_view)
     splitter.addWidget(log_panel)
@@ -169,7 +201,23 @@ def provision_headless() -> int:
       3  a reboot is required first (`wsl --install` forces one on a box with no
          WSL), so nothing after it can be judged yet; reboot and run again
       2  not ready, and what remains needs a human
+
+    On Linux, 2 is the *expected* outcome rather than a fault: there is nobody
+    here to ask about joining the docker group, and the app never makes a
+    root-equivalent change with nobody asked, so the engine is installed and
+    the one step only the user may take is printed for them to run.
     """
+    # The same defect's other half: the human-readable lines below put that same
+    # step text through `logging`, and a cp1252 stream cannot encode it either.
+    # `errors="replace"` rather than letting it raise, because a diagnostic that
+    # kills the thing it is diagnosing is worse than one with a "?" in it.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):  # a stream that cannot be re-wrapped
+                pass
     logger.info("Yu'lon provisioning (headless)")
     report = platform.ensure_docker()
     payload = {
@@ -180,6 +228,12 @@ def provision_headless() -> int:
         "reboot_required": report.reboot_required,
         "docker_ready": report.docker_ready,
         "ok": report.ok,
+        # What happened to the docker-group question. Headless has nobody to
+        # ask, so on Linux this is always "not-asked" and the exact command is
+        # in `manual_steps` — which makes exit 2 the expected outcome of a
+        # clean Linux provision, not a failure. Support reads this line to tell
+        # "the user declined root-equivalent access" apart from "it broke".
+        "docker_group": str(report.docker_group),
         # Which docker CLI this process resolved, or null. On a clean Windows box
         # this is the single most useful line in the report: it is the difference
         # between "the installer ran" and "the process that ran it can now use
@@ -189,7 +243,16 @@ def provision_headless() -> int:
     }
     # Written to stdout as one line so a harness can parse it without caring
     # about the human-readable logging that shares this stream.
-    print("YULON_PROVISION_JSON " + json.dumps(payload, ensure_ascii=False))
+    #
+    # `ensure_ascii` is left at its default, and that is the whole point: this
+    # ran as `yulon.exe --provision > log 2>&1` on a clean Windows 11 box and
+    # died here with UnicodeEncodeError, because a redirected Windows stdout is
+    # cp1252 and platform's own step text contains an arrow ("downloaded the
+    # installer -> C:\..."). The run had already spent a 659 MB download by
+    # then. JSON escapes non-ASCII as \uXXXX, so an ASCII-safe line is not a
+    # lossy one -- json.loads returns the identical object (clean-box run,
+    # 2026-08-23).
+    print("YULON_PROVISION_JSON " + json.dumps(payload))
     for step in report.done:
         logger.info("did: %s", step)
     for step in report.skipped:
@@ -207,7 +270,8 @@ def main() -> int:
     if "--provision" in sys.argv[1:] or os.environ.get("YULON_PROVISION"):
         return provision_headless()
     logger.info("Yu'lon launcher starting")
-    from PySide6.QtWidgets import QApplication, QMainWindow
+    from PySide6.QtCore import QEvent, QObject
+    from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
 
     app = QApplication(sys.argv)
     window = build_window()
@@ -217,6 +281,44 @@ def main() -> int:
             # CI / packaging check: prove the frozen app can build its window, then leave.
             logger.info("YULON_SMOKE_TEST set: window built, exiting 0")
             return 0
+
+        # Defined here rather than at module scope because this module imports
+        # PySide6 lazily — the class body names QObject, so a module-level
+        # definition would need Qt at import time.
+        class _RefuseCloseWhileBusy(QObject):
+            """Decline to close the window while something is running that cannot be stopped.
+
+            There is exactly one such thing today: the database import, which runs for
+            10-30 minutes. Closing during one used to freeze the window for
+            `STOP_GRACE_SECONDS + 30` seconds — `ControllerView.shutdown()` joins its
+            worker, `_JobWorker.run()` calls its work synchronously so `thread.quit()`
+            cannot preempt a blocking `subprocess.run` — and then abort the process
+            exactly as `_stop_background_threads()` below describes, because the join
+            expires while the thread is still running.
+
+            Refusing is the honest answer rather than a restriction. The import cannot
+            be stopped part-way without leaving the databases half-written, so the only
+            choice that ever existed was between waiting and a crash; this makes that
+            choice visible and takes the crash off the table (review, 2026-08-23).
+            """
+
+            def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+                if event.type() is not QEvent.Type.Close:
+                    return False
+                reasons = [
+                    reason
+                    for view in (watched.property("controllers") or [])
+                    if (reason := getattr(view, "busy_reason", lambda: None)())
+                ]
+                if not reasons:
+                    return False
+                logger.info(f"close refused: {reasons[0]}")
+                QMessageBox.information(None, "Yu'lon is still working", reasons[0])
+                event.ignore()
+                return True
+
+        guard = _RefuseCloseWhileBusy(window)
+        window.installEventFilter(guard)
         window.show()
         return int(app.exec())
     finally:
@@ -229,6 +331,24 @@ def _stop_background_threads(window: object) -> None:
     A `QThread` destroyed while running does not warn — it ABORTS the process
     (0xC0000409, verified): closing the window mid-install or while following
     a log must first stop and join those panels (review finding, 2026-08-21).
+
+    This runs from `main()`'s `finally`, AFTER `app.exec()` has returned, so
+    nothing is pumping the main thread's event queue while `panel.wait()`
+    blocks in it. That is not incidental — it is why the join has to be able to
+    complete without one, and for a while it could not: a panel's worker
+    reached its thread only through `worker.finished -> thread.quit`, a queued
+    connection into this very thread. Measured: `wait(3000)` returned False
+    with the worker long finished, and Qt was then torn down with the QThread
+    still running — the abort above, arriving through the function meant to
+    prevent it. `LogPanel`'s worker now ends its own thread's loop directly
+    (see `_StreamWorker.run()`), and `ThreadedJobRunner.wait()` quits each
+    thread before waiting on it. Nothing here may go back to relying on a
+    queued quit (review, 2026-08-23).
+
+    What a close mid-install does NOT do, and never did, is register the
+    install: `_on_finished` is queued into this same blocked thread, so
+    `run_finished` never fires, `CatalogView._on_run_finished()` never runs and
+    nothing is written to `state.json` on this path.
     """
     from PySide6.QtCore import QThread
 

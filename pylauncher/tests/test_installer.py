@@ -8,6 +8,7 @@ so no Docker, network, or two-hour build is involved.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from collections.abc import Iterator
@@ -150,6 +151,122 @@ def test_installer_runs_the_entry_script_through_interact(tmp_path: Path) -> Non
     assert callable(calls[0]["respond"])
 
 
+def test_a_cancelled_run_is_not_logged_as_a_finished_install(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`interact()` returns on cancel instead of raising, so `run()` fell through to success.
+
+    The app log is the file a user pastes into a bug report, and it said
+    "install of wow-wotlk finished" for an install stopped 2.3 GB into the
+    source clone (install gate, 2026-08-23).
+    """
+    import threading
+
+    entry = load_catalog().get("wow-wotlk")
+    script = tmp_path / entry.install.script
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/bin/bash\n", encoding="utf-8")
+    cancel = threading.Event()
+
+    def interact(command: list[str], **kwargs: object) -> Iterator[str]:
+        yield "cloning"
+        cancel.set()  # the Stop button, mid-stream
+
+    installer = _installer(
+        entry,
+        installers_root=tmp_path,
+        docker_check=lambda: True,
+        interact=interact,  # type: ignore[arg-type]
+    )
+    with caplog.at_level("INFO", logger="yulon.catalog.installer"):
+        assert list(installer.run(InstallOptions(), cancel=cancel)) == ["cloning"]
+    said = [record.message for record in caplog.records]
+    assert any("was cancelled" in message for message in said), said
+    assert not any("finished" in message for message in said), said
+
+
+def test_the_cancel_log_survives_a_line_arriving_after_stop(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The other cancel shape, and the one that left the log with no ending at all.
+
+    `_StreamWorker.run()` breaks its loop on the first line received AFTER Stop,
+    and breaking drops the last reference to this generator — CPython closes it
+    and raises `GeneratorExit` at the `yield`, which `except CalledProcessError`
+    does not catch. The app log is the file a user pastes into a bug report and
+    it held "installing wow-wotlk via ..." and then nothing (review,
+    2026-08-23).
+    """
+    import threading
+
+    entry = load_catalog().get("wow-wotlk")
+    script = tmp_path / entry.install.script
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/bin/bash\n", encoding="utf-8")
+    cancel = threading.Event()
+
+    def interact(command: list[str], **kwargs: object) -> Iterator[str]:
+        yield "cloning"
+        cancel.set()  # Stop, mid-stream
+        yield "one more line the worker will never take"
+
+    installer = _installer(
+        entry,
+        installers_root=tmp_path,
+        docker_check=lambda: True,
+        interact=interact,  # type: ignore[arg-type]
+    )
+    with caplog.at_level("INFO", logger="yulon.catalog.installer"):
+        lines = installer.run(InstallOptions(), cancel=cancel)
+        for _ in lines:
+            if cancel.is_set():
+                break  # exactly what `_StreamWorker.run()` does
+        lines.close()
+    said = [record.message for record in caplog.records]
+    assert any("was cancelled" in message for message in said), said
+    assert not any("finished" in message for message in said), said
+
+
+def test_the_cancel_copy_points_at_use_existing_when_the_source_is_on_disk(
+    tmp_path: Path,
+) -> None:
+    """Stop after the build finished throws away hours; the recovery is one button.
+
+    `interact()` breaks on `cancel.is_set()` at the top of its loop, before it
+    ever looks at the child's return code, so a Stop pressed while the script
+    sits in `wait_for_server` (up to 1800 s of bare dots, with the containers
+    already up) discards a completed install. The app cannot prove that from
+    here — see `cancelled_install_message()` — but it can name the evidence it
+    does have and the button that adopts the folder without pinning it.
+    """
+    from yulon.catalog.installer import cancelled_install_message
+
+    nothing_there = cancelled_install_message("WoW WotLK", tmp_path)
+    assert "Use existing" not in nothing_there
+    assert "nothing to resume" in nothing_there
+
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    source_there = cancelled_install_message("WoW WotLK", tmp_path)
+    assert "Use existing" in source_there
+    assert str(tmp_path) in source_there
+
+
+def test_neither_new_rule_answers_a_line_that_is_not_the_question() -> None:
+    """`respond()` sees every line, and on a quiet partial line the whole buffer.
+
+    An unanchored `Remove snap Docker` writes "n" into a child that is not
+    reading, which desynchronises the next real prompt; an unanchored
+    rpm-ostree rule opens a modal dialog over ordinary build output. Both new
+    rules now carry the `(y/n)` suffix `ask_yes_no` prints, the way the
+    docker-group rule already did (review, 2026-08-23).
+    """
+    asked: list[str] = []
+    respond = make_responder(InstallOptions(), ask=lambda prompt: (asked.append(prompt), "y")[1])
+    assert respond("  Remove snap Docker first if you want to keep your own containers.") is None
+    assert respond("Step 4/9: Install Docker via rpm-ostree and reboot now was skipped") is None
+    assert asked == []
+
+
 @pytest.mark.parametrize(
     ("package_manager", "expected"),
     [
@@ -224,6 +341,50 @@ def test_installer_fails_gracefully_without_docker(tmp_path: Path) -> None:
     )
     with pytest.raises(DockerUnavailableError, match="reboot is needed"):
         rebooter.preflight(InstallOptions())
+
+
+def test_the_prompter_reaches_provisioning_and_not_only_the_script(tmp_path: Path) -> None:
+    """The consent question is asked by the thing that escalates, which runs first.
+
+    `run()` has held the live prompter all along and dropped it one line before
+    `preflight()` — where `ensure_docker()` is called. So on a passwordless-sudo
+    box the launcher joined the docker group before the script started, and the
+    script's own `docker_group_consent()` then found the user already a member
+    and never asked. Nobody was asked anything, by either half.
+
+    This pins the delivery rather than the wording: whatever the dialog says,
+    the seam that can escalate has to be able to reach it.
+    """
+    entry = load_catalog().get("wow-wotlk")
+    script = tmp_path / entry.install.script
+    script.parent.mkdir(parents=True)
+    script.write_text("", encoding="utf-8")
+    seen: list[object] = []
+    from yulon.platform import ProvisionReport
+
+    def _provision(**kwargs: object) -> ProvisionReport:
+        seen.append(kwargs.get("ask"))
+        return ProvisionReport("linux", docker_ready=True)
+
+    def _prompter(_question: str) -> str:
+        return "n"
+
+    installer = _installer(
+        entry,
+        installers_root=tmp_path,
+        docker_check=lambda: False,
+        ensure_docker=_provision,
+        interact=_fake_interact([]),  # type: ignore[arg-type]
+    )
+    list(installer.run(InstallOptions(server_dir=tmp_path / "srv"), ask=_prompter))
+    assert seen == [_prompter]
+
+    # And with no prompter it arrives as None rather than being omitted, so the
+    # decline is a decision the provisioning path makes, not an accident of
+    # keyword defaults it never sees.
+    seen.clear()
+    list(installer.run(InstallOptions(server_dir=tmp_path / "srv")))
+    assert seen == [None]
 
 
 def test_installer_requires_the_client_dir_when_the_script_asks_for_it(tmp_path: Path) -> None:
@@ -307,8 +468,13 @@ def test_bash_available_probes_that_bash_actually_runs() -> None:
 
 
 def test_installer_refuses_a_platform_its_script_cannot_run(tmp_path: Path) -> None:
-    """Roadmap 6.1: an off-Linux click is refused BEFORE any subprocess starts."""
-    entry = load_catalog().get("wow-wotlk")
+    """Roadmap 6.1: an off-Linux click is refused BEFORE any subprocess starts.
+
+    Asked of TBC rather than WotLK since 6.2: WotLK is now installable on macOS
+    through the native engine, so it is no longer an example of an entry that
+    is not installable off Linux. The refusal itself is unchanged.
+    """
+    entry = load_catalog().get("wow-tbc")
     assert entry.install.platforms == ("linux",)
     assert entry.install.supports("linux") is True
     assert entry.install.supports("macos") is False
@@ -429,6 +595,49 @@ def test_the_consent_rule_wins_over_the_yes_no_catch_all() -> None:
     assert consent < catch_all
 
 
+def _shipped_question(script_name: str, needle: str) -> str:
+    """The exact line `ask_yes_no` prints for a question in a SHIPPED script.
+
+    Read out of the file rather than transcribed here. A rule that is only ever
+    matched against a copy of the wording keeps passing on the day the script
+    is reworded — which is the day the catch-all quietly takes the question
+    back.
+    """
+    from yulon import resources
+
+    text = (resources.installers_dir() / "wow-wotlk" / script_name).read_text(encoding="utf-8")
+    found = re.search(rf'ask_yes_no "([^"]*{needle}[^"]*)"', text)
+    assert found, f"{script_name} no longer asks anything containing {needle!r}"
+    return f"{found.group(1)} (y/n): "  # exactly what ask_yes_no() echoes
+
+
+def test_removing_the_users_own_docker_is_declined_rather_than_assumed() -> None:
+    """The Ubuntu script offers to `snap remove docker`; the catch-all said yes.
+
+    That takes away a Docker the user installed themselves, and every container
+    and volume on it, because the installer cannot drive snap Docker. Declining
+    costs an exit carrying the script's own instruction to remove it by hand.
+    """
+    prompt = _shipped_question("install-wow-wotlk-ubuntu.sh", "snap Docker")
+    assert make_responder(InstallOptions())(prompt) == "n"
+
+
+def test_rebooting_the_machine_is_put_to_the_user_not_answered_by_the_catch_all() -> None:
+    """Immutable Fedora's rpm-ostree path reboots 10 s after a yes.
+
+    The catch-all answered "y" — so a Bazzite user pressing Install had their
+    machine rebooted from inside the launcher, unasked. "n" is not the answer
+    either: the script then exits 0 having installed nothing.
+    """
+    prompt = _shipped_question("install-wow-wotlk-fedora.sh", "rpm-ostree")
+    asked: list[str] = []
+    respond = make_responder(InstallOptions(), ask=lambda prompt: (asked.append(prompt), "y")[1])
+    assert respond(prompt) == "y"
+    assert asked == [prompt.strip()], "the reboot was decided without asking"
+    # And with no dialog to ask through (the CLI harness) it is declined.
+    assert make_responder(InstallOptions())(prompt) == "n"
+
+
 def test_the_shipped_installers_no_longer_write_a_passwordless_sudo_rule() -> None:
     """Upstream 1.4.4's actual security change, asserted against the files we ship.
 
@@ -487,3 +696,40 @@ def test_the_gate_sees_a_docker_that_is_only_on_the_registry_path(
     gate = Installer(load_catalog().get("wow-wotlk"), installers_root=tmp_path)._docker_check
     assert gate() is True
     assert tried == ["docker", exe]
+
+
+def test_no_installer_escalates_privileges_without_asking() -> None:
+    """Roadmap Phase 6 preamble: no silent escalation of host privileges.
+
+    Adding a user to the `docker` group is a root-equivalent grant — `docker run
+    -v /:/mnt --rm -it alpine chroot /mnt sh` edits any file on the host — so
+    every script has to ask first. An audit on 2026-08-24 found three that did
+    not: TBC, Vanilla and Tortoise each ran `usermod -aG docker` with no consent
+    and no warning, having been written before the rule existed.
+
+    A grep rather than a run, because these scripts install operating-system
+    packages and cannot be executed in a test. It is worth having anyway: the
+    failure it catches is a line silently reappearing in a 2000-line shell
+    script, which is exactly what nobody re-reads.
+    """
+    from yulon import resources
+
+    scripts = sorted(resources.installers_dir().rglob("install-*.sh"))
+    assert len(scripts) >= 5, f"expected the catalog's installers, found {scripts}"
+
+    ungated: list[str] = []
+    sudoers: list[str] = []
+    for script in scripts:
+        for number, line in enumerate(script.read_text(encoding="utf-8").splitlines(), 1):
+            bare = line.strip()
+            if bare.startswith("#"):
+                continue
+            if "usermod -aG docker" in bare and "docker_group_consent &&" not in bare:
+                ungated.append(f"{script.name}:{number}")
+            if "sudoers" in bare or "NOPASSWD" in bare:
+                sudoers.append(f"{script.name}:{number}")
+
+    assert not ungated, f"the docker group is joined without consent at: {ungated}"
+    # Forbidden outright, not merely gated: membership already is root, so the
+    # rule buys nothing and is pure attack surface.
+    assert not sudoers, f"a passwordless sudo rule is written at: {sudoers}"

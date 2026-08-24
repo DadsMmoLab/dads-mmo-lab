@@ -17,7 +17,7 @@ Goals:
 4. **Data-driven module/mod management.** Modules and mods become JSON manifests fetched from GitHub, so adding content is a data-entry task, not a code task.
 5. **The app installs everything.** Every dependency is silently installed and verified by the app — including **Docker itself** (Docker Engine on Linux, Docker Desktop on Windows/macOS), the **virtualization layer it needs** (WSL2 on Windows, the Linux VM on macOS), the open-source emulator server (cloned from its official repo), any modules/mods, and even the app's own runtime. The user never installs anything by hand — not Docker, not WSL, not Python. See §3a (what the app may and may not install) and §3b (how the platform dep stack, Docker, WSL/VM, and Python are each handled).
 
-**v1 scope — four servers.** Until v1 is complete, the Catalog/Controller focuses on exactly four servers: **WoW** (Vanilla 1.12), **WoW TBC**, **WoW WotLK**, and **WoW Tortoise** (the Turtle-WoW solo fork). These are the only acronyms/`game` ids the v1 Catalog needs to know about; other games in the wider DML catalogue are explicitly out of v1 scope (README's planned/in-progress lists) and are only added after v1 ships. **This is a target, not current state** — as of Phase 1, only WotLK has a controller package; see §5's status note and `roadmap.md` §3.1 for the catalog work that will cover the other three.
+**v1 scope — four servers.** Until v1 is complete, the Catalog/Controller focuses on exactly four servers: **WoW** (Vanilla 1.12), **WoW TBC**, **WoW WotLK**, and **WoW Tortoise** (the Turtle-WoW solo fork). These are the only acronyms/`game` ids the v1 Catalog needs to know about; other games in the wider DML catalogue are explicitly out of v1 scope (README's planned/in-progress lists) and are only added after v1 ships. **This is a target, not current state** — all four are described in `catalog.json` (Phase 3.1), but only WotLK has a controller package; see §5's status note and `roadmap.md` §7.1–7.3 for the work that covers the other three.
 
 ---
 
@@ -95,10 +95,11 @@ platform dependency stack are provisioned automatically, never by the user:
 
 ### Python (the app's own runtime)
 
-- **End users never install Python.** Each distributable artifact (`.AppImage` / `.dmg` / `.exe`,
-  §4) is built with **PyInstaller**, which bundles a self-contained Python interpreter and all
-  third-party packages (PySide6, etc.) directly into the binary. The user runs one file: no
-  `python3` install, no `pip`, no virtualenv.
+- **End users never install Python.** Each distributable artifact (`.AppImage` / `.dmg` / the
+  Windows zip, §4) is built with **PyInstaller**, which bundles a self-contained Python
+  interpreter and all third-party packages (PySide6, etc.) alongside the launcher executable. On
+  Linux and macOS that is one file; on Windows the zip unpacks to a folder the user runs
+  `yulon.exe` from. No platform needs a `python3` install, `pip`, or a virtualenv.
 - **The Python-install burden is shifted to the build machine, not the user.** Only the CI build
   runner (GitHub Actions, §4) needs a real Python toolchain; the shipped artifact carries what it
   needs.
@@ -116,7 +117,7 @@ platform dependency stack are provisioned automatically, never by the user:
 | Platform | Artifact | Tooling | Notes |
 |---|---|---|---|
 | macOS | `.dmg` | PyInstaller | Built on `macos-latest` runner. |
-| Windows | `.exe` (or MSI) | PyInstaller | Built on `windows-latest` runner. |
+| Windows | zipped one-dir build (`yulon.exe` + its runtime files) | PyInstaller | Built on `windows-latest` runner; `release.yml` zips `dist/yulon`. |
 | Linux (all) | `.AppImage` | PyInstaller + `appimagetool` | **Hero artifact** — one file runs on Arch/Debian/Fedora/Bazzite/SteamOS. |
 
 **Key insight:** the Linux `.AppImage` erases the distro matrix. Focus on appimage as it should run *fine* on most linux distros that people actually use.
@@ -147,17 +148,23 @@ pylauncher/
 │   │   ├── __init__.py
 │   │   ├── catalog.json          # the four v1 servers: emulator sources, install script, containers, ports, DBs, client (Phase 3.1)
 │   │   ├── catalog.py            # typed Catalog/CatalogEntry models + load_catalog(); entry.container_spec() feeds the controller
-│   │   └── installer.py          # Phase 3a orchestrator: answers the install-*.sh prompts via runner.interact, streams output; graceful DockerUnavailableError (3.2/3.3)
+│   │   ├── installer.py          # Phase 3a orchestrator: answers the install-*.sh prompts via runner.interact, streams output; graceful DockerUnavailableError (3.2/3.3)
+│   │   ├── native.py             # the native install engine: same contract as Installer, no shell script; staged + resumable, macOS today and Windows next (6.2/6.3)
+│   │   ├── preflight.py          # gather() the machine's facts, pure evaluate() against catalog.json's floors → refuse / warn / unchecked / pass (6.2)
+│   │   └── composegen.py         # pure generation of the three compose files + .env keys from catalog/installers/<game>/native/ templates (6.2)
 │   ├── controller_wow_wotlk/     # each server has its own controller package for siloing
 │   │   ├── __init__.py
 │   │   ├── controller.py         # WotlkController(Controller) — supplies SPEC, inherits the rest (Phase 1.4)
 │   │   ├── docker_ctl.py         # start/stop/status/logs/health
 │   │   ├── console.py            # attach to worldserver console
 │   │   ├── maintenance.py        # cache clear, backups, SQL changes
-│   │   └── modules.py            # binds the shared store/fetcher/applier to WotLK (game id, bundled dir, DB container)
+│   │   ├── modules.py            # binds the shared store/fetcher/applier to WotLK (game id, bundled dir, DB container)
+│   │   ├── accounts.py           # writes the SRP6 registration row through DockerSql — the one account path that works on all three platforms (6.5)
+│   │   └── repair.py             # answers docker.ImportProbe: does this install's database look imported? (6.5 repair / re-import)
 │   ├── controller.py             # base Controller: ContainerSpec + server dir, start guarded by §12 (Phase 1.4)
 │   ├── runner.py                 # subprocess streaming (stream/run) + interact(): answer prompts of an interactive child (shared by all)
 │   ├── docker.py                 # shared Docker lifecycle + port-conflict check (shared)
+│   ├── git.py                    # clone/update git sources: RunnerGit (the host's git) or ContainerGit (git in a container, for hosts without one) (6.2)
 │   ├── platform.py               # OS detection, config_dir, §13 helpers (firewall/IP/portproxy/CGNAT) + 5.1 provisioning: ensure_docker()/ensure_wsl2() → ProvisionReport (Docker Engine via pacman/apt/dnf/zypper, WSL2 + Docker Desktop on Windows, Docker Desktop on macOS; dry_run plans)
 │   ├── networking.py             # §13 orchestration: plan() (pure) + apply() for LAN/internet play, realmlist UPDATE, router-step prompts, client realmlist writer (Phase 3.4)
 │   ├── log.py                    # shared logging convention (get_logger/configure — Phase 0.6)
@@ -173,7 +180,9 @@ pylauncher/
 │       ├── controller_view.py    # per-install tabs Server/Console/Modules/Networking over ControllerServices seams (4.3)
 │       └── widgets/
 │           ├── __init__.py
-│           └── log_panel.py      # streaming log output widget: QThread worker → line/finished signals (4.1)
+│           ├── log_panel.py      # streaming log output widget: QThread worker → line/finished signals (4.1)
+│           ├── job.py            # ThreadedJobRunner: one-shot background jobs, so a long service call never runs on the GUI thread
+│           └── prompt.py         # asks the user for a line a subprocess wants (sudo's password): worker → GUI thread → back (6.1.5)
 ├── catalog/                      # data the app EXECUTES (roadmap 6.0; archive/guides is for humans)
 │   └── installers/               # install-*.sh per game + the helpers they ship (dml-start.sh, wow-manage.sh)
 │       ├── wow-wotlk/            # install-wow-wotlk{,-ubuntu,-fedora}.sh, dml-start.sh, wow-manage.sh
@@ -219,24 +228,25 @@ pylauncher/
 ├── main.py                       # wires logging → config_dir, update banner (5.4), Catalog tab + one ControllerView tab per remembered install; YULON_SMOKE_TEST=1 builds the window and exits
 ├── README.md                     # user-facing: what the app installs under the hood (WSL/VM hidden, not removed), unsigned builds, updates (5.1.2)
 ├── requirements.txt
-├── requirements-dev.txt          # pytest, mypy, black, ruff — pinned dev tooling
+├── requirements-dev.txt          # pytest, mypy, black, ruff — `>=` floors, not pinned versions
 ├── pyproject.toml                # black/ruff/mypy/pytest config
-├── development.md                # contributor setup doc
 └── build/                        # PyInstaller specs
     └── pylauncher.spec
 
-<repo root>/.github/workflows/    # NOT under pylauncher/: GitHub only runs workflows from the repo root
+<repo root>/pyplan/contribution.md  # contributor setup doc: venv, running the app, the checks, the PyInstaller build
+<repo root>/.github/workflows/      # NOT under pylauncher/: GitHub only runs workflows from the repo root
 ├── ci.yml                        # lint + type-check + test on every push/PR (working-directory: pylauncher)
-└── release.yml                   # build matrix → AppImage/dmg/exe
+└── release.yml                   # build matrix → AppImage/dmg/Windows zip
 ```
 
-**Status as of this writing:** only `controller_wow_wotlk/` exists. The other three v1 servers
-(§1 goal 5's "four servers") — WoW, WoW TBC, and WoW Tortoise — do **not** have controller
-packages, catalog entries, or manifests yet; that work is tracked in Phase 3 (`roadmap.md` §3.1)
-and beyond, not implemented as of Phase 1. Each will get its own `controller_<acronym>/` package
-(`controller_wow_vanilla/`, `controller_wow_tbc/`, `controller_wow_tortoise/`) following the same
-file layout and underscore naming, in that order, before any server outside v1's four-server
-scope is considered (see style-guide §6 for acronym conventions).
+**Status as of this writing:** only `controller_wow_wotlk/` exists. Catalog entries exist for all
+four: `catalog.json` describes WotLK, TBC, Vanilla and Tortoise (Phase 3.1). What the other three
+v1 servers (§1 goal 5's "four servers") — WoW, WoW TBC, and WoW Tortoise — do **not** have is
+controller packages or manifests; `manifests/` holds `wow-wotlk/` only. That work is Phase 7
+(`roadmap.md` §7.1–7.3). Each will get its own `controller_<acronym>/` package
+(`controller_wow_tbc/`, `controller_wow_vanilla/`, `controller_wow_tortoise/`) following the same
+file layout and underscore naming, in the order that section sets, before any server outside v1's
+four-server scope is considered (see style-guide §6 for acronym conventions).
 
 ---
 
@@ -251,7 +261,9 @@ serves all four families (`type`: `module` | `ale` | `mod` | `keg`) — the prim
 set (`source`, `build`, `sql`, `conf`, `deploy`, `patches`, `client`, `server_dbc`, `npcs`,
 `prompts`, `notes`); unknown keys are rejected, ids/game are lowercase kebab slugs, and `source.repo`
 must be a GitHub `owner/name` slug or an `https://` URL on an allow-listed forge (§3a). Every
-field except `id`/`name`/`type`/`game` is optional, so a simple module stays short:
+field except `id`/`name`/`type`/`game` is optional — plus `source`, which `module`, `ale` and
+`keg` items all require, and `source.sparse_path`, which a `keg` also requires — so a simple
+module stays short:
 
 ```json
 {
@@ -313,17 +325,25 @@ See Roadmap.md for the full Phasing plan. The README only summarizes the high-le
 | Docker Desktop silent provisioning is fragile | Detect + verify with clear, retryable checks; offer manual-install fallback dialog. |
 | Porting `wow-manage.sh` tacit knowledge | Do it as an explicit Phase 2 with exit criteria; don't fold it into the UI work. |
 | "No WSL" expectation vs reality | Communicate honestly in docs (WSL is hidden, not removed). |
-| Scope creep on bot-party/item-mail features | Treat in-game tools (My Party, item mail, teleport) as a *separate later project*; they are not part of the launcher. |
+| Scope creep on bot-party/item-mail features | Keep in-game tools (My Party, item mail, teleport) out of Phases 1–7; `roadmap.md` Phase 8 scopes them for the launcher itself, once all four servers are done, each with its own step and definition of done. |
 | Unsigned binaries trigger OS gatekeeper warnings (Windows SmartScreen, macOS Gatekeeper) | For v1, document the click-through steps for users. Revisit code signing/notarization once the project has a budget/identity for certificates; track as a post-v1 milestone, not a blocker. |
 
 ---
 
 ## 9. Out of Scope (v1)
 
+Out of scope for the installer and controller work of Phases 1–7. The first three are deferred,
+not refused: `roadmap.md` Phase 8 picks them up as The Lab feature parity, after Phase 7's four
+servers and before the v1 Alpha, each owing its own step and definition of done there.
+
 - **My Party / bot group builder** — was in The Lab; requires in-game/DB work, not script-wrapping.
 - **Item database + in-game mail** — separate later milestone.
 - **Teleport / GM in-game tools** — later.
-- **Full native reimplementation of installers** — start by wrapping existing scripts.
+- **Full native reimplementation of installers on Linux** — Linux keeps wrapping the existing bash
+  scripts. Off Linux this is no longer out of scope: Phase 6.2's native install engine
+  (`yulon/catalog/native.py`, `preflight.py`, `composegen.py`) installs with no shell script at
+  all, and WotLK's `catalog.json` entry already lists `macos` in `install.platforms`. It is
+  written but has not been run against a real daemon on macOS or Windows (`roadmap.md` 6.2/6.3).
 - **Code signing / notarization** — accept OS gatekeeper warnings for v1; revisit later (see §8).
 
 ---
@@ -359,7 +379,7 @@ The app needs a per-OS location to persist its own state — remembered server i
 
 Existing docs are explicit: **"Only run ONE server at a time — they share the same ports"** (`WoW-WotLK-CONTROLS-1.md`). The Controller must enforce this instead of silently reproducing the shell version's foot-gun:
 
-- Before starting a server, the Controller checks whether another managed install is already running (via `docker_ctl.status()` across all known installs) and whether the required ports (e.g. 3724, 8085) are free.
+- Before starting a server, the Controller checks whether the required ports (e.g. 3724, 8085) are free. It is one **global** scan of running containers for anything publishing them — so it also catches containers with nothing to do with Yu'lon — with this install's own three excluded by name. It does NOT enumerate other managed installs; this line said it did, and `port_conflicts()`'s own docstring says it "has no concept of which install a container belongs to".
 - If a conflict is found, the UI blocks the "Start" action and clearly tells the user which install is already running and needs to be stopped first — no raw port-in-use errors surfaced from Docker.
 - This check belongs in the shared `docker_ctl.py` / `runner.py` layer (Phase 1) so every per-game controller inherits it for free, rather than each `controller_<acronym>/` reimplementing the check.
 

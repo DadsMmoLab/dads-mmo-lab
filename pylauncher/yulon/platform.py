@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import functools
 import importlib
+import json
 import os
 import shutil
 import socket
@@ -18,8 +19,8 @@ import sys
 import threading
 import time
 import urllib.request
-from collections.abc import Callable, Iterable
-from contextlib import closing
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
@@ -101,7 +102,13 @@ def config_dir() -> Path:
 # detection and the WSL2 port proxy live HERE, once, as shared behavior; the
 # port numbers come from catalog.json (data), never from this module.
 
-FirewallBackend = Literal["ufw", "firewalld", "netsh", "none"]
+FirewallBackend = Literal["ufw", "firewalld", "netsh", "alf", "none"]
+"""Which firewall tool a host uses. `alf` is macOS's Application Firewall.
+
+A closed Literal on purpose: adding a member makes mypy point at every site
+that does not handle it, which is how a Mac stopped silently falling into
+`none` and being told about ufw and firewalld.
+"""
 
 _PUBLIC_IP_SERVICES: tuple[str, ...] = ("https://icanhazip.com", "https://api.ipify.org")
 _CGNAT = IPv4Network("100.64.0.0/10")
@@ -131,15 +138,249 @@ def is_steamos() -> bool:
 
 
 def detect_firewall(which: Callable[[str], str | None] | None = None) -> FirewallBackend:
-    """Which firewall tool this host uses: netsh (Windows), ufw, firewalld, or none."""
+    """Which firewall tool this host uses: netsh (Windows), alf (macOS), ufw, firewalld, or none.
+
+    `alf` is in that list because leaving it out of this sentence is the same
+    mistake as leaving it out of the code: answering "none" for a Mac is what
+    told a Mac user about ufw. A one-line summary that enumerates the answers
+    has to enumerate all of them.
+    """
     if detect() == "windows":
         return "netsh"
+    if detect() == "macos":
+        # It ships with macOS, so the question is never "is a tool present"
+        # but "what is it set to" — which is `detect_alf_state()`'s job,
+        # not this one's. Answering "none" here is what told a Mac user about
+        # ufw.
+        return "alf"
     find = which if which is not None else _which
     if find("ufw"):
         return "ufw"
     if find("firewall-cmd"):
         return "firewalld"
     return "none"
+
+
+# ------------------------------------------------------- the macOS firewall
+# macOS's firewall is a different KIND of thing, and the difference decides the
+# whole design: the Application Firewall is per-APPLICATION, not per-port. Its
+# configuration profile schema has no port or protocol key at all, so "open TCP
+# 3724" cannot be expressed. The layer that could express it is `pf`, which
+# Apple documents as not-API (TN3165) and which no third-party app should be
+# editing. And every mutation of either needs root, which the macOS install
+# path deliberately does not have.
+#
+# Then the part that settles it: the binary the firewall evaluates for a
+# published container port is **Docker Desktop's**, not ours. The server
+# listens inside Docker's Linux VM; what accepts a LAN player's connection on
+# the host is `com.docker.backend`. Allow-listing Yu'lon would be theatre.
+#
+# So `firewall_commands("alf", ...)` returning `[]` is the correct answer, not
+# a gap, and what macOS needs instead is an honest read of the state. Every
+# claim in this section is inherited from documentation rather than measured —
+# nobody on this project has a Mac — and `pyplan/checklist.md` carries the list
+# of checks that settle each one.
+
+_SOCKETFILTERFW = Path("/usr/libexec/ApplicationFirewall/socketfilterfw")
+"""The Application Firewall's CLI. A fixed system path, never on PATH."""
+
+_DOCKER_BACKEND = Path("/Applications/Docker.app/Contents/MacOS/com.docker.backend")
+"""The binary that actually receives a player's connection on a Mac.
+
+Docker Desktop's host-side listener: the container publishes into the VM, and
+this process holds the socket on the host. Which is why the firewall question
+for a Mac is "is Docker allowed", never "is Yu'lon allowed". The path is a
+claim to check — see the macOS checks in `pyplan/checklist.md`.
+"""
+
+AlfAppStatus = Literal["allowed", "blocked", "unlisted"]
+
+
+@dataclass(frozen=True)
+class AlfState:
+    """What the macOS Application Firewall reports. `None` always means "unreadable".
+
+    Three independent reads, so one failing does not poison the others, and
+    `None` is never rounded to either neighbour — the same tri-state rule
+    `preflight.py` holds itself to. Apple exposes no supported API for
+    observing this state; the `socketfilterfw` getters are the only channel,
+    and each can fail on its own.
+    """
+
+    enabled: bool | None = None
+    block_all: bool | None = None
+    docker_backend: AlfAppStatus | None = None
+
+    def describe(self) -> str:
+        """One status line for the Networking tab. Lives here: it is a platform fact.
+
+        Not in `ui/` (no business logic in a view) and not in `networking.py`
+        (which names no OS-specific tooling). Every unread field says so out
+        loud rather than reading as a pass.
+        """
+        if self.enabled is None:
+            return (
+                "macOS firewall: unchecked — could not read the firewall state. "
+                "Unchecked is not a pass."
+            )
+        if not self.enabled:
+            return "macOS firewall: off — nothing is being blocked, no rule is needed."
+        if self.block_all:
+            return (
+                "macOS firewall: on and set to block ALL incoming connections — the per-app "
+                "allow list is ignored."
+            )
+        unread = "" if self.block_all is not None else ' (could not read the "block all" setting)'
+        if self.docker_backend == "allowed":
+            return (
+                "macOS firewall: on — Docker Desktop (com.docker.backend) is allowed to receive "
+                "incoming connections." + unread
+            )
+        if self.docker_backend == "blocked":
+            return (
+                "macOS firewall: on — Docker Desktop (com.docker.backend) is BLOCKED from "
+                "receiving incoming connections." + unread
+            )
+        if self.docker_backend == "unlisted":
+            return (
+                "macOS firewall: on — Docker Desktop is not in the allow list yet; macOS will "
+                "decide the first time the server listens." + unread
+            )
+        return (
+            "macOS firewall: on — could not read whether Docker Desktop is allowed "
+            "(unchecked — not a pass)." + unread
+        )
+
+
+def _alf_read(do: RunCmd, *args: str) -> str | None:
+    """One `socketfilterfw` getter's stdout, lowercased, or None if it could not be read.
+
+    The getters need no privilege and never prompt, which is what makes probing
+    safe on a path that has no sudo. Anything unexpected — a non-zero exit, an
+    `OSError`, a binary that is not there — is `None` rather than a guess.
+    """
+    try:
+        proc = do([str(_SOCKETFILTERFW), *args])
+    except OSError as exc:
+        logger.info(f"could not run socketfilterfw {' '.join(args)}: {exc}")
+        return None
+    if proc.returncode != 0:
+        logger.info(f"socketfilterfw {' '.join(args)} exited {proc.returncode}")
+        return None
+    return proc.stdout.strip().lower()
+
+
+def _alf_flag(said: str | None, *, yes: tuple[str, ...], no: tuple[str, ...]) -> bool | None:
+    """Three answers from one getter: True, False, or "that is not a reading".
+
+    The negative patterns are tested FIRST, because macOS's wordings nest —
+    "disabled" is a substring of nothing here, but "blocked" is a substring of
+    "not blocked" one function down, and the same class of trap is one wording
+    change away in either of these. Anything matching neither is `None`.
+    """
+    if said is None:
+        return None
+    if any(pattern in said for pattern in no):
+        return False
+    if any(pattern in said for pattern in yes):
+        return True
+    logger.info(f"socketfilterfw said something unrecognised: {said!r}")
+    return None
+
+
+def detect_alf_state(run: RunCmd | None = None, docker_backend: Path | None = None) -> AlfState:
+    """Read the macOS firewall, unprivileged and without prompting for anything.
+
+    Read-only on purpose. Every setter needs root; this path has no sudo, and a
+    GUI-launched process has no cached sudo timestamp, so `sudo -n` would fail
+    every single time and a password prompt is forbidden here. Where a root
+    action genuinely helps, `alf_unblock_commands()` produces the command for
+    the user to run.
+
+    Off macOS — and on a Mac with no `socketfilterfw` — this answers all-`None`
+    without spawning anything, which is also what makes it safe to call from
+    the test box.
+    """
+    # Bounded, like every other probe in this module. `runner.run()`'s own
+    # docstring says the callers that need a timeout are the ones running on a
+    # GUI thread, and this is a public function anyone can call synchronously —
+    # today's only caller happens to be on a worker thread, which is the
+    # caller's property, not this function's (review, 2026-08-24).
+    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv, timeout=5.0))
+    app = docker_backend if docker_backend is not None else _DOCKER_BACKEND
+    if not _SOCKETFILTERFW.is_file():
+        return AlfState()
+
+    # Each field is matched three ways, not two. "The command succeeded" is not
+    # the same as "the output was recognised", and collapsing them is how a
+    # firewall that is ON reads as OFF: `enabled` used to be
+    # `"state = 1" in said or "state = 2" in said`, so ANY unrecognised wording
+    # — a future macOS phrasing, an unanticipated locale — answered False, and
+    # `describe()` then said "off, nothing is being blocked, no rule is needed"
+    # about a machine that may be blocking every player. That is the worst
+    # outcome this design has, and it contradicted `AlfState`'s own docstring
+    # two lines above it (review of this commit, 2026-08-24).
+    enabled = _alf_flag(
+        _alf_read(do, "--getglobalstate"), yes=("state = 1", "state = 2"), no=("state = 0",)
+    )
+    blocked_all = _alf_flag(
+        _alf_read(do, "--getblockall"),
+        yes=("enabled", "block all non-essential"),
+        no=("disabled",),
+    )
+
+    status: AlfAppStatus | None = None
+    app_said = _alf_read(do, "--getappblocked", str(app))
+    if app_said is not None:
+        # Order matters: "not blocked" contains "blocked", so the negative
+        # readings are tested first or every allowed app reads as blocked.
+        if "not part of the firewall" in app_said:
+            status = "unlisted"
+        elif "not blocked" in app_said or "permitted" in app_said:
+            status = "allowed"
+        elif "blocked" in app_said:
+            status = "blocked"
+    return AlfState(enabled=enabled, block_all=blocked_all, docker_backend=status)
+
+
+def alf_unblock_commands(app: Path | None = None) -> list[list[str]]:
+    """The root-only argv that lets `app` through the macOS firewall — to SHOW, not to run.
+
+    `networking.apply()` never executes this. Mutating the Application Firewall
+    needs a password this path will not ask for, and `socketfilterfw`'s writes
+    have their own history of being ignored under management policy — so even a
+    zero exit could not honestly be reported as done. The user runs it.
+    """
+    return [[str(_SOCKETFILTERFW), "--unblockapp", str(app or _DOCKER_BACKEND)]]
+
+
+@dataclass(frozen=True)
+class ElevationPolicy:
+    """How `networking.apply()` elevates one backend's commands, and what to say if it cannot."""
+
+    prefix: tuple[str, ...] = ()
+    retry_hint: str = ""
+
+
+def elevation_policy(backend: FirewallBackend) -> ElevationPolicy:
+    """Per-backend elevation, so a new backend cannot inherit the wrong advice.
+
+    This replaced a two-branch `linux` boolean whose else-branch told everyone
+    who was not on ufw/firewalld to "run it in an Administrator PowerShell" —
+    which a Mac user would have been told the moment `alf` existed. `alf` and
+    `none` emit no commands at all, so an empty hint is the honest one.
+    """
+    if backend in ("ufw", "firewalld"):
+        return ElevationPolicy(("sudo", "-n"), " with sudo")
+    if backend in ("netsh", "none"):
+        # `none` belongs HERE, not with `alf`. It emits no firewall commands,
+        # but it is the backend a WSL2 distro with no ufw/firewall-cmd gets —
+        # and the loopback path still queues `netsh` portproxy commands for it.
+        # Grouping it with `alf` dropped the privilege hint from exactly those,
+        # which the old `linux`-boolean got right by accident (review of this
+        # commit, 2026-08-24).
+        return ElevationPolicy((), " in an Administrator PowerShell")
+    return ElevationPolicy()
 
 
 def _which(name: str, path: str | None = None) -> str | None:
@@ -164,6 +405,13 @@ def firewall_commands(
     and relocked after, exactly like the guide.
     """
     ports = list(ports)
+    if backend == "alf":
+        # No port vocabulary exists in the macOS Application Firewall, the
+        # binary it evaluates is Docker Desktop's rather than ours, and every
+        # mutation needs a root this path will not ask for. `[]` is the
+        # honest answer; `networking.plan()` reports the firewall's STATE
+        # instead.
+        return []
     if backend == "netsh":
         return [
             [
@@ -386,6 +634,32 @@ class ProvisionError(RuntimeError):
     """Provisioning hit something it cannot work around (message is user-readable)."""
 
 
+DockerGroupOutcome = Literal[
+    "granted", "join-failed", "declined", "not-asked", "already-member", "not-applicable"
+]
+"""What happened to the docker-group question on this run.
+
+Six values rather than a bool because the five ways of *not* joining are not
+the same event and must not read as one: the user said no, nobody was there to
+ask, they were already a member, this platform has no such group at all — or
+they said yes and the `usermod` that followed did not run. Only `granted` and
+`already-member` mean the user can drive Docker afterwards, and only those two
+may print the log-out-and-back-in line.
+
+`join-failed` was the sixth, added late. The field used to carry the CONSENT
+answer, so a yes whose `usermod` was refused for want of a sudo ticket was
+recorded as `granted` — a support JSON saying the user is in the docker group
+when they are not, which is precisely the "a way of not joining reads as
+joining" failure the five values existed to prevent, reintroduced one layer up.
+The manual steps had always drawn the distinction; only the machine-readable
+field did not (review residual, 2026-08-24).
+
+This field is the artifact roadmap 6.2's definition of done means by "the
+preflight records explicit consent" — it rides `--provision`'s support JSON,
+so what was asked, answered and then actually done is legible from a bug report.
+"""
+
+
 @dataclass(frozen=True)
 class ProvisionReport:
     """What `ensure_docker()` / `ensure_wsl2()` did, and what is still needed."""
@@ -396,6 +670,7 @@ class ProvisionReport:
     manual_steps: tuple[str, ...] = ()
     reboot_required: bool = False
     docker_ready: bool = False
+    docker_group: DockerGroupOutcome = "not-applicable"
 
     @property
     def ok(self) -> bool:
@@ -554,9 +829,19 @@ DOCKER_CLI_MISSING_HELP = (
 )
 """What to tell the user when `docker_program()` comes back empty.
 
-One sentence, one home. Four modules have to say it — `docker`, `console`,
-`git` and `apply` — and each raises its own error type, so the wording is the
-only part they can share (style-guide §4). Saying it at all is the point: a
+One sentence, one home. Each module that has to say it raises its own error
+type, so the wording is the only part they can share (style-guide §4).
+
+Modules that raise it: `apply`, `console`, `docker`, `git`, `maintenance`.
+
+That line is checked, not trusted. It read "Four modules … `docker`, `console`,
+`git` and `apply`" for as long as it took `maintenance` to start raising this
+and nobody to notice, and `console.py` carried a matching "the fourth module
+that has to say this" comment that went wrong with it (audit, 2026-08-24). A
+comment that enumerates code goes stale in silence, so `test_platform.py` asks
+the package which modules reference this constant and compares the two as
+sets — a module that joins and a module that leaves both fail it. The count
+word is gone on purpose: a number is one more thing to keep true. Saying it at all is the point: a
 launcher that cannot find the CLI used to fail with `FileNotFoundError:
 [WinError 2] The system cannot find the file specified`, which names neither
 docker nor anything the user can act on.
@@ -646,6 +931,128 @@ def docker_ready(run: RunCmd | None = None) -> bool:
     return False
 
 
+# ------------------------------------------------------- the docker group ask
+# Joining the `docker` group is the one thing provisioning does that changes
+# what the machine can be made to do: membership is root-equivalent, because
+# `docker run -v /:/mnt --rm -it alpine chroot /mnt sh` edits any file on the
+# host. The roadmap's Phase 6 preamble makes it a consented step on every
+# install path. It was not one here until 2026-08-24: `_ensure_docker_linux()`
+# ran it under `sudo -n` among the package steps, so on any passwordless-sudo
+# box — which is both of this project's own Linux test VMs — the launcher
+# granted itself root before the installer script got as far as its own polite
+# question, and that question then found the user already a member and never
+# asked. Proven in a throwaway ubuntu:24.04 container: `dad` went from groups
+# `['dad']` to `['dad', 'docker']` with nobody asked.
+
+DOCKER_GROUP_QUESTION = (
+    "Yu'lon can add '{user}' to the docker group, so it can use Docker without asking "
+    "for your password every time.\n"
+    "\n"
+    "Heads up: membership in the docker group is effectively full root access on this "
+    "machine. A docker user can, for example, mount your entire disk inside a container "
+    "and change any file.\n"
+    "\n"
+    "If you say yes: you'll need to log out and back in once before it takes effect, "
+    "then click Install again.\n"
+    "If you say no: Yu'lon still installs Docker Engine, but it runs docker directly "
+    "(never through sudo), so it cannot install or manage a server here until you join "
+    "the group yourself: sudo usermod -aG docker {user}, then log out and back in.\n"
+    "\n"
+    "Yu'lon never creates passwordless sudo rules and never changes the docker socket's "
+    "permissions.\n"
+    "\n"
+    "Add '{user}' to the docker group (grants root-equivalent access)? (y/n): "
+)
+"""The consent question, whose last line matches the six bash scripts' wording.
+
+The `(y/n)` is load-bearing twice over. `ui.widgets.prompt.is_secret()` reads
+it to leave the answer field unmasked — without it the consent answer arrives
+as a password box — and it is the same token the installers' own
+`docker_group_consent()` prints, so a user who meets both questions meets one
+question asked the same way. `test_prompt.py` pins the first of those.
+"""
+
+DOCKER_GROUP_DECLINED_STEP = (
+    "You said no to joining the docker group, so Yu'lon cannot use Docker on this machine "
+    "yet. To change your mind later: sudo usermod -aG docker {user}, then log out and back in."
+)
+"""What declining costs. It used to add "Docker Engine is installed" — unconditionally.
+
+That is a claim about a command that may not have run: on a box where `sudo -n`
+has no ticket, every package step lands in `skipped` and the report then
+contradicted itself inside one tuple, promising an installed engine two lines
+under "Some steps needed a password". The engine's fate is reported by the
+steps themselves, which is the only place that knows it (review, 2026-08-24).
+"""
+
+DOCKER_GROUP_JOIN_FAILED_STEP = (
+    "You said yes, but adding {user} to the docker group did not work — see the step above for "
+    "why. Until it does, Yu'lon cannot use Docker here. To do it yourself: "
+    "sudo usermod -aG docker {user}, then log out and back in."
+)
+"""Consent is not the same event as the join succeeding, and the report must not merge them.
+
+`usermod` runs under `sudo -n` exactly like the package steps, and fails for
+the same reasons: no cached ticket by the time it runs, a sudoers rule scoped
+to `apt-get` but not `usermod`, or no `docker` group because the engine install
+itself failed. The old code printed "log out and back in, then click Install
+again" on the strength of the ANSWER, so a user whose join had failed was told
+to log out, log back in, click Install, and meet the identical failure with no
+explanation (review, 2026-08-24).
+"""
+
+DOCKER_GROUP_UNASKED_STEP = (
+    "Skipped joining the docker group: it grants root-equivalent access, and with nobody to "
+    "ask Yu'lon never makes that change. To do it yourself: sudo usermod -aG docker {user}, "
+    "then log out and back in."
+)
+
+DOCKER_GROUP_RELOGIN_STEP = (
+    "Log out and back in (or run `newgrp docker`) so {user} can use Docker without sudo, "
+    "then click Install again."
+)
+"""Shown only where it is true: after a join that ran, or for an existing member.
+
+It used to be unconditional, which made it advice on the two paths where no
+group change had happened at all. The second half of the sentence is not
+padding either: `usermod` does not change a running process's supplementary
+groups, so `docker_ready()` stays false for the rest of this run even when the
+answer was yes. Saying otherwise would promise an install that cannot start.
+"""
+
+
+def _explicit_yes(reply: str | None) -> bool:
+    """Only a deliberate yes is consent. A dismissed dialog is not.
+
+    The same reading `make_responder()` applies to the installers' version of
+    this question, deliberately written the same way here: silence, an empty
+    string and a closed dialog all mean no, because refusing a privilege change
+    is recoverable and visible while granting one by accident is neither.
+    """
+    return reply is not None and reply.strip().lower() in ("y", "yes")
+
+
+def _docker_group_member(do: RunCmd, user: str) -> bool:
+    """Is `user` already in the `docker` group? False when it cannot be asked.
+
+    Exact token match, not a substring: a machine with a `dockerd` or
+    `docker-users` group must not read as a member and skip the question.
+
+    Unreadable answers False, so an unaskable machine is asked rather than
+    assumed — the safe direction, since the cost of a redundant question is a
+    click and the cost of a wrong skip is a silent escalation. `id` needs no
+    privilege, so this never goes through sudo.
+    """
+    try:
+        proc = do(["id", "-nG", user])
+    except OSError as exc:
+        logger.info(f"could not read {user}'s groups: {exc}")
+        return False
+    if proc.returncode != 0:
+        return False
+    return "docker" in proc.stdout.split()
+
+
 def linux_package_manager(
     which: Callable[[str], str | None] | None = None,
 ) -> PackageManager | None:
@@ -662,8 +1069,16 @@ def linux_package_manager(
     return None
 
 
-def docker_engine_commands(pm: PackageManager, *, steamos: bool, user: str) -> list[list[str]]:
-    """The (sudo-less) commands that install + enable Docker Engine via `pm` for `user`."""
+def docker_engine_commands(pm: PackageManager, *, steamos: bool) -> list[list[str]]:
+    """The (sudo-less) commands that install + enable Docker Engine via `pm`.
+
+    **The docker-group join is deliberately not in this list**, and putting it
+    back is not a one-line append: it would need `user` again, which is why the
+    parameter is gone. The argv that grants root-equivalent access is built in
+    exactly one place — inside `_ensure_docker_linux()`'s consent branch — so
+    there is no second construction site that a gate could be added to and then
+    forgotten. It lived here, ungated, from 5.1 until 2026-08-24.
+    """
     install: list[list[str]]
     if pm == "pacman":
         install = [["pacman", "-Sy", "--noconfirm", "docker", "docker-compose"]]
@@ -680,11 +1095,7 @@ def docker_engine_commands(pm: PackageManager, *, steamos: bool, user: str) -> l
         install = [["dnf", "-y", "install", "moby-engine", "docker-compose"]]
     else:
         install = [["zypper", "--non-interactive", "install", "docker", "docker-compose"]]
-    return [
-        *install,
-        ["systemctl", "enable", "--now", "docker"],
-        ["usermod", "-aG", "docker", user],
-    ]
+    return [*install, ["systemctl", "enable", "--now", "docker"]]
 
 
 # ------------------------------------------------------------------ downloads
@@ -1114,6 +1525,31 @@ def _wait_docker_ready(
     return docker_ready(run)
 
 
+def _c_locale_env() -> dict[str, str]:
+    """This process's environment with the messages locale pinned to C.
+
+    Provisioning classifies a skipped step by reading `sudo`'s own stderr for
+    "a password is required", and `sudo` is gettext-translated: on a Danish
+    desktop it says "adgangskode", on a German one "Passwort". Without this the
+    password case falls into the generic bucket for everyone outside an English
+    locale, and they are handed a raw exit code instead of the one instruction
+    that would fix it.
+
+    This codebase already knew: `ui/widgets/prompt.py`'s `_NOT_SECRET` regex was
+    rewritten into a deny-list for exactly this reason, and its comment lists
+    the same translations. Pinning the child's locale is the other half of that
+    lesson — read a machine's answer in a language you chose, not the one it
+    happens to be set to (review, 2026-08-24).
+
+    `LC_ALL` rather than `LANG`, because `LC_ALL` overrides every category and
+    a user with `LC_MESSAGES` set would otherwise still get translated text.
+    """
+    env = dict(os.environ)
+    env["LC_ALL"] = "C"
+    env["LANGUAGE"] = ""
+    return env
+
+
 def _run_steps(
     do: RunCmd, commands: list[list[str]], *, sudo: bool, dry_run: bool
 ) -> tuple[list[str], list[str]]:
@@ -1146,12 +1582,16 @@ def ensure_docker(
     user: str | None = None,
     wait_seconds: float = _DOCKER_READY_TIMEOUT_SECONDS,
     cancel: threading.Event | None = None,
+    ask: runner.Prompter | None = None,
 ) -> ProvisionReport:
     """Make sure a Docker daemon is reachable, installing what the OS needs (README §3b).
 
     Linux: Docker Engine through the distro package manager (under `sudo -n`; a
     password-needing sudo is a reported skip with the commands to paste). The
-    docker group change needs a re-login — reported, never hidden. Windows:
+    docker-group join is asked for through `ask` BEFORE anything privileged
+    runs, and declined whenever there is nobody to ask; the answer is on the
+    report as `docker_group`. Windows and macOS ignore `ask` — Docker Desktop
+    manages its own access there and neither path touches a Unix group. Windows:
     WSL2 (`ensure_wsl2()`) then Docker Desktop (download + silent install,
     elevated), then start it at wherever `find_docker_desktop()` says it is.
     macOS: Docker Desktop (download .dmg, copy Docker.app, open it).
@@ -1159,17 +1599,67 @@ def ensure_docker(
     lists every step as skipped so the UI can show the plan. `cancel`, when set,
     interrupts the ready-poll early (the poll still returns the latest check).
     """
-    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv))
+    # The default runner pins the messages locale — see `_c_locale_env()`. An
+    # injected `run` is the caller's business and is left alone.
+    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv, env=_c_locale_env()))
     current = detect()
     if docker_ready(do):
         logger.info("ensure_docker(): daemon already reachable")
         return ProvisionReport(current, done=("docker already running",), docker_ready=True)
     if current == "linux":
-        who = user or os.environ.get("USER") or os.environ.get("USERNAME") or "deck"
-        return _ensure_docker_linux(do, which, dry_run, who, wait_seconds, cancel)
+        return _ensure_docker_linux(
+            do, which, dry_run, _linux_user(user), wait_seconds, cancel, ask
+        )
     if current == "windows":
         return _ensure_docker_windows(do, which, download, dry_run, wait_seconds, cancel)
     return _ensure_docker_macos(do, download, dry_run, wait_seconds, cancel)
+
+
+def _linux_user(explicit: str | None) -> str:
+    """Whose name goes in the consent dialog, and whose account gets the group.
+
+    `SUDO_USER` names the INVOKER, and that is only the right answer when this
+    process is actually running as root — which is the `sudo yulon` case it was
+    added for. Under `sudo -u alice yulon` the process runs as **alice** while
+    `SUDO_USER` says **bob**: the old chain offered bob root-equivalent access
+    he never asked for, joined an account that is not the one making the docker
+    calls, and left alice still unable to use Docker. Group membership is
+    evaluated against the calling process's own credentials, so that join was
+    both wrong and useless.
+
+    So `SUDO_USER` is trusted only behind an effective-uid check, and the
+    process's real identity is preferred over any environment variable — the
+    environment is what an escalation tool rewrites, `geteuid()` is not.
+    `DOAS_USER` is read in the same breath because `doas` exports it and
+    otherwise a `doas yulon` lands on "root" the same way (unverified from
+    this side — no `doas` box here; a claim to check).
+
+    Found by a review that held it after the author had held it as too narrow:
+    the `doas` half needs a tool this audience does not use, the `sudo -u` half
+    needs nothing at all (2026-08-24).
+    """
+    if explicit:
+        return explicit
+    geteuid = getattr(os, "geteuid", None)
+    euid = geteuid() if geteuid is not None else None
+    if euid == 0:
+        for named_by in ("SUDO_USER", "DOAS_USER"):
+            invoker = os.environ.get(named_by)
+            if invoker:
+                return invoker
+    if euid is not None:
+        try:
+            import pwd
+
+            # `str()` and the ignore because mypy runs on Windows here, where
+            # the POSIX stub is not resolvable — the guard above is what makes
+            # the call safe at runtime, not the type checker.
+            return str(pwd.getpwuid(euid).pw_name)  # type: ignore[attr-defined]
+        except (ImportError, KeyError):
+            logger.info(f"no passwd entry for uid {euid}; falling back to the environment")
+    # `deck` last: it is the SteamOS default this project targets, and a wrong
+    # guess here is a name in a question rather than an action.
+    return os.environ.get("USER") or os.environ.get("USERNAME") or "deck"
 
 
 def _ensure_docker_linux(
@@ -1179,7 +1669,20 @@ def _ensure_docker_linux(
     user: str,
     wait_seconds: float,
     cancel: threading.Event | None = None,
+    ask: runner.Prompter | None = None,
 ) -> ProvisionReport:
+    """Install Docker Engine, and join the docker group only if asked and told yes.
+
+    The order matters and is the whole fix. Consent is settled BEFORE the first
+    privileged command, not after the package install: the roadmap requires the
+    question "before any docker-group join or privileged provisioning step",
+    and asking first also puts the dialog in front of someone who just clicked
+    Install rather than several minutes into an `apt-get`.
+
+    Declining the group is not declining Docker. The engine is installed either
+    way — that is the disclosed part of "the app installs everything" — and
+    what the user keeps is the choice about their own machine's security.
+    """
     pm = linux_package_manager(which)
     if pm is None:
         return ProvisionReport(
@@ -1189,18 +1692,98 @@ def _ensure_docker_linux(
                 "Engine by hand: https://docs.docker.com/engine/install/",
             ),
         )
-    commands = docker_engine_commands(pm, steamos=is_steamos(), user=user)
+
+    consent = _settle_docker_group(do, user, dry_run, cancel, ask)
+
+    commands = docker_engine_commands(pm, steamos=is_steamos())
     done, skipped = _run_steps(do, commands, sudo=True, dry_run=dry_run)
-    ready = False if dry_run else _wait_docker_ready(do, min(wait_seconds, 30.0), 2.0, cancel)
-    manual = [
-        f"Log out and back in (or run `newgrp docker`) so {user} can use Docker without sudo."
-    ]
-    if skipped and not dry_run:
-        failed = "; ".join(s.split(":")[0] for s in skipped)
-        manual.insert(
-            0, f"Some steps needed a password; run them in a terminal with sudo: {failed}"
+    joined_ok = False
+    if consent == "granted":
+        # The one place this argv is built. `docker_engine_commands()` no
+        # longer contains it, so there is no ungated path to it at all.
+        joined, refused = _run_steps(
+            do, [["usermod", "-aG", "docker", user]], sudo=True, dry_run=dry_run
         )
-    return ProvisionReport("linux", tuple(done), tuple(skipped), tuple(manual), False, ready)
+        joined_ok = bool(joined) and not refused
+        done, skipped = [*done, *joined], [*skipped, *refused]
+    elif dry_run:
+        skipped.append(f"(dry run) usermod -aG docker {user} (asks first)")
+
+    ready = False if dry_run else _wait_docker_ready(do, min(wait_seconds, 30.0), 2.0, cancel)
+
+    # What HAPPENED, not what was agreed to. `consent` answers the question;
+    # whether the command that follows it worked is a separate fact, and telling
+    # a user to log out and back in because they said yes — when the join failed
+    # — sends them round a loop that ends in the same failure. The report now
+    # carries this rather than `consent`, so the support JSON cannot claim a
+    # membership the machine does not have.
+    outcome: DockerGroupOutcome = (
+        "join-failed" if consent == "granted" and not joined_ok else consent
+    )
+
+    manual: list[str] = []
+    if outcome == "granted":
+        manual.append(DOCKER_GROUP_RELOGIN_STEP.format(user=user))
+    elif outcome == "join-failed":
+        manual.append(DOCKER_GROUP_JOIN_FAILED_STEP.format(user=user))
+    elif outcome == "declined":
+        manual.append(DOCKER_GROUP_DECLINED_STEP.format(user=user))
+    elif outcome == "not-asked":
+        manual.append(DOCKER_GROUP_UNASKED_STEP.format(user=user))
+    if skipped and not dry_run:
+        # A skip is reported by its real cause, not by the likeliest one. `sudo
+        # -n` announces the password case itself ("a password is required"),
+        # and `_run_steps` keeps that stderr in the record — so the two have
+        # always been distinguishable and the guess was never needed. Measured
+        # in a container on yulon-ubuntu (2026-08-24): `systemctl` was simply
+        # absent, and the user was told to re-run it in a terminal with sudo,
+        # which fails identically.
+        password = [s for s in skipped if "password" in s.lower()]
+        other = [s for s in skipped if s not in password]
+        if other:
+            manual.insert(0, "Some steps did not run: " + "; ".join(other))
+        if password:
+            failed = "; ".join(s.split(":")[0] for s in password)
+            manual.insert(
+                0, f"Some steps needed a password; run them in a terminal with sudo: {failed}"
+            )
+    return ProvisionReport(
+        "linux", tuple(done), tuple(skipped), tuple(manual), False, ready, outcome
+    )
+
+
+def _settle_docker_group(
+    do: RunCmd,
+    user: str,
+    dry_run: bool,
+    cancel: threading.Event | None,
+    ask: runner.Prompter | None,
+) -> DockerGroupOutcome:
+    """Decide the docker-group question without running anything privileged.
+
+    Every branch that is not a deliberate yes is a no. Four events, and
+    deliberately THREE names for them: `already-member`, `declined`, and
+    `not-asked` — which covers a cancelled run, a dry run and a run with nobody
+    to ask alike, because all three mean the same thing to someone reading a
+    report: the question was never put. (This docstring claimed four names for
+    four events until an audit read the branches, 2026-08-24. `granted` and
+    `join-failed` are the two yes-shaped outcomes and belong to the caller, not
+    to this function.)
+
+    A cancelled run never opens a dialog. A `dry_run` never opens one either —
+    it exists to show a plan, and a plan that interrogates the user is not one.
+    """
+    if dry_run or (cancel is not None and cancel.is_set()):
+        # `dry_run` shows a plan, so it runs nothing at all — not even the
+        # harmless `id`. A cancelled run does not open a dialog either.
+        return "not-asked"
+    if _docker_group_member(do, user):
+        return "already-member"
+    if ask is None:
+        return "not-asked"
+    answer = _explicit_yes(ask(DOCKER_GROUP_QUESTION.format(user=user)))
+    logger.info(f"docker group consent for {user}: {'granted' if answer else 'declined'}")
+    return "granted" if answer else "declined"
 
 
 def _ps_quote(value: object) -> str:
@@ -1583,3 +2166,360 @@ def _ensure_docker_macos(
             "icon, then try again.",
         )
     return ProvisionReport("macos", tuple(done), tuple(skipped), manual, False, ready)
+
+
+# ------------------------------------------------- machine facts (roadmap 6.2)
+# What the native install engine's preflight needs to know about THIS machine,
+# and nothing about any game (style-guide §3). Every function here answers
+# `None` for "could not be established", which `catalog/preflight.py` renders as
+# *unchecked* — never as a pass and never as a refusal. A stopped Docker Desktop
+# prints zeroes, so a fact that is merely absent must not arrive as a number
+# (`rust-prior-art.md` §3).
+
+
+@dataclass(frozen=True)
+class VmResources:
+    """What the Linux VM the containers run in actually has.
+
+    On Windows and macOS this is the VM's allowance, NOT the host's hardware —
+    a 32 GB Mac whose Docker Desktop is set to 4 GB compiles AzerothCore into
+    the OOM killer, and asking the host would have called that fine. On Linux
+    the engine is the host, so the two coincide.
+    """
+
+    memory_bytes: int
+    cpus: int
+
+
+def vm_resources(run: RunCmd | None = None) -> VmResources | None:
+    """Memory and CPU count the container engine reports, or None if it did not answer.
+
+    `docker info` rather than `psutil`/`os.cpu_count()` for the reason above:
+    the number that decides whether a build survives is the engine's, and only
+    the engine knows it.
+
+    Zeroes are treated as no answer. A stopped Docker Desktop still prints a
+    well-formed JSON document with `MemTotal: 0`, and a preflight that believed
+    it would refuse every install on the machine with "0 GB of RAM" — the exact
+    fabricated refusal the tri-state discipline exists to prevent.
+    """
+    do = run if run is not None else (lambda argv: runner.run(argv))
+    program = docker_program()
+    if program is None:
+        return None
+    try:
+        proc = do([program, "info", "--format", "{{json .}}"])
+    except OSError as exc:
+        logger.debug(f"could not start {program}: {exc}")
+        return None
+    if proc.returncode != 0:
+        logger.info(f"docker info would not answer, so the VM's size is unknown: {proc.stderr}")
+        return None
+    try:
+        parsed = json.loads(proc.stdout)
+    except ValueError:
+        logger.info("docker info did not return JSON, so the VM's size is unknown")
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    memory = parsed.get("MemTotal")
+    cpus = parsed.get("NCPU")
+    if not isinstance(memory, int) or not isinstance(cpus, int) or memory <= 0 or cpus <= 0:
+        logger.info(f"docker info reported MemTotal={memory!r} NCPU={cpus!r}; treating as unknown")
+        return None
+    return VmResources(memory, cpus)
+
+
+_DOCKER_DESKTOP_SETTINGS_KEYS = ("dataFolder", "DataFolder", "diskPath", "DiskPath")
+"""Keys Docker Desktop is believed to store its data root under.
+
+Four spellings because the file has been through several: `rust-prior-art.md`
+§3 names `DataFolder`/`dataFolder`/`diskPath`, and the casing differs between
+Docker Desktop versions. All four are read and the first present one wins;
+absent means the platform default.
+"""
+
+
+def docker_desktop_settings_file() -> Path | None:
+    """Where Docker Desktop keeps the settings JSON that names its data root.
+
+    Windows: `%APPDATA%\\Docker\\settings-store.json`, with `settings.json` as
+    the older name. **Verified on no machine by this project** — it is read
+    defensively and a miss falls through to the default.
+
+    macOS: `~/Library/Group Containers/group.com.docker/settings-store.json` is
+    what the design believes, and believing is not knowing (phase6-decisions,
+    "Baerthe's list" item 1). Returned so the Mac gate can check it against a
+    real install; `docker_desktop_data_root()` deliberately does NOT use it yet.
+
+    Linux: None. There is no Docker Desktop settings store on the path this
+    project supports there — the engine is the host's own.
+    """
+    here = detect()
+    if here == "windows":
+        appdata = os.environ.get("APPDATA")
+        base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+        store = base / "Docker" / "settings-store.json"
+        return store if store.is_file() else base / "Docker" / "settings.json"
+    if here == "macos":
+        return (
+            Path.home()
+            / "Library"
+            / "Group Containers"
+            / "group.com.docker"
+            / "settings-store.json"
+        )
+    return None
+
+
+def docker_desktop_data_root() -> Path | None:
+    """The directory whose free space decides whether the build fits. None = unknown.
+
+    This is NOT the server directory. On Windows and macOS the images and the
+    build cache live inside the Linux VM's disk, so measuring the folder the
+    user picked answers for the wrong drive entirely (`rust-prior-art.md` §3) —
+    what has to be measured is the host file that backs the VM.
+
+    * Linux: `/var/lib/docker`, which really is a host directory.
+    * Windows: the `dataFolder`/`diskPath` in Docker Desktop's settings store,
+      falling back to `%LOCALAPPDATA%\\Docker\\wsl` — the WSL2 backend's default
+      home for `docker_data`. Believed, not measured on a real box.
+    * macOS: **None, deliberately.** Two things are unverified at once — the
+      settings path and its keys, and what "free space" even means against a
+      sparse `Docker.raw` (host free space on that volume, or the VM's
+      allocation minus what it has used). Guessing would produce a confident
+      number that could refuse a Mac with plenty of room, so preflight reports
+      *unchecked* until the first Mac gate replaces this with a measurement.
+    """
+    here = detect()
+    if here == "linux":
+        return Path("/var/lib/docker")
+    if here == "macos":
+        return None
+    store = docker_desktop_settings_file()
+    configured = _settings_data_folder(store) if store is not None else None
+    if configured is not None:
+        return configured
+    local = os.environ.get("LOCALAPPDATA")
+    return (Path(local) / "Docker" / "wsl") if local else None
+
+
+def _settings_data_folder(store: Path) -> Path | None:
+    """The data root Docker Desktop's settings name, if that file can be read at all."""
+    try:
+        with store.open(encoding="utf-8") as fh:
+            parsed = json.load(fh)
+    except (OSError, ValueError) as exc:
+        logger.debug(f"could not read {store}: {exc}")
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    for key in _DOCKER_DESKTOP_SETTINGS_KEYS:
+        value = parsed.get(key)
+        if isinstance(value, str) and value.strip():
+            return Path(value)
+    return None
+
+
+# Folder-name fragments that mean a cloud sync client owns this directory. A
+# 2.4 GB checkout of build artefacts inside one is not a slow install, it is a
+# sync client rewriting files under a compiler and a user's quota exhausted
+# overnight. Matched case-insensitively against the path's PARTS, so a folder
+# genuinely called "OneDrive" anywhere above the install is enough.
+_SYNCED_DIR_NAMES = ("onedrive", "dropbox", "google drive", "googledrive", "icloud drive")
+_ICLOUD_MARKER = "com~apple~clouddocs"
+"""How iCloud Drive spells itself on disk (`~/Library/Mobile Documents/com~apple~CloudDocs`)."""
+
+
+def server_dir_problem(server_dir: Path) -> str | None:
+    """Why this folder is a bad place for a server install, in the user's words.
+
+    None means "no known problem", which is not the same as "proved good" —
+    `docker.bind_mount_ok()` is the check that cannot be wrong, and this one
+    exists to explain *why* a mount would fail, or to catch the failures that
+    only show up hours later:
+
+    * a cloud-synced folder (OneDrive, Dropbox, Google Drive, iCloud Drive):
+      the sync client rewrites files while the build reads them and uploads a
+      multi-gigabyte checkout the user never meant to store;
+    * a UNC path (`\\\\server\\share`): Docker Desktop cannot bind-mount one,
+      and the failure arrives as an empty directory rather than an error;
+    * a mapped network drive: the same, wearing a local drive letter.
+
+    All three are refusals in preflight rather than warnings, because each of
+    them fails AFTER the two-to-four-hour build rather than before it.
+    """
+    text = str(server_dir)
+    if text.startswith("\\\\") or text.startswith("//"):
+        return (
+            f"{server_dir} is a network path. Docker Desktop cannot share one with its Linux "
+            "VM, so the install would appear to work and the containers would see an empty "
+            "folder. Pick a folder on this machine's own disk."
+        )
+    lowered = [part.lower() for part in Path(text).parts]
+    if any(_ICLOUD_MARKER in part for part in lowered):
+        return (
+            f"{server_dir} is inside iCloud Drive, which syncs and evicts files while the "
+            "server is running. Pick a folder outside it."
+        )
+    for part in lowered:
+        for name in _SYNCED_DIR_NAMES:
+            if part == name or part.startswith(f"{name} -"):
+                return (
+                    f"{server_dir} is inside a cloud-synced folder ({part}). The sync client "
+                    "would rewrite files under the compiler and upload the whole checkout. "
+                    "Pick a folder outside it."
+                )
+    mapped = _mapped_network_drive(server_dir)
+    if mapped is not None:
+        return (
+            f"{server_dir} is on {mapped}, a mapped network drive. Docker Desktop cannot share "
+            "one with its Linux VM. Pick a folder on this machine's own disk."
+        )
+    return None
+
+
+def _mapped_network_drive(path: Path) -> str | None:
+    """The drive letter, if `path` sits on a Windows network drive. None otherwise.
+
+    `GetDriveTypeW` is asked rather than a heuristic about drive letters,
+    because a mapped drive is indistinguishable from a local one by name. Off
+    Windows there is nothing to ask and the answer is None.
+    """
+    if detect() != "windows":
+        return None
+    drive = os.path.splitdrive(str(path))[0]
+    if not drive:
+        return None
+    try:
+        import ctypes
+
+        # `getattr`, not `ctypes.windll`: the attribute only exists on Windows,
+        # and CI type-checks on Linux, where naming it directly is an error —
+        # while a `type: ignore` for that is itself an error when the same
+        # checker runs on a developer's Windows box. Same reason
+        # `_registry_search_path()` imports `winreg` dynamically.
+        kernel32 = getattr(ctypes, "windll").kernel32  # noqa: B009 - Windows-only attribute
+        drive_type = kernel32.GetDriveTypeW(f"{drive}\\")
+    except (AttributeError, OSError) as exc:  # pragma: no cover - non-Windows or no ctypes
+        logger.debug(f"could not ask Windows what kind of drive {drive} is: {exc}")
+        return None
+    return drive if drive_type == _DRIVE_REMOTE else None
+
+
+_DRIVE_REMOTE = 4
+"""`DRIVE_REMOTE` from winbase.h — what `GetDriveTypeW` returns for a network drive."""
+
+
+class KeepAwake(Protocol):
+    """A held assertion that the machine must not doze off. Released on exit."""
+
+    def __enter__(self) -> None: ...
+
+    def __exit__(self, *exc: object) -> None: ...
+
+
+@contextmanager
+def keep_awake(
+    *,
+    platform_id: Callable[[], PlatformId] = detect,
+    spawn: Callable[[list[str]], subprocess.Popen[bytes]] | None = None,
+) -> Iterator[None]:
+    """Hold the machine awake for the duration of the block. Best effort, and it says so.
+
+    **What this promises, exactly.** An *idle* machine will not go to sleep
+    mid-compile. That is the case that actually eats a four-hour build: nobody
+    touches the keyboard for three hours because the build is the whole point.
+
+    **What it cannot promise, and the roadmap's wording overpromises here.**
+    Closing the laptop lid still suspends the machine, on both platforms.
+    `caffeinate` does not override the lid action without an external display
+    and power, and `SetThreadExecutionState` does not either — the lid is a
+    power *setting*, and rewriting a user's power settings is not something an
+    installer may do behind their back. The lid case is UI copy shown before
+    the build starts, not an assertion. This docstring is the flag.
+
+    macOS: `caffeinate -dims -w <our pid>` — a child that dies when we do, so
+    there is no cleanup path to forget. Unverified: `caffeinate` ships with the
+    OS and `-dims` is believed to be the right assertion set for a Docker
+    Desktop VM, and neither claim has been executed on a Mac by this project.
+
+    Windows: `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)`,
+    which is a THREAD-scoped assertion — it must be set and cleared on the same
+    thread, and it only holds while that thread lives. That makes the worker
+    thread running the install the only correct place to call it, so calling it
+    from the main (GUI) thread is refused rather than silently doing nothing
+    useful the moment the install moves off it.
+
+    Linux: a no-op for Phase 6. The Linux path still runs the bash installer,
+    and `systemd-inhibit` waits for the 6.5 Linux gate rather than being
+    written blind here.
+    """
+    here = platform_id()
+    if here == "macos":
+        argv = ["caffeinate", "-dims", "-w", str(os.getpid())]
+        start = spawn if spawn is not None else _spawn_detached
+        try:
+            child = start(argv)
+        except OSError as exc:
+            logger.warning(f"could not hold this Mac awake ({exc}); the build may be interrupted")
+            yield
+            return
+        logger.info(f"holding this Mac awake for the build: {' '.join(argv)}")
+        try:
+            yield
+        finally:
+            child.terminate()
+        return
+    if here == "windows":
+        if threading.current_thread() is threading.main_thread():
+            raise RuntimeError(
+                "keep_awake() must run on the worker thread doing the install: Windows scopes "
+                "the assertion to the thread that set it, so holding it on the GUI thread would "
+                "claim a guarantee the install does not have."
+            )
+        with _keep_awake_windows():
+            yield
+        return
+    logger.debug(f"keep_awake() is a no-op on {here}")
+    yield
+
+
+def _spawn_detached(argv: list[str]) -> subprocess.Popen[bytes]:
+    """Start a helper process we do not read from and will terminate ourselves."""
+    return subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+_ES_CONTINUOUS = 0x80000000
+_ES_SYSTEM_REQUIRED = 0x00000001
+"""`SetThreadExecutionState` flags: keep the assertion until cleared; no sleep.
+
+`ES_DISPLAY_REQUIRED` is deliberately NOT among them. Keeping a laptop's screen
+lit for four hours to compile a server is a battery cost with no benefit — the
+build does not need the display, only the CPU.
+"""
+
+
+@contextmanager
+def _keep_awake_windows() -> Iterator[None]:
+    """Assert `ES_SYSTEM_REQUIRED` on THIS thread, and clear it on the way out.
+
+    Unverified on a real Windows box by this project (roadmap 6.3's gate owns
+    that). A failure to set it is logged and the block still runs: an install
+    that would have completed must not be refused because a power API said no.
+    """
+    try:
+        import ctypes
+
+        # `getattr` for the reason `_mapped_network_drive()` gives.
+        set_state = getattr(ctypes, "windll").kernel32.SetThreadExecutionState  # noqa: B009
+    except (AttributeError, OSError) as exc:  # pragma: no cover - non-Windows
+        logger.warning(f"could not hold this machine awake ({exc}); the build may be interrupted")
+        yield
+        return
+    if not set_state(_ES_CONTINUOUS | _ES_SYSTEM_REQUIRED):
+        logger.warning("Windows refused the keep-awake assertion; the build may be interrupted")
+    try:
+        yield
+    finally:
+        set_state(_ES_CONTINUOUS)
