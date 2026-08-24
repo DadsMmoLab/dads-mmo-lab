@@ -83,7 +83,9 @@ added in a day and a structural difference cannot be un-made.
 
 ## Grafted in from the approaches that did not win
 
-- **A 5-second bind-mount probe** (`docker run --rm -v <server_dir>:/probe alpine ls /probe`)
+- **A bind-mount probe** (`docker run --rm -v <nearest populated ancestor>:/probe <git image>
+  ls -A /probe`, bounded 30 s — the preflight table below records why it is neither the chosen
+  folder nor `alpine`)
   before anything long. Docker Desktop's file-sharing list is user-editable, so static path rules
   can both falsely block a legitimate directory and miss a broken one; a probe cannot be wrong.
 - **`keep_awake()`** — a dad who starts a four-hour compile *will* close the lid, and the Docker
@@ -112,7 +114,9 @@ its `account_write.rs` exists precisely because `docker attach` refuses piped st
 TTY container, and without the tty it never returns.
 
 Consequence for roadmap 6.5 item 3: option (a) — "land the SOAP-based account creation as the
-Windows path" — rests on a false premise and should not be chosen as written.
+Windows path" — rests on a false premise and should not be chosen as written. **Acted on:**
+`roadmap.md` 6.5 item 3 now says account creation no longer depends on the console at all and sends
+it to item 4's SRP6-over-`DockerSql` path; what is left in item 3 is live GM commands.
 
 The path that works identically everywhere is the database: compute AzerothCore's SRP6 registration
 values (32 random salt bytes, `x = SHA1(salt || SHA1(UPPER(user) ":" UPPER(pass)))`,
@@ -145,13 +149,20 @@ than a silent one.
 - **SRP6 must be byte-exact or the account exists and can never log in.** Unit vectors cannot prove
   this alone: derive the vector from a real server (create an account via the console, read back
   `salt`/`verifier`, assert Python reproduces the verifier from that salt) and require a real client
-  login at every live gate.
+  login at every live gate. **The vector half was done 2026-08-23:** two accounts the worldserver
+  itself created over its console on the Ubuntu box had their `salt`/`verifier` read back out of
+  `acore_auth.account`, and `accounts.verifier_for()` reproduces both byte for byte — including a
+  `Café1234` password, which `str.upper()` in place of `fold()` gets wrong
+  (`controller_wow_wotlk/accounts.py`, pinned by `SERVER_WRITTEN` in `tests/test_accounts.py`). The
+  client-login half is still owed at every live gate.
 - **Windows build-context transfer over 9p/drvfs is unmeasured.** Nobody has a number yet. Record
   it separately from the compile time at the first Windows gate.
 - **Docker Desktop resource caps OOM-kill the compiler hours in**, surfacing as an opaque
-  `signal 9`. Open question: make the memory floor a hard refusal on the native path rather than a
-  warning. Leaning yes — a refusal costs a minute, a declined warning costs three hours. The Rust
-  launcher refuses below 6 GB for exactly this reason.
+  `signal 9`. Settled: the memory floor is a hard refusal on the native path, not a warning — a
+  refusal costs a minute, a declined warning costs three hours. `NativeInstall.min_ram_gb` defaults
+  to 6.0 (`catalog/catalog.py`), `preflight._ram_check()` refuses below it, and a refusal aborts the
+  install rather than offering an override (`native.py::_preflight_lines`). The Rust launcher
+  refuses below 6 GB for the same reason.
 - **Dual maintenance is real** for the length of Phase 6, bounded by the 6.5 Linux gate and
   reversible in one line.
 - **The step engine is fixed, not a DSL.** It assumes "clone N sources, write an override, compose
@@ -175,7 +186,8 @@ Two live bugs the review found in existing code, neither of them Phase 6 regress
   start by name and fell straight back to `compose up -d`. Only a run against a real daemon showed it;
   every unit test passed throughout, because each half is correct in isolation and the invariant lives
   in the pair. Now `docker.stop_staged()`, mirroring `dml-start.sh`'s `docker stop`/`docker start`
-  pairing, with `docker.stop()` kept as the explicit teardown path.
+  pairing, with `docker.remove_staged()` kept as the explicit teardown path — it was
+  `docker.stop()` until 30f0b7ff renamed it and gave it `stop_staged()`'s ownership proof.
 
   The general lesson, worth carrying into 6.2: **a defect can live in the seam between two functions
   that are each individually right.** Mocked tests cannot see that seam; they assert the argv each half
@@ -393,8 +405,11 @@ constructor.
 
 ### Dispatch, and the contract that keeps the UI unchanged
 
-`Install` gains `script_platforms: tuple[PlatformId, ...]`, **defaulting to `platforms`** so every
-existing catalog entry keeps meaning exactly what it said. The rules, in order:
+`Install` gains `script_platforms: tuple[PlatformId, ...] | None`, defaulting to `None`, with
+`scripted_platforms()` reading `platforms` back when it is absent — so every existing catalog entry
+keeps meaning exactly what it said. A method rather than a field default, on purpose: `None` still
+tells an entry that was never asked the question apart from one that answered "the script runs
+everywhere" (`catalog/catalog.py`). The rules, in order:
 
 1. platform not in `platforms` → the 6.1 refusal, unchanged;
 2. platform in `script_platforms` → today's `Installer` (the bash path), unchanged;
@@ -497,7 +512,7 @@ zeroes, so nothing reads a resource number without confirming the engine actuall
 | data root and server dir on the same volume | floors ADD (48 / 75 GB) | refuse/warn as above | inherited |
 | bind-mount probe: `docker run --rm -v <nearest populated ancestor>:/probe <git image> ls -A /probe` | bounded 30 s | refuse, with the file-sharing explanation | grafted-in above; the probe pulls `git.CONTAINER_GIT_IMAGE` — the exact **digest** the clone stages pull, since a tag is a different image reference and asking for `alpine/git` cost a second, unpinned pull. **Corrected during implementation:** the exit code of `ls` cannot see the failure this exists for, because an unshared folder mounts as an EMPTY directory and `ls` on an empty directory exits 0 — and the chosen folder is empty at preflight time by construction. The probe therefore mounts the nearest ancestor that has entries and checks the container sees entries too; an ancestor's answer is the chosen folder's, and it also stops `-v` creating the directory before `guard` has claimed it |
 | `server_dir_problem()` | OneDrive/iCloud-synced, UNC, mapped drive | refuse, with the reason | grafted-in; layered on top of the probe, not instead of it — the probe reports whether a mount works, the path rules explain *why* |
-| port conflict (`foreign_port_conflicts(spec, project)` + socket probe) | a listener on the entry's ports that is not this install's own container | refuse — before the build, not after | grafted-in; the socket half refuses only on `AddrInUse`, because Hyper-V/WSL reserved ranges and permission errors would hard-refuse a server that would have started (rust-prior-art §4). **Corrected during implementation:** `port_conflicts_for()` is a global scan with no concept of which install a container belongs to, and preflight re-runs on every resume — so a `ready` timeout left the three `restart: unless-stopped` containers up and the next Install was refused and told to remove the containers of the install it was finishing. The conflict list is filtered by compose project, the same ownership proof `guard` uses; an unreadable owner is not filtered out |
+| port conflict (`foreign_port_conflicts(spec, project)` + socket probe) | a listener on the entry's ports that is not this install's own container | refuse — before the build, not after | grafted-in; the socket half only ever WARNS — the refusal comes solely from `foreign_port_conflicts()`. It is a connect probe (`platform.probe_tcp()`; only a completed connection counts), not a bind, so `AddrInUse` never arises: a refusal, a timeout and a permission error all come back `unknown`, because Hyper-V/WSL reserved ranges and permission errors would otherwise hard-refuse a server that would have started (rust-prior-art §4). **Corrected 2026-08-24** — this row said the socket half refuses on `AddrInUse`. **Corrected during implementation:** `port_conflicts_for()` is a global scan with no concept of which install a container belongs to, and preflight re-runs on every resume — so a `ready` timeout left the three `restart: unless-stopped` containers up and the next Install was refused and told to remove the containers of the install it was finishing. The conflict list is filtered by compose project, the same ownership proof `guard` uses; an unreadable owner is not filtered out |
 
 Every numeric floor above is **inherited, none is measured by this project**. That is stated here
 so the first live gates know their job: record the actual peak RAM, the actual data-root growth,
@@ -506,9 +521,13 @@ this table's provenance column with measurements.
 
 There is no git check: the engine clones through `git.ContainerGit`, whose docstring already makes
 the argument — macOS and Windows require Docker Desktop anyway, so a containerized git removes the
-second prerequisite instead of adding one. It also deletes three of §4's Windows traps at the root:
-no `git.exe` discovery, no `core.autocrlf` (Linux git in the container never writes CRLF), no
-Git-for-Windows curl. The HTTP/2 large-clone reset may still exist in the container image's own
+second prerequisite instead of adding one. It also deletes two of §4's Windows traps at the root:
+no `git.exe` discovery and no Git-for-Windows curl. **The third, `core.autocrlf`, is not deleted,
+and the code never relied on it being:** every containerized git call carries
+`-c core.autocrlf=false -c core.eol=lf`, and the clone persists both through `--config`, because
+the wrapper form writes nothing into `.git/config` and the next `git reset --hard` re-checks-out
+CRLF if a host git ever touches the tree (`git.py`, `_LINE_ENDING_ARGS`/`_LINE_ENDING_CONFIG`).
+Corrected 2026-08-24. The HTTP/2 large-clone reset may still exist in the container image's own
 curl, so the clone passes `-c http.version=HTTP/1.1` anyway — one flag of insurance, checked at the
 gate. **Both halves of that sentence were written as if built and neither was, until 2026-08-24.** The flag now exists, in the wrapper form on every network invocation and the `--config` form persisted into the clone, so the update path cannot renegotiate HTTP/2 on a repository that already cost 2.4 GB (`git.py`, pinned by a test). `http.postBuffer=524288000` was in the measured Windows fix and is deliberately NOT added: the two were changed together, nothing separates which one worked, and it is a widely-copied setting with a real cost and no mechanism connecting it to this failure. **Clones still do NOT retry** — prior art retried 3x for transport resets and this project does not; that is unbuilt work, not a described behaviour.
 
@@ -580,12 +599,15 @@ only the refusals differ, because an installer and a repair answer different que
 - probe says `imported`, or `populated` with `complete` → skip. A resume must not touch a finished
   import, and `populated` alone is not failure — mod-city-bots seeds 400 accounts through the same
   one-shot (measured above);
-- probe says `unreadable` → refuse; an unanswerable database is not an empty one.
+- probe says `unreadable` → refuse; an unanswerable database is not an empty one;
+- probe says `populated` but NOT `complete` → refuse. Rows nothing here wrote belong to somebody,
+  and importing over them would overwrite them. This is the fifth branch `native.py::_import()`
+  has and this list did not, until 2026-08-24.
 
 After the run, the same post-check as `repair_import()`: `imported`, or `populated` with
 `complete`. Cancel during this stage terminates the compose client while the one-shot keeps
 running in the daemon; that is fine *because* the resume re-probes — whatever the importer managed
-lands in one of the four branches above.
+lands in one of the five branches above.
 
 Cancel generally: checked between stages and inside every streamed loop; abandoning
 `runner.stream()` terminates the child (compose client) and BuildKit keeps finishing its current
@@ -618,7 +640,8 @@ CR-strip and UTF-16 traps apply only if that ever changes.
 
 ### `keep_awake()` — what it can honestly promise
 
-A context manager in `platform.py`, held from `build` through `ready`. macOS: spawn
+A context manager in `platform.py`, held from `clone-core` through `ready` — `native.py` enters it
+around the stage loop, which starts after `preflight` and `guard` have already run. macOS: spawn
 `caffeinate -dims -w <our pid>` — a child that dies with us, no cleanup path to forget. Windows:
 `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` via ctypes, set and cleared on the
 same thread because the assertion is per-thread — which means the worker thread running the
