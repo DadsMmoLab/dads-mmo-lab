@@ -100,24 +100,20 @@ booting a plausible-looking wrong server.
 DEFAULT_WORLD_ENV: Mapping[str, str] = {
     "AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES": "1",
     "AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN": "1",
-    # The bot population, which the Linux installer script configures and this
-    # engine did not. Found 2026-08-24 by the diff the design asked for and
-    # nobody had run: `docker compose config` on the proven yulon-ubuntu
-    # install against what `render()` produces. Without these a native install
-    # silently takes mod-playerbots' own defaults, so "installed on macOS" and
-    # "installed on Linux" would give the same user two different worlds.
-    #
-    # The values are the proven install's, read off it rather than chosen.
-    # Every other environment difference that diff turned up — `AC_CCACHE`,
-    # `CTYPE`, `CSCRIPTS`, `DATAPATH`, `USER_CONF_PATH` and the three empty
-    # `AC_RESTARTER_*` — is deliberately NOT carried over: they are build-time
-    # settings upstream's compose file keeps on the runtime services too, and
-    # the image's `entrypoint.sh` reads none of them (it uses `CONF_DIR`,
-    # `LOGS_DIR` and `ACORE_COMPONENT`, and the image sets `ACORE_COMPONENT`
-    # itself). Checked in the image rather than assumed.
-    "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS": "1600",
-    "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS": "2000",
 }
+"""Settings that are structural rather than tunable: without them the stack is wrong, not merely
+different. Anything a person might reasonably want a different value for belongs in
+`catalog.json`'s `install.native.world_env` instead — the playerbot population started here and
+was moved there after an adversarial review pointed out that a per-game number in a module
+constant is exactly what style-guide §3 forbids, and that one machine's 2000 bots is not a
+default for every machine.
+
+The environment differences the compose diff turned up and this deliberately does NOT carry —
+`AC_CCACHE`, `CTYPE`, `CSCRIPTS`, `DATAPATH`, `USER_CONF_PATH` and the three empty
+`AC_RESTARTER_*` — are build-time settings upstream's compose file keeps on the runtime services
+too. The image's `entrypoint.sh` reads none of them: it uses `CONF_DIR`, `LOGS_DIR` and
+`ACORE_COMPONENT`, and the image sets `ACORE_COMPONENT` itself. Checked in the image, not assumed.
+"""
 
 # Characters that cannot be spliced into the templates safely, whatever the
 # escaping. A scalar here lands in TWO contexts at once — a bare YAML value
@@ -295,7 +291,10 @@ def render(
     _refuse_unsafe(password, "the database root password")
     tag = image_tag(server_dir, platform_id=platform_id)
     project = project_name(entry.id, server_dir, platform_id=platform_id)
-    env = dict(world_env) if world_env is not None else dict(DEFAULT_WORLD_ENV)
+    # The entry's own settings layered over the structural defaults, and an
+    # explicit `world_env` overriding both — that is the seam a settings
+    # surface arrives through.
+    env = dict(world_env) if world_env is not None else {**DEFAULT_WORLD_ENV, **native.world_env}
     base = _fill(
         _read_template(templates / "base.yml.tmpl"),
         {

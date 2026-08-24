@@ -369,3 +369,28 @@ def test_a_large_clone_is_pinned_to_http_1_1_on_the_wire_and_in_the_repo(
     assert argv[argv.index("--config") :].count("http.version=HTTP/1.1") == 1
     # The wrapper form comes before the subcommand, the persisted form after.
     assert argv.index("clone") < argv.index("--config")
+
+
+def test_the_sparse_clone_path_carries_the_http_policy_too(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """Every network git operation gets HTTP/1.1, including the one built by hand.
+
+    `_sparse_clone()` does not run `git clone`; it inits a repository, writes
+    its config line by line and pulls. So it inherits nothing from
+    `clone --config`, and when the HTTP/1.1 flag landed it persisted the
+    line-ending policy and not the transport one — leaving the sparse path with
+    exactly the HTTP/2 failure the flag exists to prevent. Found by adversarial
+    review, not by this suite, which had only ever checked the two clone paths.
+    """
+    git.RunnerGit().clone(
+        git.CloneSpec(
+            url="https://example/guides.git",
+            dest=tmp_path / "guides",
+            sparse_path="guides/wow-wotlk",
+        )
+    )
+    assert ["git", "config", "http.version", "HTTP/1.1"] in seen
+    pull = next(argv for argv in seen if "pull" in argv)
+    assert "http.version=HTTP/1.1" in pull
+    assert pull.index("-c") < pull.index("pull")

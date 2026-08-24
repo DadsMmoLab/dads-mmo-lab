@@ -266,11 +266,25 @@ class RunnerGit:
         _run_git(["git", "config", "core.sparseCheckout", "true"], cwd=dest)
         _run_git(["git", "config", "core.autocrlf", "false"], cwd=dest)
         _run_git(["git", "config", "core.eol", "lf"], cwd=dest)
+        # The transport policy, persisted here for the same reason the two
+        # above are: this path builds its repository by hand, so it inherits
+        # nothing from `clone --config`. It was missed when the HTTP/1.1 flag
+        # landed — this function persisted the line-ending policy and not the
+        # transport one, so a sparse clone kept exactly the HTTP/2 failure the
+        # flag exists to prevent (adversarial review, 2026-08-24).
+        _run_git(["git", "config", "http.version", "HTTP/1.1"], cwd=dest)
         (dest / ".git" / "info").mkdir(parents=True, exist_ok=True)
         (dest / ".git" / "info" / "sparse-checkout").write_text(
             spec.sparse_path.rstrip("/") + "/\n", encoding="utf-8", newline="\n"
         )
-        pull = ["git", "pull", *_pull_depth_args(spec.depth), "origin", spec.branch or "HEAD"]
+        pull = [
+            "git",
+            *_HTTP_VERSION_ARGS,
+            "pull",
+            *_pull_depth_args(spec.depth),
+            "origin",
+            spec.branch or "HEAD",
+        ]
         _run_git(pull, cwd=dest)
 
     def _update(self, spec: CloneSpec) -> None:

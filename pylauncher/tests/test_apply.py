@@ -386,10 +386,20 @@ def test_runner_git_sparse_clone_sequence(monkeypatch: pytest.MonkeyPatch, tmp_p
         ["git", "config"],  # core.sparseCheckout
         ["git", "config"],  # core.autocrlf=false — or the checkout gets CRLF on Windows
         ["git", "config"],  # core.eol=lf
-        ["git", "pull"],
+        ["git", "config"],  # http.version=HTTP/1.1 — this path inherits no clone --config
+        ["git", "-c"],  # ...and the pull carries it too
     ]
+    assert seen[-1][:4] == ["git", "-c", "http.version=HTTP/1.1", "pull"]
     assert (dest / ".git" / "info" / "sparse-checkout").read_text(encoding="utf-8") == "guides/x/\n"
-    assert seen[-1] == ["git", "pull", "--depth=1", "origin", "HEAD"]
+    assert seen[-1] == [
+        "git",
+        "-c",
+        "http.version=HTTP/1.1",
+        "pull",
+        "--depth=1",
+        "origin",
+        "HEAD",
+    ]
 
 
 def test_remove_of_a_shared_dir_deploy_leaves_other_scripts_alone(tmp_path: Path) -> None:

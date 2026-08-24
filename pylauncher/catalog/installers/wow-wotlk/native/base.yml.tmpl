@@ -45,12 +45,19 @@ services:
       - db-data:/var/lib/mysql
     restart: unless-stopped
     healthcheck:
-      # `--protocol=TCP`, which upstream's copy of this healthcheck does not
-      # have. Without it the probe rides the unix socket, so "healthy" means
-      # "a local client can log in" — while every consumer of this condition
-      # (`ac-db-import`, the world and auth servers, the launcher's own
-      # maintenance path) reaches the database over TCP from another
-      # container. The gate should assert the thing the waiters need.
+      # Probes the way a CONSUMER does: over TCP, addressed by service name,
+      # from the compose network. Upstream's copy has no `-h` at all, so it
+      # rides the unix socket and "healthy" means only "a local client can log
+      # in" — while `ac-db-import`, both servers and the maintenance path all
+      # reach the database over TCP as `ac-database:3306`.
+      #
+      # The first version of this fix used `-h 127.0.0.1`, which an adversarial
+      # review (Codex, 2026-08-24) correctly called out as still the wrong
+      # interface: loopback inside the container is not the interface consumers
+      # arrive on, so the probe did not establish what the comment claimed. It
+      # is true that MySQL's default bind is `*`, which makes the two ready at
+      # the same instant — but "the claim happens to hold" is not the same as
+      # "the probe proves it", and this one now proves it.
       #
       # This is NOT a reproduced fix. The install of 2026-08-24 died with
       # `Can't connect to MySQL server on 'ac-database:3306' (111)` 0.3 s after
@@ -63,7 +70,7 @@ services:
       # spelling goes healthy in the same time as upstream's (17.1-18.2 s), so
       # it is a strictly stronger condition at no measured cost, which is the
       # only claim made for it here.
-      test: "/usr/bin/mysql -h 127.0.0.1 --protocol=TCP --user=root --password=$$MYSQL_ROOT_PASSWORD --execute \"SHOW DATABASES;\""
+      test: "/usr/bin/mysql -h ac-database --protocol=TCP --user=root --password=$$MYSQL_ROOT_PASSWORD --execute \"SHOW DATABASES;\""
       interval: 5s
       timeout: 10s
       retries: 40

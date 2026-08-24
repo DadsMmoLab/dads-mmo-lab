@@ -321,7 +321,11 @@ def test_the_database_healthcheck_asserts_the_thing_its_waiters_need(tmp_path: P
     plan = render(tmp_path / "wow")
     healthcheck = next(line for line in plan.base.splitlines() if line.strip().startswith("test:"))
     assert "--protocol=TCP" in healthcheck
-    assert "-h 127.0.0.1" in healthcheck
+    # By SERVICE NAME, not loopback: 127.0.0.1 inside the database container is
+    # not the interface consumers arrive on, so a probe against it does not
+    # establish what this test is for (adversarial review, 2026-08-24).
+    assert "-h ac-database" in healthcheck
+    assert "127.0.0.1" not in healthcheck
 
 
 def test_the_generated_stack_configures_the_bot_population(tmp_path: Path) -> None:
@@ -332,7 +336,20 @@ def test_the_generated_stack_configures_the_bot_population(tmp_path: Path) -> No
     Found by diffing `docker compose config` on the proven yulon-ubuntu install
     against what `render()` produces — the check `phase6-decisions.md` asks for
     and which had never been run.
+
+    The numbers live in `catalog.json`, not in a constant in this package. They
+    started in `DEFAULT_WORLD_ENV` and an adversarial review moved them: a
+    per-game value in a module constant is what style-guide §3 forbids, and one
+    machine's 2000 bots is not a default for every machine — a preflight-passing
+    laptop can install successfully and then be unusable. Making them data is
+    what lets a capacity-aware default, or a user setting, exist later.
     """
     plan = render(tmp_path / "wow")
     assert 'AC_AI_PLAYERBOT_MIN_RANDOM_BOTS: "1600"' in plan.override
     assert 'AC_AI_PLAYERBOT_MAX_RANDOM_BOTS: "2000"' in plan.override
+
+    # Data, not code — and the structural flags stay behind in the constant.
+    assert "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS" not in composegen.DEFAULT_WORLD_ENV
+    assert ENTRY.install.native is not None
+    assert ENTRY.install.native.world_env["AC_AI_PLAYERBOT_MIN_RANDOM_BOTS"] == "1600"
+    assert 'AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES: "1"' in plan.override

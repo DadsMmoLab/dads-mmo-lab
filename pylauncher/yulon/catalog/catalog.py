@@ -79,6 +79,15 @@ class NativeInstall(_Strict):
         description="The checkout is 2.4 GB but the clone PEAKS near 3.7 GB.",
     )
     warn_server_dir_gb: float = Field(default=15.0, gt=0)
+    world_env: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Per-game runtime settings for the worldserver, merged over composegen's structural "
+            "defaults. Data rather than Python because these are facts about ONE game that a "
+            "person may reasonably want different: the playerbot population lives here, not in a "
+            "module constant (style-guide §3, and an adversarial review that caught it there)."
+        ),
+    )
 
     def floors_gb(self, *, same_volume: bool) -> tuple[float, float]:
         """(refuse, warn) free-space floors when both needs land on one volume.
