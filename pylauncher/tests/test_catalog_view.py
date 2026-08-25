@@ -30,10 +30,18 @@ CATALOG = load_catalog()
 class _FakeInstaller(Installer):
     """An `Installer` whose run() is a canned stream; preflight is a no-op."""
 
-    def __init__(self, entry: CatalogEntry, lines: list[str], *, installs: bool = True) -> None:
+    def __init__(
+        self,
+        entry: CatalogEntry,
+        lines: list[str],
+        *,
+        installs: bool = True,
+        compose_name: str = "docker-compose.yml",
+    ) -> None:
         super().__init__(entry, docker_check=lambda: True)
         self.lines = lines
         self.installs = installs
+        self.compose_name = compose_name
         self.ran_with: list[InstallOptions] = []
         self.cancels: list[threading.Event | None] = []
         self.asks: list[object] = []
@@ -54,14 +62,16 @@ class _FakeInstaller(Installer):
         self.cancels.append(cancel)
         self.asks.append(ask)
         yield from self.lines
-        # A real install leaves a `docker-compose.yml` in the server dir: it
-        # comes out of the clone, and it is the one artefact every install of
-        # every game has. `installs=False` models the OTHER way these scripts
-        # exit 0 — "Keeping existing install — exiting." — which the view must
-        # not read as a finished install.
+        # A real install leaves a compose file in the server dir, and that is the
+        # one artefact every install of every game has — but NOT always under the
+        # same name, which is what `compose_name` exists to model: the WotLK and
+        # Tortoise scripts write `docker-compose.yml`, the TBC and Vanilla ones
+        # write `compose.yml`. `installs=False` models the OTHER way these
+        # scripts exit 0 — "Keeping existing install — exiting." — which the view
+        # must not read as a finished install.
         if self.installs and opts.server_dir is not None:
             opts.server_dir.mkdir(parents=True, exist_ok=True)
-            (opts.server_dir / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+            (opts.server_dir / self.compose_name).write_text("services: {}\n", encoding="utf-8")
 
 
 class _CancellableInstaller(Installer):
@@ -194,6 +204,73 @@ def test_use_existing_registers_a_folder_that_holds_an_install(
     (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
     assert view.attach_existing(CATALOG.get("wow-wotlk")) is True
     assert got == [("wow-wotlk", tmp_path, None)]
+
+
+@pytest.mark.parametrize("compose_name", ["compose.yml", "compose.yaml", "docker-compose.yaml"])
+def test_use_existing_accepts_every_name_compose_itself_accepts(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, compose_name: str
+) -> None:
+    """A server the app cannot see is a server the app cannot manage.
+
+    The TBC and Vanilla installers write `compose.yml`; only WotLK and Tortoise
+    write `docker-compose.yml`. The view checked for the latter alone, so a TBC
+    install could finish a multi-hour compile and "Use existing…" would still
+    say there was nothing there — measured 2026-08-25. Docker Compose has
+    accepted all four spellings for years and picks whichever it finds, so the
+    app has no business being stricter than the tool it drives.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        runner, "run", lambda cmd, cwd=None, timeout=None: _completed()  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)  # type: ignore[attr-defined]
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        pick_dir=lambda *_: tmp_path,
+        home=tmp_path,
+    )
+    got: list[tuple[str, object, object]] = []
+    view.installed.connect(lambda g, s, c: got.append((g, s, c)))
+    (tmp_path / compose_name).write_text("services: {}\n", encoding="utf-8")
+    assert view.attach_existing(CATALOG.get("wow-wotlk")) is True
+    assert got == [("wow-wotlk", tmp_path, None)]
+
+
+def test_an_install_that_wrote_compose_yml_is_remembered(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same blindness on the other path, and this one costs a whole install.
+
+    `start_install()` refuses to remember a folder with no compose file, which
+    is right — exit 0 is not proof of an install. But it asked only for
+    `docker-compose.yml`, so a successful TBC or Vanilla install was discarded
+    at the finish line and the user was told there was nothing installed.
+    """
+    ran: list[list[str]] = []
+    monkeypatch.setattr(
+        runner, "run", lambda cmd, cwd=None, timeout=None: ran.append(cmd) or _completed()  # type: ignore[func-returns-value]
+    )
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, ["done"], compose_name="compose.yml"),
+        panel,
+        pick_dir=lambda *_: tmp_path,
+        home=tmp_path,
+        platform_id=lambda: "linux",
+    )
+    events: list[str] = []
+    view.install_finished.connect(lambda g, ok, m: events.append(f"finished:{ok}"))
+    view.installed.connect(lambda g, s, c: events.append("installed"))
+
+    assert view.start_install(CATALOG.get("wow-wotlk")) is True
+    _wait(panel)
+    assert "installed" in events, f"a finished install was discarded: {events}"
+    assert "finished:True" in events
 
 
 def test_use_existing_does_not_pin_the_compose_project(

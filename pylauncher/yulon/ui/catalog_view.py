@@ -33,6 +33,7 @@ from yulon.catalog.installer import (
     InstallEngine,
     InstallOptions,
     cancelled_install_message,
+    compose_file,
     platform_names,
     unsupported_platform_message,
 )
@@ -205,7 +206,9 @@ class CatalogView(QWidget):
         Installs made by the shell scripts or the CLI harness (or before the app
         was reinstalled) never pass through `start_install()`, so this is how
         they get a controller tab. The only check is the one thing every install
-        has: a `docker-compose.yml` in the chosen folder.
+        has: a compose file in the chosen folder, under any of the names Compose
+        itself accepts (`installer.COMPOSE_FILENAMES`) - the TBC and Vanilla
+        scripts write `compose.yml`, not `docker-compose.yml`.
         """
         server_dir = self._pick_dir(
             self,
@@ -214,11 +217,12 @@ class CatalogView(QWidget):
         )
         if server_dir is None:
             return False
-        if not (server_dir / "docker-compose.yml").is_file():
+        if compose_file(server_dir) is None:
             QMessageBox.warning(
                 self,
                 "Not a server folder",
-                f"{server_dir} has no docker-compose.yml — pick the folder the installer created.",
+                f"{server_dir} has no compose file (compose.yml or docker-compose.yml) — "
+                "pick the folder the installer created.",
             )
             return False
         client_dir: Path | None = None
@@ -332,7 +336,7 @@ class CatalogView(QWidget):
             QMessageBox.information(self, "Install cancelled", note)
             self.install_finished.emit(game_id, False, note)
             return
-        if ok and not (server_dir / "docker-compose.yml").is_file():
+        if ok and compose_file(server_dir) is None:
             # A clean exit is not proof of an install. The scripts exit 0 for
             # "Keeping existing install — exiting." too, which is what a user
             # gets by pressing Install a second time on a folder the previous
@@ -348,7 +352,8 @@ class CatalogView(QWidget):
             ok = False
             message = (
                 f"The installer exited without error, but {server_dir} has no "
-                "docker-compose.yml — so there is nothing installed there to remember. "
+                "compose file (compose.yml or docker-compose.yml) — so there is nothing "
+                "installed there to remember. "
                 "That is what the scripts do when they find an existing folder and are "
                 "told not to replace it: delete the folder and install again, or pick a "
                 "different one."

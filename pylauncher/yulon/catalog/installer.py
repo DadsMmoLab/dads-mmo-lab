@@ -46,6 +46,39 @@ logger = get_logger(__name__)
 
 # Where `catalog.json`'s install scripts resolve from (roadmap 6.0).
 DEFAULT_INSTALLERS_ROOT = resources.installers_dir()
+
+# Every filename Docker Compose accepts for a project's compose file, in its own
+# precedence order.
+#
+# Not ours to shorten: the app only ever looked for `docker-compose.yml`, which
+# is what the WotLK and Tortoise scripts write - while the TBC and Vanilla ones
+# write `compose.yml`. The result was that a finished install of those two was
+# invisible to "Use existing..." AND was thrown away by the remember check at
+# the end of a multi-hour install, both reporting that nothing was installed.
+# Being stricter than the tool we drive buys nothing and costs exactly that.
+COMPOSE_FILENAMES: tuple[str, ...] = (
+    "compose.yaml",
+    "compose.yml",
+    "docker-compose.yaml",
+    "docker-compose.yml",
+)
+
+
+def compose_file(server_dir: Path) -> Path | None:
+    """The folder's compose file, or None if it holds no install.
+
+    Answers what Compose itself would answer, in the same order, so a folder
+    holding two spellings resolves to the one the daemon will actually load.
+    `is_file()` rather than `exists()`: a directory named `compose.yml` is not
+    an install.
+    """
+    for name in COMPOSE_FILENAMES:
+        candidate = server_dir / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 # How many of the script's last output lines a failure message carries (roadmap 6.1).
 _ERROR_TAIL_LINES = 12
 # What the scripts see as their terminal when the app was not started from one.
@@ -316,7 +349,7 @@ def cancelled_install_message(entry_name: str, server_dir: Path) -> str:
         "that is deliberate, and the finished pieces are what make a second attempt much "
         "faster, so do not clear Docker's build cache to tidy up."
     )
-    if (server_dir / "docker-compose.yml").is_file():
+    if compose_file(server_dir) is not None:
         return (
             f"{lead} The source is there. If the build had already finished, the server may "
             f'be built and even running: press "Use existing…", choose '
@@ -326,7 +359,8 @@ def cancelled_install_message(entry_name: str, server_dir: Path) -> str:
             f"so it exits having done nothing. Delete {server_dir} first in that case."
         )
     return (
-        f"{lead} The installer had not got as far as writing a docker-compose.yml, so there "
+        f"{lead} The installer had not got as far as writing a compose file "
+        f"(compose.yml or docker-compose.yml), so there "
         "is nothing there for the app to manage and nothing to resume. Pressing Install again "
         f"will not pick up where it stopped — delete {server_dir} if it still exists, then "
         "start over."

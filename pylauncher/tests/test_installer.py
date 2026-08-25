@@ -745,6 +745,31 @@ SUDO_BANNER_CLAIMS: dict[str, str] = {
 }
 
 
+def test_compose_file_finds_every_name_and_prefers_composes_own_order(tmp_path: Path) -> None:
+    """`compose_file()` answers what Docker Compose would answer.
+
+    Order matters and is not ours to invent: Compose reads `compose.yaml` first
+    and falls back through `compose.yml`, `docker-compose.yaml`,
+    `docker-compose.yml`. A folder holding two of them is not hypothetical - a
+    script-installed server that the native engine later writes into would have
+    exactly that - and answering with the one Compose ignores would have the app
+    reading a file the daemon never loads.
+    """
+    assert installer_module.compose_file(tmp_path) is None
+
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    assert installer_module.compose_file(tmp_path) == tmp_path / "docker-compose.yml"
+
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    assert installer_module.compose_file(tmp_path) == tmp_path / "compose.yaml"
+
+
+def test_compose_file_ignores_a_directory_of_that_name(tmp_path: Path) -> None:
+    """`is_file()`, not `exists()` - a directory called `compose.yml` is not an install."""
+    (tmp_path / "compose.yml").mkdir()
+    assert installer_module.compose_file(tmp_path) is None
+
+
 def _sudo_banner_bullets(text: str) -> list[str]:
     """The bullet lines between the banner header and the password prompt."""
     begin = text.index("This installer needs sudo access for")
