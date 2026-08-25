@@ -47,6 +47,82 @@ def render(server_dir: Path) -> composegen.ComposePlan:
     )
 
 
+def _services_with_user_key(base: str) -> set[str]:
+    """Which services carry a service-level `user:`, by indentation.
+
+    Asserted structurally rather than by counting the string: a `user:` that has
+    drifted inside `build:` or `environment:` would satisfy a substring count
+    while doing nothing, and the point of the key is which container it applies
+    to.
+    """
+    services: set[str] = set()
+    service = None
+    for raw in base.split("\n"):
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        if indent == 2 and raw.rstrip().endswith(":"):
+            service = raw.strip()[:-1]
+        elif indent == 4 and service and raw.strip().startswith("user:"):
+            services.add(service)
+    return services
+
+
+WRITES_TO_BOUND_ETC = {"ac-db-import", "ac-authserver", "ac-worldserver"}
+
+
+def test_windows_runs_the_env_dist_writers_as_root(tmp_path: Path) -> None:
+    """Without this, the native Windows install cannot finish.
+
+    Docker Desktop mounts a Windows drive into the WSL2 VM over 9p/drvfs with
+    `uid=0;gid=0` and mode 0755, and the images run as `acore` (uid 1000). Every
+    container that must write the bound-out `env/dist` is refused, and
+    `ac-db-import` dies with "cp: cannot create regular file ...: Permission
+    denied" on files whose Windows ACLs give the user full control. Measured on
+    a clean Windows 11 box (2026-08-25): the identical import exits 1 without
+    this key and 0 with it.
+
+    Exactly the three services that mount `env/dist/etc` - a `user:` on the
+    database or the client-data init would be scope nobody asked for.
+    """
+    plan = composegen.render(
+        ENTRY, tmp_path, templates_root=TEMPLATES, platform_id=lambda: "windows"
+    )
+    assert _services_with_user_key(plan.base) == WRITES_TO_BOUND_ETC
+    for service in WRITES_TO_BOUND_ETC:
+        assert f"{service}:" in plan.base
+    assert 'user: "0:0"' in plan.base
+
+
+@pytest.mark.parametrize("platform_id", ["linux", "macos"])
+def test_only_windows_gets_the_root_user(tmp_path: Path, platform_id: str) -> None:
+    """Everywhere else the key would cost more than it buys.
+
+    On Linux, running as root makes every file the container creates root-owned
+    ON THE HOST - and `env/dist/etc` is bound out precisely so the module system
+    and the user can edit `worldserver.conf` and every module conf. Windows pays
+    nothing for it because 9p maps ownership back to the Windows account
+    whatever uid wrote the file, which is why this is gated rather than global.
+    """
+    plan = composegen.render(
+        ENTRY, tmp_path, templates_root=TEMPLATES, platform_id=lambda: platform_id
+    )
+    assert _services_with_user_key(plan.base) == set()
+    assert "0:0" not in plan.base
+
+
+def test_the_container_user_line_is_explained_where_it_is_absent(tmp_path: Path) -> None:
+    """A line that renders to nothing teaches the next reader nothing.
+
+    On the platforms that do not get the key, the template still emits a comment
+    pointing at the function that decided - otherwise the only trace of a real,
+    measured platform difference is an absence, and absences do not survive
+    refactors.
+    """
+    plan = composegen.render(ENTRY, tmp_path, templates_root=TEMPLATES, platform_id=lambda: "linux")
+    assert plan.base.count("# user: left to the image") == len(WRITES_TO_BOUND_ETC)
+
+
 def test_ports_appear_in_exactly_one_file(tmp_path: Path) -> None:
     """`ports:` lives in the base file and NOWHERE else.
 

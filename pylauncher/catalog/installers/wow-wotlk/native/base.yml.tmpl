@@ -130,6 +130,7 @@ services:
       # import that never heard of acore_playerbots leaves a worldserver that
       # cannot start its bots.
       AC_PLAYERBOTS_DATABASE_INFO: "ac-database;3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_playerbots"
+    {{CONTAINER_USER}}
     volumes:
       - ./env/dist/etc:/azerothcore/env/dist/etc
       - ./env/dist/logs:/azerothcore/env/dist/logs
@@ -212,6 +213,7 @@ services:
       AC_LOGS_DIR: "/azerothcore/env/dist/logs"
       AC_TEMP_DIR: "/azerothcore/env/dist/temp"
       AC_LOGIN_DATABASE_INFO: "ac-database;3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_auth"
+    {{CONTAINER_USER}}
     volumes:
       - ./env/dist/etc:/azerothcore/env/dist/etc
       - ./env/dist/logs:/azerothcore/env/dist/logs
@@ -259,6 +261,7 @@ services:
       # CONCATENATES ports: across files — never add a second entry for this
       # port anywhere else.
       - "${DOCKER_SOAP_EXTERNAL_PORT:-127.0.0.1:{{SOAP_PORT}}}:7878"
+    {{CONTAINER_USER}}
     volumes:
       # env/dist/etc must be bound out to the host: it is where the module
       # system reads and writes worldserver.conf and every module conf.
