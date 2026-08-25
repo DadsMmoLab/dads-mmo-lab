@@ -49,15 +49,25 @@ libwayland-server.so.0
 libxcb.so.1
 '
 
-# Qt's GTK platform-theme plugin, and only that one, is excluded from the scan.
+# NOTHING is excluded from the scan.
 #
-# It pulls the entire GTK stack (libgtk-3, libgdk-3, cairo, pango, atk,
-# gdk-pixbuf, harfbuzz) and Qt DEGRADES PAST it - a missing theme integration
-# costs the native file dialog's GTK look, not the application. Putting nine GTK
-# sonames on HOST_PROVIDED would be claiming every supported distro ships GTK,
-# which is the kind of promise this file exists to stop making. Excluding one
-# optional plugin is the honest version of the same decision.
-EXCLUDE_RE='platformthemes/libqgtk3\.so$'
+# An earlier version skipped Qt's GTK platform-theme plugin, on the assumption
+# that libqgtk3.so drags in a GTK stack the bundle would not carry. Measured on
+# the real ubuntu-22.04 artifact instead of assumed: PyInstaller bundles the
+# whole stack - libgtk-3, libgdk-3, cairo, pango, harfbuzz, atk-bridge - so the
+# plugin resolves against nothing but the bundle itself. Turning the exclusion
+# off takes the scan from 253 objects to 254 and it still passes.
+#
+# The exclusion also did not work the way it read. It was written as a regex and
+# spliced into a `case` pattern, which takes GLOBS; it matched only because the
+# trailing `$*` expanded to empty in that exact invocation, so adding any
+# argument after the `sh -c` script would have silently switched it off. A gate
+# that quietly stops checking something is the defect this file's own header
+# describes, so the honest fix is to delete it rather than repair it.
+#
+# If some future PySide6 stops bundling GTK, this gate goes red naming the
+# missing sonames, and that is the right moment to decide - with the failure in
+# hand rather than an exception written in advance.
 
 if [ ! -d "$BUNDLE" ]; then
     echo "no such directory: $BUNDLE" >&2
@@ -91,7 +101,6 @@ output=$(docker run --rm \
         found=0
         for so in $(find /bundle -name "*.so" -o -name "*.so.*" -o -name "yulon" 2>/dev/null); do
             [ -f "$so" ] || continue
-            case "$so" in *'"$EXCLUDE_RE"'*) continue ;; esac
             found=$((found + 1))
             LD_LIBRARY_PATH=/bundle/yulon/_internal ldd "$so" 2>&1 \
                 | sed -n -e "s/^[[:space:]]*\([^ ]*\) => not found.*/MISSING \1/p" \

@@ -36,6 +36,19 @@ jobs:
           # on Debian 12 or RHEL 9. Building on the OLDEST supported runner is
           # what makes the artifact portable; moving this to a newer image
           # silently drops every distro below it.
+          #
+          # THIS LABEL HAS A DATED EXPIRY. actions/runner-images#14254: the
+          # ubuntu-22.04 images begin deprecation 2026-09-17 and are fully
+          # unsupported 2027-04-17, with brownouts (jobs failed on purpose) on
+          # 23 and 30 March and 6 and 13 April 2027. Every replacement GitHub
+          # offers - ubuntu-24.04, ubuntu-26.04, ubuntu-latest - reintroduces
+          # the exact defect above, because none of them is glibc 2.35.
+          #
+          # So the replacement is not another runner label. It is to stop
+          # depending on the runner's OS at all: build inside a pinned
+          # `container: ubuntu:22.04` (or a manylinux base) on whatever host
+          # runner exists that day, which makes the glibc floor a thing this
+          # repo chooses rather than a thing GitHub retires.
           - os: ubuntu-22.04
             artifact: AppImage
           - os: windows-latest
@@ -61,7 +74,14 @@ jobs:
       # byte-identical to the ones already published.
       - name: Name the artifacts after a ref that can be a filename
         shell: bash
-        run: echo "YULON_REF=${GITHUB_REF_NAME//\//-}" >> "$GITHUB_ENV"
+        run: |
+          # Loud rather than empty. GitHub's bash wrapper runs with -eo pipefail
+          # but NOT -u, so an unset ref would expand to nothing and quietly
+          # publish "Yulon--x86_64.AppImage". Unreachable under the two triggers
+          # this workflow has today; the guard is for the third one somebody
+          # adds later.
+          : "${GITHUB_REF_NAME:?the runner set no ref name - refusing to name artifacts after nothing}"
+          echo "YULON_REF=${GITHUB_REF_NAME//\//-}" >> "$GITHUB_ENV"
 
       - uses: actions/setup-python@v5
         with:
