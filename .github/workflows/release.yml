@@ -47,6 +47,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # GITHUB_REF_NAME is the TAG on a release run and the BRANCH on a manual
+      # one, and it goes straight into the artifact filename. Every branch here
+      # is `fix/...`, `ci/...`, `feat/...`, so on workflow_dispatch that name
+      # carries a path separator and packaging writes into a directory that does
+      # not exist. Measured on all three runners: the build succeeded and then
+      # "Could not create destination file", "hdiutil: create failed", "the path
+      # ...\\release\\Yulon-ci ... does not exist". The dispatch trigger exists so
+      # the matrix can be proven without publishing, and it could not produce a
+      # single artifact.
+      #
+      # A no-op on a v* tag - tags carry no slash - so released filenames are
+      # byte-identical to the ones already published.
+      - name: Name the artifacts after a ref that can be a filename
+        shell: bash
+        run: echo "YULON_REF=${GITHUB_REF_NAME//\//-}" >> "$GITHUB_ENV"
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -158,7 +174,7 @@ jobs:
           cp "$APPDIR/yulon.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/yulon.png"
           curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool
-          ARCH=x86_64 ./appimagetool "$APPDIR" "Yulon-${GITHUB_REF_NAME}-x86_64.AppImage"
+          ARCH=x86_64 ./appimagetool "$APPDIR" "Yulon-${YULON_REF}-x86_64.AppImage"
           mkdir -p release && mv Yulon-*.AppImage release/
 
           # A PLAIN TARBALL BESIDE THE APPIMAGE, because an AppImage cannot run
@@ -174,7 +190,7 @@ jobs:
           #
           # So the honest answer is a second artifact rather than a cleverer
           # first one: untar it and run ./yulon.
-          tar -czf "release/Yulon-${GITHUB_REF_NAME}-x86_64.tar.gz" -C dist yulon
+          tar -czf "release/Yulon-${YULON_REF}-x86_64.tar.gz" -C dist yulon
 
       # -------------------------------------------------------- Windows
       - name: Package Windows zip
@@ -182,7 +198,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force release | Out-Null
-          Compress-Archive -Path dist/yulon/* -DestinationPath "release/Yulon-$env:GITHUB_REF_NAME-windows-x64.zip"
+          Compress-Archive -Path dist/yulon/* -DestinationPath "release/Yulon-$env:YULON_REF-windows-x64.zip"
 
       # ---------------------------------------------------------- macOS
       - name: Package dmg
@@ -193,7 +209,7 @@ jobs:
           mkdir -p release dmgroot
           cp -R dist/Yulon.app dmgroot/
           ln -s /Applications dmgroot/Applications
-          hdiutil create -volname "Yu'lon" -srcfolder dmgroot -ov -format UDZO "release/Yulon-${GITHUB_REF_NAME}-macos.dmg"
+          hdiutil create -volname "Yu'lon" -srcfolder dmgroot -ov -format UDZO "release/Yulon-${YULON_REF}-macos.dmg"
 
       - uses: actions/upload-artifact@v4
         with:
