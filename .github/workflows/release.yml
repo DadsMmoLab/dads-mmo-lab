@@ -45,6 +45,23 @@ jobs:
 
       - run: pip install -r requirements.txt pyinstaller
 
+      # PYINSTALLER BUNDLES WHAT IT FINDS ON THE BUILDER, so a library missing
+      # from the runner is a library missing from the artifact. Qt 6.5+ needs
+      # libxcb-cursor0 to load its `xcb` platform plugin, ubuntu-latest does not
+      # ship it, and the v0.6.5 AppImage therefore dumped core on every X11
+      # desktop with:
+      #
+      #   qt.qpa.plugin: From 6.5.0, xcb-cursor0 or libxcb-cursor0 is needed to
+      #   load the Qt xcb platform plugin ... This application failed to start
+      #
+      # Ubuntu's own desktop defaults to Wayland, which is why it went unnoticed.
+      # Measured 2026-08-24: same commit, 6 bundled libxcb* on the runner vs 14
+      # on a machine that had the package - i.e. the artifact was not
+      # reproducible either.
+      - name: Qt runtime libraries the bundle must carry
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libxcb-cursor0
+
       - name: Build with PyInstaller
         run: pyinstaller build/pylauncher.spec --noconfirm --clean
 
@@ -89,6 +106,21 @@ jobs:
           chmod +x appimagetool
           ARCH=x86_64 ./appimagetool "$APPDIR" "Yulon-${GITHUB_REF_NAME}-x86_64.AppImage"
           mkdir -p release && mv Yulon-*.AppImage release/
+
+          # A PLAIN TARBALL BESIDE THE APPIMAGE, because an AppImage cannot run
+          # without FUSE and there is no packaging trick that removes that.
+          #
+          # A statically linked runtime was tried first and does NOT fix it,
+          # measured on a clean Arch box 2026-08-25: static linking removes the
+          # libfuse LIBRARY dependency, but mounting still shells out to the
+          # `fusermount3` setuid helper, so the artifact died exactly as before
+          # with "No suitable fusermount binary found on the $PATH". Arch ships
+          # neither fuse2 nor fuse3 by default; Fedora is fine only because it
+          # ships fuse3, which is luck rather than a contract.
+          #
+          # So the honest answer is a second artifact rather than a cleverer
+          # first one: untar it and run ./yulon.
+          tar -czf "release/Yulon-${GITHUB_REF_NAME}-x86_64.tar.gz" -C dist yulon
 
       # -------------------------------------------------------- Windows
       - name: Package Windows zip
