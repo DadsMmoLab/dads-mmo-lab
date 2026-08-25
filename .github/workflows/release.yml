@@ -76,10 +76,39 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libxcb-cursor0 libxkbcommon-x11-0
+          # The four libxcb-* here were found by the bundle-closure check below,
+          # not by a user - they were the same defect as libxkbcommon-x11 and had
+          # simply not been hit yet, because Arch's Xfce happens to ship them.
+          # libqxcb.so needs all five, and any desktop missing one gets the same
+          # abort with the same misleading "xcb-cursor0" message.
+          sudo apt-get install -y -qq \
+            libxcb-cursor0 \
+            libxkbcommon-x11-0 \
+            libxcb-icccm4 \
+            libxcb-keysyms1 \
+            libxcb-shape0 \
+            libxcb-xkb1
 
       - name: Build with PyInstaller
         run: pyinstaller build/pylauncher.spec --noconfirm --clean
+
+      # The gate that closes this class instead of the instance.
+      #
+      # Two libraries have shipped missing and been found by USERS: libxcb-cursor0
+      # (#96) and libxkbcommon-x11 (v0.6.51, which aborted on launch on Arch).
+      # Neither could have been caught here by running the app, because THIS
+      # RUNNER HAS THOSE LIBRARIES - testing the artifact on the machine that
+      # built it is blind to exactly this defect. So the check resolves the
+      # bundle's own objects inside a container that has nothing, and fails on
+      # anything the artifact silently expects the user to provide.
+      #
+      # Verified against the real history before being added (2026-08-25): it
+      # fails on the shipped v0.6.51 tarball naming all five missing sonames,
+      # and passes on a build that carries them.
+      - name: The bundle must carry the libraries it needs
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: bash build/check-bundle-closure.sh dist
 
       # ---------------------------------------------------------- Linux
       - name: Package AppImage
