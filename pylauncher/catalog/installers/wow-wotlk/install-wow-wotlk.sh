@@ -135,6 +135,26 @@ ask_yes_no() {
     done
 }
 
+# Can this directory simply be cloned into as it stands?
+#
+# The failure DIRECTION is the whole point: this must fail closed. The obvious
+# spelling, `[ -n "$(ls -A "$1")" ]`, fails OPEN - `ls -A` prints nothing for a
+# directory it cannot read exactly as it does for an empty one, so a directory
+# holding someone's existing server would read as "empty" and be cloned over.
+# `find -maxdepth 0 -empty` prints the name only when the directory is really
+# empty, and prints nothing when it cannot look.
+#
+# The -w test is here because the branch this guard skips used to repair a
+# root-owned directory by removing it. Skipping the repair without checking
+# writability just moves the failure to `git clone`, which reports it as
+# "Permission denied" with no advice attached.
+dir_is_reusable() {
+    [ -d "$1" ] || return 1
+    [ -w "$1" ] || return 1
+    [ -n "$(find "$1" -maxdepth 0 -empty 2>/dev/null)" ] || return 1
+    return 0
+}
+
 press_enter() {
     echo ""
     echo -e "${WHITE}Press ENTER to continue...${NC}"
@@ -258,7 +278,7 @@ choose_install_dir() {
 
     # Reject dangerous / well-known system roots
     case "$SERVER_DIR" in
-        /|"$HOME"|/root|/tmp|/var|/etc|/usr|/boot|/proc|/sys|/dev)
+        /|"$HOME"|/home|/root|/tmp|/var|/etc|/usr|/boot|/proc|/sys|/dev|/media|/mnt|/opt|/srv)
             print_error "Cannot use '${SERVER_DIR}' as the install location."
             print_info "Choose a dedicated subdirectory (e.g. ${default_dir})."
             exit 1
@@ -1112,8 +1132,13 @@ install_server() {
         return 0
     fi
 
-    # Images not found — handle existing folder before cloning
-    if [ -d "$SERVER_DIR" ]; then
+    # Images not found — handle existing folder before cloning.
+    # An empty, writable folder is NOT an existing install: it is what the
+    # GUI's directory picker hands over, because that picker can only return a
+    # folder that already exists. Treating it as one made every first install
+    # through the GUI answer "n" to the prompt below and exit 0 having done
+    # nothing (live gate, clean Fedora 44, 2026-08-25).
+    if [ -d "$SERVER_DIR" ] && ! dir_is_reusable "$SERVER_DIR"; then
         print_warning "Existing folder found at $SERVER_DIR (no compiled images present)"
         if ask_yes_no "Remove it and start fresh?"; then
             docker compose -f "$SERVER_DIR/docker-compose.yml" down -v 2>/dev/null || true
@@ -1135,7 +1160,11 @@ install_server() {
         --branch=Playerbot \
         "$SERVER_DIR"
 
-    if [ ! -d "$SERVER_DIR" ]; then
+    # `.git`, not the directory itself. A clone that fails into a directory that
+    # ALREADY EXISTED leaves that directory behind, so testing for the directory
+    # could never fire once the guard above stopped removing it first - and the
+    # run carried on to report a network failure as "Compilation failed".
+    if [ ! -d "$SERVER_DIR/.git" ]; then
         print_error "Clone failed. Check your internet connection."
         exit 1
     fi

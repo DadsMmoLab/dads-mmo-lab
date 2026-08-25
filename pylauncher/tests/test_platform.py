@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import tempfile
 import threading
 from pathlib import Path
 
@@ -194,6 +195,17 @@ def test_the_windows_data_root_comes_from_docker_desktops_settings(
         ("/Users/pk/Library/Mobile Documents/com~apple~CloudDocs/wow", "iCloud Drive"),
         ("/Users/pk/Dropbox/wow", "cloud-synced"),
         ("/Users/pk/games/wow", ""),
+        ("/", "root of a filesystem"),
+        ("/etc", "system directory"),
+        ("/tmp", "system directory"),
+        # One "up" click from where the picker opens, and `--reinstall` would
+        # have run `sudo rm -rf /home` - every account on the machine.
+        ("/home", "system directory"),
+        ("/media", "system directory"),
+        ("/mnt", "system directory"),
+        # A folder UNDER a reserved one is fine - only the tree roots are
+        # refused, exactly as the scripts' `case` list does it.
+        ("/var/lib/wow", ""),
     ],
 )
 def test_server_dir_problem_names_the_folders_that_break_a_build(
@@ -329,3 +341,84 @@ def test_the_missing_cli_help_names_every_module_that_raises_it() -> None:
         f"the constant's docstring names {sorted(named)} but {sorted(raisers)} raise it; "
         f"missing {sorted(raisers - named)}, stale {sorted(named - raisers)}"
     )
+
+
+def test_the_home_directory_itself_is_refused_before_the_installer_sees_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The picker opens on home, so this is the path a click-through actually produces.
+
+    Live gate on clean Fedora 44 (2026-08-25): choosing `/home/pk` passed
+    `server_dir_problem()`, reached `install-wow-wotlk-fedora.sh`, and died on
+    its `case "$SERVER_DIR" in /|"$HOME"|...` branch - but only AFTER the user
+    had typed a sudo password into Yu'lon's own dialog and waited through
+    Docker discovery. The refusal has to happen at the picker or it costs the
+    user a password and a wait.
+    """
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    problem = platform.server_dir_problem(tmp_path)
+    assert problem is not None
+    assert "home folder itself" in problem
+    # The message must say what to do instead, not merely refuse - but it must
+    # NOT name a specific game's folder: `_reserved_dir_reason` has no entry to
+    # read one from, and naming WotLK's for all four catalog entries pointed a
+    # TBC install straight at an existing WotLK install (review finding).
+    assert "dedicated subfolder" in problem
+    assert "wow-server-playerbots" not in problem
+    # a dedicated subfolder of the same home is fine
+    assert platform.server_dir_problem(tmp_path / "wow-server-playerbots") is None
+
+
+def test_the_gui_refuses_every_directory_the_install_scripts_refuse() -> None:
+    """Pin the lists together; a rule only one side knows is a delayed refusal.
+
+    Read from the scripts rather than restated, because restating is how the two
+    drift: the scripts grew this `case` and the GUI never learned it, which is
+    the defect this test exists for.
+
+    All three WotLK scripts are checked, not just Fedora - they are separate
+    files that have already diverged elsewhere. `$HOME` and `/` are handled by
+    their own branches in `_reserved_dir_reason`, so they are expected to be
+    absent from the literal tuple. The GUI is allowed to be STRICTER than the
+    scripts (it also knows the Windows trees), so this is a subset assertion in
+    that direction rather than equality.
+    """
+    installers = Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk"
+    scripts = sorted(installers.glob("install-wow-wotlk*.sh"))
+    assert len(scripts) == 3, f"expected three WotLK installers, found {[s.name for s in scripts]}"
+    handled_elsewhere = {"/", "$HOME"}
+    for script in scripts:
+        rules = [
+            raw
+            for raw in script.read_text(encoding="utf-8").splitlines()
+            if raw.strip().startswith("/|") and raw.rstrip().endswith(")")
+        ]
+        # Explicit, so a reformat of the shell reports WHICH file stopped
+        # matching rather than raising StopIteration from a bare next().
+        assert len(rules) == 1, (
+            f"{script.name}: expected exactly one `case` line starting with '/|', found "
+            f"{len(rules)}. If the script was reformatted, update this test - do not delete it."
+        )
+        banned = {part.strip().strip('"') for part in rules[0].strip().rstrip(")").split("|")}
+        missing = banned - handled_elsewhere - set(platform._RESERVED_SERVER_DIRS)
+        assert not missing, f"{script.name} refuses {sorted(missing)} but the GUI does not"
+
+
+def test_a_symlink_onto_a_reserved_directory_is_refused_too() -> None:
+    """The scripts `realpath -m --` before their `case`; a lexical check cannot.
+
+    On Fedora Atomic `/home` is a symlink to `/var/home`, so a picker returning
+    `/home/pk` and a script seeing `/var/home/pk` disagree about whether the
+    path is the home folder - and the user pays for that disagreement with a
+    sudo password and a wait before the script refuses.
+    """
+    with tempfile.TemporaryDirectory() as raw:
+        link = Path(raw) / "shortcut"
+        try:
+            link.symlink_to("/tmp", target_is_directory=True)
+        except (OSError, NotImplementedError):  # pragma: no cover - needs privilege on Windows
+            pytest.skip("cannot create a directory symlink on this machine")
+        if link.resolve() == link:  # pragma: no cover - resolution disabled
+            pytest.skip("symlinks are not resolved on this filesystem")
+        problem = platform.server_dir_problem(link)
+        assert problem is not None and "system directory" in problem
