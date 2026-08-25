@@ -261,6 +261,30 @@ class ComposePlan:
     dotenv: Mapping[str, str]
 
 
+def container_user(platform_id: Callable[[], str] = platform.detect) -> str:
+    """The `user:` line for the services that write to the bound-out env/dist.
+
+    On Windows this is `user: "0:0"`, and it is not a convenience. Docker
+    Desktop mounts a Windows drive into the WSL2 VM over 9p/drvfs with
+    `uid=0;gid=0` and mode 0755; the images run as `acore` (uid 1000); so a
+    container that must write `env/dist/etc` cannot, and `ac-db-import` fails
+    with "cp: cannot create regular file ...: Permission denied" on files whose
+    Windows ACLs give the user full control. Measured on a clean Windows 11 box
+    (2026-08-25): the identical import exits 0 with this key and 1 without it.
+    `DOCKER_USER=root`, which the image's own error text suggests, does nothing
+    here - the generated compose sets no `user:` at all, so the image wins.
+
+    Everywhere else this stays a comment, deliberately. On Linux, running as
+    root makes every file the container creates root-owned ON THE HOST, which
+    breaks the reason `env/dist/etc` is bound out in the first place: the module
+    system and the user edit those files. Windows pays no such price because 9p
+    maps ownership back to the Windows account regardless of the writing uid.
+    """
+    if platform_id() == "windows":
+        return 'user: "0:0"'
+    return "# user: left to the image (acore) - see composegen.container_user()"
+
+
 def render(
     entry: CatalogEntry,
     server_dir: Path,
@@ -313,6 +337,7 @@ def render(
             "DB_PASSWORD": password,
             "IMAGE_PREFIX": DEFAULT_IMAGE_PREFIX,
             "IMAGE_TAG": tag,
+            "CONTAINER_USER": container_user(platform_id),
         },
     )
     override = _fill(
