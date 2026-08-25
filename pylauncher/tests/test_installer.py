@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -471,6 +472,84 @@ def test_bash_available_probes_that_bash_actually_runs() -> None:
     assert bash_available(ok) is True
     assert calls[-1] == ["bash", "-c", "exit 0"]
     assert bash_available(broken) is False
+
+
+_REUSABLE_PROBE = """
+set -u
+%s
+if dir_is_reusable "$1"; then echo REUSABLE; else echo PROTECTED; fi
+"""
+
+
+def _dir_is_reusable(script: Path, target: Path) -> str:
+    """Run the installer's own `dir_is_reusable` against `target`.
+
+    The function is lifted out of the shipped script rather than restated here,
+    so this test cannot pass against a copy that has drifted from the file the
+    users actually run.
+    """
+    body = script.read_text(encoding="utf-8")
+    start = body.index("dir_is_reusable() {")
+    end = body.index("\n}", start) + 2
+    out = subprocess.run(
+        ["bash", "-c", _REUSABLE_PROBE % body[start:end], "probe", str(target)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return out.stdout.strip()
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX permission semantics")
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_the_installers_reusable_check_fails_closed(tmp_path: Path, script_name: str) -> None:
+    """An empty folder may be cloned into; anything we cannot verify may not.
+
+    This is the property a six-agent adversarial pass killed the first spelling
+    over, and no Python test can cover it because it lives in bash. The obvious
+    version, `[ -n "$(ls -A "$D")" ]`, fails OPEN: `ls -A` prints nothing for a
+    directory it cannot READ exactly as it does for an empty one, so a folder
+    holding someone's server reads as empty and gets cloned over. `find
+    -maxdepth 0 -empty` prints nothing when it cannot look, which is the safe
+    way round.
+
+    All three WotLK scripts are checked because they are separate files that
+    have already diverged elsewhere.
+    """
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert _dir_is_reusable(script, empty) == "REUSABLE"
+
+    occupied = tmp_path / "occupied"
+    occupied.mkdir()
+    (occupied / "docker-compose.yml").write_text("x", encoding="utf-8")
+    assert _dir_is_reusable(script, occupied) == "PROTECTED"
+
+    # A lone dotfile is content: `.db_password` is exactly what a half-finished
+    # install leaves behind, and `ls -A` and `find -empty` agree here.
+    dotted = tmp_path / "dotted"
+    dotted.mkdir()
+    (dotted / ".db_password").write_text("x", encoding="utf-8")
+    assert _dir_is_reusable(script, dotted) == "PROTECTED"
+
+    # The one that matters: unreadable AND non-empty. This is where `ls -A`
+    # returned "empty" and the old guard would have cloned over a real install.
+    unreadable = tmp_path / "unreadable"
+    unreadable.mkdir()
+    (unreadable / "server.sql").write_text("x", encoding="utf-8")
+    unreadable.chmod(0o000)
+    try:
+        assert _dir_is_reusable(script, unreadable) == "PROTECTED"
+    finally:
+        unreadable.chmod(0o755)
+
+    assert _dir_is_reusable(script, tmp_path / "does-not-exist") == "PROTECTED"
 
 
 def test_installer_refuses_a_reserved_folder_before_asking_for_a_password(
