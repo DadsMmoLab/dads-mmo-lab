@@ -720,6 +720,102 @@ def test_the_installers_label_the_server_folder_only_where_selinux_enforces(
     assert (target / "env" / "dist" / "logs").is_dir()
 
 
+# What the sudo banner is allowed to claim, and the command that has to back it.
+#
+# A banner shown immediately before `sudo -v` is a PROMISE about what the
+# password will be used for, and it is the only such promise the user gets. It
+# had been claiming "Fixing file ownership after build" since before there was
+# anything to own: the WotLK scripts contain no `chown` at all, so a password
+# was being asked for work that never happened - while four things sudo really
+# does (starting the Docker service, joining the docker group, running docker
+# before that membership is live, and `rm -rf` on the server folder) went
+# unmentioned.
+#
+# Keyed on a phrase in the bullet rather than the whole line so the wording
+# stays free to improve; the regex is what makes the claim true.
+SUDO_BANNER_CLAIMS: dict[str, str] = {
+    "Installing Docker": r"sudo (pacman|dnf|apt-get|rpm-ostree)",
+    "Docker service": r"sudo systemctl (enable|start|restart) docker",
+    "docker group": r"sudo usermod -aG docker",
+    "Running docker": r"sudo docker\b",
+    "old server folder": r'sudo rm -rf "?\$SERVER_DIR',
+    "SteamOS": r"sudo steamos-readonly",
+    "pacman keyring": r"sudo rm -rf /etc/pacman\.d/gnupg",
+    "apt repository": r"sudo tee /etc/apt/sources\.list\.d/docker\.list",
+}
+
+
+def _sudo_banner_bullets(text: str) -> list[str]:
+    """The bullet lines between the banner header and the password prompt."""
+    begin = text.index("This installer needs sudo access for")
+    end = text.index("Please enter your password", begin)
+    return [line for line in text[begin:end].splitlines() if "\u2022" in line]
+
+
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_the_sudo_banner_only_claims_things_the_script_actually_does(script_name: str) -> None:
+    """The password prompt must not ask for work the script never performs.
+
+    Measured 2026-08-25: all three scripts promised "Fixing file ownership after
+    build" and none of them contains a `chown` - the only match in each file is
+    a comment. The banner is the whole of the user's informed consent here, so a
+    claim with nothing behind it is the same defect as an unannounced
+    escalation, pointing the other way.
+
+    Asserted against the emitted argv rather than prose, which is the same rule
+    the docker-group tests follow: a promise spelled one way in a banner and
+    another in the commands is exactly what this caught.
+    """
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    text = script.read_text(encoding="utf-8")
+    bullets = _sudo_banner_bullets(text)
+    assert bullets, f"{script_name}: no bullets found under the sudo banner"
+
+    for bullet in bullets:
+        keys = [k for k in SUDO_BANNER_CLAIMS if k in bullet]
+        assert keys, (
+            f"{script_name}: the banner claims something with no known backing command:\n"
+            f"  {bullet.strip()}\n"
+            f"Either drop the claim or add it to SUDO_BANNER_CLAIMS with the command that "
+            f"makes it true."
+        )
+        assert len(keys) == 1, f"{script_name}: bullet matches {keys}, which is ambiguous"
+        pattern = SUDO_BANNER_CLAIMS[keys[0]]
+        assert re.search(pattern, text), (
+            f"{script_name}: the banner promises {keys[0]!r} but nothing in the script "
+            f"matches {pattern!r} - the password is being asked for work that never runs."
+        )
+
+
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_the_sudo_banner_names_every_privileged_thing_the_script_does(script_name: str) -> None:
+    """And the other direction: a real use of sudo must be declared.
+
+    The first version of this pair only checked that claims were backed, which
+    would have passed a banner listing one true thing and hiding four others -
+    which is what the scripts actually shipped. Both directions or neither.
+    """
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    text = script.read_text(encoding="utf-8")
+    bullets = " ".join(_sudo_banner_bullets(text))
+    for key, pattern in SUDO_BANNER_CLAIMS.items():
+        if re.search(pattern, text):
+            assert key in bullets, (
+                f"{script_name}: the script runs {pattern!r} under sudo but the banner never "
+                f"mentions {key!r}, so the user consents to less than they get."
+            )
+
+
 def _override_volumes(script: Path) -> dict[str, list[str]]:
     """Volumes per service from the override heredoc, by structure not substring.
 

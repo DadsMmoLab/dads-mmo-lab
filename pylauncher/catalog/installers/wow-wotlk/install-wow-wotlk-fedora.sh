@@ -1854,8 +1854,11 @@ exec > >(tee -a "$INSTALL_LOG") 2>&1
 
 echo ""
 echo -e "\033[1;33m⚠️  This installer needs sudo access for:\033[0m"
-echo -e "\033[1;33m   • Installing Docker (if not present)\033[0m"
-echo -e "\033[1;33m   • Fixing file ownership after build\033[0m"
+echo -e "\033[1;33m   • Installing Docker and the packages it needs, if they are missing\033[0m"
+echo -e "\033[1;33m   • Enabling and starting the Docker service\033[0m"
+echo -e "\033[1;33m   • Adding you to the docker group, which you are asked about first\033[0m"
+echo -e "\033[1;33m   • Running docker itself, until that group membership takes effect\033[0m"
+echo -e "\033[1;33m   • Deleting the old server folder - only if you choose to reinstall\033[0m"
 echo ""
 echo -e "\033[1;37mPlease enter your password if prompted:\033[0m"
 if ! sudo -v; then
