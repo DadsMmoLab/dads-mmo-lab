@@ -1674,6 +1674,7 @@ echo -e "\033[1;33m   • Adding you to the docker group, which you are asked ab
 echo -e "\033[1;33m   • Running docker itself, until that group membership takes effect\033[0m"
 echo -e "\033[1;33m   • Deleting the old server folder - only if you choose to reinstall\033[0m"
 echo -e "\033[1;33m   • Adding Docker's apt repository to this system\033[0m"
+echo -e "\033[1;33m   • Removing conflicting packages before installing Docker CE, including podman-docker, containerd and runc\033[0m"
 echo -e "\033[1;33m   • Removing a conflicting Docker snap, if one is installed\033[0m"
 echo ""
 echo -e "\033[1;37mPlease enter your password if prompted:\033[0m"

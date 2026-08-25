@@ -720,6 +720,36 @@ def test_the_installers_label_the_server_folder_only_where_selinux_enforces(
     assert (target / "env" / "dist" / "logs").is_dir()
 
 
+def test_compose_file_answers_in_composes_own_order(tmp_path: Path) -> None:
+    """The order is Compose's, and it is not the obvious one.
+
+    Measured against Docker Compose v5.3.1: with all four names present it
+    reports its own search list - compose.yaml, compose.yml, docker-compose.yml,
+    docker-compose.yaml - so `.yml` beats `.yaml` in the second pair and loses in
+    the first. An earlier version of COMPOSE_FILENAMES had that pair swapped, and
+    the test that claimed to check the order never exercised it.
+    """
+    assert installer_module.compose_file(tmp_path) is None
+
+    (tmp_path / "docker-compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    assert installer_module.compose_file(tmp_path) == tmp_path / "docker-compose.yaml"
+
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    assert installer_module.compose_file(tmp_path) == tmp_path / "docker-compose.yml"
+
+    (tmp_path / "compose.yml").write_text("services: {}\n", encoding="utf-8")
+    assert installer_module.compose_file(tmp_path) == tmp_path / "compose.yml"
+
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    assert installer_module.compose_file(tmp_path) == tmp_path / "compose.yaml"
+
+
+def test_compose_file_ignores_a_directory_of_that_name(tmp_path: Path) -> None:
+    """`is_file()`, not `exists()` - a directory called `compose.yml` is not an install."""
+    (tmp_path / "compose.yml").mkdir()
+    assert installer_module.compose_file(tmp_path) is None
+
+
 # The sudo banner, checked against the argv the script actually runs.
 #
 # A banner shown immediately before `sudo -v` is the whole of the user's
@@ -734,7 +764,17 @@ def test_the_installers_label_the_server_folder_only_where_selinux_enforces(
 # by the VERBS that justify it, taken from the same extraction the reverse
 # direction uses - so the two can never disagree about what a script does.
 SUDO_BANNER_CLAIMS: dict[str, frozenset[str]] = {
-    "Installing Docker": frozenset({"dnf", "apt-get", "pacman", "rpm-ostree install"}),
+    "Installing Docker": frozenset(
+        {
+            "dnf install",
+            "apt-get install",
+            "apt-get update",
+            "pacman",
+            "rpm-ostree install",
+        }
+    ),
+    # Taking software OFF the machine is a different consent from putting it on.
+    "Removing conflicting packages": frozenset({"dnf remove", "apt-get remove"}),
     "Docker service": frozenset(
         {
             "systemctl enable",
@@ -746,14 +786,20 @@ SUDO_BANNER_CLAIMS: dict[str, frozenset[str]] = {
     ),
     "docker group": frozenset({"usermod"}),
     "Running docker": frozenset({"docker"}),
-    "old server folder": frozenset({"rm"}),
-    "repository": frozenset({"tee", "install", "curl", "bash", "chmod"}),
+    "old server folder": frozenset({"rm $SERVER_DIR"}),
+    "repository": frozenset({"tee", "install", "curl", "chmod", "bash -c curl", "bash -c echo"}),
     "Restarting your computer": frozenset({"systemctl reboot"}),
     "Docker snap": frozenset({"snap remove"}),
     "SteamOS read-only root": frozenset({"steamos-readonly enable", "steamos-readonly disable"}),
     "developer mode": frozenset({"steamos-devmode"}),
     "pacman keyring": frozenset(
-        {"pacman-key --init", "pacman-key --populate", "pacman-key --list-keys"}
+        {
+            "pacman-key --init",
+            "pacman-key --populate",
+            "pacman-key --list-keys",
+            "pacman-key --refresh-keys",
+            "rm /etc/pacman.d/gnupg",
+        }
     ),
 }
 
@@ -765,32 +811,116 @@ SUDO_EXEMPT: dict[str, str] = {
     "systemctl status": "read-only diagnostics",
     "systemctl is-active": "read-only diagnostics",
     "journalctl": "read-only diagnostics",
+    "dnf list": "read-only query - asks what is installed, changes nothing",
+    "steamos-readonly status": "read-only diagnostics - reports the mode, does not change it",
 }
 
-# `sudo` inside an echo/print_* line is advice being PRINTED, not run - the
-# installers tell the user what to type when something fails, and counting that
-# as an action would make every one of those messages a consent obligation.
-_SUDO_CALL = re.compile(r"(?<![\w-])sudo\s+((?:-\w+\s+)*)([\w./-]+)(?:\s+([\w-]+))?")
+# `sudo` inside an echo/print_* line is usually advice being PRINTED - the
+# installers tell the user what to type when something fails - and counting that
+# as an action would make every one of those messages a consent obligation. But
+# only usually: a `$(...)` on the same line RUNS, and `$(sudo systemctl reboot)`
+# dropped into one of those echoes passed this check until the fragments below
+# existed.
+_SUDO_CALL = re.compile(r"(?<![\w-])sudo\s+((?:-\w+\s+)*)([\w./-]+)((?:\s+[^\s;&|]+)*)")
 _NOT_A_CALL = re.compile(r"^\s*#|^\s*(echo|print_\w+|printf)\b")
 _PRINTED = re.compile(r"(echo|print_\w+|printf)\b[^\n]*sudo")
+_SUBSTITUTION = re.compile(r"\$\(([^()]*)\)")
+# `sudo bash -c '<body>'` runs <body> AS ROOT. Collapsing it to the verb `bash`
+# discarded everything that actually ran, and `bash` was already approved for
+# repository setup - so any command could be hidden inside those quotes.
+_SHELL_C = re.compile(r"""(?<![\w-])sudo\s+(?:-\w+\s+)*(?:bash|sh)\s+-c\s+(['"])(.*?)\1""")
 
 # Programs whose SUBCOMMAND changes what the user is consenting to. Enabling a
 # service and rebooting the machine are both `systemctl`, and collapsing them
-# would hide the reboot behind the service bullet.
+# would hide the reboot behind the service bullet. `rm` is here because the
+# generic script wipes two very different things - the server folder the user
+# chose to reinstall, and the system's pacman keyring.
 _SUBCOMMAND_MATTERS = frozenset(
     {"systemctl", "rpm-ostree", "steamos-readonly", "snap", "pacman-key"}
 )
+# Package managers put flags before the subcommand (`dnf -y install`), while
+# pacman-key's subcommand IS a flag (`--populate`). Reading them the same way
+# filed `pacman-key --populate archlinux holo` under the verb "archlinux".
+_FLAGS_BEFORE_SUBCOMMAND = frozenset({"dnf", "apt-get"})
+_TARGET_MATTERS = frozenset({"rm"})
 
 
-def _sudo_verbs(text: str) -> dict[str, int]:
-    """Every executable `sudo` call in `text`, normalised to a verb, with its line."""
-    found: dict[str, int] = {}
-    for number, line in enumerate(text.splitlines(), 1):
-        if _NOT_A_CALL.match(line) or _PRINTED.search(line):
+def _executable_parts(line: str) -> list[str]:
+    """The parts of `line` that actually run, printed text removed.
+
+    A command substitution runs wherever it appears, including inside the echo
+    that prints its output - which is why it is pulled out before the advisory
+    check rather than after.
+    """
+    parts: list[str] = list(_SUBSTITUTION.findall(line))
+    if not (_NOT_A_CALL.match(line) or _PRINTED.search(line)):
+        parts.append(line)
+    return parts
+
+
+def _normalise(program: str, rest: str) -> str:
+    """One `sudo` call as the verb a user would have to consent to."""
+    words = rest.split()
+    if program in _SUBCOMMAND_MATTERS and words:
+        return f"{program} {words[0]}"
+    if program in _FLAGS_BEFORE_SUBCOMMAND:
+        subcommand = next((w for w in words if not w.startswith("-")), "")
+        return f"{program} {subcommand}" if subcommand else program
+    if program in _TARGET_MATTERS:
+        target = next((w for w in words if not w.startswith("-")), "")
+        return f"{program} {target.strip(chr(34) + chr(39))}" if target else program
+    return program
+
+
+def _logical_lines(text: str) -> list[tuple[int, str]]:
+    """Physical lines joined across backslash continuations, keyed by first line.
+
+    The real `sudo bash -c '...'` in the Fedora installer wraps its body onto a
+    second physical line, so a per-line regex saw an unterminated quote and the
+    body - which runs as root - was never inspected at all.
+    """
+    joined: list[tuple[int, str]] = []
+    number = 0
+    buffer = ""
+    for index, line in enumerate(text.splitlines(), 1):
+        if not buffer:
+            number = index
+        stripped = line.rstrip()
+        if stripped.endswith("\\"):
+            buffer += stripped[:-1] + " "
             continue
-        for _flags, program, sub in _SUDO_CALL.findall(line):
-            verb = f"{program} {sub}" if program in _SUBCOMMAND_MATTERS and sub else program
-            found.setdefault(verb, number)
+        joined.append((number, buffer + line))
+        buffer = ""
+    if buffer:
+        joined.append((number, buffer))
+    return joined
+
+
+def _sudo_verbs(text: str) -> dict[str, list[int]]:
+    """Every executable `sudo` call in `text`, normalised to a verb, with its lines.
+
+    Every line is kept, not just the first: a verb recorded once could be
+    supplied by an unrelated call elsewhere in the file, so deleting the call a
+    bullet actually describes still passed.
+    """
+    found: dict[str, list[int]] = {}
+    for number, line in _logical_lines(text):
+        # `sudo bash -c '<body>'` runs <body> as root. Name the verb after what
+        # the body actually starts with, attributed to the wrapper that gave it
+        # root, so replacing the body changes the verb and fails the check.
+        wrapped = _SHELL_C.findall(line)
+        for _quote, body in wrapped:
+            words = body.strip().split()
+            if words:
+                found.setdefault(f"bash -c {words[0]}", []).append(number)
+        for part in _executable_parts(line):
+            for _flags, program, rest in _SUDO_CALL.findall(part):
+                # Already accounted for, with its body, just above. When the
+                # body could NOT be read the wrapper is left to fail as an
+                # unknown verb rather than vanish.
+                if program in {"bash", "sh"} and wrapped:
+                    continue
+                found.setdefault(_normalise(program, rest), []).append(number)
     return found
 
 
@@ -832,7 +962,8 @@ def test_the_sudo_banner_declares_every_privileged_thing_the_script_does(script_
     """
     text = _wotlk_script(script_name).read_text(encoding="utf-8")
     bullets = " ".join(_sudo_banner_bullets(text))
-    for verb, line in sorted(_sudo_verbs(text).items()):
+    for verb, lines in sorted(_sudo_verbs(text).items()):
+        line = lines[0]
         if verb in SUDO_EXEMPT:
             continue
         claims = [phrase for phrase, verbs in SUDO_BANNER_CLAIMS.items() if verb in verbs]

@@ -156,7 +156,11 @@ class Install(_Strict):
         if self.db_root_password_file:
             try:
                 text = (server_dir / self.db_root_password_file).read_text(encoding="utf-8")
-            except OSError:
+            except (OSError, ValueError):
+                # ValueError covers UnicodeDecodeError, which is what a file
+                # written in another encoding raises - it is not an OSError, so
+                # it used to escape this handler and crash the caller rather
+                # than being reported as "not knowable from here".
                 return None
             return text.strip() or None
         return None

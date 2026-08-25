@@ -88,7 +88,22 @@ class ControllerServices:
         # Create account and Backup. The default stays as a last resort so an
         # install whose password file has gone missing still gets a tab that can
         # start and stop, rather than no tab at all.
-        password = entry.install.db_password(server_dir) or wotlk_modules.DEFAULT_DB_ROOT_PASSWORD
+        password = entry.install.db_password(server_dir)
+        if password is None:
+            # `db_password()` says None when the entry NAMES a password file and
+            # that file cannot be read - which is not the same as "use the
+            # default", and silently defaulting here would rebuild the bug this
+            # seam exists to close. The tab is still built, because Start and
+            # Stop need no database and no tab at all is worse; but the reason
+            # every SQL-backed control is about to fail is written down once,
+            # here, instead of arriving as "access denied" six clicks later.
+            if entry.install.db_root_password_file:
+                logger.warning(
+                    f"{entry.id}: cannot read {entry.install.db_root_password_file} in "
+                    f"{server_dir}, so the database password is unknown - accounts, backup "
+                    f"and restore will fail until that file is restored"
+                )
+            password = wotlk_modules.DEFAULT_DB_ROOT_PASSWORD
         sql = DockerSql(spec.db, password)
         # Bound to this entry's own db container, not `mysql_for()`'s
         # `docker_ctl.SPEC.db`, so a catalog entry that names a different one
