@@ -159,20 +159,23 @@ Three layers, all under `pylauncher/yulon/catalog/` unless said otherwise.
 | Wiring | `yulon/install_wiring.py` | `installer_for_app(entry)`: the AC probe/reset wiring that `main.py:65-80` and `ui/controller_view.py:104-108` each hand-write today, including the fixed-password fallback both carry; **and the CLI harness `_main()`**, moved here from `catalog/installer.py` because it must wire the probe and `catalog/` may not import `controller_wow_wotlk` | Contain UI |
 
 Supporting changes: `docker.py` gains `run_container(ContainerRun)`, `copy_from_image()`,
-`exec_stdin()`, and **`wait_ready()` changes signature to take a `ReadySpec`** — its four direct
-callers in `test_docker.py` (`:166`, `:204`, `:215`, `:481`) are updated; `wait_ready_for()` keeps
-its signature as a wrapper so `controller.py`, `docker_ctl.py` and their tests are untouched.
-`platform.py` gains the Linux `keep_awake()` body (`systemd-inhibit`), SELinux facts +
-`relabel_for_containers()`, `container_user_args()` — **the one home for the uid:gid policy;
-`composegen.container_user()` and `git.ContainerGit._user_args` are rewritten to call it** — and
-the sudo-password transport inside `_run_steps()`. `catalog.py` gains the family blocks (below);
+`exec_stdin()`, and **`wait_ready()` changes signature to take a `ReadySpec`** — its eight direct
+callers in `test_docker.py` are updated; `wait_ready_for(spec, ready)` takes a `ReadySpec` too,
+and `docker.azerothcore_ready(host, port)` builds the AzerothCore one for `controller.py` and
+`docker_ctl.py`, whose behaviour is unchanged. `platform.py` gains the Linux `keep_awake()` body
+(`systemd-inhibit`), SELinux facts + `relabel_for_containers()`, `container_user_args()` — **the
+one home for the `docker run` uid:gid policy; `git.ContainerGit._user_args` calls it in 7.1 and
+`run_container` in 7.3. `composegen.container_user()` (compose `user: "0:0"` on Windows only) is
+a different policy for a different mechanism and stays where it is** — and the once-asked sudo
+password inside `_run_steps()`. `catalog.py` gains the 7.1 subset of the models below;
 `composegen.py` takes its image prefix, built-service list and extra tokens from the entry
 instead of module constants, and reads `password.value` where it read `db_root_password`.
 
 Deleted in 7.2: the six `install-*.sh`, `dml-start.sh`, `wow-manage.sh` (eight files, 19,451
 lines of bash); `installer.Installer`, `PromptRule`, `PROMPT_RULES`, `make_responder`,
 `bash_available`, `host_package_manager`, `NO_BASH_HELP`; `Install.script`, `script_platforms`,
-`script_variants`, `db_root_password`, `db_root_password_file`; the script-path tests including
+`script_variants` (`db_root_password`/`db_root_password_file` go earlier, in 7.1, the moment
+`password` replaces them); the script-path tests including
 `test_installer.py::test_no_installer_escalates_privileges_without_asking` (a grep over the
 scripts — the argv-level assertion in `test_provision.py` is the one that matters and stays).
 Kept: `InstallOptions` (minus `reinstall`), the three error types, the `InstallEngine` protocol,
@@ -305,31 +308,41 @@ image at `/opt/tortoise/bin/` exactly as TBC's come out at `/opt/mangos/bin/tool
 ### `catalog.py` additions
 
 All `_Strict` (extra keys forbidden, frozen). Field names are final; the JSON below uses them.
+Which step each lands in is stated, because WotLK's 7.1 catalog entry already needs the first
+group.
+
+**In 7.1** (the spine and the AzerothCore family need them):
 
 - `EmulatorSource(Source)`: `dest: str` — where the clone lands, relative to the server dir
   (`"."` for AzerothCore's core, `"src/mangos-tbc/src/modules/Bots"` for CMaNGOS playerbots).
-  Replaces the index coupling of "sources[0] is the core, the rest go under modules/".
-- `Source.rev: str | None` — an optional commit pin, honoured by `CloneSpec`. Lands in 7.3 so
-  it exists before the Vanilla gate; Tortoise is pinned the day 7.6 passes.
+  Replaces the index coupling of "sources[0] is the core, the rest go under modules/". All four
+  entries get their `dest`s in 7.1 (data only; the three CMaNGOS entries are not yet dispatched).
 - `Install.password: PasswordPlan` — `{"mode": "fixed", "value": "password"}` or
   `{"mode": "generated", "file": ".db_password", "prefix": "tbc"}`. Replaces
-  `db_root_password` / `db_root_password_file`.
-- `Install.platforms` loses its `min_length=1`: an empty list is the honest state of an entry
-  between 7.2 and its own gate (see Dispatch, below).
+  `db_root_password` / `db_root_password_file`, which are deleted in the same step.
 - `NativeInstall.family: Literal["azerothcore", "cmangos"]`; `images: tuple[str, ...]`
-  (the built service keys); `image_prefix: str`; `dockerfile_dir: str | None` (the AC family
-  leaves it `None`); `db: DbFacts` (`image`, `client` (`mysql`|`mariadb`), `user`, `charset`);
-  `ready: ReadyMarkers` (`world`, `auth: str | None`, `fatal: str | None`, `timeout_s`,
-  `restart_loop`); `templates`, `soap_port` and the floors stay where they are.
-- `NativeInstall.azerothcore: AzerothCoreData | None` — `world_env` only. `Containers.db_import`
-  and `Containers.client_data` stay exactly where they are: `container_spec()` reads
-  `db_import` into `ContainerSpec.import_service`, which `main.py`, `controller_view.py` and
+  (the built service keys); `image_prefix: str`; `db: DbFacts` (`image`, `client`
+  (`mysql`|`mariadb`), `user`, `charset`); `ready: ReadyMarkers` (`world`, `auth: str | None`,
+  `fatal: str | None`, `timeout_s`, `restart_loop`); `templates`, `soap_port` and the floors stay
+  where they are.
+- `NativeInstall.azerothcore: AzerothCoreData | None` — `world_env` moves here from
+  `NativeInstall.world_env`, and that is all it holds. `Containers.db_import` and
+  `Containers.client_data` stay exactly where they are: `container_spec()` reads `db_import` into
+  `ContainerSpec.import_service`, which `main.py`, `controller_view.py` and
   `docker.repair_import()` branch on, and the Repair button is on the not-touched list.
+
+**In 7.2:** `Install.script`, `script_platforms`, `script_variants` deleted; `Install.platforms`
+loses its `min_length=1`: an empty list is the honest state of an entry between 7.2 and its own
+gate (see Dispatch, below).
+
+**In 7.3** (the CMaNGOS family needs them):
+
+- `Source.rev: str | None` — an optional commit pin, honoured by `CloneSpec`. Exists before the
+  Vanilla gate; Tortoise is pinned the day 7.6 passes.
+- `NativeInstall.dockerfile_dir: str | None` (the AC family leaves it `None`).
 - `NativeInstall.cmangos: CmangosData | None` — `client: ClientSpec`, `dockerfile:
   DockerfileSpec`, `extract: ExtractPlan`, `mmaps: MmapPlan`, `conf: ConfPatchTable`,
   `sql: SqlPlan`. A model validator requires exactly the block the `family` names.
-- `Install.script`, `script_platforms`, `script_variants`, `db_root_password`,
-  `db_root_password_file` deleted (7.2).
 
 ### Dispatch, and the interim between 7.2 and each game's gate
 
@@ -504,7 +517,9 @@ keeps its default and `start_database`'s `compose up -d --no-deps <db>` works un
 price is that the conf DB host is the container name, not the script's `db`, and that is the
 `DB_HOST` token. Its database healthcheck is mariadb's own `healthcheck.sh --connect
 --innodb_initialized` (shipped in the official 10.6 and 11 images; the Tortoise script used it on
-10.6), proved on mariadb:11 by the 7.3 primitives gate.
+10.6), proved on mariadb:11 by the 7.3 primitives gate. It publishes the DB port on `127.0.0.1`
+only, as WotLK's base template does — every CMaNGOS entry's `ports.db` is loopback-bound, never
+the scripts' all-interfaces `3306:3306`.
 
 Tokens available to every template: `PROJECT_NAME`, `DB_PORT`, `AUTH_PORT`, `WORLD_PORT`,
 `IMAGE_PREFIX`, `IMAGE_TAG`, `BUILD_CONTEXT`, `CONTAINER_USER`, `BIND_LABEL`, `DB_IMAGE`,
@@ -688,12 +703,14 @@ the declined step. No `sudoers.d`, no socket `chmod`, ever.
 `sudo -n <cmd>`; `docker_engine_commands()` yields two or three of them plus the `usermod`, and
 sudo's default per-tty timestamp would re-prompt on every fresh pty. The bash path asked exactly
 once — `sudo -v` on one pty (`installer.py:556-558`) — and the clean Fedora/Arch gates depend on
-that. So `platform._run_steps()` gains this transport: on the first "a password is required" from
-`sudo -n`, it opens **one** pty, runs `sudo -v` there with the random `SUDO_PROMPT` marker,
-answers from `ask`, and runs every remaining privileged step and the `usermod` on that same pty,
-so the ticket the one answer bought covers them. `test_provision.py` asserts `ask()` is called at
-most once per `ensure_docker()`. It is the second and last question on the path, it lives in
-provisioning, and it is engine-neutral.
+that. So `platform._run_steps()` gains a `SudoSession`: on the first "a password is required"
+from `sudo -n`, it asks through `ask` (the same `InputPrompter` that masked the scripts'
+password), verifies with `sudo -S -p '' -v` (up to three attempts), and feeds every remaining
+privileged step and the `usermod` as `sudo -S -p '' <cmd>` with the password on stdin — no pty,
+no per-tty ticket to keep alive, argv that the argv-parse test can read. The password lives in
+memory for the length of provisioning, as it did in the prompter. `test_provision.py` asserts
+`ask()` is called at most once per `ensure_docker()`. It is the second and last question on the
+path, it lives in provisioning, and it is engine-neutral.
 
 **buildx before gate 7.1.** The apt list already carries `docker-buildx` because the Ubuntu gate
 found `docker.io` ships no BuildKit plugin; the dnf list (`moby-engine docker-compose`) and the
@@ -779,9 +796,9 @@ and 7.4c alike. It is not part of the install.
 
 | Step | What lands | Gate |
 |---|---|---|
-| **7.1** | Spine + `AzerothCoreInstaller`, Linux native. Extract `StagedInstaller`/`Stage`; move the AC stages with their names; forward `ask`; sudo-password transport in `_run_steps` (asked once); `docker-buildx` on the dnf and pacman lists; SELinux facts + `{{BIND_LABEL}}` + relabel seam; `systemd-inhibit`; `install_wiring.py` (probe wiring + `_main()`); `wait_ready(ReadySpec)`; the compose-config fixture; catalog wow-wotlk gains `family`, `password`, `db`, `ready`, `images`, `image_prefix`, source `dest`s and loses `script_platforms`. | yulon-ubuntu, clean checkpoint, **two presses**: press 1 → consent dialog on screen → sudo dialog once → re-login report; re-login; press 2 → `ready`; record both presses and press 2's wall-clock. Kill during the build, resume skips the compile. `docker compose config` matches the fixture. Auth log shows `127.0.0.1:8085` with no `UPDATE`; bots log in. Account created; client on the host logs in after the LAN step. Then the packaged artifact on clean Fedora 44 (SELinux, password sudo, `moby-engine` + buildx) and clean Arch (pacman + buildx). |
+| **7.1** | Spine + `AzerothCoreInstaller`, Linux native. Extract `StagedInstaller`/`Stage`; move the AC stages with their names; forward `ask`; `SudoSession` in `_run_steps` (asked once); `docker-buildx` on the dnf and pacman lists; SELinux facts + `{{BIND_LABEL}}` + relabel seam; `systemd-inhibit`; `install_wiring.py` (probe wiring + `_main()`); `wait_ready(ReadySpec)`; the compose-config fixture; the 7.1 catalog models (`EmulatorSource.dest`, `PasswordPlan`, `DbFacts`, `ReadyMarkers`, `NativeInstall.family/images/image_prefix/azerothcore`); catalog wow-wotlk gains them and loses `script_platforms`; all four entries get `password` and source `dest`s; style-guide §3 row for `install_wiring.py`. | yulon-ubuntu, clean checkpoint, **two presses**: press 1 → consent dialog on screen → sudo dialog once → re-login report; re-login; press 2 → `ready`; record both presses and press 2's wall-clock. Kill during the build, resume skips the compile. `docker compose config` matches the fixture. Auth log shows `127.0.0.1:8085` with no `UPDATE`; bots log in. Account created; client on the host logs in after the LAN step. Then the packaged artifact on clean Fedora 44 (SELinux, password sudo, `moby-engine` + buildx) and clean Arch (pacman + buildx). |
 | **7.2** | Delete the bash lineage (the list in the layout section); `platforms: []` on the three CMaNGOS entries; gaming mode → `steam-deck/setup-gaming-mode.sh`; `contribution.md`'s harness paragraph rewritten (`python -m yulon.install_wiring …`, no `sudo -v`); style-guide §3 rows for `catalog/installer.py` (options, errors, protocol, dispatch — never runs a subprocess) and `catalog/catalog.py` (no "install script"). | Full `pytest` + `mypy` + `ruff` + `black`; 7.1's Ubuntu gate re-run from the same checkpoint against the same fixture — nothing else may change. |
-| **7.3** | CMaNGOS data model + stage kinds + engine, no real server: `catalog.py` family blocks, `EmulatorSource.dest`, `Source.rev`, `PasswordPlan`, `DbFacts`, `ReadyMarkers`, `ClientSpec`, `ExtractPlan`, `ConfPatchTable`, `SqlPlan`, `dockerfile_dir`; composegen tokens from data; preflight client facts + client bind probe; `families/cmangos.py`; `clientdir`, `dockerfile`, `extract`, `conf`, `sqlplan`; `docker.run_container`/`copy_from_image`/`exec_stdin`; all four catalog entries validate (CMaNGOS `platforms` still `[]`); WotLK templates render byte-identical; static invariants test; style-guide §3 rows for `families/*` and `install_wiring.py`. | Unit suite, plus a **busybox/mariadb:11 primitives gate**: `run_container` (`-u`, `:ro` refuses a write, `/out` ownership), `copy_from_image`, `exec_stdin` + gzip into a throwaway mariadb:11 (proves the `mariadb` client name and `healthcheck.sh --connect --innodb_initialized`), `wait_ready(ReadySpec)` restart-loop detection — gate the tool, not the payload. |
+| **7.3** | CMaNGOS data model + stage kinds + engine, no real server: `catalog.py` 7.3 models (`Source.rev`, `dockerfile_dir`, `CmangosData` with `ClientSpec`, `DockerfileSpec`, `ExtractPlan`, `MmapPlan`, `ConfPatchTable`, `SqlPlan`); composegen tokens from data; preflight client facts + client bind probe; `families/cmangos.py`; `clientdir`, `dockerfile`, `extract`, `conf`, `sqlplan`; `docker.run_container`/`copy_from_image`/`exec_stdin`; all four catalog entries validate (CMaNGOS `platforms` still `[]`); WotLK templates render byte-identical; static invariants test; style-guide §3 rows for `families/*` and `install_wiring.py`. | Unit suite, plus a **busybox/mariadb:11 primitives gate**: `run_container` (`-u`, `:ro` refuses a write, `/out` ownership), `copy_from_image`, `exec_stdin` + gzip into a throwaway mariadb:11 (proves the `mariadb` client name and `healthcheck.sh --connect --innodb_initialized`), `wait_ready(ReadySpec)` restart-loop detection — gate the tool, not the payload. |
 | **7.4a** | wow-tbc through `build`. | yulon-ubuntu: the image builds (2–4 h, record it); a kill + resume skips it; context-transfer time recorded; `.git` excluded and cmake still configures. |
 | **7.4b** | wow-tbc extract + mmaps with the 2.4.3 client. | Checksum the client tree before and after — **no file written into it**; per-tool counts pass the data gates; mmaps ≥ 500; kill after `ad`, resume runs only `vmap_extractor` onward (by completion record, not by luck). If a tool refuses the `:ro`/`-i`/`-o` model, switch to the symlink-farm fallback (data change only) and record which. |
 | **7.4c** | wow-tbc conf + start-db + import + up + ready; `platforms` → `["linux"]`. | Confs materialised and patched; SQL plan applied with the marker; every `warn` justified or flipped; `Avg Diff:` reached; realmd's ready line recorded into `ready.auth`; interrupted import → `partial` → reset → re-run; a second Install press over the finished install ends in seconds; playerbots visible in the logs; client on the host logs in after the LAN step. |
@@ -814,8 +831,9 @@ Named, because 7.1 replaces the only path that has ever built a real server on L
   otherwise unchanged; `write_plan()`'s dotenv branch runs for the first time, not on WotLK.
 - Templates: `{{BIND_LABEL}}` on eight bind lines. Off SELinux the rendered files are
   byte-identical, and the committed compose-config fixture is the proof.
-- `docker.py`: `wait_ready()`'s signature changes (four `test_docker.py` call sites updated);
-  `wait_ready_for()` and everything the Server tab calls are unchanged.
+- `docker.py`: `wait_ready()` and `wait_ready_for()` take a `ReadySpec` (eight `test_docker.py`
+  call sites updated); `controller.py` and `docker_ctl.py` build theirs with
+  `azerothcore_ready()`, so what the Server tab does is unchanged.
 - `catalog.json` wow-wotlk: gains the fields listed above; loses `script*` — the Linux flip.
 - `installer.py`: `installer_for()` dispatches by family; `Installer` is deleted in 7.2, after
   gate 7.1 has passed three times; `_main()` moves to `install_wiring.py`.
@@ -932,12 +950,13 @@ Live gates: the table above, one per step.
 - `pyplan/checklist.md` — Phase 6 exit line annotated (gate lifted, items still owed); Phase 7
   preamble and items rewritten as 7.1–7.10 (the four original lines kept as 7.9/7.10). Applied
   with this page.
-- `pyplan/style-guide.md` §3 — in 7.2: the `catalog/installer.py` row (options, errors,
-  protocol, dispatch, never runs a subprocess) and the `catalog/catalog.py` row (no "install
-  script"); in 7.3: rows for `catalog/families/*` and `install_wiring.py`, and the
-  `catalog/native.py` row's "Prompt for anything" becomes "Prompt for its own decisions; forward
-  `ask` to exactly one consent seam". **Applied when the modules exist**, not before: a row for a
-  file that is not there teaches a reader to discount the table.
+- `pyplan/style-guide.md` §3 — in 7.1: rows for `install_wiring.py` and
+  `catalog/families/azerothcore.py`, and the `catalog/native.py` row's "Prompt for anything"
+  becomes "Prompt for its own decisions; forward `ask` to exactly one consent seam"; in 7.2: the
+  `catalog/installer.py` row (options, errors, protocol, dispatch, never runs a subprocess) and the
+  `catalog/catalog.py` row (no "install script"); in 7.3: rows for the rest of
+  `catalog/families/*`. **Applied when the modules exist**, not before: a row for a file that is
+  not there teaches a reader to discount the table.
 - `pyplan/contribution.md` — the CLI-harness paragraph is rewritten in 7.2: the harness is
   `python -m yulon.install_wiring <game> …`, it reaches the same engine as the button, and it
   needs neither cached sudo nor bash.
@@ -968,7 +987,9 @@ definitions of done, no narrative.
 2. Forward `ask` to `platform.ensure_docker()`; add the once-only sudo-password transport to
    provisioning; `docker-buildx` on the dnf and pacman lists; SELinux facts and `{{BIND_LABEL}}`;
    `systemd-inhibit` keep-awake; `install_wiring.py`; a committed compose-config fixture.
-3. Dispatch WotLK natively on Linux (`catalog.json`: `family`, no `script_platforms`).
+3. The 7.1 catalog models (`EmulatorSource.dest`, `PasswordPlan`, `DbFacts`, `ReadyMarkers`,
+   `NativeInstall.family/images/image_prefix/azerothcore`); dispatch WotLK natively on Linux
+   (`catalog.json`: `family`, no `script_platforms`).
 4. _Definition of done:_ WotLK installs through the Install button to `ready` on clean Ubuntu,
    Fedora 44 and Arch, with the consent dialog on screen and the sudo password asked once; a
    mid-build cancel resumes without recompiling; `docker compose config` matches the fixture.
@@ -982,8 +1003,8 @@ definitions of done, no narrative.
    same checkpoint with no other change.
 
 ### 7.3 CMaNGOS family — data model, stage kinds, engine
-1. Typed catalog blocks (`ClientSpec`, `ExtractPlan`, `ConfPatchTable`, `SqlPlan`, `DbFacts`,
-   `ReadyMarkers`, `PasswordPlan`, `EmulatorSource.dest`, `Source.rev`); `families/cmangos.py`;
+1. Typed catalog blocks (`CmangosData` with `ClientSpec`, `DockerfileSpec`, `ExtractPlan`,
+   `MmapPlan`, `ConfPatchTable`, `SqlPlan`; `Source.rev`; `dockerfile_dir`); `families/cmangos.py`;
    the five stage-kind modules; `docker.run_container`/`copy_from_image`/`exec_stdin`. **[style]**
 2. _Definition of done:_ all four catalog entries validate; WotLK templates render
    byte-identical; busybox/mariadb:11 primitives pass live.
