@@ -518,6 +518,17 @@ class Installer:
             )
         if options.client_dir is not None and not options.client_dir.is_dir():
             raise InstallerError(f"client folder does not exist: {options.client_dir}")
+        # Before Docker, because Docker provisioning is what asks for the
+        # password. The scripts refuse this set themselves - `case "$SERVER_DIR"
+        # in /|"$HOME"|/home|...` - but they refuse it AFTER their own sudo
+        # prompt and after Docker discovery, so a folder that was never going to
+        # work cost the user a password and a wait (live gate, 2026-08-25).
+        # None means "let the script pick its own default", which is by
+        # construction a dedicated subfolder and never one of these.
+        if options.server_dir is not None:
+            folder_problem = platform.server_dir_problem(options.server_dir)
+            if folder_problem is not None:
+                raise InstallerError(folder_problem)
         if not self._docker_check():
             report = self._ensure_docker(cancel=cancel, ask=ask)
             if report.reboot_required:

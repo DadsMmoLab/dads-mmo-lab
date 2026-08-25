@@ -145,7 +145,13 @@ def test_installer_runs_the_entry_script_through_interact(tmp_path: Path) -> Non
         docker_check=lambda: True,
         interact=_fake_interact(calls),  # type: ignore[arg-type]
     )
-    assert list(installer.run(InstallOptions(server_dir=Path("/srv")))) == ["hello", "done"]
+    # Not a bare "/srv": that is now one of the reserved trees preflight
+    # refuses, and this test is about the script running, not about the
+    # folder rule.
+    assert list(installer.run(InstallOptions(server_dir=Path("/srv/wow-server")))) == [
+        "hello",
+        "done",
+    ]
     assert calls[0]["command"] == ["bash", str(script)]
     assert calls[0]["cwd"] == script.parent
     assert callable(calls[0]["respond"])
@@ -465,6 +471,45 @@ def test_bash_available_probes_that_bash_actually_runs() -> None:
     assert bash_available(ok) is True
     assert calls[-1] == ["bash", "-c", "exit 0"]
     assert bash_available(broken) is False
+
+
+def test_installer_refuses_a_reserved_folder_before_asking_for_a_password(
+    tmp_path: Path,
+) -> None:
+    """The refusal has to land BEFORE Docker provisioning, not after it.
+
+    The scripts refuse this set themselves - `case "$SERVER_DIR" in
+    /|"$HOME"|/home|/root|/tmp|...` - but they do it after their own sudo prompt
+    and after Docker discovery. On a clean Fedora 44 box (2026-08-25) picking
+    the home folder cost a sudo password typed into Yu'lon's own dialog and a
+    wait, and only then said "Cannot use '/home/pk' as the install location".
+
+    Adding the mirror to `platform.server_dir_problem()` was not enough on its
+    own: `Installer.preflight()` never consults `preflight.gather()` - that
+    belongs to the native engine - so the mirror was dead code for every Linux
+    install until this call site existed. `calls == []` is the assertion that
+    matters; a refusal that still shelled out has not saved the user anything.
+    """
+    entry = load_catalog().get("wow-wotlk")
+    calls: list[dict[str, object]] = []
+    # A real script on disk, so the refusal under test is reached rather than
+    # the "install script not found" one standing in for it.
+    script = tmp_path / "wow-wotlk" / "install-wow-wotlk.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "#!/usr/bin/env bash" + chr(10) + "exit 0" + chr(10),
+        encoding="utf-8",
+    )
+    installer = _installer(
+        entry,
+        installers_root=tmp_path,
+        docker_check=lambda: True,
+        interact=_fake_interact(calls),  # type: ignore[arg-type]
+        platform_id=lambda: "linux",
+    )
+    with pytest.raises(InstallerError, match="home folder itself"):
+        list(installer.run(InstallOptions(server_dir=Path.home())))
+    assert calls == []
 
 
 def test_installer_refuses_a_platform_its_script_cannot_run(tmp_path: Path) -> None:
