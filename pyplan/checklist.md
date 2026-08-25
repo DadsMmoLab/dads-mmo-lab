@@ -129,6 +129,10 @@
   - [ ] **Second clean-box attempt, from `clean-nested-virt` (2026-08-25 evening) — the fix for the blocker above is still UNVERIFIED, and two new findings came out of trying.** Driven from a Windows build of `fix/windows-bind-mount-user` (the `user: "0:0"` fix), on a box with nested virtualisation on, no Docker, and no WSL. The GUI half all worked: the launcher started, the catalog rendered, Install opened the native folder picker — and unlike Linux, that picker has a **New folder** button, so the Linux dead-end has no Windows equivalent. The install then stopped at provisioning:
     1. **The engine cannot install Docker for itself:** `DockerUnavailableError: Docker isn't available and could not be set up automatically. Open an Administrator PowerShell and run: wsl --install --no-distribution, then reboot.` Both optional features really were `Disabled`, so the diagnosis was right.
     2. **The remediation it prints is circular on the machine that needs it.** In an elevated PowerShell, `wsl --install --no-distribution` exits 1 printing *"The Windows Subsystem for Linux is not installed. You can install by running 'wsl.exe --install'."* — and plain `wsl --install` prints the same and exits 1. Enabling `Microsoft-Windows-Subsystem-Linux` and `VirtualMachinePlatform` via DISM and rebooting does not change it: the inbox `wsl.exe` is a stub, and modern WSL is a separate package. After installing WSL 2.7.12 from Microsoft's MSI by hand, **the exact command the product prints then succeeds (exit 0)**. So the text is not wrong, it is only actionable on a box that already has what it is telling you to get. Worth pointing at the MSI, or detecting the stub, since the stub is what a clean Windows 11 has.
+    *Evidence note: the two quoted strings are in the source (`platform.py`'s remediation text and
+    `native.py`'s `DockerUnavailableError`), but everything below about how the box BEHAVED is
+    field observation with no log committed anywhere in this repo. Treat it as a lead for the next
+    Windows session rather than as a measurement of the kind the Linux findings above carry.*
     Beyond that the run did not reach the thing it was for. Docker Desktop 4.x installed silently (exit 0) but its GUI process exits within seconds of launch and never creates its `docker-desktop` WSL distro, so no engine and no `ac-db-import`. `com.docker.service` was found `Stopped` and starting it did not change the outcome; nested virtualisation is confirmed on (`ExposeVirtualizationExtensions: True`, 15 vCPU, 20 GB static). Since the earlier `clean-debloated` gate did reach engine 29.7.2, this looks like VM-state rather than product, and is where the next Windows session should start. **`user: "0:0"` therefore still has no live evidence** — only the unit tests and the measured cause.
 
 - [ ] 6.4 Tests & gates (mocked platform-gating + script-resolution tests; live-gate on real macOS and Windows 11 — WotLK only). **The mocked, no-hardware half is done (2026-08-24).** Platform gating is tested end to end: `test_installer.py::test_installer_refuses_a_platform_its_script_cannot_run` (TBC on `macos`, nothing subprocesses, `UnsupportedPlatformError`, `issubclass` of `InstallerError`) and `test_native.py`'s dispatch table (`installer_for(ENTRY, platform_id=…)` → `Installer` on linux, `NativeInstaller` on both macOS and Windows; TBC still Linux-only). The 6.4.3 privilege-transparency rule is now asserted on the emitted argv for **all three** provisioning paths, not one: Linux (`test_linux_never_joins_the_docker_group_without_consent`, parametrized over five package managers), macOS (`test_macos_provisioning_never_escalates_privileges`, non-dry), and — newly added this pass — Windows (`test_windows_provisioning_never_escalates_privileges`, non-dry: asserts no `sudo`, no `usermod`/`gpasswd`/`adduser` group join, no `sudoers`/`NOPASSWD`, no `docker.sock` `chmod`, while either recording the `-Verb RunAs` UAC prompt as present so the run actually traversed the elevated install). The remaining two halves — the live macOS gate and the live Windows gate — are on the sub-lines below and are hardware-blocked.
@@ -207,8 +211,10 @@
 
 ## Cross-cutting
 
-- **CI was red on `Yulon` itself for a day, and the break was in a test harness rather than in
-  the product (2026-08-25).** `test_the_installers_label_the_server_folder_only_where_selinux_enforces`
+- **CI is red on `Yulon` itself, and the break is in a test harness rather than in the product
+  (2026-08-25).** *Status when this was written: still red.* The relabel landed at 13:22 UTC and
+  `Yulon` had been failing for about six hours; the fix is PR #100, green on its own checks and
+  **not yet merged**, so every branch cut from `Yulon` still inherits the failure until it is. `test_the_installers_label_the_server_folder_only_where_selinux_enforces`
   failed on three parametrisations and both Python versions from the moment the SELinux relabel
   merged, so every branch cut from `Yulon` inherited it. The test lifts shell functions out of the
   shipped installer and runs them; it lifted **two** of the **four** that
@@ -239,11 +245,18 @@
   exactly that, which is why `libxcb-cursor0` (#96) and `libxkbcommon-x11` (v0.6.51, aborting on
   Arch) were both found by users. The gate resolves the bundle's own objects inside a bare
   `debian:bookworm-slim`. Run against real history it named **five** missing sonames on the shipped
-  tarball - the two known plus `libxcb-icccm`, `libxcb-keysyms`, `libxcb-shape`, `libxcb-xkb`,
-  which had simply not been hit because Arch's Xfce ships them - and then caught the glibc floor
-  above, a bigger bug than the one it was written for. Nothing is excluded from the scan: an
-  exclusion for Qt's GTK platform theme was removed once measurement showed PyInstaller bundles the
-  whole GTK stack anyway (254 objects, still clean), and that it had only ever matched by accident.
+  tarball: `libxkbcommon-x11` - the one that was aborting on Arch - plus `libxcb-icccm`,
+  `libxcb-keysyms`, `libxcb-shape` and `libxcb-xkb`, four that had never been hit at all and
+  survived only because Arch's Xfce happens to ship them. (`libxcb-cursor0` is NOT among them:
+  #96 had already added it to the apt step, which is what that fix was. An earlier version of this
+  note said "the two known plus" those four, which is six and misdescribes the set.) It then caught
+  the glibc floor above, a bigger bug than the one it was written for. **One thing is skipped:**
+  Qt's GTK platform theme, because Qt degrades past it - a missing `libqgtk3.so` costs the file
+  dialog's GTK look, not the app, and this gate exists to fail a release that cannot RUN. Removing
+  the skip was tried and reverted: PyInstaller does bundle the whole GTK stack today (254 objects
+  instead of 253, still clean), but nothing in `release.yml` installs GTK, so that is the runner
+  image's ambient package set rather than anything this repo declares - and resting a permanent
+  rule on it is the same mistake the gate exists to catch.
 
 - **`workflow_dispatch` had never produced an artifact, in a workflow whose own comment says it
   exists "so the matrix can be PROVEN without publishing anything".** `GITHUB_REF_NAME` is the tag
