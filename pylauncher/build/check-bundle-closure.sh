@@ -2,23 +2,22 @@
 # Does the Linux bundle carry every shared library it needs, or does it expect
 # the user's machine to supply one?
 #
-# Twice a library has been missing from the shipped artifact and been found by a
-# user rather than by CI: libxcb-cursor0 (#96) and libxkbcommon-x11 (v0.6.51,
-# which aborted on launch on Arch). Both had the same cause - PyInstaller
-# bundles what the BUILD HOST happens to have - and both would have SURVIVED a
-# smoke test on the GitHub runner, because the runner has those libraries
-# installed. Testing the artifact on the machine that built it cannot find this
-# class of defect at all, which is why this runs in a container that has
-# nothing.
+# Twice a library shipped missing and was found by a user, not by us:
+# libxcb-cursor0 (#96) and libxkbcommon-x11 (v0.6.51, which aborted on launch on
+# Arch). Both had the same cause - PyInstaller bundles what the BUILD HOST
+# happens to have - and both would have SURVIVED a smoke test on the GitHub
+# runner, because the runner has those libraries. Testing an artifact on the
+# machine that built it is blind to this whole class, which is why this resolves
+# the bundle inside a container that has nothing.
 #
 # Static: no X server, no display, the app is never launched. Seconds.
 #
 #   usage: check-bundle-closure.sh <dir containing yulon/ and yulon/_internal>
 #
-# The Qt platform plugins are checked as well as the top-level binary, because
-# that is where both real defects lived: libqxcb.so is dlopened at runtime, so
-# nothing in the executable's own DT_NEEDED mentions it, and a missing
-# dependency of it does not surface until a user starts the app.
+# EVERY failure path here exits non-zero on purpose. A review of the first
+# version measured two ways it could report a clean bundle without having looked
+# at one - an unpullable image, and globs that matched nothing - and a gate that
+# passes when it did not run is worse than no gate, because it is believed.
 set -uo pipefail
 
 BUNDLE=${1:?usage: check-bundle-closure.sh <dir containing yulon/ and yulon/_internal>}
@@ -29,17 +28,18 @@ IMAGE=${BUNDLE_CHECK_IMAGE:-debian:bookworm-slim}
 # The graphics stack is tied to the user's GPU driver: shipping our own libGL
 # against their kernel driver is a documented way to break machines, and every
 # AppImage guide says to exclude it. libxcb and the core X client libraries are
-# present on any machine that has a display at all - which is the only kind of
-# machine that can run a GUI.
+# on any machine that has a display at all - which is the only kind that can run
+# a GUI.
 #
-# Nothing else belongs here. A soname added to this list is a promise that every
-# supported distro ships it, and the Arch failure is what that promise looks
-# like when it is wrong: libxkbcommon-x11 was assumed universal and is not.
+# Nothing else belongs here. A soname added is a PROMISE that every supported
+# distro ships it, and libxkbcommon-x11 is what that promise looks like when it
+# is wrong: assumed universal, absent on Arch, and the app aborted on launch.
 HOST_PROVIDED='
 libGL.so.1
 libEGL.so.1
 libGLX.so.0
 libGLdispatch.so.0
+libOpenGL.so.0
 libdrm.so.2
 libgbm.so.1
 libwayland-client.so.0
@@ -48,6 +48,16 @@ libwayland-egl.so.1
 libwayland-server.so.0
 libxcb.so.1
 '
+
+# Qt's GTK platform-theme plugin, and only that one, is excluded from the scan.
+#
+# It pulls the entire GTK stack (libgtk-3, libgdk-3, cairo, pango, atk,
+# gdk-pixbuf, harfbuzz) and Qt DEGRADES PAST it - a missing theme integration
+# costs the native file dialog's GTK look, not the application. Putting nine GTK
+# sonames on HOST_PROVIDED would be claiming every supported distro ships GTK,
+# which is the kind of promise this file exists to stop making. Excluding one
+# optional plugin is the honest version of the same decision.
+EXCLUDE_RE='platformthemes/libqgtk3\.so$'
 
 if [ ! -d "$BUNDLE" ]; then
     echo "no such directory: $BUNDLE" >&2
@@ -60,44 +70,91 @@ echo "=== resolving the bundle against a bare $IMAGE (no desktop libraries)"
 # everything satisfied - which is exactly how both shipped defects passed. The
 # container is the whole point.
 #
-# Only "=> not found" lines are a finding. `ldd` also prints its own error lines
-# for an object it cannot load at all, and matching those produced nonsense the
-# first time this was written.
-raw=$(docker run --rm \
+# LD_LIBRARY_PATH is scoped to the ldd invocation, NOT exported to the
+# container: several of the bundle's libraries (libselinux, libstdc++, libssl)
+# are newer than the image's, and exporting it makes the container's own
+# coreutils die with a glibc version error - measured, `find` and `sed` both
+# abort. That would empty the pipeline, which used to look like a pass.
+#
+# Two failure shapes are collected, because only the first was caught before and
+# the second is the same defect wearing different words:
+#   libfoo.so.1 => not found                       - a library nobody provides
+#   ... version `GLIBC_2.38' not found (required by ...)  - one too new to use
+# The second is live in this pipeline by construction: the runner is Ubuntu
+# 24.04 (glibc 2.39) and this image is bookworm (2.36), so the artifact is
+# always built against the newer of the two.
+output=$(docker run --rm \
     -v "$(cd "$BUNDLE" && pwd)":/bundle:ro \
-    -e LD_LIBRARY_PATH=/bundle/yulon/_internal \
     "$IMAGE" \
     sh -c '
         set -u
-        for so in /bundle/yulon/_internal/PySide6/Qt/plugins/platforms/*.so \
-                  /bundle/yulon/_internal/lib*.so* \
-                  /bundle/yulon/yulon; do
-            [ -e "$so" ] || continue
-            ldd "$so" 2>/dev/null | awk "/=> not found/ {print \$1}"
+        found=0
+        for so in $(find /bundle -name "*.so" -o -name "*.so.*" -o -name "yulon" 2>/dev/null); do
+            [ -f "$so" ] || continue
+            case "$so" in *'"$EXCLUDE_RE"'*) continue ;; esac
+            found=$((found + 1))
+            LD_LIBRARY_PATH=/bundle/yulon/_internal ldd "$so" 2>&1 \
+                | sed -n -e "s/^[[:space:]]*\([^ ]*\) => not found.*/MISSING \1/p" \
+                         -e "s/.*version .\(GLIBC_[0-9.]*\). not found.*/TOONEW \1/p"
         done
-    ' 2>/dev/null | sort -u)
+        echo "INSPECTED $found"
+    ' 2>&1)
+rc=$?
+
+if [ "$rc" -ne 0 ]; then
+    echo
+    echo "the probe itself failed (docker exit $rc) - this is NOT a pass:" >&2
+    printf '%s\n' "$output" | sed 's/^/  /' >&2
+    echo "Rate limiting, a daemon that is not up, or no docker at all look like" >&2
+    echo "this. The bundle has not been checked." >&2
+    exit 2
+fi
+
+inspected=$(printf '%s\n' "$output" | awk '/^INSPECTED /{print $2; exit}')
+if [ -z "$inspected" ] || [ "$inspected" -eq 0 ]; then
+    echo
+    echo "the probe inspected NO objects - this is NOT a pass." >&2
+    echo "The bundle layout has moved (a PyInstaller upgrade relocating _internal," >&2
+    echo "or the executable being renamed) and this check is now blind. Fix the" >&2
+    echo "paths rather than the symptom." >&2
+    exit 2
+fi
+echo "  inspected $inspected objects"
 
 missing=""
-for soname in $raw; do
+for line in $(printf '%s\n' "$output" | awk '/^MISSING /{print $2}' | sort -u); do
     case "$HOST_PROVIDED" in
         *"
-$soname
+$line
 "*) continue ;;
     esac
-    missing="$missing$soname
+    missing="$missing  $line
 "
 done
 
-if [ -n "$missing" ]; then
+toonew=$(printf '%s\n' "$output" | awk '/^TOONEW /{print $2}' | sort -u)
+
+if [ -n "$missing" ] || [ -n "$toonew" ]; then
     echo
-    echo "MISSING from the bundle, and not on the host-provided list:"
-    printf '%s' "$missing" | sed 's/^/  /'
-    echo
-    echo "Each is a library the artifact expects the USER's machine to have."
-    echo "It resolved on the builder, which is why nothing caught it there."
-    echo "Either add the providing package to the workflow's apt step so the"
-    echo "bundle carries it, or - if every supported distro really does ship it -"
-    echo "add the soname to HOST_PROVIDED in this script, with a reason."
+    if [ -n "$missing" ]; then
+        echo "MISSING from the bundle, and not on the host-provided list:"
+        printf '%s' "$missing"
+        echo
+        echo "Each is a library the artifact expects the USER's machine to have."
+        echo "It resolved on the builder, which is why nothing caught it there."
+        echo "Either add the providing package to the workflow's apt step so the"
+        echo "bundle carries it, or - if every supported distro really ships it -"
+        echo "add the soname to HOST_PROVIDED here, with a reason."
+    fi
+    if [ -n "$toonew" ]; then
+        echo
+        echo "BUILT AGAINST A NEWER GLIBC than the bundle can run on:"
+        printf '%s\n' "$toonew" | sed 's/^/  /'
+        echo
+        echo "The artifact will abort before drawing anything on any distro older"
+        echo "than the builder. Build on an older runner image, or vendor the"
+        echo "affected library."
+    fi
     exit 1
 fi
 

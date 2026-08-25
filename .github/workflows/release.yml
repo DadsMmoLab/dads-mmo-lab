@@ -28,7 +28,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # NOT ubuntu-latest. A glibc binary runs forward but never
+          # backward, so the builder's glibc is the artifact's FLOOR. Measured
+          # on a real Ubuntu 22.04.5 box: the v0.6.51 tarball, built on 24.04,
+          # dies with "libm.so.6: version `GLIBC_2.38' not found" before drawing
+          # anything - i.e. it cannot run on the most widely deployed LTS, nor
+          # on Debian 12 or RHEL 9. Building on the OLDEST supported runner is
+          # what makes the artifact portable; moving this to a newer image
+          # silently drops every distro below it.
+          - os: ubuntu-22.04
             artifact: AppImage
           - os: windows-latest
             artifact: exe
@@ -47,7 +55,7 @@ jobs:
 
       # PYINSTALLER BUNDLES WHAT IT FINDS ON THE BUILDER, so a library missing
       # from the runner is a library missing from the artifact. Qt 6.5+ needs
-      # libxcb-cursor0 to load its `xcb` platform plugin, ubuntu-latest does not
+      # libxcb-cursor0 to load its `xcb` platform plugin, the runner does not
       # ship it, and the v0.6.5 AppImage therefore dumped core on every X11
       # desktop with:
       #
@@ -73,7 +81,7 @@ jobs:
       # build of the same tree on a machine with the package has both. Fedora
       # hid it because GNOME pulls the package in; Arch does not.
       - name: Qt runtime libraries the bundle must carry
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-22.04'
         run: |
           sudo apt-get update -qq
           # The four libxcb-* here were found by the bundle-closure check below,
@@ -87,7 +95,8 @@ jobs:
             libxcb-icccm4 \
             libxcb-keysyms1 \
             libxcb-shape0 \
-            libxcb-xkb1
+            libxcb-xkb1 \
+            libxcb-glx0
 
       - name: Build with PyInstaller
         run: pyinstaller build/pylauncher.spec --noconfirm --clean
@@ -106,13 +115,13 @@ jobs:
       # fails on the shipped v0.6.51 tarball naming all five missing sonames,
       # and passes on a build that carries them.
       - name: The bundle must carry the libraries it needs
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-22.04'
         shell: bash
         run: bash build/check-bundle-closure.sh dist
 
       # ---------------------------------------------------------- Linux
       - name: Package AppImage
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-22.04'
         shell: bash
         run: |
           set -euo pipefail
