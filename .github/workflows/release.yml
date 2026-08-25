@@ -44,11 +44,25 @@ jobs:
           # offers - ubuntu-24.04, ubuntu-26.04, ubuntu-latest - reintroduces
           # the exact defect above, because none of them is glibc 2.35.
           #
-          # So the replacement is not another runner label. It is to stop
-          # depending on the runner's OS at all: build inside a pinned
-          # `container: ubuntu:22.04` (or a manylinux base) on whatever host
-          # runner exists that day, which makes the glibc floor a thing this
-          # repo chooses rather than a thing GitHub retires.
+          # So the replacement is not another runner label - it is to stop
+          # depending on the runner's OS at all. Do NOT reach for a job-level
+          # `container: ubuntu:22.04` when that day comes: the stock image has
+          # no `sudo` (every `sudo apt-get` below breaks), appimagetool is
+          # itself an AppImage and needs `--appimage-extract-and-run` because
+          # containers have no FUSE, and the closure gate's own `docker run`
+          # would need a socket mount and a docker CLI the image does not ship.
+          #
+          # What works instead is to scope the container to the ONE step whose
+          # glibc matters, leaving checkout, setup-python, packaging and the
+          # gate on the host runner:
+          #
+          #   docker run --rm -v "$PWD:/work" -w /work ubuntu:22.04 \
+          #     bash -c "apt-get update && apt-get install -y python3-pip &&
+          #              pip install -r requirements.txt pyinstaller &&
+          #              pyinstaller build/pylauncher.spec --noconfirm --clean"
+          #
+          # That pins the floor to an image this repo chooses rather than one
+          # GitHub retires, and touches nothing else in the job.
           - os: ubuntu-22.04
             artifact: AppImage
           - os: windows-latest

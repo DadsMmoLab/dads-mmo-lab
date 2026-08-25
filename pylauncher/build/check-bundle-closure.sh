@@ -49,25 +49,28 @@ libwayland-server.so.0
 libxcb.so.1
 '
 
-# NOTHING is excluded from the scan.
+# Qt's GTK platform-theme plugin, and only that one, is skipped.
 #
-# An earlier version skipped Qt's GTK platform-theme plugin, on the assumption
-# that libqgtk3.so drags in a GTK stack the bundle would not carry. Measured on
-# the real ubuntu-22.04 artifact instead of assumed: PyInstaller bundles the
-# whole stack - libgtk-3, libgdk-3, cairo, pango, harfbuzz, atk-bridge - so the
-# plugin resolves against nothing but the bundle itself. Turning the exclusion
-# off takes the scan from 253 objects to 254 and it still passes.
+# Qt DEGRADES PAST it: without libqgtk3.so you lose the GTK look of the native
+# file dialog, not the application. This gate exists to fail a release when the
+# artifact cannot RUN, so an optional plugin must not be able to block one.
 #
-# The exclusion also did not work the way it read. It was written as a regex and
-# spliced into a `case` pattern, which takes GLOBS; it matched only because the
-# trailing `$*` expanded to empty in that exact invocation, so adding any
-# argument after the `sh -c` script would have silently switched it off. A gate
-# that quietly stops checking something is the defect this file's own header
-# describes, so the honest fix is to delete it rather than repair it.
+# Passed through the environment and used UNQUOTED, which is the whole point.
+# The first version wrote a regex ('platformthemes/libqgtk3\.so$') and spliced
+# it into a `case`, which takes globs - it matched only because the trailing
+# `$*` expanded to empty in that exact invocation, so a later edit that gave
+# `sh -c` two more tokens would have silently switched it off. A gate that
+# quietly stops checking is the defect this file's header describes twice.
 #
-# If some future PySide6 stops bundling GTK, this gate goes red naming the
-# missing sonames, and that is the right moment to decide - with the failure in
-# hand rather than an exception written in advance.
+# Deleting it outright was tried first and was wrong for a subtler reason.
+# Measured on the real ubuntu-22.04 artifact, PyInstaller does bundle the whole
+# GTK stack, so scanning the plugin passes today at 254 objects instead of 253.
+# But NOTHING in release.yml installs GTK - that stack is on the runner only as
+# an ambient side effect of its preinstalled browsers. Resting a permanent rule
+# on one image's incidental package set is the same mistake this file was
+# written to catch, and it would come due exactly when the ubuntu-22.04 pin
+# expires (see release.yml) and the artifact moves to an image that may trim it.
+EXCLUDE_GLOB=${BUNDLE_CHECK_EXCLUDE_GLOB:-'*/platformthemes/libqgtk3.so'}
 
 if [ ! -d "$BUNDLE" ]; then
     echo "no such directory: $BUNDLE" >&2
@@ -95,12 +98,15 @@ echo "=== resolving the bundle against a bare $IMAGE (no desktop libraries)"
 # always built against the newer of the two.
 output=$(docker run --rm \
     -v "$(cd "$BUNDLE" && pwd)":/bundle:ro \
+    -e EXCLUDE_GLOB="$EXCLUDE_GLOB" \
     "$IMAGE" \
     sh -c '
         set -u
         found=0
         for so in $(find /bundle -name "*.so" -o -name "*.so.*" -o -name "yulon" 2>/dev/null); do
             [ -f "$so" ] || continue
+            # Unquoted on purpose: expanded, then matched AS a glob.
+            case "$so" in $EXCLUDE_GLOB) continue ;; esac
             found=$((found + 1))
             LD_LIBRARY_PATH=/bundle/yulon/_internal ldd "$so" 2>&1 \
                 | sed -n -e "s/^[[:space:]]*\([^ ]*\) => not found.*/MISSING \1/p" \
