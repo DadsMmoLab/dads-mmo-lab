@@ -583,27 +583,53 @@ def _selinux_free_path(tmp_path: Path) -> str:
     return str(bin_dir)
 
 
+def _selinux_body(script: Path) -> str:
+    """Both functions, lifted from the shipped script rather than restated."""
+    text = script.read_text(encoding="utf-8")
+    out = []
+    for name in ("selinux_is_enforcing() {", "selinux_label_for_containers() {"):
+        assert text.count(name) == 1, f"{script.name}: {name} appears {text.count(name)} times"
+        begin = text.index(name)
+        out.append(text[begin : text.index("\n}", begin) + 2])
+    return "\n".join(out)
+
+
 def _selinux_calls(
-    script: Path, target: Path, calls: Path, enforce: str | None, path: str | None = None
+    script: Path,
+    target: Path,
+    calls: Path,
+    enforce: str | None,
+    *,
+    sysfs: Path | None = None,
+    path: str | None = None,
 ) -> list[str]:
-    """Run the installer's own `selinux_label_for_containers` and report its argv.
+    """Run the installer's own relabel helper and report the argv it emitted.
 
     Asserting on the emitted command rather than on the message it prints: a
     rule spelled one way in prose and another in argv is how this project has
     been caught before.
+
+    `sysfs` points the kernel-interface check at a file under the test's
+    control. Without it the real /sys/fs/selinux/enforce answers on any box that
+    has one, the `getenforce` stub is never consulted, and the not-enforcing
+    cases assert nothing at all.
     """
-    body = script.read_text(encoding="utf-8")
-    start = body.index("selinux_label_for_containers() {")
-    end = body.index("\n}", start) + 2
     stub = "" if enforce is None else f'getenforce() {{ echo "{enforce}"; }}'
-    probe = _SELINUX_PROBE % {"stub": stub, "body": body[start:end]}
+    probe = _SELINUX_PROBE % {"stub": stub, "body": _selinux_body(script)}
     calls.write_text("", encoding="utf-8")
+    env = {
+        "PATH": path if path is not None else os.environ.get("PATH", ""),
+        "CALLS": str(calls),
+        # A path that does not exist takes the getenforce branch, which is what
+        # "this kernel exposes no selinuxfs" looks like.
+        "YULON_SELINUX_ENFORCE_PATH": str(sysfs) if sysfs else str(target / "no-selinuxfs"),
+    }
     subprocess.run(
         ["bash", "-c", probe, "probe", str(target)],
         capture_output=True,
         text=True,
         timeout=30,
-        env={"PATH": path if path is not None else os.environ.get("PATH", ""), "CALLS": str(calls)},
+        env=env,
     )
     return [line for line in calls.read_text(encoding="utf-8").splitlines() if line]
 
@@ -625,8 +651,11 @@ def test_the_installers_label_the_server_folder_only_where_selinux_enforces(
     the container is refused. Relabelling made the identical import exit 0 and
     the whole stack came up.
 
-    The negative cases carry the weight: a relabel that fired on Debian would be
-    a change nobody asked for on a system with no SELinux to satisfy.
+    Both sources of truth are covered. selinuxfs is checked first because it
+    exists whenever SELinux is loaded, while `getenforce` ships in an optional
+    package - gating only on the tool fails OPEN, which is the direction of the
+    bug. The negative cases carry the weight: a relabel firing on Debian would
+    be a change nobody asked for on a system with no SELinux to satisfy.
     """
     script = (
         Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
@@ -634,22 +663,63 @@ def test_the_installers_label_the_server_folder_only_where_selinux_enforces(
     target = tmp_path / "server"
     target.mkdir()
     calls = tmp_path / "calls.txt"
+    expected = [f"chcon -Rt container_file_t {target}/env"]
 
-    # No getenforce at all - Debian, Ubuntu, Arch. Expressed as a PATH without
-    # the tools, because omitting the stub finds the real binary on Fedora.
-    assert _selinux_calls(script, target, calls, None, _selinux_free_path(tmp_path)) == []
+    # selinuxfs present - the kernel's own answer wins, and `getenforce` is not
+    # consulted even when it disagrees.
+    enforcing = tmp_path / "enforce-1"
+    enforcing.write_text("1\n", encoding="utf-8")
+    assert _selinux_calls(script, target, calls, "Disabled", sysfs=enforcing) == expected
 
-    # SELinux present but not enforcing.
+    permissive = tmp_path / "enforce-0"
+    permissive.write_text("0\n", encoding="utf-8")
+    assert _selinux_calls(script, target, calls, "Enforcing", sysfs=permissive) == []
+
+    # No selinuxfs - fall back to the tool.
+    assert _selinux_calls(script, target, calls, "Enforcing") == expected
     assert _selinux_calls(script, target, calls, "Permissive") == []
     assert _selinux_calls(script, target, calls, "Disabled") == []
 
-    # Enforcing: exactly one relabel, of env, with the container type.
-    emitted = _selinux_calls(script, target, calls, "Enforcing")
-    assert emitted == [f"chcon -Rt container_file_t {target}/env"]
+    # Neither source: no selinuxfs and no tools on PATH - Debian, Ubuntu, Arch.
+    assert _selinux_calls(script, target, calls, None, path=_selinux_free_path(tmp_path)) == []
+
     # The directories are made first, so whatever compose creates inside them
     # inherits the label rather than needing a second pass.
     assert (target / "env" / "dist" / "etc").is_dir()
     assert (target / "env" / "dist" / "logs").is_dir()
+
+
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_the_generated_override_labels_every_bind_mount_it_shares(script_name: str) -> None:
+    """`:z` is the half that survives a relabel; chcon is the half that runs once.
+
+    A review of the first version made the case: `chcon` is applied before ONE
+    of the several `docker compose up` sites in this product - the resume
+    branch, the generated launcher script, wow-manage.sh and dml-start.sh all
+    bring the stack up without it - and any policy relabel (`restorecon -R ~`, a
+    selinux-policy update, `touch /.autorelabel`) puts the tree back with
+    nothing to re-apply it. `:z` is applied by Docker on every start, so it is
+    self-healing and covers every site. Read from the shipped script so the two
+    cannot drift.
+    """
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    text = script.read_text(encoding="utf-8")
+    override = text[text.index("docker-compose.override.yml") : text.index("\nOVERRIDE")]
+    for service in ("ac-worldserver", "ac-authserver", "ac-db-import"):
+        assert service in override, f"{script_name}: {service} missing from the override"
+    for mount in ("/azerothcore/env/dist/etc:z", "/azerothcore/env/dist/logs:z"):
+        # once per service that mounts it
+        assert (
+            override.count(mount) == 3
+        ), f"{script_name}: expected {mount} on all three services, found {override.count(mount)}"
+    # Spelled with the base file's own default so Compose merges by target path.
+    assert "${DOCKER_VOL_ETC:-./env/dist/etc}" in override
+    assert "${DOCKER_VOL_LOGS:-./env/dist/logs}" in override
 
 
 def test_installer_refuses_a_reserved_folder_before_asking_for_a_password(

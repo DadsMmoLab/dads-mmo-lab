@@ -155,9 +155,27 @@ dir_is_reusable() {
 # No sudo: a user may relabel files they own, which is why this runs quietly
 # rather than adding another password prompt. A no-op wherever getenforce does
 # not exist, which covers Debian, Ubuntu and Arch.
+selinux_is_enforcing() {
+    # /sys/fs/selinux/enforce first: it is the kernel's own interface and exists
+    # whenever SELinux is actually loaded, while `getenforce` lives in
+    # libselinux-utils, which is optional. Gating only on the optional tool fails
+    # OPEN in the direction of the bug this exists to prevent - a Fedora Server
+    # or minimal image can be enforcing with no getenforce on it.
+    # The path is a variable ONLY so the test can point it somewhere; nothing in
+    # the product ever sets it. Without that, a `getenforce` stub is bypassed on
+    # every box that has the real sysfs file, and the not-enforcing cases assert
+    # nothing.
+    _enforce_path="${YULON_SELINUX_ENFORCE_PATH:-/sys/fs/selinux/enforce}"
+    if [ -r "$_enforce_path" ]; then
+        [ "$(cat "$_enforce_path" 2>/dev/null)" = "1" ] && return 0
+        return 1
+    fi
+    command -v getenforce >/dev/null 2>&1 || return 1
+    [ "$(getenforce 2>/dev/null)" = "Enforcing" ]
+}
+
 selinux_label_for_containers() {
-    command -v getenforce >/dev/null 2>&1 || return 0
-    [ "$(getenforce 2>/dev/null)" = "Enforcing" ] || return 0
+    selinux_is_enforcing || return 0
     command -v chcon >/dev/null 2>&1 || return 0
 
     print_info "SELinux is enforcing — labelling the server folder for container access"
@@ -166,9 +184,15 @@ selinux_label_for_containers() {
     if chcon -Rt container_file_t "$1/env" 2>/dev/null; then
         print_success "Server folder labelled for container access"
     else
-        print_warning "Could not label $1/env for container access."
-        print_info "If the database import fails with 'Permission denied', run:"
-        print_info "  chcon -Rt container_file_t $1/env"
+        # `sudo`, and quoted. `chcon -R` walks past a per-file EPERM and still
+        # exits non-zero, so this branch is reached with the tree PARTIALLY
+        # relabelled - typically because something earlier ran as root (
+        # wow-manage.sh chowns parts of env/dist). Printing the command that
+        # just failed, unprivileged and unquoted, is advice that cannot work.
+        print_warning "Could not fully label $1/env for container access."
+        print_info "If the server fails with 'Permission denied' on its config, run:"
+        print_info "  sudo chcon -Rt container_file_t \"$1/env\""
+        print_info "The compose file also carries ':z', which relabels on each start."
     fi
 }
 
@@ -1078,6 +1102,14 @@ services:
       target: worldserver
     volumes:
       - ./modules:/azerothcore/modules
+      # `:z` so Docker relabels these for container access on EVERY start.
+      # AzerothCore's own compose mounts them without it, which on SELinux
+      # distros leaves them user_home_t and the container cannot write its
+      # config - ac-db-import exits 1 with "Permission denied" on files the
+      # user owns. Spelled with the same ${VAR:-default} as the base file so
+      # Compose expands it identically and merges by target path.
+      - ${DOCKER_VOL_ETC:-./env/dist/etc}:/azerothcore/env/dist/etc:z
+      - ${DOCKER_VOL_LOGS:-./env/dist/logs}:/azerothcore/env/dist/logs:z
     environment:
       AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES: "1"
       AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN: "1"
@@ -1087,10 +1119,16 @@ services:
     build:
       context: .
       target: authserver
+    volumes:
+      - ${DOCKER_VOL_ETC:-./env/dist/etc}:/azerothcore/env/dist/etc:z
+      - ${DOCKER_VOL_LOGS:-./env/dist/logs}:/azerothcore/env/dist/logs:z
   ac-db-import:
     build:
       context: .
       target: db-import
+    volumes:
+      - ${DOCKER_VOL_ETC:-./env/dist/etc}:/azerothcore/env/dist/etc:z
+      - ${DOCKER_VOL_LOGS:-./env/dist/logs}:/azerothcore/env/dist/logs:z
   ac-client-data-init:
     build:
       context: .
