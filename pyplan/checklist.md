@@ -579,6 +579,28 @@ it settled eight minutes later. **Three remain**, per the tally in `phase6-decis
 since and still open for want of a Hyper-V box or a Mac — and `compose up -d --no-deps <db>`
 against images this engine built. The count is kept in one file now, and both mentions here point at it.)
 
+### The first macOS run: Docker was running and the launcher could not see it (2026-08-25)
+
+Baerthe (Discord, the only Mac on the team) ran the 0.6.53 dmg: WotLK Install showed the two
+opening lines, then nothing for minutes, then failed. Root cause is in `docker_programs()`, whose
+docstring said "off Windows, PATH means the same thing to a running process as to the shell that
+started it". True on Linux, false for a `.app` opened from Finder: it is a child of launchd, whose
+PATH is `/usr/bin:/bin:/usr/sbin:/sbin`, and Docker Desktop's CLI is a symlink in `/usr/local/bin`.
+So plain `docker` raised `FileNotFoundError`, `ensure_docker()` saw `Docker.app` in /Applications,
+ran `open -a Docker`, polled `docker info` for the full 180 s against a binary it could never start,
+and raised "Docker isn't available and could not be set up automatically". The Windows bug fixed
+2026-08-23 (`_windows_docker_programs()`), on a second OS, with the same 180-second signature.
+
+Fixed with `_macos_docker_bins()` / `_macos_docker_programs()` — `/usr/local/bin`,
+`/opt/homebrew/bin`, `/Applications/Docker.app/Contents/Resources/bin`, tried only when plain
+`docker` does not resolve — which also unblocks `ContainerGit`, since `docker_program()` picks from
+the same list. The second half of the report ("no progress details") was real on its own:
+`_preflight_lines()` yielded nothing between `OPENING_NOTE` and the end of provisioning, and
+provisioning can be a .dmg download plus the poll. It now says "Checking Docker." and, when Docker is
+not answering, that setup can take a few minutes with no output. Still unverified on a real Mac: the
+run-sheet's remaining steps, and whether `xcode-select -p` on Baerthe's box makes the clone go through
+the container git. Ask for `~/Library/Application Support/yulon/yulon.log` on the next run.
+
 ### Two things the first button-driven install found (2026-08-24)
 
 **1. A first-run failure whose diagnosis did not survive being tested, and a message that sends

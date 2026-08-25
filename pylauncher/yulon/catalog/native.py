@@ -413,7 +413,17 @@ class NativeInstaller:
                 "fix on this machine."
             )
         server_dir = self.server_dir(options)
+        yield "Checking Docker."
         if not self._seams.docker_ready():
+            # Provisioning prints nothing of its own and can be a Docker
+            # Desktop download followed by a three-minute readiness poll. The
+            # first macOS tester watched an empty panel through all of it and
+            # reported the install as silently dead (macOS gate, 2026-08-25).
+            yield (
+                "Docker is not answering yet. Setting it up - this can mean downloading "
+                "Docker Desktop and waiting for its engine, up to a few minutes with no "
+                "output. You can stop at any time."
+            )
             report = self._seams.ensure_docker(cancel=cancel)
             if report.reboot_required:
                 raise DockerUnavailableError(

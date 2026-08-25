@@ -938,6 +938,30 @@ def test_the_state_file_only_records_stages_this_engine_knows(tmp_path: Path) ->
 # -- provisioning and readiness --------------------------------------------
 
 
+def test_the_panel_says_docker_is_being_set_up_before_the_silent_wait(tmp_path: Path) -> None:
+    """Provisioning can be a .dmg download plus a 180-second poll with no output of its own.
+
+    The first macOS tester saw two lines and then nothing for minutes, and
+    called the install silently dead (macOS gate, 2026-08-25). The engine must
+    say what it is waiting on BEFORE it starts waiting, and say how long that
+    can take.
+    """
+    rec = Recorder()
+    report = platform.ProvisionReport("macos", (), ("open Docker Desktop yourself",), ())
+    installer = engine(
+        rec,
+        docker_ready=lambda: False,
+        ensure_docker=lambda **_kwargs: report,
+    )
+    lines: list[str] = []
+    with pytest.raises(DockerUnavailableError):
+        for line in installer.run(InstallOptions(server_dir=tmp_path / "wow")):
+            lines.append(line)
+    docker_lines = [line for line in lines if "Docker" in line]
+    assert docker_lines, lines
+    assert any("minutes" in line for line in docker_lines), docker_lines
+
+
 def test_docker_that_cannot_be_provisioned_is_a_clean_refusal(tmp_path: Path) -> None:
     rec = Recorder()
     report = platform.ProvisionReport("macos", (), ("open Docker Desktop yourself",), ())
