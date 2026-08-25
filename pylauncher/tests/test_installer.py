@@ -8,6 +8,7 @@ so no Docker, network, or two-hour build is involved.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -550,6 +551,105 @@ def test_the_installers_reusable_check_fails_closed(tmp_path: Path, script_name:
         unreadable.chmod(0o755)
 
     assert _dir_is_reusable(script, tmp_path / "does-not-exist") == "PROTECTED"
+
+
+_SELINUX_PROBE = """
+set -u
+print_info() { :; }
+print_success() { :; }
+print_warning() { :; }
+%(stub)s
+chcon() { echo "chcon $*" >> "$CALLS"; }
+%(body)s
+selinux_label_for_containers "$1"
+"""
+
+
+def _selinux_free_path(tmp_path: Path) -> str:
+    """A PATH with the tools the function needs and no SELinux ones.
+
+    Omitting the `getenforce` stub is NOT how you express "this distro has no
+    SELinux": on Fedora - and on any CI image with the tools installed -
+    `command -v getenforce` then finds the real binary and the case asserts the
+    opposite of what it says. Verified on Fedora 44, where exactly that made
+    three "absent" cases fire the relabel.
+    """
+    bin_dir = tmp_path / "nosel-bin"
+    bin_dir.mkdir(exist_ok=True)
+    for tool in ("bash", "sh", "mkdir", "cat", "rm"):
+        found = shutil.which(tool)
+        if found and not (bin_dir / tool).exists():
+            (bin_dir / tool).symlink_to(found)
+    return str(bin_dir)
+
+
+def _selinux_calls(
+    script: Path, target: Path, calls: Path, enforce: str | None, path: str | None = None
+) -> list[str]:
+    """Run the installer's own `selinux_label_for_containers` and report its argv.
+
+    Asserting on the emitted command rather than on the message it prints: a
+    rule spelled one way in prose and another in argv is how this project has
+    been caught before.
+    """
+    body = script.read_text(encoding="utf-8")
+    start = body.index("selinux_label_for_containers() {")
+    end = body.index("\n}", start) + 2
+    stub = "" if enforce is None else f'getenforce() {{ echo "{enforce}"; }}'
+    probe = _SELINUX_PROBE % {"stub": stub, "body": body[start:end]}
+    calls.write_text("", encoding="utf-8")
+    subprocess.run(
+        ["bash", "-c", probe, "probe", str(target)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={"PATH": path if path is not None else os.environ.get("PATH", ""), "CALLS": str(calls)},
+    )
+    return [line for line in calls.read_text(encoding="utf-8").splitlines() if line]
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_the_installers_label_the_server_folder_only_where_selinux_enforces(
+    tmp_path: Path, script_name: str
+) -> None:
+    """Fedora could not finish an install until this ran; Ubuntu must not see it.
+
+    Measured on clean Fedora 44 (2026-08-25), with the first-install dead-end
+    already fixed: `ac-db-import` exited 1 with "cp: cannot create regular file
+    ...: Permission denied" on files owned by the user. AzerothCore's compose
+    bind-mounts env/dist without `:z`, so the directory keeps `user_home_t` and
+    the container is refused. Relabelling made the identical import exit 0 and
+    the whole stack came up.
+
+    The negative cases carry the weight: a relabel that fired on Debian would be
+    a change nobody asked for on a system with no SELinux to satisfy.
+    """
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    target = tmp_path / "server"
+    target.mkdir()
+    calls = tmp_path / "calls.txt"
+
+    # No getenforce at all - Debian, Ubuntu, Arch. Expressed as a PATH without
+    # the tools, because omitting the stub finds the real binary on Fedora.
+    assert _selinux_calls(script, target, calls, None, _selinux_free_path(tmp_path)) == []
+
+    # SELinux present but not enforcing.
+    assert _selinux_calls(script, target, calls, "Permissive") == []
+    assert _selinux_calls(script, target, calls, "Disabled") == []
+
+    # Enforcing: exactly one relabel, of env, with the container type.
+    emitted = _selinux_calls(script, target, calls, "Enforcing")
+    assert emitted == [f"chcon -Rt container_file_t {target}/env"]
+    # The directories are made first, so whatever compose creates inside them
+    # inherits the label rather than needing a second pass.
+    assert (target / "env" / "dist" / "etc").is_dir()
+    assert (target / "env" / "dist" / "logs").is_dir()
 
 
 def test_installer_refuses_a_reserved_folder_before_asking_for_a_password(

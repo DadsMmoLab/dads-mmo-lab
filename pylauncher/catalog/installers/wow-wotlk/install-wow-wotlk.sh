@@ -155,6 +155,37 @@ dir_is_reusable() {
     return 0
 }
 
+# Let containers write to the bind-mounted server folder on SELinux systems.
+#
+# AzerothCore's compose mounts env/dist WITHOUT the `:z` suffix that would make
+# Docker relabel it, so on Fedora, RHEL, Rocky, Alma, CentOS Stream and the
+# Silverblue/Bazzite family the directory keeps its `user_home_t` label and the
+# container (running as `container_t`) is refused. It surfaces as ac-db-import
+# exiting 1 with "cp: cannot create regular file ...: Permission denied", and
+# the image's own advice blames cloning as root - which is wrong here, the files
+# are owned by the user. Measured on clean Fedora 44 (2026-08-25): relabelling
+# makes the identical import exit 0.
+#
+# No sudo: a user may relabel files they own, which is why this runs quietly
+# rather than adding another password prompt. A no-op wherever getenforce does
+# not exist, which covers Debian, Ubuntu and Arch.
+selinux_label_for_containers() {
+    command -v getenforce >/dev/null 2>&1 || return 0
+    [ "$(getenforce 2>/dev/null)" = "Enforcing" ] || return 0
+    command -v chcon >/dev/null 2>&1 || return 0
+
+    print_info "SELinux is enforcing — labelling the server folder for container access"
+    # Created first so the label is inherited by whatever compose puts inside.
+    mkdir -p "$1/env/dist/etc" "$1/env/dist/logs" 2>/dev/null || true
+    if chcon -Rt container_file_t "$1/env" 2>/dev/null; then
+        print_success "Server folder labelled for container access"
+    else
+        print_warning "Could not label $1/env for container access."
+        print_info "If the database import fails with 'Permission denied', run:"
+        print_info "  chcon -Rt container_file_t $1/env"
+    fi
+}
+
 press_enter() {
     echo ""
     echo -e "${WHITE}Press ENTER to continue...${NC}"
@@ -1223,6 +1254,8 @@ OVERRIDE
     print_info "Compiling Playerbots server (2-4 hours)..."
     print_info "Progress saved to: ~/playerbots-build.log"
     print_info "Go make a coffee — this will take a while! ☕"
+
+    selinux_label_for_containers "$SERVER_DIR"
 
     cd "$SERVER_DIR"
     docker compose up -d --build 2>&1 | tee ~/playerbots-build.log
