@@ -183,7 +183,7 @@ class DockerSql:
                 # (2026-08-23).
                 errors="replace",
                 check=False,
-                env=self._env(),
+                env=runner.child_env(self._env()),
                 creationflags=runner.creationflags(),
             )
         except OSError as exc:

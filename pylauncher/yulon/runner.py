@@ -70,6 +70,68 @@ def creationflags() -> int:
     return int(getattr(subprocess, "CREATE_NO_WINDOW"))  # noqa: B009 - Windows-only attribute
 
 
+_FROZEN_LIBRARY_VARS = (
+    "LD_LIBRARY_PATH",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FRAMEWORK_PATH",
+    "LIBPATH",
+)
+"""Loader search paths PyInstaller rewrites, and children must not inherit.
+
+One per platform family - Linux/BSD, macOS (two of them), AIX - listed together
+because the bug is one bug and a fix applied to some of them is a fix on some
+platforms only.
+"""
+
+
+def child_env(env: Mapping[str, str] | None = None) -> dict[str, str] | None:
+    """The environment a spawned child should actually get.
+
+    THE PACKAGED LAUNCHER BREAKS THE TOOLS IT SHELLS OUT TO, and this is where
+    that stops. PyInstaller points `LD_LIBRARY_PATH` at the bundle's own
+    `_internal` directory so the frozen interpreter finds its libraries. Every
+    child process inherits it, and a system binary that links anything the
+    bundle also ships then loads the BUNDLE's copy. Measured inside the v0.6.5
+    AppImage on Arch, 2026-08-24:
+
+        bash  -> symbol lookup error: undefined symbol: rl_print_keybinding
+        curl  -> libssl.so.3: version `OPENSSL_3.2.0' not found
+                 (required by /usr/lib/libcurl.so.4)
+        git   -> libpcre2-8.so.0: no version information available
+
+    bash dies outright, so `installer.bash_available()` - which runs
+    `bash -c "exit 0"` and is the FIRST subprocess an install makes - answers
+    False, and the user is told "this machine has no working bash" about a
+    machine whose bash is fine. curl loses HTTPS entirely, which is what
+    "refuses to download files" looks like from the outside.
+
+    PyInstaller saves the pre-launch value as `<VAR>_ORIG` for exactly this
+    purpose. Restoring it (or removing the variable when there was nothing to
+    restore) hands the child the environment it would have had if the user had
+    typed the command themselves.
+
+    Returns None when not frozen, so a source checkout keeps inheriting this
+    process's environment exactly as before - the bug does not exist there, and
+    neither should the fix. That asymmetry is also why the whole test suite and
+    the CLI harness stayed green while the shipped artifact could not run
+    `bash`: they never run frozen.
+    """
+    if not getattr(sys, "frozen", False):
+        return dict(env) if env is not None else None
+    base = dict(env) if env is not None else dict(os.environ)
+    for var in _FROZEN_LIBRARY_VARS:
+        original = base.pop(f"{var}_ORIG", None)
+        if original:
+            base[var] = original
+        else:
+            # No _ORIG, or an empty one: the variable was unset before the
+            # bundle set it, so unset is what the child should see. Leaving an
+            # empty string behind is not the same thing - an empty
+            # LD_LIBRARY_PATH means "the current directory" to some loaders.
+            base.pop(var, None)
+    return base
+
+
 def stream(
     command: list[str], cwd: Path | None = None, *, merge_stderr: bool = False
 ) -> Generator[str, None, None]:
@@ -123,6 +185,7 @@ def stream(
         text=True,
         encoding="utf-8",
         errors="replace",
+        env=child_env(),
         creationflags=creationflags(),
     )
     stderr_lines: list[str] = []
@@ -208,7 +271,7 @@ def run(
         return subprocess.run(
             command,
             cwd=_cwd_arg(cwd),
-            env=dict(env) if env is not None else None,
+            env=child_env(env),
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -401,7 +464,7 @@ def interact(
                 stdin=slave,
                 stdout=slave,
                 stderr=slave,
-                env=dict(env) if env is not None else None,
+                env=child_env(env),
                 bufsize=0,
                 start_new_session=True,  # see _CLAIM_THE_TERMINAL
             )
@@ -412,7 +475,7 @@ def interact(
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                env=dict(env) if env is not None else None,
+                env=child_env(env),
                 bufsize=0,
                 creationflags=creationflags(),
             )

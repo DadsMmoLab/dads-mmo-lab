@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import subprocess
 import threading
 import time
@@ -200,3 +201,131 @@ def test_interact_cancel_interrupts_a_child_stuck_on_a_prompt(tmp_path: Path) ->
         lines.append(line)
     assert time.monotonic() - started < 20  # would never return before this fix
     assert lines and lines[0] == "hello"
+
+
+# ---------------------------------------------------- the frozen library path
+# The bug these cover shipped and could not be seen from here: it exists ONLY
+# in the packaged app, and everything in this file runs from source.
+
+
+def _frozen(monkeypatch: pytest.MonkeyPatch, **env: str) -> None:
+    """Pretend to be the PyInstaller bundle, with the environment it creates."""
+    monkeypatch.setattr(runner.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(runner.os, "environ", dict(env))
+
+
+def test_running_from_source_leaves_the_child_environment_alone() -> None:
+    """None means "inherit", which is what every caller has always got.
+
+    The fix must not change the unfrozen case at all: the bug does not exist
+    there, and a source checkout that suddenly spawns children with a rebuilt
+    environment would be a new bug wearing the old one's clothes.
+    """
+    assert runner.child_env() is None
+    assert runner.child_env({"A": "1"}) == {"A": "1"}
+
+
+@pytest.mark.parametrize(
+    "var", ["LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH", "LIBPATH"]
+)
+def test_a_frozen_launcher_hands_back_the_users_own_loader_path(
+    monkeypatch: pytest.MonkeyPatch, var: str
+) -> None:
+    """PyInstaller saves the pre-launch value; the child must get THAT one.
+
+    Parametrised across all four because the bug is one bug and a fix applied
+    to `LD_LIBRARY_PATH` alone is a fix on Linux only - macOS carries the same
+    breakage under two different names.
+    """
+    _frozen(monkeypatch, **{var: "/bundle/_internal", f"{var}_ORIG": "/opt/mine/lib"})
+    got = runner.child_env()
+    assert got is not None
+    assert got[var] == "/opt/mine/lib"
+    assert f"{var}_ORIG" not in got
+
+
+@pytest.mark.parametrize("orig", ["", None])
+def test_a_frozen_launcher_unsets_a_path_the_user_never_had(
+    monkeypatch: pytest.MonkeyPatch, orig: str | None
+) -> None:
+    """No _ORIG, or an empty one, means it was unset before the bundle set it.
+
+    Unset is not the same as empty: an empty `LD_LIBRARY_PATH` means "look in
+    the current directory" to some loaders, so leaving one behind would swap a
+    library-path bug for a subtler one. Measured inside the real AppImage:
+    `LD_LIBRARY_PATH_ORIG` is present and EMPTY there, which is exactly this
+    case and the one that bites (2026-08-24).
+    """
+    env = {"LD_LIBRARY_PATH": "/bundle/_internal"}
+    if orig is not None:
+        env["LD_LIBRARY_PATH_ORIG"] = orig
+    _frozen(monkeypatch, **env)
+    got = runner.child_env()
+    assert got is not None
+    assert "LD_LIBRARY_PATH" not in got
+    assert "LD_LIBRARY_PATH_ORIG" not in got
+
+
+def test_a_caller_supplied_environment_is_sanitised_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`platform._c_locale_env()` copies os.environ, so it carries the poison.
+
+    A caller passing an environment is not opting out of this - it is usually
+    os.environ plus one key, which is the exact shape that hands the bundle's
+    libraries to a child while looking deliberate.
+    """
+    _frozen(monkeypatch)
+    poisoned = {"LC_ALL": "C", "LD_LIBRARY_PATH": "/bundle/_internal"}
+    got = runner.child_env(poisoned)
+    assert got == {"LC_ALL": "C"}
+
+
+def test_every_spawn_site_in_this_module_sanitises_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Asked of the seam, not of the source.
+
+    Grepping for `child_env(` would pass on a call that computes the right
+    environment and then throws it away, and the defect being guarded against
+    is precisely a spawn site that forgets. So each entry point is driven and
+    the environment `subprocess` was actually handed is read back.
+    """
+    _frozen(monkeypatch, LD_LIBRARY_PATH="/bundle/_internal", PATH="/usr/bin")
+    seen: list[dict[str, str] | None] = []
+
+    class _Proc:
+        returncode = 0
+        pid = 1234
+
+        def __init__(self, *a: object, **kw: object) -> None:
+            seen.append(kw.get("env"))  # type: ignore[arg-type]
+            # Real file objects: `stream()` asserts on both and iterates stdout,
+            # so a double with None here fails for the wrong reason.
+            self.stdout = io.StringIO("")
+            self.stderr = io.StringIO("")
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+        def poll(self) -> int:
+            return 0
+
+        def kill(self) -> None:
+            return None
+
+    def fake_run(*a: object, **kw: object) -> subprocess.CompletedProcess[str]:
+        seen.append(kw.get("env"))  # type: ignore[arg-type]
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner.subprocess, "Popen", _Proc)
+
+    runner.run(["true"])
+    runner.run(["true"], env={"LD_LIBRARY_PATH": "/bundle/_internal", "X": "1"})
+    list(runner.stream(["true"]))
+
+    assert seen, "no spawn site was reached; this test is measuring nothing"
+    for env in seen:
+        assert env is not None, "a frozen spawn passed env=None and so inherited the bundle's path"
+        assert "LD_LIBRARY_PATH" not in env, env
