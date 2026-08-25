@@ -424,6 +424,42 @@ clone_source() {
     fi
 
     mkdir -p "$SERVER_DIR" "$SERVER_DIR/data"
+
+    # Keep the generated root password somewhere other than the compose file.
+    # It is interpolated into MARIADB_ROOT_PASSWORD below and was otherwise
+    # unrecoverable, so the launcher had no way to reach this server's database
+    # and fell back to a default that was simply wrong. Same shape as the TBC
+    # and Vanilla installers: reload it when it already exists, so re-running
+    # the script against an existing database does not lock itself out.
+    local pw_file="$SERVER_DIR/.db_password"
+    local db_password_loaded=false
+    if [ -s "$pw_file" ]; then
+        # -s, not -f: a zero-byte file is not a password, and treating one as
+        # "loaded" would hand MariaDB an empty root password and report success.
+        DB_PASSWORD=$(cat "$pw_file")
+        db_password_loaded=true
+        print_info "Loaded existing database password from previous install."
+    else
+        # Created empty and locked down BEFORE the secret goes in: writing first
+        # and chmod-ing after leaves it world-readable in between.
+        rm -f "$pw_file"
+        (umask 077; : > "$pw_file")
+        chmod 600 "$pw_file"
+        echo "$DB_PASSWORD" > "$pw_file"
+    fi
+
+    # A generated password is only ever applied to an EMPTY database volume:
+    # MariaDB reads MARIADB_ROOT_PASSWORD on first init and never again. So a
+    # new password beside a surviving volume is a database nothing can log into.
+    if [ "$db_password_loaded" = false ]; then
+        local db_volume
+        db_volume="$(basename "$SERVER_DIR")_dbdata"
+        if docker volume ls -q 2>/dev/null | grep -qx "$db_volume"; then
+            print_warning "Found a database volume from an earlier install whose password is"
+            print_warning "unknown - removing it so the database re-initialises with this one."
+            docker volume rm "$db_volume" 2>/dev/null || true
+        fi
+    fi
     print_info "Cloning $SOURCE_REPO ..."
     if ! git clone --depth 1 "$SOURCE_REPO" "$SERVER_DIR/src"; then
         print_error "git clone failed."; exit 1

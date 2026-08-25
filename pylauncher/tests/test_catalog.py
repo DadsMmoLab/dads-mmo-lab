@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -100,3 +102,57 @@ def test_unknown_game_and_bad_entries_are_rejected() -> None:
             }
         )
     assert CATALOG_FILE.name == "catalog.json"
+
+
+def test_db_password_prefers_a_fixed_one_then_the_generated_file(tmp_path: Path) -> None:
+    """Where the root password comes from, for a game that does not have a fixed one.
+
+    `db_root_password_file` was declared in the schema and read nowhere, so
+    every caller fell back to the shared default - which for TBC and Vanilla is
+    simply the wrong password, because their installers generate one. Start and
+    Stop need no database, so it would have surfaced on Create account.
+    """
+    catalog = load_catalog()
+
+    wotlk = catalog.get("wow-wotlk").install
+    assert wotlk.db_password(tmp_path) == "password", "a fixed password wins outright"
+
+    tbc = catalog.get("wow-tbc").install
+    assert tbc.db_root_password_file, "wow-tbc is expected to generate its password"
+    assert tbc.db_password(tmp_path) is None, "no file yet, so nothing is knowable"
+
+    (tmp_path / tbc.db_root_password_file).write_text("tbcdeadbeef\n", encoding="utf-8")
+    assert tbc.db_password(tmp_path) == "tbcdeadbeef", "read, and stripped of its newline"
+
+    (tmp_path / tbc.db_root_password_file).write_text("   \n", encoding="utf-8")
+    assert tbc.db_password(tmp_path) is None, "a blank file is not a password"
+
+
+def test_db_password_is_none_when_the_file_cannot_be_read(tmp_path: Path) -> None:
+    """A directory where the password file should be is unreadable, not empty.
+
+    None rather than the default on purpose: the caller is then free to say the
+    password is unknown instead of authenticating with a guess.
+    """
+    tbc = load_catalog().get("wow-tbc").install
+    assert tbc.db_root_password_file
+    (tmp_path / tbc.db_root_password_file).mkdir()
+    assert tbc.db_password(tmp_path) is None
+
+
+def test_every_game_says_how_its_db_password_can_be_known() -> None:
+    """A game that declares neither is a controller that cannot use its database.
+
+    The app needs the root password for every SQL-backed control - accounts,
+    backup, restore, the repair probes. An entry that names no fixed password
+    AND no generated-password file silently resolves to the shared default,
+    which is right only by accident. This is the invariant that caught
+    wow-tortoise: its installer generates `tortoise$(date +%s | tail -c 6)` and
+    the catalog declared nothing at all.
+    """
+    for entry in load_catalog().games:
+        install = entry.install
+        assert install.db_root_password or install.db_root_password_file, (
+            f"{entry.id} declares neither db_root_password nor db_root_password_file, "
+            f"so the app would authenticate to its database with the shared default"
+        )

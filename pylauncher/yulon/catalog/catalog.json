@@ -200,6 +200,7 @@
         ],
         "script": "wow-tortoise/install-tortoise-wow-wsl.sh",
         "default_server_dir": "tortoise-wow-server",
+        "db_root_password_file": ".db_password",
         "requires_client_dir": true
       },
       "containers": {

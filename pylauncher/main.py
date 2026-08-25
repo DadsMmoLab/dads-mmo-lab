@@ -68,6 +68,12 @@ def build_window() -> object:
         from yulon.controller_wow_wotlk import repair as wotlk_repair
 
         spec = entry.container_spec()
+        # Not `db_password()` here, deliberately: this factory has no server_dir,
+        # and the password only reaches the two import seams below, which are
+        # wired solely for an entry that names an `import_service`. wow-wotlk is
+        # the only one and it carries a fixed password, so a game that GENERATES
+        # its password can never reach this line. The Server tab's copy of this
+        # wiring does have a server_dir, and does read the file.
         password = entry.install.db_root_password or wotlk_modules.DEFAULT_DB_ROOT_PASSWORD
         sql = DockerSql(spec.db, password)
         mysql = wotlk_maintenance.DockerMysql(spec.db, password)

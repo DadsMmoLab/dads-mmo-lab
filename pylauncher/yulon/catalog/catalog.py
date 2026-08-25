@@ -134,6 +134,37 @@ class Install(_Strict):
         default=False,
         description="The script asks for the user's client folder and loops until given one.",
     )
+
+    def db_password(self, server_dir: Path) -> str | None:
+        """The database root password for an install at `server_dir`, if knowable.
+
+        Not every game has a fixed one: the TBC and Vanilla installers GENERATE
+        a password (`tbc$(openssl rand -hex 8)`) and write it to a file under the
+        server dir, which is what `db_root_password_file` names. That field was
+        declared here and read NOWHERE, so every caller fell back to the shared
+        default and authenticated as root with the literal string "password".
+        Start and Stop need no database, which is why it would have surfaced
+        later - on Create account, Backup and Restore.
+
+        Returns None when the entry names a file that cannot be read. That is
+        deliberately not the same answer as the default: it means this install's
+        password is not knowable from here, and a caller should decide what to
+        do about that rather than be handed a guess.
+        """
+        if self.db_root_password:
+            return self.db_root_password
+        if self.db_root_password_file:
+            try:
+                text = (server_dir / self.db_root_password_file).read_text(encoding="utf-8")
+            except (OSError, ValueError):
+                # ValueError covers UnicodeDecodeError, which is what a file
+                # written in another encoding raises - it is not an OSError, so
+                # it used to escape this handler and crash the caller rather
+                # than being reported as "not knowable from here".
+                return None
+            return text.strip() or None
+        return None
+
     platforms: tuple[PlatformId, ...] = Field(
         default=("linux",),
         min_length=1,
