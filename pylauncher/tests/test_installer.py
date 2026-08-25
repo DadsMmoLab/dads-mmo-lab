@@ -583,11 +583,33 @@ def _selinux_free_path(tmp_path: Path) -> str:
     return str(bin_dir)
 
 
+# Every shell function the probe must carry, not just the entry point.
+#
+# `selinux_label_for_containers` calls the other three. An unlifted callee is
+# not an absent behaviour - it is `command not found`, which exits 127, which
+# `if ! selinux_labels_supported ...` reads as "this filesystem cannot hold
+# labels", so the function returns having relabelled nothing and the test sees
+# an empty list. That is exactly how this broke: two of the four were lifted,
+# every positive case asserted [], and it merged because the whole test is
+# skipped on the Windows dev box.
+_SELINUX_FUNCTIONS = (
+    "selinux_is_enforcing",
+    "selinux_labels_supported",
+    "selinux_drop_z_from_override",
+    "selinux_label_for_containers",
+)
+
+
 def _selinux_body(script: Path) -> str:
-    """Both functions, lifted from the shipped script rather than restated."""
+    """Every function in the call graph, lifted from the shipped script.
+
+    Lifted rather than restated so the test cannot pass against a copy of the
+    logic that the product no longer has.
+    """
     text = script.read_text(encoding="utf-8")
     out = []
-    for name in ("selinux_is_enforcing() {", "selinux_label_for_containers() {"):
+    for func in _SELINUX_FUNCTIONS:
+        name = f"{func}() {{"
         assert text.count(name) == 1, f"{script.name}: {name} appears {text.count(name)} times"
         begin = text.index(name)
         out.append(text[begin : text.index("\n}", begin) + 2])
@@ -624,12 +646,21 @@ def _selinux_calls(
         # "this kernel exposes no selinuxfs" looks like.
         "YULON_SELINUX_ENFORCE_PATH": str(sysfs) if sysfs else str(target / "no-selinuxfs"),
     }
-    subprocess.run(
+    result = subprocess.run(
         ["bash", "-c", probe, "probe", str(target)],
         capture_output=True,
         text=True,
         timeout=30,
         env=env,
+    )
+    # A helper the probe forgot to lift is `command not found`, and bash's 127
+    # is indistinguishable from a real "no" to every caller here - it silently
+    # turns "did not relabel" into the answer. Failing on the shell's own
+    # complaint names the missing function; without it the next unlifted callee
+    # arrives as an empty list that reads like a behaviour change.
+    assert "command not found" not in result.stderr, (
+        f"{script.name}: the probe is missing a function the shipped code calls, "
+        f"so its result means nothing:\n{result.stderr.strip()}"
     )
     return [line for line in calls.read_text(encoding="utf-8").splitlines() if line]
 
