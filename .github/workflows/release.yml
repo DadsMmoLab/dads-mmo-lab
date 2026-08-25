@@ -58,9 +58,25 @@ jobs:
       # Measured 2026-08-24: same commit, 6 bundled libxcb* on the runner vs 14
       # on a machine that had the package - i.e. the artifact was not
       # reproducible either.
+      #
+      # libxkbcommon-x11-0 is the same trap one library over, and the shipped
+      # v0.6.51 artifact still had it: on a clean Arch box the tarball aborts
+      # with the message above, which names xcb-cursor0 and is a RED HERRING.
+      # Qt prints that line whenever the xcb plugin fails to load, whatever the
+      # reason. QT_DEBUG_PLUGINS=1 gives the real one:
+      #
+      #   Cannot load library .../libqxcb.so:
+      #   libxkbcommon-x11.so.0: cannot open shared object file
+      #
+      # The bundle carries libxkbcommon.so.0 and NOT libxkbcommon-x11.so.0 -
+      # different libraries. Measured 2026-08-25: the CI artifact has one, a
+      # build of the same tree on a machine with the package has both. Fedora
+      # hid it because GNOME pulls the package in; Arch does not.
       - name: Qt runtime libraries the bundle must carry
         if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libxcb-cursor0
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libxcb-cursor0 libxkbcommon-x11-0
 
       - name: Build with PyInstaller
         run: pyinstaller build/pylauncher.spec --noconfirm --clean
