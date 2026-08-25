@@ -28,7 +28,42 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # NOT ubuntu-latest. A glibc binary runs forward but never
+          # backward, so the builder's glibc is the artifact's FLOOR. Measured
+          # on a real Ubuntu 22.04.5 box: the v0.6.51 tarball, built on 24.04,
+          # dies with "libm.so.6: version `GLIBC_2.38' not found" before drawing
+          # anything - i.e. it cannot run on the most widely deployed LTS, nor
+          # on Debian 12 or RHEL 9. Building on the OLDEST supported runner is
+          # what makes the artifact portable; moving this to a newer image
+          # silently drops every distro below it.
+          #
+          # THIS LABEL HAS A DATED EXPIRY. actions/runner-images#14254: the
+          # ubuntu-22.04 images begin deprecation 2026-09-17 and are fully
+          # unsupported 2027-04-17, with brownouts (jobs failed on purpose) on
+          # 23 and 30 March and 6 and 13 April 2027. Every replacement GitHub
+          # offers - ubuntu-24.04, ubuntu-26.04, ubuntu-latest - reintroduces
+          # the exact defect above, because none of them is glibc 2.35.
+          #
+          # So the replacement is not another runner label - it is to stop
+          # depending on the runner's OS at all. Do NOT reach for a job-level
+          # `container: ubuntu:22.04` when that day comes: the stock image has
+          # no `sudo` (every `sudo apt-get` below breaks), appimagetool is
+          # itself an AppImage and needs `--appimage-extract-and-run` because
+          # containers have no FUSE, and the closure gate's own `docker run`
+          # would need a socket mount and a docker CLI the image does not ship.
+          #
+          # What works instead is to scope the container to the ONE step whose
+          # glibc matters, leaving checkout, setup-python, packaging and the
+          # gate on the host runner:
+          #
+          #   docker run --rm -v "$PWD:/work" -w /work ubuntu:22.04 \
+          #     bash -c "apt-get update && apt-get install -y python3-pip &&
+          #              pip install -r requirements.txt pyinstaller &&
+          #              pyinstaller build/pylauncher.spec --noconfirm --clean"
+          #
+          # That pins the floor to an image this repo chooses rather than one
+          # GitHub retires, and touches nothing else in the job.
+          - os: ubuntu-22.04
             artifact: AppImage
           - os: windows-latest
             artifact: exe
@@ -39,6 +74,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # GITHUB_REF_NAME is the TAG on a release run and the BRANCH on a manual
+      # one, and it goes straight into the artifact filename. Every branch here
+      # is `fix/...`, `ci/...`, `feat/...`, so on workflow_dispatch that name
+      # carries a path separator and packaging writes into a directory that does
+      # not exist. Measured on all three runners: the build succeeded and then
+      # "Could not create destination file", "hdiutil: create failed", "the path
+      # ...\\release\\Yulon-ci ... does not exist". The dispatch trigger exists so
+      # the matrix can be proven without publishing, and it could not produce a
+      # single artifact.
+      #
+      # A no-op on a v* tag - tags carry no slash - so released filenames are
+      # byte-identical to the ones already published.
+      - name: Name the artifacts after a ref that can be a filename
+        shell: bash
+        run: |
+          # Loud rather than empty. GitHub's bash wrapper runs with -eo pipefail
+          # but NOT -u, so an unset ref would expand to nothing and quietly
+          # publish "Yulon--x86_64.AppImage". Unreachable under the two triggers
+          # this workflow has today; the guard is for the third one somebody
+          # adds later.
+          : "${GITHUB_REF_NAME:?the runner set no ref name - refusing to name artifacts after nothing}"
+          echo "YULON_REF=${GITHUB_REF_NAME//\//-}" >> "$GITHUB_ENV"
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -47,7 +105,7 @@ jobs:
 
       # PYINSTALLER BUNDLES WHAT IT FINDS ON THE BUILDER, so a library missing
       # from the runner is a library missing from the artifact. Qt 6.5+ needs
-      # libxcb-cursor0 to load its `xcb` platform plugin, ubuntu-latest does not
+      # libxcb-cursor0 to load its `xcb` platform plugin, the runner does not
       # ship it, and the v0.6.5 AppImage therefore dumped core on every X11
       # desktop with:
       #
@@ -73,17 +131,47 @@ jobs:
       # build of the same tree on a machine with the package has both. Fedora
       # hid it because GNOME pulls the package in; Arch does not.
       - name: Qt runtime libraries the bundle must carry
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-22.04'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libxcb-cursor0 libxkbcommon-x11-0
+          # The four libxcb-* here were found by the bundle-closure check below,
+          # not by a user - they were the same defect as libxkbcommon-x11 and had
+          # simply not been hit yet, because Arch's Xfce happens to ship them.
+          # libqxcb.so needs all five, and any desktop missing one gets the same
+          # abort with the same misleading "xcb-cursor0" message.
+          sudo apt-get install -y -qq \
+            libxcb-cursor0 \
+            libxkbcommon-x11-0 \
+            libxcb-icccm4 \
+            libxcb-keysyms1 \
+            libxcb-shape0 \
+            libxcb-xkb1 \
+            libxcb-glx0
 
       - name: Build with PyInstaller
         run: pyinstaller build/pylauncher.spec --noconfirm --clean
 
+      # The gate that closes this class instead of the instance.
+      #
+      # Two libraries have shipped missing and been found by USERS: libxcb-cursor0
+      # (#96) and libxkbcommon-x11 (v0.6.51, which aborted on launch on Arch).
+      # Neither could have been caught here by running the app, because THIS
+      # RUNNER HAS THOSE LIBRARIES - testing the artifact on the machine that
+      # built it is blind to exactly this defect. So the check resolves the
+      # bundle's own objects inside a container that has nothing, and fails on
+      # anything the artifact silently expects the user to provide.
+      #
+      # Verified against the real history before being added (2026-08-25): it
+      # fails on the shipped v0.6.51 tarball naming all five missing sonames,
+      # and passes on a build that carries them.
+      - name: The bundle must carry the libraries it needs
+        if: matrix.os == 'ubuntu-22.04'
+        shell: bash
+        run: bash build/check-bundle-closure.sh dist
+
       # ---------------------------------------------------------- Linux
       - name: Package AppImage
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-22.04'
         shell: bash
         run: |
           set -euo pipefail
@@ -120,7 +208,7 @@ jobs:
           cp "$APPDIR/yulon.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/yulon.png"
           curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool
-          ARCH=x86_64 ./appimagetool "$APPDIR" "Yulon-${GITHUB_REF_NAME}-x86_64.AppImage"
+          ARCH=x86_64 ./appimagetool "$APPDIR" "Yulon-${YULON_REF}-x86_64.AppImage"
           mkdir -p release && mv Yulon-*.AppImage release/
 
           # A PLAIN TARBALL BESIDE THE APPIMAGE, because an AppImage cannot run
@@ -136,7 +224,7 @@ jobs:
           #
           # So the honest answer is a second artifact rather than a cleverer
           # first one: untar it and run ./yulon.
-          tar -czf "release/Yulon-${GITHUB_REF_NAME}-x86_64.tar.gz" -C dist yulon
+          tar -czf "release/Yulon-${YULON_REF}-x86_64.tar.gz" -C dist yulon
 
       # -------------------------------------------------------- Windows
       - name: Package Windows zip
@@ -144,7 +232,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force release | Out-Null
-          Compress-Archive -Path dist/yulon/* -DestinationPath "release/Yulon-$env:GITHUB_REF_NAME-windows-x64.zip"
+          Compress-Archive -Path dist/yulon/* -DestinationPath "release/Yulon-$env:YULON_REF-windows-x64.zip"
 
       # ---------------------------------------------------------- macOS
       - name: Package dmg
@@ -155,7 +243,7 @@ jobs:
           mkdir -p release dmgroot
           cp -R dist/Yulon.app dmgroot/
           ln -s /Applications dmgroot/Applications
-          hdiutil create -volname "Yu'lon" -srcfolder dmgroot -ov -format UDZO "release/Yulon-${GITHUB_REF_NAME}-macos.dmg"
+          hdiutil create -volname "Yu'lon" -srcfolder dmgroot -ov -format UDZO "release/Yulon-${YULON_REF}-macos.dmg"
 
       - uses: actions/upload-artifact@v4
         with:
