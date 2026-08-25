@@ -8,9 +8,11 @@ so no Docker, network, or two-hour build is involved.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -145,7 +147,13 @@ def test_installer_runs_the_entry_script_through_interact(tmp_path: Path) -> Non
         docker_check=lambda: True,
         interact=_fake_interact(calls),  # type: ignore[arg-type]
     )
-    assert list(installer.run(InstallOptions(server_dir=Path("/srv")))) == ["hello", "done"]
+    # Not a bare "/srv": that is now one of the reserved trees preflight
+    # refuses, and this test is about the script running, not about the
+    # folder rule.
+    assert list(installer.run(InstallOptions(server_dir=Path("/srv/wow-server")))) == [
+        "hello",
+        "done",
+    ]
     assert calls[0]["command"] == ["bash", str(script)]
     assert calls[0]["cwd"] == script.parent
     assert callable(calls[0]["respond"])
@@ -465,6 +473,362 @@ def test_bash_available_probes_that_bash_actually_runs() -> None:
     assert bash_available(ok) is True
     assert calls[-1] == ["bash", "-c", "exit 0"]
     assert bash_available(broken) is False
+
+
+_REUSABLE_PROBE = """
+set -u
+%s
+if dir_is_reusable "$1"; then echo REUSABLE; else echo PROTECTED; fi
+"""
+
+
+def _dir_is_reusable(script: Path, target: Path) -> str:
+    """Run the installer's own `dir_is_reusable` against `target`.
+
+    The function is lifted out of the shipped script rather than restated here,
+    so this test cannot pass against a copy that has drifted from the file the
+    users actually run.
+    """
+    body = script.read_text(encoding="utf-8")
+    start = body.index("dir_is_reusable() {")
+    end = body.index("\n}", start) + 2
+    out = subprocess.run(
+        ["bash", "-c", _REUSABLE_PROBE % body[start:end], "probe", str(target)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return out.stdout.strip()
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX permission semantics")
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_the_installers_reusable_check_fails_closed(tmp_path: Path, script_name: str) -> None:
+    """An empty folder may be cloned into; anything we cannot verify may not.
+
+    This is the property a six-agent adversarial pass killed the first spelling
+    over, and no Python test can cover it because it lives in bash. The obvious
+    version, `[ -n "$(ls -A "$D")" ]`, fails OPEN: `ls -A` prints nothing for a
+    directory it cannot READ exactly as it does for an empty one, so a folder
+    holding someone's server reads as empty and gets cloned over. `find
+    -maxdepth 0 -empty` prints nothing when it cannot look, which is the safe
+    way round.
+
+    All three WotLK scripts are checked because they are separate files that
+    have already diverged elsewhere.
+    """
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert _dir_is_reusable(script, empty) == "REUSABLE"
+
+    occupied = tmp_path / "occupied"
+    occupied.mkdir()
+    (occupied / "docker-compose.yml").write_text("x", encoding="utf-8")
+    assert _dir_is_reusable(script, occupied) == "PROTECTED"
+
+    # A lone dotfile is content: `.db_password` is exactly what a half-finished
+    # install leaves behind, and `ls -A` and `find -empty` agree here.
+    dotted = tmp_path / "dotted"
+    dotted.mkdir()
+    (dotted / ".db_password").write_text("x", encoding="utf-8")
+    assert _dir_is_reusable(script, dotted) == "PROTECTED"
+
+    # The one that matters: unreadable AND non-empty. This is where `ls -A`
+    # returned "empty" and the old guard would have cloned over a real install.
+    unreadable = tmp_path / "unreadable"
+    unreadable.mkdir()
+    (unreadable / "server.sql").write_text("x", encoding="utf-8")
+    unreadable.chmod(0o000)
+    try:
+        assert _dir_is_reusable(script, unreadable) == "PROTECTED"
+    finally:
+        unreadable.chmod(0o755)
+
+    assert _dir_is_reusable(script, tmp_path / "does-not-exist") == "PROTECTED"
+
+
+_SELINUX_PROBE = """
+set -u
+print_info() { :; }
+print_success() { :; }
+print_warning() { :; }
+%(stub)s
+chcon() { echo "chcon $*" >> "$CALLS"; }
+%(body)s
+selinux_label_for_containers "$1"
+"""
+
+
+def _selinux_free_path(tmp_path: Path) -> str:
+    """A PATH with the tools the function needs and no SELinux ones.
+
+    Omitting the `getenforce` stub is NOT how you express "this distro has no
+    SELinux": on Fedora - and on any CI image with the tools installed -
+    `command -v getenforce` then finds the real binary and the case asserts the
+    opposite of what it says. Verified on Fedora 44, where exactly that made
+    three "absent" cases fire the relabel.
+    """
+    bin_dir = tmp_path / "nosel-bin"
+    bin_dir.mkdir(exist_ok=True)
+    for tool in ("bash", "sh", "mkdir", "cat", "rm"):
+        found = shutil.which(tool)
+        if found and not (bin_dir / tool).exists():
+            (bin_dir / tool).symlink_to(found)
+    return str(bin_dir)
+
+
+def _selinux_body(script: Path) -> str:
+    """Both functions, lifted from the shipped script rather than restated."""
+    text = script.read_text(encoding="utf-8")
+    out = []
+    for name in ("selinux_is_enforcing() {", "selinux_label_for_containers() {"):
+        assert text.count(name) == 1, f"{script.name}: {name} appears {text.count(name)} times"
+        begin = text.index(name)
+        out.append(text[begin : text.index("\n}", begin) + 2])
+    return "\n".join(out)
+
+
+def _selinux_calls(
+    script: Path,
+    target: Path,
+    calls: Path,
+    enforce: str | None,
+    *,
+    sysfs: Path | None = None,
+    path: str | None = None,
+) -> list[str]:
+    """Run the installer's own relabel helper and report the argv it emitted.
+
+    Asserting on the emitted command rather than on the message it prints: a
+    rule spelled one way in prose and another in argv is how this project has
+    been caught before.
+
+    `sysfs` points the kernel-interface check at a file under the test's
+    control. Without it the real /sys/fs/selinux/enforce answers on any box that
+    has one, the `getenforce` stub is never consulted, and the not-enforcing
+    cases assert nothing at all.
+    """
+    stub = "" if enforce is None else f'getenforce() {{ echo "{enforce}"; }}'
+    probe = _SELINUX_PROBE % {"stub": stub, "body": _selinux_body(script)}
+    calls.write_text("", encoding="utf-8")
+    env = {
+        "PATH": path if path is not None else os.environ.get("PATH", ""),
+        "CALLS": str(calls),
+        # A path that does not exist takes the getenforce branch, which is what
+        # "this kernel exposes no selinuxfs" looks like.
+        "YULON_SELINUX_ENFORCE_PATH": str(sysfs) if sysfs else str(target / "no-selinuxfs"),
+    }
+    subprocess.run(
+        ["bash", "-c", probe, "probe", str(target)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+    return [line for line in calls.read_text(encoding="utf-8").splitlines() if line]
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_the_installers_label_the_server_folder_only_where_selinux_enforces(
+    tmp_path: Path, script_name: str
+) -> None:
+    """Fedora could not finish an install until this ran; Ubuntu must not see it.
+
+    Measured on clean Fedora 44 (2026-08-25), with the first-install dead-end
+    already fixed: `ac-db-import` exited 1 with "cp: cannot create regular file
+    ...: Permission denied" on files owned by the user. AzerothCore's compose
+    bind-mounts env/dist without `:z`, so the directory keeps `user_home_t` and
+    the container is refused. Relabelling made the identical import exit 0 and
+    the whole stack came up.
+
+    Both sources of truth are covered. selinuxfs is checked first because it
+    exists whenever SELinux is loaded, while `getenforce` ships in an optional
+    package - gating only on the tool fails OPEN, which is the direction of the
+    bug. The negative cases carry the weight: a relabel firing on Debian would
+    be a change nobody asked for on a system with no SELinux to satisfy.
+    """
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    target = tmp_path / "server"
+    target.mkdir()
+    calls = tmp_path / "calls.txt"
+    expected = [f"chcon -Rt container_file_t {target}/env"]
+
+    # selinuxfs present - the kernel's own answer wins, and `getenforce` is not
+    # consulted even when it disagrees.
+    enforcing = tmp_path / "enforce-1"
+    enforcing.write_text("1\n", encoding="utf-8")
+    assert _selinux_calls(script, target, calls, "Disabled", sysfs=enforcing) == expected
+
+    permissive = tmp_path / "enforce-0"
+    permissive.write_text("0\n", encoding="utf-8")
+    assert _selinux_calls(script, target, calls, "Enforcing", sysfs=permissive) == []
+
+    # No selinuxfs - fall back to the tool.
+    assert _selinux_calls(script, target, calls, "Enforcing") == expected
+    assert _selinux_calls(script, target, calls, "Permissive") == []
+    assert _selinux_calls(script, target, calls, "Disabled") == []
+
+    # Neither source: no selinuxfs and no tools on PATH - Debian, Ubuntu, Arch.
+    assert _selinux_calls(script, target, calls, None, path=_selinux_free_path(tmp_path)) == []
+
+    # The directories are made first, so whatever compose creates inside them
+    # inherits the label rather than needing a second pass.
+    assert (target / "env" / "dist" / "etc").is_dir()
+    assert (target / "env" / "dist" / "logs").is_dir()
+
+
+def _override_volumes(script: Path) -> dict[str, list[str]]:
+    """Volumes per service from the override heredoc, by structure not substring.
+
+    A two-space key is a service; a four-space `volumes:` belongs to that
+    service; six-space `- ` entries under it are its mounts. Anything deeper -
+    such as a `volumes:` that has drifted INSIDE `build:` - is deliberately not
+    collected, because that is the shape that makes `docker compose config`
+    reject the file outright while every substring the old assertions looked for
+    is still present.
+    """
+    text = script.read_text(encoding="utf-8")
+    body = text[text.index("docker-compose.override.yml") : text.index("\nOVERRIDE")]
+    services: dict[str, list[str]] = {}
+    service = None
+    in_volumes = False
+    for raw in body.split("\n"):
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        line = raw.strip()
+        if indent == 2 and line.endswith(":"):
+            service = line[:-1]
+            services.setdefault(service, [])
+            in_volumes = False
+        elif indent == 4 and service is not None:
+            in_volumes = line == "volumes:"
+        elif indent == 6 and in_volumes and line.startswith("- ") and service is not None:
+            services[service].append(line[2:])
+        elif indent >= 6 and not (in_volumes and line.startswith("- ")):
+            in_volumes = False
+    return services
+
+
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_the_generated_override_labels_every_bind_mount_it_shares(script_name: str) -> None:
+    """`:z` is the half that survives a relabel; chcon is the half that runs once.
+
+    A review of the first version made the case: `chcon` is applied before ONE of
+    the several `docker compose up` sites in this product, and any policy relabel
+    (`restorecon -R ~`, a selinux-policy update, `touch /.autorelabel`) puts the
+    tree back with nothing to re-apply it. `:z` is applied by Docker on every
+    start, so it is self-healing.
+
+    Asserted per SERVICE, because the mount only helps the container that has
+    it, and because a `volumes:` block that drifts inside `build:` is rejected by
+    `docker compose config` while leaving every substring intact.
+    """
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    services = _override_volumes(script)
+    for service in ("ac-worldserver", "ac-authserver", "ac-db-import"):
+        assert service in services, f"{script_name}: {service} missing from the override"
+        mounts = services[service]
+        assert (
+            "${DOCKER_VOL_ETC:-./env/dist/etc}:/azerothcore/env/dist/etc:z" in mounts
+        ), f"{script_name}: {service} has no labelled etc mount, only {mounts}"
+        assert (
+            "${DOCKER_VOL_LOGS:-./env/dist/logs}:/azerothcore/env/dist/logs:z" in mounts
+        ), f"{script_name}: {service} has no labelled logs mount, only {mounts}"
+    # Spelled with the base file's own default so Compose merges by target path
+    # rather than adding a second mount of the same directory.
+    assert all(
+        m.startswith("${DOCKER_VOL_")
+        for svc in ("ac-authserver", "ac-db-import")
+        for m in services[svc]
+    )
+
+
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_the_relabel_also_runs_on_the_branch_that_reuses_an_existing_build(
+    script_name: str,
+) -> None:
+    """The recovery path needs it most, and had it least.
+
+    Found by review: the relabel was called only where a fresh build is made. The
+    branch that finds compiled images already present - which is exactly how a
+    user recovers an install whose labels were reset - ran `docker compose up`
+    with no relabel and no override rewrite, so the only recovery left was the
+    2-4 hour rebuild the change exists to avoid. An override written by an older
+    build carries no `:z` either, so on that path the relabel is the only thing
+    that can help.
+    """
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    text = script.read_text(encoding="utf-8")
+    reuse = text[text.index("Skipping compile") : text.index("Skipping compile") + 1200]
+    reuse = reuse[: reuse.index("return 0")]
+    assert (
+        'selinux_label_for_containers "$SERVER_DIR"' in reuse
+    ), f"{script_name}: the reuse branch brings the stack up without relabelling"
+    assert reuse.index('selinux_label_for_containers "$SERVER_DIR"') < reuse.index(
+        "docker compose up"
+    ), f"{script_name}: the relabel must run BEFORE the stack comes up"
+
+
+def test_installer_refuses_a_reserved_folder_before_asking_for_a_password(
+    tmp_path: Path,
+) -> None:
+    """The refusal has to land BEFORE Docker provisioning, not after it.
+
+    The scripts refuse this set themselves - `case "$SERVER_DIR" in
+    /|"$HOME"|/home|/root|/tmp|...` - but they do it after their own sudo prompt
+    and after Docker discovery. On a clean Fedora 44 box (2026-08-25) picking
+    the home folder cost a sudo password typed into Yu'lon's own dialog and a
+    wait, and only then said "Cannot use '/home/pk' as the install location".
+
+    Adding the mirror to `platform.server_dir_problem()` was not enough on its
+    own: `Installer.preflight()` never consults `preflight.gather()` - that
+    belongs to the native engine - so the mirror was dead code for every Linux
+    install until this call site existed. `calls == []` is the assertion that
+    matters; a refusal that still shelled out has not saved the user anything.
+    """
+    entry = load_catalog().get("wow-wotlk")
+    calls: list[dict[str, object]] = []
+    # A real script on disk, so the refusal under test is reached rather than
+    # the "install script not found" one standing in for it.
+    script = tmp_path / "wow-wotlk" / "install-wow-wotlk.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "#!/usr/bin/env bash" + chr(10) + "exit 0" + chr(10),
+        encoding="utf-8",
+    )
+    installer = _installer(
+        entry,
+        installers_root=tmp_path,
+        docker_check=lambda: True,
+        interact=_fake_interact(calls),  # type: ignore[arg-type]
+        platform_id=lambda: "linux",
+    )
+    with pytest.raises(InstallerError, match="home folder itself"):
+        list(installer.run(InstallOptions(server_dir=Path.home())))
+    assert calls == []
 
 
 def test_installer_refuses_a_platform_its_script_cannot_run(tmp_path: Path) -> None:

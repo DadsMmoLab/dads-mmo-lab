@@ -2374,8 +2374,112 @@ def _settings_data_folder(store: Path) -> Path | None:
 # overnight. Matched case-insensitively against the path's PARTS, so a folder
 # genuinely called "OneDrive" anywhere above the install is enough.
 _SYNCED_DIR_NAMES = ("onedrive", "dropbox", "google drive", "googledrive", "icloud drive")
+# The install scripts refuse these outright (e.g. install-wow-wotlk-fedora.sh's
+# `case "$SERVER_DIR" in /|"$HOME"|/root|/tmp|...`). Mirrored here so the GUI
+# refuses them at the picker instead of after the user has typed a sudo
+# password and waited through Docker discovery, which is where the script's
+# refusal actually lands (live gate on clean Fedora 44, 2026-08-25).
+_RESERVED_SERVER_DIRS = (
+    "/home",
+    "/media",
+    "/mnt",
+    "/opt",
+    "/root",
+    "/srv",
+    "/tmp",
+    "/var",
+    "/etc",
+    "/usr",
+    "/boot",
+    "/proc",
+    "/sys",
+    "/dev",
+)
+# Windows has no shell installer to mirror, so this list answers to nothing but
+# the same rule: a reinstall removes the folder it was given, and these are
+# folders nobody may hand it. Matched case-insensitively because NTFS is.
+_RESERVED_WINDOWS_DIRS = (
+    "windows",
+    "program files",
+    "program files (x86)",
+    "programdata",
+    "users",
+)
 _ICLOUD_MARKER = "com~apple~clouddocs"
 """How iCloud Drive spells itself on disk (`~/Library/Mobile Documents/com~apple~CloudDocs`)."""
+
+
+def _canonical(path: Path) -> Path:
+    """`realpath -m --` in Python: resolve symlinks, tolerate a missing tail.
+
+    The install scripts canonicalise with `realpath -m -- "$SERVER_DIR"` BEFORE
+    their `case`, so a purely lexical `os.path.normpath` here cannot deliver the
+    one guarantee this mirror exists for. On Fedora Atomic `/home` is a symlink
+    to `/var/home`: a picker that returns `/home/pk` and a script that sees
+    `/var/home/pk` disagree about whether the path is `$HOME`, and the user pays
+    for the disagreement with a sudo password and a wait.
+
+    `strict=False` never raises for a path that does not exist; the guard is for
+    the ones that do raise - a symlink loop, or a mount present in the tree but
+    not answering.
+    """
+    try:
+        return path.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return Path(os.path.normpath(str(path)))
+
+
+def _home_readable() -> bool:
+    """Whether `Path.home()` answers at all. It raises when HOME is unset."""
+    try:
+        Path.home()
+    except (RuntimeError, OSError):
+        return False
+    return True
+
+
+def _reserved_dir_reason(server_dir: Path) -> str | None:
+    """Why this is a place no server may be installed, or None.
+
+    Three shapes, all of which the scripts already refuse and the GUI did not:
+    a filesystem root, the user's home itself, and the well-known system trees.
+    Installing into any of them means a later `rm -rf` of that path during a
+    reinstall, which is why the scripts treat it as fatal rather than a warning.
+
+    The home directory is the one that actually bites: the picker opens there,
+    and `server_dir_problem()` used to pass it, so a click-through reached the
+    script and died with "Cannot use '/home/pk' as the install location" only
+    after the sudo password had been entered.
+    """
+    lexical = Path(os.path.normpath(str(server_dir)))
+    resolved = _canonical(server_dir)
+    spellings = (lexical, resolved)
+    if any(one.parent == one for one in spellings):
+        return (
+            f"{server_dir} is the root of a filesystem. Pick a dedicated subfolder inside it, "
+            "not the drive itself."
+        )
+    if _home_readable():
+        home = Path.home()
+        if any(one in (Path(os.path.normpath(str(home))), _canonical(home)) for one in spellings):
+            return (
+                f"{server_dir} is your home folder itself. A server install owns the folder it "
+                "is given - a reinstall removes it - so pick a dedicated subfolder inside your "
+                "home folder instead."
+            )
+    if any(one.as_posix() in _RESERVED_SERVER_DIRS for one in spellings):
+        return (
+            f"{server_dir} is a system directory. Pick a folder under your home directory "
+            "instead."
+        )
+    if any(
+        len(one.parts) == 2 and one.parts[1].lower() in _RESERVED_WINDOWS_DIRS for one in spellings
+    ):
+        return (
+            f"{server_dir} is a Windows system folder. Pick a folder under your user folder "
+            "instead."
+        )
+    return None
 
 
 def server_dir_problem(server_dir: Path) -> str | None:
@@ -2423,7 +2527,10 @@ def server_dir_problem(server_dir: Path) -> str | None:
             f"{server_dir} is on {mapped}, a mapped network drive. Docker Desktop cannot share "
             "one with its Linux VM. Pick a folder on this machine's own disk."
         )
-    return None
+    # Last, so a path that is BOTH a drive root and a mapped network drive is
+    # refused with the network reason. A bare mapped drive used to be answered
+    # "pick a subfolder inside it", which walks the user into a second refusal.
+    return _reserved_dir_reason(server_dir)
 
 
 def _mapped_network_drive(path: Path) -> str | None:

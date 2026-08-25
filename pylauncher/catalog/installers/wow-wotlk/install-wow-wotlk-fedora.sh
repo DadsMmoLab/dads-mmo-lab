@@ -170,6 +170,119 @@ ask_yes_no() {
     done
 }
 
+# Can this directory simply be cloned into as it stands?
+#
+# The failure DIRECTION is the whole point: this must fail closed. The obvious
+# spelling, `[ -n "$(ls -A "$1")" ]`, fails OPEN - `ls -A` prints nothing for a
+# directory it cannot read exactly as it does for an empty one, so a directory
+# holding someone's existing server would read as "empty" and be cloned over.
+# `find -maxdepth 0 -empty` prints the name only when the directory is really
+# empty, and prints nothing when it cannot look.
+#
+# The -w test is here because the branch this guard skips used to repair a
+# root-owned directory by removing it. Skipping the repair without checking
+# writability just moves the failure to `git clone`, which reports it as
+# "Permission denied" with no advice attached.
+dir_is_reusable() {
+    [ -d "$1" ] || return 1
+    [ -w "$1" ] || return 1
+    [ -n "$(find "$1" -maxdepth 0 -empty 2>/dev/null)" ] || return 1
+    return 0
+}
+
+# Let containers write to the bind-mounted server folder on SELinux systems.
+#
+# AzerothCore's compose mounts env/dist WITHOUT the `:z` suffix that would make
+# Docker relabel it, so on Fedora, RHEL, Rocky, Alma, CentOS Stream and the
+# Silverblue/Bazzite family the directory keeps its `user_home_t` label and the
+# container (running as `container_t`) is refused. It surfaces as ac-db-import
+# exiting 1 with "cp: cannot create regular file ...: Permission denied", and
+# the image's own advice blames cloning as root - which is wrong here, the files
+# are owned by the user. Measured on clean Fedora 44 (2026-08-25): relabelling
+# makes the identical import exit 0.
+#
+# No sudo: a user may relabel files they own, which is why this runs quietly
+# rather than adding another password prompt. A no-op wherever getenforce does
+# not exist, which covers Debian, Ubuntu and Arch.
+selinux_is_enforcing() {
+    # /sys/fs/selinux/enforce first: it is the kernel's own interface and exists
+    # whenever SELinux is actually loaded, while `getenforce` lives in
+    # libselinux-utils, which is optional. Gating only on the optional tool fails
+    # OPEN in the direction of the bug this exists to prevent - a Fedora Server
+    # or minimal image can be enforcing with no getenforce on it.
+    # The path is a variable ONLY so the test can point it somewhere; nothing in
+    # the product ever sets it. Without that, a `getenforce` stub is bypassed on
+    # every box that has the real sysfs file, and the not-enforcing cases assert
+    # nothing.
+    _enforce_path="${YULON_SELINUX_ENFORCE_PATH:-/sys/fs/selinux/enforce}"
+    if [ -r "$_enforce_path" ]; then
+        [ "$(cat "$_enforce_path" 2>/dev/null)" = "1" ] && return 0
+        return 1
+    fi
+    command -v getenforce >/dev/null 2>&1 || return 1
+    [ "$(getenforce 2>/dev/null)" = "Enforcing" ]
+}
+
+# Can this filesystem hold an SELinux label at all?
+#
+# Deny-list rather than allow-list: anything not named here keeps `:z`, so a
+# filesystem nobody thought of does not quietly lose the fix. Checked by type
+# rather than by matching chcon's stderr, because that string is
+# gettext-translated - the same trap this project already hit reading sudo's
+# "a password is required".
+selinux_labels_supported() {
+    case "$(stat -f -c %T "$1" 2>/dev/null)" in
+        exfat|ntfs|ntfs3|fuseblk|msdos|vfat|cifs|smb2|nfs|nfs4|9p) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+# Take `:z` back out of the override we just wrote.
+#
+# `:z` asks Docker to relabel the bind source on every start. On a filesystem
+# that cannot hold xattrs that is not a warning - the daemon refuses to CREATE
+# the container ("lsetxattr <path>: operation not supported"), which names
+# neither SELinux nor the drive, and `sudo chcon` cannot help either. Dropping
+# the option puts such a box back to where it was: it may still fail later on a
+# permission denial, but it fails with a message about the thing that is wrong.
+selinux_drop_z_from_override() {
+    local override="$1/docker-compose.override.yml"
+    [ -f "$override" ] || return 0
+    grep -q '/azerothcore/env/dist/etc:z' "$override" || return 0
+    sed -i 's|\(/azerothcore/env/dist/[a-z]*\):z|\1|' "$override"
+    print_warning "This filesystem cannot hold SELinux labels ($(stat -f -c %T "$1" 2>/dev/null))."
+    print_info "Removed ':z' from the compose override - with it, Docker refuses to start"
+    print_info "the containers at all on such a filesystem."
+    print_info "If the server later fails with 'Permission denied' on its config, install"
+    print_info "it on a normal Linux filesystem (ext4/xfs/btrfs) instead of this drive."
+}
+
+selinux_label_for_containers() {
+    selinux_is_enforcing || return 0
+    command -v chcon >/dev/null 2>&1 || return 0
+    if ! selinux_labels_supported "$1"; then
+        selinux_drop_z_from_override "$1"
+        return 0
+    fi
+
+    print_info "SELinux is enforcing — labelling the server folder for container access"
+    # Created first so the label is inherited by whatever compose puts inside.
+    mkdir -p "$1/env/dist/etc" "$1/env/dist/logs" 2>/dev/null || true
+    if chcon -Rt container_file_t "$1/env" 2>/dev/null; then
+        print_success "Server folder labelled for container access"
+    else
+        # `sudo`, and quoted. `chcon -R` walks past a per-file EPERM and still
+        # exits non-zero, so this branch is reached with the tree PARTIALLY
+        # relabelled - typically because something earlier ran as root (
+        # wow-manage.sh chowns parts of env/dist). Printing the command that
+        # just failed, unprivileged and unquoted, is advice that cannot work.
+        print_warning "Could not fully label $1/env for container access."
+        print_info "If the server fails with 'Permission denied' on its config, run:"
+        print_info "  sudo chcon -Rt container_file_t \"$1/env\""
+        print_info "The compose file also carries ':z', which relabels on each start."
+    fi
+}
+
 press_enter() {
     echo ""
     echo -e "${WHITE}Press ENTER to continue...${NC}"
@@ -292,7 +405,7 @@ choose_install_dir() {
 
     # Reject dangerous / well-known system roots
     case "$SERVER_DIR" in
-        /|"$HOME"|/root|/tmp|/var|/etc|/usr|/boot|/proc|/sys|/dev)
+        /|"$HOME"|/home|/root|/tmp|/var|/etc|/usr|/boot|/proc|/sys|/dev|/media|/mnt|/opt|/srv)
             print_error "Cannot use '${SERVER_DIR}' as the install location."
             print_info "Choose a dedicated subdirectory (e.g. ${default_dir})."
             exit 1
@@ -1149,13 +1262,26 @@ install_server() {
         print_info "Skipping compile — reusing your existing build."
         print_info "To force a fresh compile, remove the server folder:"
         print_info "  sudo rm -rf $SERVER_DIR"
+        # Also here, not only on the fresh-build path. This branch is how a user
+        # recovers an install whose labels were reset - by `restorecon -R ~`, a
+        # selinux-policy update, or /.autorelabel - and it is the one that must
+        # not send them back to a 2-4 hour rebuild. An override written by an
+        # older build carries no `:z`, so the relabel is the only thing that can
+        # help here; the override is deliberately NOT rewritten, since other
+        # install flavours ship their own.
+        selinux_label_for_containers "$SERVER_DIR"
         cd "$SERVER_DIR" || exit 1
         docker compose up -d 2>&1 | tail -5
         return 0
     fi
 
-    # Images not found — handle existing folder before cloning
-    if [ -d "$SERVER_DIR" ]; then
+    # Images not found — handle existing folder before cloning.
+    # An empty, writable folder is NOT an existing install: it is what the
+    # GUI's directory picker hands over, because that picker can only return a
+    # folder that already exists. Treating it as one made every first install
+    # through the GUI answer "n" to the prompt below and exit 0 having done
+    # nothing (live gate, clean Fedora 44, 2026-08-25).
+    if [ -d "$SERVER_DIR" ] && ! dir_is_reusable "$SERVER_DIR"; then
         print_warning "Existing folder found at $SERVER_DIR (no compiled images present)"
         if ask_yes_no "Remove it and start fresh?"; then
             docker compose -f "$SERVER_DIR/docker-compose.yml" down -v 2>/dev/null || true
@@ -1177,7 +1303,11 @@ install_server() {
         --branch=Playerbot \
         "$SERVER_DIR"
 
-    if [ ! -d "$SERVER_DIR" ]; then
+    # `.git`, not the directory itself. A clone that fails into a directory that
+    # ALREADY EXISTED leaves that directory behind, so testing for the directory
+    # could never fire once the guard above stopped removing it first - and the
+    # run carried on to report a network failure as "Compilation failed".
+    if [ ! -d "$SERVER_DIR/.git" ]; then
         print_error "Clone failed. Check your internet connection."
         exit 1
     fi
@@ -1203,6 +1333,25 @@ services:
       target: worldserver
     volumes:
       - ./modules:/azerothcore/modules:Z
+      # `:z` so Docker relabels these for container access on EVERY start.
+      # AzerothCore's own compose mounts them without it, which on SELinux
+      # distros leaves them user_home_t and the container cannot write its
+      # config - ac-db-import exits 1 with "Permission denied" on files the
+      # user owns. Spelled with the same ${VAR:-default} as the base file so
+      # Compose expands it identically and merges by target path.
+      #
+      # Merging by target REPLACES the base entry, so these two lines own the
+      # WHOLE mount spec for those targets, not just the label - the base's
+      # `:delegated` is already dropped here (a macOS hint, inert on Linux).
+      # If upstream ever adds an option that matters, such as `:ro`, it has to
+      # be repeated here or it is silently discarded.
+      #
+      # `z`, not `Z`: three services share these mounts, and `Z` would give each
+      # container a private MCS category pair, so whichever relabelled last
+      # would lock the others out. The `./modules:...:Z` above is the opposite
+      # case - a single mounting service - and is not a precedent for this.
+      - ${DOCKER_VOL_ETC:-./env/dist/etc}:/azerothcore/env/dist/etc:z
+      - ${DOCKER_VOL_LOGS:-./env/dist/logs}:/azerothcore/env/dist/logs:z
     environment:
       AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES: "1"
       AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN: "1"
@@ -1212,10 +1361,16 @@ services:
     build:
       context: .
       target: authserver
+    volumes:
+      - ${DOCKER_VOL_ETC:-./env/dist/etc}:/azerothcore/env/dist/etc:z
+      - ${DOCKER_VOL_LOGS:-./env/dist/logs}:/azerothcore/env/dist/logs:z
   ac-db-import:
     build:
       context: .
       target: db-import
+    volumes:
+      - ${DOCKER_VOL_ETC:-./env/dist/etc}:/azerothcore/env/dist/etc:z
+      - ${DOCKER_VOL_LOGS:-./env/dist/logs}:/azerothcore/env/dist/logs:z
   ac-client-data-init:
     build:
       context: .
@@ -1227,6 +1382,8 @@ OVERRIDE
     print_info "Compiling Playerbots server (2-4 hours)..."
     print_info "Progress saved to: ~/playerbots-build.log"
     print_info "Go make a coffee — this will take a while! ☕"
+
+    selinux_label_for_containers "$SERVER_DIR"
 
     cd "$SERVER_DIR"
     docker compose up -d --build 2>&1 | tee ~/playerbots-build.log
