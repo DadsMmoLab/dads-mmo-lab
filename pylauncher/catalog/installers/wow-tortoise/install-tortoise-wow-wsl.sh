@@ -424,6 +424,21 @@ clone_source() {
     fi
 
     mkdir -p "$SERVER_DIR" "$SERVER_DIR/data"
+
+    # Keep the generated root password somewhere other than the compose file.
+    # It is interpolated into MARIADB_ROOT_PASSWORD below and was otherwise
+    # unrecoverable, so the launcher had no way to reach this server's database
+    # and fell back to a default that was simply wrong. Same shape as the TBC
+    # and Vanilla installers: reload it when it already exists, so re-running
+    # the script against an existing database does not lock itself out.
+    pw_file="$SERVER_DIR/.db_password"
+    if [ -f "$pw_file" ]; then
+        DB_PASSWORD=$(cat "$pw_file")
+        print_info "Loaded existing database password from previous install."
+    else
+        echo "$DB_PASSWORD" > "$pw_file"
+        chmod 600 "$pw_file"
+    fi
     print_info "Cloning $SOURCE_REPO ..."
     if ! git clone --depth 1 "$SOURCE_REPO" "$SERVER_DIR/src"; then
         print_error "git clone failed."; exit 1

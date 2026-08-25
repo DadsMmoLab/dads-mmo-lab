@@ -59,8 +59,8 @@ DEFAULT_INSTALLERS_ROOT = resources.installers_dir()
 COMPOSE_FILENAMES: tuple[str, ...] = (
     "compose.yaml",
     "compose.yml",
-    "docker-compose.yaml",
     "docker-compose.yml",
+    "docker-compose.yaml",
 )
 
 
@@ -69,6 +69,11 @@ def compose_file(server_dir: Path) -> Path | None:
 
     Answers what Compose itself would answer, in the same order, so a folder
     holding two spellings resolves to the one the daemon will actually load.
+    The order is measured, not guessed: with all four present, Compose v5.3.1
+    reports "Found multiple config files with supported names: compose.yaml,
+    compose.yml, docker-compose.yml, docker-compose.yaml" and uses the first.
+    Note the last two - `.yml` before `.yaml`, the opposite way round from the
+    first pair, which is why an earlier version of this tuple had them swapped.
     `is_file()` rather than `exists()`: a directory named `compose.yml` is not
     an install.
     """

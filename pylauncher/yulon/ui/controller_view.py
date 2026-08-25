@@ -81,7 +81,14 @@ class ControllerServices:
     ) -> ControllerServices:
         """The real WotLK wiring for an install at `server_dir`."""
         spec = entry.container_spec()
-        password = entry.install.db_root_password or wotlk_modules.DEFAULT_DB_ROOT_PASSWORD
+        # The entry may carry the password, or name a file the installer generated
+        # it into; `db_password()` knows both. TBC and Vanilla generate one, so
+        # before this they authenticated as root with the literal "password" -
+        # Start and Stop need no database, which is why it surfaced later, on
+        # Create account and Backup. The default stays as a last resort so an
+        # install whose password file has gone missing still gets a tab that can
+        # start and stop, rather than no tab at all.
+        password = entry.install.db_password(server_dir) or wotlk_modules.DEFAULT_DB_ROOT_PASSWORD
         sql = DockerSql(spec.db, password)
         # Bound to this entry's own db container, not `mysql_for()`'s
         # `docker_ctl.SPEC.db`, so a catalog entry that names a different one

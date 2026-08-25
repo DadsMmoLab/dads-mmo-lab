@@ -1859,6 +1859,8 @@ echo -e "\033[1;33m   • Enabling and starting the Docker service\033[0m"
 echo -e "\033[1;33m   • Adding you to the docker group, which you are asked about first\033[0m"
 echo -e "\033[1;33m   • Running docker itself, until that group membership takes effect\033[0m"
 echo -e "\033[1;33m   • Deleting the old server folder - only if you choose to reinstall\033[0m"
+echo -e "\033[1;33m   • Adding Docker's package repository to this system\033[0m"
+echo -e "\033[1;33m   • Restarting your computer - immutable Fedora (Silverblue, Bazzite) can only layer packages across a reboot, and this installer triggers one\033[0m"
 echo ""
 echo -e "\033[1;37mPlease enter your password if prompted:\033[0m"
 if ! sudo -v; then

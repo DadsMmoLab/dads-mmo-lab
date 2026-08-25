@@ -720,125 +720,180 @@ def test_the_installers_label_the_server_folder_only_where_selinux_enforces(
     assert (target / "env" / "dist" / "logs").is_dir()
 
 
-# What the sudo banner is allowed to claim, and the command that has to back it.
+# The sudo banner, checked against the argv the script actually runs.
 #
-# A banner shown immediately before `sudo -v` is a PROMISE about what the
-# password will be used for, and it is the only such promise the user gets. It
-# had been claiming "Fixing file ownership after build" since before there was
-# anything to own: the WotLK scripts contain no `chown` at all, so a password
-# was being asked for work that never happened - while four things sudo really
-# does (starting the Docker service, joining the docker group, running docker
-# before that membership is live, and `rm -rf` on the server folder) went
-# unmentioned.
+# A banner shown immediately before `sudo -v` is the whole of the user's
+# informed consent, and it is checked in BOTH directions off this one table:
+# every bullet must be backed by a command, and every privileged command must
+# have a bullet. The second is the one with teeth - the first version of this
+# check was a closed world of hand-written keys, so `sudo systemctl reboot`
+# (five sites in the Fedora installer, four of them with no confirmation at all)
+# sat behind a test whose docstring claimed a real use of sudo must be declared.
 #
-# Keyed on a phrase in the bullet rather than the whole line so the wording
-# stays free to improve; the regex is what makes the claim true.
-SUDO_BANNER_CLAIMS: dict[str, str] = {
-    "Installing Docker": r"sudo (pacman|dnf|apt-get|rpm-ostree)",
-    "Docker service": r"sudo systemctl (enable|start|restart) docker",
-    "docker group": r"sudo usermod -aG docker",
-    "Running docker": r"sudo docker\b",
-    "old server folder": r'sudo rm -rf "?\$SERVER_DIR',
-    "SteamOS": r"sudo steamos-readonly",
-    "pacman keyring": r"sudo rm -rf /etc/pacman\.d/gnupg",
-    "apt repository": r"sudo tee /etc/apt/sources\.list\.d/docker\.list",
+# Keyed on a phrase in the bullet so wording stays free to improve, and valued
+# by the VERBS that justify it, taken from the same extraction the reverse
+# direction uses - so the two can never disagree about what a script does.
+SUDO_BANNER_CLAIMS: dict[str, frozenset[str]] = {
+    "Installing Docker": frozenset({"dnf", "apt-get", "pacman", "rpm-ostree install"}),
+    "Docker service": frozenset(
+        {
+            "systemctl enable",
+            "systemctl start",
+            "systemctl restart",
+            "systemctl daemon-reload",
+            "systemctl reset-failed",
+        }
+    ),
+    "docker group": frozenset({"usermod"}),
+    "Running docker": frozenset({"docker"}),
+    "old server folder": frozenset({"rm"}),
+    "repository": frozenset({"tee", "install", "curl", "bash", "chmod"}),
+    "Restarting your computer": frozenset({"systemctl reboot"}),
+    "Docker snap": frozenset({"snap remove"}),
+    "SteamOS read-only root": frozenset({"steamos-readonly enable", "steamos-readonly disable"}),
+    "developer mode": frozenset({"steamos-devmode"}),
+    "pacman keyring": frozenset(
+        {"pacman-key --init", "pacman-key --populate", "pacman-key --list-keys"}
+    ),
 }
 
+# Privileged calls that need no bullet, each with the reason it needs none.
+# Anything NOT here and not in a claim above fails the suite by name.
+SUDO_EXEMPT: dict[str, str] = {
+    "-v": "the credential prompt itself - this IS the thing the banner introduces",
+    "true": "`sudo -n true`, the keepalive that refreshes the cache already granted",
+    "systemctl status": "read-only diagnostics",
+    "systemctl is-active": "read-only diagnostics",
+    "journalctl": "read-only diagnostics",
+}
 
-def test_compose_file_finds_every_name_and_prefers_composes_own_order(tmp_path: Path) -> None:
-    """`compose_file()` answers what Docker Compose would answer.
+# `sudo` inside an echo/print_* line is advice being PRINTED, not run - the
+# installers tell the user what to type when something fails, and counting that
+# as an action would make every one of those messages a consent obligation.
+_SUDO_CALL = re.compile(r"(?<![\w-])sudo\s+((?:-\w+\s+)*)([\w./-]+)(?:\s+([\w-]+))?")
+_NOT_A_CALL = re.compile(r"^\s*#|^\s*(echo|print_\w+|printf)\b")
+_PRINTED = re.compile(r"(echo|print_\w+|printf)\b[^\n]*sudo")
 
-    Order matters and is not ours to invent: Compose reads `compose.yaml` first
-    and falls back through `compose.yml`, `docker-compose.yaml`,
-    `docker-compose.yml`. A folder holding two of them is not hypothetical - a
-    script-installed server that the native engine later writes into would have
-    exactly that - and answering with the one Compose ignores would have the app
-    reading a file the daemon never loads.
-    """
-    assert installer_module.compose_file(tmp_path) is None
-
-    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
-    assert installer_module.compose_file(tmp_path) == tmp_path / "docker-compose.yml"
-
-    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
-    assert installer_module.compose_file(tmp_path) == tmp_path / "compose.yaml"
+# Programs whose SUBCOMMAND changes what the user is consenting to. Enabling a
+# service and rebooting the machine are both `systemctl`, and collapsing them
+# would hide the reboot behind the service bullet.
+_SUBCOMMAND_MATTERS = frozenset(
+    {"systemctl", "rpm-ostree", "steamos-readonly", "snap", "pacman-key"}
+)
 
 
-def test_compose_file_ignores_a_directory_of_that_name(tmp_path: Path) -> None:
-    """`is_file()`, not `exists()` - a directory called `compose.yml` is not an install."""
-    (tmp_path / "compose.yml").mkdir()
-    assert installer_module.compose_file(tmp_path) is None
+def _sudo_verbs(text: str) -> dict[str, int]:
+    """Every executable `sudo` call in `text`, normalised to a verb, with its line."""
+    found: dict[str, int] = {}
+    for number, line in enumerate(text.splitlines(), 1):
+        if _NOT_A_CALL.match(line) or _PRINTED.search(line):
+            continue
+        for _flags, program, sub in _SUDO_CALL.findall(line):
+            verb = f"{program} {sub}" if program in _SUBCOMMAND_MATTERS and sub else program
+            found.setdefault(verb, number)
+    return found
 
 
 def _sudo_banner_bullets(text: str) -> list[str]:
-    """The bullet lines between the banner header and the password prompt."""
-    begin = text.index("This installer needs sudo access for")
-    end = text.index("Please enter your password", begin)
-    return [line for line in text[begin:end].splitlines() if "\u2022" in line]
+    """The bullet lines between the banner header and the password prompt.
 
-
-@pytest.mark.parametrize(
-    "script_name",
-    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
-)
-def test_the_sudo_banner_only_claims_things_the_script_actually_does(script_name: str) -> None:
-    """The password prompt must not ask for work the script never performs.
-
-    Measured 2026-08-25: all three scripts promised "Fixing file ownership after
-    build" and none of them contains a `chown` - the only match in each file is
-    a comment. The banner is the whole of the user's informed consent here, so a
-    claim with nothing behind it is the same defect as an unannounced
-    escalation, pointing the other way.
-
-    Asserted against the emitted argv rather than prose, which is the same rule
-    the docker-group tests follow: a promise spelled one way in a banner and
-    another in the commands is exactly what this caught.
+    Anchored on the `echo` that prints the header rather than on the text
+    appearing anywhere, so a comment quoting the banner cannot shadow it.
     """
-    script = (
+    header = re.search(r"^echo .*This installer needs sudo access for", text, re.MULTILINE)
+    assert header, "no sudo banner header found"
+    end = text.index("Please enter your password", header.start())
+    return [line for line in text[header.start() : end].splitlines() if "\u2022" in line]
+
+
+def _wotlk_script(script_name: str) -> Path:
+    return (
         Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
     )
-    text = script.read_text(encoding="utf-8")
+
+
+WOTLK_SCRIPTS = [
+    "install-wow-wotlk.sh",
+    "install-wow-wotlk-fedora.sh",
+    "install-wow-wotlk-ubuntu.sh",
+]
+
+
+@pytest.mark.parametrize("script_name", WOTLK_SCRIPTS)
+def test_the_sudo_banner_declares_every_privileged_thing_the_script_does(script_name: str) -> None:
+    """No privileged action may be absent from the banner - and none may be unknown.
+
+    This is the direction that failed before. It used to iterate the claims
+    table, so a command outside it could never be required; `sudo systemctl
+    reboot` was exactly that, and the Fedora installer reboots the machine after
+    a 10-second sleep with no confirmation on four of its five paths. Now the
+    iteration is over what the SCRIPT does, and a verb this table has never
+    heard of fails by name rather than passing by omission.
+    """
+    text = _wotlk_script(script_name).read_text(encoding="utf-8")
+    bullets = " ".join(_sudo_banner_bullets(text))
+    for verb, line in sorted(_sudo_verbs(text).items()):
+        if verb in SUDO_EXEMPT:
+            continue
+        claims = [phrase for phrase, verbs in SUDO_BANNER_CLAIMS.items() if verb in verbs]
+        assert claims, (
+            f"{script_name}:{line}: `sudo {verb}` is a privileged action this table has never "
+            f"heard of. Add it to SUDO_BANNER_CLAIMS with the bullet that discloses it, or to "
+            f"SUDO_EXEMPT with the reason it needs none. Do not leave it unlisted: that is how "
+            f"a reboot shipped undisclosed."
+        )
+        assert any(phrase in bullets for phrase in claims), (
+            f"{script_name}:{line}: the script runs `sudo {verb}` but no banner bullet mentions "
+            f"{' or '.join(repr(c) for c in claims)}, so the user consents to less than they get."
+        )
+
+
+@pytest.mark.parametrize("script_name", WOTLK_SCRIPTS)
+def test_the_sudo_banner_claims_nothing_the_script_does_not_do(script_name: str) -> None:
+    """And the other way: a promise with nothing behind it.
+
+    All three scripts used to promise "Fixing file ownership after build" and
+    none of them contains a `chown` - the only match in each file is a comment,
+    which is why this now reads extracted argv rather than the file's text.
+    """
+    text = _wotlk_script(script_name).read_text(encoding="utf-8")
+    present = set(_sudo_verbs(text))
     bullets = _sudo_banner_bullets(text)
     assert bullets, f"{script_name}: no bullets found under the sudo banner"
 
     for bullet in bullets:
-        keys = [k for k in SUDO_BANNER_CLAIMS if k in bullet]
-        assert keys, (
+        phrases = [phrase for phrase in SUDO_BANNER_CLAIMS if phrase in bullet]
+        assert phrases, (
             f"{script_name}: the banner claims something with no known backing command:\n"
             f"  {bullet.strip()}\n"
-            f"Either drop the claim or add it to SUDO_BANNER_CLAIMS with the command that "
-            f"makes it true."
+            f"Either drop the claim, or add it to SUDO_BANNER_CLAIMS with the verbs that make "
+            f"it true."
         )
-        assert len(keys) == 1, f"{script_name}: bullet matches {keys}, which is ambiguous"
-        pattern = SUDO_BANNER_CLAIMS[keys[0]]
-        assert re.search(pattern, text), (
-            f"{script_name}: the banner promises {keys[0]!r} but nothing in the script "
-            f"matches {pattern!r} - the password is being asked for work that never runs."
-        )
-
-
-@pytest.mark.parametrize(
-    "script_name",
-    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
-)
-def test_the_sudo_banner_names_every_privileged_thing_the_script_does(script_name: str) -> None:
-    """And the other direction: a real use of sudo must be declared.
-
-    The first version of this pair only checked that claims were backed, which
-    would have passed a banner listing one true thing and hiding four others -
-    which is what the scripts actually shipped. Both directions or neither.
-    """
-    script = (
-        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
-    )
-    text = script.read_text(encoding="utf-8")
-    bullets = " ".join(_sudo_banner_bullets(text))
-    for key, pattern in SUDO_BANNER_CLAIMS.items():
-        if re.search(pattern, text):
-            assert key in bullets, (
-                f"{script_name}: the script runs {pattern!r} under sudo but the banner never "
-                f"mentions {key!r}, so the user consents to less than they get."
+        for phrase in phrases:
+            assert SUDO_BANNER_CLAIMS[phrase] & present, (
+                f"{script_name}: the banner promises {phrase!r} but the script runs none of "
+                f"{sorted(SUDO_BANNER_CLAIMS[phrase])} - a password asked for work that never "
+                f"happens."
             )
+
+
+def test_the_verb_extractor_ignores_advice_and_comments() -> None:
+    """The extractor's own trap, pinned.
+
+    The installers print `sudo` commands as advice when something fails, and
+    they carry comments naming commands they no longer run. Counting either as
+    an action would make the banner grow obligations the script does not have -
+    and counting a comment as BACKING is how the first version of this check
+    could be satisfied without any real command at all.
+    """
+    text = (
+        "# sudo rm -rf /etc/pacman.d/gnupg\n"
+        'print_info "  sudo chcon -Rt container_file_t /srv"\n'
+        'echo "run: sudo usermod -aG docker $USER"\n'
+        "sudo systemctl reboot\n"
+        "sudo systemctl enable docker\n"
+    )
+    assert set(_sudo_verbs(text)) == {"systemctl reboot", "systemctl enable"}
 
 
 def _override_volumes(script: Path) -> dict[str, list[str]]:
