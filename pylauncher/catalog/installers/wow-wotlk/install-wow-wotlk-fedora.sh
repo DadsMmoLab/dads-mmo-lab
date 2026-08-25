@@ -223,9 +223,47 @@ selinux_is_enforcing() {
     [ "$(getenforce 2>/dev/null)" = "Enforcing" ]
 }
 
+# Can this filesystem hold an SELinux label at all?
+#
+# Deny-list rather than allow-list: anything not named here keeps `:z`, so a
+# filesystem nobody thought of does not quietly lose the fix. Checked by type
+# rather than by matching chcon's stderr, because that string is
+# gettext-translated - the same trap this project already hit reading sudo's
+# "a password is required".
+selinux_labels_supported() {
+    case "$(stat -f -c %T "$1" 2>/dev/null)" in
+        exfat|ntfs|ntfs3|fuseblk|msdos|vfat|cifs|smb2|nfs|nfs4|9p) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+# Take `:z` back out of the override we just wrote.
+#
+# `:z` asks Docker to relabel the bind source on every start. On a filesystem
+# that cannot hold xattrs that is not a warning - the daemon refuses to CREATE
+# the container ("lsetxattr <path>: operation not supported"), which names
+# neither SELinux nor the drive, and `sudo chcon` cannot help either. Dropping
+# the option puts such a box back to where it was: it may still fail later on a
+# permission denial, but it fails with a message about the thing that is wrong.
+selinux_drop_z_from_override() {
+    local override="$1/docker-compose.override.yml"
+    [ -f "$override" ] || return 0
+    grep -q '/azerothcore/env/dist/etc:z' "$override" || return 0
+    sed -i 's|\(/azerothcore/env/dist/[a-z]*\):z|\1|' "$override"
+    print_warning "This filesystem cannot hold SELinux labels ($(stat -f -c %T "$1" 2>/dev/null))."
+    print_info "Removed ':z' from the compose override - with it, Docker refuses to start"
+    print_info "the containers at all on such a filesystem."
+    print_info "If the server later fails with 'Permission denied' on its config, install"
+    print_info "it on a normal Linux filesystem (ext4/xfs/btrfs) instead of this drive."
+}
+
 selinux_label_for_containers() {
     selinux_is_enforcing || return 0
     command -v chcon >/dev/null 2>&1 || return 0
+    if ! selinux_labels_supported "$1"; then
+        selinux_drop_z_from_override "$1"
+        return 0
+    fi
 
     print_info "SELinux is enforcing — labelling the server folder for container access"
     # Created first so the label is inherited by whatever compose puts inside.
@@ -1224,6 +1262,14 @@ install_server() {
         print_info "Skipping compile — reusing your existing build."
         print_info "To force a fresh compile, remove the server folder:"
         print_info "  sudo rm -rf $SERVER_DIR"
+        # Also here, not only on the fresh-build path. This branch is how a user
+        # recovers an install whose labels were reset - by `restorecon -R ~`, a
+        # selinux-policy update, or /.autorelabel - and it is the one that must
+        # not send them back to a 2-4 hour rebuild. An override written by an
+        # older build carries no `:z`, so the relabel is the only thing that can
+        # help here; the override is deliberately NOT rewritten, since other
+        # install flavours ship their own.
+        selinux_label_for_containers "$SERVER_DIR"
         cd "$SERVER_DIR" || exit 1
         docker compose up -d 2>&1 | tail -5
         return 0
@@ -1293,6 +1339,17 @@ services:
       # config - ac-db-import exits 1 with "Permission denied" on files the
       # user owns. Spelled with the same ${VAR:-default} as the base file so
       # Compose expands it identically and merges by target path.
+      #
+      # Merging by target REPLACES the base entry, so these two lines own the
+      # WHOLE mount spec for those targets, not just the label - the base's
+      # `:delegated` is already dropped here (a macOS hint, inert on Linux).
+      # If upstream ever adds an option that matters, such as `:ro`, it has to
+      # be repeated here or it is silently discarded.
+      #
+      # `z`, not `Z`: three services share these mounts, and `Z` would give each
+      # container a private MCS category pair, so whichever relabelled last
+      # would lock the others out. The `./modules:...:Z` above is the opposite
+      # case - a single mounting service - and is not a precedent for this.
       - ${DOCKER_VOL_ETC:-./env/dist/etc}:/azerothcore/env/dist/etc:z
       - ${DOCKER_VOL_LOGS:-./env/dist/logs}:/azerothcore/env/dist/logs:z
     environment:

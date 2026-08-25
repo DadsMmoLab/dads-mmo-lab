@@ -689,6 +689,39 @@ def test_the_installers_label_the_server_folder_only_where_selinux_enforces(
     assert (target / "env" / "dist" / "logs").is_dir()
 
 
+def _override_volumes(script: Path) -> dict[str, list[str]]:
+    """Volumes per service from the override heredoc, by structure not substring.
+
+    A two-space key is a service; a four-space `volumes:` belongs to that
+    service; six-space `- ` entries under it are its mounts. Anything deeper -
+    such as a `volumes:` that has drifted INSIDE `build:` - is deliberately not
+    collected, because that is the shape that makes `docker compose config`
+    reject the file outright while every substring the old assertions looked for
+    is still present.
+    """
+    text = script.read_text(encoding="utf-8")
+    body = text[text.index("docker-compose.override.yml") : text.index("\nOVERRIDE")]
+    services: dict[str, list[str]] = {}
+    service = None
+    in_volumes = False
+    for raw in body.split("\n"):
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        line = raw.strip()
+        if indent == 2 and line.endswith(":"):
+            service = line[:-1]
+            services.setdefault(service, [])
+            in_volumes = False
+        elif indent == 4 and service is not None:
+            in_volumes = line == "volumes:"
+        elif indent == 6 and in_volumes and line.startswith("- ") and service is not None:
+            services[service].append(line[2:])
+        elif indent >= 6 and not (in_volumes and line.startswith("- ")):
+            in_volumes = False
+    return services
+
+
 @pytest.mark.parametrize(
     "script_name",
     ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
@@ -696,30 +729,67 @@ def test_the_installers_label_the_server_folder_only_where_selinux_enforces(
 def test_the_generated_override_labels_every_bind_mount_it_shares(script_name: str) -> None:
     """`:z` is the half that survives a relabel; chcon is the half that runs once.
 
-    A review of the first version made the case: `chcon` is applied before ONE
-    of the several `docker compose up` sites in this product - the resume
-    branch, the generated launcher script, wow-manage.sh and dml-start.sh all
-    bring the stack up without it - and any policy relabel (`restorecon -R ~`, a
-    selinux-policy update, `touch /.autorelabel`) puts the tree back with
-    nothing to re-apply it. `:z` is applied by Docker on every start, so it is
-    self-healing and covers every site. Read from the shipped script so the two
-    cannot drift.
+    A review of the first version made the case: `chcon` is applied before ONE of
+    the several `docker compose up` sites in this product, and any policy relabel
+    (`restorecon -R ~`, a selinux-policy update, `touch /.autorelabel`) puts the
+    tree back with nothing to re-apply it. `:z` is applied by Docker on every
+    start, so it is self-healing.
+
+    Asserted per SERVICE, because the mount only helps the container that has
+    it, and because a `volumes:` block that drifts inside `build:` is rejected by
+    `docker compose config` while leaving every substring intact.
+    """
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    services = _override_volumes(script)
+    for service in ("ac-worldserver", "ac-authserver", "ac-db-import"):
+        assert service in services, f"{script_name}: {service} missing from the override"
+        mounts = services[service]
+        assert (
+            "${DOCKER_VOL_ETC:-./env/dist/etc}:/azerothcore/env/dist/etc:z" in mounts
+        ), f"{script_name}: {service} has no labelled etc mount, only {mounts}"
+        assert (
+            "${DOCKER_VOL_LOGS:-./env/dist/logs}:/azerothcore/env/dist/logs:z" in mounts
+        ), f"{script_name}: {service} has no labelled logs mount, only {mounts}"
+    # Spelled with the base file's own default so Compose merges by target path
+    # rather than adding a second mount of the same directory.
+    assert all(
+        m.startswith("${DOCKER_VOL_")
+        for svc in ("ac-authserver", "ac-db-import")
+        for m in services[svc]
+    )
+
+
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_the_relabel_also_runs_on_the_branch_that_reuses_an_existing_build(
+    script_name: str,
+) -> None:
+    """The recovery path needs it most, and had it least.
+
+    Found by review: the relabel was called only where a fresh build is made. The
+    branch that finds compiled images already present - which is exactly how a
+    user recovers an install whose labels were reset - ran `docker compose up`
+    with no relabel and no override rewrite, so the only recovery left was the
+    2-4 hour rebuild the change exists to avoid. An override written by an older
+    build carries no `:z` either, so on that path the relabel is the only thing
+    that can help.
     """
     script = (
         Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
     )
     text = script.read_text(encoding="utf-8")
-    override = text[text.index("docker-compose.override.yml") : text.index("\nOVERRIDE")]
-    for service in ("ac-worldserver", "ac-authserver", "ac-db-import"):
-        assert service in override, f"{script_name}: {service} missing from the override"
-    for mount in ("/azerothcore/env/dist/etc:z", "/azerothcore/env/dist/logs:z"):
-        # once per service that mounts it
-        assert (
-            override.count(mount) == 3
-        ), f"{script_name}: expected {mount} on all three services, found {override.count(mount)}"
-    # Spelled with the base file's own default so Compose merges by target path.
-    assert "${DOCKER_VOL_ETC:-./env/dist/etc}" in override
-    assert "${DOCKER_VOL_LOGS:-./env/dist/logs}" in override
+    reuse = text[text.index("Skipping compile") : text.index("Skipping compile") + 1200]
+    reuse = reuse[: reuse.index("return 0")]
+    assert (
+        'selinux_label_for_containers "$SERVER_DIR"' in reuse
+    ), f"{script_name}: the reuse branch brings the stack up without relabelling"
+    assert reuse.index('selinux_label_for_containers "$SERVER_DIR"') < reuse.index(
+        "docker compose up"
+    ), f"{script_name}: the relabel must run BEFORE the stack comes up"
 
 
 def test_installer_refuses_a_reserved_folder_before_asking_for_a_password(
