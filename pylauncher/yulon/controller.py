@@ -129,7 +129,7 @@ class Controller:
         established, because that is where acting on the wrong container does
         damage, and its refusal is now shown on the tab.
         """
-        running = set(docker.status())
+        running = set(docker.status(wsl_distro=self.wsl_distro))
         return InstallStatus(
             db=self.spec.db in running,
             auth=self.spec.auth in running,
@@ -156,7 +156,11 @@ class Controller:
         then reports the daemon's own "container name is already in use".
         """
         own = {self.spec.db, self.spec.auth, self.spec.world}
-        return [name for name in docker.port_conflicts_for(self.spec) if name not in own]
+        return [
+            name
+            for name in docker.port_conflicts_for(self.spec, wsl_distro=self.wsl_distro)
+            if name not in own
+        ]
 
     # -- lifecycle -------------------------------------------------------
 
@@ -179,7 +183,7 @@ class Controller:
         # entry, so the lambda that used to be built here was dead code reading
         # like a health wait that no longer happens. Compose does the waiting
         # now, through the project's own `service_healthy` conditions.
-        docker.start_staged(self.spec, self.server_dir)
+        docker.start_staged(self.spec, self.server_dir, wsl_distro=self.wsl_distro)
 
     def stop(self) -> bool:
         """Stop the install, keeping its containers so the next start is staged.
@@ -201,7 +205,7 @@ class Controller:
             if there was nothing to stop. This used to be discarded, so the tab
             said the same thing either way (review, 2026-08-22).
         """
-        return docker.stop_staged(self.spec, self.server_dir)
+        return docker.stop_staged(self.spec, self.server_dir, wsl_distro=self.wsl_distro)
 
     def remove(self) -> bool:
         """Stop the install and remove its containers, keeping every volume.
@@ -214,7 +218,7 @@ class Controller:
             True if this install had containers and they are now gone, False if
             there was nothing of it to remove.
         """
-        return docker.remove_staged(self.spec, self.server_dir)
+        return docker.remove_staged(self.spec, self.server_dir, wsl_distro=self.wsl_distro)
 
     def import_state(self) -> docker.ImportState:
         """Ask this install's databases whether the one-shot import ever finished.
@@ -259,6 +263,7 @@ class Controller:
             self.import_probe,
             reset=self.reset_unfinished,
             output=output,
+            wsl_distro=self.wsl_distro,
         )
 
     # -- polling ---------------------------------------------------------

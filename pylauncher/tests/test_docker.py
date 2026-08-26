@@ -3013,8 +3013,7 @@ def _seam_reachers() -> dict[str, list[str]]:
         calls[node.name] = {
             child.func.id if isinstance(child.func, ast.Name) else child.func.attr
             for child in ast.walk(node)
-            if isinstance(child, ast.Call)
-            and isinstance(child.func, (ast.Name, ast.Attribute))
+            if isinstance(child, ast.Call) and isinstance(child.func, (ast.Name, ast.Attribute))
         }
 
     # Only names this module actually defines: an attribute call to something

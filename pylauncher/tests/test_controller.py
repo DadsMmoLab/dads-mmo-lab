@@ -9,11 +9,13 @@ is guarded by the shared single-instance/port-conflict check (README §12).
 
 from __future__ import annotations
 
+import ast
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from yulon import controller as controller_module
 from yulon import docker, runner
 from yulon.controller import Controller, InstallStatus, PortConflictError
 from yulon.controller_wow_wotlk import docker_ctl
@@ -333,6 +335,7 @@ def test_repair_import_hands_the_output_sink_through_to_docker(
         reset: docker.ResetUnfinished | None = None,
         output: docker.OutputSink | None = None,
         db_timeout: float = 1.0,
+        **_kw: object,
     ) -> bool:
         seen.append((spec, server_dir, output))
         return True
@@ -344,3 +347,106 @@ def test_repair_import_hands_the_output_sink_through_to_docker(
     # And a caller that wants nothing shown still gets an import.
     assert ctl.repair_import() is True
     assert seen == [(SPEC, SERVER_DIR, lines.append), (SPEC, SERVER_DIR, None)]
+
+
+# Controller methods that deliberately do not name a daemon, with the reason.
+_NOT_THIS_INSTALLS_DAEMON: dict[str, str] = {}
+
+
+def _controller_docker_calls() -> dict[str, list[str]]:
+    """Every `docker.<fn>(...)` call inside `Controller`, by method, that could
+    name a daemon and does not.
+
+    The companion to docker.py's completeness test, and the gap it left. That
+    one proves every docker function CAN be told which daemon to ask; this one
+    proves the caller actually tells it. Both are needed, because a controller
+    that holds a distro and forgets to pass it produces the exact silent failure
+    the distro exists to prevent - Docker Desktop answers "no containers" and a
+    running server reads as stopped.
+    """
+    source = Path(controller_module.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    takes_distro = {
+        node.name
+        for node in ast.walk(ast.parse(Path(docker.__file__).read_text(encoding="utf-8")))
+        if isinstance(node, ast.FunctionDef)
+        and "wsl_distro"
+        in [a.arg for a in (*node.args.args, *node.args.kwonlyargs, *node.args.posonlyargs)]
+    }
+
+    missing: dict[str, list[str]] = {}
+    for klass in ast.walk(tree):
+        if not isinstance(klass, ast.ClassDef) or klass.name != "Controller":
+            continue
+        for method in klass.body:
+            if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for call in ast.walk(method):
+                if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute):
+                    continue
+                value = call.func.value
+                if not isinstance(value, ast.Name) or value.id != "docker":
+                    continue
+                if call.func.attr not in takes_distro:
+                    continue
+                if any(k.arg == "wsl_distro" for k in call.keywords):
+                    continue
+                missing.setdefault(method.name, []).append(call.func.attr)
+    return missing
+
+
+def test_every_controller_call_says_which_daemon_it_means() -> None:
+    """The gap the docker.py completeness test cannot see.
+
+    That test proves each docker function ACCEPTS `wsl_distro`. It says nothing
+    about whether a caller passes one - and the first version of this feature
+    threaded all 33 functions and then forwarded the distro from exactly two of
+    the Controller's eight call sites. Start, Stop, Remove, Status,
+    port_conflicts and repair_import all addressed the local daemon, on a
+    machine that in the reported case has no local daemon at all.
+
+    Nothing failed loudly: `docker.status()` against Docker Desktop answers "no
+    containers", so a running server reads as stopped. That is why this is a
+    test and not a review checklist.
+    """
+    missing = {
+        method: calls
+        for method, calls in _controller_docker_calls().items()
+        if method not in _NOT_THIS_INSTALLS_DAEMON
+    }
+    assert not missing, (
+        "these Controller methods call docker without saying which daemon, so a "
+        f"WSL-resident server would be asked of the wrong one: {missing}\n"
+        "Pass `wsl_distro=self.wsl_distro`, or name the method in "
+        "_NOT_THIS_INSTALLS_DAEMON with the reason it must not."
+    )
+
+
+def test_the_caller_scan_would_notice_a_forgotten_call() -> None:
+    """The guard's own guard: prove it reads the class rather than an empty set."""
+    source = """
+import ast
+class Controller:
+    def good(self):
+        return docker.status(wsl_distro=self.wsl_distro)
+    def bad(self):
+        return docker.status()
+"""
+    tree = ast.parse(source)
+    forgot = []
+    for klass in ast.walk(tree):
+        if not isinstance(klass, ast.ClassDef):
+            continue
+        for method in klass.body:
+            if not isinstance(method, ast.FunctionDef):
+                continue
+            for call in ast.walk(method):
+                if (
+                    isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Attribute)
+                    and isinstance(call.func.value, ast.Name)
+                    and call.func.value.id == "docker"
+                    and not any(k.arg == "wsl_distro" for k in call.keywords)
+                ):
+                    forgot.append(method.name)
+    assert forgot == ["bad"], f"the scan does not distinguish the two: {forgot}"
