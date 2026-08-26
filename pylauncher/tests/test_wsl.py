@@ -27,6 +27,27 @@ COMPOSE_LS = (
 )
 
 
+# `wsl -d yulon-no-such-distro -- docker ps` on the same box (2026-08-26), as
+# `runner.run()` hands it over: text mode, UTF-8, `errors="replace"`. wsl.exe
+# writes UTF-16LE, so every ASCII character arrives followed by a NUL - and it
+# writes this to STDOUT, with stderr empty, which is why `docker._run()`'s
+# message ended at "docker ps exited 4294967295: " and said nothing more.
+WSL_NO_SUCH_DISTRO_STDOUT = (
+    "T\x00h\x00e\x00r\x00e\x00 \x00i\x00s\x00 \x00n\x00o\x00 \x00"
+    "d\x00i\x00s\x00t\x00r\x00i\x00b\x00u\x00t\x00i\x00o\x00n\x00"
+    " \x00w\x00i\x00t\x00h\x00 \x00t\x00h\x00e\x00 \x00s\x00u\x00"
+    "p\x00p\x00l\x00i\x00e\x00d\x00 \x00n\x00a\x00m\x00e\x00.\x00"
+    "\n\x00\n\x00E\x00r\x00r\x00o\x00r\x00 \x00c\x00o\x00d\x00e\x00"
+    ":\x00 \x00W\x00s\x00l\x00/\x00S\x00e\x00r\x00v\x00i\x00c\x00"
+    "e\x00/\x00W\x00S\x00L\x00_\x00E\x00_\x00D\x00I\x00S\x00T\x00"
+    "R\x00O\x00_\x00N\x00O\x00T\x00_\x00F\x00O\x00U\x00N\x00D\x00"
+    "\n\x00\n\x00"
+)
+
+WSL_NO_SUCH_DISTRO_RETURNCODE = 4294967295
+"""0xFFFFFFFF, captured from the same run. Windows' unsigned DWORD exit status."""
+
+
 def test_distro_names_come_from_a_listing_no_locale_translates() -> None:
     """`wsl -l -v`'s STATE column is TRANSLATED, and reading it broke everything.
 
@@ -51,6 +72,95 @@ def test_distro_states_pairs_the_two_listings(monkeypatch: pytest.MonkeyPatch) -
         wsl.Distro(name="dml-arch", running=True),
         wsl.Distro(name="docker-desktop", running=False),
     )
+
+
+def test_a_deleted_distro_is_named_instead_of_wsls_bare_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A user whose distro is gone was shown "docker ps exited 4294967295: ".
+
+    Nothing after the colon, because wsl.exe writes its complaint to stdout and
+    the message quotes stderr - so the number was the entire explanation, and it
+    named neither the distro nor anything to do about it. The refusal has to say
+    which distro is missing and that the tab cannot reach it until it is back or
+    the server is re-adopted.
+
+    `distro_states` is made fatal here to prove the error code alone settles it:
+    recognising this must not spawn `wsl -l -q` on a path that has already
+    failed once.
+    """
+
+    def no_listing() -> tuple[wsl.Distro, ...]:
+        raise AssertionError("the listing was asked for a failure wsl.exe already explained")
+
+    monkeypatch.setattr(wsl, "distro_states", no_listing)
+
+    problem = wsl.missing_distro_problem(
+        "dml-arch", WSL_NO_SUCH_DISTRO_RETURNCODE, WSL_NO_SUCH_DISTRO_STDOUT
+    )
+    assert problem is not None
+    assert "dml-arch" in problem
+    assert "4294967295" not in problem
+    assert "Use existing" in problem
+
+
+def test_a_failure_wsl_did_not_spell_out_is_settled_by_the_listing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The streamed seams may hold no output carrying the error code.
+
+    `follow_logs()` yields lines and `run_attached()` keeps only a bounded tail,
+    so the code can be off the end of what the caller still has. The listing is
+    authoritative about which distros exist, and reading it starts nothing.
+    """
+    monkeypatch.setattr(wsl, "distro_states", lambda: (wsl.Distro("docker-desktop", False),))
+    problem = wsl.missing_distro_problem("dml-arch", WSL_NO_SUCH_DISTRO_RETURNCODE)
+    assert problem is not None
+    assert "dml-arch" in problem
+
+
+def test_a_distro_that_still_exists_is_never_reported_as_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """wsl.exe exits 4294967295 for more than a missing name.
+
+    A stopped or wedged distro fails the same way, and telling that user their
+    distro was deleted sends them off to re-adopt a server sitting exactly where
+    they left it. The listing still naming it is the veto.
+    """
+    monkeypatch.setattr(wsl, "distro_states", lambda: (wsl.Distro("dml-arch", False),))
+    assert wsl.missing_distro_problem("dml-arch", WSL_NO_SUCH_DISTRO_RETURNCODE) is None
+
+
+def test_a_cancelled_run_is_not_mistaken_for_a_deleted_distro() -> None:
+    """`docker.CANCELLED_RETURNCODE` is -1, which is 4294967295 written signed.
+
+    A user cancelling their own build would otherwise be told their distro had
+    been deleted. Only the unsigned value Windows actually reports counts.
+    """
+    assert wsl.missing_distro_problem("dml-arch", -1, WSL_NO_SUCH_DISTRO_STDOUT) is None
+
+
+def test_an_ordinary_docker_failure_keeps_its_own_message() -> None:
+    """Compose failing inside a healthy distro must not be blamed on WSL.
+
+    Its exit code and its own stderr are the explanation the user needs; a WSL
+    refusal pasted over the top would hide the port clash or the bad image.
+    """
+    assert (
+        wsl.missing_distro_problem("dml-arch", 1, "Error response from daemon: no such image")
+        is None
+    )
+
+
+def test_a_plain_windows_install_has_no_distro_to_blame() -> None:
+    """Docker Desktop installs pass `wsl_distro=None` through every docker seam.
+
+    Answering None here is what lets those seams ask unconditionally, in one
+    line, rather than each guarding first - which is how this stays out of
+    `docker.py`'s 33 functions.
+    """
+    assert wsl.missing_distro_problem(None, WSL_NO_SUCH_DISTRO_RETURNCODE) is None
 
 
 def test_a_windows_folder_mounted_into_a_distro_is_not_a_wsl_server() -> None:
@@ -175,3 +285,30 @@ def test_find_servers_survives_one_distro_failing(monkeypatch: pytest.MonkeyPatc
         lambda: (wsl.Distro("broken", True), wsl.Distro("dml-arch", True)),
     )
     assert [s.distro for s in wsl.find_servers()] == ["dml-arch"]
+
+
+def test_a_listing_that_could_not_answer_never_accuses_a_distro_of_being_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty listing is not the same fact as an empty machine.
+
+    `_wsl_list()` answers `()` for four different things - no wsl.exe on PATH,
+    OSError, a timeout, and a non-zero exit - and only one of them means "there
+    are no distros". The failure that reaches tier 2 is a 0xFFFFFFFF carrying no
+    WSL_E_DISTRO_NOT_FOUND, which is WSL broken at the SERVICE level; that is
+    exactly the state in which `wsl -l -q` also fails and answers `()`.
+
+    So the first version told the user their distro had been deleted whenever
+    WSL itself was wedged, and sent them off to re-adopt a server that was never
+    missing - in precisely the case tier 2 exists to judge.
+    """
+    monkeypatch.setattr(wsl, "distro_states", lambda: ())
+    assert (
+        wsl.missing_distro_problem("dml-arch", WSL_NO_SUCH_DISTRO_RETURNCODE, "terminated") is None
+    )
+    # And the tier-1 path is unaffected: wsl.exe naming the code is proof on its
+    # own and never consults the listing.
+    said = wsl.missing_distro_problem(
+        "dml-arch", WSL_NO_SUCH_DISTRO_RETURNCODE, WSL_NO_SUCH_DISTRO_STDOUT
+    )
+    assert said is not None and "dml-arch" in said

@@ -3138,3 +3138,52 @@ def unrelated(proc):
 
     assert "reached_by_attribute" in reaching, "a module-qualified call is still invisible"
     assert "unrelated" not in reaching, "an unrelated attribute call was miscounted"
+
+
+def test_a_deleted_distro_is_explained_rather_than_reported_as_a_bare_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The helper that explains this was written, and then nothing called it.
+
+    A helper with no caller reads as a fix in the diff and changes nothing for
+    the user, so this asserts through `_run()` - the seam every buffered docker
+    call goes through - rather than by calling `wsl.missing_distro_problem()`
+    directly. That distinction is the whole lesson of this branch: four blockers
+    were functions that accepted something no caller passed.
+
+    The bare message is empty here, not merely terse: wsl.exe complains on
+    STDOUT, and `_run()` quotes stderr, so what the user actually saw was
+    `docker ps exited 4294967295: ` with nothing after the colon.
+    """
+    from yulon import wsl
+
+    gone = "T\x00h\x00e\x00r\x00e\x00 \x00i\x00s\x00 \x00n\x00o\x00"
+    monkeypatch.setattr(
+        docker, "_docker", lambda *a, **k: _completed(4294967295, stdout=gone, stderr="")
+    )
+    monkeypatch.setattr(wsl, "distro_states", lambda: (wsl.Distro("other-distro", True),))
+
+    with pytest.raises(docker.DockerCommandError) as raised:
+        docker._run(["ps"], wsl_distro="dml-arch")
+
+    said = str(raised.value)
+    assert "dml-arch" in said and "no longer exists" in said, said
+    assert "4294967295" not in said, "the raw exit code is still what the user reads"
+
+
+def test_an_ordinary_docker_failure_still_reports_the_command_and_the_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard for the above: the new branch must not swallow every failure.
+
+    A wrong container name, a daemon that refused, a compose file with a typo -
+    all of those still need the command, the exit code and whatever docker put
+    on stderr, and none of them are a missing distro.
+    """
+    monkeypatch.setattr(
+        docker, "_docker", lambda *a, **k: _completed(1, stderr="no such container: nope")
+    )
+    with pytest.raises(docker.DockerCommandError) as raised:
+        docker._run(["inspect", "nope"], wsl_distro="dml-arch")
+    said = str(raised.value)
+    assert "docker inspect nope exited 1" in said and "no such container" in said, said

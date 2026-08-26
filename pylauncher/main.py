@@ -22,7 +22,15 @@ logger = get_logger(__name__)
 def build_window() -> object:
     """Create the main window (imports Qt lazily so `--help`-style tooling stays cheap)."""
     from PySide6.QtCore import QObject, QThread, Signal, Slot
-    from PySide6.QtWidgets import QLabel, QMainWindow, QSplitter, QTabWidget, QVBoxLayout, QWidget
+    from PySide6.QtWidgets import (
+        QLabel,
+        QMainWindow,
+        QMessageBox,
+        QSplitter,
+        QTabWidget,
+        QVBoxLayout,
+        QWidget,
+    )
 
     from yulon import __version__
     from yulon.catalog.catalog import CatalogEntry, load_catalog
@@ -33,9 +41,28 @@ def build_window() -> object:
     from yulon.ui.widgets.log_panel import LogPanel
     from yulon.update import UpdateCheck, check_for_update
 
+    class _Window(QMainWindow):
+        """The main window, which also carries the two registries the exit path walks.
+
+        They are attributes and NOT `setProperty()` values, and that is
+        load-bearing: Qt stores a property as a QVariant, and PySide converts a
+        Python list into one by COPYING it. Measured on 6.11.2 - appending to
+        the list after `setProperty()` leaves `property()` still answering with
+        the snapshot taken at that call. Every tab opened after startup, which
+        is every install and every adopt, was therefore invisible to
+        `_stop_background_threads()`: a console left following the worldserver
+        log on such a tab was never joined, and Qt was then torn down with that
+        QThread still running - the 0xC0000409 abort that function exists to
+        prevent. A QObject (`tabs`, the update thread) is stored by pointer and
+        is unaffected, so those stay properties.
+        """
+
+        yulon_controllers: list[QWidget]
+        yulon_log_panels: list[LogPanel]
+
     catalog = load_catalog()
     state = load_state()
-    window = QMainWindow()
+    window = _Window()
     window.setWindowTitle(f"Yu'lon — Dad's MMO Lab launcher {__version__}")
     tabs = QTabWidget(window)
     central = QWidget(window)
@@ -93,8 +120,37 @@ def build_window() -> object:
     splitter.addWidget(log_panel)
     tabs.addTab(splitter, "Catalog")
 
-    controllers: dict[tuple[str, Path], QWidget] = {}
+    # Typed as the concrete view, not QWidget: `drop_controller()` and the
+    # distro comparison both reach into `services` and `console_log`.
+    controllers: dict[tuple[str, Path], ControllerView] = {}
     controller_views: list[QWidget] = []
+
+    def drop_controller(key: tuple[str, Path]) -> None:
+        """Tear one live tab down completely, mirroring `_stop_background_threads()`.
+
+        Same reason as that function: a `QThread` destroyed while running ABORTS
+        the process (0xC0000409, verified), so the view's own `shutdown()` and
+        its console panel's stop+join have to happen BEFORE the widget leaves
+        the tab bar. The three registries are cleaned out with it, because a
+        stale entry in any of them is what `_stop_background_threads()` would
+        later call `shutdown()`/`wait()` on at exit.
+        """
+        view = controllers.pop(key)
+        view.shutdown()
+        panel = view.console_log
+        panel.stop()
+        panel.wait(5000)
+        if view in controller_views:
+            controller_views.remove(view)
+        if panel in panels:
+            panels.remove(panel)
+        index = tabs.indexOf(view)
+        if index != -1:
+            tabs.removeTab(index)
+        # `removeTab()` only unparents the page, it does not delete it. Without
+        # this the discarded view stays alive for the life of the process, and
+        # it is a whole ControllerView (six sub-tabs, a LogPanel, a QTimer).
+        view.deleteLater()
 
     def add_controller(
         game: str,
@@ -102,11 +158,53 @@ def build_window() -> object:
         client_dir: Path | None,
         wsl_distro: str | None = None,
     ) -> None:
-        """One tab per (game, server dir); a repeat (e.g. "Use existing…" twice) just focuses it."""
+        """One tab per (game, server dir); a repeat (e.g. "Use existing…" twice) just focuses it.
+
+        Unless the distro changed. Adopting a WSL-resident server that already
+        had a tab used to write the distro to `state.json` and stop there, so
+        every button on the open tab kept talking to the LOCAL docker daemon
+        until the app was restarted - Start reported nothing up, Stop stopped
+        nothing, and none of it said anything was wrong.
+
+        Rebuilt rather than patched in place: `ControllerServices.for_wotlk()`
+        bakes the distro into `DockerSql`, `DockerMysql` AND the `Controller`,
+        and captures it again in the `logs_source` lambda. Setting
+        `controller.wsl_distro` would fix one of those four and leave the
+        others pointed at the wrong daemon - the exact half-updated shape this
+        branch has already produced four times.
+        """
         key = (game, server_dir)
-        if key in controllers:
-            tabs.setCurrentWidget(controllers[key])
-            return
+        live = controllers.get(key)
+        if live is not None:
+            # `None` here means "this caller was not told a distro", NOT "this
+            # server is local". `on_installed` never passes one, and "Use
+            # existing…" accepts a `\\wsl.localhost\...` folder - the same
+            # spelling an adopted server is stored under - so the keys collide.
+            # Treating that as a change demoted a working WSL tab to the local
+            # daemon: this fix's own failure mode, running backwards
+            # (review, 2026-08-26).
+            same = wsl_distro is None or live.services.controller.wsl_distro == wsl_distro
+            if same:
+                tabs.setCurrentWidget(live)
+                return
+            if (reason := live.busy_reason()) is not None:
+                # A rebuild is a teardown, and `busy_reason()` exists because one
+                # kind of work cannot survive being torn down: the import runs
+                # 10-30 minutes inside a blocking `subprocess.run`, so
+                # `shutdown()`'s join times out and the deferred delete then
+                # destroys a still-running QThread - 0xC0000409, in a LIVE app
+                # rather than at exit. The close guard already refuses for this
+                # reason; so does this. The tab keeps addressing the old daemon
+                # until it is reopened, which is stated rather than silent.
+                QMessageBox.warning(
+                    window,
+                    "Cannot switch this server over yet",
+                    f"{reason}\n\nThe WSL distro has been saved, and this tab will use it "
+                    "the next time Yu'lon starts.",
+                )
+                tabs.setCurrentWidget(live)
+                return
+            drop_controller(key)
         entry = catalog.get(game)
         services = ControllerServices.for_wotlk(entry, server_dir, client_dir, wsl_distro)
         view = ControllerView(entry, services)
@@ -131,9 +229,24 @@ def build_window() -> object:
     def on_installed(game: str, server_dir: object, client_dir: object) -> None:
         sd = Path(str(server_dir))
         cd = Path(str(client_dir)) if client_dir is not None else None
-        state.remember(KnownInstall(game=game, server_dir=sd, client_dir=cd))
+        # Carried over, not defaulted away: `remember()` REPLACES the entry with
+        # the same game + dir, and this signal carries no distro - so pointing
+        # "Use existing…" at a `\\wsl.localhost\...` folder already known as a
+        # WSL server erased the distro from `state.json`, and the next launch
+        # built its tab against the local daemon. An install genuinely has no
+        # distro to lose, so keeping the known one costs nothing
+        # (review, 2026-08-26).
+        known = state.find(game, sd)
+        state.remember(
+            KnownInstall(
+                game=game,
+                server_dir=sd,
+                client_dir=cd,
+                wsl_distro=known.wsl_distro if known else None,
+            )
+        )
         save_state(state)
-        add_controller(game, sd, cd)
+        add_controller(game, sd, cd, known.wsl_distro if known else None)
 
     def on_adopted(game: str, server_dir: object, client_dir: object, wsl_distro: object) -> None:
         """A server adopted from a WSL distro, which is remembered with it.
@@ -192,8 +305,9 @@ def build_window() -> object:
     update_thread.start()
     window.resize(1100, 750)
     window.setProperty("tabs", tabs)
-    window.setProperty("log_panels", panels)
-    window.setProperty("controllers", controller_views)
+    # The live lists themselves, not a copy of either - see `_Window`.
+    window.yulon_log_panels = panels
+    window.yulon_controllers = controller_views
     assert isinstance(window, QWidget)
     return window
 
@@ -334,7 +448,7 @@ def main() -> int:
                     return False
                 reasons = [
                     reason
-                    for view in (watched.property("controllers") or [])
+                    for view in getattr(watched, "yulon_controllers", [])
                     if (reason := getattr(view, "busy_reason", lambda: None)())
                 ]
                 if not reasons:
@@ -380,9 +494,12 @@ def _stop_background_threads(window: object) -> None:
     from PySide6.QtCore import QThread
 
     prop = getattr(window, "property", lambda _name: None)
-    for view in prop("controllers") or []:
+    # Read off the window as attributes: `build_window()`'s `_Window` records
+    # why - a list put through `setProperty()` comes back as a copy frozen at
+    # that call, and the tabs that matter here are the ones opened after it.
+    for view in getattr(window, "yulon_controllers", []):
         view.shutdown()
-    for panel in prop("log_panels") or []:
+    for panel in getattr(window, "yulon_log_panels", []):
         panel.stop()
         panel.wait(5000)
     thread = prop("update_thread")

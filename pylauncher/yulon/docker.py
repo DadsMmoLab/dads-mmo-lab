@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from yulon import platform, runner
+from yulon import platform, runner, wsl
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -213,6 +213,15 @@ def _run(
     if _cli_missing(proc):
         raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP)
     if proc.returncode != 0:
+        # Asked before the generic message is built, because on this one failure
+        # the generic message is empty: a distro that no longer exists makes
+        # wsl.exe complain on STDOUT and exit 0xFFFFFFFF, so the user was shown
+        # `docker ps exited 4294967295: ` with nothing after the colon. The
+        # knowledge of wsl.exe's codes and its UTF-16 output stays in `wsl.py`;
+        # this seam only asks (see `wsl.missing_distro_problem`).
+        problem = wsl.missing_distro_problem(wsl_distro, proc.returncode, proc.stdout)
+        if problem is not None:
+            raise DockerCommandError(problem)
         raise DockerCommandError(
             f"docker {' '.join(argv)} exited {proc.returncode}: {proc.stderr.strip()}"
         )

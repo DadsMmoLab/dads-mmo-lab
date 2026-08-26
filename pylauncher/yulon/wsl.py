@@ -110,6 +110,98 @@ def is_running(distro: str) -> bool:
     return any(d.name == distro and d.running for d in distro_states())
 
 
+_DISTRO_NOT_FOUND_RETURNCODE = 0xFFFFFFFF
+"""What `wsl.exe` exits with when it could not launch the command at all.
+
+4294967295 - the unsigned DWORD Windows reports, which is the number Python
+hands back. Measured 2026-08-26 with `wsl -d yulon-no-such-distro -- docker ps`
+on the box this module was written for.
+
+Deliberately NOT the same value written signed. `docker.CANCELLED_RETURNCODE`
+is -1, so accepting -1 here would read a user pressing Cancel as a deleted
+distro.
+"""
+
+_DISTRO_NOT_FOUND_CODE = "WSL_E_DISTRO_NOT_FOUND"
+"""The symbolic half of wsl.exe's complaint, and the only half worth matching.
+
+The sentence beside it - "There is no distribution with the supplied name." -
+is translated, the same trap that made `wsl -l -v`'s STATE column unusable (see
+`distro_states()`). The `Wsl/Service/WSL_E_DISTRO_NOT_FOUND` code is not.
+"""
+
+
+def missing_distro_problem(distro: str | None, returncode: int, output: str = "") -> str | None:
+    """Why a docker command inside `distro` failed, if the distro itself is gone.
+
+    A remembered distro can be deleted or renamed under a server that was
+    adopted out of it, and what the user was shown for that was the raw failure:
+    `docker ps exited 4294967295: ` - with nothing after the colon, because
+    **wsl.exe writes this complaint to stdout, not stderr**, and stderr is what
+    `docker._run()` quotes. Captured 2026-08-26:
+
+        rc     : 4294967295
+        stdout : 'T\\x00h\\x00e\\x00r\\x00e\\x00 \\x00i\\x00s\\x00 ...'
+        stderr : ''
+
+    The NULs are not damage: wsl.exe writes UTF-16LE, and `runner.run()` decodes
+    as UTF-8, so every ASCII character arrives followed by `\\x00`. Matching
+    survives that by removing them rather than by re-decoding, because the caller
+    has already lost the bytes.
+
+    **Why the translation lives here and not at the seam that raises.** There
+    are three of those seams, all in `docker.py` - `_run()` for buffered calls,
+    `follow_logs()` and `run_attached()` for the streamed ones - and a missing
+    distro fails at all three. Putting the knowledge of wsl.exe's exit codes and
+    UTF-16 output in each of them would spread this module's traps across the
+    file that already carries the most review history. Every one of those seams
+    already holds a `wsl_distro`, an exit code and the captured output, so this
+    signature is what each needs to ask in one line, with no new parameter
+    threaded anywhere.
+
+    `distro` is `str | None` for the same reason: the seams hold exactly that,
+    and a plain Windows docker failure has no distro to blame, so it is None
+    here rather than an `if` at each call site.
+
+    Two-tier on purpose. The error code settles it without spawning anything.
+    Whether every wsl.exe build prints that code could not be captured here -
+    only this box's was, and inventing the older one's output is exactly what
+    this module's fixtures refuse to do - so a failure that does not carry it
+    asks the listing instead. Asking the listing does not start any distro,
+    unlike probing one (see `find_servers()`), and it only happens on a path
+    that has already failed.
+
+    **An EMPTY listing is not evidence of anything.** `_wsl_list()` answers `()`
+    for four different things - no wsl.exe on PATH, `OSError`, a timeout, and a
+    non-zero exit - and only one of them means "there are no distros". The
+    condition that sends a failure down to tier 2 is a `0xFFFFFFFF` carrying no
+    `WSL_E_DISTRO_NOT_FOUND`, which is WSL failing at the SERVICE level
+    (LxssManager wedged, vmcompute down) - and that is exactly the state in
+    which `wsl -l -q` also fails and returns `()`. Reading that silence as "the
+    distro is gone" sent the user off to re-adopt a server that was never
+    missing, in precisely the case tier 2 exists to judge (review, 2026-08-26).
+    So the accusation needs a listing that ANSWERED and did not name the distro;
+    anything else stays quiet and lets the raw failure through, which is
+    unhelpful but true.
+    """
+    if distro is None or returncode != _DISTRO_NOT_FOUND_RETURNCODE:
+        return None
+    if _DISTRO_NOT_FOUND_CODE not in output.replace("\x00", ""):
+        existing = distro_states()
+        if not existing or any(state.name == distro for state in existing):
+            # Either the distro is still there - merely stopped, or broken - or
+            # the listing itself could not answer. Both mean this is not the
+            # moment to tell someone their distro was deleted and send them off
+            # to re-adopt a server that is exactly where they left it.
+            return None
+    return (
+        f"The WSL distro {distro} no longer exists - it was deleted, or renamed. Everything on "
+        f"this tab runs docker inside {distro}, so nothing here can start, stop or read the log "
+        "until that distro is back under that name, or this server is adopted again with "
+        '"Use existing…".'
+    )
+
+
 def parse_compose_ls(distro: str, stdout: str) -> tuple[FoundServer, ...]:
     """Turn `docker compose ls --all --format json` into servers we could adopt.
 

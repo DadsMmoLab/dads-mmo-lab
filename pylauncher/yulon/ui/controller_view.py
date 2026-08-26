@@ -138,14 +138,23 @@ class ControllerServices:
         return cls(
             controller=controller,
             logs_source=lambda: docker.follow_logs(spec.world, wsl_distro=wsl_distro),
-            send_console=lambda cmd: wotlk_console.send_command(cmd, container=spec.world),
+            # The distro travels with the command because `send_command()` shells
+            # into the world container, and on a WSL-resident server that
+            # container exists only inside the distro. Without it the attach goes
+            # to the local daemon, which has never heard of `ac-worldserver` - so
+            # every console line came back as a docker error rather than a reply.
+            send_console=lambda cmd: wotlk_console.send_command(
+                cmd, container=spec.world, wsl_distro=wsl_distro
+            ),
             store=wotlk_modules.store() if entry.has_manifests else None,
             applier=(
                 wotlk_modules.applier(server_dir, sql=sql, client_dir=client_dir)
                 if entry.has_manifests
                 else None
             ),
-            network_plan=lambda mode: networking.plan(entry, mode, bindings=_safe_bindings()),
+            network_plan=lambda mode: networking.plan(
+                entry, mode, bindings=_safe_bindings(wsl_distro=wsl_distro)
+            ),
             network_apply=lambda plan: networking.apply(plan, sql=sql),
             # `gm_level` is passed through rather than defaulted here: the guide
             # pairs every `account create` with `account set gmlevel ... 3`, and
@@ -169,9 +178,25 @@ class ControllerServices:
         )
 
 
-def _safe_bindings() -> dict[int, str] | None:
+def _safe_bindings(wsl_distro: str | None = None) -> dict[int, str] | None:
+    """Which host address each published port is bound to, or None if docker refused.
+
+    It takes the distro because it had no way to learn one, and the answer is
+    read off whichever daemon is asked. `networking.plan()` uses this for one
+    thing (`networking.py:204`): whether this entry's own ports came up on
+    127.0.0.1 rather than 0.0.0.0, which is what makes it warn and emit
+    `portproxy` commands.
+
+    Asked of the LOCAL daemon about a WSL-resident server, the realistic wrong
+    answer is a host container that happens to publish 3724 or 8085 on
+    loopback: the plan then warns about, and writes portproxy rules for, a
+    machine the server is not on. The other direction is quieter than it
+    looks - an empty dict is falsy, so `if bindings:` skips the block entirely
+    and the plan simply says nothing about bindings rather than saying
+    something false.
+    """
     try:
-        return docker.published_bindings()
+        return docker.published_bindings(wsl_distro=wsl_distro)
     except docker.DockerCommandError:
         return None
 
