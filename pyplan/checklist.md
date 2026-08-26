@@ -1001,3 +1001,27 @@ that build.
      `OsBuildNumber`/`OsName` instead.
 
 - **`pyplan/rust-prior-art.md` (2026-08-21):** what the earlier Rust launcher (`rust-main`) already solved, distilled so nobody has to read Rust — the staged/resumable install machine, the compose three-file split and its build-file trap, preflight floors with the measurements behind them, Windows Docker Desktop specifics, and creating the first GM account via SRP6 (no console/pty needed, which is the open Windows console gap in 6.5 item 3). Sections 1-5 feed Phase 6; section 7 lists what is waiting for Phase 8's feature port.
+- **The CMaNGOS games were AzerothCore everywhere it was not visible (2026-08-26)** — the Tortoise
+  Discord report started at `docker compose up` and did not stop there. Once Start worked, an argv-level
+  audit and a schema-research pass found the same shape five more times: a constant that is right for
+  the one game everyone tests, defaulted for the three nobody does. `apply.DB_NAMES` put `acore_auth`
+  at the end of every `docker exec ... mysql` argv; `maintenance.CORE_DATABASES` fired a data-loss alarm
+  on a complete backup; `console._PROMPT` was `AC>`; `catalog.Realmlist` defaulted to a `localAddress`
+  column CMaNGOS does not have; and every "run `docker compose logs X`" message named a container.
+  Each one is invisible on WotLK, and only on WotLK.
+
+  Two things worth keeping beyond the fixes. **The console needed both facts, not one.** Setting
+  `_PROMPT = "mangos>"` would have been worse than leaving it: AzerothCore reads with GNU readline,
+  which redisplays the prompt in FRONT of the answer, while CMaNGOS and tortoise read with `fgets` and
+  print theirs only from `commandFinished()`, after it. Walked through the old parser a CMaNGOS window
+  yields `lines=()` with `prompted=True` — silence presented as the server's reply. The catalog now
+  carries `prompt` and `prompt_precedes_answer`, and the parser turns the pair into one integer. Still
+  wants one live `docker attach` capture on a CMaNGOS install to confirm the pty echo behaves as read.
+
+  **Account creation was left undone on purpose.** tbc/vanilla keep SRP6 as `v`/`s` hex, tortoise reads
+  `sha_pass_hash`, GM level is `account.gmlevel` or `account.rank`, and no core has `account_access`.
+  None of the three installers pins a revision — `git clone --depth 1`, no `--branch` — so the schema is
+  whatever the default branch held that day, and the derivation could not be settled from this checkout.
+  A wrong one inserts a row that looks correct and can never log in, so the tab disables itself and names
+  the console command instead. `sha_pass_hash = SHA1(UPPER(user):UPPER(pass))` is the first candidate to
+  test when a live Tortoise install is available.
