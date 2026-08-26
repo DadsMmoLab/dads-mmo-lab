@@ -3022,7 +3022,23 @@ def _seam_reachers() -> dict[str, list[str]]:
     defined = set(defs)
     calls = {name: called & defined for name, called in calls.items()}
 
-    reaching = {"_docker"}
+    # Rooted at every function that asks platform HOW to reach docker, not at
+    # `_docker` alone. There are two spawn seams in this module - `_docker()`
+    # buffers, `follow_logs()` and `run_attached()` stream - and a closure rooted
+    # at the first blessed the second: between them they carry the Console tab's
+    # log stream and `build_staged()`, so a WSL-resident server's logs and image
+    # build both addressed the local daemon while this test passed.
+    roots = {
+        name
+        for name, node in defs.items()
+        if any(
+            isinstance(c, ast.Call)
+            and isinstance(c.func, ast.Attribute)
+            and c.func.attr in {"docker_prefix", "docker_program"}
+            for c in ast.walk(node)
+        )
+    }
+    reaching = {"_docker", *roots}
     changed = True
     while changed:
         changed = False

@@ -1121,7 +1121,7 @@ def repair_import(
         )
 
     logger.warning(f"repair_import(): `compose up --no-deps {service}` in {server_dir}")
-    run = run_one_shot(service, server_dir, sink=output)
+    run = run_one_shot(service, server_dir, wsl_distro=wsl_distro, sink=output)
     verify_import(probe, service, server_dir, run)
     return True
 
@@ -1185,6 +1185,7 @@ def run_one_shot(
     service: str,
     server_dir: Path,
     *,
+    wsl_distro: str | None = None,
     sink: OutputSink | None = None,
     cancel: threading.Event | None = None,
 ) -> AttachedRun:
@@ -1203,7 +1204,11 @@ def run_one_shot(
     tell them apart.
     """
     run = run_attached(
-        ["compose", "up", "--no-deps", service], server_dir, sink=sink, cancel=cancel
+        ["compose", "up", "--no-deps", service],
+        server_dir,
+        wsl_distro=wsl_distro,
+        sink=sink,
+        cancel=cancel,
     )
     if run.returncode != 0:
         # Not raised here. See above — the probe is the only thing that can
@@ -2012,7 +2017,7 @@ def published_bindings(*, wsl_distro: str | None = None) -> dict[int, str]:
     return bindings
 
 
-def follow_logs(container: str, tail: int = 200) -> Iterator[str]:
+def follow_logs(container: str, tail: int = 200, *, wsl_distro: str | None = None) -> Iterator[str]:
     """Stream `docker logs -f` for one container (the Console tab's log source).
 
     Lives here so no `ui/` module ever builds a docker argv itself
@@ -2026,11 +2031,11 @@ def follow_logs(container: str, tail: int = 200) -> Iterator[str]:
     panel — where the unresolved name used to surface a bare WinError 2.
     """
     logger.debug(f"follow_logs() called: container={container} tail={tail}")
-    program = platform.docker_program()
-    if program is None:
+    prefix = platform.docker_prefix(wsl_distro)
+    if prefix is None:
         raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP)
     try:
-        yield from runner.stream([program, "logs", "-f", "--tail", str(tail), container])
+        yield from runner.stream([*prefix, "logs", "-f", "--tail", str(tail), container])
     except OSError as exc:
         # The same uninstalled-mid-run case `_docker()` handles, arriving from
         # `Popen` on the first line instead of from `subprocess.run`. Both roads
@@ -2095,6 +2100,7 @@ def run_attached(
     argv: list[str],
     cwd: Path,
     *,
+    wsl_distro: str | None = None,
     sink: OutputSink | None = None,
     keep: int = KEEP_OUTPUT_LINES,
     cancel: threading.Event | None = None,
@@ -2149,8 +2155,12 @@ def run_attached(
     """
     logger.debug(f"run_attached() called: argv={argv} cwd={cwd}")
     tail: deque[str] = deque(maxlen=keep)
-    program = platform.docker_program()
-    if program is None:
+    # The same two-seam rule as `_docker()`: for a WSL install the location
+    # rides in the argv as `wsl --cd`, because a Windows process cannot cd into
+    # a distro and `runner.stream()` would be handed a cwd that does not exist.
+    inside = platform.wsl_linux_path(cwd) if (wsl_distro is not None and cwd is not None) else None
+    prefix = platform.docker_prefix(wsl_distro, inside=inside)
+    if prefix is None:
         logger.debug(f"no docker CLI on this host; not running: docker {' '.join(argv)}")
         return AttachedRun(_CLI_MISSING_RETURNCODE, (platform.DOCKER_CLI_MISSING_HELP,))
     live = sink
@@ -2159,7 +2169,10 @@ def run_attached(
         # generator for `stream()`'s finally to terminate the child, and
         # relying on the loop variable falling out of scope makes that depend
         # on refcounting rather than on the code saying so.
-        with closing(runner.stream([program, *argv], cwd=cwd, merge_stderr=merge_stderr)) as lines:
+        stream_cwd = None if wsl_distro is not None else cwd
+        with closing(
+            runner.stream([*prefix, *argv], cwd=stream_cwd, merge_stderr=merge_stderr)
+        ) as lines:
             for line in lines:
                 if cancel is not None and cancel.is_set():
                     logger.warning(f"docker {' '.join(argv)} was cancelled; abandoning the client")
@@ -2176,7 +2189,7 @@ def run_attached(
     except OSError as exc:
         # Docker uninstalled while the launcher is open, arriving from `Popen`;
         # `follow_logs()` handles the same case one line above.
-        logger.warning(f"{program} could not be started: {exc}")
+        logger.warning(f"{prefix[0]} could not be started: {exc}")
         return AttachedRun(_CLI_MISSING_RETURNCODE, (platform.DOCKER_CLI_MISSING_HELP,))
     return AttachedRun(0, tuple(tail))
 
@@ -2206,6 +2219,7 @@ def build_staged(
     server_dir: Path,
     compose_files: Sequence[str],
     *,
+    wsl_distro: str | None = None,
     sink: OutputSink | None = None,
     cancel: threading.Event | None = None,
 ) -> AttachedRun:
@@ -2237,7 +2251,9 @@ def build_staged(
         argv += ["-f", name]
     argv += ["build", "--progress", "plain"]
     logger.info(f"build_staged(): `docker {' '.join(argv)}` in {server_dir}")
-    return run_attached(argv, server_dir, sink=sink, cancel=cancel, merge_stderr=True)
+    return run_attached(
+        argv, server_dir, wsl_distro=wsl_distro, sink=sink, cancel=cancel, merge_stderr=True
+    )
 
 
 def images_built(refs: Sequence[str], *, wsl_distro: str | None = None) -> bool | None:

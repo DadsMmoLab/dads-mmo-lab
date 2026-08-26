@@ -137,7 +137,7 @@ class ControllerServices:
         )
         return cls(
             controller=controller,
-            logs_source=lambda: docker.follow_logs(spec.world),
+            logs_source=lambda: docker.follow_logs(spec.world, wsl_distro=wsl_distro),
             send_console=lambda cmd: wotlk_console.send_command(cmd, container=spec.world),
             store=wotlk_modules.store() if entry.has_manifests else None,
             applier=(
