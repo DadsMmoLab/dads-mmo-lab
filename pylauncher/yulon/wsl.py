@@ -96,6 +96,17 @@ def distro_states() -> tuple[Distro, ...]:
     return parse_distro_states(proc.stdout.decode("utf-16le", errors="ignore"))
 
 
+def is_running(distro: str) -> bool:
+    """True if `distro` is up right now, WITHOUT starting it.
+
+    Reads the listing rather than running anything inside the distro, because
+    running anything is what starts one. Callers that poll - the Server tab
+    refreshes every five seconds - must ask this first, or opening the app boots
+    every distro it has ever adopted a server from.
+    """
+    return any(d.name == distro and d.running for d in distro_states())
+
+
 def parse_compose_ls(distro: str, stdout: str) -> tuple[FoundServer, ...]:
     """Turn `docker compose ls --all --format json` into servers we could adopt.
 

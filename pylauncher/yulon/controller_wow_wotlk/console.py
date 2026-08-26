@@ -150,6 +150,7 @@ def send_command(
     command: str,
     *,
     container: str = docker_ctl.SPEC.world,
+    wsl_distro: str | None = None,
     window: float = _DEFAULT_WINDOW_SECONDS,
     popen: type[subprocess.Popen[bytes]] = subprocess.Popen,
 ) -> ConsoleReply:
@@ -182,7 +183,7 @@ def send_command(
     # Resolve the CLI BEFORE the pty exists. `attach_argv()` can raise, and the
     # `except OSError` below would not catch a ConsoleError — the master/slave
     # pair would leak one fd per attempt.
-    argv = attach_argv(container)
+    argv = attach_argv(container, wsl_distro=wsl_distro)
     # The worldserver container runs with tty=true, so docker REFUSES to attach
     # unless its stdin is a terminal ("the input device is not a TTY"). Writing
     # to /proc/1/fd/0 does not help either: that fd is the terminal, so a write

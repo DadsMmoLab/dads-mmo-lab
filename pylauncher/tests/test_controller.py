@@ -450,3 +450,34 @@ class Controller:
                 ):
                     forgot.append(method.name)
     assert forgot == ["bad"], f"the scan does not distinguish the two: {forgot}"
+
+
+def test_polling_status_does_not_start_a_stopped_distro(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Server tab polls every five seconds, and `wsl -d` STARTS a distro.
+
+    So an adopted WSL server would boot its distro simply by opening the app -
+    the exact side effect discovery was designed to avoid, reintroduced through
+    the back door by polling. Nothing is running when the distro is down, so the
+    empty answer is true rather than merely convenient; Start still starts it,
+    because that is something the user asked for.
+    """
+    ran: list[list[str]] = []
+    monkeypatch.setattr(
+        docker, "status", lambda **kw: ran.append(["docker", "ps"]) or []  # type: ignore[func-returns-value]
+    )
+    monkeypatch.setattr(controller_module.wsl, "is_running", lambda distro: False)
+
+    ctl = Controller(SPEC, SERVER_DIR, wsl_distro="dml-arch")
+    assert not ctl.status().any_running
+    assert ran == [], "the poll shelled into a stopped distro and started it"
+
+
+def test_polling_status_asks_docker_when_the_distro_is_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """And the guard must not turn a running server into a permanently dead one."""
+    monkeypatch.setattr(docker, "status", lambda **kw: [SPEC.db])
+    monkeypatch.setattr(controller_module.wsl, "is_running", lambda distro: True)
+    ctl = Controller(SPEC, SERVER_DIR, wsl_distro="dml-arch")
+    # `status()` returns an InstallStatus, not a list of names.
+    assert ctl.status().any_running

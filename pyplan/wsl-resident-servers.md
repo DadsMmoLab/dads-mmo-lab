@@ -47,10 +47,22 @@ and each takes the prefix:
 
 | file | what it runs |
 |---|---|
-| `docker.py::_docker()` | everything lifecycle — 21 call sites behind one function |
+| `docker.py::_docker()` | the buffered seam — 20 call sites behind one function |
+| `docker.py::run_attached()` / `follow_logs()` | the **streaming** seam — image builds, one-shots, the Console log |
 | `apply.py` | `docker exec … mysql` (the SQL runner) |
 | `maintenance.py` | `docker exec` (backup and restore) |
 | `console.py` | `docker attach` (GM console, POSIX-only today) |
+
+**There are two seams in `docker.py`, not one**, and the first version of this
+document said otherwise. `_docker()` buffers a run into a string; `run_attached()`
+and `follow_logs()` stream it, and they resolve the CLI themselves rather than
+going through `_docker`. A completeness test rooted at `_docker` blessed both,
+so the Console's log stream and `build_staged()` shipped unable to name a daemon
+at all. The test is now rooted at every function that asks platform *how* to
+reach docker, whichever seam it then uses.
+
+38 functions end up taking `wsl_distro`. Accepting it is not the same as
+forwarding it, which is the subject of §4a.
 
 The prefix is a pure function of its arguments, so it is table-tested and
 cannot drift per platform.
@@ -137,11 +149,38 @@ Measured: `wsl -d docker-desktop -- true` flipped that distro from `Stopped` to
 slow, and a side effect nobody asked for by opening a dialog.
 
 Stopped distros are therefore listed but not probed, each with an explicit
-opt-in that says starting it is what will happen. A user who knows their server
+opt-in that says starting it is what will happen.
+
+**Polling obeys the same rule**, and did not at first. The Server tab refreshes
+every five seconds, so once `Controller.status()` correctly ran `wsl -d …` it
+booted an adopted server's distro simply by opening the app — the rule written
+for discovery, broken by the poll. `status()` now asks `wsl.is_running()` first
+and reports nothing up when the distro is down, which is true rather than merely
+convenient. Start still starts it, because that is something the user asked for. A user who knows their server
 is in a stopped distro can still reach it in one click; a user who does not is
 not made to wait for distros they do not care about.
 
 ---
+
+## 4a. Accepting a parameter is not passing one
+
+Two tests, at two levels, because each is blind to the other's failure.
+
+`test_every_function_that_talks_to_docker_can_say_which_daemon` parses
+`docker.py` and proves every function reaching either seam **accepts**
+`wsl_distro`. It says nothing about whether a caller supplies one.
+
+`test_every_controller_call_says_which_daemon_it_means` parses `Controller` and
+proves every `docker.<fn>(...)` call whose target accepts `wsl_distro`
+**passes** it. That gap was not hypothetical: the first version threaded all 33
+functions and then forwarded the distro from two of the Controller's eight call
+sites, so Start, Stop, Remove, Status, port_conflicts and repair_import all
+addressed the local daemon — on a machine that has no local daemon.
+
+The same shape bit twice more. `DockerSql._env()` called `mysql_env()` without
+the distro while the WSLENV test called `mysql_env()` directly and passed; and
+`adopt_from_wsl()` shipped with a signal, persistence and tests, and no button.
+Test the path, not the piece.
 
 ## 3. Adopt once, then own
 
