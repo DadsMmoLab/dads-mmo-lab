@@ -161,11 +161,36 @@ press_enter() {
 }
 
 # ─────────────────────────────────────────
+# RANDOMNESS (no hard dependency on openssl)
+# ─────────────────────────────────────────
+# `openssl rand -hex 8` was called inline below to build the database password.
+# On a box without openssl that substitution yields an EMPTY string with only a
+# "command not found" line scrolling past, so every such install silently got
+# the same guessable root password. Measured on a clean Fedora VM 2026-08-26,
+# where openssl is not installed by default. /dev/urandom + od is coreutils, so
+# it is there on every box this installer supports.
+rand_hex() {
+    local bytes="${1:-8}" out=""
+    if command -v openssl >/dev/null 2>&1; then
+        out=$(openssl rand -hex "$bytes" 2>/dev/null)
+    fi
+    if [ -z "$out" ]; then
+        out=$(od -An -tx1 -N "$bytes" /dev/urandom 2>/dev/null | tr -d ' 
+')
+    fi
+    if [ -z "$out" ]; then
+        echo "FATAL: no way to generate a random database password on this box" >&2
+        exit 1
+    fi
+    printf '%s' "$out"
+}
+
+# ─────────────────────────────────────────
 # CONFIGURATION
 # ─────────────────────────────────────────
 SERVER_DIR="$HOME/wow-vanilla-server"
 CLIENT_DIR=""
-DB_PASSWORD="vanilla$(openssl rand -hex 8)"
+DB_PASSWORD="vanilla$(rand_hex 8)"
 DB_PASSWORD_LOADED=false   # set to true when loaded from .db_password file
 
 # Source pinning — change these to update what we compile
