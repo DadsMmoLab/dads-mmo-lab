@@ -261,8 +261,20 @@ def window_builder(
         return window
 
     yield build
+    from PySide6.QtWidgets import QApplication
+
     for window in windows:
         main._stop_background_threads(window)
+        window.close()
+    # Flush the deferred deletes BEFORE this test ends, with every thread
+    # already joined. `drop_controller()` uses `deleteLater()`, and a test has
+    # no event loop to run it - so without this the delete fired at whatever
+    # later moment Qt next pumped events, inside an unrelated test, tearing
+    # down widgets while that test held them. It crashed as a SEGFAULT on
+    # CI's py3.11 and passed on py3.13, which is what a lifetime bug looks like
+    # when the only difference is when the garbage collector ran.
+    QApplication.processEvents()
+    windows.clear()
 
 
 def _catalog_view(window: Any) -> Any:
