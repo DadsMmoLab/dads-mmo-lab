@@ -1048,6 +1048,23 @@ def wsl_linux_path(path: Path) -> str | None:
     return None
 
 
+def wsl_unc_path(distro: str, inside: str) -> Path | None:
+    """The Windows spelling of `inside` within `distro`, or None if it is not absolute.
+
+    The inverse of `wsl_linux_path()`. Discovery gets paths from docker in the
+    distro's own terms and everything Windows-side needs the UNC form, so the
+    conversion belongs beside its opposite rather than in the caller.
+
+    The `wsl.localhost` share rather than the older `wsl$`: both work on a
+    current Windows, and `wslpath -w` answers with the former, so this matches
+    what the system itself would say.
+    """
+    if not distro or not inside.startswith("/"):
+        return None
+    parts = [part for part in inside.split("/") if part]
+    return Path("\\\\wsl.localhost\\" + "\\".join([distro, *parts]))
+
+
 def wsl_distros() -> tuple[str, ...]:
     """The names of this machine's WSL distros, in `wsl -l -q` order.
 
