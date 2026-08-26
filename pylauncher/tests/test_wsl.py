@@ -14,13 +14,10 @@ import pytest
 
 from yulon import wsl
 
-# `wsl -l -v`, decoded from UTF-16LE. Note the leading `*` on the default
-# distro, and that STATE is the second column only once that marker is stripped.
-WSL_LIST_V = (
-    "  NAME              STATE           VERSION\r\n"
-    "* dml-arch          Running         2\r\n"
-    "  docker-desktop    Stopped         2\r\n"
-)
+# `wsl -l -q`, decoded from UTF-16LE. Names only: no header, no `*` marking the
+# default distro, and no STATE column - which is the part `wsl.exe` translates,
+# and the reason this listing is used instead of `-v`.
+WSL_LIST_Q = "dml-arch\r\ndocker-desktop\r\n"
 
 # `docker compose ls --all --format json`, run inside `dml-arch`.
 COMPOSE_LS = (
@@ -30,19 +27,46 @@ COMPOSE_LS = (
 )
 
 
-def test_distro_states_reads_the_name_and_state_past_the_default_marker() -> None:
-    """The `*` marks the default distro and would otherwise be read as a name."""
-    got = wsl.parse_distro_states(WSL_LIST_V)
-    assert got == (
+def test_distro_names_come_from_a_listing_no_locale_translates() -> None:
+    """`wsl -l -v`'s STATE column is TRANSLATED, and reading it broke everything.
+
+    On German Windows a running distro reads "Wird ausgeführt", so a
+    `state == "running"` test is False for every distro: all of them look
+    stopped, and discovery - which refuses to probe stopped distros - finds
+    nothing at all on a machine where everything works. Reproduced before this
+    changed. `-q` prints names only, which no locale rewrites.
+    """
+    assert wsl.parse_distro_names(WSL_LIST_Q) == ("dml-arch", "docker-desktop")
+    assert wsl.parse_distro_names("") == ()
+
+
+def test_distro_states_pairs_the_two_listings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Running-ness comes from `--running` naming it, not from parsing a word."""
+    monkeypatch.setattr(
+        wsl,
+        "_wsl_list",
+        lambda *args: ("dml-arch",) if args else ("dml-arch", "docker-desktop"),
+    )
+    assert wsl.distro_states() == (
         wsl.Distro(name="dml-arch", running=True),
         wsl.Distro(name="docker-desktop", running=False),
     )
 
 
-def test_distro_states_ignores_a_header_it_does_not_recognise() -> None:
-    """A future `wsl.exe` may add columns; it must not invent a distro called NAME."""
-    assert wsl.parse_distro_states("") == ()
-    assert wsl.parse_distro_states("  NAME   STATE   VERSION\r\n") == ()
+def test_a_windows_folder_mounted_into_a_distro_is_not_a_wsl_server() -> None:
+    """Docker Desktop's integration distros surface the user's Windows projects.
+
+    A project whose compose file is at `/mnt/c/...` is a Windows folder reached
+    through the distro, not a server living in it. Adopting one would hand back
+    a UNC path back into `mnt/c/Users/pk/proj` - a local folder taken the long
+    way round, then managed through the wrong daemon. "Use existing…" adopts
+    those as themselves.
+    """
+    windows_project = (
+        '[{"Name":"myapp","Status":"running(1)",'
+        '"ConfigFiles":"/mnt/c/Users/pk/proj/docker-compose.yml"}]'
+    )
+    assert wsl.parse_compose_ls("Ubuntu", windows_project) == ()
 
 
 def test_found_servers_carry_a_windows_path_the_rest_of_the_app_can_read() -> None:

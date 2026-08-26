@@ -56,33 +56,23 @@ class FoundServer:
     """
 
 
-def parse_distro_states(text: str) -> tuple[Distro, ...]:
-    """Parse `wsl -l -v` output that has already been decoded.
+def parse_distro_names(text: str) -> tuple[str, ...]:
+    """Distro names from `wsl -l -q` output that has already been decoded.
 
-    The default distro is marked with a leading `*`, which is why the name is
-    not simply the first column: read naively, the default distro is called
-    `*`. The header line is skipped by requiring three fields after the marker,
-    so a future `wsl.exe` that adds a column does not invent a distro named
-    NAME.
+    `-q` prints names and nothing else - no header, no `*` marking the default,
+    and crucially no STATE column, which is the one part `wsl.exe` translates.
     """
-    found: list[Distro] = []
-    for line in text.splitlines():
-        parts = line.replace("*", " ", 1).split() if line.lstrip().startswith("*") else line.split()
-        if len(parts) < 3 or parts[0] == "NAME":
-            continue
-        name, state = parts[0], parts[1]
-        found.append(Distro(name=name, running=state.lower() == "running"))
-    return tuple(found)
+    return tuple(name for name in (line.strip() for line in text.splitlines()) if name)
 
 
-def distro_states() -> tuple[Distro, ...]:
-    """This machine's distros and whether each is running, or `()` if there is no WSL."""
+def _wsl_list(*args: str) -> tuple[str, ...]:
+    """Names from one `wsl -l -q ...` listing, or `()` if there is no WSL here."""
     launcher = platform._which(platform.WSL_PROGRAM)
     if launcher is None:
         return ()
     try:
         proc = subprocess.run(
-            [launcher, "-l", "-v"],
+            [launcher, "-l", "-q", *args],
             capture_output=True,
             timeout=_PROBE_TIMEOUT,
             creationflags=runner.creationflags(),
@@ -93,7 +83,20 @@ def distro_states() -> tuple[Distro, ...]:
     if proc.returncode != 0:
         return ()
     # UTF-16LE, like every other `wsl.exe` listing — see `platform.wsl_distros()`.
-    return parse_distro_states(proc.stdout.decode("utf-16le", errors="ignore"))
+    return parse_distro_names(proc.stdout.decode("utf-16le", errors="ignore"))
+
+
+def distro_states() -> tuple[Distro, ...]:
+    """This machine's distros and whether each is running, or `()` if there is no WSL.
+
+    Two `-q` listings rather than one `wsl -l -v`, because **`-v`'s STATE column
+    is translated**. On German Windows a running distro reads "Wird ausgeführt",
+    so a `state == "running"` test is False for every distro, every one looks
+    stopped, and discovery finds nothing at all — on a machine where everything
+    is working. `-q --running` answers with names only, which no locale changes.
+    """
+    running = set(_wsl_list("--running"))
+    return tuple(Distro(name=name, running=name in running) for name in _wsl_list())
 
 
 def is_running(distro: str) -> bool:
@@ -131,6 +134,15 @@ def parse_compose_ls(distro: str, stdout: str) -> tuple[FoundServer, ...]:
         first = configs.split(",")[0].strip()
         if not name or not first:
             # No config path means nothing to adopt and no folder to show.
+            continue
+        if first.startswith("/mnt/"):
+            # A Windows folder mounted INTO the distro, not a server living in
+            # it - which is what Docker Desktop's own integration distros
+            # surface: the user's ordinary Windows projects. Adopting one would
+            # hand back \\wsl.localhost\<distro>\mnt\c\... , a local folder
+            # reached the long way round and then managed through the wrong
+            # daemon. Those are attachable with "Use existing…" as themselves.
+            logger.debug(f"{distro}: {name} lives on a Windows mount ({first}); not a WSL server")
             continue
         server_dir = platform.wsl_unc_path(distro, str(Path(first).parent).replace("\\", "/"))
         if server_dir is None:
