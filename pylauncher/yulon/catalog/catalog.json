@@ -126,6 +126,9 @@
         "address_column": "address",
         "local_address_column": null
       },
+      "accounts": {
+        "by_sql": false
+      },
       "console": {
         "prompt": "mangos>",
         "prompt_precedes_answer": false
@@ -189,6 +192,9 @@
         "address_column": "address",
         "local_address_column": null
       },
+      "accounts": {
+        "by_sql": false
+      },
       "console": {
         "prompt": "mangos>",
         "prompt_precedes_answer": false
@@ -245,6 +251,9 @@
         "table": "realmlist",
         "address_column": "address",
         "local_address_column": null
+      },
+      "accounts": {
+        "by_sql": false
       },
       "console": {
         "prompt": "mangos>",

@@ -1145,3 +1145,26 @@ def test_a_cmangos_console_is_sent_its_own_prompt(
     assert seen.get("prompt") == "mangos>", seen
     assert seen.get("prompt_precedes_answer") is False, seen
     assert seen.get("container") == "tortoise-mangosd", seen
+
+
+def test_a_core_that_cannot_be_given_an_account_by_sql_says_so_instead_of_failing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Better a disabled button with the working command than one that writes a dead row.
+
+    CMaNGOS keeps SRP6 as `v`/`s`, tortoise writes `sha_pass_hash`, and neither
+    has AzerothCore's salt/verifier — so the INSERT this app builds either fails
+    outright or, worse, succeeds and produces an account nobody can log into.
+    The console can do it, and now that the prompt is right the Console tab
+    works, so the tab points at the command rather than pretending.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    view = ControllerView(tortoise, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert view.create_account_button.isEnabled() is False
+    said = view.account_report.text()
+    assert "account create" in said, said
+    assert "Console" in said, said
+
+    # The game that CAN is untouched.
+    assert ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert view.create_account_button.isEnabled() is False

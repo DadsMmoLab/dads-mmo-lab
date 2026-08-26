@@ -335,6 +335,29 @@ class Realmlist(_Strict):
     realm_id: int = 1
 
 
+class Accounts(_Strict):
+    """Whether this app can create an account on this core by writing the row itself.
+
+    True only where the `account` table this app knows how to write is the one
+    the core reads. AzerothCore's is (`salt`/`verifier`, `account_access`);
+    CMaNGOS keeps SRP6 as `v`/`s` and its GM level as `account.gmlevel`, and
+    tortoise writes `sha_pass_hash` and `account.rank`. Getting the derivation
+    wrong there does not fail — it inserts a row that looks correct and can
+    never log in, which is why this is declared rather than attempted
+    (research, 2026-08-26).
+    """
+
+    by_sql: bool = Field(
+        default=True,
+        description="False where the Accounts tab must point at the console instead.",
+    )
+    console_command: str = Field(
+        default="account create <name> <password>",
+        min_length=1,
+        description="What to type on the worldserver console when `by_sql` is False.",
+    )
+
+
 class Console(_Strict):
     """How this core's worldserver console delimits the answer to a command.
 
@@ -381,6 +404,7 @@ class CatalogEntry(_Strict):
     client: Client
     realmlist: Realmlist = Realmlist()
     console: Console = Console()
+    accounts: Accounts = Accounts()
     has_manifests: bool = Field(
         default=False, description="Whether manifests/<id>/ exists for module management."
     )

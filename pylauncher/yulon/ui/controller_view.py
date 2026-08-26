@@ -895,6 +895,19 @@ class ControllerView(QWidget):
         form.addRow(self.create_account_button)
 
         self.account_report = QLabel("", tab)
+        # A core this app cannot write an account for is said once, here, with
+        # the command that does work — rather than left as a live button whose
+        # every press ends in a SQL error, or worse in a row that inserts
+        # cleanly and can never log in. See `catalog.Accounts`.
+        if not self.entry.accounts.by_sql:
+            self.create_account_button.setEnabled(False)
+            for widget in (self.account_name, self.account_password, self.account_gm):
+                widget.setEnabled(False)
+            self.account_report.setText(
+                f"{self.entry.name} keeps its accounts in a form this app does not write yet. "
+                f"Make one on the Console tab instead: "
+                f"{self.entry.accounts.console_command}"
+            )
         self.account_report.setWordWrap(True)
         self.account_report.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         box.addWidget(accounts)
