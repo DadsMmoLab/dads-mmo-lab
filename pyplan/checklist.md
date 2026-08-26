@@ -1001,3 +1001,20 @@ that build.
      `OsBuildNumber`/`OsName` instead.
 
 - **`pyplan/rust-prior-art.md` (2026-08-21):** what the earlier Rust launcher (`rust-main`) already solved, distilled so nobody has to read Rust — the staged/resumable install machine, the compose three-file split and its build-file trap, preflight floors with the measurements behind them, Windows Docker Desktop specifics, and creating the first GM account via SRP6 (no console/pty needed, which is the open Windows console gap in 6.5 item 3). Sections 1-5 feed Phase 6; section 7 lists what is waiting for Phase 8's feature port.
+- **Start was broken for all three CMaNGOS games, and only the catalog knew (Discord report, 2026-08-26)** —
+  a user with a working WotLK install ("server starting and shutdown without issue, console is running fine")
+  tried an existing Tortoise install from the same family of scripts and got
+  `docker compose up -d --no-deps tortoise-db tortoise-realmd tortoise-mangosd exited 1: no such service:
+  tortoise-db`. Not an attach problem and not specific to that install: **every** Tortoise, TBC and Vanilla
+  install fails the same way, ours included, because their compose files name the services `db`/`realmd`/
+  `mangosd` and give the *containers* the `<game>-` prefix. `ContainerSpec` had modelled that distinction
+  since it was written and `compose_services()` falls back to container names only "for every
+  AzerothCore-derived game"; `catalog.json` simply never filled the `services` field in, so the fallback
+  applied to games it was never true for. WotLK hid it — `ac-database`/`ac-authserver`/`ac-worldserver` are
+  both names at once, so the fallback is right there and only there.
+
+  Two things this says beyond the fix. A data field whose default is right for the one game everyone tests
+  is indistinguishable from a field nobody filled in — the live integration fixture had deliberately used
+  differing service and container names since 2026-08-22, so the *code* was proven and the *catalog* was
+  never checked against the installers it ships. The regression test now reads the compose services straight
+  out of each installer script and refuses any catalog service that is really a container name there.
