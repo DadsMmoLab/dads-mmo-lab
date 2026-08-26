@@ -1,0 +1,235 @@
+# WSL-resident servers
+
+How Yu'lon manages a WoW server that lives **inside a WSL2 distro**, with its own
+Docker CE, rather than on the Windows side through Docker Desktop.
+
+Written 2026-08-26, after a spike against a real WSL-resident server. Every
+mechanism below was measured rather than assumed; the measurements are quoted
+where they decide something.
+
+---
+
+## Why
+
+A tester reported a WotLK server installed by the DML Launcher living at
+`\\wsl.localhost\dml-arch\home\dml\games\wow-server-playerbots`, with Docker CE
+running *inside* `dml-arch`. Yu'lon could not manage it, and "Use existing…"
+accepted the folder anyway and would have failed later — fixed separately as the
+honest refusal (`fix/attach-folder-rule`).
+
+Refusing clearly is not the end state. **Yu'lon is intended to replace the DML
+Launcher**, so a topology a large part of the existing user base already runs
+cannot stay unsupported: adopting those servers is the migration path off the
+old tool, and a multi-hour compile is not something to ask a user to repeat.
+
+## What this is not
+
+Creating distros, or installing a server into one. The seam below is where that
+would plug in — §7 names it — but nothing here provisions anything. Installing
+remains the Windows-side or DML-Launcher path until a separate design says
+otherwise.
+
+---
+
+## 1. The seam: a prefix, not a program
+
+`platform.docker_program()` answers "what is the docker CLI called here" with a
+name. That is the wrong shape for a docker that is not local. It becomes a
+**prefix** — the argv that gets you to a docker daemon:
+
+```python
+docker_prefix(None)         -> ["docker"]
+docker_prefix("dml-arch")   -> ["wsl", "-d", "dml-arch", "--", "docker"]
+```
+
+Callers splice rather than prepend a name. Four places build docker argv today
+and each takes the prefix:
+
+| file | what it runs |
+|---|---|
+| `docker.py::_docker()` | everything lifecycle — 21 call sites behind one function |
+| `apply.py` | `docker exec … mysql` (the SQL runner) |
+| `maintenance.py` | `docker exec` (backup and restore) |
+| `console.py` | `docker attach` (GM console, POSIX-only today) |
+
+The prefix is a pure function of one optional string, so it is table-tested and
+cannot drift per platform.
+
+### Where the distro comes from
+
+`state.KnownInstall` gains one optional field:
+
+```python
+wsl_distro: str | None = None
+```
+
+Optional with a default, so every `state.json` written before this change still
+loads. It sits beside `server_dir` because it is the same kind of fact: *where
+this server is*. Nothing infers it at runtime — an install either was adopted
+from a distro or was not.
+
+### cwd
+
+`_docker()` passes `cwd=server_dir` today. A Windows process cannot usefully
+`cd` into a WSL path, so for a WSL install the location moves **out of the
+process and into the argv**:
+
+```
+docker compose --project-directory /home/dml/games/wow-server-playerbots ps
+```
+
+Measured: `rc=0`, `ac-database running`. `wsl --cd <path>` works equally well;
+`--project-directory` is chosen because it keeps the Windows-side cwd irrelevant
+rather than merely unused, and because it is compose's own documented way to say
+where a project lives.
+
+---
+
+## 2. Discovery: ask Docker, not the filesystem
+
+Docker already knows where every compose project is. Measured inside `dml-arch`:
+
+```
+$ wsl -d dml-arch -- docker compose ls --all --format json
+name='wow-server-playerbots'  status='running(1)'
+configs='/home/dml/games/wow-server-playerbots/docker-compose.yml,
+         /home/dml/games/wow-server-playerbots/docker-compose.override.yml'
+```
+
+That is the whole of discovery: project name, state, and the exact config paths.
+
+**This is what keeps Yu'lon uncoupled from the DML Launcher.** No scanning for
+`~/games/*`, no parsing another product's folder conventions, nothing that
+breaks when that product reorganises. Docker is the authority on where its own
+projects are, and Docker is what we ask.
+
+### The flow
+
+1. `wsl -l -v`, decoded UTF-16LE, for the distros and their state.
+2. For each **running** distro, `docker compose ls --all --format json`.
+3. Present what was found: distro, project name, status, path.
+4. Adopting one writes a normal `KnownInstall` with `wsl_distro` set.
+
+### Stopped distros are not probed
+
+Measured: `wsl -d docker-desktop -- true` flipped that distro from `Stopped` to
+`Running`. So probing every distro to see what is inside it **boots them all** —
+slow, and a side effect nobody asked for by opening a dialog.
+
+Stopped distros are therefore listed but not probed, each with an explicit
+opt-in that says starting it is what will happen. A user who knows their server
+is in a stopped distro can still reach it in one click; a user who does not is
+not made to wait for distros they do not care about.
+
+---
+
+## 3. Adopt once, then own
+
+Adoption reads the distro, the project and its paths **at import time only**.
+From then on the install is an ordinary `KnownInstall` and Yu'lon manages it
+through its own seams.
+
+Full control after adoption — start, stop, teardown, repair, accounts, backup,
+restore, modules. Yu'lon is replacing the DML Launcher, not sharing a server
+with it, and a half-owned server ("you may start it but not repair it") is a
+worse product than either owning it or refusing it.
+
+---
+
+## 4. Two traps, measured
+
+### `WSLENV` is mandatory
+
+`apply.py` runs `docker exec -e MYSQL_PWD` with **no `=value`**, deliberately, so
+the password reaches the container through the environment and never appears in
+an argv that `ps` can read. Through `wsl.exe` that only works if `WSLENV` names
+the variable:
+
+```
+without WSLENV : '[]'
+with WSLENV    : '[from-windows]'
+```
+
+End to end against a real container: `docker exec -e MYSQL_PWD ac-database` →
+`rc=0`, `[spike-probe-value]`. So the security property survives, and the failure
+mode of forgetting it is an **empty password**, which surfaces as an
+authentication failure rather than as a missing setting. Set it where the
+prefix is built, not at each call site, so a new caller cannot forget.
+
+### `wsl -l` output is UTF-16LE
+
+```
+raw    : b'd\x00m\x00l\x00-\x00a\x00r\x00c\x00h\x00\r\x00\n\x00d\x00o\x00c\x00k…'
+utf-8  : ['d\x00m\x00l\x00-\x00a\x00r\x00c\x00h\x00', '\x00', …]   <- garbage
+utf-16 : ['dml-arch', 'docker-desktop']
+```
+
+Decoding is in one function, tested with those exact captured bytes. This has
+already cost time twice in one day; a test with real bytes is what stops a third.
+
+---
+
+## 5. What the spike settled
+
+Run against a real WSL-resident server, read-only:
+
+| question | answer |
+|---|---|
+| exit codes propagate? | **yes** — 7→7, 0→0, 127→127 |
+| stdout/stderr separate? | yes |
+| child output encoding | plain ASCII, no NUL bytes |
+| `--project-directory` | works, `rc=0` |
+| `docker compose ps` | `ac-database running` |
+| stdin piping | works |
+| `docker exec -e VAR` | works, value arrives |
+| path translation | `wslpath -w` both ways |
+
+Exit-code fidelity is the load-bearing one: the controller reads exit codes
+everywhere, and `wsl.exe` swallowing them would have ended the idea.
+
+---
+
+## 6. Failure modes
+
+| case | behaviour |
+|---|---|
+| named distro no longer exists | refuse naming it; offer to forget the install |
+| distro stopped | `wsl -d` auto-starts it — say so, rather than appearing to hang |
+| `wsl.exe` absent (Windows without WSL) | the existing "no docker CLI" sentinel shape, so callers are unchanged |
+| Docker inside the distro not running | the existing daemon-down message, naming the distro |
+| adopted project's path deleted | the existing "no compose file" refusal, naming the distro |
+
+Nothing here invents a new error channel. Every case maps onto one the callers
+already handle, which is what keeps the change to a seam rather than a rewrite.
+
+---
+
+## 7. Where installing would plug in
+
+`docker_prefix()` is the only thing that knows a server can live somewhere other
+than here. An install-into-WSL design would add: choosing or creating a distro,
+installing Docker CE inside it, and running the existing install engine with the
+prefix already set. It needs no change to the 21 lifecycle call sites, because
+they take the prefix rather than build it.
+
+---
+
+## 8. Testing
+
+- **Prefix**: pure function, table test over `None` and a distro name.
+- **Call sites**: argv assertions at each of the four, the pattern already used
+  for the privilege rules — asserting on the emitted command, not on prose.
+- **UTF-16 decoding**: the captured bytes above as a fixture.
+- **Discovery**: the captured `compose ls` JSON as a fixture, plus the
+  stopped-distro rule (a stopped distro must not be probed — asserted through
+  the run seam, so it fails if anything shells into it).
+- **`WSLENV`**: asserted on the environment the prefix builder produces.
+- **Live gate**: the real `dml-arch` server, and the tester's machine.
+
+## 9. Out of scope
+
+- Creating or provisioning distros; installing Docker inside one.
+- Installing a server into WSL (§7).
+- WSL1. Docker needs WSL2, and the spike box reports WSL1 as unsupported.
+- Managing a server over SSH or on another machine. The prefix would allow it;
+  nobody has asked for it, and it is not designed for here.
