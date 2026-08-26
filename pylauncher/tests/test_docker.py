@@ -2887,3 +2887,49 @@ def test_a_missing_image_is_told_apart_from_a_daemon_that_will_not_talk(
             docker.runner, "run", lambda *a, s=said, **k: _completed(returncode=1, stderr=s)
         )
         assert docker.images_built(REFS) is None, said
+
+
+def test_the_diagnostic_it_offers_is_a_command_that_actually_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`docker compose logs` takes a SERVICE, and the sentence used to pass a container.
+
+    The argv three lines above it was already correct; the advice under it was
+    not, so the one command the app hands a stuck user answered
+    `no such service` — the very error the Discord report opened with
+    (2026-08-26). Invisible on AzerothCore, where the two names are the same.
+    """
+    renamed = docker.ContainerSpec(
+        db="c-db",
+        auth="c-auth",
+        world="c-world",
+        ports=(1,),
+        services=("s-db", "s-auth", "s-world"),
+    )
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _start_runner(calls, up=("c-db",)))
+    with pytest.raises(docker.DockerCommandError) as raised:
+        docker.start_staged(renamed, Path("/tmp/x"))
+    said = str(raised.value)
+    assert (
+        "c-auth, c-world are not running" in said
+    ), "it must still name the containers it looked for"
+    assert "docker compose logs s-auth" in said, said
+    assert "docker compose logs c-auth" not in said
+
+
+def test_container_spec_translates_a_container_name_to_its_service() -> None:
+    """The two-name mapping in one place, so no caller has to index tuples by hand."""
+    renamed = docker.ContainerSpec(
+        db="c-db",
+        auth="c-auth",
+        world="c-world",
+        ports=(1,),
+        services=("s-db", "s-auth", "s-world"),
+    )
+    assert renamed.service_for("c-db") == "s-db"
+    assert renamed.service_for("c-world") == "s-world"
+    # A name it does not know is returned unchanged: better a possibly-right
+    # command than a confidently wrong one.
+    assert renamed.service_for("ac-database") == "ac-database"
+    assert SPEC.service_for(SPEC.db) == SPEC.db

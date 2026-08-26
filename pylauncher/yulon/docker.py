@@ -102,6 +102,22 @@ class ContainerSpec:
         """
         return self.services or (self.db, self.auth, self.world)
 
+    def service_for(self, container: str) -> str:
+        """The compose service that owns `container`, or `container` unchanged.
+
+        Every message that tells a user to run `docker compose logs X` needs
+        this: the code knows which CONTAINER is missing, and compose only
+        answers to SERVICE names. Unchanged for a name this spec does not know,
+        because a possibly-right command beats a confidently wrong one — and
+        unchanged for every AzerothCore game, where the two names are equal.
+        """
+        containers = (self.db, self.auth, self.world)
+        services = self.compose_services()
+        for known, service in zip(containers, services, strict=False):
+            if known == container:
+                return service
+        return container
+
 
 CANCELLED_RETURNCODE = -1
 """What `run_attached()` reports when the caller's cancel token stopped the read.
@@ -605,7 +621,8 @@ def start_staged(spec: ContainerSpec, server_dir: Path) -> bool:
     if missing:
         raise DockerCommandError(
             f"compose reported success but {', '.join(missing)} are not running. "
-            f"`docker compose logs {missing[0]}` in {server_dir} will say why."
+            f"`docker compose logs {spec.service_for(missing[0])}` in {server_dir} "
+            f"will say why."
         )
     return True
 
@@ -1143,7 +1160,7 @@ def start_database(
     if not wait_db_healthy(spec.db, timeout=timeout):
         raise DockerCommandError(
             f"{spec.db} did not report healthy within {timeout:.0f}s, so {because}. "
-            f"`docker compose logs {spec.db}` in {server_dir} will say why."
+            f"`docker compose logs {spec.service_for(spec.db)}` in {server_dir} will say why."
         )
 
 

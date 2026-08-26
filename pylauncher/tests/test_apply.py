@@ -594,3 +594,55 @@ def test_output_that_is_not_utf8_does_not_escape_as_a_decode_error(
     # perfectly valid cp1252 characters on this one. Asserting U+FFFD passed on
     # Linux and failed on Windows, which is the wrong thing to pin.
     assert "ok" in out, out
+
+
+def test_docker_sql_addresses_the_game_s_own_schemas(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A CMaNGOS install has no `acore_auth`; the schema name is the game's, not a constant.
+
+    Discord report, 2026-08-26: every SQL-backed control on Tortoise/TBC/Vanilla died with
+    `ERROR 1049 (42000): Unknown database 'acore_auth'` because the schema was a module
+    constant. Asserted at argv level, where the defect actually lived.
+    """
+    import subprocess
+
+    seen: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    sql = DockerSql(
+        "tortoise-db",
+        "hunter2",
+        schemas={"auth": "tw_logon", "characters": "tw_char", "world": "tw_world"},
+    )
+    sql.run_statement("auth", "SELECT 1")
+    sql.query("world", "SELECT 1")
+    assert [argv[-1] for argv in seen] == ["tw_logon", "tw_world"]
+    assert not any("acore" in " ".join(argv) for argv in seen)
+
+
+def test_docker_sql_refuses_a_database_this_game_does_not_have(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refuse by name rather than raise KeyError or connect to somebody else's schema."""
+    import subprocess
+
+    seen: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    sql = DockerSql("tortoise-db", "hunter2", schemas={"auth": "tw_logon"})
+    with pytest.raises(ApplyError) as excinfo:
+        sql.run_statement("playerbots", "SELECT 1")
+    assert "playerbots" in str(excinfo.value)
+    assert seen == [], "it must not run mysql at all"
+
+
+def test_docker_sql_still_defaults_to_the_azerothcore_schemas() -> None:
+    """Every existing caller passes no map and must keep addressing acore_*."""
+    assert DockerSql("ac-database", "hunter2").schemas == apply_module.DB_NAMES

@@ -17,7 +17,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from yulon.docker import ContainerSpec
-from yulon.manifest import Source
+from yulon.manifest import Db, Source
 from yulon.platform import PlatformId
 
 CATALOG_FILE = Path(__file__).resolve().with_name("catalog.json")
@@ -283,6 +283,45 @@ class Databases(_Strict):
     characters: str = Field(min_length=1)
     world: str = Field(min_length=1)
     extra: tuple[str, ...] = ()
+    playerbots: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "The playerbots schema, for the cores that keep one. Named separately from `extra` "
+            "because the applier addresses it by the manifest key `playerbots`, and a name in a "
+            "list cannot be looked up by key."
+        ),
+    )
+    ale: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "The ALE (Paragon) schema, same reasoning as `playerbots`. Created by the module "
+            "rather than by the installer, so it is a name this core WOULD use, not a promise "
+            "the schema exists."
+        ),
+    )
+
+    def schema_map(self) -> dict[Db, str]:
+        """Manifest `db` key → this core's schema name, for `apply.DockerSql`.
+
+        Only the databases this core actually names appear. A key that is absent
+        is a database this game does not have, and `DockerSql` refuses it by
+        name rather than connecting to somebody else's schema — which is exactly
+        the failure this map exists to end: every SQL-backed control used to
+        address AzerothCore's `acore_auth` on a CMaNGOS install and die with
+        `ERROR 1049 Unknown database` (Discord report, 2026-08-26).
+        """
+        named: dict[Db, str] = {
+            "auth": self.auth,
+            "characters": self.characters,
+            "world": self.world,
+        }
+        if self.playerbots:
+            named["playerbots"] = self.playerbots
+        if self.ale:
+            named["ale"] = self.ale
+        return named
 
 
 class Realmlist(_Strict):
@@ -322,6 +361,20 @@ class CatalogEntry(_Strict):
     has_manifests: bool = Field(
         default=False, description="Whether manifests/<id>/ exists for module management."
     )
+
+    def schema_map(self) -> dict[Db, str]:
+        """This game's `manifest db key → schema name` map (see `Databases.schema_map`)."""
+        return self.databases.schema_map()
+
+    def core_databases(self) -> tuple[str, str, str]:
+        """The three schemas whose absence is an alarm, in this core's own names.
+
+        `maintenance.backup()` reports what it could not find; asked of the
+        entry so the alarm names schemas this install could plausibly have. The
+        module-level default is AzerothCore's, which is why a Tortoise backup
+        reported `acore_auth` missing on a dump that had taken everything.
+        """
+        return (self.databases.auth, self.databases.characters, self.databases.world)
 
     def container_spec(self) -> ContainerSpec:
         """The `ContainerSpec` a controller for this game would be built from."""

@@ -156,3 +156,26 @@ def test_every_game_says_how_its_db_password_can_be_known() -> None:
             f"{entry.id} declares neither db_root_password nor db_root_password_file, "
             f"so the app would authenticate to its database with the shared default"
         )
+
+
+def test_every_game_maps_its_own_schema_names() -> None:
+    """The schema names SQL connects to come from the entry, not from a constant."""
+    catalog = load_catalog()
+    assert catalog.get("wow-tortoise").schema_map() == {
+        "auth": "tw_logon",
+        "characters": "tw_char",
+        "world": "tw_world",
+    }
+    for game_id in ("wow-tbc", "wow-vanilla"):
+        assert catalog.get(game_id).schema_map() == {
+            "auth": "realmd",
+            "characters": "characters",
+            "world": "mangos",
+        }, game_id
+
+
+def test_wotlk_s_schema_map_is_the_applier_s_default() -> None:
+    """`apply.DB_NAMES` is the AzerothCore map; wow-wotlk must not drift from it."""
+    from yulon.apply import DB_NAMES
+
+    assert load_catalog().get("wow-wotlk").schema_map() == dict(DB_NAMES)

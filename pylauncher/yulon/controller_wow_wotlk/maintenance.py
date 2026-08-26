@@ -119,10 +119,17 @@ _TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
 # accepting its own root password.
 SYSTEM_SCHEMAS = frozenset({"information_schema", "performance_schema", "mysql", "sys"})
 
-# The three every AzerothCore install has. `DB_NAMES` also knows `acore_playerbots`
-# and `acore_ale`, which exist only where those modules are installed — so their
-# absence is normal and is not reported, while the absence of one of these is an
-# alarm worth carrying in the report (see `BackupReport.missing_core`).
+# The three every AzerothCore install has, and the DEFAULT only. `DB_NAMES` also
+# knows `acore_playerbots` and `acore_ale`, which exist only where those modules
+# are installed — so their absence is normal and is not reported, while the
+# absence of one of these is an alarm worth carrying in the report (see
+# `BackupReport.missing_core`).
+#
+# A CMaNGOS install has none of these names, and the alarm fired on every
+# successful backup it took: "expected but absent: acore_auth, acore_characters,
+# acore_world" on a dump that had taken tw_logon, tw_char and tw_world
+# (Discord report, 2026-08-26). `backup(core_databases=...)` is what a caller
+# holding the catalog entry passes instead.
 CORE_DATABASES: tuple[str, ...] = (DB_NAMES["auth"], DB_NAMES["characters"], DB_NAMES["world"])
 
 CLIENT_CACHE_NOTE = (
@@ -417,6 +424,7 @@ def backup(
     only: Sequence[str] | None = None,
     label: str | None = None,
     spec: docker.ContainerSpec = docker_ctl.SPEC,
+    core_databases: Sequence[str] = CORE_DATABASES,
     running: RunningNames | None = None,
     now: datetime | None = None,
 ) -> BackupReport:
@@ -470,7 +478,7 @@ def backup(
     directory = backups_dir(server_dir)
     directory.mkdir(parents=True, exist_ok=True)
     stamp = (now or datetime.now()).strftime(_TIMESTAMP_FORMAT)
-    missing_core = tuple(name for name in CORE_DATABASES if name not in present)
+    missing_core = tuple(name for name in core_databases if name not in present)
     if missing_core:
         logger.warning(f"this install has no {', '.join(missing_core)}; backing up what it does")
 

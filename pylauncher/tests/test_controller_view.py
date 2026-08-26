@@ -1082,3 +1082,48 @@ def test_the_restore_warning_names_the_plan_and_does_not_overstate(
     assert "Every character on the server is replaced" not in said
     assert "LEFT AS THEY ARE" in said, "the merge is not stated"
     assert "merges" in said
+
+
+def test_a_cmangos_install_s_account_path_addresses_its_own_schema(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wiring, not the seam: what `Accounts → Create` really sends for Tortoise.
+
+    `for_wotlk()` builds the `DockerSql` every SQL-backed control uses, and it is
+    the one place that holds the catalog entry. Testing `DockerSql(schemas=...)`
+    alone would have passed while this call site still handed it nothing — which
+    is how `acore_auth` reached a CMaNGOS install in the first place.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    seen: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        # "" first, so the username reads as free; a row afterwards, so the
+        # read-back that follows the INSERT finds the account it just made.
+        return subprocess.CompletedProcess(argv, 0, "" if len(seen) == 1 else "1", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    services = ControllerServices.for_wotlk(tortoise, tmp_path, None)
+    services.create_account("bob", "hunter2", 0)
+
+    assert seen, "nothing was sent to mysql at all"
+    schemas = {argv[-1] for argv in seen}
+    assert schemas == {"tw_logon"}, schemas
+    assert not any("acore" in " ".join(argv) for argv in seen)
+
+
+def test_a_cmangos_backup_is_told_which_schemas_that_core_has(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The call site, not the function: `backup()` takes the names, someone must pass them."""
+    tortoise = load_catalog().get("wow-tortoise")
+    seen: dict[str, object] = {}
+
+    def fake_backup(*args: object, **kwargs: object) -> object:
+        seen.update(kwargs)
+        return None
+
+    monkeypatch.setattr(controller_view_module.wotlk_maintenance, "backup", fake_backup)
+    ControllerServices.for_wotlk(tortoise, tmp_path, None).backup()
+    assert seen.get("core_databases") == ("tw_logon", "tw_char", "tw_world"), seen

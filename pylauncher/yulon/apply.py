@@ -99,17 +99,25 @@ class DockerSql:
 
     db_container: str
     root_password: str
+    schemas: Mapping[Db, str] = field(default_factory=lambda: DB_NAMES)
+    """This server's `manifest db key → schema name` map.
+
+    Defaults to `DB_NAMES` so every AzerothCore caller reads as it did, and is
+    overridden from `CatalogEntry.schema_map()` for a game whose schemas are
+    named anything else. It is per-instance rather than a module constant
+    because one process can hold two installs of different cores at once.
+    """
 
     def run_file(self, db: Db, path: Path) -> None:
         with path.open("rb") as fh:
             proc = self._mysql(db, stdin=fh)
-        _check_sql(proc, f"{path.name} → {DB_NAMES[db]}")
+        _check_sql(proc, f"{path.name} → {self._schema(db)}")
 
     def run_statement(self, db: Db, statement: str) -> None:
         # Over stdin, never `-e <sql>`: argv is world-readable (`ps`, Task
         # Manager, /proc/<pid>/cmdline) and a statement can carry a password.
         proc = self._mysql(db, statement=statement)
-        _check_sql(proc, f"inline → {DB_NAMES[db]}")
+        _check_sql(proc, f"inline → {self._schema(db)}")
 
     def query(self, db: Db, statement: str) -> str:
         """Run one SELECT and return its rows, tab-separated, one per line.
@@ -134,7 +142,7 @@ class DockerSql:
                 non-zero.
         """
         proc = self._mysql(db, statement=statement, extra=("--batch", "--skip-column-names"))
-        _check_sql(proc, f"query → {DB_NAMES[db]}")
+        _check_sql(proc, f"query → {self._schema(db)}")
         return proc.stdout
 
     def _mysql(
@@ -223,8 +231,24 @@ class DockerSql:
             "mysql",
             "-uroot",
             *extra,
-            DB_NAMES[db],
+            self._schema(db),
         ]
+
+    def _schema(self, db: Db) -> str:
+        """The schema name for `db` on THIS server, or a refusal naming it.
+
+        A missing key is a database this core does not have, and there is no
+        safe fallback: connecting to the AzerothCore name instead is what
+        produced `Unknown database 'acore_auth'` on every CMaNGOS install, and
+        connecting to some other schema of this server's would be worse.
+        Raised before the argv is built, so nothing runs.
+        """
+        try:
+            return self.schemas[db]
+        except KeyError:
+            raise ApplyError(
+                f"this server has no {db} database; it has " f"{', '.join(sorted(self.schemas))}"
+            ) from None
 
 
 def _check_sql(proc: subprocess.CompletedProcess[str], what: str) -> None:

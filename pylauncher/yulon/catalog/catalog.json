@@ -62,7 +62,9 @@
         "world": "acore_world",
         "extra": [
           "acore_playerbots"
-        ]
+        ],
+        "playerbots": "acore_playerbots",
+        "ale": "acore_ale"
       },
       "client": {
         "version": "3.3.5a",

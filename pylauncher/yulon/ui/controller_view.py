@@ -104,7 +104,10 @@ class ControllerServices:
                     f"and restore will fail until that file is restored"
                 )
             password = wotlk_modules.DEFAULT_DB_ROOT_PASSWORD
-        sql = DockerSql(spec.db, password)
+        # `schemas=` is what keeps a CMaNGOS install off AzerothCore's `acore_*`
+        # names. This factory is the only place that holds both the entry and the
+        # seam, so it is the only place that can say which schemas exist here.
+        sql = DockerSql(spec.db, password, schemas=entry.schema_map())
         # Bound to this entry's own db container, not `mysql_for()`'s
         # `docker_ctl.SPEC.db`, so a catalog entry that names a different one
         # cannot end up backing up somebody else's database.
@@ -149,7 +152,9 @@ class ControllerServices:
             create_account=lambda name, pw, gm: wotlk_accounts.create_account(
                 sql, name, pw, gm_level=gm
             ),
-            backup=lambda: wotlk_maintenance.backup(server_dir, mysql, spec=spec),
+            backup=lambda: wotlk_maintenance.backup(
+                server_dir, mysql, spec=spec, core_databases=entry.core_databases()
+            ),
             backups_dir=lambda: wotlk_maintenance.backups_dir(server_dir),
             plan_restore=lambda path: wotlk_maintenance.plan_restore(path, server_dir, spec=spec),
             # `confirm=plan.token` is not a rubber stamp: the token can only come
