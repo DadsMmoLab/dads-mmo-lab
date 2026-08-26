@@ -223,10 +223,14 @@ present, otherwise generates the value — so a frozen context can carry it; the
 stage's job is the refusal check and persisting the file, not producing the value.
 
 `StagedInstaller.stages() -> tuple[Stage, ...]` is the one abstract method. `run()` keeps
-today's shape: preflight lines → guard → keep-awake → `for stage in self.stages(): yield
-f"--- {stage.name}"; state = yield from self._run_stage(stage, ctx)`. `_run_stage` calls
-`stage.run(ctx)` and writes the state file only when `stage.recorded`. Preflight and guard are
-not stages: they are the spine's own, so a family can neither forget them nor record them.
+today's shape: preflight lines → guard → keep-awake → for each stage, `--- <name>`, then the
+stage's `cancel_note` if it has one (said by the spine, once, before the work it describes — no
+stage body says its own), then `stage.run(ctx)`, then the state file only when `stage.recorded`.
+Preflight and guard are not stages: they are the spine's own, so a family can neither forget them
+nor record them. The spine's `stage_import(ctx, gate, service)` always runs the five-branch probe
+table first; with a compose one-shot `service` it then runs it as today, and with `service=None`
+it returns after the branch table so the family can apply its own SQL. `stage_start_db` is
+unconditional.
 
 Rules carried over unchanged from 6.2, because each cost the Rust launcher an evening:
 
@@ -323,8 +327,9 @@ group.
 - `NativeInstall.family: Literal["azerothcore", "cmangos"]`; `images: tuple[str, ...]`
   (the built service keys); `image_prefix: str`; `db: DbFacts` (`image`, `client`
   (`mysql`|`mariadb`), `user`, `charset`); `ready: ReadyMarkers` (`world`, `auth: str | None`,
-  `fatal: str | None`, `timeout_s`, `restart_loop`); `templates`, `soap_port` and the floors stay
-  where they are.
+  `fatal: str | None`, `timeout_s`, `restart_loop`, `regex: bool = False` — the strings are
+  literal and `re.escape`d unless an entry says `regex: true`, which only Tortoise's alternations
+  need); `templates`, `soap_port` and the floors stay where they are.
 - `NativeInstall.azerothcore: AzerothCoreData | None` — `world_env` moves here from
   `NativeInstall.world_env`, and that is all it holds. `Containers.db_import` and
   `Containers.client_data` stay exactly where they are: `container_spec()` reads `db_import` into
@@ -337,8 +342,9 @@ gate (see Dispatch, below).
 
 **In 7.3** (the CMaNGOS family needs them):
 
-- `Source.rev: str | None` — an optional commit pin, honoured by `CloneSpec`. Exists before the
-  Vanilla gate; Tortoise is pinned the day 7.6 passes.
+- `Source.rev: str | None` — an optional commit pin, a full 40-hex SHA (GitHub serves
+  fetch-by-hash only for full object ids), honoured by `CloneSpec` and checked out after the
+  clone. Exists before the Vanilla gate; Tortoise is pinned the day 7.6 passes.
 - `NativeInstall.dockerfile_dir: str | None` (the AC family leaves it `None`).
 - `NativeInstall.cmangos: CmangosData | None` — `client: ClientSpec`, `dockerfile:
   DockerfileSpec`, `extract: ExtractPlan`, `mmaps: MmapPlan`, `conf: ConfPatchTable`,
@@ -346,9 +352,13 @@ gate (see Dispatch, below).
 
 ### Dispatch, and the interim between 7.2 and each game's gate
 
-`installer_for()` returns the family engine for every entry. The platform refusal stays where it
-is (`_preflight_lines()` → `unsupported_platform_message()`), and an entry with `native: None`
-gets the existing "its catalog entry has no `install.native` section" refusal. In 7.2 the three
+In 7.1, while the script path still exists, `installer_for()` returns `Installer` for an entry
+whose `install.native` is `None` and the family engine for every other — so wow-wotlk's Linux
+flip is that one rule plus its catalog entry, and the three CMaNGOS entries keep their scripts
+until 7.2. From 7.2 `installer_for()` returns the family engine for every entry and raises
+`InstallerError` for `native: None` (the harness catches it; the GUI never reaches it). The
+platform refusal stays where it is (`_preflight_lines()` → `unsupported_platform_message()`).
+In 7.2 the three
 CMaNGOS entries set `platforms: []` — the tile's Install button is disabled with the 6.1 wording,
 unchanged — and keep it empty through 7.3 (their `native`/`cmangos` blocks land, unused); 7.4c,
 7.5 and 7.6 restore `["linux"]` as each passes. **A release cut in that window has no CMaNGOS
@@ -524,13 +534,18 @@ the scripts' all-interfaces `3306:3306`.
 Tokens available to every template: `PROJECT_NAME`, `DB_PORT`, `AUTH_PORT`, `WORLD_PORT`,
 `IMAGE_PREFIX`, `IMAGE_TAG`, `BUILD_CONTEXT`, `CONTAINER_USER`, `BIND_LABEL`, `DB_IMAGE`,
 `DB_HOST` (= `containers.db`), `DB_USER`, `AUTH_DB`, `WORLD_DB`, `CHAR_DB`, `LOGS_DB`,
-`CONTAINER_PREFIX`, `CORE_DIR`, and `DB_PASSWORD` — which renders the `fixed` value and is
-**refused** in `generated` mode, where templates must use `${DB_ROOT_PASSWORD:?Yu'lon .env is
-missing}` (that is what the no-password-text invariant checks). Family extras: `SOAP_PORT` and
-`ENVIRONMENT` (the AzerothCore override's env block), `CLIENT_BUILD`, `MAKE_JOBS`. Conf values,
-SQL statements and `ready.*` strings take the same `{{TOKEN}}` grammar plus `REALM_HOST` — one
-grammar, one `fill()`, which refuses an unknown token (a value between a template and a conf table
-cannot become a silent literal). The three-file contract is asserted for every game: ports in
+`CONTAINER_PREFIX`, `CORE_DIR` (the in-image install prefix — the parent of the conf table's
+`source_dir`: `/opt/mangos`, `/opt/tortoise`), and `DB_PASSWORD` — which renders the `fixed`
+value and is **refused** in `generated` mode, where templates must use `${DB_ROOT_PASSWORD:?Yu'lon
+.env is missing}` (that is what the no-password-text invariant checks). Family extras: `SOAP_PORT`
+and `ENVIRONMENT` (the AzerothCore override's env block), `CLIENT_BUILD`, `MAKE_JOBS`. Conf
+values, SQL statements and `ready.*` strings take the same `{{TOKEN}}` grammar plus `REALM_HOST`
+(`native.INSTALL_REALM_HOST`, `127.0.0.1`) — one grammar, one public `composegen.fill()`, which
+refuses an unknown token (a value between a template and a conf table cannot become a silent
+literal), and one public `composegen.entry_tokens(entry)` that builds the per-game set, so the
+family adds only the secrets and the install identity. Every mangosd.conf also gets
+`WorldServerPort = {{WORLD_PORT}}`, which the scripts never set: it is why Tortoise's published
+8090 could never have answered. The three-file contract is asserted for every game: ports in
 exactly one file, the build overlay never auto-loaded, no `{{` survives rendering, generated-
 password templates contain no password text, every referenced template exists, services are named
 after containers.
@@ -611,9 +626,11 @@ password is in them. No SOAP/RA is enabled at install; that is 7.9 controller wo
 **Transport.** `sqlplan.apply()` streams each file from the host checkout on stdin of
 `docker exec -i -e MYSQL_PWD <db-container> <client> -u root <schema>`, gzip decompressed by
 Python on the way in. No helper container on the compose network, no `docker network ls | grep`,
-no `sh -c 'ls -v … 2>/dev/null'`. The password travels in the exec environment, never in argv or
-SQL text. `db.client` is the binary the DB image ships (`mariadb` for mariadb:10.6/11), which
-settles MariaDB-vs-MySQL for this path.
+no `sh -c 'ls -v … 2>/dev/null'`. The password travels in the exec environment — `-e MYSQL_PWD`
+is passed bare and the value rides the subprocess environment — never in argv or SQL text.
+Literal `statements` go through `composegen.fill()` before they are streamed; files never do.
+`db.client` is the binary the DB image ships (`mariadb` for mariadb:10.6/11), which settles
+MariaDB-vs-MySQL for this path.
 
 **One secret.** The generated value is both the container's root password (via `.env`) and the
 password of the app user phase 0 creates (`db.user`, `'mangos'@'%'`); the import streams as root,
@@ -661,8 +678,9 @@ is the second line of defence.
 
 `fixed` (WotLK keeps `"password"` — a contract with backup, console and every guide) is spliced
 into the base file as the `${DB_ROOT_PASSWORD:-…}` default exactly as today, through the
-`DB_PASSWORD` token. `generated` (TBC/Vanilla/Tortoise) is resolved by the spine before stage 1,
-persisted at `.db_password` (0600) by `db-password`, and reaches `.env` through
+`DB_PASSWORD` token. `generated` (TBC/Vanilla/Tortoise) is resolved by the spine before stage 1
+(`<prefix>` + 16 hex from `secrets.token_hex(8)`), persisted at `.db_password` (0600, one line,
+read back stripped) by `db-password`, and reaches `.env` through
 `generate-compose`'s plan `dotenv` — `composegen.write_plan()` already calls `write_dotenv()`
 whenever a plan carries one, and `render()` has never produced one until now (the function
 landed 2026-08-24 and has waited for this caller since). The templates spell
@@ -787,7 +805,10 @@ inherited floors. No bash line is deleted before gate 7.1 passes on all three Li
 exists on a clean checkpoint. Before the checkpoint is restored, the proven yulon-ubuntu install's
 `docker compose config --format json` is captured service by service (the 2026-08-24 method) and
 committed as `pylauncher/tests/data/wotlk-compose-config.json`; the gate and 7.2's re-run both
-diff against that file.
+diff against that file, and a unit test renders wow-wotlk and compares the parsed YAML against it
+(pyyaml becomes a test-only dependency in `requirements-dev.txt` for that; the app itself still
+does not read YAML). A second, byte-level snapshot of the three rendered WotLK files lives under
+`tests/data/wotlk-rendered/` so 7.3's template work cannot change them unnoticed.
 
 **Where the client runs.** Every VM is a Hyper-V guest; the clients are on the host. A login
 therefore always needs the Networking tab's LAN step (the realmlist row + `realmlist.wtf` on the
