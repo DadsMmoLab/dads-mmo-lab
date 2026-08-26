@@ -1270,8 +1270,8 @@ extract_client_data() {
     echo ""
 
     if ! $DOCKER_CMD run --rm \
-        -v "$CLIENT_DIR:/client" \
-        -v "$SERVER_DIR/data:/extracted" \
+        -v "$CLIENT_DIR:/client:z" \
+        -v "$SERVER_DIR/data:/extracted:z" \
         --entrypoint /bin/bash \
         "$SERVER_IMAGE" -c '
             set -e
@@ -1337,7 +1337,7 @@ extract_client_data() {
     mkdir -p "$SERVER_DIR/data/mmaps"
 
     if ! $DOCKER_CMD run --rm \
-        -v "$SERVER_DIR/data:/data" \
+        -v "$SERVER_DIR/data:/data:z" \
         --entrypoint /bin/bash \
         "$SERVER_IMAGE" -c '
             cd /data
@@ -1454,7 +1454,7 @@ EOF
     mkdir -p "$SERVER_DIR/etc"
     print_info "Extracting config templates from compiled image..."
     $DOCKER_CMD run --rm \
-        -v "$SERVER_DIR/etc:/out" \
+        -v "$SERVER_DIR/etc:/out:z" \
         --entrypoint /bin/bash \
         "$SERVER_IMAGE" -c '
             cp /opt/mangos/etc/mangosd.conf.dist /out/mangosd.conf 2>/dev/null || true

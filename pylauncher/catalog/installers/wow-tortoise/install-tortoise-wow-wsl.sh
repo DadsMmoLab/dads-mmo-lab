@@ -527,8 +527,8 @@ do_compile() {
     if ! $DOCKER_CMD run --rm \
             -u "$(id -u):$(id -g)" \
             -e BUILD_JOBS="$(build_jobs)" \
-            -v "$SERVER_DIR/src":/src \
-            -v "$SERVER_DIR/install":/install \
+            -v "$SERVER_DIR/src":/src:z \
+            -v "$SERVER_DIR/install":/install:z \
             -w /src/_build "$IMAGE" bash -c '
         set -e
         cmake .. \
@@ -572,10 +572,10 @@ extract_client_data() {
 
     if ! $DOCKER_CMD run --rm \
             -u "$(id -u):$(id -g)" \
-            -v "$CLIENT_DIR":/client:ro \
-            -v "$SERVER_DIR/data":/out \
-            -v "$SERVER_DIR/src":/src \
-            -v "$SERVER_DIR/install":/install \
+            -v "$CLIENT_DIR":/client:ro,z \
+            -v "$SERVER_DIR/data":/out:z \
+            -v "$SERVER_DIR/src":/src:z \
+            -v "$SERVER_DIR/install":/install:z \
             -w /out "$IMAGE" bash -c "
         set -e
         echo '=== mapextractor (maps + dbc) ==='
@@ -619,7 +619,7 @@ write_compose_and_configs() {
     # NOTE: the shipped default points CharacterDatabase.Info at "tw_chars"
     # (plural) but the DB created is "tw_char" (singular) — we fix that here.
     $DOCKER_CMD run --rm -u "$(id -u):$(id -g)" \
-        -v "$SERVER_DIR/install":/install -v "$SERVER_DIR/etc":/etc_out "$IMAGE" bash -c '
+        -v "$SERVER_DIR/install":/install:z -v "$SERVER_DIR/etc":/etc_out:z "$IMAGE" bash -c '
         cd /install/etc
         sed -E \
           -e "s#^LoginDatabase\.Info.*#LoginDatabase.Info = \"db;3306;mangos;'"$DB_PASSWORD"';tw_logon\"#" \
@@ -727,7 +727,7 @@ setup_database() {
     # namespace (--network container:tortoise-db) so the DB is reachable at
     # 127.0.0.1 — avoids guessing the compose-generated network name.
     if ! $DOCKER_CMD run --rm --network "container:tortoise-db" \
-            -v "$SERVER_DIR/src/sql":/sql:ro "$IMAGE" bash -c "
+            -v "$SERVER_DIR/src/sql":/sql:ro,z "$IMAGE" bash -c "
         set -e
         echo '=== schema (create_databases.sql) ==='
         mariadb -h127.0.0.1 -uroot -p'${DB_PASSWORD}' < /sql/create_databases.sql

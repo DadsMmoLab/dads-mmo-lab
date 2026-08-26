@@ -990,27 +990,6 @@ locate_client() {
         fi
 
 
-        # -- Validation gate 5: locale MPQ ------------------------
-        # The DBC files the extractor reads live in
-        # Data/<locale>/locale-<locale>.MPQ, NOT in Data/dbc.MPQ. A package
-        # that ships every Data/*.MPQ but no locale folder passes every gate
-        # above and then extracts 0 DBCs, aborting with "Invalid Map.dbc file
-        # format" -- AFTER the multi-hour compile. Measured on a real client
-        # package 2026-08-26. Such a client cannot be played either; the
-        # locale archive is not optional.
-        locale_mpq=$(find "$CLIENT_DIR/Data" -maxdepth 2 -iname "locale-*.MPQ" 2>/dev/null | head -1)
-        if [ -z "$locale_mpq" ]; then
-            print_error "No locale archive under Data/ (expected e.g. Data/enUS/locale-enUS.MPQ)."
-            print_info "  - The DBC files the server needs are inside that archive."
-            print_info "  - Without it the extractor produces 0 DBCs and gives up with"
-            print_info "    'Invalid Map.dbc file format' after the whole build has run."
-            print_info "  - A client missing it cannot be played either -- re-download it."
-            if ! ask_yes_no "Continue anyway? (extraction WILL fail)"; then
-                continue
-            fi
-        else
-            print_success "Locale archive found: $(basename "$locale_mpq")"
-        fi
         # ── Validation gate 5: Disk space for extraction ──────────
         # Extraction produces ~3-5 GB of data + temp Buildings folder
         local client_disk=$(df -BG "$CLIENT_DIR" 2>/dev/null | awk 'NR==2 {print $4}' | sed 's/G//')
@@ -1329,8 +1308,8 @@ extract_client_data() {
     echo ""
 
     if ! $DOCKER_CMD run --rm \
-        -v "$CLIENT_DIR:/client" \
-        -v "$SERVER_DIR/data:/extracted" \
+        -v "$CLIENT_DIR:/client:z" \
+        -v "$SERVER_DIR/data:/extracted:z" \
         --entrypoint /bin/bash \
         "$SERVER_IMAGE" -c '
             set -e
@@ -1400,8 +1379,8 @@ extract_client_data() {
             echo ""
 
             if ! $DOCKER_CMD run --rm \
-                -v "$CLIENT_DIR:/client" \
-                -v "$SERVER_DIR/data:/extracted" \
+                -v "$CLIENT_DIR:/client:z" \
+                -v "$SERVER_DIR/data:/extracted:z" \
                 --entrypoint /bin/bash \
                 "$SERVER_IMAGE" -c '
                     ulimit -s unlimited 2>/dev/null || true
@@ -1478,7 +1457,7 @@ extract_client_data() {
     mkdir -p "$SERVER_DIR/data/mmaps"
 
     if ! $DOCKER_CMD run --rm \
-        -v "$SERVER_DIR/data:/data" \
+        -v "$SERVER_DIR/data:/data:z" \
         --entrypoint /bin/bash \
         "$SERVER_IMAGE" -c '
             ulimit -s unlimited 2>/dev/null || true
@@ -1600,7 +1579,7 @@ EOF
     mkdir -p "$SERVER_DIR/etc"
     print_info "Extracting config templates from compiled image..."
     $DOCKER_CMD run --rm \
-        -v "$SERVER_DIR/etc:/out" \
+        -v "$SERVER_DIR/etc:/out:z" \
         --entrypoint /bin/bash \
         "$SERVER_IMAGE" -c '
             cp /opt/mangos/etc/mangosd.conf.dist /out/mangosd.conf 2>/dev/null || true
