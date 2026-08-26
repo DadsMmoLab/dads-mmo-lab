@@ -190,8 +190,41 @@ def test_wait_helpers_are_bound_to_the_spec(monkeypatch: pytest.MonkeyPatch) -> 
     ctl = Controller(SPEC, SERVER_DIR)
     assert ctl.wait_db_healthy(timeout=1.0, interval=0.5) is True
     assert ctl.wait_ready("127.0.0.1", 8085, timeout=2.0) is False
-    assert seen["db"] == (SPEC, {"timeout": 1.0, "interval": 0.5})
-    assert seen["ready"] == (SPEC, "127.0.0.1", 8085, {"timeout": 2.0})
+    assert seen["db"] == (SPEC, {"wsl_distro": None, "timeout": 1.0, "interval": 0.5})
+    assert seen["ready"] == (SPEC, "127.0.0.1", 8085, {"wsl_distro": None, "timeout": 2.0})
+
+
+def test_wait_helpers_forward_the_distro_a_wsl_install_lives_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Polling has to ask the right daemon, and asking the wrong one does not fail.
+
+    A server inside a WSL distro answers only to that distro's docker. Poll
+    Docker Desktop instead and it reports no containers - so `wait_ready()`
+    would sit out its full timeout on a server that came up seconds in, and
+    `wait_db_healthy()` would call a healthy database dead. Nothing raises,
+    which is why this is asserted rather than assumed.
+    """
+    seen: dict[str, object] = {}
+
+    def fake_wait_db_healthy(spec: docker.ContainerSpec, **kwargs: object) -> bool:
+        seen["db"] = kwargs
+        return True
+
+    def fake_wait_ready(
+        spec: docker.ContainerSpec, realm_host: str, realm_port: int, **kwargs: object
+    ) -> bool:
+        seen["ready"] = kwargs
+        return True
+
+    monkeypatch.setattr(docker, "wait_db_healthy_for", fake_wait_db_healthy)
+    monkeypatch.setattr(docker, "wait_ready_for", fake_wait_ready)
+
+    ctl = Controller(SPEC, SERVER_DIR, wsl_distro="dml-arch")
+    ctl.wait_db_healthy(timeout=1.0)
+    ctl.wait_ready("127.0.0.1", 8085, timeout=1.0)
+    assert seen["db"] == {"wsl_distro": "dml-arch", "timeout": 1.0}
+    assert seen["ready"] == {"wsl_distro": "dml-arch", "timeout": 1.0}
 
 
 def test_wotlk_controller_inherits_everything_with_its_own_spec(

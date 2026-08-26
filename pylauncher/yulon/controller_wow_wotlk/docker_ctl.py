@@ -43,14 +43,16 @@ wait_ready = docker.wait_ready
 port_conflicts = docker.port_conflicts
 
 
-def wait_db_healthy_ready(**kwargs: float) -> bool:
+def wait_db_healthy_ready(*, wsl_distro: str | None = None, **kwargs: float) -> bool:
     """`wait_db_healthy()` pre-bound to `SPEC.db`. `kwargs` forward timeout/interval."""
-    return docker.wait_db_healthy_for(SPEC, **kwargs)
+    return docker.wait_db_healthy_for(SPEC, wsl_distro=wsl_distro, **kwargs)
 
 
-def wait_server_ready(realm_host: str, realm_port: int, **kwargs: float) -> bool:
+def wait_server_ready(
+    realm_host: str, realm_port: int, *, wsl_distro: str | None = None, **kwargs: float
+) -> bool:
     """`wait_ready()` pre-bound to `SPEC`'s auth/world containers."""
-    return docker.wait_ready_for(SPEC, realm_host, realm_port, **kwargs)
+    return docker.wait_ready_for(SPEC, realm_host, realm_port, wsl_distro=wsl_distro, **kwargs)
 
 
 def port_conflicts_here() -> list[str]:

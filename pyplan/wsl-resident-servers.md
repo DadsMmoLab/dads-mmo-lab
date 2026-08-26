@@ -52,8 +52,13 @@ and each takes the prefix:
 | `maintenance.py` | `docker exec` (backup and restore) |
 | `console.py` | `docker attach` (GM console, POSIX-only today) |
 
-The prefix is a pure function of one optional string, so it is table-tested and
+The prefix is a pure function of its arguments, so it is table-tested and
 cannot drift per platform.
+
+**The local docker CLI is not consulted for a WSL install.** The machine that
+prompted this work has no Docker Desktop at all - the daemon lives inside the
+distro - so resolving `docker.exe` first would refuse a perfectly good server
+for the absence of something it never uses.
 
 ### Where the distro comes from
 
@@ -75,13 +80,28 @@ from a distro or was not.
 process and into the argv**:
 
 ```
-docker compose --project-directory /home/dml/games/wow-server-playerbots ps
+wsl -d dml-arch --cd /home/dml/games/wow-server-playerbots -- docker compose ps
 ```
 
-Measured: `rc=0`, `ac-database running`. `wsl --cd <path>` works equally well;
-`--project-directory` is chosen because it keeps the Windows-side cwd irrelevant
-rather than merely unused, and because it is compose's own documented way to say
-where a project lives.
+`wsl --cd`, not compose's `--project-directory`. The spike measured both, and
+the first draft of this document chose `--project-directory`; building it showed
+that was wrong, because `_docker()` runs **every** docker subcommand and only
+compose understands that flag. `docker exec`, `docker ps` and `docker inspect`
+all need the same treatment and none of them would have taken it.
+
+**`--cd` is an argument to `wsl.exe` and must precede the `--` separator.**
+Everything after `--` is the command line handed to the distro's shell, so
+
+```
+wsl -d dml-arch -- --cd /home/... docker compose ps    # WRONG
+```
+
+reaches bash, which answers `--: invalid option`. This is placed by
+`docker_prefix()` rather than by callers, so there is one place to get it right.
+It is worth recording how it was found: a unit test asserted that `--cd` was
+present and that the path followed it - both true of a command that could not
+run - and it passed. A live run against a real distro failed immediately. The
+test now asserts the flag's position relative to `--`.
 
 ---
 

@@ -82,11 +82,18 @@ class Controller:
         spec: docker.ContainerSpec,
         server_dir: Path,
         *,
+        wsl_distro: str | None = None,
         import_probe: docker.ImportProbe | None = None,
         reset_unfinished: docker.ResetUnfinished | None = None,
     ) -> None:
         self.spec = spec
         self.server_dir = server_dir
+        # The WSL2 distro this server lives inside, if it does. Every docker
+        # command this controller issues carries it, because a server inside a
+        # distro is reached by that distro's own docker - and asking the wrong
+        # daemon does not fail, it answers "no containers" and the server reads
+        # as stopped while it is running. See `pyplan/wsl-resident-servers.md`.
+        self.wsl_distro = wsl_distro
         # Composed, not inherited, and optional: asking a database what state it
         # is in needs a SQL client and per-game schema names, neither of which
         # this class may know (style-guide §3). A controller built without one
@@ -258,8 +265,10 @@ class Controller:
 
     def wait_db_healthy(self, **kwargs: float) -> bool:
         """Poll until the DB container is healthy. `kwargs` forward timeout/interval."""
-        return docker.wait_db_healthy_for(self.spec, **kwargs)
+        return docker.wait_db_healthy_for(self.spec, wsl_distro=self.wsl_distro, **kwargs)
 
     def wait_ready(self, realm_host: str, realm_port: int, **kwargs: float) -> bool:
         """Poll until auth+world are up and ready. `kwargs` forward timeout/interval."""
-        return docker.wait_ready_for(self.spec, realm_host, realm_port, **kwargs)
+        return docker.wait_ready_for(
+            self.spec, realm_host, realm_port, wsl_distro=self.wsl_distro, **kwargs
+        )

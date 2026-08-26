@@ -8,6 +8,7 @@ real AzerothCore compose project gets exercised.
 
 from __future__ import annotations
 
+import ast
 import subprocess
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
@@ -255,14 +256,14 @@ def test_foreign_port_conflicts_drops_our_own_containers_and_keeps_everything_el
     a container is not proof that we do.
     """
     labels = {"mine": "yulon-wow-wotlk-abc", "theirs": "some-other", "?": docker.UNREADABLE}
-    monkeypatch.setattr(docker, "port_conflicts", lambda _ports: list(labels))
-    monkeypatch.setattr(docker, "container_project", labels.get)
+    monkeypatch.setattr(docker, "port_conflicts", lambda _ports, **_kw: list(labels))
+    monkeypatch.setattr(docker, "container_project", lambda name, **_kw: labels.get(name))
     spec = docker.ContainerSpec(db="d", auth="a", world="w", ports=(9999,))
     assert docker.foreign_port_conflicts(spec, "yulon-wow-wotlk-abc") == ["theirs", "?"]
     # Nothing publishing the ports means nothing is asked about ownership either.
-    monkeypatch.setattr(docker, "port_conflicts", lambda _ports: [])
+    monkeypatch.setattr(docker, "port_conflicts", lambda _ports, **_kw: [])
     monkeypatch.setattr(
-        docker, "container_project", lambda _n: pytest.fail("asked who owns nothing")
+        docker, "container_project", lambda _n, **_kw: pytest.fail("asked who owns nothing")
     )
     assert docker.foreign_port_conflicts(spec, "yulon-wow-wotlk-abc") == []
 
@@ -2975,3 +2976,90 @@ def test_no_wsl_on_this_host_is_the_existing_missing_cli_answer(
     monkeypatch.setattr(docker.platform, "_which", lambda name, path=None: None)
     proc = docker._docker(["ps"], wsl_distro="dml-arch")
     assert docker._cli_missing(proc)
+
+
+# Functions that reach the docker seam without needing to name a daemon, each
+# with the reason. Anything NOT here and NOT taking `wsl_distro` fails the
+# completeness test below.
+_DAEMON_AGNOSTIC: dict[str, str] = {
+    "_docker": "the seam itself - it takes the distro and builds the argv",
+}
+
+
+def _seam_reachers() -> dict[str, list[str]]:
+    """Every function in `docker.py` that reaches `_docker`, directly or not.
+
+    Transitive on purpose. `wait_ready()` never calls `_docker` itself - it calls
+    `_health()`, which does - so a direct-callers-only rule would bless it while
+    it quietly asked the wrong daemon. The closure is what makes this a
+    guarantee rather than a spot check.
+
+    Parsed rather than grepped, so a call inside a nested block counts and a
+    mention in a docstring does not.
+    """
+    tree = ast.parse(Path(docker.__file__).read_text(encoding="utf-8"))
+    defs: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    calls: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        defs[node.name] = node
+        calls[node.name] = {
+            child.func.id
+            for child in ast.walk(node)
+            if isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+        }
+
+    reaching = {"_docker"}
+    changed = True
+    while changed:
+        changed = False
+        for name, called in calls.items():
+            if name not in reaching and called & reaching:
+                reaching.add(name)
+                changed = True
+
+    out: dict[str, list[str]] = {}
+    for name in reaching:
+        node = defs[name]
+        args = node.args
+        out[name] = [a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)]
+    return out
+
+
+def test_every_function_that_talks_to_docker_can_say_which_daemon() -> None:
+    """A missed call site is SILENT, which is why this is a test and not a habit.
+
+    A WSL-resident server's containers live in that distro's docker. A function
+    that cannot pass the distro asks Docker Desktop instead - and Docker Desktop
+    answers cheerfully, with an empty list. The server reads as stopped while it
+    is running fine, and nothing raises.
+
+    So the rule is checked by parsing the module rather than by remembering:
+    every function that reaches the seam, at any depth, either takes
+    `wsl_distro` or is named in `_DAEMON_AGNOSTIC` with the reason.
+    """
+    missing = [
+        name
+        for name, args in _seam_reachers().items()
+        if "wsl_distro" not in args and name not in _DAEMON_AGNOSTIC
+    ]
+    assert not missing, (
+        "these reach docker but cannot say which daemon, so a WSL-resident "
+        f"server would be asked of the wrong one: {sorted(missing)}\n"
+        "Add `wsl_distro: str | None = None` and forward it, or add the name to "
+        "_DAEMON_AGNOSTIC with the reason it needs none."
+    )
+
+
+def test_the_completeness_test_would_notice_a_new_function() -> None:
+    """The guard's own guard: prove it reads the module rather than a list.
+
+    Without this, `_seam_reachers()` could quietly return almost nothing - a
+    parse error, a renamed seam - and the test above would pass by finding
+    nothing to complain about, which is the failure mode it exists to prevent.
+    """
+    reaching = _seam_reachers()
+    assert len(reaching) > 15, f"only found {len(reaching)} - is the parse working?"
+    for known in ("status", "_run", "_docker", "wait_ready"):
+        assert known in reaching, f"{known} should reach the seam but was not found"
