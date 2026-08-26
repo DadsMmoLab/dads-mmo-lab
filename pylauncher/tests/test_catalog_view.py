@@ -9,7 +9,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QPushButton, QWidget
 
 from tests.conftest import process_events
 from yulon import runner, wsl
@@ -661,3 +661,65 @@ def test_a_client_folder_is_still_asked_for_when_the_game_needs_one(
     view.adopted.connect(lambda *a: got.append(a))
     assert view.adopt_from_wsl(CATALOG.get("wow-tbc")) is True
     assert got == [("wow-tbc", tbc_server.server_dir, client, "dml-arch")]
+
+
+def test_the_wsl_adopt_button_exists_where_a_distro_could_hold_a_server(
+    qapp: object, tmp_path: Path
+) -> None:
+    """A feature with no button is a feature nobody has.
+
+    `adopt_from_wsl()` shipped with its signal, its persistence and its tests,
+    and nothing in the running app could reach any of it - the method had no
+    caller at all. Asserted on the widget tree rather than on the method, since
+    that is the difference the user experiences.
+    """
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        home=tmp_path,
+        wsl_distros=lambda: ("dml-arch",),
+    )
+    button = view.findChild(QPushButton, "adopt-wsl-wow-wotlk")
+    assert button is not None, "no way to reach adopt_from_wsl from the UI"
+    assert button.isEnabled()
+
+
+def test_no_wsl_adopt_button_where_there_are_no_distros(qapp: object, tmp_path: Path) -> None:
+    """On Linux, macOS, and a Windows box with no WSL, the offer cannot be honoured.
+
+    `wsl_distros()` answers () for all three, so one check covers every case
+    rather than a platform test that would have to be kept in step.
+    """
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        home=tmp_path,
+        wsl_distros=lambda: (),
+    )
+    assert view.findChild(QPushButton, "adopt-wsl-wow-wotlk") is None
+
+
+def test_the_adopt_button_actually_calls_adopt_from_wsl(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Wired, not merely present - a button connected to nothing looks identical."""
+    called: list[str] = []
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        home=tmp_path,
+        wsl_distros=lambda: ("dml-arch",),
+    )
+    monkeypatch.setattr(
+        view, "adopt_from_wsl", lambda entry: called.append(entry.id) or True  # type: ignore[func-returns-value]
+    )
+    button = view.findChild(QPushButton, "adopt-wsl-wow-wotlk")
+    assert button is not None
+    button.click()
+    assert called == ["wow-wotlk"]

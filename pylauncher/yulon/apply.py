@@ -205,7 +205,12 @@ class DockerSql:
             raise ApplyError(platform.DOCKER_CLI_MISSING_HELP) from exc
 
     def _env(self) -> dict[str, str]:
-        return mysql_env(self.root_password)
+        # The distro goes with the password. Without it `mysql_env()` builds an
+        # environment with no WSLENV, so `docker exec -e MYSQL_PWD` forwards a
+        # variable that arrives EMPTY inside the distro and mysql reports an
+        # authentication failure against a healthy database. The unit test for
+        # WSLENV called `mysql_env()` directly and so never saw this.
+        return mysql_env(self.root_password, self.wsl_distro)
 
     def _argv(self, db: Db, *, extra: tuple[str, ...] = ()) -> list[str]:
         """`docker exec ... mysql <db>`, with the CLI name this host can start.

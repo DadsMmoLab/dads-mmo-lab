@@ -160,6 +160,7 @@ class CatalogView(QWidget):
         home: Path | None = None,
         platform_id: Callable[[], str] = platform.detect,
         pick_wsl_server: WslServerPicker = _qt_wsl_server_picker,
+        wsl_distros: Callable[[], tuple[str, ...]] = platform.wsl_distros,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -169,6 +170,8 @@ class CatalogView(QWidget):
         self._log = log_panel
         self._pick_dir = pick_dir
         self._pick_wsl_server = pick_wsl_server
+        self._wsl_distros = wsl_distros
+        self._adopt_buttons: dict[str, QPushButton] = {}
         self._home = home if home is not None else Path.home()
         self._buttons: dict[str, QPushButton] = {}
         self._gated: set[str] = set()  # ids the platform gate disabled (roadmap 6.1)
@@ -226,6 +229,22 @@ class CatalogView(QWidget):
         existing.clicked.connect(lambda _checked=False, e=entry: self.attach_existing(e))
         box.addWidget(existing)
         self._existing_buttons[entry.id] = existing
+
+        # Only where a WSL-resident server can exist. On Linux, macOS, and on a
+        # Windows box with no distros, this button would be an offer the machine
+        # cannot honour - and `wsl_distros()` answers () for all of them, so the
+        # one check covers every case.
+        if self._wsl_distros():
+            adopt = QPushButton("Find in WSL…", frame)
+            adopt.setObjectName(f"adopt-wsl-{entry.id}")
+            adopt.setToolTip(
+                "Adopt a server that lives inside a WSL distro — for example one the "
+                "DML Launcher built. Yu'lon manages it where it is; nothing is moved "
+                "or reinstalled."
+            )
+            adopt.clicked.connect(lambda _checked=False, e=entry: self.adopt_from_wsl(e))
+            box.addWidget(adopt)
+            self._adopt_buttons[entry.id] = adopt
         return frame
 
     def button_for(self, game_id: str) -> QPushButton:

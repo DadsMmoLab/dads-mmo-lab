@@ -642,3 +642,31 @@ def test_mysql_env_adds_no_wslenv_for_a_local_install() -> None:
     env = apply_module.mysql_env("hunter2")
     assert env["MYSQL_PWD"] == "hunter2"
     assert "WSLENV" not in env or "MYSQL_PWD" not in env.get("WSLENV", "")
+
+
+def test_the_sql_runner_announces_the_password_through_its_own_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Through `DockerSql`, not through `mysql_env` - that is the whole point.
+
+    The first WSLENV test called `mysql_env()` directly and passed, while
+    `DockerSql._env()` called it WITHOUT the distro. So the function was right,
+    the only caller that matters was wrong, and the password crossed into the
+    distro empty: an authentication failure against a healthy database, which is
+    the exact symptom the crossing exists to prevent.
+
+    Asserting through the object is the fix for the test as much as for the code.
+    """
+    monkeypatch.setattr(apply_module.platform, "_which", lambda name, path=None: "wsl.exe")
+    env = DockerSql("ac-database", "hunter2", wsl_distro="dml-arch")._env()
+    assert env["MYSQL_PWD"] == "hunter2"
+    assert "MYSQL_PWD" in env.get("WSLENV", "").split(
+        ":"
+    ), "the password will arrive EMPTY inside the distro"
+
+
+def test_a_local_sql_runner_announces_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing crosses a boundary, so nothing needs announcing."""
+    env = DockerSql("ac-database", "hunter2")._env()
+    assert env["MYSQL_PWD"] == "hunter2"
+    assert "MYSQL_PWD" not in env.get("WSLENV", "").split(":")
