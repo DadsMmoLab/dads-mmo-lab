@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from yulon import docker
+from yulon import docker, runner
 from yulon.controller_wow_wotlk import docker_ctl
 
 SPEC = docker_ctl.SPEC
@@ -3187,3 +3187,86 @@ def test_an_ordinary_docker_failure_still_reports_the_command_and_the_code(
         docker._run(["inspect", "nope"], wsl_distro="dml-arch")
     said = str(raised.value)
     assert "docker inspect nope exited 1" in said and "no such container" in said, said
+
+
+# wsl.exe writes UTF-16LE, and `runner.stream()` decodes as UTF-8, so each ASCII
+# character arrives followed by a NUL. This is what the Console tab was showing.
+_GONE_LINE = "T\x00h\x00e\x00r\x00e\x00 \x00i\x00s\x00 \x00n\x00o\x00"
+
+
+def _stream_that_fails(*lines: str, returncode: int = 4294967295):
+    """A `runner.stream` stand-in: yields lines, then fails the way the real one does."""
+
+    def fake(command: list[str], cwd: object = None, **_kw: object):
+        yield from lines
+        raise subprocess.CalledProcessError(returncode, command)
+
+    return fake
+
+
+def test_a_deleted_distro_is_explained_in_the_console_log_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_run()` was wired for this and the two STREAMING seams were not.
+
+    Start, Stop and Status go through `_run()`; the Console tab's log goes
+    through `follow_logs()`, which raises whatever `runner.stream()` raises. So
+    the same dead distro was explained on one tab and shown as NUL-riddled
+    gibberish followed by "CalledProcessError: ... exit status 4294967295" on
+    another - naming neither the distro nor anything to do about it.
+
+    A seam-by-seam fix that stops at the first seam is how this branch produced
+    four blockers; the second one is not optional.
+    """
+    from yulon import wsl
+
+    monkeypatch.setattr(runner, "stream", _stream_that_fails(_GONE_LINE))
+    monkeypatch.setattr(wsl, "distro_states", lambda: (wsl.Distro("other-distro", True),))
+
+    with pytest.raises(docker.DockerCommandError) as raised:
+        list(docker.follow_logs("ac-worldserver", wsl_distro="dml-arch"))
+
+    said = str(raised.value)
+    assert "dml-arch" in said and "no longer exists" in said, said
+
+
+def test_a_streamed_command_in_a_deleted_distro_says_so_instead_of_its_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The build and the import read this one, and it must not start raising.
+
+    `run_attached()` promises its callers a status back rather than an
+    exception - `repair_import()` needs to go on and check something else - so
+    the translation replaces the retained lines and leaves the contract alone.
+    Replaced, not appended: on this failure every retained line IS the
+    complaint, and printing it above the explanation buries the explanation in
+    the noise it was written to translate.
+    """
+    from yulon import wsl
+
+    monkeypatch.setattr(runner, "stream", _stream_that_fails(_GONE_LINE, _GONE_LINE))
+    monkeypatch.setattr(wsl, "distro_states", lambda: (wsl.Distro("other-distro", True),))
+
+    result = docker.run_attached(["compose", "up"], Path("/srv"), wsl_distro="dml-arch")
+
+    assert result.returncode == 4294967295, "the status was swallowed"
+    assert len(result.tail) == 1, result.tail
+    assert "dml-arch" in result.tail[0] and "no longer exists" in result.tail[0]
+    assert "\x00" not in result.tail[0], "the raw UTF-16 complaint is still what is shown"
+
+
+def test_an_ordinary_streamed_failure_keeps_its_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard: a compile that failed on line 900 still needs its last 200 lines.
+
+    The translation above only fires on a distro that is really gone, so every
+    other non-zero exit - a broken compose file, a failed build - comes back
+    exactly as it did.
+    """
+    monkeypatch.setattr(
+        runner, "stream", _stream_that_fails("error: undefined reference", returncode=2)
+    )
+    result = docker.run_attached(["compose", "build"], Path("/srv"), wsl_distro="dml-arch")
+    assert result.returncode == 2
+    assert result.tail == ("error: undefined reference",)

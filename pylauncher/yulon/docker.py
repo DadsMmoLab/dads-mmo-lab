@@ -2043,8 +2043,26 @@ def follow_logs(container: str, tail: int = 200, *, wsl_distro: str | None = Non
     prefix = platform.docker_prefix(wsl_distro)
     if prefix is None:
         raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP)
+    # Kept because wsl.exe's complaint arrives as OUTPUT here, not as an
+    # exception message: `stream()` yields whatever the child wrote and only
+    # then raises a `CalledProcessError` that carries a number and an argv. A
+    # missing distro is recognised from that text, so the last of it has to
+    # survive long enough to be asked about. Bounded for the same reason
+    # `KEEP_OUTPUT_LINES` is - this can follow a log for days.
+    recent: deque[str] = deque(maxlen=20)
     try:
-        yield from runner.stream([*prefix, "logs", "-f", "--tail", str(tail), container])
+        for line in runner.stream([*prefix, "logs", "-f", "--tail", str(tail), container]):
+            recent.append(line)
+            yield line
+    except subprocess.CalledProcessError as exc:
+        # The streaming half of what `_run()` does for buffered calls. Without
+        # it the Console tab showed wsl.exe's UTF-16 complaint as NUL-riddled
+        # gibberish and then "CalledProcessError: ... exit status 4294967295",
+        # which names neither the distro nor anything to do about it.
+        problem = wsl.missing_distro_problem(wsl_distro, exc.returncode, "\n".join(recent))
+        if problem is not None:
+            raise DockerCommandError(problem) from exc
+        raise
     except OSError as exc:
         # The same uninstalled-mid-run case `_docker()` handles, arriving from
         # `Popen` on the first line instead of from `subprocess.run`. Both roads
@@ -2194,6 +2212,14 @@ def run_attached(
                         logger.warning(f"the output sink stopped accepting lines: {exc}")
                         live = None
     except subprocess.CalledProcessError as exc:
+        # Replaced rather than appended: on a missing distro every line in
+        # `tail` IS the complaint, arriving as UTF-16 with a NUL after each
+        # character, and showing that above the explanation would bury it in
+        # the noise it exists to translate. This one keeps the contract above -
+        # the status comes back, nothing is raised.
+        problem = wsl.missing_distro_problem(wsl_distro, exc.returncode, "\n".join(tail))
+        if problem is not None:
+            return AttachedRun(exc.returncode, (problem,))
         return AttachedRun(exc.returncode, tuple(tail))
     except OSError as exc:
         # Docker uninstalled while the launcher is open, arriving from `Popen`;
