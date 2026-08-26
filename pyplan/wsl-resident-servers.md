@@ -189,11 +189,29 @@ From then on the install is an ordinary `KnownInstall` and Yu'lon manages it
 through its own seams.
 
 Full control after adoption — start, stop, teardown, repair, accounts, backup,
-restore, modules. Yu'lon is replacing the DML Launcher, not sharing a server
-with it, and a half-owned server ("you may start it but not repair it") is a
-worse product than either owning it or refusing it.
+restore, modules. A half-owned server ("you may start it but not repair it")
+would be a worse product than either owning it or refusing it.
 
----
+**This is settled, not assumed.** An adversarial review raised coexistence as an
+open risk: the DML Launcher may still be installed and managing the same
+containers, and nothing here detects that. The project owner's answer
+(2026-08-26) is that **Yu'lon is taking over everything** — the launcher is
+being retired rather than run alongside. So there is no ownership-transfer
+protocol to design, because there is no second owner to negotiate with; what
+remains is a migration, and adopting the servers people already have is what
+makes that migration possible without a multi-hour rebuild.
+
+Two consequences worth stating, because they follow from that decision rather
+than from this design:
+
+* **WSL-resident is a first-class topology, not a compatibility shim.** The same
+  review suggested treating it as a bounded layer with an exit policy. That
+  would be right if the launcher were staying and this were a bridge; it is not.
+  The servers are where they are, and Yu'lon owns them there.
+* **Installing into a distro becomes a real question later.** It is still out of
+  scope here (§7), but "Yu'lon takes over everything" means the answer is
+  eventually yes rather than never, and §7 names the seam it plugs into.
+
 
 ## 4. Two traps, measured
 
