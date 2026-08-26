@@ -77,7 +77,11 @@ class ControllerServices:
 
     @classmethod
     def for_wotlk(
-        cls, entry: CatalogEntry, server_dir: Path, client_dir: Path | None = None
+        cls,
+        entry: CatalogEntry,
+        server_dir: Path,
+        client_dir: Path | None = None,
+        wsl_distro: str | None = None,
     ) -> ControllerServices:
         """The real WotLK wiring for an install at `server_dir`."""
         spec = entry.container_spec()
@@ -104,17 +108,18 @@ class ControllerServices:
                     f"and restore will fail until that file is restored"
                 )
             password = wotlk_modules.DEFAULT_DB_ROOT_PASSWORD
-        sql = DockerSql(spec.db, password)
+        sql = DockerSql(spec.db, password, wsl_distro=wsl_distro)
         # Bound to this entry's own db container, not `mysql_for()`'s
         # `docker_ctl.SPEC.db`, so a catalog entry that names a different one
         # cannot end up backing up somebody else's database.
-        mysql = wotlk_maintenance.DockerMysql(spec.db, password)
+        mysql = wotlk_maintenance.DockerMysql(spec.db, password, wsl_distro=wsl_distro)
         # Both seams, because neither answers the whole question on its own:
         # `DockerMysql` can ask what schemas exist without naming one to connect
         # to, `DockerSql` can then read inside them. See `repair.import_state()`.
         controller = Controller(
             spec,
             server_dir,
+            wsl_distro=wsl_distro,
             # Only for a game that named a one-shot import service. `for_wotlk()`
             # is called for EVERY install in state.json, not just wow-wotlk, and
             # `repair.import_state()` looks for the `acore_*` schemas by name — so

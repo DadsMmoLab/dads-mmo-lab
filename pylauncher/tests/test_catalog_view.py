@@ -12,7 +12,7 @@ import pytest
 from PySide6.QtWidgets import QWidget
 
 from tests.conftest import process_events
-from yulon import runner
+from yulon import runner, wsl
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.installer import Installer, InstallOptions
 from yulon.ui import catalog_view
@@ -552,3 +552,112 @@ def test_the_picker_gives_up_rather_than_looping_on_a_root_that_is_not_there() -
     weird = Path(PureWindowsPath("Q:/gone/deeper").as_posix())
     got = catalog_view._existing_ancestor(weird)
     assert got is None or got.is_dir()
+
+
+# ------------------------------------------------- adopting a WSL-resident server
+
+_WSL_SERVER = wsl.FoundServer(
+    distro="dml-arch",
+    project="wow-server-playerbots",
+    running=True,
+    server_dir=Path(r"\\wsl.localhost\dml-arch\home\dml\games\wow-server-playerbots"),
+)
+
+
+def test_adopting_a_wsl_server_remembers_the_distro_it_lives_in(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The distro is the whole point: without it every later command asks the wrong docker.
+
+    Yu'lon is replacing the DML Launcher, so a server already built inside a
+    distro has to be adoptable - asking a user to repeat a multi-hour compile is
+    not a migration path.
+    """
+    monkeypatch.setattr(wsl, "find_servers", lambda include=(): (_WSL_SERVER,))
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        home=tmp_path,
+        pick_wsl_server=lambda _found: _WSL_SERVER,
+    )
+    got: list[tuple[object, ...]] = []
+    view.adopted.connect(lambda *a: got.append(a))
+
+    assert view.adopt_from_wsl(CATALOG.get("wow-wotlk")) is True
+    assert got == [("wow-wotlk", _WSL_SERVER.server_dir, None, "dml-arch")]
+
+
+def test_adopting_is_declined_without_complaint(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Closing the picker is an answer, not an error."""
+    monkeypatch.setattr(wsl, "find_servers", lambda include=(): (_WSL_SERVER,))
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        home=tmp_path,
+        pick_wsl_server=lambda _found: None,
+    )
+    got: list[object] = []
+    view.adopted.connect(lambda *a: got.append(a))
+    assert view.adopt_from_wsl(CATALOG.get("wow-wotlk")) is False
+    assert got == []
+
+
+def test_finding_nothing_says_so_rather_than_opening_an_empty_picker(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty list is a message, not a dialog with nothing in it."""
+    from PySide6.QtWidgets import QMessageBox
+
+    told: list[str] = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: told.append(a[2]))  # type: ignore[attr-defined]
+    monkeypatch.setattr(wsl, "find_servers", lambda include=(): ())
+    opened: list[object] = []
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        home=tmp_path,
+        pick_wsl_server=lambda found: opened.append(found),  # type: ignore[func-returns-value,arg-type]
+    )
+    assert view.adopt_from_wsl(CATALOG.get("wow-wotlk")) is False
+    assert opened == [], "an empty picker was opened"
+    assert told and "WSL" in told[0]
+
+
+def test_a_client_folder_is_still_asked_for_when_the_game_needs_one(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Adopting changes where the SERVER is, not whether a client is required.
+
+    TBC asks for one; the folder lives on the Windows side either way, because
+    it is the user's own WoW install and nothing about it moved into a distro.
+    """
+    tbc_server = wsl.FoundServer(
+        distro="dml-arch",
+        project="wow-tbc-server",
+        running=False,
+        server_dir=Path(r"\\wsl.localhost\dml-arch\home\dml\tbc"),
+    )
+    monkeypatch.setattr(wsl, "find_servers", lambda include=(): (tbc_server,))
+    client = tmp_path / "client"
+    client.mkdir()
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        home=tmp_path,
+        pick_dir=lambda *_: client,
+        pick_wsl_server=lambda _f: tbc_server,
+    )
+    got: list[tuple[object, ...]] = []
+    view.adopted.connect(lambda *a: got.append(a))
+    assert view.adopt_from_wsl(CATALOG.get("wow-tbc")) is True
+    assert got == [("wow-tbc", tbc_server.server_dir, client, "dml-arch")]

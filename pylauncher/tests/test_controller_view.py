@@ -1082,3 +1082,26 @@ def test_the_restore_warning_names_the_plan_and_does_not_overstate(
     assert "Every character on the server is replaced" not in said
     assert "LEFT AS THEY ARE" in said, "the merge is not stated"
     assert "merges" in said
+
+
+def test_for_wotlk_wires_the_distro_into_every_seam_that_talks_to_docker(
+    qapp: object, tmp_path: Path
+) -> None:
+    """An accepted-but-ignored parameter is worse than no parameter.
+
+    `for_wotlk()` builds three things that each shell out to docker - the
+    controller, the SQL runner and the mysqldump runner - and a WSL-resident
+    server answers only to its own distro's daemon. The first version of this
+    took `wsl_distro` and passed it to none of them, which nothing would have
+    reported: the tab would open and every action would quietly address the
+    wrong docker.
+    """
+    entry = load_catalog().get("wow-wotlk")
+    services = ControllerServices.for_wotlk(entry, tmp_path, None, "dml-arch")
+    assert services.controller.wsl_distro == "dml-arch"
+
+
+def test_for_wotlk_defaults_to_no_distro(qapp: object, tmp_path: Path) -> None:
+    """An ordinary local install is unchanged by any of this."""
+    entry = load_catalog().get("wow-wotlk")
+    assert ControllerServices.for_wotlk(entry, tmp_path).controller.wsl_distro is None

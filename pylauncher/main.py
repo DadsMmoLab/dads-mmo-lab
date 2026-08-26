@@ -96,14 +96,19 @@ def build_window() -> object:
     controllers: dict[tuple[str, Path], QWidget] = {}
     controller_views: list[QWidget] = []
 
-    def add_controller(game: str, server_dir: Path, client_dir: Path | None) -> None:
+    def add_controller(
+        game: str,
+        server_dir: Path,
+        client_dir: Path | None,
+        wsl_distro: str | None = None,
+    ) -> None:
         """One tab per (game, server dir); a repeat (e.g. "Use existing…" twice) just focuses it."""
         key = (game, server_dir)
         if key in controllers:
             tabs.setCurrentWidget(controllers[key])
             return
         entry = catalog.get(game)
-        services = ControllerServices.for_wotlk(entry, server_dir, client_dir)
+        services = ControllerServices.for_wotlk(entry, server_dir, client_dir, wsl_distro)
         view = ControllerView(entry, services)
         # Every failure this view reports also lands in the app log. Each one is
         # already shown on its own tab, but the log is what a user pastes into a
@@ -119,7 +124,7 @@ def build_window() -> object:
 
     for install in state.installs:
         try:
-            add_controller(install.game, install.server_dir, install.client_dir)
+            add_controller(install.game, install.server_dir, install.client_dir, install.wsl_distro)
         except KeyError:
             logger.warning(f"state.json names unknown game {install.game!r}; skipping")
 
@@ -130,7 +135,23 @@ def build_window() -> object:
         save_state(state)
         add_controller(game, sd, cd)
 
+    def on_adopted(game: str, server_dir: object, client_dir: object, wsl_distro: object) -> None:
+        """A server adopted from a WSL distro, which is remembered with it.
+
+        The distro is recorded rather than re-derived on every start: a server
+        inside a distro answers only to that distro's docker, and working it out
+        again later would mean guessing from a path. See
+        `pyplan/wsl-resident-servers.md`.
+        """
+        sd = Path(str(server_dir))
+        cd = Path(str(client_dir)) if client_dir is not None else None
+        distro = str(wsl_distro) if wsl_distro else None
+        state.remember(KnownInstall(game=game, server_dir=sd, client_dir=cd, wsl_distro=distro))
+        save_state(state)
+        add_controller(game, sd, cd, distro)
+
     catalog_view.installed.connect(on_installed)
+    catalog_view.adopted.connect(on_adopted)
 
     # README §10: non-blocking update check on a background thread; banner only if newer.
     class _UpdateWorker(QObject):
