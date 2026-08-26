@@ -147,6 +147,26 @@ docker_group_consent() {
 # ─────────────────────────────────────────
 # CONFIGURATION
 # ─────────────────────────────────────────
+# ─────────────────────────────────────────
+# BUILD PARALLELISM
+# ─────────────────────────────────────────
+# The compile step used to hardcode a fixed -j "to avoid OOM kills on the Deck's
+# 16GB RAM". Measured on this codebase 2026-08-26 (mangos + playerbots, gcc):
+# a cc1plus process peaks around 835 MB, not the ~8 GB that number implies. So
+# the limit is derived rather than fixed: 1.5 GB per job after reserving 2 GB
+# for the OS, never more jobs than cores, never fewer than one.
+#
+# A Steam Deck (16 GB, 8 threads) still gets a safe 8; a 15-core builder stops
+# compiling at the speed of a 2-core one, which is what this cost before.
+build_jobs() {
+    local cores ram_gb by_ram
+    cores=$(nproc 2>/dev/null || echo 2)
+    ram_gb=$(awk '/MemTotal/ {printf "%d", $2/1048576}' /proc/meminfo 2>/dev/null || echo 4)
+    by_ram=$(( (ram_gb - 2) * 2 / 3 ))
+    [ "$by_ram" -lt 1 ] && by_ram=1
+    if [ "$cores" -lt "$by_ram" ]; then echo "$cores"; else echo "$by_ram"; fi
+}
+
 SERVER_DIR="$HOME/tortoise-wow-server"
 CLIENT_DIR=""
 DB_PASSWORD="tortoise$(date +%s | tail -c 6)"
@@ -506,6 +526,7 @@ do_compile() {
     # USE_ANTICHEAT=OFF: pointless on a solo offline server and can flag a Proton client.
     if ! $DOCKER_CMD run --rm \
             -u "$(id -u):$(id -g)" \
+            -e BUILD_JOBS="$(build_jobs)" \
             -v "$SERVER_DIR/src":/src \
             -v "$SERVER_DIR/install":/install \
             -w /src/_build "$IMAGE" bash -c '
@@ -514,7 +535,7 @@ do_compile() {
           -DCMAKE_INSTALL_PREFIX=/install \
           -DUSE_EXTRACTORS=ON -DUSE_SCRIPTS=ON -DUSE_STD_MALLOC=ON \
           -DDEBUG_SYMBOLS=OFF -DUSE_ANTICHEAT=OFF -DALLOW_TURTLE_ADDONS=ON
-        make -j4
+        make -j${BUILD_JOBS}
         make install
     ' 2>&1 | tee /tmp/tortoise-build.log ; then
         kill $HB 2>/dev/null
