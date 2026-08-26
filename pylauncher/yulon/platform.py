@@ -2502,6 +2502,22 @@ def server_dir_problem(server_dir: Path) -> str | None:
     """
     text = str(server_dir)
     if text.startswith("\\\\") or text.startswith("//"):
+        # A WSL path is a network path to Windows and emphatically not one to
+        # the user - it is their own machine, one virtualisation layer over.
+        # Telling them to "pick a folder on this machine's own disk" answers a
+        # question they did not ask, so this case gets its own words (tester
+        # report, 2026-08-26). Docker Desktop refuses it either way: measured on
+        # Windows 11, `docker run -v \\\\wsl.localhost\\...:/probe` fails with
+        # "is not a valid Windows path".
+        head = text.replace("/", "\\").lower()
+        if head.startswith("\\\\wsl.localhost\\") or head.startswith("\\\\wsl$\\"):
+            return (
+                f"{server_dir} is inside WSL. Docker Desktop cannot bind-mount a WSL path from "
+                "Windows, so the containers would see an empty folder. If that server was "
+                "installed by the DML Launcher it already has its own Docker inside that "
+                "distro - manage it from there, or install a separate server here with a "
+                "folder on the Windows side."
+            )
         return (
             f"{server_dir} is a network path. Docker Desktop cannot share one with its Linux "
             "VM, so the install would appear to work and the containers would see an empty "
