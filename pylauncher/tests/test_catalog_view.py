@@ -723,3 +723,100 @@ def test_the_adopt_button_actually_calls_adopt_from_wsl(
     assert button is not None
     button.click()
     assert called == ["wow-wotlk"]
+
+
+def _wsl_server_at(tmp_path: Path, compose: str) -> wsl.FoundServer:
+    """A FoundServer whose folder really exists, so the check can read it."""
+    (tmp_path / "docker-compose.yml").write_text(compose, encoding="utf-8")
+    return wsl.FoundServer(
+        distro="dml-arch", project="some-server", running=True, server_dir=tmp_path
+    )
+
+
+def test_adopting_refuses_a_project_that_is_a_different_game(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Discovery finds compose projects, not WoW servers, and cannot tell them apart.
+
+    `docker compose ls` reports every project in the distro - a TBC server, a
+    Nextcloud, someone's blog. Adopting one under the wrong catalog entry builds
+    a tab whose every button names containers that do not exist, and each one
+    fails separately and confusingly rather than once and clearly.
+
+    The catalog's container names are the signal; the project name is just a
+    folder name and proves nothing.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    told: list[str] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: told.append(a[2]))  # type: ignore[attr-defined]
+    other_game = _wsl_server_at(tmp_path, "services:\n  db:\n    container_name: mangos-db\n")
+    monkeypatch.setattr(wsl, "find_servers", lambda include=(): (other_game,))
+
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        home=tmp_path,
+        pick_wsl_server=lambda _f: other_game,
+    )
+    got: list[object] = []
+    view.adopted.connect(lambda *a: got.append(a))
+
+    assert view.adopt_from_wsl(CATALOG.get("wow-wotlk")) is False
+    assert got == [], "a different game was adopted as WotLK"
+    assert told and "WoW WotLK" in told[0]
+
+
+def test_adopting_accepts_a_project_whose_containers_match(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """And the check must not refuse the server it was written to accept."""
+    spec = CATALOG.get("wow-wotlk").container_spec()
+    ours = _wsl_server_at(tmp_path, f"services:\n  db:\n    container_name: {spec.db}\n")
+    monkeypatch.setattr(wsl, "find_servers", lambda include=(): (ours,))
+
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        home=tmp_path,
+        pick_wsl_server=lambda _f: ours,
+    )
+    got: list[object] = []
+    view.adopted.connect(lambda *a: got.append(a))
+    assert view.adopt_from_wsl(CATALOG.get("wow-wotlk")) is True
+    assert len(got) == 1
+
+
+def test_adopting_allows_a_compose_file_it_cannot_read(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreadable file is not evidence of the wrong game.
+
+    The folder lives inside a distro and is reached over a UNC path; that read
+    can fail for reasons that have nothing to do with which game it is. Refusing
+    on "I could not check" would block the migration this feature exists to
+    provide, so the check only fires on a file it actually read.
+    """
+    unreadable = wsl.FoundServer(
+        distro="dml-arch",
+        project="wow",
+        running=True,
+        server_dir=tmp_path / "gone",
+    )
+    monkeypatch.setattr(wsl, "find_servers", lambda include=(): (unreadable,))
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        home=tmp_path,
+        pick_wsl_server=lambda _f: unreadable,
+    )
+    got: list[object] = []
+    view.adopted.connect(lambda *a: got.append(a))
+    assert view.adopt_from_wsl(CATALOG.get("wow-wotlk")) is True
+    assert len(got) == 1

@@ -136,6 +136,34 @@ def _qt_wsl_server_picker(found: tuple[wsl.FoundServer, ...]) -> wsl.FoundServer
     return found[labels.index(choice)]
 
 
+def _looks_like(entry: CatalogEntry, server_dir: Path) -> bool:
+    """Does the compose file in `server_dir` name any container this game uses?
+
+    Discovery finds compose PROJECTS, not WoW servers - `docker compose ls`
+    reports a TBC install, a Nextcloud and someone's blog with equal enthusiasm.
+    Adopting one under the wrong catalog entry produces a tab whose every button
+    names containers that do not exist, failing separately and confusingly
+    instead of once and clearly.
+
+    The catalog's container names are the evidence; the project name is a folder
+    name and proves nothing.
+
+    True when the file cannot be read at all. The folder lives inside a distro
+    and is reached over a UNC path, and that read can fail for reasons unrelated
+    to which game it is - refusing on "I could not check" would block the
+    migration this feature exists to provide.
+    """
+    compose = compose_file(server_dir)
+    if compose is None:
+        return True
+    try:
+        text = compose.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return True
+    spec = entry.container_spec()
+    return any(name and name in text for name in (spec.db, spec.auth, spec.world))
+
+
 class CatalogView(QWidget):
     """One tile per catalog entry; Install streams the Phase 3a installer into `log_panel`."""
 
@@ -332,6 +360,19 @@ class CatalogView(QWidget):
 
         chosen = self._pick_wsl_server(found)
         if chosen is None:
+            return False
+
+        if not _looks_like(entry, chosen.server_dir):
+            QMessageBox.warning(
+                self,
+                "That is a different server",
+                f"{chosen.project} in {chosen.distro} does not look like a "
+                f"{entry.name} install — its compose file names none of the containers "
+                f"{entry.name} uses.\n\n"
+                "Adopting it here would give you a tab whose every button talks about "
+                "containers that do not exist. Pick the entry that matches it, or a "
+                "different server.",
+            )
             return False
 
         client_dir: Path | None = None
