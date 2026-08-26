@@ -3204,6 +3204,24 @@ def _stream_that_fails(*lines: str, returncode: int = 4294967295):
     return fake
 
 
+def _wsl_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pretend this box can reach a distro, whatever OS the suite is running on.
+
+    Without this the three tests below pass on Windows and fail on CI's Ubuntu
+    for a reason that has nothing to do with what they check: `docker_prefix()`
+    looks for `wsl.exe` on PATH, finds none, and both seams return
+    `_CLI_MISSING_RETURNCODE` before `runner.stream` is ever reached - so the
+    assertion reads 127 and the Docker-is-missing help text. The seam under
+    test is what happens AFTER the command runs, so the prefix is pinned rather
+    than discovered.
+    """
+    monkeypatch.setattr(
+        docker.platform,
+        "docker_prefix",
+        lambda wsl_distro=None, *, inside=None: ("wsl.exe", "-d", str(wsl_distro), "--", "docker"),
+    )
+
+
 def test_a_deleted_distro_is_explained_in_the_console_log_too(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3220,6 +3238,7 @@ def test_a_deleted_distro_is_explained_in_the_console_log_too(
     """
     from yulon import wsl
 
+    _wsl_prefix(monkeypatch)
     monkeypatch.setattr(runner, "stream", _stream_that_fails(_GONE_LINE))
     monkeypatch.setattr(wsl, "distro_states", lambda: (wsl.Distro("other-distro", True),))
 
@@ -3244,6 +3263,7 @@ def test_a_streamed_command_in_a_deleted_distro_says_so_instead_of_its_output(
     """
     from yulon import wsl
 
+    _wsl_prefix(monkeypatch)
     monkeypatch.setattr(runner, "stream", _stream_that_fails(_GONE_LINE, _GONE_LINE))
     monkeypatch.setattr(wsl, "distro_states", lambda: (wsl.Distro("other-distro", True),))
 
@@ -3264,6 +3284,7 @@ def test_an_ordinary_streamed_failure_keeps_its_output(
     other non-zero exit - a broken compose file, a failed build - comes back
     exactly as it did.
     """
+    _wsl_prefix(monkeypatch)
     monkeypatch.setattr(
         runner, "stream", _stream_that_fails("error: undefined reference", returncode=2)
     )
