@@ -350,12 +350,14 @@ class Accounts(_Strict):
     correct and can never log in.
     """
 
-    scheme: Literal["azerothcore", "mangos_sha"] | None = Field(
+    scheme: Literal["azerothcore", "mangos_sha", "mangos_srp6"] | None = Field(
         default="azerothcore",
         description=(
-            "How this core stores an account: `azerothcore` is SRP6 in salt/verifier with "
-            "the level in account_access; `mangos_sha` is sha_pass_hash with the level in "
-            "account.rank. None means this app does not write accounts for this core and "
+            "How this core stores an account: `azerothcore` is SRP6 in binary salt/verifier "
+            "with the level in account_access; `mangos_sha` is sha_pass_hash with the level "
+            "in account.rank; `mangos_srp6` is the same SRP6 as AzerothCore stored as hex "
+            "text in v/s with the level in account.gmlevel. None means this app does not "
+            "write accounts for this core and "
             "the Accounts tab points at `console_command` instead. Never defaulted onto a "
             "core that has not been measured — a wrong scheme inserts a row that looks "
             "correct and can never log in."

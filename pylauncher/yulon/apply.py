@@ -51,11 +51,101 @@ DB_NAMES: dict[Db, str] = {
     "ale": "acore_ale",
 }
 
+_CLIENT_PROBE_TIMEOUT_SECONDS = 30.0
+"""Bounded, because this runs before any SQL and a wedged daemon must not turn
+one statement into an indefinite wait — but not tightly. 10s was the first
+value and it was too short: `docker exec` against a remote context has to bring
+up its transport first, so the probe timed out, fell back to the classic name,
+and every statement then failed against a container that does not have it. The
+answer is cached, so this is paid once per container per run."""
+
 _CONF_KEY_WRITE_SUFFIXES = (".conf",)
 
 
 class ApplyError(RuntimeError):
     """A step failed in a way that must stop the run (missing template value, git failure, ...)."""
+
+
+_CLIENT_NAMES: dict[str, tuple[str, ...]] = {
+    "mysql": ("mysql", "mariadb"),
+    "mysqldump": ("mysqldump", "mariadb-dump"),
+}
+"""What each tool may be called inside the database container, best guess first."""
+
+_client_cache: dict[tuple[str, str], str] = {}
+
+
+def mysql_client(db_container: str, tool: str = "mysql") -> str:
+    """The name `db_container` actually answers to for `tool`.
+
+    **`mariadb:11` ships neither `mysql` nor `mysqldump`.** MariaDB deprecated
+    the `mysql*` symlinks and removed them in 11, leaving only `mariadb` and
+    `mariadb-dump`. wow-tbc and wow-vanilla run `mariadb:11`, so every statement
+    this app sent them died before it reached a database; wow-tortoise pins
+    `mariadb:10.6`, which still has the symlinks, which is why it worked and
+    hid this (measured on a live TBC server, 2026-08-26).
+
+    Asked of the container rather than derived from the image tag: the tag is
+    not visible from here, images get rebuilt, and `command -v` is the same
+    question the shell would ask. The answer is cached per container because it
+    cannot change without the container being replaced.
+
+    Falls back to the first candidate when the probe cannot run at all, so a
+    daemon hiccup produces the same failure it always did rather than a new one.
+    """
+    key = (db_container, tool)
+    cached = _client_cache.get(key)
+    if cached is not None:
+        return cached
+    candidates = _CLIENT_NAMES.get(tool, (tool,))
+    resolved = _probe_client(db_container, candidates)
+    if resolved is None:
+        return candidates[0]
+    if resolved != candidates[0]:
+        logger.info(f"{db_container} has no `{tool}`; using `{resolved}`")
+    _client_cache[key] = resolved
+    return resolved
+
+
+def _probe_client(db_container: str, candidates: tuple[str, ...]) -> str | None:
+    """Ask the container which of `candidates` it has, or None if it cannot say.
+
+    Its own function so tests can answer for it without also intercepting the
+    statements under test — every caller here runs `docker exec`, and a probe
+    sharing that seam would show up in argv assertions that are about SQL.
+    """
+    program = platform.docker_program()
+    if program is None:
+        return None
+    probe = " || ".join(f"command -v {name}" for name in candidates)
+    try:
+        proc = subprocess.run(
+            [program, "exec", db_container, "sh", "-c", probe],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            check=False,
+            # `os.environ`, not a bare `child_env()`: the calls this probe is
+            # resolving for run with the process environment, so DOCKER_HOST and
+            # friends must reach the probe too. Without it the probe talks to a
+            # different daemon than the statements do, silently answers "no
+            # mariadb here", and every statement then names a binary the real
+            # container does not have.
+            env=runner.child_env(dict(os.environ)),
+            creationflags=runner.creationflags(),
+            timeout=_CLIENT_PROBE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        # WARNING, not DEBUG: falling back is a guess, and when the guess is
+        # wrong every statement afterwards fails with "executable file not
+        # found" — a failure that reads like a broken database rather than an
+        # unanswered question.
+        logger.warning(f"could not ask {db_container} which client it has: {exc}")
+        return None
+    found = proc.stdout.strip().splitlines()
+    if proc.returncode != 0 or not found:
+        return None
+    return found[0].rsplit("/", 1)[-1]
 
 
 def mysql_env(root_password: str) -> dict[str, str]:
@@ -228,7 +318,7 @@ class DockerSql:
             "-e",
             "MYSQL_PWD",  # value taken from OUR env by `docker exec`, not written here
             self.db_container,
-            "mysql",
+            mysql_client(self.db_container),
             "-uroot",
             *extra,
             self._schema(db),
@@ -252,8 +342,23 @@ class DockerSql:
 
 
 def _check_sql(proc: subprocess.CompletedProcess[str], what: str) -> None:
-    if proc.returncode != 0:
-        raise ApplyError(f"SQL failed ({what}): {proc.stderr.strip()}")
+    """Raise with the reason, wherever the reason happens to be.
+
+    `docker exec` reports its OWN failures on STDOUT, not stderr — a container
+    missing the client binary answers
+
+        OCI runtime exec failed: ... exec: "mysql": executable file not found
+
+    on stdout with stderr empty. Reading only stderr turned that into
+    `SQL failed (query -> realmd):` with nothing after the colon, which is the
+    least useful message this app can produce; it cost an hour of looking in the
+    wrong place (2026-08-26). mysql's own errors still arrive on stderr, so
+    stderr stays first and stdout is the fallback.
+    """
+    if proc.returncode == 0:
+        return
+    reason = proc.stderr.strip() or proc.stdout.strip()
+    raise ApplyError(f"SQL failed ({what}): {reason}")
 
 
 # ------------------------------------------------------------------ report

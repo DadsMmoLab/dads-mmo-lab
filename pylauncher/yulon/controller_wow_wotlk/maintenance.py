@@ -100,7 +100,7 @@ from pathlib import Path
 from typing import IO, Protocol
 
 from yulon import docker, platform, runner
-from yulon.apply import DB_NAMES, mysql_env
+from yulon.apply import DB_NAMES, mysql_client, mysql_env
 from yulon.controller_wow_wotlk import docker_ctl
 from yulon.log import get_logger
 
@@ -219,7 +219,7 @@ class DockerMysql:
 
     def databases(self) -> tuple[str, ...]:
         proc = self._exec(
-            ["mysql", "-uroot", "--batch", "--skip-column-names"],
+            [mysql_client(self.db_container), "-uroot", "--batch", "--skip-column-names"],
             # Over stdin like `DockerSql.run_statement()`, though this particular
             # statement holds no secret — one rule, not one rule with exceptions.
             input_text="SHOW DATABASES;\n",
@@ -242,7 +242,7 @@ class DockerMysql:
         # No database in argv: a dump taken with `--databases` carries its own
         # `CREATE DATABASE`/`USE`, so the file decides where it lands and there
         # is no second place for that answer to be wrong.
-        proc = self._exec(["mysql", "-uroot"], stdin=source)
+        proc = self._exec([mysql_client(self.db_container), "-uroot"], stdin=source)
         if proc.returncode != 0:
             raise MaintenanceError(f"restore failed: {_stderr(proc)}")
 
@@ -292,7 +292,7 @@ class DockerMysql:
         what the guide's own restore line consumes.
         """
         return [
-            "mysqldump",
+            mysql_client(self.db_container, "mysqldump"),
             "-uroot",
             "--single-transaction",
             "--routines",

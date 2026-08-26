@@ -173,13 +173,20 @@ def fold(text: str) -> str:
     return "".join(chr(ord(ch) - 0x20) if "a" <= ch <= "z" else ch for ch in text)
 
 
-Scheme = Literal["azerothcore", "mangos_sha"]
+Scheme = Literal["azerothcore", "mangos_sha", "mangos_srp6"]
 """How a core stores an account's credentials and its GM level.
 
-`azerothcore` is SRP6 in `salt`/`verifier` with the level in a separate
-`account_access` table. `mangos_sha` is the CMaNGOS-family shape: a single
-`sha_pass_hash` column and the level in `account.rank`, with `v`/`s` left
-NULL for the auth server to fill on first login.
+`azerothcore` is SRP6 in binary `salt`/`verifier` with the level in a separate
+`account_access` table. `mangos_sha` is tortoise's shape: a single
+`sha_pass_hash` column and the level in `account.rank`, with `v`/`s` left NULL
+for the auth server to fill on first login. `mangos_srp6` is CMaNGOS proper
+(TBC, Vanilla): the SAME SRP6 arithmetic as AzerothCore, stored as uppercase
+hex text in `v`/`s` and with the level in `account.gmlevel`.
+
+Three cores, three shapes, and the difference between them is three statements:
+the insert, reading the level, writing the level. Everything else -- the
+validation, the id lookup, the realmcharacters seeding, the convergence rules --
+is the same on all of them.
 """
 
 
@@ -222,6 +229,38 @@ def verifier_for(username: str, password: str, salt: bytes) -> bytes:
     # ToByteArray<32>() → BN_bn2lebinpad: little-endian, zero-padded to exactly
     # 32 bytes, so a verifier that happens to fit in fewer still fills binary(32).
     return pow(GENERATOR, x, MODULUS).to_bytes(VERIFIER_LENGTH, "little")
+
+
+def mangos_srp6_credentials(
+    username: str, password: str, *, salt: bytes | None = None
+) -> tuple[str, str]:
+    """CMaNGOS's `(s, v)` pair, as that core stores them: uppercase hex text.
+
+    The arithmetic is `verifier_for()` unchanged -- same modulus, same generator,
+    same `H(s || H(U:P))` read little-endian. Only the REPRESENTATION differs:
+    AzerothCore writes binary little-endian into `binary(32)` columns, CMaNGOS
+    writes big-endian hex into `longtext`. So the salt is reversed on the way out
+    and the verifier is re-read as an integer and printed big-endian.
+
+    Solved from rows the servers themselves shipped rather than from a
+    specification: the seeded ADMINISTRATOR and PLAYER accounts on a live TBC and
+    a live Vanilla server (2026-08-26, byte-identical on both) are reproduced
+    exactly by this function when handed their own salt. `tests/test_accounts.py`
+    pins both.
+
+    Args:
+        salt: the raw hashing bytes, for reproducing a known row. Generated
+            fresh when omitted, which is what callers want.
+
+    Returns:
+        `(s, v)`, both 64 uppercase hex characters, ready to be written.
+    """
+    raw = make_salt() if salt is None else salt
+    verifier = verifier_for(username, password, raw)
+    # `raw` is the byte order the hash consumed; the column holds its reverse.
+    s_hex = raw[::-1].hex().upper()
+    v_hex = f"{int.from_bytes(verifier, 'little'):064X}"
+    return s_hex, v_hex
 
 
 def registration_data(username: str, password: str) -> tuple[bytes, bytes]:
@@ -372,7 +411,17 @@ def _account_row(sql: SqlSeam, name: str, password: str, scheme: Scheme) -> tupl
         return existing, False
 
     logger.info(f"creating account {name}")  # never the password
-    if scheme == "mangos_sha":
+    if scheme == "mangos_srp6":
+        # Only the four columns this core has no default for. `gmlevel` is left
+        # at its own default and raised by `_grant_gm()` when asked, so an
+        # ordinary account is never briefly an administrator.
+        s_hex, v_hex = mangos_srp6_credentials(name, password)
+        statement = (
+            "INSERT INTO account (username, v, s, joindate)"
+            f" VALUES ({_text_literal(name)}, {_text_literal(v_hex)},"
+            f" {_text_literal(s_hex)}, NOW())"
+        )
+    elif scheme == "mangos_sha":
         # Byte for byte what the core's own `account create` emits, columns and
         # all: it names only these three, and every other column on that table
         # has a default. Adding `expansion` or `email` here would be this app
@@ -442,12 +491,14 @@ def _grant_gm(sql: SqlSeam, account_id: int, gm_level: int, scheme: Scheme) -> N
     justified itself with a "retry path" that no call could reach; the
     convergence fix in `create_account()` is what made the branch real.)
     """
-    if scheme == "mangos_sha":
-        # No `account_access` table exists on these cores at all; the level is a
-        # column, and `rank` is a reserved word, hence the quoting.
+    if scheme in ("mangos_sha", "mangos_srp6"):
+        # No `account_access` table exists on either core; the level is a column
+        # on `account`. tortoise calls it `rank` (a reserved word, hence the
+        # quoting), CMaNGOS calls it `gmlevel`.
+        column = "`rank`" if scheme == "mangos_sha" else "gmlevel"
         _run(
             sql,
-            f"UPDATE account SET `rank` = {gm_level} WHERE id = {account_id}",
+            f"UPDATE account SET {column} = {gm_level} WHERE id = {account_id}",
             f"grant GM level {gm_level} to account {account_id}",
         )
         return
@@ -497,10 +548,11 @@ def _account_id(sql: SqlSeam, username: str) -> int | None:
 
 def _gm_level(sql: SqlSeam, account_id: int, scheme: Scheme) -> int:
     """The account's GM level for all realms, or `NO_GM` when it has no `account_access` row."""
-    if scheme == "mangos_sha":
+    if scheme in ("mangos_sha", "mangos_srp6"):
+        column = "`rank`" if scheme == "mangos_sha" else "gmlevel"
         rows = _query_rows(
             sql,
-            f"SELECT `rank` FROM account WHERE id = {account_id}",
+            f"SELECT {column} FROM account WHERE id = {account_id}",
             f"read the GM level of account {account_id}",
         )
         level = _one_int(rows, f"read the GM level of account {account_id}")

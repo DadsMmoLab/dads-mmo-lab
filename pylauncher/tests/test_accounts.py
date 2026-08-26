@@ -691,3 +691,60 @@ def test_the_azerothcore_scheme_is_still_the_default() -> None:
     accounts.create_account(sql, "bob", "hunter2")
     insert = _one_statement(sql, "INSERT INTO account (")
     assert "salt, verifier" in insert and "sha_pass_hash" not in insert, insert
+
+
+# ------------------------------------------------ the mangos_srp6 scheme
+
+# Rows the CMaNGOS seed data ships and both live servers agreed on byte for byte
+# (TBC on yulon-ubuntu, Vanilla on yulon-fedora, 2026-08-26). Password equals
+# username for these seeded accounts. Same N and g as AzerothCore; what differs
+# is only how the two numbers are stored -- hex text, big-endian, where
+# AzerothCore uses binary little-endian.
+CMANGOS_WRITTEN: list[tuple[str, str, str, str]] = [
+    (
+        "ADMINISTRATOR",
+        "ADMINISTRATOR",
+        "8EB5DE915AA3D805FA7099CF61C0BB8A77990EA869078A0C5B9EEE55828F4505",
+        "312B99EEF1C0196BB73B79D114CE161C5D089319E6EF54FAA6117DAB8B672C14",
+    ),
+    (
+        "PLAYER",
+        "PLAYER",
+        "EBA23AF194D89B8061CA7FEBA06D336B1C38D8FBDABA76F2C51D45141362D881",
+        "3738EC7E7C731FD431C716990C6D97CA5C1D50EF0DA7DE9819076DE1D03AA891",
+    ),
+]
+
+
+def test_mangos_srp6_reproduces_the_verifier_the_server_stored() -> None:
+    """Given the server's own salt, our arithmetic must produce the server's verifier."""
+    for username, password, s_hex, v_hex in CMANGOS_WRITTEN:
+        salt = bytes.fromhex(s_hex)[::-1]  # stored big-endian; hashed the other way
+        got_s, got_v = accounts.mangos_srp6_credentials(username, password, salt=salt)
+        assert got_s == s_hex, username
+        assert got_v == v_hex, username
+
+
+def test_mangos_srp6_salts_are_fresh_and_the_right_shape() -> None:
+    """A generated pair is 64 uppercase hex characters each, and never repeats."""
+    first_s, first_v = accounts.mangos_srp6_credentials("bob", "hunter2")
+    second_s, _ = accounts.mangos_srp6_credentials("bob", "hunter2")
+    assert len(first_s) == 64 and len(first_v) == 64
+    assert first_s == first_s.upper() and first_v == first_v.upper()
+    assert int(first_s, 16) >= 0 and int(first_v, 16) >= 0
+    assert first_s != second_s, "a fixed salt would make every verifier comparable"
+
+
+def test_a_cmangos_account_is_written_with_v_s_and_gmlevel() -> None:
+    """No salt/verifier columns, no account_access, no sha_pass_hash on these cores."""
+    sql = _FakeSql()
+    result = accounts.create_account(sql, "bob", "hunter2", gm_level=2, scheme="mangos_srp6")
+    assert result.created is True and result.gm_level == 2
+
+    written = [s for _, s in sql.statements]
+    insert = _one_statement(sql, "INSERT INTO account (username, v, s")
+    assert "hunter2" not in insert, "the password itself must never reach a statement"
+    assert not any("account_access" in s for s in written), written
+    assert not any("sha_pass_hash" in s for s in written), written
+    grant = _one_statement(sql, "UPDATE account SET gmlevel")
+    assert f"WHERE id = {result.account_id}" in grant

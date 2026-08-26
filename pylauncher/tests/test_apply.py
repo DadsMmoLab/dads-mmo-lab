@@ -646,3 +646,55 @@ def test_docker_sql_refuses_a_database_this_game_does_not_have(
 def test_docker_sql_still_defaults_to_the_azerothcore_schemas() -> None:
     """Every existing caller passes no map and must keep addressing acore_*."""
     assert DockerSql("ac-database", "hunter2").schemas == apply_module.DB_NAMES
+
+
+def test_the_client_probe_finds_mariadb_when_there_is_no_mysql(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """mariadb:11 ships `mariadb`/`mariadb-dump` and neither `mysql` nor `mysqldump`.
+
+    wow-tbc and wow-vanilla run that image, so every statement this app sent
+    them died before it reached a database. wow-tortoise pins mariadb:10.6,
+    which still has the symlinks — which is why it worked and hid this
+    (measured on a live TBC server, 2026-08-26).
+    """
+    apply_module._client_cache.clear()
+    monkeypatch.setattr(
+        apply_module,
+        "_probe_client",
+        lambda container, candidates: "mariadb" if candidates[0] == "mysql" else "mariadb-dump",
+    )
+    assert apply_module.mysql_client("tbc-db") == "mariadb"
+    assert apply_module.mysql_client("tbc-db", "mysqldump") == "mariadb-dump"
+
+
+def test_a_container_that_has_mysql_keeps_using_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AzerothCore and tortoise images have the classic names; nothing changes for them."""
+    apply_module._client_cache.clear()
+    monkeypatch.setattr(apply_module, "_probe_client", lambda container, candidates: "mysql")
+    assert apply_module.mysql_client("ac-database") == "mysql"
+
+
+def test_an_unanswerable_probe_falls_back_to_the_classic_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A daemon hiccup must produce the failure it always did, not a new one."""
+    apply_module._client_cache.clear()
+    monkeypatch.setattr(apply_module, "_probe_client", lambda container, candidates: None)
+    assert apply_module.mysql_client("whatever") == "mysql"
+    assert apply_module.mysql_client("whatever", "mysqldump") == "mysqldump"
+
+
+def test_the_probe_is_asked_once_per_container(monkeypatch: pytest.MonkeyPatch) -> None:
+    """It cannot change without the container being replaced, and SQL is on a hot path."""
+    apply_module._client_cache.clear()
+    asked: list[str] = []
+
+    def probe(container: str, candidates: tuple[str, ...]) -> str:
+        asked.append(container)
+        return "mariadb"
+
+    monkeypatch.setattr(apply_module, "_probe_client", probe)
+    for _ in range(3):
+        apply_module.mysql_client("tbc-db")
+    assert asked == ["tbc-db"], asked

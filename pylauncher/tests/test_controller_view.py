@@ -1152,25 +1152,32 @@ def test_a_core_that_cannot_be_given_an_account_by_sql_says_so_instead_of_failin
 ) -> None:
     """Better a disabled button with the working command than one that writes a dead row.
 
-    CMaNGOS keeps SRP6 as `v`/`s`, tortoise writes `sha_pass_hash`, and neither
-    has AzerothCore's salt/verifier — so the INSERT this app builds either fails
-    outright or, worse, succeeds and produces an account nobody can log into.
-    The console can do it, and now that the prompt is right the Console tab
-    works, so the tab points at the command rather than pretending.
+    Every game in the catalog can be given an account by SQL today, so the
+    subject here is a synthetic entry rather than a real one: this pins the
+    BEHAVIOUR for the next core added before anyone has measured how it stores a
+    password. Guessing that wrong does not fail loudly -- it inserts a row that
+    looks correct and can never log in -- so the tab refuses and names the
+    console command instead.
     """
-    tbc = load_catalog().get("wow-tbc")
-    view = ControllerView(tbc, _services(ps, tmp_path, []), status_poll_ms=0)
+    catalog = load_catalog()
+    for entry in catalog.games:
+        assert entry.accounts.scheme is not None, f"{entry.id} lost its scheme"
+
+    unmeasured = WOTLK.model_copy(
+        update={"accounts": WOTLK.accounts.model_copy(update={"scheme": None})}
+    )
+    view = ControllerView(unmeasured, _services(ps, tmp_path, []), status_poll_ms=0)
     assert view.create_account_button.isEnabled() is False
     said = view.account_report.text()
     assert "account create" in said, said
     assert "Console" in said, said
 
-    # The two games that CAN are untouched — AzerothCore, and now Tortoise,
-    # whose scheme was measured against a live server.
-    for entry in (WOTLK, load_catalog().get("wow-tortoise")):
-        other = ControllerView(entry, _services(ps, tmp_path, []), status_poll_ms=0)
-        assert other.create_account_button.isEnabled() is True, entry.id
-        assert other.account_report.text() == "", entry.id
+    # The measured cores are untouched: AzerothCore, tortoise, and now the two
+    # CMaNGOS games whose scheme was solved from rows their own servers wrote.
+    for game_id in ("wow-wotlk", "wow-tortoise", "wow-tbc", "wow-vanilla"):
+        other = ControllerView(catalog.get(game_id), _services(ps, tmp_path, []), status_poll_ms=0)
+        assert other.create_account_button.isEnabled() is True, game_id
+        assert other.account_report.text() == "", game_id
 
 
 def test_a_tortoise_account_is_created_with_that_core_s_own_scheme(
