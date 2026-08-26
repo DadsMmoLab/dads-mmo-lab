@@ -545,3 +545,26 @@ def test_a_utf8_read_of_the_same_bytes_would_have_been_garbage() -> None:
     naive = [d for d in WSL_LIST_UTF16.decode("utf-8", "ignore").split() if d]
     assert naive != ["dml-arch", "docker-desktop"]
     assert "\x00" in naive[0], "the UTF-8 reading is expected to carry NUL bytes"
+
+
+def test_wsl_linux_path_converts_a_unc_path_back_to_the_distro_view() -> None:
+    """`\\\\wsl.localhost\\dml-arch\\home\\dml\\x` is `/home/dml/x` to the distro.
+
+    A WSL install's `server_dir` is stored in its Windows UNC form, because that
+    is what the picker returns and what `compose_file()` can read. Docker inside
+    the distro knows nothing of it, so the argv needs the Linux spelling.
+    """
+    got = platform.wsl_linux_path(Path(r"\\wsl.localhost\dml-arch\home\dml\games\srv"))
+    assert got == "/home/dml/games/srv"
+    assert platform.wsl_linux_path(Path(r"\\wsl$\Ubuntu\srv\wow")) == "/srv/wow"
+
+
+def test_wsl_linux_path_is_none_for_a_path_that_is_not_in_wsl() -> None:
+    """An ordinary Windows path has no Linux spelling, and guessing one would lie."""
+    assert platform.wsl_linux_path(Path(r"C:\Users\pk\srv")) is None
+    assert platform.wsl_linux_path(Path(r"\\nas\share\srv")) is None
+
+
+def test_wsl_linux_path_keeps_the_distro_root_itself() -> None:
+    """The share root is the distro's `/`."""
+    assert platform.wsl_linux_path(Path(r"\\wsl.localhost\dml-arch")) == "/"

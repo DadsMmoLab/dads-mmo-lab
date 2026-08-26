@@ -122,7 +122,11 @@ branches on `returncode != 0`.
 
 
 def _docker(
-    argv: list[str], cwd: Path | None = None, timeout: float | None = None
+    argv: list[str],
+    cwd: Path | None = None,
+    timeout: float | None = None,
+    *,
+    wsl_distro: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run `docker <argv...>` under whatever name this host can actually start it.
 
@@ -154,14 +158,24 @@ def _docker(
     `wait_ready()` issues five per poll. The `OSError` carries what the sentence
     does not: which path was tried, and the errno.
     """
-    program = platform.docker_program()
-    if program is not None:
+    # A Windows process cannot cd into a distro, so for a WSL install the
+    # location rides in the argv instead - `wsl --cd`, positioned by
+    # `docker_prefix()` because only it knows the flag belongs before the `--`
+    # separator. `--cd` rather than compose's `--project-directory`, because
+    # this function runs every docker subcommand and only compose understands
+    # the latter.
+    inside = platform.wsl_linux_path(cwd) if (wsl_distro is not None and cwd is not None) else None
+    prefix = platform.docker_prefix(wsl_distro, inside=inside)
+    if prefix is not None:
+        command = [*prefix, *argv]
+        run_cwd: Path | None = None if wsl_distro is not None else cwd
         try:
-            return runner.run([program, *argv], cwd=cwd, timeout=timeout)
+            return runner.run(command, cwd=run_cwd, timeout=timeout)
         except OSError as exc:
-            logger.warning(f"{program} could not be started: {exc}")
+            logger.warning(f"{prefix[0]} could not be started: {exc}")
     else:
-        logger.debug(f"no docker CLI on this host; not running: docker {' '.join(argv)}")
+        where = f" in {wsl_distro}" if wsl_distro else ""
+        logger.debug(f"no docker CLI on this host{where}; not running: docker {' '.join(argv)}")
     return subprocess.CompletedProcess(
         ["docker", *argv], _CLI_MISSING_RETURNCODE, "", platform.DOCKER_CLI_MISSING_HELP
     )

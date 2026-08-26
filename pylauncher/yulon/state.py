@@ -29,6 +29,14 @@ class KnownInstall(BaseModel):
     game: str = Field(min_length=1)
     server_dir: Path
     client_dir: Path | None = None
+    wsl_distro: str | None = None
+    """The WSL2 distro this server lives inside, if it does.
+
+    Optional with a default, so every `state.json` written before WSL-resident
+    servers were supported still loads. It sits beside `server_dir` because it
+    is the same kind of fact - where this server is - and nothing infers it at
+    runtime: an install was either adopted from a distro or it was not.
+    """
 
 
 class AppState(BaseModel):

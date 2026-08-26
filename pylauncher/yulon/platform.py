@@ -921,7 +921,9 @@ WSL_PROGRAM = "wsl"
 """`wsl.exe`, resolved through `_which` like every other program this module runs."""
 
 
-def docker_prefix(wsl_distro: str | None = None) -> tuple[str, ...] | None:
+def docker_prefix(
+    wsl_distro: str | None = None, *, inside: str | None = None
+) -> tuple[str, ...] | None:
     """The argv that reaches a docker daemon, or None if none can be reached.
 
     A prefix rather than a program name, because the daemon is not always on
@@ -950,9 +952,16 @@ def docker_prefix(wsl_distro: str | None = None) -> tuple[str, ...] | None:
     if launcher is None:
         logger.debug(f"no {WSL_PROGRAM} on this host; cannot reach docker in {wsl_distro!r}")
         return None
+    # `--cd` is an argument to wsl.exe and MUST precede the `--` separator:
+    # everything after `--` is the command line handed to the distro's shell, so
+    # a `--cd` placed there arrives at bash, which answers "--: invalid option".
+    # Measured against a real distro, which is the only reason this is right -
+    # the first version put it after the separator, and the unit test, which
+    # asserted only that `--cd` was present, passed a command that could not run.
+    location = ("--cd", inside) if inside else ()
     # `docker` unqualified on purpose: it is resolved by the distro's own PATH,
     # by its own shell, where this process's PATH means nothing.
-    return (launcher, "-d", wsl_distro, "--", "docker")
+    return (launcher, "-d", wsl_distro, *location, "--", "docker")
 
 
 def wsl_env(extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -1011,6 +1020,32 @@ def _wsl_list_bytes() -> bytes | None:
 
 
 _WSL_LIST_TIMEOUT = 30
+
+
+_WSL_SHARE_PREFIXES = ("\\\\wsl.localhost\\", "\\\\wsl$\\")
+
+
+def wsl_linux_path(path: Path) -> str | None:
+    """The distro's own spelling of a `\\\\wsl.localhost\\<distro>\\...` path, or None.
+
+    A WSL install's `server_dir` is kept in its Windows UNC form: that is what
+    the folder picker returns, and it is what `compose_file()` and every other
+    Windows-side read needs. Docker inside the distro knows nothing about it, so
+    the argv needs the Linux spelling instead.
+
+    None for anything that is not a WSL share - an ordinary drive letter, or a
+    real file server. Guessing a Linux path for those would invent one.
+    """
+    text = str(path).replace("/", "\\")
+    for prefix in _WSL_SHARE_PREFIXES:
+        if not text.lower().startswith(prefix.lower()):
+            continue
+        rest = text[len(prefix) :]
+        # The first component is the distro name; everything after it is the
+        # path inside that distro, and nothing after it is the distro root.
+        _, _, inside = rest.partition("\\")
+        return "/" + inside.replace("\\", "/").strip("/")
+    return None
 
 
 def wsl_distros() -> tuple[str, ...]:

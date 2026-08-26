@@ -2887,3 +2887,91 @@ def test_a_missing_image_is_told_apart_from_a_daemon_that_will_not_talk(
             docker.runner, "run", lambda *a, s=said, **k: _completed(returncode=1, stderr=s)
         )
         assert docker.images_built(REFS) is None, said
+
+
+# --------------------------------------------------------- WSL-resident servers
+
+
+def test_docker_commands_for_a_wsl_install_go_through_that_distro(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The whole point, asserted on the emitted argv rather than on prose.
+
+    A server inside a distro is reached by that distro's own docker. Every
+    lifecycle call goes through `_docker()`, so pinning it here pins all 21.
+    """
+    seen: list[list[str]] = []
+
+    def fake_run(cmd, cwd=None, timeout=None, env=None):  # type: ignore[no-untyped-def]
+        seen.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    monkeypatch.setattr(docker.platform, "_which", lambda name, path=None: "wsl.exe")
+
+    docker._docker(["ps"], wsl_distro="dml-arch")
+    assert seen[0][:5] == ["wsl.exe", "-d", "dml-arch", "--", "docker"]
+    assert seen[0][-1] == "ps"
+
+
+def test_a_wsl_install_sends_its_directory_as_a_distro_path_not_a_windows_cwd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Windows process cannot cd into a distro, so the location rides in argv.
+
+    `wsl --cd <linux path>` rather than compose's `--project-directory`, because
+    `_docker()` runs every docker subcommand and only compose understands the
+    latter.
+    """
+    seen: list[dict[str, object]] = []
+
+    def fake_run(cmd, cwd=None, timeout=None, env=None):  # type: ignore[no-untyped-def]
+        seen.append({"cmd": list(cmd), "cwd": cwd})
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    monkeypatch.setattr(docker.platform, "_which", lambda name, path=None: "wsl.exe")
+
+    unc = Path(r"\\wsl.localhost\dml-arch\home\dml\games\srv")
+    docker._docker(["compose", "ps"], cwd=unc, wsl_distro="dml-arch")
+
+    cmd = seen[0]["cmd"]
+    assert "--cd" in cmd, f"the distro path never reached the command: {cmd}"
+    assert cmd[cmd.index("--cd") + 1] == "/home/dml/games/srv"
+    # WHERE it sits is the whole of the bug this caught. Everything after `--`
+    # is the command line for the distro's shell, so a `--cd` placed there
+    # reaches bash, which answers "--: invalid option". The first version of
+    # this test asserted only that the flag was present, and passed a command
+    # that could not run; a live run against a real distro found it.
+    assert cmd.index("--cd") < cmd.index("--"), f"--cd landed after the separator: {cmd}"
+    assert seen[0]["cwd"] is None, "a UNC path was handed to the process as its cwd"
+
+
+def test_a_local_install_is_unchanged(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """No distro means exactly what it meant before this existed."""
+    seen: list[dict[str, object]] = []
+
+    def fake_run(cmd, cwd=None, timeout=None, env=None):  # type: ignore[no-untyped-def]
+        seen.append({"cmd": list(cmd), "cwd": cwd})
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
+
+    docker._docker(["ps"], cwd=tmp_path)
+    assert seen[0]["cmd"] == ["docker", "ps"]
+    assert seen[0]["cwd"] == tmp_path
+
+
+def test_no_wsl_on_this_host_is_the_existing_missing_cli_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new topology must not bring a new failure channel.
+
+    Callers already know how to report `_cli_missing()`; a WSL install on a box
+    without WSL reports through that rather than raising something nobody
+    catches.
+    """
+    monkeypatch.setattr(docker.platform, "_which", lambda name, path=None: None)
+    proc = docker._docker(["ps"], wsl_distro="dml-arch")
+    assert docker._cli_missing(proc)
