@@ -151,6 +151,8 @@ def send_command(
     *,
     container: str = docker_ctl.SPEC.world,
     window: float = _DEFAULT_WINDOW_SECONDS,
+    prompt: str = _PROMPT,
+    prompt_precedes_answer: bool = True,
     popen: type[subprocess.Popen[bytes]] = subprocess.Popen,
 ) -> ConsoleReply:
     """Send one console line to the worldserver and return that command's answer.
@@ -247,7 +249,9 @@ def send_command(
     # timeout, and on a timeout that thread is still appending to `out`. A list
     # this module's docstrings make precise claims about should be frozen before
     # it is read (review, 2026-08-23).
-    return _parse_reply(list(out), command)
+    return _parse_reply(
+        list(out), command, prompt=prompt, prompt_precedes_answer=prompt_precedes_answer
+    )
 
 
 def _close_console(proc: subprocess.Popen[bytes], master: int, reader: threading.Thread) -> None:
@@ -264,7 +268,13 @@ def _close_console(proc: subprocess.Popen[bytes], master: int, reader: threading
     reader.join(timeout=2)
 
 
-def _parse_reply(raw: list[str], command: str) -> ConsoleReply:
+def _parse_reply(
+    raw: list[str],
+    command: str,
+    *,
+    prompt: str = _PROMPT,
+    prompt_precedes_answer: bool = True,
+) -> ConsoleReply:
     """This command's answer: the lines between the console's prompt and its next one.
 
     The window is a clock, and a clock does not know when an answer ends. This
@@ -326,15 +336,23 @@ def _parse_reply(raw: list[str], command: str) -> ConsoleReply:
     carries player and mod text that can contain the string. Not observed live.
     """
     sent = command.strip()
+    # How many prompts have gone by while the answer is arriving. One for a
+    # readline console (AzerothCore), which redisplays the prompt in FRONT of
+    # what it is about to print; zero for an `fgets` console (CMaNGOS and
+    # tortoise), which prints its prompt only from `commandFinished()` - after
+    # the answer. Same window, same delimiter, the answer on the other side of
+    # it. Setting only the string would have made every CMaNGOS reply an empty
+    # tuple flagged `prompted=True` (research, 2026-08-26).
+    wanted = 1 if prompt_precedes_answer else 0
     answer: list[str] = []
     everything: list[str] = []
     prompts = 0
     anchored = False
     for line in raw:
         text = runner.strip_ansi(line).replace("\x1b", "").strip()
-        while text.startswith(_PROMPT):
+        while text.startswith(prompt):
             prompts += 1
-            text = text[len(_PROMPT) :].lstrip()
+            text = text[len(prompt) :].lstrip()
         if not text:
             continue
         if text == sent and not anchored:
@@ -345,7 +363,7 @@ def _parse_reply(raw: list[str], command: str) -> ConsoleReply:
         if text == sent:
             continue
         everything.append(text)
-        if prompts == 1:
+        if prompts == wanted:
             answer.append(text)
     return ConsoleReply(
         command=command,

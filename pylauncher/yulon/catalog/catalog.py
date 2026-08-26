@@ -335,6 +335,28 @@ class Realmlist(_Strict):
     realm_id: int = 1
 
 
+class Console(_Strict):
+    """How this core's worldserver console delimits the answer to a command.
+
+    Two facts, because the string alone is not enough. AzerothCore reads its
+    console with GNU readline, which redisplays the prompt in FRONT of what it
+    is about to print; CMaNGOS and tortoise read with `fgets` and print theirs
+    only after the command finished. Same delimiter, the answer on opposite
+    sides of it — so a core that declared only the string would have every reply
+    parsed as empty (research, 2026-08-26).
+    """
+
+    prompt: str = Field(
+        default="AC>",
+        min_length=1,
+        description="What the console prints when it is ready for the next command.",
+    )
+    prompt_precedes_answer: bool = Field(
+        default=True,
+        description="True for a readline console (AzerothCore), False for an `fgets` one.",
+    )
+
+
 class Client(_Strict):
     """The client the USER supplies (README §3a) and how to point it at the server."""
 
@@ -358,6 +380,7 @@ class CatalogEntry(_Strict):
     databases: Databases
     client: Client
     realmlist: Realmlist = Realmlist()
+    console: Console = Console()
     has_manifests: bool = Field(
         default=False, description="Whether manifests/<id>/ exists for module management."
     )

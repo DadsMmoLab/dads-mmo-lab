@@ -333,3 +333,35 @@ def test_a_missing_cli_never_opens_a_pty_it_cannot_close(
     with pytest.raises(console.ConsoleError, match="Docker could not be found"):
         console.send_command("server info", container="ac-worldserver")
     assert opened == [], "a pty was opened for a command that could never run"
+
+
+def test_a_mangos_console_is_parsed_by_its_own_prompt() -> None:
+    """`AC>` is AzerothCore's, and the prompt does not arrive in the same place.
+
+    AzerothCore reads with GNU readline, which redisplays the prompt in FRONT of
+    what it is about to print, so the answer falls between prompt 1 and prompt 2.
+    CMaNGOS and tortoise read with `fgets` and print `mangos>` only from
+    `commandFinished()` - after the answer - so the answer falls between the echo
+    and the FIRST prompt. Swapping the string alone would have made every reply
+    an empty tuple flagged `prompted=True`: a confident silent answer, worse than
+    the raw-log dump it replaced (research, 2026-08-26).
+    """
+    captured = (
+        b"\x1b[0mserver info\r\n"
+        b"Online players: 1 (max: 3) Queued players: 0\r\n"
+        b"mangos> \r\n"
+        b"\x1b[36m[bot] Grimtusk arrives in Orgrimmar\r\n"
+    )
+    pumped = [raw.decode("utf-8", errors="replace").rstrip("\r\n") for raw in io.BytesIO(captured)]
+    reply = console._parse_reply(
+        pumped, "server info", prompt="mangos>", prompt_precedes_answer=False
+    )
+    assert reply.prompted is True
+    assert reply.lines == ("Online players: 1 (max: 3) Queued players: 0",)
+
+
+def test_the_azerothcore_prompt_is_still_the_default() -> None:
+    """Every existing caller passes no prompt and must keep parsing `AC>`."""
+    captured = b"\x1b[0mgm list\r\nAC> No gamemasters.\r\nAC> next\r\n"
+    pumped = [raw.decode("utf-8", errors="replace").rstrip("\r\n") for raw in io.BytesIO(captured)]
+    assert console._parse_reply(pumped, "gm list").lines == ("No gamemasters.",)

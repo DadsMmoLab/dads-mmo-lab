@@ -569,3 +569,20 @@ def test_a_failed_realmlist_update_does_not_throw_away_the_firewall_report() -> 
     assert any("realmlist not updated" in s and "Unknown column" in s for s in report.skipped)
     assert report.restart_required is False
     assert not any("realmlist →" in d for d in report.done)
+
+
+def test_the_cmangos_cores_get_no_local_address_column_either() -> None:
+    """CMaNGOS's realmlist has the MaNGOS column set, which has no `localAddress`.
+
+    Tortoise already said so; TBC and Vanilla inherited AzerothCore's default and
+    would have written a column their realmd schema does not have, failing with
+    `ERROR 1054 Unknown column 'localAddress'` the moment the schema-name fix
+    let the statement reach the server at all.
+    """
+    catalog = load_catalog()
+    for game_id in ("wow-tbc", "wow-vanilla"):
+        entry = catalog.get(game_id)
+        assert entry.realmlist.local_address_column is None, game_id
+        assert networking.realmlist_sql(entry, "98.24.105.7", "192.168.1.25") == (
+            "UPDATE realmd.realmlist SET address='98.24.105.7' WHERE id=1;"
+        ), game_id

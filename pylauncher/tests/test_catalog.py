@@ -179,3 +179,11 @@ def test_wotlk_s_schema_map_is_the_applier_s_default() -> None:
     from yulon.apply import DB_NAMES
 
     assert load_catalog().get("wow-wotlk").schema_map() == dict(DB_NAMES)
+
+
+def test_the_cmangos_cores_declare_the_mangos_console_prompt() -> None:
+    """`AC>` is AzerothCore's delimiter; mangosd prints `mangos>` (archive/guides)."""
+    catalog = load_catalog()
+    for game_id in ("wow-tbc", "wow-vanilla", "wow-tortoise"):
+        assert catalog.get(game_id).console.prompt == "mangos>", game_id
+    assert catalog.get("wow-wotlk").console.prompt == "AC>"

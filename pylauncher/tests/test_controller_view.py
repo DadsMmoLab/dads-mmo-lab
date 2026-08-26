@@ -1127,3 +1127,21 @@ def test_a_cmangos_backup_is_told_which_schemas_that_core_has(
     monkeypatch.setattr(controller_view_module.wotlk_maintenance, "backup", fake_backup)
     ControllerServices.for_wotlk(tortoise, tmp_path, None).backup()
     assert seen.get("core_databases") == ("tw_logon", "tw_char", "tw_world"), seen
+
+
+def test_a_cmangos_console_is_sent_its_own_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The parser takes the core's prompt; this is the call site that supplies it."""
+    tortoise = load_catalog().get("wow-tortoise")
+    seen: dict[str, object] = {}
+
+    def fake_send(command: str, **kwargs: object) -> object:
+        seen.update(kwargs)
+        return ConsoleReply(command, ())
+
+    monkeypatch.setattr(controller_view_module.wotlk_console, "send_command", fake_send)
+    ControllerServices.for_wotlk(tortoise, tmp_path, None).send_console("server info")
+    assert seen.get("prompt") == "mangos>", seen
+    assert seen.get("prompt_precedes_answer") is False, seen
+    assert seen.get("container") == "tortoise-mangosd", seen
