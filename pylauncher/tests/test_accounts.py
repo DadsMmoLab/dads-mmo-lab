@@ -68,6 +68,7 @@ class _FakeSql:
         self.queries: list[tuple[str, str]] = []
         self.table: dict[str, int] = dict(accounts_table or {})
         self.access: dict[int, int] = {}
+        self.ranks: dict[int, int] = {}
         self.next_id = 12401
         self.fail_on: str | None = None
         self.failure = ApplyError("SQL failed (inline → acore_auth): Lost connection")
@@ -77,7 +78,14 @@ class _FakeSql:
         self.statements.append((db, statement))
         if self.fail_on is not None and statement.startswith(self.fail_on):
             raise self.failure
-        if statement.startswith("INSERT INTO account ("):
+        if statement.startswith("INSERT INTO account(username,sha_pass_hash"):
+            self.table[_folded_name_in(statement)] = self.next_id
+            self.next_id += 1
+        elif statement.startswith("UPDATE account SET `rank`"):
+            self.ranks[int(statement.split("WHERE id = ")[1].rstrip(";"))] = int(
+                statement.split("`rank` = ")[1].split(" ")[0]
+            )
+        elif statement.startswith("INSERT INTO account ("):
             self.table[_folded_name_in(statement)] = self.next_id
             self.next_id += 1
         elif statement.startswith("INSERT INTO account_access"):
@@ -90,6 +98,9 @@ class _FakeSql:
         self.queries.append((db, statement))
         if self.query_error is not None:
             raise self.query_error
+        if statement.startswith("SELECT `rank` FROM account"):
+            who = int(statement.split("WHERE id = ")[1].rstrip(";"))
+            return str(self.ranks.get(who, 0)) + chr(10)
         if statement.startswith("SELECT id FROM account"):
             name = _folded_name_in(statement)
             found = self.table.get(name)
@@ -607,3 +618,76 @@ def test_a_lookup_that_answers_with_something_that_is_not_a_number_is_an_account
 
     with pytest.raises(accounts.AccountError, match="expected a number"):
         accounts.create_account(_Garbled(), "caitlin", PASSWORD)
+
+
+# ------------------------------------------------- the mangos_sha scheme
+
+# Rows the TORTOISE worldserver itself wrote, over its console on the m910q box
+# (2026-08-26). Not computed here: `account create` was typed at the `mangos>`
+# prompt and the core logged its own INSERT, which is where these hashes come
+# from. Same discipline as SERVER_WRITTEN above — a vector we generated would
+# only prove our code agrees with our code.
+#
+#   INSERT INTO account(username,sha_pass_hash,joindate)
+#   VALUES('PLAYER','3CE8A96D17C5AE88A30681024E86279F1A38C041',NOW())
+#
+# The MixedCase row is the one that discriminates: it is the only one that can
+# tell "uppercase both" from "uppercase the username only" or "as typed".
+MANGOS_WRITTEN: list[tuple[str, str, str]] = [
+    ("player", "player", "3CE8A96D17C5AE88A30681024E86279F1A38C041"),
+    ("MixedCase", "SoMePaSs", "75FA45B4D076CD2C9FDE701C821EE057C1CB151E"),
+]
+
+
+def test_mangos_password_hash_matches_the_rows_the_server_wrote() -> None:
+    """`sha_pass_hash = SHA1(UPPER(user):UPPER(pass))`, uppercase hex."""
+    for username, password, expected in MANGOS_WRITTEN:
+        assert accounts.mangos_password_hash(username, password) == expected, username
+
+
+def test_the_mixedcase_vector_rules_out_the_plausible_wrong_foldings() -> None:
+    """Every wrong folding still matches on an all-lowercase pair; this one does not."""
+    import hashlib
+
+    _, _, server = MANGOS_WRITTEN[1]
+    for wrong in ("MixedCase:SoMePaSs", "MIXEDCASE:SoMePaSs", "mixedcase:somepass"):
+        assert hashlib.sha1(wrong.encode()).hexdigest().upper() != server, wrong
+
+
+def test_a_mangos_account_is_written_the_way_that_core_writes_it() -> None:
+    """The core's own statement, reproduced: no salt, no verifier, no account_access."""
+    sql = _FakeSql()
+    result = accounts.create_account(sql, "bob", "hunter2", scheme="mangos_sha")
+    assert result.created is True and result.username == "BOB"
+
+    written = [s for _, s in sql.statements]
+    insert = _one_statement(sql, "INSERT INTO account(username,sha_pass_hash")
+    # Literals go through `_text_literal`, so the hash appears hex-encoded —
+    # the same treatment every other value in this module gets.
+    expected = accounts._text_literal(accounts.mangos_password_hash("bob", "hunter2"))
+    assert expected in insert, insert
+    assert "hunter2" not in insert, "the password itself must never reach a statement"
+    assert not any("salt" in s or "verifier" in s for s in written), written
+    assert not any("account_access" in s for s in written), written
+
+
+def test_a_mangos_account_takes_its_gm_level_from_the_rank_column() -> None:
+    """CMaNGOS-family cores have no `account_access`; the level is a column."""
+    sql = _FakeSql()
+    result = accounts.create_account(sql, "gm", "hunter2", gm_level=3, scheme="mangos_sha")
+    assert result.gm_level == 3
+    grant = _one_statement(sql, "UPDATE account SET `rank`")
+    assert "`rank` = 3" in grant and f"WHERE id = {result.account_id}" in grant
+
+    # `gm_level` is a floor on this scheme too: asking for less writes nothing.
+    again = accounts.create_account(sql, "gm", "hunter2", gm_level=1, scheme="mangos_sha")
+    assert again.created is False and again.gm_level == 3
+    assert len([s for _, s in sql.statements if s.startswith("UPDATE account SET `rank`")]) == 1
+
+
+def test_the_azerothcore_scheme_is_still_the_default() -> None:
+    """Every existing caller passes no scheme and must keep writing salt/verifier."""
+    sql = _FakeSql()
+    accounts.create_account(sql, "bob", "hunter2")
+    insert = _one_statement(sql, "INSERT INTO account (")
+    assert "salt, verifier" in insert and "sha_pass_hash" not in insert, insert

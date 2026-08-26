@@ -1158,13 +1158,32 @@ def test_a_core_that_cannot_be_given_an_account_by_sql_says_so_instead_of_failin
     The console can do it, and now that the prompt is right the Console tab
     works, so the tab points at the command rather than pretending.
     """
-    tortoise = load_catalog().get("wow-tortoise")
-    view = ControllerView(tortoise, _services(ps, tmp_path, []), status_poll_ms=0)
+    tbc = load_catalog().get("wow-tbc")
+    view = ControllerView(tbc, _services(ps, tmp_path, []), status_poll_ms=0)
     assert view.create_account_button.isEnabled() is False
     said = view.account_report.text()
     assert "account create" in said, said
     assert "Console" in said, said
 
-    # The game that CAN is untouched.
-    assert ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
-    assert view.create_account_button.isEnabled() is False
+    # The two games that CAN are untouched — AzerothCore, and now Tortoise,
+    # whose scheme was measured against a live server.
+    for entry in (WOTLK, load_catalog().get("wow-tortoise")):
+        other = ControllerView(entry, _services(ps, tmp_path, []), status_poll_ms=0)
+        assert other.create_account_button.isEnabled() is True, entry.id
+        assert other.account_report.text() == "", entry.id
+
+
+def test_a_tortoise_account_is_created_with_that_core_s_own_scheme(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The call site again: `create_account()` takes a scheme, someone must pass it."""
+    tortoise = load_catalog().get("wow-tortoise")
+    seen: dict[str, object] = {}
+
+    def fake_create(*args: object, **kwargs: object) -> object:
+        seen.update(kwargs)
+        return AccountResult(username="BOB", account_id=1, created=True, gm_level=0)
+
+    monkeypatch.setattr(controller_view_module.wotlk_accounts, "create_account", fake_create)
+    ControllerServices.for_wotlk(tortoise, tmp_path, None).create_account("bob", "pw", 0)
+    assert seen.get("scheme") == "mangos_sha", seen

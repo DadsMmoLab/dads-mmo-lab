@@ -338,18 +338,28 @@ class Realmlist(_Strict):
 class Accounts(_Strict):
     """Whether this app can create an account on this core by writing the row itself.
 
-    True only where the `account` table this app knows how to write is the one
-    the core reads. AzerothCore's is (`salt`/`verifier`, `account_access`);
-    CMaNGOS keeps SRP6 as `v`/`s` and its GM level as `account.gmlevel`, and
-    tortoise writes `sha_pass_hash` and `account.rank`. Getting the derivation
-    wrong there does not fail — it inserts a row that looks correct and can
-    never log in, which is why this is declared rather than attempted
-    (research, 2026-08-26).
+    Three shapes, one per core family. AzerothCore uses `salt`/`verifier` with
+    the level in `account_access`. Tortoise uses `sha_pass_hash` with the level
+    in `account.rank` — measured against a live server on 2026-08-26, where the
+    core logged its own INSERT and `SHA1(UPPER(user):UPPER(pass))` matched it
+    exactly. CMaNGOS proper (TBC, Vanilla) keeps SRP6 in `v`/`s` with the level
+    in `gmlevel`, which is a THIRD shape and has not been measured, so it is
+    declared unsupported rather than assumed to be tortoise's.
+
+    Getting this wrong does not fail loudly — it inserts a row that looks
+    correct and can never log in.
     """
 
-    by_sql: bool = Field(
-        default=True,
-        description="False where the Accounts tab must point at the console instead.",
+    scheme: Literal["azerothcore", "mangos_sha"] | None = Field(
+        default="azerothcore",
+        description=(
+            "How this core stores an account: `azerothcore` is SRP6 in salt/verifier with "
+            "the level in account_access; `mangos_sha` is sha_pass_hash with the level in "
+            "account.rank. None means this app does not write accounts for this core and "
+            "the Accounts tab points at `console_command` instead. Never defaulted onto a "
+            "core that has not been measured — a wrong scheme inserts a row that looks "
+            "correct and can never log in."
+        ),
     )
     console_command: str = Field(
         default="account create <name> <password>",

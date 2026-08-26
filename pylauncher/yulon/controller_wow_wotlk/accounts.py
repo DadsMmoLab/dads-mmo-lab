@@ -71,7 +71,7 @@ import hashlib
 import re
 import secrets
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
 from yulon.apply import ApplyError, DockerSql
 from yulon.controller_wow_wotlk import docker_ctl
@@ -173,6 +173,30 @@ def fold(text: str) -> str:
     return "".join(chr(ord(ch) - 0x20) if "a" <= ch <= "z" else ch for ch in text)
 
 
+Scheme = Literal["azerothcore", "mangos_sha"]
+"""How a core stores an account's credentials and its GM level.
+
+`azerothcore` is SRP6 in `salt`/`verifier` with the level in a separate
+`account_access` table. `mangos_sha` is the CMaNGOS-family shape: a single
+`sha_pass_hash` column and the level in `account.rank`, with `v`/`s` left
+NULL for the auth server to fill on first login.
+"""
+
+
+def mangos_password_hash(username: str, password: str) -> str:
+    """`SHA1(UPPER(user):UPPER(pass))`, uppercase hex — what mangosd writes itself.
+
+    Measured, not derived. `account create` at the `mangos>` prompt of a live
+    tortoise server logged its own INSERT, and these are its hashes; the
+    `MixedCase` vector in `tests/test_accounts.py` is what rules out folding
+    only the username, or neither.
+
+    No SRP6 here and none needed: `v` and `s` are nullable on this schema and
+    the auth server derives them on first login.
+    """
+    return hashlib.sha1(f"{fold(username)}:{fold(password)}".encode()).hexdigest().upper()
+
+
 def make_salt() -> bytes:
     """32 CSPRNG bytes, matching `Crypto::GetRandomBytes(res.first)` in `MakeRegistrationData`."""
     return secrets.token_bytes(SALT_LENGTH)
@@ -252,6 +276,7 @@ def create_account(
     password: str,
     *,
     gm_level: int = NO_GM,
+    scheme: Scheme = "azerothcore",
 ) -> AccountResult:
     """Create one game account, or bring an existing one up to what was asked for.
 
@@ -310,7 +335,7 @@ def create_account(
     if not NO_GM <= gm_level <= MAX_GM_LEVEL:
         raise AccountError(f"GM level must be between {NO_GM} and {MAX_GM_LEVEL}, got {gm_level}")
 
-    account_id, created = _account_row(sql, name, password)
+    account_id, created = _account_row(sql, name, password, scheme)
     # AccountMgr::CreateAccount runs LOGIN_INS_REALM_CHARACTERS_INIT right after
     # the insert. Reproduced verbatim; its `WHERE acctid IS NULL` makes it
     # idempotent, which is what lets it run on the already-exists path too.
@@ -329,11 +354,11 @@ def create_account(
         " LEFT JOIN realmcharacters ON acctid=account.id WHERE acctid IS NULL",
         "seed the realm character counters for every account missing them",
     )
-    level = _ensure_gm(sql, account_id, gm_level)
+    level = _ensure_gm(sql, account_id, gm_level, scheme)
     return AccountResult(username=name, account_id=account_id, created=created, gm_level=level)
 
 
-def _account_row(sql: SqlSeam, name: str, password: str) -> tuple[int, bool]:
+def _account_row(sql: SqlSeam, name: str, password: str, scheme: Scheme) -> tuple[int, bool]:
     """The account's id, and whether *this* call wrote its row.
 
     Never touches a row that is already there: re-salting a taken name would
@@ -346,15 +371,26 @@ def _account_row(sql: SqlSeam, name: str, password: str) -> tuple[int, bool]:
         logger.info(f"account {name} already exists (id {existing}), keeping its password")
         return existing, False
 
-    salt, verifier = registration_data(name, password)
     logger.info(f"creating account {name}")  # never the password
-    try:
-        sql.run_statement(
-            _ACCOUNTS_DB,
+    if scheme == "mangos_sha":
+        # Byte for byte what the core's own `account create` emits, columns and
+        # all: it names only these three, and every other column on that table
+        # has a default. Adding `expansion` or `email` here would be this app
+        # inventing a row shape the core does not write.
+        statement = (
+            "INSERT INTO account(username,sha_pass_hash,joindate)"
+            f" VALUES({_text_literal(name)},"
+            f"{_text_literal(mangos_password_hash(name, password))},NOW())"
+        )
+    else:
+        salt, verifier = registration_data(name, password)
+        statement = (
             "INSERT INTO account (username, salt, verifier, expansion, reg_mail, email, joindate)"
             f" VALUES ({_text_literal(name)}, {_hex_literal(salt)}, {_hex_literal(verifier)},"
-            f" {EXPANSION}, '', '', NOW())",
+            f" {EXPANSION}, '', '', NOW())"
         )
+    try:
+        sql.run_statement(_ACCOUNTS_DB, statement)
     except ApplyError as exc:
         # Something raced us to the name between the check above and here. Ask
         # the database again rather than reading the driver's error text: the
@@ -380,7 +416,7 @@ def _account_row(sql: SqlSeam, name: str, password: str) -> tuple[int, bool]:
     return account_id, True
 
 
-def _ensure_gm(sql: SqlSeam, account_id: int, gm_level: int) -> int:
+def _ensure_gm(sql: SqlSeam, account_id: int, gm_level: int, scheme: Scheme) -> int:
     """Raise the account to `gm_level` if it is not there yet; return the level it holds.
 
     Reading the current level first is what makes `gm_level` a floor rather than
@@ -388,15 +424,15 @@ def _ensure_gm(sql: SqlSeam, account_id: int, gm_level: int) -> int:
     that finishes a half-applied create writes the row, the one after that sees
     the level and writes nothing.
     """
-    current = _gm_level(sql, account_id)
+    current = _gm_level(sql, account_id, scheme)
     if gm_level <= current:
         return current
     logger.info(f"granting GM level {gm_level} to account {account_id}")
-    _grant_gm(sql, account_id, gm_level)
+    _grant_gm(sql, account_id, gm_level, scheme)
     return gm_level
 
 
-def _grant_gm(sql: SqlSeam, account_id: int, gm_level: int) -> None:
+def _grant_gm(sql: SqlSeam, account_id: int, gm_level: int, scheme: Scheme) -> None:
     """Write the `account_access` row (`LOGIN_INS_ACCOUNT_ACCESS`), for every realm.
 
     `ON DUPLICATE KEY UPDATE` rather than a plain insert because the primary key
@@ -406,6 +442,15 @@ def _grant_gm(sql: SqlSeam, account_id: int, gm_level: int) -> None:
     justified itself with a "retry path" that no call could reach; the
     convergence fix in `create_account()` is what made the branch real.)
     """
+    if scheme == "mangos_sha":
+        # No `account_access` table exists on these cores at all; the level is a
+        # column, and `rank` is a reserved word, hence the quoting.
+        _run(
+            sql,
+            f"UPDATE account SET `rank` = {gm_level} WHERE id = {account_id}",
+            f"grant GM level {gm_level} to account {account_id}",
+        )
+        return
     _run(
         sql,
         f"INSERT INTO account_access (id, gmlevel, RealmID)"
@@ -450,8 +495,16 @@ def _account_id(sql: SqlSeam, username: str) -> int | None:
     return _one_int(rows, f"look up account {username}")
 
 
-def _gm_level(sql: SqlSeam, account_id: int) -> int:
+def _gm_level(sql: SqlSeam, account_id: int, scheme: Scheme) -> int:
     """The account's GM level for all realms, or `NO_GM` when it has no `account_access` row."""
+    if scheme == "mangos_sha":
+        rows = _query_rows(
+            sql,
+            f"SELECT `rank` FROM account WHERE id = {account_id}",
+            f"read the GM level of account {account_id}",
+        )
+        level = _one_int(rows, f"read the GM level of account {account_id}")
+        return NO_GM if level is None else level
     rows = _query_rows(
         sql,
         f"SELECT gmlevel FROM account_access WHERE id = {account_id} AND RealmID = {ALL_REALMS}",

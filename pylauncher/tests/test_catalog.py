@@ -187,3 +187,16 @@ def test_the_cmangos_cores_declare_the_mangos_console_prompt() -> None:
     for game_id in ("wow-tbc", "wow-vanilla", "wow-tortoise"):
         assert catalog.get(game_id).console.prompt == "mangos>", game_id
     assert catalog.get("wow-wotlk").console.prompt == "AC>"
+
+
+def test_each_core_declares_how_its_accounts_are_stored() -> None:
+    """Measured per core, never defaulted: a wrong guess writes an unusable row."""
+    catalog = load_catalog()
+    assert catalog.get("wow-wotlk").accounts.scheme == "azerothcore"
+    # Proven against a live server on 2026-08-26 (m910q): sha_pass_hash + rank.
+    assert catalog.get("wow-tortoise").accounts.scheme == "mangos_sha"
+    # CMaNGOS proper keeps SRP6 in `v`/`s` and the level in `gmlevel`. Not the
+    # same shape as tortoise and not yet measured, so it stays unsupported and
+    # the tab points at the console.
+    for game_id in ("wow-tbc", "wow-vanilla"):
+        assert catalog.get(game_id).accounts.scheme is None, game_id

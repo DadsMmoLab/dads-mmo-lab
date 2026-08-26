@@ -155,7 +155,7 @@ class ControllerServices:
             # copying that would hand administrator to every account made from
             # the tile. The spin box defaults to 0 and the user raises it.
             create_account=lambda name, pw, gm: wotlk_accounts.create_account(
-                sql, name, pw, gm_level=gm
+                sql, name, pw, gm_level=gm, scheme=entry.accounts.scheme or "azerothcore"
             ),
             backup=lambda: wotlk_maintenance.backup(
                 server_dir, mysql, spec=spec, core_databases=entry.core_databases()
@@ -899,7 +899,7 @@ class ControllerView(QWidget):
         # the command that does work — rather than left as a live button whose
         # every press ends in a SQL error, or worse in a row that inserts
         # cleanly and can never log in. See `catalog.Accounts`.
-        if not self.entry.accounts.by_sql:
+        if self.entry.accounts.scheme is None:
             self.create_account_button.setEnabled(False)
             for widget in (self.account_name, self.account_password, self.account_gm):
                 widget.setEnabled(False)

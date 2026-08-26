@@ -127,7 +127,7 @@
         "local_address_column": null
       },
       "accounts": {
-        "by_sql": false
+        "scheme": null
       },
       "console": {
         "prompt": "mangos>",
@@ -193,7 +193,7 @@
         "local_address_column": null
       },
       "accounts": {
-        "by_sql": false
+        "scheme": null
       },
       "console": {
         "prompt": "mangos>",
@@ -253,7 +253,7 @@
         "local_address_column": null
       },
       "accounts": {
-        "by_sql": false
+        "scheme": "mangos_sha"
       },
       "console": {
         "prompt": "mangos>",
