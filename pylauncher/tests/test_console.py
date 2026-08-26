@@ -336,28 +336,47 @@ def test_a_missing_cli_never_opens_a_pty_it_cannot_close(
 
 
 def test_a_mangos_console_is_parsed_by_its_own_prompt() -> None:
-    """`AC>` is AzerothCore's, and the prompt does not arrive in the same place.
+    """Captured from a real mangosd, not hand-written (m910q, 2026-08-26).
 
-    AzerothCore reads with GNU readline, which redisplays the prompt in FRONT of
-    what it is about to print, so the answer falls between prompt 1 and prompt 2.
-    CMaNGOS and tortoise read with `fgets` and print `mangos>` only from
-    `commandFinished()` - after the answer - so the answer falls between the echo
-    and the FIRST prompt. Swapping the string alone would have made every reply
-    an empty tuple flagged `prompted=True`: a confident silent answer, worse than
-    the raw-log dump it replaced (research, 2026-08-26).
+    `docker attach tortoise-mangosd`, `server info`, 3s window - the same pty
+    dance `send_command()` does. AzerothCore reads its console with GNU
+    readline, which redisplays the prompt in FRONT of what it prints; CMaNGOS
+    and tortoise read with `fgets` and print `mangos>` only from
+    `commandFinished()`, AFTER the answer. These are the bytes that proves it:
+    one prompt, at the end, and none in front.
     """
     captured = (
-        b"\x1b[0mserver info\r\n"
-        b"Online players: 1 (max: 3) Queued players: 0\r\n"
-        b"mangos> \r\n"
-        b"\x1b[36m[bot] Grimtusk arrives in Orgrimmar\r\n"
+        b"server info\r\n"
+        b"Core revision: 61a8269151721f6467ed / 2026-08-22 15:25:45 -0700 "
+        b"/ Linux_x64 (little-endian)\r\r\n"
+        b"Players online: 0. Max online: 0.\r\r\n"
+        b"Server uptime: 1 Minute 8 Seconds.\r\r\n"
+        b"Server Time: Wed, 26.08.2026 16:04:33\r\r\n"
+        b"mangos>"
     )
     pumped = [raw.decode("utf-8", errors="replace").rstrip("\r\n") for raw in io.BytesIO(captured)]
     reply = console._parse_reply(
         pumped, "server info", prompt="mangos>", prompt_precedes_answer=False
     )
     assert reply.prompted is True
-    assert reply.lines == ("Online players: 1 (max: 3) Queued players: 0",)
+    assert reply.lines == (
+        "Core revision: 61a8269151721f6467ed / 2026-08-22 15:25:45 -0700 / Linux_x64 "
+        "(little-endian)",
+        "Players online: 0. Max online: 0.",
+        "Server uptime: 1 Minute 8 Seconds.",
+        "Server Time: Wed, 26.08.2026 16:04:33",
+    )
+
+    # The two ways this went wrong, on the same real bytes. Before the fix the
+    # window was unrecognised, so the tab printed "not an answer" over the raw
+    # log; with the right string on the wrong side it comes back EMPTY while
+    # claiming to be an answer - silence presented as the server's reply. Both
+    # were reproduced against the live server before this test was written.
+    assert console._parse_reply(pumped, "server info").prompted is False
+    trap = console._parse_reply(
+        pumped, "server info", prompt="mangos>", prompt_precedes_answer=True
+    )
+    assert trap.lines == () and trap.prompted is True
 
 
 def test_the_azerothcore_prompt_is_still_the_default() -> None:

@@ -720,10 +720,28 @@ setup_database() {
           n=\$((n+1))
         done
         echo \"imported \$n base files\"
+        echo '=== schema updates (database_updates) ==='
+        u=0
+        for f in \$(ls /sql/database_updates/world/*.sql 2>/dev/null | sort); do
+          mariadb -h127.0.0.1 -uroot -p'${DB_PASSWORD}' tw_world < \"\$f\" || { echo FAIL \$f; exit 1; }
+          u=\$((u+1))
+        done
+        for f in \$(ls /sql/database_updates/character/*.sql 2>/dev/null | sort); do
+          mariadb -h127.0.0.1 -uroot -p'${DB_PASSWORD}' tw_char < \"\$f\" || { echo FAIL \$f; exit 1; }
+          u=\$((u+1))
+        done
+        echo \"applied \$u schema updates\"
     " 2>&1 | tee /tmp/tortoise-dbimport.log | tail -6 ; then
         print_error "Database import failed — see /tmp/tortoise-dbimport.log"; exit 1
     fi
-    print_success "Database imported (mangosd auto-applies updates on first boot)"
+    print_success "Database imported (base content + schema updates applied)"
+    # NOT left to the core. The comment here used to say "mangosd auto-applies
+    # updates on first boot"; it does not. Measured on a clean Ubuntu box
+    # (2026-08-26): the compiled core SELECTs spell_template.script_name, the
+    # base dump has no such column, and mangosd asserts in HandleMySQLError
+    # and dies with SIGSEGV (exit 139) before it ever listens on 8090 - while
+    # this installer printed "TORTOISE WOW INSTALLED!" and an account that was
+    # never created. 121 update files applied cleanly and the server started.
 
     # Seed the realm row: address = LAN IP, world port 8090, build 7272.
     # (No realmlist row ships in the dump.)
