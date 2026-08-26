@@ -123,10 +123,10 @@ NO_TTY_HELP = (
 )
 
 
-def attach_argv(container: str) -> list[str]:
+def attach_argv(container: str, *, wsl_distro: str | None = None) -> list[str]:
     """The exact `docker attach` invocation used (pinned by tests).
 
-    argv[0] is `platform.docker_program()`, not the literal `docker`, and this
+    argv[0] comes from `platform.docker_prefix()`, not the literal `docker`, and this
     is the site where getting that wrong is worst. Everywhere else an
     unresolved CLI is a command that failed and can be retried; here it is the
     GM console — account creation, `.server info`, every gameplay command the
@@ -140,10 +140,10 @@ def attach_argv(container: str) -> list[str]:
             opens a pty, and so the user gets `DOCKER_CLI_MISSING_HELP` instead
             of a `FileNotFoundError` from `Popen`.
     """
-    program = platform.docker_program()
-    if program is None:
+    prefix = platform.docker_prefix(wsl_distro)
+    if prefix is None:
         raise ConsoleError(platform.DOCKER_CLI_MISSING_HELP)
-    return [program, "attach", "--sig-proxy=false", container]
+    return [*prefix, "attach", "--sig-proxy=false", container]
 
 
 def send_command(

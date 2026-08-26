@@ -58,7 +58,7 @@ class ApplyError(RuntimeError):
     """A step failed in a way that must stop the run (missing template value, git failure, ...)."""
 
 
-def mysql_env(root_password: str) -> dict[str, str]:
+def mysql_env(root_password: str, wsl_distro: str | None = None) -> dict[str, str]:
     """This process's environment plus `MYSQL_PWD`, so the password never enters argv.
 
     `docker exec -e MYSQL_PWD` (no `=value`) forwards the variable from OUR
@@ -69,8 +69,16 @@ def mysql_env(root_password: str) -> dict[str, str]:
     Module-level rather than a `DockerSql` method because `maintenance.py` runs
     `mysqldump`, not `mysql`, and so cannot reuse `DockerSql` itself — but the
     one rule that must never be re-derived is how the password is handed over
-    (style-guide §4).
+    (style-guide §4). `wsl_distro` is part of that rule now: a variable set here
+    does NOT reach a process inside a distro unless `WSLENV` names it, so both
+    callers get the crossing right by using this rather than by remembering.
     """
+    if wsl_distro is not None:
+        # Crossing into a distro, the variable does not follow just because it
+        # is set here - measured, it arrives EMPTY, and mysql then reports an
+        # authentication failure against a perfectly healthy database.
+        # `wsl_env()` names it in WSLENV, which is what carries it across.
+        return platform.wsl_env({"MYSQL_PWD": root_password})
     env = dict(os.environ)
     env["MYSQL_PWD"] = root_password
     return env
@@ -99,6 +107,8 @@ class DockerSql:
 
     db_container: str
     root_password: str
+    wsl_distro: str | None = None
+    """The WSL2 distro this server's docker lives in, if it is not local."""
 
     def run_file(self, db: Db, path: Path) -> None:
         with path.open("rb") as fh:
@@ -210,11 +220,11 @@ class DockerSql:
                 to the PATH Docker Desktop's installer wrote — see
                 `platform.docker_program()`.
         """
-        program = platform.docker_program()
-        if program is None:
+        prefix = platform.docker_prefix(self.wsl_distro)
+        if prefix is None:
             raise ApplyError(platform.DOCKER_CLI_MISSING_HELP)
         return [
-            program,
+            *prefix,
             "exec",
             "-i",
             "-e",

@@ -594,3 +594,51 @@ def test_output_that_is_not_utf8_does_not_escape_as_a_decode_error(
     # perfectly valid cp1252 characters on this one. Asserting U+FFFD passed on
     # Linux and failed on Windows, which is the wrong thing to pin.
     assert "ok" in out, out
+
+
+# ------------------------------------------------------- WSL-resident servers
+
+
+def test_the_sql_runner_reaches_the_distros_own_docker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A WSL-resident server's database answers only to that distro's docker."""
+    monkeypatch.setattr(apply_module.platform, "_which", lambda name, path=None: "wsl.exe")
+    runner_ = DockerSql("ac-database", "hunter2", wsl_distro="dml-arch")
+    argv = runner_._argv("auth")
+    assert argv[:5] == ["wsl.exe", "-d", "dml-arch", "--", "docker"]
+    assert "exec" in argv and "ac-database" in argv
+
+
+def test_the_password_still_never_enters_argv_through_wsl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one rule that must survive the crossing.
+
+    `docker exec -e MYSQL_PWD` names the variable and not its value precisely so
+    the secret stays out of a command line every local process can read. Routing
+    through `wsl.exe` must not quietly turn that into `-e MYSQL_PWD=hunter2`.
+    """
+    monkeypatch.setattr(apply_module.platform, "_which", lambda name, path=None: "wsl.exe")
+    argv = DockerSql("ac-database", "hunter2", wsl_distro="dml-arch")._argv("auth")
+    assert "MYSQL_PWD" in argv
+    assert not any("hunter2" in part for part in argv), f"the password is in argv: {argv}"
+
+
+def test_mysql_env_names_the_password_in_wslenv_for_a_distro() -> None:
+    """Without WSLENV the variable crosses EMPTY, and mysql reports a bad password.
+
+    Measured 2026-08-26: a variable set on the Windows side arrives as `[]`
+    inside the distro unless WSLENV names it. The failure is an authentication
+    error, not a missing-setting error, which is the worst kind to debug - so it
+    is set in `mysql_env()`, the one place this codebase decides how the
+    password is handed over.
+    """
+    env = apply_module.mysql_env("hunter2", wsl_distro="dml-arch")
+    assert env["MYSQL_PWD"] == "hunter2"
+    assert "MYSQL_PWD" in env["WSLENV"].split(":")
+
+
+def test_mysql_env_adds_no_wslenv_for_a_local_install() -> None:
+    """Nothing crosses a boundary, so nothing needs announcing."""
+    env = apply_module.mysql_env("hunter2")
+    assert env["MYSQL_PWD"] == "hunter2"
+    assert "WSLENV" not in env or "MYSQL_PWD" not in env.get("WSLENV", "")

@@ -209,6 +209,8 @@ class DockerMysql:
     keeps it out of argv, out of log lines and off disk, and a default `repr`
     would put it back — in a pytest assertion diff, a logged object, or a
     traceback frame dump in a UI error handler (review, 2026-08-23)."""
+    wsl_distro: str | None = None
+    """The WSL2 distro this server's docker lives in, if it is not local."""
 
     def databases(self) -> tuple[str, ...]:
         proc = self._exec(
@@ -313,14 +315,14 @@ class DockerMysql:
                 `apply.DockerSql._mysql()`; without this the second surfaces as
                 a bare `[WinError 2]`.
         """
-        program = platform.docker_program()
-        if program is None:
+        prefix = platform.docker_prefix(self.wsl_distro)
+        if prefix is None:
             raise MaintenanceError(platform.DOCKER_CLI_MISSING_HELP)
         # `-i` only when something is being written to the child: a mysqldump
         # reads nothing, and an idle open stdin is one more thing to get wrong.
         interactive = ["-i"] if (input_text is not None or stdin is not None) else []
         argv = [
-            program,
+            *prefix,
             "exec",
             *interactive,
             "-e",
@@ -336,7 +338,7 @@ class DockerMysql:
                 stdout=stdout if stdout is not None else subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=False,
-                env=runner.child_env(mysql_env(self.root_password)),
+                env=runner.child_env(mysql_env(self.root_password, self.wsl_distro)),
                 creationflags=runner.creationflags(),
             )
         except OSError as exc:

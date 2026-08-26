@@ -333,3 +333,12 @@ def test_a_missing_cli_never_opens_a_pty_it_cannot_close(
     with pytest.raises(console.ConsoleError, match="Docker could not be found"):
         console.send_command("server info", container="ac-worldserver")
     assert opened == [], "a pty was opened for a command that could never run"
+
+
+def test_attach_argv_reaches_the_distros_own_docker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The GM console attaches to a container, and it must be the right daemon's."""
+    monkeypatch.setattr(console.platform, "_which", lambda name, path=None: "wsl.exe")
+    argv = console.attach_argv("ac-worldserver", wsl_distro="dml-arch")
+    assert argv[:5] == ["wsl.exe", "-d", "dml-arch", "--", "docker"]
+    assert argv[-1] == "ac-worldserver"
+    assert "--sig-proxy=false" in argv

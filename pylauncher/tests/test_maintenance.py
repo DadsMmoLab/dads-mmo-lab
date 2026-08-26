@@ -7,6 +7,7 @@ daemon or a database. The two tests that pin argv/env drive the real
 
 from __future__ import annotations
 
+import io
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -935,3 +936,33 @@ def test_a_dump_does_not_ask_mysqldump_to_drop_the_database() -> None:
     assert argv[:2] == ["mysqldump", "-uroot"]
     assert argv[-2:] == ["--databases", "acore_world"]
     assert "--single-transaction" in argv, "a backup must be takeable while people are playing"
+
+
+def test_backup_runs_mysqldump_in_the_distro_and_announces_the_password(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backup shells out itself, so it needs both halves of the crossing.
+
+    The argv has to reach the distro's docker, and `MYSQL_PWD` has to be named
+    in WSLENV or `mysqldump` is handed an empty password and reports an
+    authentication failure against a database that is perfectly healthy.
+    """
+    seen: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        seen["argv"] = list(argv)
+        seen["env"] = kwargs.get("env") or {}
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(maintenance.subprocess, "run", fake_run)
+    monkeypatch.setattr(maintenance.platform, "_which", lambda name, path=None: "wsl.exe")
+
+    mysql = maintenance.DockerMysql("ac-database", "hunter2", wsl_distro="dml-arch")
+    mysql.dump_into("acore_auth", io.BytesIO())
+
+    argv = seen["argv"]
+    assert argv[:5] == ["wsl.exe", "-d", "dml-arch", "--", "docker"]
+    assert not any("hunter2" in part for part in argv), f"password in argv: {argv}"
+    env = seen["env"]
+    assert env.get("MYSQL_PWD") == "hunter2"
+    assert "MYSQL_PWD" in env.get("WSLENV", "").split(":")
