@@ -3004,11 +3004,24 @@ def _seam_reachers() -> dict[str, list[str]]:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         defs[node.name] = node
+        # Both call shapes. `_docker(...)` is an ast.Name, but `docker.status(...)`
+        # or `self._logs(...)` is an ast.Attribute - and a function reaching the
+        # seam that way was INVISIBLE to the first version of this scan. Proved
+        # by writing one: a helper calling `me.container_state(...)` through an
+        # `import yulon.docker as me` passed this test while being unable to name
+        # a daemon.
         calls[node.name] = {
-            child.func.id
+            child.func.id if isinstance(child.func, ast.Name) else child.func.attr
             for child in ast.walk(node)
-            if isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+            if isinstance(child, ast.Call)
+            and isinstance(child.func, (ast.Name, ast.Attribute))
         }
+
+    # Only names this module actually defines: an attribute call to something
+    # else entirely (`proc.stdout.splitlines()`) must not be mistaken for one of
+    # ours because the attribute happens to share a name.
+    defined = set(defs)
+    calls = {name: called & defined for name, called in calls.items()}
 
     reaching = {"_docker"}
     changed = True
@@ -3063,3 +3076,50 @@ def test_the_completeness_test_would_notice_a_new_function() -> None:
     assert len(reaching) > 15, f"only found {len(reaching)} - is the parse working?"
     for known in ("status", "_run", "_docker", "wait_ready"):
         assert known in reaching, f"{known} should reach the seam but was not found"
+
+
+def test_the_completeness_scan_sees_a_module_qualified_call() -> None:
+    """The hole the first version had, pinned so it cannot come back.
+
+    A function reaching the seam through `docker.status(...)` or
+    `me.container_state(...)` rather than a bare name was invisible, because the
+    scan matched only `ast.Name` callees. Proved by writing exactly such a helper
+    into docker.py: the completeness test passed while the helper could not name
+    a daemon, so the guarantee was narrower than it claimed.
+
+    Asserted against a synthetic module, so proving it needs no edit to the real
+    one - and the unrelated-attribute case is asserted too, because the fix must
+    not start counting `proc.stdout.splitlines()` as a call to one of ours.
+    """
+    source = """
+def _docker(argv, *, wsl_distro=None): ...
+def reached_by_name(*, wsl_distro=None):
+    return _docker([], wsl_distro=wsl_distro)
+def reached_by_attribute():
+    import yulon.docker as me
+    return me.reached_by_name()
+def unrelated(proc):
+    return proc.stdout.splitlines()
+"""
+    tree = ast.parse(source)
+    defined = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    calls: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            calls[node.name] = {
+                c.func.id if isinstance(c.func, ast.Name) else c.func.attr
+                for c in ast.walk(node)
+                if isinstance(c, ast.Call) and isinstance(c.func, (ast.Name, ast.Attribute))
+            } & defined
+
+    reaching = {"_docker"}
+    changed = True
+    while changed:
+        changed = False
+        for name, called in calls.items():
+            if name not in reaching and called & reaching:
+                reaching.add(name)
+                changed = True
+
+    assert "reached_by_attribute" in reaching, "a module-qualified call is still invisible"
+    assert "unrelated" not in reaching, "an unrelated attribute call was miscounted"
