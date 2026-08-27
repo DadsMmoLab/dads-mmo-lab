@@ -123,10 +123,12 @@ class CatalogView(QWidget):
         pick_dir: DirPicker = _qt_dir_picker,
         home: Path | None = None,
         platform_id: Callable[[], str] = platform.detect,
+        dir_problem: Callable[[Path], str | None] = platform.server_dir_problem,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._platform_id = platform_id
+        self._dir_problem = dir_problem
         self._catalog = catalog
         self._make_installer = installer_factory
         self._log = log_panel
@@ -205,10 +207,14 @@ class CatalogView(QWidget):
 
         Installs made by the shell scripts or the CLI harness (or before the app
         was reinstalled) never pass through `start_install()`, so this is how
-        they get a controller tab. The only check is the one thing every install
-        has: a compose file in the chosen folder, under any of the names Compose
-        itself accepts (`installer.COMPOSE_FILENAMES`) - the TBC and Vanilla
-        scripts write `compose.yml`, not `docker-compose.yml`.
+        they get a controller tab. Two checks: a compose file in the chosen
+        folder, under any of the names Compose itself accepts
+        (`installer.COMPOSE_FILENAMES`) - the TBC and Vanilla scripts write
+        `compose.yml`, not `docker-compose.yml` - and the same folder rule
+        `start_install()` applies, because a folder Docker cannot mount is no
+        more attachable than it is installable. That second one was missing
+        until a tester attached a server living inside WSL (2026-08-26): the
+        rule existed and simply was not wired to the button they pressed.
         """
         server_dir = self._pick_dir(
             self,
@@ -224,6 +230,13 @@ class CatalogView(QWidget):
                 f"{server_dir} has no compose file (compose.yml or docker-compose.yml) — "
                 "pick the folder the installer created.",
             )
+            return False
+        # Asked second, so "there is no server here" beats "this folder would
+        # not work anyway" - the first is the likelier mistake and the easier
+        # one to act on.
+        folder_problem = self._dir_problem(server_dir)
+        if folder_problem is not None:
+            QMessageBox.warning(self, "That folder will not work", folder_problem)
             return False
         client_dir: Path | None = None
         if entry.install.requires_client_dir:

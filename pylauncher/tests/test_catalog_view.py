@@ -273,6 +273,75 @@ def test_an_install_that_wrote_compose_yml_is_remembered(
     assert "finished:True" in events
 
 
+def test_use_existing_refuses_a_folder_docker_cannot_mount(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The folder rule was wired to Install and not to the button users press.
+
+    Reported by a tester on 2026-08-26: a WotLK server installed by the DML
+    Launcher lives INSIDE a WSL distro, at `\\\\wsl.localhost\\dml-arch\\...`. They
+    could reach it by pasting the path into the picker's address bar, and
+    "Use existing..." accepted it - because this path only ever checked for a
+    compose file. `start_install()` refuses such a folder through
+    `server_dir_problem()`; attaching one did not, so the failure would arrive
+    later as a container that mounted nothing.
+
+    Measured on Windows 11 with Docker running: `docker run -v
+    \\\\wsl.localhost\\...:/probe` fails with "is not a valid Windows path".
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    ran: list[list[str]] = []
+    monkeypatch.setattr(
+        runner, "run", lambda cmd, cwd=None, timeout=None: ran.append(cmd) or _completed()  # type: ignore[func-returns-value]
+    )
+    warned: list[str] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))  # type: ignore[attr-defined]
+
+    # A real compose file, so the ONLY thing that can refuse it is the folder rule.
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        pick_dir=lambda *_: tmp_path,
+        home=tmp_path,
+        dir_problem=lambda _p: "that folder is inside WSL and Docker cannot mount it",
+    )
+    got: list[object] = []
+    view.installed.connect(lambda *a: got.append(a))
+
+    assert view.attach_existing(CATALOG.get("wow-wotlk")) is False
+    assert got == [], "a folder Docker cannot mount was attached anyway"
+    assert warned and "Docker cannot mount" in warned[0]
+    assert ran == [], f"it shelled out before refusing: {ran}"
+
+
+def test_use_existing_still_accepts_a_folder_with_no_problem(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard must not refuse the ordinary case it was added around."""
+    monkeypatch.setattr(
+        runner, "run", lambda cmd, cwd=None, timeout=None: _completed()  # type: ignore[arg-type]
+    )
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        pick_dir=lambda *_: tmp_path,
+        home=tmp_path,
+        dir_problem=lambda _p: None,
+    )
+    got: list[object] = []
+    view.installed.connect(lambda *a: got.append(a))
+    assert view.attach_existing(CATALOG.get("wow-wotlk")) is True
+    assert len(got) == 1
+
+
 def test_use_existing_does_not_pin_the_compose_project(
     qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
