@@ -786,7 +786,20 @@ setup_database() {
           mariadb -h127.0.0.1 -uroot -p'${DB_PASSWORD}' tw_world < \"\$f\" || { echo FAIL \$f; exit 1; }
           u=\$((u+1))
         done
-        for f in \$(ls /sql/database_updates/character/*.sql 2>/dev/null | sort); do
+        # Character migrations live in two directories whose timestamps
+        # interleave, so neither can simply follow the other: sql/character_updates
+        # runs 2026-07-08..08-12 and sql/database_updates/character starts 08-17.
+        # Only the second was ever applied here, which is why
+        # 20260812142512_character_inventory_copy.sql never landed - the table the
+        # core TRUNCATEs on weekly honor maintenance and never creates. The server
+        # installs fine and dies days later saying the database is out of date,
+        # which is its generic wording for a query hitting a table that isn't there.
+        : > /tmp/charsql
+        for f in /sql/character_updates/*.sql /sql/database_updates/character/*.sql; do
+          [ -f \"\$f\" ] || continue
+          echo \"\$(basename \"\$f\")|\$f\" >> /tmp/charsql
+        done
+        for f in \$(sort /tmp/charsql | cut -d'|' -f2); do
           mariadb -h127.0.0.1 -uroot -p'${DB_PASSWORD}' tw_char < \"\$f\" || { echo FAIL \$f; exit 1; }
           u=\$((u+1))
         done
