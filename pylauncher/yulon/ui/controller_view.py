@@ -174,17 +174,31 @@ class ControllerServices:
             create_account=lambda name, pw, gm: wotlk_accounts.create_account(
                 sql, name, pw, gm_level=gm, scheme=entry.accounts.scheme or "azerothcore"
             ),
+            # `wsl_distro=` as well as the distro-aware `mysql`: the dump goes
+            # through `docker exec`, but before it runs, maintenance censuses
+            # the containers with `docker ps` — a second question, to the same
+            # daemon, that was going to the Windows host. On a machine whose
+            # only Docker is inside the distro that is the one with no Docker on
+            # it, so Back up now answered "Docker could not be found on this
+            # machine" while the Console tab, one seam over, was attached and
+            # streaming (Discord report, 2026-08-27).
             backup=lambda: wotlk_maintenance.backup(
-                server_dir, mysql, spec=spec, core_databases=entry.core_databases()
+                server_dir,
+                mysql,
+                spec=spec,
+                core_databases=entry.core_databases(),
+                wsl_distro=wsl_distro,
             ),
             backups_dir=lambda: wotlk_maintenance.backups_dir(server_dir),
-            plan_restore=lambda path: wotlk_maintenance.plan_restore(path, server_dir, spec=spec),
+            plan_restore=lambda path: wotlk_maintenance.plan_restore(
+                path, server_dir, spec=spec, wsl_distro=wsl_distro
+            ),
             # `confirm=plan.token` is not a rubber stamp: the token can only come
             # from a plan, a plan can only come from a real file, and the human
             # confirmation is the dialog the view puts in front of this call.
             # What the token buys is that no confirmation can be spelled `True`.
             restore=lambda plan: wotlk_maintenance.restore(
-                plan, mysql, confirm=plan.token, spec=spec
+                plan, mysql, confirm=plan.token, spec=spec, wsl_distro=wsl_distro
             ),
             interrupted_restore=lambda: wotlk_maintenance.interrupted_restore(server_dir),
             forget_interrupted=lambda: wotlk_maintenance.forget_interrupted_restore(server_dir),

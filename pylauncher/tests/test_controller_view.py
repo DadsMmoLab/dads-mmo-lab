@@ -18,6 +18,7 @@ from yulon.controller_wow_wotlk.console import ConsoleReply
 from yulon.controller_wow_wotlk.maintenance import (
     BackupReport,
     InterruptedRestore,
+    MaintenanceError,
     RestorePlan,
     RestoreReport,
 )
@@ -1128,6 +1129,50 @@ def test_for_wotlk_wires_the_distro_into_every_seam_that_talks_to_docker(
     )
     services.network_plan("lan")
     assert asked == ["dml-arch"], f"the port scan addressed the wrong daemon: {asked}"
+
+
+def test_the_maintenance_tab_asks_the_distro_s_docker_what_is_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Backup and restore census the containers, and that census has a daemon too.
+
+    Reported from a WSL-resident install (2026-08-27): the Console tab attached
+    and its log streamed, while `Maintenance -> Back up now` answered "could not
+    ask Docker what is running ... Docker could not be found on this machine".
+    One machine, one daemon, two answers - because the census went to the
+    Windows host, which is exactly the box with no Docker on it.
+
+    The seam scan below walked past this: `maintenance` spells "which daemon"
+    as an injectable `running` callable rather than as `wsl_distro`, so three
+    call sites that pass neither were invisible to a scan that looks for the
+    name. Asked here through the callables the view really calls, down to the
+    argv the census would have run.
+    """
+    asked: list[str | None] = []
+
+    def fake_prefix(wsl_distro: str | None = None, *, inside: str | None = None) -> tuple[str, ...]:
+        asked.append(wsl_distro)
+        return ("wsl.exe", "-d", str(wsl_distro), "--", "docker")
+
+    monkeypatch.setattr(docker.platform, "docker_prefix", fake_prefix)
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        lambda cmd, cwd=None, timeout=None: subprocess.CompletedProcess(cmd, 0, "", ""),
+    )
+    services = ControllerServices.for_wotlk(WOTLK, tmp_path, None, "dml-arch")
+
+    # Nothing is running in this fake, so both calls end in their own ordinary
+    # refusal ("ac-database is not running"). What is under test is which
+    # daemon was asked before they got there.
+    with pytest.raises(MaintenanceError):
+        services.backup()
+    assert asked == ["dml-arch"], f"the backup census addressed the wrong daemon: {asked}"
+
+    asked.clear()
+    plan = services.plan_restore(tmp_path / "there-is-no-such-dump.sql")
+    assert asked == ["dml-arch"], f"the restore census addressed the wrong daemon: {asked}"
+    assert not any("could not be found on this machine" in r for r in plan.refusals), plan.refusals
 
 
 def test_every_seam_for_wotlk_builds_says_which_daemon_it_means() -> None:
