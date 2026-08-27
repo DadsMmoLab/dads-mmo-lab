@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -233,48 +233,72 @@ def test_headless_provisioning_never_hands_over_a_prompter(
 # --------------------------------------------------------------- window tabs
 
 
-@pytest.fixture
-def window_builder(
-    monkeypatch: pytest.MonkeyPatch, qapp: object, tmp_path: Any
-) -> Iterator[Callable[..., Any]]:
-    """Build real windows through `main.build_window()` and stop their threads after.
+@pytest.fixture(scope="module")
+def _app_window(qapp: object) -> Iterator[Any]:
+    """ONE real window, built through `main.build_window()`, shared by this module.
+
+    Repeatedly building windows is what made this file crash. Measured on Linux
+    with offscreen Qt (PySide6 6.11.2), 25 runs per count:
+
+        1 window  0/25   2 windows  2/25   3 windows  3/25
+        4 windows 8/25   5 windows  9/25
+
+    A dose-response, not a bug in any one test: each of the five passed 25/25
+    alone. It surfaced as a SEGFAULT (and sometimes SIGBUS) inside whichever
+    test happened to be allocating at the time - `state.remember()`, a signal
+    emit - which is why three attempts at making teardown safer all measured as
+    noise. Only the count matters, so there is one window and the tests share
+    it.
+
+    Sharing is safe because tabs are keyed by (game, server_dir): every test
+    below uses its own directory, creates its own tab through the real signals,
+    and cannot see another's. Nothing is pre-seeded into `state.json` - a tab
+    arrives the way a user's does.
 
     Three things `build_window()` does are unacceptable in a unit test and are
-    neutralised here rather than in each test: it reads the user's real
-    `state.json` on the way in, writes it back every time a tab is added, and
-    starts a background thread that asks GitHub for the latest release.
-
-    The teardown is `main._stop_background_threads()` itself, not a hand-rolled
-    equivalent: a QThread destroyed while running ABORTS the process
-    (0xC0000409), and a test that leaks one takes the whole run down with it.
+    neutralised here: it reads the user's real `state.json`, writes it back
+    whenever a tab is added, and starts a thread that asks GitHub for the
+    latest release.
     """
-    monkeypatch.setattr(update, "check_for_update", lambda: None)
-    monkeypatch.setattr(state, "save_state", lambda _state, path=None: tmp_path / "state.json")
-    windows: list[Any] = []
-
-    def build(*installs: state.KnownInstall) -> Any:
-        monkeypatch.setattr(
-            state, "load_state", lambda path=None: state.AppState(installs=list(installs))
-        )
-        window = main.build_window()
-        windows.append(window)
-        return window
-
-    yield build
     from PySide6.QtWidgets import QApplication
 
-    for window in windows:
-        main._stop_background_threads(window)
-        window.close()
-    # Flush the deferred deletes BEFORE this test ends, with every thread
-    # already joined. `drop_controller()` uses `deleteLater()`, and a test has
-    # no event loop to run it - so without this the delete fired at whatever
-    # later moment Qt next pumped events, inside an unrelated test, tearing
-    # down widgets while that test held them. It crashed as a SEGFAULT on
-    # CI's py3.11 and passed on py3.13, which is what a lifetime bug looks like
-    # when the only difference is when the garbage collector ran.
+    from yulon.ui.controller_view import ControllerView
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(update, "check_for_update", lambda: None)
+    monkeypatch.setattr(state, "load_state", lambda path=None: state.AppState(installs=[]))
+    # Captured here rather than in the test that reads it: `build_window()`
+    # imports `save_state` into its own namespace on the way in, so a patch
+    # applied after the window exists is never seen by the window.
+    saved: list[Any] = []
+    monkeypatch.setattr(state, "save_state", lambda app_state, path=None: saved.append(app_state))
+
+    # A test about which tab exists must not also be shelling out to docker on a
+    # 5-second timer, into a worker thread that outlives the assertions.
+    real_init = ControllerView.__init__
+
+    def _no_polling(self: Any, entry: Any, services: Any, **kwargs: Any) -> None:
+        kwargs["status_poll_ms"] = 0
+        real_init(self, entry, services, **kwargs)
+
+    monkeypatch.setattr(ControllerView, "__init__", _no_polling)
+
+    window = main.build_window()
+    window.saved_states = saved
+    yield window
+
+    # `_stop_background_threads` itself, not a hand-rolled equivalent: a QThread
+    # destroyed while running ABORTS the process, and a leaked one takes the
+    # whole run down with it.
+    main._stop_background_threads(window)
     QApplication.processEvents()
-    windows.clear()
+    monkeypatch.undo()
+
+
+@pytest.fixture
+def window(_app_window: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """The shared window, with `save_state` captured for the test that reads it."""
+    return _app_window
 
 
 def _catalog_view(window: Any) -> Any:
@@ -290,46 +314,54 @@ def _catalog_view(window: Any) -> Any:
     return view
 
 
+def _tab_for(window: Any, server_dir: Any) -> Any:
+    """The controller tab this test owns, by the key tabs are stored under."""
+    for view in window.yulon_controllers:
+        if view.services.controller.server_dir == server_dir:
+            return view
+    raise AssertionError(f"no tab for {server_dir}")
+
+
 def test_adopting_a_server_that_already_has_a_tab_rebuilds_it_for_the_new_distro(
-    window_builder: Callable[..., Any], tmp_path: Any
+    window: Any, tmp_path: Any
 ) -> None:
     """Otherwise every button on that tab keeps driving the LOCAL docker daemon.
 
-    The server was remembered as an ordinary local install, so its tab was built
-    with no distro; adopting it from WSL wrote the distro to `state.json` and
-    stopped there, leaving the open tab wired to a daemon the server is not in.
-    Nothing reports an error: Start finds nothing to start, Stop stops nothing,
-    and Status says "not running" about a server that is - until the app is
-    restarted.
+    The tab was opened as an ordinary local install, so it was built with no
+    distro; adopting the same server from WSL wrote the distro to `state.json`
+    and stopped there, leaving the open tab wired to a daemon the server is not
+    in. Nothing reports an error: Start finds nothing to start, Stop stops
+    nothing, and Status says "not running" about a server that is - until the
+    app is restarted.
 
     The whole services bundle has to be new, not just the `Controller`:
     `ControllerServices.for_wotlk()` bakes the distro into `DockerSql`,
     `DockerMysql` and the `Controller`, and captures it a fourth time in the
     `logs_source` lambda.
     """
-    server_dir = tmp_path / "wotlk-server"
-    window = window_builder(state.KnownInstall(game="wow-wotlk", server_dir=server_dir))
-    tabs = window.property("tabs")
-    stale = window.yulon_controllers[0]
+    server_dir = tmp_path / "rebuild-me"
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-wotlk", server_dir, None)
+    stale = _tab_for(window, server_dir)
     assert stale.services.controller.wsl_distro is None
 
-    _catalog_view(window).adopted.emit("wow-wotlk", server_dir, None, "Ubuntu-24.04")
+    catalog.adopted.emit("wow-wotlk", server_dir, None, "Ubuntu-24.04")
 
-    live = window.yulon_controllers
-    assert len(live) == 1, "the torn-down tab was left in the shutdown list"
-    assert live[0] is not stale, "the tab was patched in place instead of rebuilt"
-    assert live[0].services is not stale.services
-    assert live[0].services.controller.wsl_distro == "Ubuntu-24.04"
-    assert tabs.count() == 2, "Catalog plus exactly one server tab"
+    live = _tab_for(window, server_dir)
+    assert live is not stale, "the tab was patched in place instead of rebuilt"
+    assert live.services is not stale.services
+    assert live.services.controller.wsl_distro == "Ubuntu-24.04"
+    assert stale not in window.yulon_controllers, "the torn-down tab is still in the shutdown list"
+    tabs = window.property("tabs")
     assert tabs.indexOf(stale) == -1, "the stale tab is still in the tab bar"
-    assert tabs.currentWidget() is live[0]
+    assert tabs.currentWidget() is live
     # The panel list is what `_stop_background_threads()` joins at exit. A stale
     # console panel left in it is a `wait()` on a widget nothing owns any more.
-    assert len(window.yulon_log_panels) == 2, "the shared app log plus one console"
+    assert stale.console_log not in window.yulon_log_panels
 
 
 def test_re_adopting_a_server_from_the_same_distro_only_focuses_its_tab(
-    window_builder: Callable[..., Any], tmp_path: Any
+    window: Any, tmp_path: Any
 ) -> None:
     """Adopting twice is an ordinary thing to do, and must not cost the tab its state.
 
@@ -338,61 +370,28 @@ def test_re_adopting_a_server_from_the_same_distro_only_focuses_its_tab(
     behind - give one server two tabs that disagree. The distro changing is the
     only thing that justifies one.
     """
-    server_dir = tmp_path / "wotlk-server"
-    window = window_builder(
-        state.KnownInstall(game="wow-wotlk", server_dir=server_dir, wsl_distro="Ubuntu-24.04")
-    )
+    server_dir = tmp_path / "same-distro"
+    catalog = _catalog_view(window)
+    catalog.adopted.emit("wow-wotlk", server_dir, None, "Ubuntu-24.04")
+    existing = _tab_for(window, server_dir)
     tabs = window.property("tabs")
-    existing = window.yulon_controllers[0]
     tabs.setCurrentIndex(0)  # so "it focused the tab" is a real change, not the status quo
+    before = len(window.yulon_controllers)
 
-    _catalog_view(window).adopted.emit("wow-wotlk", server_dir, None, "Ubuntu-24.04")
+    catalog.adopted.emit("wow-wotlk", server_dir, None, "Ubuntu-24.04")
 
-    assert window.yulon_controllers == [existing], "the tab was rebuilt for nothing"
-    assert tabs.count() == 2
+    assert _tab_for(window, server_dir) is existing, "the tab was rebuilt for nothing"
+    assert len(window.yulon_controllers) == before, "adopting twice made a second tab"
     assert tabs.currentWidget() is existing
 
 
-def test_a_tab_opened_after_startup_is_still_joined_when_the_window_closes(
-    window_builder: Callable[..., Any], tmp_path: Any
-) -> None:
-    """A running console on such a tab used to abort the process on close.
-
-    `build_window()` handed its panel list to `setProperty()`, which stores a
-    QVariant COPY: the exit path then walked the list as it stood when the
-    window was built, and every tab opened during the session - each install,
-    each adopt - was missing from it. So "Follow worldserver log" on a tab the
-    user opened themselves left a QThread running while Qt was torn down, which
-    aborts (0xC0000409) rather than warns. Both registries are checked here,
-    because the same copy silently froze the controller list too.
-    """
-    server_dir = tmp_path / "wotlk-server"
-    window = window_builder()  # nothing remembered: the tab arrives later, as a user's does
-    _catalog_view(window).adopted.emit("wow-wotlk", server_dir, None, "Ubuntu-24.04")
-    view = window.yulon_controllers[-1]
-
-    def endless() -> Iterator[str]:
-        while True:
-            yield "worldserver line"
-            time.sleep(0.005)
-
-    # What "Follow worldserver log" leaves running, without a real `docker logs`.
-    assert view.console_log.run(endless, title="worldserver log") is True
-    process_events(50)
-    assert view.console_log.running is True, "the job under test was not running to begin with"
-
-    main._stop_background_threads(window)
-
-    assert view.console_log.running is False, "the new tab's console thread outlived the window"
-
-
 def test_use_existing_on_a_wsl_server_does_not_demote_its_tab_to_the_local_daemon(
-    window_builder: Callable[..., Any], tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     r""" "I was not told a distro" is not the same fact as "this server is local".
 
     `installed` carries no distro, and "Use existing…" accepts a
-    `\\wsl.localhost\...` folder - which is exactly the spelling an adopted
+    `\wsl.localhost\...` folder - which is exactly the spelling an adopted
     server is stored under, so the two paths collide on the same key. Reading
     that silence as a change rebuilt a working WSL tab against the local docker
     daemon: this feature's own failure mode, running backwards.
@@ -401,36 +400,25 @@ def test_use_existing_on_a_wsl_server_does_not_demote_its_tab_to_the_local_daemo
     the next launch: the live tab keeps its distro, and so does what is written
     to `state.json` - `remember()` REPLACES the entry for a game + dir, so an
     install rebuilt from the signal's own arguments erases what adoption learnt.
-
-    `save_state` is captured BEFORE the window is built, deliberately:
-    `build_window()` imports it into its own namespace on the way in, so a
-    patch applied afterwards would never be seen.
     """
-    saved: list[Any] = []
-    monkeypatch.setattr(
-        state,
-        "save_state",
-        lambda app_state, path=None: saved.append(app_state) or (tmp_path / "state.json"),
-    )
-    server_dir = tmp_path / "wotlk-server"
-    window = window_builder(
-        state.KnownInstall(game="wow-wotlk", server_dir=server_dir, wsl_distro="Ubuntu-24.04")
-    )
-    existing = window.yulon_controllers[0]
+    server_dir = tmp_path / "keep-my-distro"
+    catalog = _catalog_view(window)
+    catalog.adopted.emit("wow-wotlk", server_dir, None, "Ubuntu-24.04")
+    existing = _tab_for(window, server_dir)
 
-    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    catalog.installed.emit("wow-wotlk", server_dir, None)
 
-    assert window.yulon_controllers == [existing], "the WSL tab was rebuilt as a local one"
+    assert _tab_for(window, server_dir) is existing, "the WSL tab was rebuilt as a local one"
     assert existing.services.controller.wsl_distro == "Ubuntu-24.04"
-    assert saved, "nothing was written back at all"
-    remembered = saved[-1].find("wow-wotlk", server_dir)
+    assert window.saved_states, "nothing was written back at all"
+    remembered = window.saved_states[-1].find("wow-wotlk", server_dir)
     assert (
         remembered is not None and remembered.wsl_distro == "Ubuntu-24.04"
     ), "the distro was erased from what would be saved"
 
 
 def test_a_tab_that_is_mid_import_is_not_torn_down_to_change_its_distro(
-    window_builder: Callable[..., Any], tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A rebuild is a teardown, and one kind of work cannot survive one.
 
@@ -448,15 +436,54 @@ def test_a_tab_that_is_mid_import_is_not_torn_down_to_change_its_distro(
     """
     from PySide6.QtWidgets import QMessageBox
 
-    server_dir = tmp_path / "wotlk-server"
-    window = window_builder(state.KnownInstall(game="wow-wotlk", server_dir=server_dir))
-    busy = window.yulon_controllers[0]
+    server_dir = tmp_path / "mid-import"
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-wotlk", server_dir, None)
+    busy = _tab_for(window, server_dir)
+
     monkeypatch.setattr(type(busy), "busy_reason", lambda _self: "The database import is running.")
     told: list[str] = []
     monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: told.append(a[2]))
 
-    _catalog_view(window).adopted.emit("wow-wotlk", server_dir, None, "Ubuntu-24.04")
+    catalog.adopted.emit("wow-wotlk", server_dir, None, "Ubuntu-24.04")
 
-    assert window.yulon_controllers == [busy], "a tab mid-import was torn down"
+    assert _tab_for(window, server_dir) is busy, "a tab mid-import was torn down"
     assert told and "import" in told[0], f"the refusal was silent: {told}"
     assert "next time" in told[0], "the user was not told when it will take effect"
+
+
+def test_a_tab_opened_after_startup_is_still_joined_when_the_window_closes(
+    window: Any, tmp_path: Any
+) -> None:
+    """A running console on such a tab used to abort the process on close.
+
+    `build_window()` handed its panel list to `setProperty()`, which stores a
+    QVariant COPY: the exit path then walked the list as it stood when the
+    window was built, and every tab opened during the session - each install,
+    each adopt - was missing from it. So "Follow worldserver log" on a tab the
+    user opened themselves left a QThread running while Qt was torn down, which
+    aborts (0xC0000409) rather than warns.
+
+    This one stops the window's threads itself, which is the behaviour under
+    test, so it is deliberately LAST in the file: the window is shared, and
+    nothing may run against it afterwards.
+    """
+    server_dir = tmp_path / "following-a-log"
+    _catalog_view(window).adopted.emit("wow-wotlk", server_dir, None, "Ubuntu-24.04")
+    view = _tab_for(window, server_dir)
+    assert view in window.yulon_controllers, "a tab opened after startup is missing from the list"
+    assert view.console_log in window.yulon_log_panels, "so is its console panel"
+
+    def endless() -> Iterator[str]:
+        while True:
+            yield "worldserver line"
+            time.sleep(0.005)
+
+    # What "Follow worldserver log" leaves running, without a real `docker logs`.
+    assert view.console_log.run(endless, title="worldserver log") is True
+    process_events(50)
+    assert view.console_log.running is True, "the job under test was not running to begin with"
+
+    main._stop_background_threads(window)
+
+    assert view.console_log.running is False, "the new tab's console thread outlived the window"
