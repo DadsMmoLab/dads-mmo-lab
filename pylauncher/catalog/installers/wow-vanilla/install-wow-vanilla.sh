@@ -161,11 +161,56 @@ press_enter() {
 }
 
 # ─────────────────────────────────────────
+# RANDOMNESS (no hard dependency on openssl)
+# ─────────────────────────────────────────
+# `openssl rand -hex 8` was called inline below to build the database password.
+# On a box without openssl that substitution yields an EMPTY string with only a
+# "command not found" line scrolling past, so every such install silently got
+# the same guessable root password. Measured on a clean Fedora VM 2026-08-26,
+# where openssl is not installed by default. /dev/urandom + od is coreutils, so
+# it is there on every box this installer supports.
+rand_hex() {
+    local bytes="${1:-8}" out=""
+    if command -v openssl >/dev/null 2>&1; then
+        out=$(openssl rand -hex "$bytes" 2>/dev/null)
+    fi
+    if [ -z "$out" ]; then
+        out=$(od -An -tx1 -N "$bytes" /dev/urandom 2>/dev/null | tr -d ' 
+')
+    fi
+    if [ -z "$out" ]; then
+        echo "FATAL: no way to generate a random database password on this box" >&2
+        exit 1
+    fi
+    printf '%s' "$out"
+}
+
+# ─────────────────────────────────────────
+# BUILD PARALLELISM
+# ─────────────────────────────────────────
+# The compile step used to hardcode a fixed -j "to avoid OOM kills on the Deck's
+# 16GB RAM". Measured on this codebase 2026-08-26 (mangos + playerbots, gcc):
+# a cc1plus process peaks around 835 MB, not the ~8 GB that number implies. So
+# the limit is derived rather than fixed: 1.5 GB per job after reserving 2 GB
+# for the OS, never more jobs than cores, never fewer than one.
+#
+# A Steam Deck (16 GB, 8 threads) still gets a safe 8; a 15-core builder stops
+# compiling at the speed of a 2-core one, which is what this cost before.
+build_jobs() {
+    local cores ram_gb by_ram
+    cores=$(nproc 2>/dev/null || echo 2)
+    ram_gb=$(awk '/MemTotal/ {printf "%d", $2/1048576}' /proc/meminfo 2>/dev/null || echo 4)
+    by_ram=$(( (ram_gb - 2) * 2 / 3 ))
+    [ "$by_ram" -lt 1 ] && by_ram=1
+    if [ "$cores" -lt "$by_ram" ]; then echo "$cores"; else echo "$by_ram"; fi
+}
+
+# ─────────────────────────────────────────
 # CONFIGURATION
 # ─────────────────────────────────────────
 SERVER_DIR="$HOME/wow-vanilla-server"
 CLIENT_DIR=""
-DB_PASSWORD="vanilla$(openssl rand -hex 8)"
+DB_PASSWORD="vanilla$(rand_hex 8)"
 DB_PASSWORD_LOADED=false   # set to true when loaded from .db_password file
 
 # Source pinning — change these to update what we compile
@@ -944,6 +989,7 @@ locate_client() {
             fi
         fi
 
+
         # ── Validation gate 5: Disk space for extraction ──────────
         # Extraction produces ~3-5 GB of data + temp Buildings folder
         local client_disk=$(df -BG "$CLIENT_DIR" 2>/dev/null | awk 'NR==2 {print $4}' | sed 's/G//')
@@ -1140,7 +1186,8 @@ RUN mkdir -p build && cd build && \
 
 # Compile (the 2-4 hour step on Steam Deck)
 # -j2 instead of $(nproc) to avoid OOM kills on the Deck's 16GB RAM
-RUN cd build && make -j2 && make install
+ARG BUILD_JOBS=2
+RUN cd build && make -j${BUILD_JOBS} && make install
 
 # ── PRESERVATION: copy SQL files into /opt/mangos/ before stage 2 ──
 # Without this, the multi-stage Dockerfile would strip them. The
@@ -1204,7 +1251,7 @@ DOCKERFILE
     ) &
     HEARTBEAT_PID=$!
 
-    if ! $DOCKER_CMD build -t "$SERVER_IMAGE" "$SERVER_DIR" 2>&1 | \
+    if ! $DOCKER_CMD build --build-arg BUILD_JOBS="$(build_jobs)" -t "$SERVER_IMAGE" "$SERVER_DIR" 2>&1 | \
         tee /tmp/wow-vanilla-build.log; then
         kill $HEARTBEAT_PID 2>/dev/null
         print_error "Compile failed!"
@@ -1261,8 +1308,8 @@ extract_client_data() {
     echo ""
 
     if ! $DOCKER_CMD run --rm \
-        -v "$CLIENT_DIR:/client" \
-        -v "$SERVER_DIR/data:/extracted" \
+        -v "$CLIENT_DIR:/client:z" \
+        -v "$SERVER_DIR/data:/extracted:z" \
         --entrypoint /bin/bash \
         "$SERVER_IMAGE" -c '
             set -e
@@ -1332,8 +1379,8 @@ extract_client_data() {
             echo ""
 
             if ! $DOCKER_CMD run --rm \
-                -v "$CLIENT_DIR:/client" \
-                -v "$SERVER_DIR/data:/extracted" \
+                -v "$CLIENT_DIR:/client:z" \
+                -v "$SERVER_DIR/data:/extracted:z" \
                 --entrypoint /bin/bash \
                 "$SERVER_IMAGE" -c '
                     ulimit -s unlimited 2>/dev/null || true
@@ -1410,7 +1457,7 @@ extract_client_data() {
     mkdir -p "$SERVER_DIR/data/mmaps"
 
     if ! $DOCKER_CMD run --rm \
-        -v "$SERVER_DIR/data:/data" \
+        -v "$SERVER_DIR/data:/data:z" \
         --entrypoint /bin/bash \
         "$SERVER_IMAGE" -c '
             ulimit -s unlimited 2>/dev/null || true
@@ -1532,7 +1579,7 @@ EOF
     mkdir -p "$SERVER_DIR/etc"
     print_info "Extracting config templates from compiled image..."
     $DOCKER_CMD run --rm \
-        -v "$SERVER_DIR/etc:/out" \
+        -v "$SERVER_DIR/etc:/out:z" \
         --entrypoint /bin/bash \
         "$SERVER_IMAGE" -c '
             cp /opt/mangos/etc/mangosd.conf.dist /out/mangosd.conf 2>/dev/null || true

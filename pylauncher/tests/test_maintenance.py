@@ -935,3 +935,38 @@ def test_a_dump_does_not_ask_mysqldump_to_drop_the_database() -> None:
     assert argv[:2] == ["mysqldump", "-uroot"]
     assert argv[-2:] == ["--databases", "acore_world"]
     assert "--single-transaction" in argv, "a backup must be takeable while people are playing"
+
+
+def test_a_cmangos_backup_is_not_told_its_databases_are_missing(tmp_path: Path) -> None:
+    """The alarm names the schemas THIS core has, not AzerothCore's three.
+
+    A Tortoise install dumps tw_logon/tw_char/tw_world correctly and was then
+    told `!! expected but absent: acore_auth, acore_characters, acore_world` —
+    a data-loss alarm on a backup that took everything (Discord report,
+    2026-08-26).
+    """
+    mysql = FakeMysql(("tw_logon", "tw_char", "tw_world", "tw_logs"))
+    report = backup(
+        tmp_path,
+        mysql,
+        running=running(DB),
+        now=AT,
+        core_databases=("tw_logon", "tw_char", "tw_world"),
+    )
+    assert report.databases == ("tw_char", "tw_logon", "tw_logs", "tw_world")
+    assert report.missing_core == ()
+
+
+def test_a_cmangos_backup_still_raises_the_alarm_for_its_own_missing_schema(
+    tmp_path: Path,
+) -> None:
+    """Per-game names must not turn the alarm off, only point it at the right schemas."""
+    mysql = FakeMysql(("tw_logon", "tw_world"))
+    report = backup(
+        tmp_path,
+        mysql,
+        running=running(DB),
+        now=AT,
+        core_databases=("tw_logon", "tw_char", "tw_world"),
+    )
+    assert report.missing_core == ("tw_char",)

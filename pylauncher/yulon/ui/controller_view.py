@@ -104,7 +104,10 @@ class ControllerServices:
                     f"and restore will fail until that file is restored"
                 )
             password = wotlk_modules.DEFAULT_DB_ROOT_PASSWORD
-        sql = DockerSql(spec.db, password)
+        # `schemas=` is what keeps a CMaNGOS install off AzerothCore's `acore_*`
+        # names. This factory is the only place that holds both the entry and the
+        # seam, so it is the only place that can say which schemas exist here.
+        sql = DockerSql(spec.db, password, schemas=entry.schema_map())
         # Bound to this entry's own db container, not `mysql_for()`'s
         # `docker_ctl.SPEC.db`, so a catalog entry that names a different one
         # cannot end up backing up somebody else's database.
@@ -133,7 +136,12 @@ class ControllerServices:
         return cls(
             controller=controller,
             logs_source=lambda: docker.follow_logs(spec.world),
-            send_console=lambda cmd: wotlk_console.send_command(cmd, container=spec.world),
+            send_console=lambda cmd: wotlk_console.send_command(
+                cmd,
+                container=spec.world,
+                prompt=entry.console.prompt,
+                prompt_precedes_answer=entry.console.prompt_precedes_answer,
+            ),
             store=wotlk_modules.store() if entry.has_manifests else None,
             applier=(
                 wotlk_modules.applier(server_dir, sql=sql, client_dir=client_dir)
@@ -147,9 +155,11 @@ class ControllerServices:
             # copying that would hand administrator to every account made from
             # the tile. The spin box defaults to 0 and the user raises it.
             create_account=lambda name, pw, gm: wotlk_accounts.create_account(
-                sql, name, pw, gm_level=gm
+                sql, name, pw, gm_level=gm, scheme=entry.accounts.scheme or "azerothcore"
             ),
-            backup=lambda: wotlk_maintenance.backup(server_dir, mysql, spec=spec),
+            backup=lambda: wotlk_maintenance.backup(
+                server_dir, mysql, spec=spec, core_databases=entry.core_databases()
+            ),
             backups_dir=lambda: wotlk_maintenance.backups_dir(server_dir),
             plan_restore=lambda path: wotlk_maintenance.plan_restore(path, server_dir, spec=spec),
             # `confirm=plan.token` is not a rubber stamp: the token can only come
@@ -885,6 +895,19 @@ class ControllerView(QWidget):
         form.addRow(self.create_account_button)
 
         self.account_report = QLabel("", tab)
+        # A core this app cannot write an account for is said once, here, with
+        # the command that does work — rather than left as a live button whose
+        # every press ends in a SQL error, or worse in a row that inserts
+        # cleanly and can never log in. See `catalog.Accounts`.
+        if self.entry.accounts.scheme is None:
+            self.create_account_button.setEnabled(False)
+            for widget in (self.account_name, self.account_password, self.account_gm):
+                widget.setEnabled(False)
+            self.account_report.setText(
+                f"{self.entry.name} keeps its accounts in a form this app does not write yet. "
+                f"Make one on the Console tab instead: "
+                f"{self.entry.accounts.console_command}"
+            )
         self.account_report.setWordWrap(True)
         self.account_report.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         box.addWidget(accounts)

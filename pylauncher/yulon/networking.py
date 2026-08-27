@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Literal
 
 from yulon import platform, runner
-from yulon.apply import SqlRunner
+from yulon.apply import ApplyError, SqlRunner
 from yulon.catalog.catalog import CatalogEntry
 from yulon.log import get_logger
 
@@ -338,9 +338,19 @@ def apply(
         if sql is None:
             skipped.append(f"realmlist not updated (no DB access): {network_plan.realmlist_sql}")
         else:
-            sql.run_statement("auth", network_plan.realmlist_sql)
-            done.append(f"realmlist → {network_plan.client_realmlist}")
-            restart = True
+            try:
+                sql.run_statement("auth", network_plan.realmlist_sql)
+            except ApplyError as exc:
+                # Reported, not raised. Every firewall failure above lands in
+                # `skipped` and the report survives; this one used to leave
+                # through the top of the function and take with it the record of
+                # the rules that HAD been applied — so a user whose realmlist
+                # update failed was also not told which ports were now open, nor
+                # which command to retry by hand (Discord report, 2026-08-26).
+                skipped.append(f"realmlist not updated: {exc}")
+            else:
+                done.append(f"realmlist → {network_plan.client_realmlist}")
+                restart = True
 
     logger.info(
         f"networking {network_plan.mode} for {network_plan.game_id}: "

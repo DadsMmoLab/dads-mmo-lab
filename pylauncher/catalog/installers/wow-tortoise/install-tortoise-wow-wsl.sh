@@ -147,6 +147,26 @@ docker_group_consent() {
 # ─────────────────────────────────────────
 # CONFIGURATION
 # ─────────────────────────────────────────
+# ─────────────────────────────────────────
+# BUILD PARALLELISM
+# ─────────────────────────────────────────
+# The compile step used to hardcode a fixed -j "to avoid OOM kills on the Deck's
+# 16GB RAM". Measured on this codebase 2026-08-26 (mangos + playerbots, gcc):
+# a cc1plus process peaks around 835 MB, not the ~8 GB that number implies. So
+# the limit is derived rather than fixed: 1.5 GB per job after reserving 2 GB
+# for the OS, never more jobs than cores, never fewer than one.
+#
+# A Steam Deck (16 GB, 8 threads) still gets a safe 8; a 15-core builder stops
+# compiling at the speed of a 2-core one, which is what this cost before.
+build_jobs() {
+    local cores ram_gb by_ram
+    cores=$(nproc 2>/dev/null || echo 2)
+    ram_gb=$(awk '/MemTotal/ {printf "%d", $2/1048576}' /proc/meminfo 2>/dev/null || echo 4)
+    by_ram=$(( (ram_gb - 2) * 2 / 3 ))
+    [ "$by_ram" -lt 1 ] && by_ram=1
+    if [ "$cores" -lt "$by_ram" ]; then echo "$cores"; else echo "$by_ram"; fi
+}
+
 SERVER_DIR="$HOME/tortoise-wow-server"
 CLIENT_DIR=""
 DB_PASSWORD="tortoise$(date +%s | tail -c 6)"
@@ -506,15 +526,16 @@ do_compile() {
     # USE_ANTICHEAT=OFF: pointless on a solo offline server and can flag a Proton client.
     if ! $DOCKER_CMD run --rm \
             -u "$(id -u):$(id -g)" \
-            -v "$SERVER_DIR/src":/src \
-            -v "$SERVER_DIR/install":/install \
+            -e BUILD_JOBS="$(build_jobs)" \
+            -v "$SERVER_DIR/src":/src:z \
+            -v "$SERVER_DIR/install":/install:z \
             -w /src/_build "$IMAGE" bash -c '
         set -e
         cmake .. \
           -DCMAKE_INSTALL_PREFIX=/install \
           -DUSE_EXTRACTORS=ON -DUSE_SCRIPTS=ON -DUSE_STD_MALLOC=ON \
           -DDEBUG_SYMBOLS=OFF -DUSE_ANTICHEAT=OFF -DALLOW_TURTLE_ADDONS=ON
-        make -j4
+        make -j${BUILD_JOBS}
         make install
     ' 2>&1 | tee /tmp/tortoise-build.log ; then
         kill $HB 2>/dev/null
@@ -551,10 +572,10 @@ extract_client_data() {
 
     if ! $DOCKER_CMD run --rm \
             -u "$(id -u):$(id -g)" \
-            -v "$CLIENT_DIR":/client:ro \
-            -v "$SERVER_DIR/data":/out \
-            -v "$SERVER_DIR/src":/src \
-            -v "$SERVER_DIR/install":/install \
+            -v "$CLIENT_DIR":/client:ro,z \
+            -v "$SERVER_DIR/data":/out:z \
+            -v "$SERVER_DIR/src":/src:z \
+            -v "$SERVER_DIR/install":/install:z \
             -w /out "$IMAGE" bash -c "
         set -e
         echo '=== mapextractor (maps + dbc) ==='
@@ -598,7 +619,7 @@ write_compose_and_configs() {
     # NOTE: the shipped default points CharacterDatabase.Info at "tw_chars"
     # (plural) but the DB created is "tw_char" (singular) — we fix that here.
     $DOCKER_CMD run --rm -u "$(id -u):$(id -g)" \
-        -v "$SERVER_DIR/install":/install -v "$SERVER_DIR/etc":/etc_out "$IMAGE" bash -c '
+        -v "$SERVER_DIR/install":/install:z -v "$SERVER_DIR/etc":/etc_out:z "$IMAGE" bash -c '
         cd /install/etc
         sed -E \
           -e "s#^LoginDatabase\.Info.*#LoginDatabase.Info = \"db;3306;mangos;'"$DB_PASSWORD"';tw_logon\"#" \
@@ -706,7 +727,7 @@ setup_database() {
     # namespace (--network container:tortoise-db) so the DB is reachable at
     # 127.0.0.1 — avoids guessing the compose-generated network name.
     if ! $DOCKER_CMD run --rm --network "container:tortoise-db" \
-            -v "$SERVER_DIR/src/sql":/sql:ro "$IMAGE" bash -c "
+            -v "$SERVER_DIR/src/sql":/sql:ro,z "$IMAGE" bash -c "
         set -e
         echo '=== schema (create_databases.sql) ==='
         mariadb -h127.0.0.1 -uroot -p'${DB_PASSWORD}' < /sql/create_databases.sql
@@ -720,10 +741,28 @@ setup_database() {
           n=\$((n+1))
         done
         echo \"imported \$n base files\"
+        echo '=== schema updates (database_updates) ==='
+        u=0
+        for f in \$(ls /sql/database_updates/world/*.sql 2>/dev/null | sort); do
+          mariadb -h127.0.0.1 -uroot -p'${DB_PASSWORD}' tw_world < \"\$f\" || { echo FAIL \$f; exit 1; }
+          u=\$((u+1))
+        done
+        for f in \$(ls /sql/database_updates/character/*.sql 2>/dev/null | sort); do
+          mariadb -h127.0.0.1 -uroot -p'${DB_PASSWORD}' tw_char < \"\$f\" || { echo FAIL \$f; exit 1; }
+          u=\$((u+1))
+        done
+        echo \"applied \$u schema updates\"
     " 2>&1 | tee /tmp/tortoise-dbimport.log | tail -6 ; then
         print_error "Database import failed — see /tmp/tortoise-dbimport.log"; exit 1
     fi
-    print_success "Database imported (mangosd auto-applies updates on first boot)"
+    print_success "Database imported (base content + schema updates applied)"
+    # NOT left to the core. The comment here used to say "mangosd auto-applies
+    # updates on first boot"; it does not. Measured on a clean Ubuntu box
+    # (2026-08-26): the compiled core SELECTs spell_template.script_name, the
+    # base dump has no such column, and mangosd asserts in HandleMySQLError
+    # and dies with SIGSEGV (exit 139) before it ever listens on 8090 - while
+    # this installer printed "TORTOISE WOW INSTALLED!" and an account that was
+    # never created. 121 update files applied cleanly and the server started.
 
     # Seed the realm row: address = LAN IP, world port 8090, build 7272.
     # (No realmlist row ships in the dump.)

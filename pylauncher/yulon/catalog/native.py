@@ -935,14 +935,14 @@ class NativeInstaller:
         yield "Waiting for the database."
         if not self._seams.wait_db_healthy(spec):
             raise InstallerError(
-                f"The database never reported healthy. `docker compose logs {spec.db}` in "
-                f"{server_dir} will say why."
+                f"The database never reported healthy. `docker compose logs "
+                f"{spec.service_for(spec.db)}` in {server_dir} will say why."
             )
         yield "Waiting for the world server to finish loading (this can take many minutes)."
         if not self._seams.wait_ready(spec, _READY_REALM_HOST, self.entry.ports.world):
             raise InstallerError(
                 f"The server started but never reported ready. `docker compose logs "
-                f"{spec.world}` in {server_dir} has what it printed."
+                f"{spec.service_for(spec.world)}` in {server_dir} has what it printed."
             )
         yield "The server is up."
 

@@ -62,7 +62,9 @@
         "world": "acore_world",
         "extra": [
           "acore_playerbots"
-        ]
+        ],
+        "playerbots": "acore_playerbots",
+        "ale": "acore_ale"
       },
       "client": {
         "version": "3.3.5a",
@@ -120,6 +122,18 @@
           "logs"
         ]
       },
+      "realmlist": {
+        "table": "realmlist",
+        "address_column": "address",
+        "local_address_column": null
+      },
+      "accounts": {
+        "scheme": "mangos_srp6"
+      },
+      "console": {
+        "prompt": "mangos>",
+        "prompt_precedes_answer": false
+      },
       "client": {
         "version": "2.4.3",
         "build": 8606,
@@ -175,6 +189,18 @@
           "logs"
         ]
       },
+      "realmlist": {
+        "table": "realmlist",
+        "address_column": "address",
+        "local_address_column": null
+      },
+      "accounts": {
+        "scheme": "mangos_srp6"
+      },
+      "console": {
+        "prompt": "mangos>",
+        "prompt_precedes_answer": false
+      },
       "client": {
         "version": "1.12.1",
         "build": 5875,
@@ -228,6 +254,13 @@
         "table": "realmlist",
         "address_column": "address",
         "local_address_column": null
+      },
+      "accounts": {
+        "scheme": "mangos_sha"
+      },
+      "console": {
+        "prompt": "mangos>",
+        "prompt_precedes_answer": false
       },
       "client": {
         "version": "1.18.1",

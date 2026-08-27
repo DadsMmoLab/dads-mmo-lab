@@ -68,6 +68,7 @@ class _FakeSql:
         self.queries: list[tuple[str, str]] = []
         self.table: dict[str, int] = dict(accounts_table or {})
         self.access: dict[int, int] = {}
+        self.ranks: dict[int, int] = {}
         self.next_id = 12401
         self.fail_on: str | None = None
         self.failure = ApplyError("SQL failed (inline → acore_auth): Lost connection")
@@ -77,7 +78,14 @@ class _FakeSql:
         self.statements.append((db, statement))
         if self.fail_on is not None and statement.startswith(self.fail_on):
             raise self.failure
-        if statement.startswith("INSERT INTO account ("):
+        if statement.startswith("INSERT INTO account(username,sha_pass_hash"):
+            self.table[_folded_name_in(statement)] = self.next_id
+            self.next_id += 1
+        elif statement.startswith("UPDATE account SET `rank`"):
+            self.ranks[int(statement.split("WHERE id = ")[1].rstrip(";"))] = int(
+                statement.split("`rank` = ")[1].split(" ")[0]
+            )
+        elif statement.startswith("INSERT INTO account ("):
             self.table[_folded_name_in(statement)] = self.next_id
             self.next_id += 1
         elif statement.startswith("INSERT INTO account_access"):
@@ -90,6 +98,9 @@ class _FakeSql:
         self.queries.append((db, statement))
         if self.query_error is not None:
             raise self.query_error
+        if statement.startswith("SELECT `rank` FROM account"):
+            who = int(statement.split("WHERE id = ")[1].rstrip(";"))
+            return str(self.ranks.get(who, 0)) + chr(10)
         if statement.startswith("SELECT id FROM account"):
             name = _folded_name_in(statement)
             found = self.table.get(name)
@@ -607,3 +618,133 @@ def test_a_lookup_that_answers_with_something_that_is_not_a_number_is_an_account
 
     with pytest.raises(accounts.AccountError, match="expected a number"):
         accounts.create_account(_Garbled(), "caitlin", PASSWORD)
+
+
+# ------------------------------------------------- the mangos_sha scheme
+
+# Rows the TORTOISE worldserver itself wrote, over its console on the m910q box
+# (2026-08-26). Not computed here: `account create` was typed at the `mangos>`
+# prompt and the core logged its own INSERT, which is where these hashes come
+# from. Same discipline as SERVER_WRITTEN above — a vector we generated would
+# only prove our code agrees with our code.
+#
+#   INSERT INTO account(username,sha_pass_hash,joindate)
+#   VALUES('PLAYER','3CE8A96D17C5AE88A30681024E86279F1A38C041',NOW())
+#
+# The MixedCase row is the one that discriminates: it is the only one that can
+# tell "uppercase both" from "uppercase the username only" or "as typed".
+MANGOS_WRITTEN: list[tuple[str, str, str]] = [
+    ("player", "player", "3CE8A96D17C5AE88A30681024E86279F1A38C041"),
+    ("MixedCase", "SoMePaSs", "75FA45B4D076CD2C9FDE701C821EE057C1CB151E"),
+]
+
+
+def test_mangos_password_hash_matches_the_rows_the_server_wrote() -> None:
+    """`sha_pass_hash = SHA1(UPPER(user):UPPER(pass))`, uppercase hex."""
+    for username, password, expected in MANGOS_WRITTEN:
+        assert accounts.mangos_password_hash(username, password) == expected, username
+
+
+def test_the_mixedcase_vector_rules_out_the_plausible_wrong_foldings() -> None:
+    """Every wrong folding still matches on an all-lowercase pair; this one does not."""
+    import hashlib
+
+    _, _, server = MANGOS_WRITTEN[1]
+    for wrong in ("MixedCase:SoMePaSs", "MIXEDCASE:SoMePaSs", "mixedcase:somepass"):
+        assert hashlib.sha1(wrong.encode()).hexdigest().upper() != server, wrong
+
+
+def test_a_mangos_account_is_written_the_way_that_core_writes_it() -> None:
+    """The core's own statement, reproduced: no salt, no verifier, no account_access."""
+    sql = _FakeSql()
+    result = accounts.create_account(sql, "bob", "hunter2", scheme="mangos_sha")
+    assert result.created is True and result.username == "BOB"
+
+    written = [s for _, s in sql.statements]
+    insert = _one_statement(sql, "INSERT INTO account(username,sha_pass_hash")
+    # Literals go through `_text_literal`, so the hash appears hex-encoded —
+    # the same treatment every other value in this module gets.
+    expected = accounts._text_literal(accounts.mangos_password_hash("bob", "hunter2"))
+    assert expected in insert, insert
+    assert "hunter2" not in insert, "the password itself must never reach a statement"
+    assert not any("salt" in s or "verifier" in s for s in written), written
+    assert not any("account_access" in s for s in written), written
+
+
+def test_a_mangos_account_takes_its_gm_level_from_the_rank_column() -> None:
+    """CMaNGOS-family cores have no `account_access`; the level is a column."""
+    sql = _FakeSql()
+    result = accounts.create_account(sql, "gm", "hunter2", gm_level=3, scheme="mangos_sha")
+    assert result.gm_level == 3
+    grant = _one_statement(sql, "UPDATE account SET `rank`")
+    assert "`rank` = 3" in grant and f"WHERE id = {result.account_id}" in grant
+
+    # `gm_level` is a floor on this scheme too: asking for less writes nothing.
+    again = accounts.create_account(sql, "gm", "hunter2", gm_level=1, scheme="mangos_sha")
+    assert again.created is False and again.gm_level == 3
+    assert len([s for _, s in sql.statements if s.startswith("UPDATE account SET `rank`")]) == 1
+
+
+def test_the_azerothcore_scheme_is_still_the_default() -> None:
+    """Every existing caller passes no scheme and must keep writing salt/verifier."""
+    sql = _FakeSql()
+    accounts.create_account(sql, "bob", "hunter2")
+    insert = _one_statement(sql, "INSERT INTO account (")
+    assert "salt, verifier" in insert and "sha_pass_hash" not in insert, insert
+
+
+# ------------------------------------------------ the mangos_srp6 scheme
+
+# Rows the CMaNGOS seed data ships and both live servers agreed on byte for byte
+# (TBC on yulon-ubuntu, Vanilla on yulon-fedora, 2026-08-26). Password equals
+# username for these seeded accounts. Same N and g as AzerothCore; what differs
+# is only how the two numbers are stored -- hex text, big-endian, where
+# AzerothCore uses binary little-endian.
+CMANGOS_WRITTEN: list[tuple[str, str, str, str]] = [
+    (
+        "ADMINISTRATOR",
+        "ADMINISTRATOR",
+        "8EB5DE915AA3D805FA7099CF61C0BB8A77990EA869078A0C5B9EEE55828F4505",
+        "312B99EEF1C0196BB73B79D114CE161C5D089319E6EF54FAA6117DAB8B672C14",
+    ),
+    (
+        "PLAYER",
+        "PLAYER",
+        "EBA23AF194D89B8061CA7FEBA06D336B1C38D8FBDABA76F2C51D45141362D881",
+        "3738EC7E7C731FD431C716990C6D97CA5C1D50EF0DA7DE9819076DE1D03AA891",
+    ),
+]
+
+
+def test_mangos_srp6_reproduces_the_verifier_the_server_stored() -> None:
+    """Given the server's own salt, our arithmetic must produce the server's verifier."""
+    for username, password, s_hex, v_hex in CMANGOS_WRITTEN:
+        salt = bytes.fromhex(s_hex)[::-1]  # stored big-endian; hashed the other way
+        got_s, got_v = accounts.mangos_srp6_credentials(username, password, salt=salt)
+        assert got_s == s_hex, username
+        assert got_v == v_hex, username
+
+
+def test_mangos_srp6_salts_are_fresh_and_the_right_shape() -> None:
+    """A generated pair is 64 uppercase hex characters each, and never repeats."""
+    first_s, first_v = accounts.mangos_srp6_credentials("bob", "hunter2")
+    second_s, _ = accounts.mangos_srp6_credentials("bob", "hunter2")
+    assert len(first_s) == 64 and len(first_v) == 64
+    assert first_s == first_s.upper() and first_v == first_v.upper()
+    assert int(first_s, 16) >= 0 and int(first_v, 16) >= 0
+    assert first_s != second_s, "a fixed salt would make every verifier comparable"
+
+
+def test_a_cmangos_account_is_written_with_v_s_and_gmlevel() -> None:
+    """No salt/verifier columns, no account_access, no sha_pass_hash on these cores."""
+    sql = _FakeSql()
+    result = accounts.create_account(sql, "bob", "hunter2", gm_level=2, scheme="mangos_srp6")
+    assert result.created is True and result.gm_level == 2
+
+    written = [s for _, s in sql.statements]
+    insert = _one_statement(sql, "INSERT INTO account (username, v, s")
+    assert "hunter2" not in insert, "the password itself must never reach a statement"
+    assert not any("account_access" in s for s in written), written
+    assert not any("sha_pass_hash" in s for s in written), written
+    grant = _one_statement(sql, "UPDATE account SET gmlevel")
+    assert f"WHERE id = {result.account_id}" in grant

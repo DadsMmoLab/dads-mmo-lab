@@ -594,3 +594,107 @@ def test_output_that_is_not_utf8_does_not_escape_as_a_decode_error(
     # perfectly valid cp1252 characters on this one. Asserting U+FFFD passed on
     # Linux and failed on Windows, which is the wrong thing to pin.
     assert "ok" in out, out
+
+
+def test_docker_sql_addresses_the_game_s_own_schemas(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A CMaNGOS install has no `acore_auth`; the schema name is the game's, not a constant.
+
+    Discord report, 2026-08-26: every SQL-backed control on Tortoise/TBC/Vanilla died with
+    `ERROR 1049 (42000): Unknown database 'acore_auth'` because the schema was a module
+    constant. Asserted at argv level, where the defect actually lived.
+    """
+    import subprocess
+
+    seen: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    sql = DockerSql(
+        "tortoise-db",
+        "hunter2",
+        schemas={"auth": "tw_logon", "characters": "tw_char", "world": "tw_world"},
+    )
+    sql.run_statement("auth", "SELECT 1")
+    sql.query("world", "SELECT 1")
+    assert [argv[-1] for argv in seen] == ["tw_logon", "tw_world"]
+    assert not any("acore" in " ".join(argv) for argv in seen)
+
+
+def test_docker_sql_refuses_a_database_this_game_does_not_have(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refuse by name rather than raise KeyError or connect to somebody else's schema."""
+    import subprocess
+
+    seen: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    sql = DockerSql("tortoise-db", "hunter2", schemas={"auth": "tw_logon"})
+    with pytest.raises(ApplyError) as excinfo:
+        sql.run_statement("playerbots", "SELECT 1")
+    assert "playerbots" in str(excinfo.value)
+    assert seen == [], "it must not run mysql at all"
+
+
+def test_docker_sql_still_defaults_to_the_azerothcore_schemas() -> None:
+    """Every existing caller passes no map and must keep addressing acore_*."""
+    assert DockerSql("ac-database", "hunter2").schemas == apply_module.DB_NAMES
+
+
+def test_the_client_probe_finds_mariadb_when_there_is_no_mysql(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """mariadb:11 ships `mariadb`/`mariadb-dump` and neither `mysql` nor `mysqldump`.
+
+    wow-tbc and wow-vanilla run that image, so every statement this app sent
+    them died before it reached a database. wow-tortoise pins mariadb:10.6,
+    which still has the symlinks — which is why it worked and hid this
+    (measured on a live TBC server, 2026-08-26).
+    """
+    apply_module._client_cache.clear()
+    monkeypatch.setattr(
+        apply_module,
+        "_probe_client",
+        lambda container, candidates: "mariadb" if candidates[0] == "mysql" else "mariadb-dump",
+    )
+    assert apply_module.mysql_client("tbc-db") == "mariadb"
+    assert apply_module.mysql_client("tbc-db", "mysqldump") == "mariadb-dump"
+
+
+def test_a_container_that_has_mysql_keeps_using_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AzerothCore and tortoise images have the classic names; nothing changes for them."""
+    apply_module._client_cache.clear()
+    monkeypatch.setattr(apply_module, "_probe_client", lambda container, candidates: "mysql")
+    assert apply_module.mysql_client("ac-database") == "mysql"
+
+
+def test_an_unanswerable_probe_falls_back_to_the_classic_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A daemon hiccup must produce the failure it always did, not a new one."""
+    apply_module._client_cache.clear()
+    monkeypatch.setattr(apply_module, "_probe_client", lambda container, candidates: None)
+    assert apply_module.mysql_client("whatever") == "mysql"
+    assert apply_module.mysql_client("whatever", "mysqldump") == "mysqldump"
+
+
+def test_the_probe_is_asked_once_per_container(monkeypatch: pytest.MonkeyPatch) -> None:
+    """It cannot change without the container being replaced, and SQL is on a hot path."""
+    apply_module._client_cache.clear()
+    asked: list[str] = []
+
+    def probe(container: str, candidates: tuple[str, ...]) -> str:
+        asked.append(container)
+        return "mariadb"
+
+    monkeypatch.setattr(apply_module, "_probe_client", probe)
+    for _ in range(3):
+        apply_module.mysql_client("tbc-db")
+    assert asked == ["tbc-db"], asked
