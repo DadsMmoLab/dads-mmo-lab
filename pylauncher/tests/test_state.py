@@ -55,3 +55,19 @@ def test_a_state_file_with_a_byte_order_mark_is_not_treated_as_corrupt(tmp_path:
 
     assert [i.game for i in loaded.installs] == ["wow-wotlk"]
     assert not (tmp_path / "state.json.broken").exists(), "moved a perfectly good file aside"
+
+
+def test_a_known_install_can_name_the_distro_it_lives_in(tmp_path: Path) -> None:
+    """Where a server lives is the same kind of fact as which folder it is in."""
+    install = KnownInstall(
+        game="wow-wotlk",
+        server_dir=Path(r"\\wsl.localhost\dml-arch\home\dml\games\srv"),
+        wsl_distro="dml-arch",
+    )
+    assert install.wsl_distro == "dml-arch"
+
+
+def test_state_written_before_wsl_support_still_loads() -> None:
+    """The field is optional, so no user's state.json is invalidated by adding it."""
+    parsed = KnownInstall.model_validate({"game": "wow-wotlk", "server_dir": "C:/srv/wow"})
+    assert parsed.wsl_distro is None

@@ -8,13 +8,14 @@ real AzerothCore compose project gets exercised.
 
 from __future__ import annotations
 
+import ast
 import subprocess
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
 import pytest
 
-from yulon import docker
+from yulon import docker, runner
 from yulon.controller_wow_wotlk import docker_ctl
 
 SPEC = docker_ctl.SPEC
@@ -255,14 +256,14 @@ def test_foreign_port_conflicts_drops_our_own_containers_and_keeps_everything_el
     a container is not proof that we do.
     """
     labels = {"mine": "yulon-wow-wotlk-abc", "theirs": "some-other", "?": docker.UNREADABLE}
-    monkeypatch.setattr(docker, "port_conflicts", lambda _ports: list(labels))
-    monkeypatch.setattr(docker, "container_project", labels.get)
+    monkeypatch.setattr(docker, "port_conflicts", lambda _ports, **_kw: list(labels))
+    monkeypatch.setattr(docker, "container_project", lambda name, **_kw: labels.get(name))
     spec = docker.ContainerSpec(db="d", auth="a", world="w", ports=(9999,))
     assert docker.foreign_port_conflicts(spec, "yulon-wow-wotlk-abc") == ["theirs", "?"]
     # Nothing publishing the ports means nothing is asked about ownership either.
-    monkeypatch.setattr(docker, "port_conflicts", lambda _ports: [])
+    monkeypatch.setattr(docker, "port_conflicts", lambda _ports, **_kw: [])
     monkeypatch.setattr(
-        docker, "container_project", lambda _n: pytest.fail("asked who owns nothing")
+        docker, "container_project", lambda _n, **_kw: pytest.fail("asked who owns nothing")
     )
     assert docker.foreign_port_conflicts(spec, "yulon-wow-wotlk-abc") == []
 
@@ -2889,6 +2890,407 @@ def test_a_missing_image_is_told_apart_from_a_daemon_that_will_not_talk(
         assert docker.images_built(REFS) is None, said
 
 
+# --------------------------------------------------------- WSL-resident servers
+
+
+def test_docker_commands_for_a_wsl_install_go_through_that_distro(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The whole point, asserted on the emitted argv rather than on prose.
+
+    A server inside a distro is reached by that distro's own docker. Every
+    lifecycle call goes through `_docker()`, so pinning it here pins all 21.
+    """
+    seen: list[list[str]] = []
+
+    def fake_run(cmd, cwd=None, timeout=None, env=None):  # type: ignore[no-untyped-def]
+        seen.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    monkeypatch.setattr(docker.platform, "_which", lambda name, path=None: "wsl.exe")
+
+    docker._docker(["ps"], wsl_distro="dml-arch")
+    assert seen[0][:5] == ["wsl.exe", "-d", "dml-arch", "--", "docker"]
+    assert seen[0][-1] == "ps"
+
+
+def test_a_wsl_install_sends_its_directory_as_a_distro_path_not_a_windows_cwd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Windows process cannot cd into a distro, so the location rides in argv.
+
+    `wsl --cd <linux path>` rather than compose's `--project-directory`, because
+    `_docker()` runs every docker subcommand and only compose understands the
+    latter.
+    """
+    seen: list[dict[str, object]] = []
+
+    def fake_run(cmd, cwd=None, timeout=None, env=None):  # type: ignore[no-untyped-def]
+        seen.append({"cmd": list(cmd), "cwd": cwd})
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    monkeypatch.setattr(docker.platform, "_which", lambda name, path=None: "wsl.exe")
+
+    unc = Path(r"\\wsl.localhost\dml-arch\home\dml\games\srv")
+    docker._docker(["compose", "ps"], cwd=unc, wsl_distro="dml-arch")
+
+    cmd = seen[0]["cmd"]
+    assert "--cd" in cmd, f"the distro path never reached the command: {cmd}"
+    assert cmd[cmd.index("--cd") + 1] == "/home/dml/games/srv"
+    # WHERE it sits is the whole of the bug this caught. Everything after `--`
+    # is the command line for the distro's shell, so a `--cd` placed there
+    # reaches bash, which answers "--: invalid option". The first version of
+    # this test asserted only that the flag was present, and passed a command
+    # that could not run; a live run against a real distro found it.
+    assert cmd.index("--cd") < cmd.index("--"), f"--cd landed after the separator: {cmd}"
+    assert seen[0]["cwd"] is None, "a UNC path was handed to the process as its cwd"
+
+
+def test_a_local_install_is_unchanged(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """No distro means exactly what it meant before this existed."""
+    seen: list[dict[str, object]] = []
+
+    def fake_run(cmd, cwd=None, timeout=None, env=None):  # type: ignore[no-untyped-def]
+        seen.append({"cmd": list(cmd), "cwd": cwd})
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
+
+    docker._docker(["ps"], cwd=tmp_path)
+    assert seen[0]["cmd"] == ["docker", "ps"]
+    assert seen[0]["cwd"] == tmp_path
+
+
+def test_no_wsl_on_this_host_is_the_existing_missing_cli_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new topology must not bring a new failure channel.
+
+    Callers already know how to report `_cli_missing()`; a WSL install on a box
+    without WSL reports through that rather than raising something nobody
+    catches.
+    """
+    monkeypatch.setattr(docker.platform, "_which", lambda name, path=None: None)
+    proc = docker._docker(["ps"], wsl_distro="dml-arch")
+    assert docker._cli_missing(proc)
+
+
+# Functions that reach the docker seam without needing to name a daemon, each
+# with the reason. Anything NOT here and NOT taking `wsl_distro` fails the
+# completeness test below.
+_DAEMON_AGNOSTIC: dict[str, str] = {
+    "_docker": "the seam itself - it takes the distro and builds the argv",
+}
+
+
+def _seam_reachers() -> dict[str, list[str]]:
+    """Every function in `docker.py` that reaches `_docker`, directly or not.
+
+    Transitive on purpose. `wait_ready()` never calls `_docker` itself - it calls
+    `_health()`, which does - so a direct-callers-only rule would bless it while
+    it quietly asked the wrong daemon. The closure is what makes this a
+    guarantee rather than a spot check.
+
+    Parsed rather than grepped, so a call inside a nested block counts and a
+    mention in a docstring does not.
+    """
+    tree = ast.parse(Path(docker.__file__).read_text(encoding="utf-8"))
+    defs: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    calls: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        defs[node.name] = node
+        # Both call shapes. `_docker(...)` is an ast.Name, but `docker.status(...)`
+        # or `self._logs(...)` is an ast.Attribute - and a function reaching the
+        # seam that way was INVISIBLE to the first version of this scan. Proved
+        # by writing one: a helper calling `me.container_state(...)` through an
+        # `import yulon.docker as me` passed this test while being unable to name
+        # a daemon.
+        calls[node.name] = {
+            child.func.id if isinstance(child.func, ast.Name) else child.func.attr
+            for child in ast.walk(node)
+            if isinstance(child, ast.Call) and isinstance(child.func, (ast.Name, ast.Attribute))
+        }
+
+    # Only names this module actually defines: an attribute call to something
+    # else entirely (`proc.stdout.splitlines()`) must not be mistaken for one of
+    # ours because the attribute happens to share a name.
+    defined = set(defs)
+    calls = {name: called & defined for name, called in calls.items()}
+
+    # Rooted at every function that asks platform HOW to reach docker, not at
+    # `_docker` alone. There are two spawn seams in this module - `_docker()`
+    # buffers, `follow_logs()` and `run_attached()` stream - and a closure rooted
+    # at the first blessed the second: between them they carry the Console tab's
+    # log stream and `build_staged()`, so a WSL-resident server's logs and image
+    # build both addressed the local daemon while this test passed.
+    roots = {
+        name
+        for name, node in defs.items()
+        if any(
+            isinstance(c, ast.Call)
+            and isinstance(c.func, ast.Attribute)
+            and c.func.attr in {"docker_prefix", "docker_program"}
+            for c in ast.walk(node)
+        )
+    }
+    reaching = {"_docker", *roots}
+    changed = True
+    while changed:
+        changed = False
+        for name, called in calls.items():
+            if name not in reaching and called & reaching:
+                reaching.add(name)
+                changed = True
+
+    out: dict[str, list[str]] = {}
+    for name in reaching:
+        node = defs[name]
+        args = node.args
+        out[name] = [a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)]
+    return out
+
+
+def test_every_function_that_talks_to_docker_can_say_which_daemon() -> None:
+    """A missed call site is SILENT, which is why this is a test and not a habit.
+
+    A WSL-resident server's containers live in that distro's docker. A function
+    that cannot pass the distro asks Docker Desktop instead - and Docker Desktop
+    answers cheerfully, with an empty list. The server reads as stopped while it
+    is running fine, and nothing raises.
+
+    So the rule is checked by parsing the module rather than by remembering:
+    every function that reaches the seam, at any depth, either takes
+    `wsl_distro` or is named in `_DAEMON_AGNOSTIC` with the reason.
+    """
+    missing = [
+        name
+        for name, args in _seam_reachers().items()
+        if "wsl_distro" not in args and name not in _DAEMON_AGNOSTIC
+    ]
+    assert not missing, (
+        "these reach docker but cannot say which daemon, so a WSL-resident "
+        f"server would be asked of the wrong one: {sorted(missing)}\n"
+        "Add `wsl_distro: str | None = None` and forward it, or add the name to "
+        "_DAEMON_AGNOSTIC with the reason it needs none."
+    )
+
+
+def test_the_completeness_test_would_notice_a_new_function() -> None:
+    """The guard's own guard: prove it reads the module rather than a list.
+
+    Without this, `_seam_reachers()` could quietly return almost nothing - a
+    parse error, a renamed seam - and the test above would pass by finding
+    nothing to complain about, which is the failure mode it exists to prevent.
+    """
+    reaching = _seam_reachers()
+    assert len(reaching) > 15, f"only found {len(reaching)} - is the parse working?"
+    for known in ("status", "_run", "_docker", "wait_ready"):
+        assert known in reaching, f"{known} should reach the seam but was not found"
+
+
+def test_the_completeness_scan_sees_a_module_qualified_call() -> None:
+    """The hole the first version had, pinned so it cannot come back.
+
+    A function reaching the seam through `docker.status(...)` or
+    `me.container_state(...)` rather than a bare name was invisible, because the
+    scan matched only `ast.Name` callees. Proved by writing exactly such a helper
+    into docker.py: the completeness test passed while the helper could not name
+    a daemon, so the guarantee was narrower than it claimed.
+
+    Asserted against a synthetic module, so proving it needs no edit to the real
+    one - and the unrelated-attribute case is asserted too, because the fix must
+    not start counting `proc.stdout.splitlines()` as a call to one of ours.
+    """
+    source = """
+def _docker(argv, *, wsl_distro=None): ...
+def reached_by_name(*, wsl_distro=None):
+    return _docker([], wsl_distro=wsl_distro)
+def reached_by_attribute():
+    import yulon.docker as me
+    return me.reached_by_name()
+def unrelated(proc):
+    return proc.stdout.splitlines()
+"""
+    tree = ast.parse(source)
+    defined = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    calls: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            calls[node.name] = {
+                c.func.id if isinstance(c.func, ast.Name) else c.func.attr
+                for c in ast.walk(node)
+                if isinstance(c, ast.Call) and isinstance(c.func, (ast.Name, ast.Attribute))
+            } & defined
+
+    reaching = {"_docker"}
+    changed = True
+    while changed:
+        changed = False
+        for name, called in calls.items():
+            if name not in reaching and called & reaching:
+                reaching.add(name)
+                changed = True
+
+    assert "reached_by_attribute" in reaching, "a module-qualified call is still invisible"
+    assert "unrelated" not in reaching, "an unrelated attribute call was miscounted"
+
+
+def test_a_deleted_distro_is_explained_rather_than_reported_as_a_bare_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The helper that explains this was written, and then nothing called it.
+
+    A helper with no caller reads as a fix in the diff and changes nothing for
+    the user, so this asserts through `_run()` - the seam every buffered docker
+    call goes through - rather than by calling `wsl.missing_distro_problem()`
+    directly. That distinction is the whole lesson of this branch: four blockers
+    were functions that accepted something no caller passed.
+
+    The bare message is empty here, not merely terse: wsl.exe complains on
+    STDOUT, and `_run()` quotes stderr, so what the user actually saw was
+    `docker ps exited 4294967295: ` with nothing after the colon.
+    """
+    from yulon import wsl
+
+    gone = "T\x00h\x00e\x00r\x00e\x00 \x00i\x00s\x00 \x00n\x00o\x00"
+    monkeypatch.setattr(
+        docker, "_docker", lambda *a, **k: _completed(4294967295, stdout=gone, stderr="")
+    )
+    monkeypatch.setattr(wsl, "distro_states", lambda: (wsl.Distro("other-distro", True),))
+
+    with pytest.raises(docker.DockerCommandError) as raised:
+        docker._run(["ps"], wsl_distro="dml-arch")
+
+    said = str(raised.value)
+    assert "dml-arch" in said and "no longer exists" in said, said
+    assert "4294967295" not in said, "the raw exit code is still what the user reads"
+
+
+def test_an_ordinary_docker_failure_still_reports_the_command_and_the_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard for the above: the new branch must not swallow every failure.
+
+    A wrong container name, a daemon that refused, a compose file with a typo -
+    all of those still need the command, the exit code and whatever docker put
+    on stderr, and none of them are a missing distro.
+    """
+    monkeypatch.setattr(
+        docker, "_docker", lambda *a, **k: _completed(1, stderr="no such container: nope")
+    )
+    with pytest.raises(docker.DockerCommandError) as raised:
+        docker._run(["inspect", "nope"], wsl_distro="dml-arch")
+    said = str(raised.value)
+    assert "docker inspect nope exited 1" in said and "no such container" in said, said
+
+
+# wsl.exe writes UTF-16LE, and `runner.stream()` decodes as UTF-8, so each ASCII
+# character arrives followed by a NUL. This is what the Console tab was showing.
+_GONE_LINE = "T\x00h\x00e\x00r\x00e\x00 \x00i\x00s\x00 \x00n\x00o\x00"
+
+
+def _stream_that_fails(*lines: str, returncode: int = 4294967295):
+    """A `runner.stream` stand-in: yields lines, then fails the way the real one does."""
+
+    def fake(command: list[str], cwd: object = None, **_kw: object):
+        yield from lines
+        raise subprocess.CalledProcessError(returncode, command)
+
+    return fake
+
+
+def _wsl_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pretend this box can reach a distro, whatever OS the suite is running on.
+
+    Without this the three tests below pass on Windows and fail on CI's Ubuntu
+    for a reason that has nothing to do with what they check: `docker_prefix()`
+    looks for `wsl.exe` on PATH, finds none, and both seams return
+    `_CLI_MISSING_RETURNCODE` before `runner.stream` is ever reached - so the
+    assertion reads 127 and the Docker-is-missing help text. The seam under
+    test is what happens AFTER the command runs, so the prefix is pinned rather
+    than discovered.
+    """
+    monkeypatch.setattr(
+        docker.platform,
+        "docker_prefix",
+        lambda wsl_distro=None, *, inside=None: ("wsl.exe", "-d", str(wsl_distro), "--", "docker"),
+    )
+
+
+def test_a_deleted_distro_is_explained_in_the_console_log_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_run()` was wired for this and the two STREAMING seams were not.
+
+    Start, Stop and Status go through `_run()`; the Console tab's log goes
+    through `follow_logs()`, which raises whatever `runner.stream()` raises. So
+    the same dead distro was explained on one tab and shown as NUL-riddled
+    gibberish followed by "CalledProcessError: ... exit status 4294967295" on
+    another - naming neither the distro nor anything to do about it.
+
+    A seam-by-seam fix that stops at the first seam is how this branch produced
+    four blockers; the second one is not optional.
+    """
+    from yulon import wsl
+
+    _wsl_prefix(monkeypatch)
+    monkeypatch.setattr(runner, "stream", _stream_that_fails(_GONE_LINE))
+    monkeypatch.setattr(wsl, "distro_states", lambda: (wsl.Distro("other-distro", True),))
+
+    with pytest.raises(docker.DockerCommandError) as raised:
+        list(docker.follow_logs("ac-worldserver", wsl_distro="dml-arch"))
+
+    said = str(raised.value)
+    assert "dml-arch" in said and "no longer exists" in said, said
+
+
+def test_a_streamed_command_in_a_deleted_distro_says_so_instead_of_its_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The build and the import read this one, and it must not start raising.
+
+    `run_attached()` promises its callers a status back rather than an
+    exception - `repair_import()` needs to go on and check something else - so
+    the translation replaces the retained lines and leaves the contract alone.
+    Replaced, not appended: on this failure every retained line IS the
+    complaint, and printing it above the explanation buries the explanation in
+    the noise it was written to translate.
+    """
+    from yulon import wsl
+
+    _wsl_prefix(monkeypatch)
+    monkeypatch.setattr(runner, "stream", _stream_that_fails(_GONE_LINE, _GONE_LINE))
+    monkeypatch.setattr(wsl, "distro_states", lambda: (wsl.Distro("other-distro", True),))
+
+    result = docker.run_attached(["compose", "up"], Path("/srv"), wsl_distro="dml-arch")
+
+    assert result.returncode == 4294967295, "the status was swallowed"
+    assert len(result.tail) == 1, result.tail
+    assert "dml-arch" in result.tail[0] and "no longer exists" in result.tail[0]
+    assert "\x00" not in result.tail[0], "the raw UTF-16 complaint is still what is shown"
+
+
+def test_an_ordinary_streamed_failure_keeps_its_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard: a compile that failed on line 900 still needs its last 200 lines.
+
+    The translation above only fires on a distro that is really gone, so every
+    other non-zero exit - a broken compose file, a failed build - comes back
+    exactly as it did.
+    """
+    _wsl_prefix(monkeypatch)
+    monkeypatch.setattr(
+        runner, "stream", _stream_that_fails("error: undefined reference", returncode=2)
+    )
+    result = docker.run_attached(["compose", "build"], Path("/srv"), wsl_distro="dml-arch")
+    assert result.returncode == 2
+    assert result.tail == ("error: undefined reference",)
 def test_the_diagnostic_it_offers_is_a_command_that_actually_runs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

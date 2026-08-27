@@ -1084,6 +1084,120 @@ def test_the_restore_warning_names_the_plan_and_does_not_overstate(
     assert "merges" in said
 
 
+def test_for_wotlk_wires_the_distro_into_every_seam_that_talks_to_docker(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An accepted-but-ignored parameter is worse than no parameter.
+
+    `for_wotlk()` builds a handful of things that each shell out to docker, and
+    a WSL-resident server answers only to its own distro's daemon. The first
+    version of this took `wsl_distro` and passed it to none of them, which
+    nothing would have reported: the tab would open and every action would
+    quietly address the wrong docker.
+
+    The version after THAT passed it to three of them, and this test asserted
+    only the controller - so `send_console` and the port scan kept addressing
+    the local daemon while a test named "every seam" watched one. Each seam is
+    now exercised through the callable the view actually calls, rather than by
+    reading an attribute off the object standing next to it.
+    """
+    entry = load_catalog().get("wow-wotlk")
+    services = ControllerServices.for_wotlk(entry, tmp_path, None, "dml-arch")
+
+    assert services.controller.wsl_distro == "dml-arch"
+
+    # The Console tab. `send_command` shells into the world container, which on
+    # a WSL-resident server exists only inside the distro.
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        console,
+        "send_command",
+        lambda cmd, **kw: seen.update(kw) or ConsoleReply(command=cmd, lines=()),
+    )
+    services.send_console("server info")
+    assert seen.get("wsl_distro") == "dml-arch", f"Console addressed the wrong daemon: {seen}"
+
+    # The Networking tab, which reads the published ports to warn about
+    # conflicts. Asked of the local daemon it describes a machine the server is
+    # not on: it reports conflicts that do not exist and misses the ones that do.
+    asked: list[object] = []
+    monkeypatch.setattr(
+        controller_view_module.docker,
+        "published_bindings",
+        lambda wsl_distro=None: asked.append(wsl_distro) or {},
+    )
+    services.network_plan("lan")
+    assert asked == ["dml-arch"], f"the port scan addressed the wrong daemon: {asked}"
+
+
+def test_every_seam_for_wotlk_builds_says_which_daemon_it_means() -> None:
+    """The guard for the test above, so the next seam added cannot be forgotten.
+
+    Four blockers on this branch were one mistake wearing different clothes: a
+    function that ACCEPTS `wsl_distro`, called from a site that does not PASS
+    one. `Controller` has its own version of this scan. `for_wotlk()` is the
+    other place that wires docker to a server, and it held two such call sites
+    that six review passes walked straight past.
+
+    Asked of the parse rather than of a spelling: which functions declare the
+    parameter, and does each call supply it. A renamed helper stays covered.
+
+    Locally-defined helpers are NOT exempt, and that is the point. The first
+    version of this scan skipped any callee defined in this file, which
+    exempted `_safe_bindings()` - a helper that takes `wsl_distro` and whose
+    caller could forget it. The blocker shape reappeared one level up, inside
+    the test written to prevent it (review, 2026-08-26). The cost is that such
+    a call must NAME the parameter rather than pass it positionally, which is
+    cheap and reads better at the call site anyway.
+    """
+    import ast
+
+    package = Path(controller_view_module.__file__).parent.parent
+    accepts: set[str] = set()
+    for path in package.rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                args = node.args
+                if any(a.arg == "wsl_distro" for a in args.args + args.kwonlyargs):
+                    # Not dunders: a constructor is spelled by its CLASS name at
+                    # the call site, so matching the bare name `__init__` only
+                    # ever catches somebody else's `super().__init__(parent)`.
+                    if not node.name.startswith("__"):
+                        accepts.add(node.name)
+    assert {
+        "send_command",
+        "published_bindings",
+    } <= accepts, "the scan found no wsl_distro-aware functions, so it would pass on an empty repo"
+
+    source = Path(controller_view_module.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    missing = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            name = func.attr
+            # `self.<x>` and `self.services.<x>` are the view calling objects
+            # that were built WITH the distro; they are not the seam.
+            on_self = ast.unparse(func.value).startswith("self")
+        elif isinstance(func, ast.Name):
+            name, on_self = func.id, False
+        else:
+            continue
+        if name not in accepts or on_self:
+            continue
+        if not any(k.arg == "wsl_distro" for k in node.keywords):
+            missing.append(f"{name}() at controller_view.py:{node.lineno}")
+    assert not missing, "these address the wrong docker on a WSL-resident server: " + ", ".join(
+        missing
+    )
+
+
+def test_for_wotlk_defaults_to_no_distro(qapp: object, tmp_path: Path) -> None:
+    """An ordinary local install is unchanged by any of this."""
+    entry = load_catalog().get("wow-wotlk")
+    assert ControllerServices.for_wotlk(entry, tmp_path).controller.wsl_distro is None
 def test_a_cmangos_install_s_account_path_addresses_its_own_schema(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

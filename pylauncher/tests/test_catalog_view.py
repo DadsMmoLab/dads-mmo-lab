@@ -9,10 +9,10 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QPushButton, QWidget
 
 from tests.conftest import process_events
-from yulon import runner
+from yulon import runner, wsl
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.installer import Installer, InstallOptions
 from yulon.ui import catalog_view
@@ -621,3 +621,271 @@ def test_the_picker_gives_up_rather_than_looping_on_a_root_that_is_not_there() -
     weird = Path(PureWindowsPath("Q:/gone/deeper").as_posix())
     got = catalog_view._existing_ancestor(weird)
     assert got is None or got.is_dir()
+
+
+# ------------------------------------------------- adopting a WSL-resident server
+
+_WSL_SERVER = wsl.FoundServer(
+    distro="dml-arch",
+    project="wow-server-playerbots",
+    running=True,
+    server_dir=Path(r"\\wsl.localhost\dml-arch\home\dml\games\wow-server-playerbots"),
+)
+
+
+def test_adopting_a_wsl_server_remembers_the_distro_it_lives_in(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The distro is the whole point: without it every later command asks the wrong docker.
+
+    Yu'lon is replacing the DML Launcher, so a server already built inside a
+    distro has to be adoptable - asking a user to repeat a multi-hour compile is
+    not a migration path.
+    """
+    monkeypatch.setattr(wsl, "find_servers", lambda include=(): (_WSL_SERVER,))
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        home=tmp_path,
+        pick_wsl_server=lambda _found: _WSL_SERVER,
+    )
+    got: list[tuple[object, ...]] = []
+    view.adopted.connect(lambda *a: got.append(a))
+
+    assert view.adopt_from_wsl(CATALOG.get("wow-wotlk")) is True
+    assert got == [("wow-wotlk", _WSL_SERVER.server_dir, None, "dml-arch")]
+
+
+def test_adopting_is_declined_without_complaint(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Closing the picker is an answer, not an error."""
+    monkeypatch.setattr(wsl, "find_servers", lambda include=(): (_WSL_SERVER,))
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        home=tmp_path,
+        pick_wsl_server=lambda _found: None,
+    )
+    got: list[object] = []
+    view.adopted.connect(lambda *a: got.append(a))
+    assert view.adopt_from_wsl(CATALOG.get("wow-wotlk")) is False
+    assert got == []
+
+
+def test_finding_nothing_says_so_rather_than_opening_an_empty_picker(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty list is a message, not a dialog with nothing in it."""
+    from PySide6.QtWidgets import QMessageBox
+
+    told: list[str] = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: told.append(a[2]))  # type: ignore[attr-defined]
+    monkeypatch.setattr(wsl, "find_servers", lambda include=(): ())
+    opened: list[object] = []
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        home=tmp_path,
+        pick_wsl_server=lambda found: opened.append(found),  # type: ignore[func-returns-value,arg-type]
+    )
+    assert view.adopt_from_wsl(CATALOG.get("wow-wotlk")) is False
+    assert opened == [], "an empty picker was opened"
+    assert told and "WSL" in told[0]
+
+
+def test_a_client_folder_is_still_asked_for_when_the_game_needs_one(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Adopting changes where the SERVER is, not whether a client is required.
+
+    TBC asks for one; the folder lives on the Windows side either way, because
+    it is the user's own WoW install and nothing about it moved into a distro.
+    """
+    tbc_server = wsl.FoundServer(
+        distro="dml-arch",
+        project="wow-tbc-server",
+        running=False,
+        server_dir=Path(r"\\wsl.localhost\dml-arch\home\dml\tbc"),
+    )
+    monkeypatch.setattr(wsl, "find_servers", lambda include=(): (tbc_server,))
+    client = tmp_path / "client"
+    client.mkdir()
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        home=tmp_path,
+        pick_dir=lambda *_: client,
+        pick_wsl_server=lambda _f: tbc_server,
+    )
+    got: list[tuple[object, ...]] = []
+    view.adopted.connect(lambda *a: got.append(a))
+    assert view.adopt_from_wsl(CATALOG.get("wow-tbc")) is True
+    assert got == [("wow-tbc", tbc_server.server_dir, client, "dml-arch")]
+
+
+def test_the_wsl_adopt_button_exists_where_a_distro_could_hold_a_server(
+    qapp: object, tmp_path: Path
+) -> None:
+    """A feature with no button is a feature nobody has.
+
+    `adopt_from_wsl()` shipped with its signal, its persistence and its tests,
+    and nothing in the running app could reach any of it - the method had no
+    caller at all. Asserted on the widget tree rather than on the method, since
+    that is the difference the user experiences.
+    """
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        home=tmp_path,
+        wsl_distros=lambda: ("dml-arch",),
+    )
+    button = view.findChild(QPushButton, "adopt-wsl-wow-wotlk")
+    assert button is not None, "no way to reach adopt_from_wsl from the UI"
+    assert button.isEnabled()
+
+
+def test_no_wsl_adopt_button_where_there_are_no_distros(qapp: object, tmp_path: Path) -> None:
+    """On Linux, macOS, and a Windows box with no WSL, the offer cannot be honoured.
+
+    `wsl_distros()` answers () for all three, so one check covers every case
+    rather than a platform test that would have to be kept in step.
+    """
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        home=tmp_path,
+        wsl_distros=lambda: (),
+    )
+    assert view.findChild(QPushButton, "adopt-wsl-wow-wotlk") is None
+
+
+def test_the_adopt_button_actually_calls_adopt_from_wsl(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Wired, not merely present - a button connected to nothing looks identical."""
+    called: list[str] = []
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        home=tmp_path,
+        wsl_distros=lambda: ("dml-arch",),
+    )
+    monkeypatch.setattr(
+        view, "adopt_from_wsl", lambda entry: called.append(entry.id) or True  # type: ignore[func-returns-value]
+    )
+    button = view.findChild(QPushButton, "adopt-wsl-wow-wotlk")
+    assert button is not None
+    button.click()
+    assert called == ["wow-wotlk"]
+
+
+def _wsl_server_at(tmp_path: Path, compose: str) -> wsl.FoundServer:
+    """A FoundServer whose folder really exists, so the check can read it."""
+    (tmp_path / "docker-compose.yml").write_text(compose, encoding="utf-8")
+    return wsl.FoundServer(
+        distro="dml-arch", project="some-server", running=True, server_dir=tmp_path
+    )
+
+
+def test_adopting_refuses_a_project_that_is_a_different_game(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Discovery finds compose projects, not WoW servers, and cannot tell them apart.
+
+    `docker compose ls` reports every project in the distro - a TBC server, a
+    Nextcloud, someone's blog. Adopting one under the wrong catalog entry builds
+    a tab whose every button names containers that do not exist, and each one
+    fails separately and confusingly rather than once and clearly.
+
+    The catalog's container names are the signal; the project name is just a
+    folder name and proves nothing.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    told: list[str] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: told.append(a[2]))  # type: ignore[attr-defined]
+    other_game = _wsl_server_at(tmp_path, "services:\n  db:\n    container_name: mangos-db\n")
+    monkeypatch.setattr(wsl, "find_servers", lambda include=(): (other_game,))
+
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        home=tmp_path,
+        pick_wsl_server=lambda _f: other_game,
+    )
+    got: list[object] = []
+    view.adopted.connect(lambda *a: got.append(a))
+
+    assert view.adopt_from_wsl(CATALOG.get("wow-wotlk")) is False
+    assert got == [], "a different game was adopted as WotLK"
+    assert told and "WoW WotLK" in told[0]
+
+
+def test_adopting_accepts_a_project_whose_containers_match(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """And the check must not refuse the server it was written to accept."""
+    spec = CATALOG.get("wow-wotlk").container_spec()
+    ours = _wsl_server_at(tmp_path, f"services:\n  db:\n    container_name: {spec.db}\n")
+    monkeypatch.setattr(wsl, "find_servers", lambda include=(): (ours,))
+
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        home=tmp_path,
+        pick_wsl_server=lambda _f: ours,
+    )
+    got: list[object] = []
+    view.adopted.connect(lambda *a: got.append(a))
+    assert view.adopt_from_wsl(CATALOG.get("wow-wotlk")) is True
+    assert len(got) == 1
+
+
+def test_adopting_allows_a_compose_file_it_cannot_read(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreadable file is not evidence of the wrong game.
+
+    The folder lives inside a distro and is reached over a UNC path; that read
+    can fail for reasons that have nothing to do with which game it is. Refusing
+    on "I could not check" would block the migration this feature exists to
+    provide, so the check only fires on a file it actually read.
+    """
+    unreadable = wsl.FoundServer(
+        distro="dml-arch",
+        project="wow",
+        running=True,
+        server_dir=tmp_path / "gone",
+    )
+    monkeypatch.setattr(wsl, "find_servers", lambda include=(): (unreadable,))
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        home=tmp_path,
+        pick_wsl_server=lambda _f: unreadable,
+    )
+    got: list[object] = []
+    view.adopted.connect(lambda *a: got.append(a))
+    assert view.adopt_from_wsl(CATALOG.get("wow-wotlk")) is True
+    assert len(got) == 1

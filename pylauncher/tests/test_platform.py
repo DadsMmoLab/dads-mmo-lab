@@ -424,6 +424,150 @@ def test_a_symlink_onto_a_reserved_directory_is_refused_too() -> None:
         assert problem is not None and "system directory" in problem
 
 
+# ---------------------------------------------------------------- WSL-resident
+
+# Real bytes, captured from `wsl -l -q` on a Windows 11 box (2026-08-26).
+# `wsl.exe` writes UTF-16LE, and decoding it as UTF-8 yields NUL-riddled
+# garbage rather than an error - so the wrong reading looks like a distro named
+# "d\x00m\x00l\x00...". Two days of this project have already been spent on
+# that, which is why the fixture is the real thing rather than a hand-written
+# unicode string.
+WSL_LIST_UTF16 = (
+    b"d\x00m\x00l\x00-\x00a\x00r\x00c\x00h\x00\r\x00\n\x00"
+    b"d\x00o\x00c\x00k\x00e\x00r\x00-\x00d\x00e\x00s\x00k\x00t\x00o\x00p\x00\r\x00\n\x00"
+)
+
+
+def test_docker_prefix_is_the_local_cli_when_no_distro_is_named(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ordinary case is unchanged: whatever `docker_program()` resolved."""
+    monkeypatch.setattr(platform, "docker_program", lambda: "docker")
+    assert platform.docker_prefix(None) == ("docker",)
+
+
+def test_docker_prefix_routes_through_wsl_for_a_distro(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A server inside a distro is reached by its own docker, not Docker Desktop's.
+
+    Measured against a real WSL-resident server (2026-08-26): `wsl -d dml-arch
+    -- docker compose ps` returns rc=0 and the running container, and exit codes
+    propagate faithfully - which is what makes this substitution safe for the 21
+    lifecycle call sites that read them.
+    """
+    monkeypatch.setattr(platform, "_which", lambda name, path=None: "C:\\Windows\\wsl.exe")
+    assert platform.docker_prefix("dml-arch") == (
+        "C:\\Windows\\wsl.exe",
+        "-d",
+        "dml-arch",
+        "--",
+        "docker",
+    )
+
+
+def test_docker_prefix_is_none_when_the_host_cannot_reach_docker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """None is a real answer, the same one `docker_program()` gives.
+
+    Callers already turn that into an error carrying DOCKER_CLI_MISSING_HELP, so
+    a Windows box with no WSL fails the way a box with no docker already does
+    rather than through a new channel.
+    """
+    monkeypatch.setattr(platform, "docker_program", lambda: None)
+    assert platform.docker_prefix(None) is None
+
+    monkeypatch.setattr(platform, "_which", lambda name, path=None: None)
+    assert platform.docker_prefix("dml-arch") is None
+
+
+def test_docker_prefix_does_not_ask_the_host_about_its_own_docker_for_a_distro(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A WSL install must not need Docker Desktop installed at all.
+
+    The tester who prompted this has NO Docker Desktop on Windows - the daemon
+    lives inside the distro. Resolving the local CLI first would refuse a
+    perfectly good server for the absence of something it never uses.
+    """
+    asked = []
+    monkeypatch.setattr(
+        platform, "docker_program", lambda: asked.append("local") or None  # type: ignore[func-returns-value]
+    )
+    monkeypatch.setattr(platform, "_which", lambda name, path=None: "wsl.exe")
+    assert platform.docker_prefix("dml-arch") is not None
+    assert asked == [], "the local docker CLI was consulted for a WSL install"
+
+
+def test_wsl_env_names_the_variables_that_must_cross(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without WSLENV a forwarded variable arrives EMPTY, not missing.
+
+    `apply.py` runs `docker exec -e MYSQL_PWD` with no `=value` deliberately, so
+    the password never appears in an argv `ps` can read. Measured: without
+    WSLENV the inner process sees `[]`, with it `[from-windows]` - so forgetting
+    this produces an authentication failure rather than a missing-setting error,
+    which is the worst kind of bug to debug.
+    """
+    monkeypatch.delenv("WSLENV", raising=False)
+    env = platform.wsl_env({"MYSQL_PWD": "hunter2"})
+    assert env["MYSQL_PWD"] == "hunter2"
+    assert "MYSQL_PWD" in env["WSLENV"].split(":")
+
+
+def test_wsl_env_keeps_an_existing_wslenv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Someone else's WSLENV is not ours to discard."""
+    monkeypatch.setenv("WSLENV", "THEIRS/p")
+    env = platform.wsl_env({"MYSQL_PWD": "hunter2"})
+    assert "THEIRS/p" in env["WSLENV"]
+    assert "MYSQL_PWD" in env["WSLENV"]
+
+
+def test_wsl_distros_decodes_utf16(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`wsl.exe` writes UTF-16LE and a UTF-8 read returns garbage, not an error."""
+    monkeypatch.setattr(platform, "_wsl_list_bytes", lambda: WSL_LIST_UTF16)
+    assert platform.wsl_distros() == ("dml-arch", "docker-desktop")
+
+
+def test_wsl_distros_is_empty_rather_than_raising_without_wsl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Windows box with no WSL, and every non-Windows host, has no distros."""
+    monkeypatch.setattr(platform, "_wsl_list_bytes", lambda: None)
+    assert platform.wsl_distros() == ()
+
+
+def test_a_utf8_read_of_the_same_bytes_would_have_been_garbage() -> None:
+    """The fixture earns its place: prove the wrong decoding is silently wrong.
+
+    Not a test of our code - a test of the trap, so that anyone tempted to
+    simplify `wsl_distros()` to `subprocess.run(..., text=True)` sees what that
+    produces before they try it.
+    """
+    naive = [d for d in WSL_LIST_UTF16.decode("utf-8", "ignore").split() if d]
+    assert naive != ["dml-arch", "docker-desktop"]
+    assert "\x00" in naive[0], "the UTF-8 reading is expected to carry NUL bytes"
+
+
+def test_wsl_linux_path_converts_a_unc_path_back_to_the_distro_view() -> None:
+    """`\\\\wsl.localhost\\dml-arch\\home\\dml\\x` is `/home/dml/x` to the distro.
+
+    A WSL install's `server_dir` is stored in its Windows UNC form, because that
+    is what the picker returns and what `compose_file()` can read. Docker inside
+    the distro knows nothing of it, so the argv needs the Linux spelling.
+    """
+    got = platform.wsl_linux_path(Path(r"\\wsl.localhost\dml-arch\home\dml\games\srv"))
+    assert got == "/home/dml/games/srv"
+    assert platform.wsl_linux_path(Path(r"\\wsl$\Ubuntu\srv\wow")) == "/srv/wow"
+
+
+def test_wsl_linux_path_is_none_for_a_path_that_is_not_in_wsl() -> None:
+    """An ordinary Windows path has no Linux spelling, and guessing one would lie."""
+    assert platform.wsl_linux_path(Path(r"C:\Users\pk\srv")) is None
+    assert platform.wsl_linux_path(Path(r"\\nas\share\srv")) is None
+
+
+def test_wsl_linux_path_keeps_the_distro_root_itself() -> None:
+    """The share root is the distro's `/`."""
+    assert platform.wsl_linux_path(Path(r"\\wsl.localhost\dml-arch")) == "/"
 def test_a_wsl_path_is_refused_in_words_that_fit_what_happened() -> None:
     """`\\\\wsl.localhost\\...` is a network path to Windows, but not to the user.
 

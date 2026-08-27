@@ -335,6 +335,13 @@ def test_a_missing_cli_never_opens_a_pty_it_cannot_close(
     assert opened == [], "a pty was opened for a command that could never run"
 
 
+def test_attach_argv_reaches_the_distros_own_docker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The GM console attaches to a container, and it must be the right daemon's."""
+    monkeypatch.setattr(console.platform, "_which", lambda name, path=None: "wsl.exe")
+    argv = console.attach_argv("ac-worldserver", wsl_distro="dml-arch")
+    assert argv[:5] == ["wsl.exe", "-d", "dml-arch", "--", "docker"]
+    assert argv[-1] == "ac-worldserver"
+    assert "--sig-proxy=false" in argv
 def test_a_mangos_console_is_parsed_by_its_own_prompt() -> None:
     """Captured from a real mangosd, not hand-written (m910q, 2026-08-26).
 

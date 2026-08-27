@@ -292,18 +292,20 @@ def test_gather_does_not_report_this_installs_own_containers_as_a_port_conflict(
     """
     ours = composegen.project_name(ENTRY.id, tmp_path, platform_id=lambda: "macos")
     monkeypatch.setattr(
-        docker, "port_conflicts", lambda _ports: ["ac-authserver", "ac-worldserver", "someone-else"]
+        docker,
+        "port_conflicts",
+        lambda _ports, **_kw: ["ac-authserver", "ac-worldserver", "someone-else"],
     )
     monkeypatch.setattr(
         docker,
         "container_project",
-        lambda name: ours if name.startswith("ac-") else "another-project",
+        lambda name, **_kw: ours if name.startswith("ac-") else "another-project",
     )
     got = _gather(tmp_path)
     assert got.port_conflicts == ("someone-else",)
     assert verdict(preflight.evaluate(ENTRY, tmp_path, got), "the server's ports") == "refuse"
     # …and with nothing but our own containers publishing them, it passes.
-    monkeypatch.setattr(docker, "container_project", lambda _name: ours)
+    monkeypatch.setattr(docker, "container_project", lambda _name, **_kw: ours)
     again = _gather(tmp_path)
     assert again.port_conflicts == ()
     assert verdict(preflight.evaluate(ENTRY, tmp_path, again), "the server's ports") == "pass"
@@ -313,8 +315,8 @@ def test_a_publisher_docker_will_not_name_an_owner_for_still_refuses(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An unreadable owner is not proof of ownership, so it is not filtered out."""
-    monkeypatch.setattr(docker, "port_conflicts", lambda _ports: ["ac-worldserver"])
-    monkeypatch.setattr(docker, "container_project", lambda _name: docker.UNREADABLE)
+    monkeypatch.setattr(docker, "port_conflicts", lambda _ports, **_kw: ["ac-worldserver"])
+    monkeypatch.setattr(docker, "container_project", lambda _name, **_kw: docker.UNREADABLE)
     assert _gather(tmp_path).port_conflicts == ("ac-worldserver",)
 
 

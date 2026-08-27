@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from yulon import docker
+from yulon import docker, wsl
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -82,11 +82,18 @@ class Controller:
         spec: docker.ContainerSpec,
         server_dir: Path,
         *,
+        wsl_distro: str | None = None,
         import_probe: docker.ImportProbe | None = None,
         reset_unfinished: docker.ResetUnfinished | None = None,
     ) -> None:
         self.spec = spec
         self.server_dir = server_dir
+        # The WSL2 distro this server lives inside, if it does. Every docker
+        # command this controller issues carries it, because a server inside a
+        # distro is reached by that distro's own docker - and asking the wrong
+        # daemon does not fail, it answers "no containers" and the server reads
+        # as stopped while it is running. See `pyplan/wsl-resident-servers.md`.
+        self.wsl_distro = wsl_distro
         # Composed, not inherited, and optional: asking a database what state it
         # is in needs a SQL client and per-game schema names, neither of which
         # this class may know (style-guide §3). A controller built without one
@@ -122,7 +129,15 @@ class Controller:
         established, because that is where acting on the wrong container does
         damage, and its refusal is now shown on the tab.
         """
-        running = set(docker.status())
+        if self.wsl_distro is not None and not wsl.is_running(self.wsl_distro):
+            # Asking docker anything inside a distro STARTS that distro, and
+            # this runs on a five-second timer - so an adopted server would boot
+            # its distro simply by opening the app. Nothing is running when the
+            # distro is down, so the empty answer is true rather than merely
+            # convenient; Start still starts it, because that is asked for.
+            logger.debug(f"{self.wsl_distro} is not running; reporting nothing up")
+            return InstallStatus(db=False, auth=False, world=False)
+        running = set(docker.status(wsl_distro=self.wsl_distro))
         return InstallStatus(
             db=self.spec.db in running,
             auth=self.spec.auth in running,
@@ -149,7 +164,11 @@ class Controller:
         then reports the daemon's own "container name is already in use".
         """
         own = {self.spec.db, self.spec.auth, self.spec.world}
-        return [name for name in docker.port_conflicts_for(self.spec) if name not in own]
+        return [
+            name
+            for name in docker.port_conflicts_for(self.spec, wsl_distro=self.wsl_distro)
+            if name not in own
+        ]
 
     # -- lifecycle -------------------------------------------------------
 
@@ -172,7 +191,7 @@ class Controller:
         # entry, so the lambda that used to be built here was dead code reading
         # like a health wait that no longer happens. Compose does the waiting
         # now, through the project's own `service_healthy` conditions.
-        docker.start_staged(self.spec, self.server_dir)
+        docker.start_staged(self.spec, self.server_dir, wsl_distro=self.wsl_distro)
 
     def stop(self) -> bool:
         """Stop the install, keeping its containers so the next start is staged.
@@ -194,7 +213,7 @@ class Controller:
             if there was nothing to stop. This used to be discarded, so the tab
             said the same thing either way (review, 2026-08-22).
         """
-        return docker.stop_staged(self.spec, self.server_dir)
+        return docker.stop_staged(self.spec, self.server_dir, wsl_distro=self.wsl_distro)
 
     def remove(self) -> bool:
         """Stop the install and remove its containers, keeping every volume.
@@ -207,7 +226,7 @@ class Controller:
             True if this install had containers and they are now gone, False if
             there was nothing of it to remove.
         """
-        return docker.remove_staged(self.spec, self.server_dir)
+        return docker.remove_staged(self.spec, self.server_dir, wsl_distro=self.wsl_distro)
 
     def import_state(self) -> docker.ImportState:
         """Ask this install's databases whether the one-shot import ever finished.
@@ -252,14 +271,17 @@ class Controller:
             self.import_probe,
             reset=self.reset_unfinished,
             output=output,
+            wsl_distro=self.wsl_distro,
         )
 
     # -- polling ---------------------------------------------------------
 
     def wait_db_healthy(self, **kwargs: float) -> bool:
         """Poll until the DB container is healthy. `kwargs` forward timeout/interval."""
-        return docker.wait_db_healthy_for(self.spec, **kwargs)
+        return docker.wait_db_healthy_for(self.spec, wsl_distro=self.wsl_distro, **kwargs)
 
     def wait_ready(self, realm_host: str, realm_port: int, **kwargs: float) -> bool:
         """Poll until auth+world are up and ready. `kwargs` forward timeout/interval."""
-        return docker.wait_ready_for(self.spec, realm_host, realm_port, **kwargs)
+        return docker.wait_ready_for(
+            self.spec, realm_host, realm_port, wsl_distro=self.wsl_distro, **kwargs
+        )

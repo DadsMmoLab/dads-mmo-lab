@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QGridLayout,
+    QInputDialog,
     QLabel,
     QMessageBox,
     QPushButton,
@@ -27,7 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from yulon import docker, platform
+from yulon import docker, platform, wsl
 from yulon.catalog.catalog import Catalog, CatalogEntry
 from yulon.catalog.installer import (
     InstallEngine,
@@ -107,12 +108,75 @@ def _pin_compose_project(server_dir: Path) -> None:
         logger.warning(f"could not pin the compose project name in {server_dir}: {exc}")
 
 
+WslServerPicker = Callable[[tuple[wsl.FoundServer, ...]], "wsl.FoundServer | None"]
+"""Chooses one of the servers discovery found, or None to cancel.
+
+A constructor seam for the same reason `DirPicker` is one: a modal dialog cannot
+run headless, and the logic worth testing is what happens with the answer.
+"""
+
+
+def _qt_wsl_server_picker(found: tuple[wsl.FoundServer, ...]) -> wsl.FoundServer | None:
+    """The real picker: one line per server, chosen by name."""
+    labels = [
+        f"{server.project}  —  {server.distro}" f"  ({'running' if server.running else 'stopped'})"
+        for server in found
+    ]
+    choice, ok = QInputDialog.getItem(
+        None,
+        "Servers found in WSL",
+        "Yu'lon found these Docker Compose projects inside your WSL distros.\n"
+        "Adopting one lets Yu'lon manage it from here.",
+        labels,
+        0,
+        False,
+    )
+    if not ok or choice not in labels:
+        return None
+    return found[labels.index(choice)]
+
+
+def _looks_like(entry: CatalogEntry, server_dir: Path) -> bool:
+    """Does the compose file in `server_dir` name any container this game uses?
+
+    Discovery finds compose PROJECTS, not WoW servers - `docker compose ls`
+    reports a TBC install, a Nextcloud and someone's blog with equal enthusiasm.
+    Adopting one under the wrong catalog entry produces a tab whose every button
+    names containers that do not exist, failing separately and confusingly
+    instead of once and clearly.
+
+    The catalog's container names are the evidence; the project name is a folder
+    name and proves nothing.
+
+    True when the file cannot be read at all. The folder lives inside a distro
+    and is reached over a UNC path, and that read can fail for reasons unrelated
+    to which game it is - refusing on "I could not check" would block the
+    migration this feature exists to provide.
+    """
+    compose = compose_file(server_dir)
+    if compose is None:
+        return True
+    try:
+        text = compose.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return True
+    spec = entry.container_spec()
+    return any(name and name in text for name in (spec.db, spec.auth, spec.world))
+
+
 class CatalogView(QWidget):
     """One tile per catalog entry; Install streams the Phase 3a installer into `log_panel`."""
 
     install_started = Signal(str)  # game id
     install_finished = Signal(str, bool, str)  # game id, ok, message
     installed = Signal(str, object, object)  # game id, server_dir (Path), client_dir (Path|None)
+    adopted = Signal(str, object, object, object)
+    """A server adopted from a WSL distro: game id, server_dir, client_dir, distro name.
+
+    Separate from `installed` rather than a fourth argument on it, because every
+    existing emitter and receiver of that signal means "there is no distro" and
+    widening it would make all of them say so explicitly for no benefit.
+    """
 
     def __init__(
         self,
@@ -123,6 +187,8 @@ class CatalogView(QWidget):
         pick_dir: DirPicker = _qt_dir_picker,
         home: Path | None = None,
         platform_id: Callable[[], str] = platform.detect,
+        pick_wsl_server: WslServerPicker = _qt_wsl_server_picker,
+        wsl_distros: Callable[[], tuple[str, ...]] = platform.wsl_distros,
         dir_problem: Callable[[Path], str | None] = platform.server_dir_problem,
         parent: QWidget | None = None,
     ) -> None:
@@ -133,6 +199,9 @@ class CatalogView(QWidget):
         self._make_installer = installer_factory
         self._log = log_panel
         self._pick_dir = pick_dir
+        self._pick_wsl_server = pick_wsl_server
+        self._wsl_distros = wsl_distros
+        self._adopt_buttons: dict[str, QPushButton] = {}
         self._home = home if home is not None else Path.home()
         self._buttons: dict[str, QPushButton] = {}
         self._gated: set[str] = set()  # ids the platform gate disabled (roadmap 6.1)
@@ -190,6 +259,22 @@ class CatalogView(QWidget):
         existing.clicked.connect(lambda _checked=False, e=entry: self.attach_existing(e))
         box.addWidget(existing)
         self._existing_buttons[entry.id] = existing
+
+        # Only where a WSL-resident server can exist. On Linux, macOS, and on a
+        # Windows box with no distros, this button would be an offer the machine
+        # cannot honour - and `wsl_distros()` answers () for all of them, so the
+        # one check covers every case.
+        if self._wsl_distros():
+            adopt = QPushButton("Find in WSL…", frame)
+            adopt.setObjectName(f"adopt-wsl-{entry.id}")
+            adopt.setToolTip(
+                "Adopt a server that lives inside a WSL distro — for example one the "
+                "DML Launcher built. Yu'lon manages it where it is; nothing is moved "
+                "or reinstalled."
+            )
+            adopt.clicked.connect(lambda _checked=False, e=entry: self.adopt_from_wsl(e))
+            box.addWidget(adopt)
+            self._adopt_buttons[entry.id] = adopt
         return frame
 
     def button_for(self, game_id: str) -> QPushButton:
@@ -259,6 +344,67 @@ class CatalogView(QWidget):
         # pin: there the basename provably is what the containers were just
         # created under (review, 2026-08-22).
         self.installed.emit(entry.id, server_dir, client_dir)
+        return True
+
+    def adopt_from_wsl(self, entry: CatalogEntry) -> bool:
+        """Adopt a server that lives inside a WSL distro. False if nothing was adopted.
+
+        The migration path off the DML Launcher, which builds its servers inside
+        a distro with Docker CE of their own. Yu'lon is replacing that launcher,
+        and a multi-hour compile is not something to ask a user to repeat, so
+        those servers are adopted rather than refused.
+
+        Discovery asks docker what projects exist rather than scanning folders,
+        so nothing here depends on the other product's layout - see
+        `yulon.wsl.find_servers()`. Stopped distros are listed but not opened,
+        because opening one starts it.
+        """
+        found = wsl.find_servers()
+        if not found:
+            QMessageBox.information(
+                self,
+                "No servers found in WSL",
+                "No Docker Compose projects were found in the running WSL distros.\n\n"
+                "If the server is in a distro that is not running, start that distro "
+                "first — Yu'lon does not start them itself, because doing so as a side "
+                "effect of looking around is not its call to make.",
+            )
+            return False
+
+        chosen = self._pick_wsl_server(found)
+        if chosen is None:
+            return False
+
+        if not _looks_like(entry, chosen.server_dir):
+            QMessageBox.warning(
+                self,
+                "That is a different server",
+                f"{chosen.project} in {chosen.distro} does not look like a "
+                f"{entry.name} install — its compose file names none of the containers "
+                f"{entry.name} uses.\n\n"
+                "Adopting it here would give you a tab whose every button talks about "
+                "containers that do not exist. Pick the entry that matches it, or a "
+                "different server.",
+            )
+            return False
+
+        client_dir: Path | None = None
+        if entry.install.requires_client_dir:
+            # Still on the Windows side: the client is the user's own WoW
+            # install and nothing about it moved into a distro.
+            client_dir = self._pick_dir(
+                self,
+                f"Select your {entry.client.version} client folder (the app never downloads one)",
+                self._home,
+            )
+            if client_dir is None:
+                return False
+
+        logger.info(
+            f"adopting {entry.id} from WSL distro {chosen.distro}: "
+            f"project {chosen.project} at {chosen.server_dir}"
+        )
+        self.adopted.emit(entry.id, chosen.server_dir, client_dir, chosen.distro)
         return True
 
     # -- install --------------------------------------------------------

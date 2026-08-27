@@ -949,6 +949,182 @@ def docker_program() -> str | None:
     return None
 
 
+# ------------------------------------------------------------ WSL-resident servers
+#
+# A server can live INSIDE a WSL2 distro, with its own Docker CE, rather than on
+# the Windows side through Docker Desktop - that is what the DML Launcher builds,
+# and Yu'lon is replacing it, so those servers have to be manageable rather than
+# merely refused. See `pyplan/wsl-resident-servers.md` for the spike this rests
+# on; everything below was measured against a real one on 2026-08-26.
+
+WSL_PROGRAM = "wsl"
+"""`wsl.exe`, resolved through `_which` like every other program this module runs."""
+
+
+def docker_prefix(
+    wsl_distro: str | None = None, *, inside: str | None = None
+) -> tuple[str, ...] | None:
+    """The argv that reaches a docker daemon, or None if none can be reached.
+
+    A prefix rather than a program name, because the daemon is not always on
+    this machine's own PATH:
+
+        docker_prefix(None)       -> ("docker",)
+        docker_prefix("dml-arch") -> ("wsl", "-d", "dml-arch", "--", "docker")
+
+    Callers splice it in front of their arguments, which is why the 21 lifecycle
+    call sites behind `docker._docker()` need no change: they never named the
+    program in the first place.
+
+    **The local CLI is not consulted for a distro**, deliberately. The machine
+    that prompted this has no Docker Desktop at all - the daemon lives inside
+    the distro - so resolving `docker.exe` first would refuse a working server
+    for the absence of something it never uses.
+
+    None is the same answer `docker_program()` gives, so callers turn it into
+    the same error carrying `DOCKER_CLI_MISSING_HELP` rather than learning a new
+    failure channel.
+    """
+    if wsl_distro is None:
+        program = docker_program()
+        return (program,) if program is not None else None
+    launcher = _which(WSL_PROGRAM)
+    if launcher is None:
+        logger.debug(f"no {WSL_PROGRAM} on this host; cannot reach docker in {wsl_distro!r}")
+        return None
+    # `--cd` is an argument to wsl.exe and MUST precede the `--` separator:
+    # everything after `--` is the command line handed to the distro's shell, so
+    # a `--cd` placed there arrives at bash, which answers "--: invalid option".
+    # Measured against a real distro, which is the only reason this is right -
+    # the first version put it after the separator, and the unit test, which
+    # asserted only that `--cd` was present, passed a command that could not run.
+    location = ("--cd", inside) if inside else ()
+    # `docker` unqualified on purpose: it is resolved by the distro's own PATH,
+    # by its own shell, where this process's PATH means nothing.
+    return (launcher, "-d", wsl_distro, *location, "--", "docker")
+
+
+def wsl_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """This process's environment, plus `extra`, with `WSLENV` naming what must cross.
+
+    A variable does NOT reach a process inside a distro just because it is set
+    out here. Measured 2026-08-26:
+
+        without WSLENV : '[]'
+        with WSLENV    : '[from-windows]'
+
+    Empty, not absent - so forgetting this surfaces as an authentication failure
+    rather than as a missing setting, which is why it is built here once instead
+    of at each call site. `apply.py` depends on it: it runs `docker exec -e
+    MYSQL_PWD` with no `=value` precisely so the password never appears in an
+    argv that `ps` can read, and that property only survives the crossing if
+    `WSLENV` names the variable.
+
+    An existing `WSLENV` is extended rather than replaced - it may be carrying
+    somebody else's flags, and the separator is `:` even on Windows because
+    `WSLENV` is read by the Linux side.
+    """
+    env = dict(os.environ)
+    names = list(extra or ())
+    env.update(extra or {})
+    if not names:
+        return env
+    existing = [part for part in env.get("WSLENV", "").split(":") if part]
+    for name in names:
+        if name not in existing and f"{name}/p" not in existing:
+            existing.append(name)
+    env["WSLENV"] = ":".join(existing)
+    return env
+
+
+def _wsl_list_bytes() -> bytes | None:
+    """Raw `wsl -l -q` output, or None if there is no WSL here.
+
+    Bytes rather than text, because the decoding is the whole problem - see
+    `wsl_distros()`.
+    """
+    launcher = _which(WSL_PROGRAM)
+    if launcher is None:
+        return None
+    try:
+        proc = subprocess.run(
+            [launcher, "-l", "-q"],
+            capture_output=True,
+            timeout=_WSL_LIST_TIMEOUT,
+            creationflags=runner.creationflags(),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.debug(f"could not list WSL distros: {exc}")
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+_WSL_LIST_TIMEOUT = 30
+
+
+_WSL_SHARE_PREFIXES = ("\\\\wsl.localhost\\", "\\\\wsl$\\")
+
+
+def wsl_linux_path(path: Path) -> str | None:
+    """The distro's own spelling of a `\\\\wsl.localhost\\<distro>\\...` path, or None.
+
+    A WSL install's `server_dir` is kept in its Windows UNC form: that is what
+    the folder picker returns, and it is what `compose_file()` and every other
+    Windows-side read needs. Docker inside the distro knows nothing about it, so
+    the argv needs the Linux spelling instead.
+
+    None for anything that is not a WSL share - an ordinary drive letter, or a
+    real file server. Guessing a Linux path for those would invent one.
+    """
+    text = str(path).replace("/", "\\")
+    for prefix in _WSL_SHARE_PREFIXES:
+        if not text.lower().startswith(prefix.lower()):
+            continue
+        rest = text[len(prefix) :]
+        # The first component is the distro name; everything after it is the
+        # path inside that distro, and nothing after it is the distro root.
+        _, _, inside = rest.partition("\\")
+        return "/" + inside.replace("\\", "/").strip("/")
+    return None
+
+
+def wsl_unc_path(distro: str, inside: str) -> Path | None:
+    """The Windows spelling of `inside` within `distro`, or None if it is not absolute.
+
+    The inverse of `wsl_linux_path()`. Discovery gets paths from docker in the
+    distro's own terms and everything Windows-side needs the UNC form, so the
+    conversion belongs beside its opposite rather than in the caller.
+
+    The `wsl.localhost` share rather than the older `wsl$`: both work on a
+    current Windows, and `wslpath -w` answers with the former, so this matches
+    what the system itself would say.
+    """
+    if not distro or not inside.startswith("/"):
+        return None
+    parts = [part for part in inside.split("/") if part]
+    return Path("\\\\wsl.localhost\\" + "\\".join([distro, *parts]))
+
+
+def wsl_distros() -> tuple[str, ...]:
+    """The names of this machine's WSL distros, in `wsl -l -q` order.
+
+    **`wsl.exe` writes UTF-16LE**, and reading it as UTF-8 does not raise - it
+    returns NUL-riddled garbage that looks like a distro called
+    `d\x00m\x00l\x00-\x00a\x00r\x00c\x00h`. That has cost this project time
+    twice in one day, so the decoding lives in one function with a test carrying
+    the real captured bytes.
+
+    An empty tuple covers every "there is no WSL here" case - not Windows, no
+    WSL installed, `wsl.exe` present but failing - because none of them is an
+    error worth raising at a caller that is only asking what is available.
+    """
+    raw = _wsl_list_bytes()
+    if not raw:
+        return ()
+    text = raw.decode("utf-16le", errors="ignore")
+    return tuple(name for name in (line.strip() for line in text.splitlines()) if name)
+
+
 def docker_ready(run: RunCmd | None = None) -> bool:
     """True if `docker info` succeeds (daemon reachable); False if binary/daemon is missing.
 

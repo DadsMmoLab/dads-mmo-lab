@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from yulon import platform, runner
+from yulon import platform, runner, wsl
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -138,7 +138,11 @@ branches on `returncode != 0`.
 
 
 def _docker(
-    argv: list[str], cwd: Path | None = None, timeout: float | None = None
+    argv: list[str],
+    cwd: Path | None = None,
+    timeout: float | None = None,
+    *,
+    wsl_distro: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run `docker <argv...>` under whatever name this host can actually start it.
 
@@ -170,14 +174,24 @@ def _docker(
     `wait_ready()` issues five per poll. The `OSError` carries what the sentence
     does not: which path was tried, and the errno.
     """
-    program = platform.docker_program()
-    if program is not None:
+    # A Windows process cannot cd into a distro, so for a WSL install the
+    # location rides in the argv instead - `wsl --cd`, positioned by
+    # `docker_prefix()` because only it knows the flag belongs before the `--`
+    # separator. `--cd` rather than compose's `--project-directory`, because
+    # this function runs every docker subcommand and only compose understands
+    # the latter.
+    inside = platform.wsl_linux_path(cwd) if (wsl_distro is not None and cwd is not None) else None
+    prefix = platform.docker_prefix(wsl_distro, inside=inside)
+    if prefix is not None:
+        command = [*prefix, *argv]
+        run_cwd: Path | None = None if wsl_distro is not None else cwd
         try:
-            return runner.run([program, *argv], cwd=cwd, timeout=timeout)
+            return runner.run(command, cwd=run_cwd, timeout=timeout)
         except OSError as exc:
-            logger.warning(f"{program} could not be started: {exc}")
+            logger.warning(f"{prefix[0]} could not be started: {exc}")
     else:
-        logger.debug(f"no docker CLI on this host; not running: docker {' '.join(argv)}")
+        where = f" in {wsl_distro}" if wsl_distro else ""
+        logger.debug(f"no docker CLI on this host{where}; not running: docker {' '.join(argv)}")
     return subprocess.CompletedProcess(
         ["docker", *argv], _CLI_MISSING_RETURNCODE, "", platform.DOCKER_CLI_MISSING_HELP
     )
@@ -200,7 +214,9 @@ def _cli_missing(proc: subprocess.CompletedProcess[str]) -> bool:
     )
 
 
-def _run(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+def _run(
+    argv: list[str], cwd: Path | None = None, *, wsl_distro: str | None = None
+) -> subprocess.CompletedProcess[str]:
     """Run `docker <argv...>`; raise `DockerCommandError` on non-zero exit.
 
     Raises `DockerCliMissingError` — a subclass — when there was no CLI to run,
@@ -209,17 +225,26 @@ def _run(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedProces
     in front of the sentence is noise to the user reading it in a dialog, and
     `_docker()` has already put the command in the log at DEBUG.
     """
-    proc = _docker(argv, cwd=cwd)
+    proc = _docker(argv, cwd=cwd, wsl_distro=wsl_distro)
     if _cli_missing(proc):
         raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP)
     if proc.returncode != 0:
+        # Asked before the generic message is built, because on this one failure
+        # the generic message is empty: a distro that no longer exists makes
+        # wsl.exe complain on STDOUT and exit 0xFFFFFFFF, so the user was shown
+        # `docker ps exited 4294967295: ` with nothing after the colon. The
+        # knowledge of wsl.exe's codes and its UTF-16 output stays in `wsl.py`;
+        # this seam only asks (see `wsl.missing_distro_problem`).
+        problem = wsl.missing_distro_problem(wsl_distro, proc.returncode, proc.stdout)
+        if problem is not None:
+            raise DockerCommandError(problem)
         raise DockerCommandError(
             f"docker {' '.join(argv)} exited {proc.returncode}: {proc.stderr.strip()}"
         )
     return proc
 
 
-def start(server_dir: Path) -> None:
+def start(server_dir: Path, *, wsl_distro: str | None = None) -> None:
     """Bring the compose project in `server_dir` up in the background.
 
     Creates whatever does not exist yet, which on an installed server also
@@ -227,13 +252,13 @@ def start(server_dir: Path) -> None:
     has already been installed — see the warning there.
     """
     logger.debug(f"start() called: server_dir={server_dir}")
-    _run(["compose", "up", "-d"], cwd=server_dir)
+    _run(["compose", "up", "-d"], cwd=server_dir, wsl_distro=wsl_distro)
 
 
 PROJECT_NAME_VAR = "COMPOSE_PROJECT_NAME"
 
 
-def compose_project_name(server_dir: Path) -> str | None:
+def compose_project_name(server_dir: Path, *, wsl_distro: str | None = None) -> str | None:
     """What compose currently calls this project, or None if it cannot say.
 
     Asked rather than computed. Compose derives the name from the directory
@@ -254,6 +279,7 @@ def compose_project_name(server_dir: Path) -> str | None:
         ["compose", "config", "--format", "json"],
         cwd=server_dir,
         timeout=_COMPOSE_CONFIG_TIMEOUT_SECONDS,
+        wsl_distro=wsl_distro,
     )
     if proc.returncode != 0:
         logger.debug(f"compose config failed in {server_dir}: {proc.stderr.strip()}")
@@ -267,7 +293,7 @@ def compose_project_name(server_dir: Path) -> str | None:
     return name if isinstance(name, str) and name else None
 
 
-def pin_project_name(server_dir: Path) -> str | None:
+def pin_project_name(server_dir: Path, *, wsl_distro: str | None = None) -> str | None:
     """Freeze this install's compose project name into its own `.env`.
 
     Compose identifies a project by its directory basename unless told
@@ -296,7 +322,7 @@ def pin_project_name(server_dir: Path) -> str | None:
     if pinned_project_name(server_dir) is not None:
         logger.debug(f"{PROJECT_NAME_VAR} already pinned in {env_path}")
         return None
-    name = compose_project_name(server_dir)
+    name = compose_project_name(server_dir, wsl_distro=wsl_distro)
     if name is None:
         logger.info(f"could not ask compose for the project name in {server_dir}; not pinning")
         return None
@@ -438,7 +464,7 @@ the unreadable case gets a value no project name can collide with (review,
 """
 
 
-def container_project(container: str) -> str | None:
+def container_project(container: str, *, wsl_distro: str | None = None) -> str | None:
     """Which compose project owns this container.
 
     Returns the project name, `None` for a container carrying no compose label
@@ -446,14 +472,16 @@ def container_project(container: str) -> str | None:
     be asked at all.
     """
     fmt = '{{index .Config.Labels "' + PROJECT_LABEL + '"}}'
-    proc = _docker(["inspect", container, "--format", fmt])
+    proc = _docker(["inspect", container, "--format", fmt], wsl_distro=wsl_distro)
     if proc.returncode != 0:
         logger.warning(f"could not read the compose project of {container}: {proc.stderr.strip()}")
         return UNREADABLE
     return proc.stdout.strip() or None
 
 
-def install_project(spec: ContainerSpec, server_dir: Path) -> str | None:
+def install_project(
+    spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | None = None
+) -> str | None:
     """This install's compose project, asked of the containers themselves first.
 
     The directory is the WRONG source of truth here. Compose derives a project
@@ -478,7 +506,9 @@ def install_project(spec: ContainerSpec, server_dir: Path) -> str | None:
     named the containers after. Attaching an existing install does not pin, an
     already-moved folder being exactly what that path exists to adopt.
     """
-    return pinned_project_name(server_dir) or compose_project_name(server_dir)
+    return pinned_project_name(server_dir) or compose_project_name(
+        server_dir, wsl_distro=wsl_distro
+    )
 
 
 @dataclass(frozen=True)
@@ -503,7 +533,7 @@ class Running:
     """Running, but Docker would not say who owns them. Not proof of anything."""
 
 
-def _running(spec: ContainerSpec, project: str) -> Running:
+def _running(spec: ContainerSpec, project: str, *, wsl_distro: str | None = None) -> Running:
     """Classify what is running under this install's names by compose project label.
 
     Compose stamps every container it creates with the project it belongs to,
@@ -519,7 +549,7 @@ def _running(spec: ContainerSpec, project: str) -> Running:
         DockerCommandError: Docker could not be asked what is running at all,
             so no claim about this install can be made.
     """
-    listed = _status_safe()
+    listed = _status_safe(wsl_distro=wsl_distro)
     if listed is None:
         raise DockerCommandError(
             "could not ask Docker what is running, so the stop cannot be confirmed"
@@ -531,7 +561,7 @@ def _running(spec: ContainerSpec, project: str) -> Running:
     for name in (spec.world, spec.auth, spec.db):
         if name not in running:
             continue
-        owner = container_project(name)
+        owner = container_project(name, wsl_distro=wsl_distro)
         if owner == UNREADABLE:
             unreadable.append(name)
         elif owner == project:
@@ -541,13 +571,13 @@ def _running(spec: ContainerSpec, project: str) -> Running:
     return Running(tuple(ours), tuple(strangers), tuple(unreadable))
 
 
-def container_exists(container: str) -> bool:
+def container_exists(container: str, *, wsl_distro: str | None = None) -> bool:
     """True if a container by that name exists at all, running or exited."""
-    proc = _run(["ps", "-a", "--format", "{{.Names}}"])
+    proc = _run(["ps", "-a", "--format", "{{.Names}}"], wsl_distro=wsl_distro)
     return any(line.strip() == container for line in proc.stdout.splitlines())
 
 
-def start_staged(spec: ContainerSpec, server_dir: Path) -> bool:
+def start_staged(spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | None = None) -> bool:
     """Start this install's long-running services, and only those.
 
     `docker compose up -d` with no arguments starts every service that has no
@@ -611,8 +641,8 @@ def start_staged(spec: ContainerSpec, server_dir: Path) -> bool:
     """
     services = spec.compose_services()
     logger.info(f"start_staged(): `compose up -d --no-deps {' '.join(services)}` in {server_dir}")
-    _run(["compose", "up", "-d", "--no-deps", *services], cwd=server_dir)
-    listed = _status_safe()
+    _run(["compose", "up", "-d", "--no-deps", *services], cwd=server_dir, wsl_distro=wsl_distro)
+    listed = _status_safe(wsl_distro=wsl_distro)
     if listed is None:
         logger.warning("start_staged(): could not confirm what is running; taking compose's word")
         return True
@@ -627,7 +657,7 @@ def start_staged(spec: ContainerSpec, server_dir: Path) -> bool:
     return True
 
 
-def _project_containers(project: str) -> list[str] | None:
+def _project_containers(project: str, *, wsl_distro: str | None = None) -> list[str] | None:
     """Every container compose stamped with `project`, running or exited.
 
     `container_exists()` cannot answer this: AzerothCore pins container names
@@ -640,7 +670,8 @@ def _project_containers(project: str) -> list[str] | None:
     "nothing is there".
     """
     proc = _docker(
-        ["ps", "-a", "--filter", f"label={PROJECT_LABEL}={project}", "--format", "{{.Names}}"]
+        ["ps", "-a", "--filter", f"label={PROJECT_LABEL}={project}", "--format", "{{.Names}}"],
+        wsl_distro=wsl_distro,
     )
     if proc.returncode != 0:
         logger.warning(f"could not list containers for project {project}: {proc.stderr.strip()}")
@@ -648,7 +679,7 @@ def _project_containers(project: str) -> list[str] | None:
     return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
-def remove_staged(spec: ContainerSpec, server_dir: Path) -> bool:
+def remove_staged(spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | None = None) -> bool:
     """Stop this install and REMOVE its containers. Volumes are never touched.
 
     The deliberate teardown, for a project that needs recreating rather than
@@ -688,14 +719,14 @@ def remove_staged(spec: ContainerSpec, server_dir: Path) -> bool:
             this install are still there afterwards.
     """
     logger.debug(f"remove_staged() called: server_dir={server_dir}")
-    project = install_project(spec, server_dir)
+    project = install_project(spec, server_dir, wsl_distro=wsl_distro)
     if project is None:
-        _refuse_without_an_identity(spec, server_dir, "Nothing was removed.")
+        _refuse_without_an_identity(spec, server_dir, "Nothing was removed.", wsl_distro=wsl_distro)
         return False
 
     # The same look-before-touching census as the stop path, for the same
     # reason: a refusal has to happen before the command, not after it.
-    running = _running(spec, project)
+    running = _running(spec, project, wsl_distro=wsl_distro)
     if running.unreadable:
         raise DockerCommandError(
             f"Docker would not say which project owns {', '.join(running.unreadable)}, so this "
@@ -705,7 +736,7 @@ def remove_staged(spec: ContainerSpec, server_dir: Path) -> bool:
     if running.strangers:
         raise DockerCommandError(_stranger_message(running.strangers, project, server_dir))
 
-    before = _project_containers(project)
+    before = _project_containers(project, wsl_distro=wsl_distro)
     if before is None:
         raise DockerCommandError(
             "could not ask Docker which containers this install has, so nothing was removed"
@@ -726,12 +757,14 @@ def remove_staged(spec: ContainerSpec, server_dir: Path) -> bool:
     # SIGKILLed mid-drain and the save queue is what is lost, not the containers
     # (review, 2026-08-23; the measurement is under `STOP_GRACE_SECONDS`).
     proc = _docker(
-        ["compose", "down", "-t", str(STOP_GRACE_SECONDS), "--remove-orphans"], cwd=server_dir
+        ["compose", "down", "-t", str(STOP_GRACE_SECONDS), "--remove-orphans"],
+        cwd=server_dir,
+        wsl_distro=wsl_distro,
     )
     if proc.returncode != 0:
         logger.warning(f"compose down failed ({proc.stderr.strip()}); removing by name")
 
-    after = _project_containers(project)
+    after = _project_containers(project, wsl_distro=wsl_distro)
     if after is None:
         raise DockerCommandError(
             "the containers were asked to go, but Docker will no longer say what this install "
@@ -745,9 +778,9 @@ def remove_staged(spec: ContainerSpec, server_dir: Path) -> bool:
             # SIGKILL with no grace at all, so leaving it as the only fallback
             # left a hard-kill path reachable from the same button whose copy
             # promises the characters survive (review, 2026-08-23).
-            _run_docker_stop(name)
-            _docker(["rm", "-f", name])
-        after = _project_containers(project) or []
+            _run_docker_stop(name, wsl_distro=wsl_distro)
+            _docker(["rm", "-f", name], wsl_distro=wsl_distro)
+        after = _project_containers(project, wsl_distro=wsl_distro) or []
     if after:
         raise DockerCommandError(f"still present after remove: {', '.join(after)}")
 
@@ -922,6 +955,7 @@ def repair_import(
     reset: ResetUnfinished | None = None,
     output: OutputSink | None = None,
     db_timeout: float = _DB_HEALTHY_TIMEOUT_SECONDS,
+    wsl_distro: str | None = None,
 ) -> bool:
     """Re-run this install's one-shot database import. For a BROKEN install only.
 
@@ -1028,16 +1062,18 @@ def repair_import(
             "nothing to re-run. Nothing was changed."
         )
 
-    project = install_project(spec, server_dir)
+    project = install_project(spec, server_dir, wsl_distro=wsl_distro)
     if project is None:
-        _refuse_without_an_identity(spec, server_dir, "The import was not re-run.")
+        _refuse_without_an_identity(
+            spec, server_dir, "The import was not re-run.", wsl_distro=wsl_distro
+        )
         raise DockerCommandError(
             f"the install in {server_dir} cannot say which compose project it is — its compose "
             f"files are unreadable and no {PROJECT_NAME_VAR} is pinned — so the import was not "
             "re-run. Running it against the wrong project would overwrite the wrong database."
         )
 
-    running = _running(spec, project)
+    running = _running(spec, project, wsl_distro=wsl_distro)
     if running.unreadable:
         raise DockerCommandError(
             f"Docker would not say which project owns {', '.join(running.unreadable)}, so this "
@@ -1055,7 +1091,9 @@ def repair_import(
             "whatever it finds. Press Stop first, then try again."
         )
 
-    start_database(spec, server_dir, timeout=db_timeout, because="nothing was imported")
+    start_database(
+        spec, server_dir, timeout=db_timeout, because="nothing was imported", wsl_distro=wsl_distro
+    )
 
     before = probe()
     logger.info(f"repair_import(): the databases read as {before.state} — {before.detail}")
@@ -1109,7 +1147,7 @@ def repair_import(
         )
 
     logger.warning(f"repair_import(): `compose up --no-deps {service}` in {server_dir}")
-    run = run_one_shot(service, server_dir, sink=output)
+    run = run_one_shot(service, server_dir, wsl_distro=wsl_distro, sink=output)
     verify_import(probe, service, server_dir, run)
     return True
 
@@ -1120,6 +1158,7 @@ def start_database(
     *,
     timeout: float = _DB_HEALTHY_TIMEOUT_SECONDS,
     because: str = "nothing was run",
+    wsl_distro: str | None = None,
 ) -> None:
     """Start this install's database alone and wait for it to report healthy.
 
@@ -1145,7 +1184,7 @@ def start_database(
         DockerCommandError: compose would not start it, or it never became
             healthy inside `timeout`.
     """
-    if spec.db in set(status()):
+    if spec.db in set(status(wsl_distro=wsl_distro)):
         return
     # Started rather than demanded, because Stop takes the database down with
     # everything else — a user who followed the repair refusals would otherwise
@@ -1156,8 +1195,12 @@ def start_database(
     # `ContainerSpec` exists precisely so a game whose compose file disagrees
     # can say so — reaching past it here would have made that promise false
     # for the first such game (review, 2026-08-23).
-    _run(["compose", "up", "-d", "--no-deps", spec.compose_services()[0]], cwd=server_dir)
-    if not wait_db_healthy(spec.db, timeout=timeout):
+    _run(
+        ["compose", "up", "-d", "--no-deps", spec.compose_services()[0]],
+        cwd=server_dir,
+        wsl_distro=wsl_distro,
+    )
+    if not wait_db_healthy(spec.db, timeout=timeout, wsl_distro=wsl_distro):
         raise DockerCommandError(
             f"{spec.db} did not report healthy within {timeout:.0f}s, so {because}. "
             f"`docker compose logs {spec.service_for(spec.db)}` in {server_dir} will say why."
@@ -1168,6 +1211,7 @@ def run_one_shot(
     service: str,
     server_dir: Path,
     *,
+    wsl_distro: str | None = None,
     sink: OutputSink | None = None,
     cancel: threading.Event | None = None,
 ) -> AttachedRun:
@@ -1186,7 +1230,11 @@ def run_one_shot(
     tell them apart.
     """
     run = run_attached(
-        ["compose", "up", "--no-deps", service], server_dir, sink=sink, cancel=cancel
+        ["compose", "up", "--no-deps", service],
+        server_dir,
+        wsl_distro=wsl_distro,
+        sink=sink,
+        cancel=cancel,
     )
     if run.returncode != 0:
         # Not raised here. See above — the probe is the only thing that can
@@ -1263,7 +1311,7 @@ def verify_import(
     return after
 
 
-def _run_docker_stop(container: str) -> None:
+def _run_docker_stop(container: str, *, wsl_distro: str | None = None) -> None:
     """`docker stop <container>`, blocking until that one container has exited.
 
     One call per container on purpose. `docker stop a b c` looks ordered and is
@@ -1288,7 +1336,7 @@ def _run_docker_stop(container: str) -> None:
     # every version this project can meet, so it is the only spelling that is
     # safe here — `--timeout` would exit 125 with `unknown flag` on any older
     # daemon, turning a working by-name stop into a hard failure (review).
-    proc = _docker(["stop", "-t", str(STOP_GRACE_SECONDS), container])
+    proc = _docker(["stop", "-t", str(STOP_GRACE_SECONDS), container], wsl_distro=wsl_distro)
     if proc.returncode == 0:
         return
     if "No such container" in proc.stderr:
@@ -1298,7 +1346,11 @@ def _run_docker_stop(container: str) -> None:
 
 
 def _refuse_without_an_identity(
-    spec: ContainerSpec, server_dir: Path, nothing_was: str = "Nothing was stopped."
+    spec: ContainerSpec,
+    server_dir: Path,
+    nothing_was: str = "Nothing was stopped.",
+    *,
+    wsl_distro: str | None = None,
 ) -> None:
     """Raise if anything is running under our names while we cannot name our project.
 
@@ -1315,7 +1367,7 @@ def _refuse_without_an_identity(
             (review, 2026-08-23).
         DockerCommandError: Docker was asked and would not answer.
     """
-    listed = _status_safe()
+    listed = _status_safe(wsl_distro=wsl_distro)
     if listed is None:
         # `or []` used to live here, which turned "Docker would not answer" into
         # "nothing is running" and returned False — the caller then told the user
@@ -1420,7 +1472,7 @@ def _stranger_message(
     return " ".join(lines)
 
 
-def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
+def stop_staged(spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | None = None) -> bool:
     """Stop this install without destroying its containers.
 
     The counterpart to `start_staged()`. `docker compose down` *removes* the
@@ -1464,16 +1516,16 @@ def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
             is down while players are still connected.
     """
     logger.debug(f"stop_staged() called: server_dir={server_dir}")
-    project = install_project(spec, server_dir)
+    project = install_project(spec, server_dir, wsl_distro=wsl_distro)
     if project is None:
-        _refuse_without_an_identity(spec, server_dir)
+        _refuse_without_an_identity(spec, server_dir, wsl_distro=wsl_distro)
         return False
 
     # Look before touching anything. Taking the census first is what lets the
     # refusals below happen before a `compose stop`, and what makes the return
     # value mean "there was something of ours and it is now down" rather than
     # "compose had nothing to complain about" (review, 2026-08-22).
-    before = _running(spec, project)
+    before = _running(spec, project, wsl_distro=wsl_distro)
     if before.unreadable:
         raise DockerCommandError(
             f"Docker would not say which project owns {', '.join(before.unreadable)}, so this "
@@ -1521,7 +1573,9 @@ def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
     # `-t` for the same reason as `_run_docker_stop()`; compose has always
     # accepted the short form, and spelling the two call sites alike means a
     # future reader does not have to know which CLI they are looking at.
-    proc = _docker(["compose", "stop", "-t", str(STOP_GRACE_SECONDS)], cwd=server_dir)
+    proc = _docker(
+        ["compose", "stop", "-t", str(STOP_GRACE_SECONDS)], cwd=server_dir, wsl_distro=wsl_distro
+    )
     if proc.returncode != 0:
         logger.warning(f"compose stop failed ({proc.stderr.strip()}); stopping containers by name")
     if not before.ours:
@@ -1532,15 +1586,15 @@ def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
         logger.info("stop_staged(): none of this install's servers were running")
         return False
 
-    after = _running(spec, project)
+    after = _running(spec, project, wsl_distro=wsl_distro)
     if after.ours:
         # Either `compose stop` failed, or it succeeded having matched nothing —
         # the moved-folder case, where compose names the project after the
         # directory. Finish the job by name rather than believing the exit code.
         logger.warning(f"compose stop left {list(after.ours)} running; stopping by name")
         for name in after.ours:
-            _run_docker_stop(name)
-        after = _running(spec, project)
+            _run_docker_stop(name, wsl_distro=wsl_distro)
+        after = _running(spec, project, wsl_distro=wsl_distro)
 
     if after.ours:
         raise DockerCommandError(f"still running after stop: {', '.join(after.ours)}")
@@ -1558,7 +1612,7 @@ def stop_staged(spec: ContainerSpec, server_dir: Path) -> bool:
     return True
 
 
-def status() -> list[str]:
+def status(*, wsl_distro: str | None = None) -> list[str]:
     """Return the names of all currently-running containers (`docker ps`).
 
     Raises:
@@ -1568,11 +1622,11 @@ def status() -> list[str]:
             `_status_safe()`/the polling helpers below instead.
     """
     logger.debug("status() called")
-    proc = _run(["ps", "--format", "{{.Names}}"])
+    proc = _run(["ps", "--format", "{{.Names}}"], wsl_distro=wsl_distro)
     return [name for name in proc.stdout.splitlines() if name.strip()]
 
 
-def _status_safe() -> list[str] | None:
+def _status_safe(*, wsl_distro: str | None = None) -> list[str] | None:
     """Like `status()`, but returns `None` instead of raising on a *transient* failure.
 
     Used by polling loops (`wait_ready()`) where a single `docker ps` failure
@@ -1588,7 +1642,7 @@ def _status_safe() -> list[str] | None:
     written for.
     """
     try:
-        return status()
+        return status(wsl_distro=wsl_distro)
     except DockerCliMissingError:
         raise
     except DockerCommandError as exc:
@@ -1596,7 +1650,7 @@ def _status_safe() -> list[str] | None:
         return None
 
 
-def health(container: str) -> str:
+def health(container: str, *, wsl_distro: str | None = None) -> str:
     """Return a container's health status, or `"unknown"` if it can't be read.
 
     `"unknown"` is deliberately overloaded and covers several distinct cases
@@ -1609,10 +1663,10 @@ def health(container: str) -> str:
     report `"healthy"` and will look identical to "container missing."
     Mirrors `dml-start.sh`'s `... || echo unknown`.
     """
-    return _health(container)[0]
+    return _health(container, wsl_distro=wsl_distro)[0]
 
 
-def _health(container: str) -> tuple[str, bool]:
+def _health(container: str, *, wsl_distro: str | None = None) -> tuple[str, bool]:
     """`health()`'s answer, plus whether there was a docker CLI to ask.
 
     Split out so `wait_db_healthy()` can tell "no Docker on this machine" from
@@ -1621,7 +1675,9 @@ def _health(container: str) -> tuple[str, bool]:
     two, deliberately — see there — so this is additive, not a contract change.
     """
     logger.debug(f"health() called: container={container}")
-    proc = _docker(["inspect", container, "--format", "{{.State.Health.Status}}"])
+    proc = _docker(
+        ["inspect", container, "--format", "{{.State.Health.Status}}"], wsl_distro=wsl_distro
+    )
     if proc.returncode != 0 or not proc.stdout.strip():
         return "unknown", _cli_missing(proc)
     return proc.stdout.strip(), False
@@ -1648,7 +1704,7 @@ class ContainerState:
         return self.status == "running"
 
 
-def container_state(container: str) -> ContainerState:
+def container_state(container: str, *, wsl_distro: str | None = None) -> ContainerState:
     """Status and current-run start time in ONE `docker inspect`.
 
     One call, not two, because `wait_ready()` asks for both every two seconds
@@ -1658,7 +1714,7 @@ def container_state(container: str) -> ContainerState:
     names (review, 2026-08-22).
     """
     fmt = "{{.State.Status}}\t{{.State.StartedAt}}"
-    proc = _docker(["inspect", container, "--format", fmt])
+    proc = _docker(["inspect", container, "--format", fmt], wsl_distro=wsl_distro)
     if proc.returncode != 0:
         logger.warning(f"could not read the state of {container}: {proc.stderr.strip()}")
         return ContainerState()
@@ -1666,12 +1722,14 @@ def container_state(container: str) -> ContainerState:
     return ContainerState(status.strip(), started.strip())
 
 
-def started_at(container: str) -> str:
+def started_at(container: str, *, wsl_distro: str | None = None) -> str:
     """When the container's CURRENT run began, or `""` if it cannot be read."""
-    return container_state(container).started_at
+    return container_state(container, wsl_distro=wsl_distro).started_at
 
 
-def _logs(container: str, *, this_run_only: bool = False, since: str = "") -> str:
+def _logs(
+    container: str, *, this_run_only: bool = False, since: str = "", wsl_distro: str | None = None
+) -> str:
     """Return a container's logs, or `""` if they can't be read.
 
     `docker logs` prints everything the container has ever written, across every
@@ -1693,10 +1751,10 @@ def _logs(container: str, *, this_run_only: bool = False, since: str = "") -> st
     if this_run_only:
         # The caller may already have the start time from the state read it
         # had to do anyway; asking again is a second `docker inspect`.
-        since = since or started_at(container)
+        since = since or started_at(container, wsl_distro=wsl_distro)
         if since:
             argv += ["--since", since]
-    proc = _docker([*argv, container])
+    proc = _docker([*argv, container], wsl_distro=wsl_distro)
     if proc.returncode != 0:
         # Silently returning "" turned a rejected --since, a container removed
         # mid-wait, or an unreadable log driver into eight minutes of "starting"
@@ -1760,6 +1818,8 @@ def wait_db_healthy(
     db_container: str,
     timeout: float = _DB_HEALTHY_TIMEOUT_SECONDS,
     interval: float = _POLL_INTERVAL_SECONDS,
+    *,
+    wsl_distro: str | None = None,
 ) -> bool:
     """Poll `health()` until the DB container reports `healthy` or time out.
 
@@ -1788,7 +1848,7 @@ def wait_db_healthy(
     deadline = time.monotonic() + timeout
     cli_missing_since: float | None = None
     while time.monotonic() < deadline:
-        status, cli_missing = _health(db_container)
+        status, cli_missing = _health(db_container, wsl_distro=wsl_distro)
         if cli_missing:
             cli_missing_since, give_up = _cli_missing_run(cli_missing_since, "wait_db_healthy()")
             if give_up:
@@ -1808,6 +1868,8 @@ def wait_ready(
     realm_port: int,
     timeout: float = _READY_TIMEOUT_SECONDS,
     interval: float = _POLL_INTERVAL_SECONDS,
+    *,
+    wsl_distro: str | None = None,
 ) -> bool:
     """Poll until auth+world are up and both have emitted their ready markers.
 
@@ -1844,7 +1906,7 @@ def wait_ready(
     cli_missing_since: float | None = None
     while time.monotonic() < deadline:
         try:
-            running = _status_safe()
+            running = _status_safe(wsl_distro=wsl_distro)
         except DockerCliMissingError:
             cli_missing_since, give_up = _cli_missing_run(cli_missing_since, "wait_ready()")
             if give_up:
@@ -1857,20 +1919,29 @@ def wait_ready(
             # `docker ps` lists a container in restart backoff, so being listed
             # is not the same as being up. One inspect per container answers
             # both that and "when did THIS run start".
-            auth = container_state(auth_container)
-            world = container_state(world_container)
+            auth = container_state(auth_container, wsl_distro=wsl_distro)
+            world = container_state(world_container, wsl_distro=wsl_distro)
             if (
                 auth.settled
                 and world.settled
-                and target in _logs(auth_container, this_run_only=True, since=auth.started_at)
-                and "ready..." in _logs(world_container, this_run_only=True, since=world.started_at)
+                and target
+                in _logs(
+                    auth_container, this_run_only=True, since=auth.started_at, wsl_distro=wsl_distro
+                )
+                and "ready..."
+                in _logs(
+                    world_container,
+                    this_run_only=True,
+                    since=world.started_at,
+                    wsl_distro=wsl_distro,
+                )
             ):
                 return True
         time.sleep(interval)
     return False
 
 
-def port_conflicts(ports: tuple[int, ...]) -> list[str]:
+def port_conflicts(ports: tuple[int, ...], *, wsl_distro: str | None = None) -> list[str]:
     """Return the names of *any* running containers currently binding `ports`.
 
     This is the single-instance guard from README §12: all v1 servers share
@@ -1885,7 +1956,7 @@ def port_conflicts(ports: tuple[int, ...]) -> list[str]:
     logger.debug(f"port_conflicts() called: ports={ports}")
     if not ports:
         return []
-    proc = _run(["ps", "--format", "{{.Names}}\t{{.Ports}}"])
+    proc = _run(["ps", "--format", "{{.Names}}\t{{.Ports}}"], wsl_distro=wsl_distro)
     conflicts: list[str] = []
     for line in proc.stdout.splitlines():
         if "\t" not in line:
@@ -1898,22 +1969,35 @@ def port_conflicts(ports: tuple[int, ...]) -> list[str]:
     return conflicts
 
 
-def wait_db_healthy_for(spec: ContainerSpec, **kwargs: float) -> bool:
+def wait_db_healthy_for(
+    spec: ContainerSpec, *, wsl_distro: str | None = None, **kwargs: float
+) -> bool:
     """`wait_db_healthy()` for `spec.db`. `kwargs` forwards `timeout`/`interval`."""
-    return wait_db_healthy(spec.db, **kwargs)
+    return wait_db_healthy(spec.db, **kwargs, wsl_distro=wsl_distro)
 
 
-def wait_ready_for(spec: ContainerSpec, realm_host: str, realm_port: int, **kwargs: float) -> bool:
+def wait_ready_for(
+    spec: ContainerSpec,
+    realm_host: str,
+    realm_port: int,
+    *,
+    wsl_distro: str | None = None,
+    **kwargs: float,
+) -> bool:
     """`wait_ready()` for `spec.auth`/`spec.world`. `kwargs` forwards timeout/interval."""
-    return wait_ready(spec.auth, spec.world, realm_host, realm_port, **kwargs)
+    return wait_ready(
+        spec.auth, spec.world, realm_host, realm_port, **kwargs, wsl_distro=wsl_distro
+    )
 
 
-def port_conflicts_for(spec: ContainerSpec) -> list[str]:
+def port_conflicts_for(spec: ContainerSpec, *, wsl_distro: str | None = None) -> list[str]:
     """`port_conflicts()` for `spec.ports` — the convenience form callers want."""
-    return port_conflicts(spec.ports)
+    return port_conflicts(spec.ports, wsl_distro=wsl_distro)
 
 
-def foreign_port_conflicts(spec: ContainerSpec, project: str) -> list[str]:
+def foreign_port_conflicts(
+    spec: ContainerSpec, project: str, *, wsl_distro: str | None = None
+) -> list[str]:
     """`port_conflicts_for()` minus the containers belonging to `project`.
 
     The global scan cannot answer "is this MY server?", and a caller that
@@ -1929,13 +2013,13 @@ def foreign_port_conflicts(spec: ContainerSpec, project: str) -> list[str]:
     for is NOT filtered out — an unreadable owner is not proof of ownership, and
     the caller refusing is the fail-closed direction here.
     """
-    conflicts = port_conflicts(spec.ports)
+    conflicts = port_conflicts(spec.ports, wsl_distro=wsl_distro)
     if not conflicts:
         return []
-    return [name for name in conflicts if container_project(name) != project]
+    return [name for name in conflicts if container_project(name, wsl_distro=wsl_distro) != project]
 
 
-def published_bindings() -> dict[int, str]:
+def published_bindings(*, wsl_distro: str | None = None) -> dict[int, str]:
     """Host address each published port is bound to, parsed from `docker ps` (`{{.Ports}}`).
 
     The guide's LAN check: `0.0.0.0:3724->3724/tcp` reaches the network,
@@ -1943,7 +2027,7 @@ def published_bindings() -> dict[int, str]:
     publishes (`[::]:3724->`) are ignored; the first IPv4 binding per port wins.
     """
     logger.debug("published_bindings() called")
-    proc = _run(["ps", "--format", "{{.Ports}}"])
+    proc = _run(["ps", "--format", "{{.Ports}}"], wsl_distro=wsl_distro)
     bindings: dict[int, str] = {}
     for line in proc.stdout.splitlines():
         for part in line.split(","):
@@ -1959,7 +2043,7 @@ def published_bindings() -> dict[int, str]:
     return bindings
 
 
-def follow_logs(container: str, tail: int = 200) -> Iterator[str]:
+def follow_logs(container: str, tail: int = 200, *, wsl_distro: str | None = None) -> Iterator[str]:
     """Stream `docker logs -f` for one container (the Console tab's log source).
 
     Lives here so no `ui/` module ever builds a docker argv itself
@@ -1973,11 +2057,29 @@ def follow_logs(container: str, tail: int = 200) -> Iterator[str]:
     panel — where the unresolved name used to surface a bare WinError 2.
     """
     logger.debug(f"follow_logs() called: container={container} tail={tail}")
-    program = platform.docker_program()
-    if program is None:
+    prefix = platform.docker_prefix(wsl_distro)
+    if prefix is None:
         raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP)
+    # Kept because wsl.exe's complaint arrives as OUTPUT here, not as an
+    # exception message: `stream()` yields whatever the child wrote and only
+    # then raises a `CalledProcessError` that carries a number and an argv. A
+    # missing distro is recognised from that text, so the last of it has to
+    # survive long enough to be asked about. Bounded for the same reason
+    # `KEEP_OUTPUT_LINES` is - this can follow a log for days.
+    recent: deque[str] = deque(maxlen=20)
     try:
-        yield from runner.stream([program, "logs", "-f", "--tail", str(tail), container])
+        for line in runner.stream([*prefix, "logs", "-f", "--tail", str(tail), container]):
+            recent.append(line)
+            yield line
+    except subprocess.CalledProcessError as exc:
+        # The streaming half of what `_run()` does for buffered calls. Without
+        # it the Console tab showed wsl.exe's UTF-16 complaint as NUL-riddled
+        # gibberish and then "CalledProcessError: ... exit status 4294967295",
+        # which names neither the distro nor anything to do about it.
+        problem = wsl.missing_distro_problem(wsl_distro, exc.returncode, "\n".join(recent))
+        if problem is not None:
+            raise DockerCommandError(problem) from exc
+        raise
     except OSError as exc:
         # The same uninstalled-mid-run case `_docker()` handles, arriving from
         # `Popen` on the first line instead of from `subprocess.run`. Both roads
@@ -2042,6 +2144,7 @@ def run_attached(
     argv: list[str],
     cwd: Path,
     *,
+    wsl_distro: str | None = None,
     sink: OutputSink | None = None,
     keep: int = KEEP_OUTPUT_LINES,
     cancel: threading.Event | None = None,
@@ -2096,8 +2199,12 @@ def run_attached(
     """
     logger.debug(f"run_attached() called: argv={argv} cwd={cwd}")
     tail: deque[str] = deque(maxlen=keep)
-    program = platform.docker_program()
-    if program is None:
+    # The same two-seam rule as `_docker()`: for a WSL install the location
+    # rides in the argv as `wsl --cd`, because a Windows process cannot cd into
+    # a distro and `runner.stream()` would be handed a cwd that does not exist.
+    inside = platform.wsl_linux_path(cwd) if (wsl_distro is not None and cwd is not None) else None
+    prefix = platform.docker_prefix(wsl_distro, inside=inside)
+    if prefix is None:
         logger.debug(f"no docker CLI on this host; not running: docker {' '.join(argv)}")
         return AttachedRun(_CLI_MISSING_RETURNCODE, (platform.DOCKER_CLI_MISSING_HELP,))
     live = sink
@@ -2106,7 +2213,10 @@ def run_attached(
         # generator for `stream()`'s finally to terminate the child, and
         # relying on the loop variable falling out of scope makes that depend
         # on refcounting rather than on the code saying so.
-        with closing(runner.stream([program, *argv], cwd=cwd, merge_stderr=merge_stderr)) as lines:
+        stream_cwd = None if wsl_distro is not None else cwd
+        with closing(
+            runner.stream([*prefix, *argv], cwd=stream_cwd, merge_stderr=merge_stderr)
+        ) as lines:
             for line in lines:
                 if cancel is not None and cancel.is_set():
                     logger.warning(f"docker {' '.join(argv)} was cancelled; abandoning the client")
@@ -2119,11 +2229,19 @@ def run_attached(
                         logger.warning(f"the output sink stopped accepting lines: {exc}")
                         live = None
     except subprocess.CalledProcessError as exc:
+        # Replaced rather than appended: on a missing distro every line in
+        # `tail` IS the complaint, arriving as UTF-16 with a NUL after each
+        # character, and showing that above the explanation would bury it in
+        # the noise it exists to translate. This one keeps the contract above -
+        # the status comes back, nothing is raised.
+        problem = wsl.missing_distro_problem(wsl_distro, exc.returncode, "\n".join(tail))
+        if problem is not None:
+            return AttachedRun(exc.returncode, (problem,))
         return AttachedRun(exc.returncode, tuple(tail))
     except OSError as exc:
         # Docker uninstalled while the launcher is open, arriving from `Popen`;
         # `follow_logs()` handles the same case one line above.
-        logger.warning(f"{program} could not be started: {exc}")
+        logger.warning(f"{prefix[0]} could not be started: {exc}")
         return AttachedRun(_CLI_MISSING_RETURNCODE, (platform.DOCKER_CLI_MISSING_HELP,))
     return AttachedRun(0, tuple(tail))
 
@@ -2153,6 +2271,7 @@ def build_staged(
     server_dir: Path,
     compose_files: Sequence[str],
     *,
+    wsl_distro: str | None = None,
     sink: OutputSink | None = None,
     cancel: threading.Event | None = None,
 ) -> AttachedRun:
@@ -2184,10 +2303,12 @@ def build_staged(
         argv += ["-f", name]
     argv += ["build", "--progress", "plain"]
     logger.info(f"build_staged(): `docker {' '.join(argv)}` in {server_dir}")
-    return run_attached(argv, server_dir, sink=sink, cancel=cancel, merge_stderr=True)
+    return run_attached(
+        argv, server_dir, wsl_distro=wsl_distro, sink=sink, cancel=cancel, merge_stderr=True
+    )
 
 
-def images_built(refs: Sequence[str]) -> bool | None:
+def images_built(refs: Sequence[str], *, wsl_distro: str | None = None) -> bool | None:
     """Do all of `refs` exist on this daemon? None = could not ask.
 
     Disk evidence for the install engine's `build` stage (rust-prior-art §1),
@@ -2224,7 +2345,7 @@ def images_built(refs: Sequence[str]) -> bool | None:
         # to the branch rather than only in a transcript (2026-08-24).
         return None
     for ref in refs:
-        proc = _docker(["image", "inspect", "--format", "{{.Id}}", ref])
+        proc = _docker(["image", "inspect", "--format", "{{.Id}}", ref], wsl_distro=wsl_distro)
         if proc.returncode == 0 and proc.stdout.strip():
             continue
         # `docker image inspect` exits non-zero for "no such image", which is an
@@ -2243,7 +2364,11 @@ def images_built(refs: Sequence[str]) -> bool | None:
 
 
 def bind_mount_ok(
-    server_dir: Path, image: str, *, timeout: float = BIND_PROBE_TIMEOUT_SECONDS
+    server_dir: Path,
+    image: str,
+    *,
+    timeout: float = BIND_PROBE_TIMEOUT_SECONDS,
+    wsl_distro: str | None = None,
 ) -> bool | None:
     """Can a container actually see the chosen folder? None = could not ask.
 
@@ -2300,6 +2425,7 @@ def bind_mount_ok(
     proc = _docker(
         ["run", "--rm", "--entrypoint", "ls", "-v", f"{mount}:/probe:ro", image, "-A", "/probe"],
         timeout=timeout,
+        wsl_distro=wsl_distro,
     )
     if _cli_missing(proc):
         return None
