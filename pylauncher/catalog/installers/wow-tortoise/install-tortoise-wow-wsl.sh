@@ -3,7 +3,12 @@
 #  Dad's MMO Lab — Tortoise WoW Server Installer  (PERSONAL)
 #  Source-compile path (MaNGOS Zero / Turtle-WoW solo fork)
 #
-#  Upstream: https://github.com/Penqle/tortoise-wow   (AGPL-3.0)
+#  Upstream: https://github.com/Shyalya/tortoise-wow   (AGPL-3.0)
+#            branch `playerbots-integration-gh` -- a fork of
+#            Penqle/tortoise-wow that vendors the cmangos/playerbots
+#            AI under src/modules/PlayerBots/.  This is the tree the
+#            "Turtle WoW V2" servers are built from; Penqle main has
+#            no bots in it at all.
 #
 #  Version: 0.1.0-tortoise   (DEV — personal use only)
 #
@@ -17,7 +22,8 @@
 #    3. Compiles mangosd + realmd + extractors from source
 #    4. Extracts map/dbc/vmap/mmap data from your 1.18.1 client
 #    5. Imports the bundled database (4 DBs + 186 world files)
-#    6. Starts the server (Dockerised) + creates player/player
+#    6. Starts the server (Dockerised) + creates player/player,
+#       with a random-bot cohort populating the world
 #    7. Writes the Gaming Mode launcher
 #
 #  ⚠️  You MUST own the matching client: patch 1.18.1, build 7272
@@ -35,7 +41,7 @@
 #    step (Step 5) and final in-game connect — watch those first.
 # ============================================================
 
-INSTALLER_VERSION="0.1.0-tortoise"
+INSTALLER_VERSION="0.2.0-tortoise-playerbots"
 
 set -o pipefail
 
@@ -172,7 +178,28 @@ CLIENT_DIR=""
 DB_PASSWORD="tortoise$(date +%s | tail -c 6)"
 CLIENT_BUILD="7272"
 
-SOURCE_REPO="https://github.com/Penqle/tortoise-wow.git"
+SOURCE_REPO="https://github.com/Shyalya/tortoise-wow.git"
+# The bots live on a branch, not on main. That branch happens to be this
+# fork's default today, but a fork's default can move under us, so pin it.
+SOURCE_BRANCH="playerbots-integration-gh"
+
+# Random-bot cohort. Upstream ships 1000/1000, which is a number for a
+# public realm with a build server behind it: every boot that has to create
+# new bots rebuilds their equipment/talent cache off the world DB first, and
+# a thousand of them turns first boot into an hour on a Steam Deck. 40 fills
+# the levelling world without that. RandomBotAccountCount only has to hold
+# the cohort at 10 characters per account, not upstream's 500 accounts.
+BOT_MIN_RANDOM=40
+BOT_MAX_RANDOM=40
+BOT_ACCOUNT_COUNT=20
+
+# The binaries are installed at this prefix AND run from it, and the two
+# have to be the same path: CMake bakes SYSCONFDIR=<prefix>/etc/ into
+# mangosd at compile time, and that -- not the -c argument -- is where it
+# looks for aiplayerbot.conf. Installing to /install while running from
+# /opt/tortoise leaves the bot config unreadable and the bots absent, with
+# nothing in the log but a line saying the file could not be opened.
+INSTALL_PREFIX="/opt/tortoise"
 
 # LOCAL image (built here, not pulled)
 IMAGE="dml/tortoise-wow:local"
@@ -480,8 +507,8 @@ clone_source() {
             docker volume rm "$db_volume" 2>/dev/null || true
         fi
     fi
-    print_info "Cloning $SOURCE_REPO ..."
-    if ! git clone --depth 1 "$SOURCE_REPO" "$SERVER_DIR/src"; then
+    print_info "Cloning $SOURCE_REPO ($SOURCE_BRANCH) ..."
+    if ! git clone --depth 1 --branch "$SOURCE_BRANCH" "$SOURCE_REPO" "$SERVER_DIR/src"; then
         print_error "git clone failed."; exit 1
     fi
     print_success "Source cloned to $SERVER_DIR/src"
@@ -494,6 +521,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake git pkg-config ca-certificates \
     libace-dev default-libmysqlclient-dev libmysqlclient-dev \
     libssl-dev zlib1g-dev libbz2-dev \
+    libboost-thread-dev libboost-filesystem-dev libboost-system-dev \
     mariadb-client gosu \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /opt/tortoise
@@ -528,13 +556,14 @@ do_compile() {
             -u "$(id -u):$(id -g)" \
             -e BUILD_JOBS="$(build_jobs)" \
             -v "$SERVER_DIR/src":/src:z \
-            -v "$SERVER_DIR/install":/install:z \
+            -v "$SERVER_DIR/install":"$INSTALL_PREFIX":z \
             -w /src/_build "$IMAGE" bash -c '
         set -e
         cmake .. \
-          -DCMAKE_INSTALL_PREFIX=/install \
+          -DCMAKE_INSTALL_PREFIX='"$INSTALL_PREFIX"' \
           -DUSE_EXTRACTORS=ON -DUSE_SCRIPTS=ON -DUSE_STD_MALLOC=ON \
-          -DDEBUG_SYMBOLS=OFF -DUSE_ANTICHEAT=OFF -DALLOW_TURTLE_ADDONS=ON
+          -DDEBUG_SYMBOLS=OFF -DUSE_ANTICHEAT=OFF -DALLOW_TURTLE_ADDONS=ON \
+          -DBUILD_PLAYERBOTS=ON
         make -j${BUILD_JOBS}
         make install
     ' 2>&1 | tee /tmp/tortoise-build.log ; then
@@ -638,8 +667,15 @@ write_compose_and_configs() {
           realmd.conf.dist \
           | sed -E "s#^ForcePinAccountRank.*#ForcePinAccountRank = 10#" \
           > /etc_out/realmd.conf
+        sed -E \
+          -e "s#^AiPlayerbot\.Enabled.*#AiPlayerbot.Enabled = 1#" \
+          -e "s#^AiPlayerbot\.MinRandomBots.*#AiPlayerbot.MinRandomBots = '"$BOT_MIN_RANDOM"'#" \
+          -e "s#^AiPlayerbot\.MaxRandomBots.*#AiPlayerbot.MaxRandomBots = '"$BOT_MAX_RANDOM"'#" \
+          -e "s#^AiPlayerbot\.RandomBotAccountCount.*#AiPlayerbot.RandomBotAccountCount = '"$BOT_ACCOUNT_COUNT"'#" \
+          aiplayerbot.conf.dist > /etc_out/aiplayerbot.conf
     '
     print_success "Configs written (DB names fixed: tw_char, not tw_chars)"
+    print_success "Bot cohort: ${BOT_MIN_RANDOM}-${BOT_MAX_RANDOM} random bots"
 
     # docker-compose: db (restart:no per port-collision rule) + realmd + mangosd
     cat > "$SERVER_DIR/docker-compose.yml" << EOF
@@ -691,6 +727,8 @@ services:
     volumes:
       - ./install:/opt/tortoise
       - ./etc/mangosd.conf:/opt/tortoise/bin/mangosd.conf:ro
+      # mangosd reads this one from its compiled-in SYSCONFDIR, not from bin/
+      - ./etc/aiplayerbot.conf:/opt/tortoise/etc/aiplayerbot.conf:ro
       - ./data:/opt/tortoise/data
       - ./src/sql:/opt/tortoise/sql
       - ./logs:/opt/tortoise/logs
@@ -727,7 +765,8 @@ setup_database() {
     # namespace (--network container:tortoise-db) so the DB is reachable at
     # 127.0.0.1 — avoids guessing the compose-generated network name.
     if ! $DOCKER_CMD run --rm --network "container:tortoise-db" \
-            -v "$SERVER_DIR/src/sql":/sql:ro,z "$IMAGE" bash -c "
+            -v "$SERVER_DIR/src/sql":/sql:ro,z \
+            -v "$SERVER_DIR/src/src/modules/PlayerBots/sql":/pbsql:ro,z "$IMAGE" bash -c "
         set -e
         echo '=== schema (create_databases.sql) ==='
         mariadb -h127.0.0.1 -uroot -p'${DB_PASSWORD}' < /sql/create_databases.sql
@@ -752,10 +791,22 @@ setup_database() {
           u=\$((u+1))
         done
         echo \"applied \$u schema updates\"
+        echo '=== playerbot tables (world) ==='
+        p=0
+        for f in \$(ls /pbsql/world/*.sql /pbsql/world/classic/*.sql 2>/dev/null | sort); do
+          mariadb -h127.0.0.1 -uroot -p'${DB_PASSWORD}' tw_world < \"\$f\" || { echo FAIL \$f; exit 1; }
+          p=\$((p+1))
+        done
+        echo '=== playerbot tables (characters) ==='
+        for f in \$(ls /pbsql/characters/*.sql 2>/dev/null | sort); do
+          mariadb -h127.0.0.1 -uroot -p'${DB_PASSWORD}' tw_char < \"\$f\" || { echo FAIL \$f; exit 1; }
+          p=\$((p+1))
+        done
+        echo \"applied \$p playerbot files\"
     " 2>&1 | tee /tmp/tortoise-dbimport.log | tail -6 ; then
         print_error "Database import failed — see /tmp/tortoise-dbimport.log"; exit 1
     fi
-    print_success "Database imported (base content + schema updates applied)"
+    print_success "Database imported (base + schema updates + playerbot tables)"
     # NOT left to the core. The comment here used to say "mangosd auto-applies
     # updates on first boot"; it does not. Measured on a clean Ubuntu box
     # (2026-08-26): the compiled core SELECTs spell_template.script_name, the
