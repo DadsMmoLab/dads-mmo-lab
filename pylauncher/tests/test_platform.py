@@ -568,6 +568,8 @@ def test_wsl_linux_path_is_none_for_a_path_that_is_not_in_wsl() -> None:
 def test_wsl_linux_path_keeps_the_distro_root_itself() -> None:
     """The share root is the distro's `/`."""
     assert platform.wsl_linux_path(Path(r"\\wsl.localhost\dml-arch")) == "/"
+
+
 def test_a_wsl_path_is_refused_in_words_that_fit_what_happened() -> None:
     """`\\\\wsl.localhost\\...` is a network path to Windows, but not to the user.
 

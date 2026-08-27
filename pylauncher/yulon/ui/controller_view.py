@@ -108,11 +108,12 @@ class ControllerServices:
                     f"and restore will fail until that file is restored"
                 )
             password = wotlk_modules.DEFAULT_DB_ROOT_PASSWORD
-        sql = DockerSql(spec.db, password, wsl_distro=wsl_distro)
         # `schemas=` is what keeps a CMaNGOS install off AzerothCore's `acore_*`
         # names. This factory is the only place that holds both the entry and the
         # seam, so it is the only place that can say which schemas exist here.
-        sql = DockerSql(spec.db, password, schemas=entry.schema_map())
+        # `wsl_distro=` is the other half of the same sentence: the schemas say
+        # WHICH databases, the distro says which daemon they are inside.
+        sql = DockerSql(spec.db, password, schemas=entry.schema_map(), wsl_distro=wsl_distro)
         # Bound to this entry's own db container, not `mysql_for()`'s
         # `docker_ctl.SPEC.db`, so a catalog entry that names a different one
         # cannot end up backing up somebody else's database.
@@ -142,19 +143,19 @@ class ControllerServices:
         return cls(
             controller=controller,
             logs_source=lambda: docker.follow_logs(spec.world, wsl_distro=wsl_distro),
-            # The distro travels with the command because `send_command()` shells
-            # into the world container, and on a WSL-resident server that
-            # container exists only inside the distro. Without it the attach goes
-            # to the local daemon, which has never heard of `ac-worldserver` - so
-            # every console line came back as a docker error rather than a reply.
-            send_console=lambda cmd: wotlk_console.send_command(
-                cmd, container=spec.world, wsl_distro=wsl_distro
-            logs_source=lambda: docker.follow_logs(spec.world),
+            # Three facts, from three different places, and the command needs
+            # all of them: WHICH container (the spec), how to recognise this
+            # server's console prompt (the entry - CMaNGOS does not print
+            # AzerothCore's), and which daemon that container is inside (the
+            # distro). Without the last one the attach goes to the local daemon,
+            # which has never heard of `ac-worldserver`, so every console line
+            # came back as a docker error rather than as a reply.
             send_console=lambda cmd: wotlk_console.send_command(
                 cmd,
                 container=spec.world,
                 prompt=entry.console.prompt,
                 prompt_precedes_answer=entry.console.prompt_precedes_answer,
+                wsl_distro=wsl_distro,
             ),
             store=wotlk_modules.store() if entry.has_manifests else None,
             applier=(

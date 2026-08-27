@@ -247,9 +247,43 @@ def window_builder(
     The teardown is `main._stop_background_threads()` itself, not a hand-rolled
     equivalent: a QThread destroyed while running ABORTS the process
     (0xC0000409), and a test that leaks one takes the whole run down with it.
+
+    **Every window built here is destroyed here, by hand.** Twice now CI has
+    died with a SEGFAULT (exit 139) inside a LATER test than the one that
+    caused it - once on py3.11 while py3.13 passed the same commit, then the
+    other way round after a first attempt at this. A crash that swaps
+    interpreters between runs is a lifetime bug whose only variable is when the
+    garbage collector ran, so nothing here is left to Python's refcount or to
+    whenever Qt next happens to pump events:
+
+    * the poll timer is off, so no window is running `docker ps` on a 5-second
+      QTimer into a worker thread while the suite moves on to other tests;
+    * `processEvents()` runs the deferred deletes that `drop_controller()`
+      queues, at a moment this fixture picked, with every thread already joined;
+    * `shiboken6.delete()` then destroys the C++ side outright, rather than
+      leaving a window alive until some later collection frees it under
+      whichever test is running by then.
     """
+    from PySide6.QtWidgets import QApplication
+    from shiboken6 import delete as delete_cpp
+
+    from yulon.ui.controller_view import ControllerView
+
     monkeypatch.setattr(update, "check_for_update", lambda: None)
     monkeypatch.setattr(state, "save_state", lambda _state, path=None: tmp_path / "state.json")
+
+    # A test about which tab exists must not also be shelling out to docker.
+    # `build_window()` takes the default 5000ms, and each poll runs
+    # `controller.status()` on a worker thread - real subprocesses, outliving
+    # the assertions that finished long before they did.
+    real_init = ControllerView.__init__
+
+    def _no_polling(self: Any, entry: Any, services: Any, **kwargs: Any) -> None:
+        kwargs["status_poll_ms"] = 0
+        real_init(self, entry, services, **kwargs)
+
+    monkeypatch.setattr(ControllerView, "__init__", _no_polling)
+
     windows: list[Any] = []
 
     def build(*installs: state.KnownInstall) -> Any:
@@ -261,19 +295,13 @@ def window_builder(
         return window
 
     yield build
-    from PySide6.QtWidgets import QApplication
 
     for window in windows:
         main._stop_background_threads(window)
         window.close()
-    # Flush the deferred deletes BEFORE this test ends, with every thread
-    # already joined. `drop_controller()` uses `deleteLater()`, and a test has
-    # no event loop to run it - so without this the delete fired at whatever
-    # later moment Qt next pumped events, inside an unrelated test, tearing
-    # down widgets while that test held them. It crashed as a SEGFAULT on
-    # CI's py3.11 and passed on py3.13, which is what a lifetime bug looks like
-    # when the only difference is when the garbage collector ran.
     QApplication.processEvents()
+    for window in windows:
+        delete_cpp(window)
     windows.clear()
 
 

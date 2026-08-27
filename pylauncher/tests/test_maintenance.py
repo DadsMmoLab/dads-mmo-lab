@@ -966,6 +966,8 @@ def test_backup_runs_mysqldump_in_the_distro_and_announces_the_password(
     env = seen["env"]
     assert env.get("MYSQL_PWD") == "hunter2"
     assert "MYSQL_PWD" in env.get("WSLENV", "").split(":")
+
+
 def test_a_cmangos_backup_is_not_told_its_databases_are_missing(tmp_path: Path) -> None:
     """The alarm names the schemas THIS core has, not AzerothCore's three.
 

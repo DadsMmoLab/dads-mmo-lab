@@ -1198,6 +1198,8 @@ def test_for_wotlk_defaults_to_no_distro(qapp: object, tmp_path: Path) -> None:
     """An ordinary local install is unchanged by any of this."""
     entry = load_catalog().get("wow-wotlk")
     assert ControllerServices.for_wotlk(entry, tmp_path).controller.wsl_distro is None
+
+
 def test_a_cmangos_install_s_account_path_addresses_its_own_schema(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

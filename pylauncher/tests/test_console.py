@@ -342,6 +342,8 @@ def test_attach_argv_reaches_the_distros_own_docker(monkeypatch: pytest.MonkeyPa
     assert argv[:5] == ["wsl.exe", "-d", "dml-arch", "--", "docker"]
     assert argv[-1] == "ac-worldserver"
     assert "--sig-proxy=false" in argv
+
+
 def test_a_mangos_console_is_parsed_by_its_own_prompt() -> None:
     """Captured from a real mangosd, not hand-written (m910q, 2026-08-26).
 

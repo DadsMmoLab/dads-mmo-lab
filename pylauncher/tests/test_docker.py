@@ -3291,6 +3291,8 @@ def test_an_ordinary_streamed_failure_keeps_its_output(
     result = docker.run_attached(["compose", "build"], Path("/srv"), wsl_distro="dml-arch")
     assert result.returncode == 2
     assert result.tail == ("error: undefined reference",)
+
+
 def test_the_diagnostic_it_offers_is_a_command_that_actually_runs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -66,7 +66,6 @@ class ApplyError(RuntimeError):
     """A step failed in a way that must stop the run (missing template value, git failure, ...)."""
 
 
-def mysql_env(root_password: str, wsl_distro: str | None = None) -> dict[str, str]:
 _CLIENT_NAMES: dict[str, tuple[str, ...]] = {
     "mysql": ("mysql", "mariadb"),
     "mysqldump": ("mysqldump", "mariadb-dump"),
@@ -149,7 +148,7 @@ def _probe_client(db_container: str, candidates: tuple[str, ...]) -> str | None:
     return found[0].rsplit("/", 1)[-1]
 
 
-def mysql_env(root_password: str) -> dict[str, str]:
+def mysql_env(root_password: str, wsl_distro: str | None = None) -> dict[str, str]:
     """This process's environment plus `MYSQL_PWD`, so the password never enters argv.
 
     `docker exec -e MYSQL_PWD` (no `=value`) forwards the variable from OUR
