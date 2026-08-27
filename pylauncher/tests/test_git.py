@@ -200,6 +200,54 @@ def test_container_git_mounts_the_destination_and_clones_into_it(
     assert "@sha256:" in " ".join(argv), "the image must be pinned by digest, not by a moving tag"
 
 
+def test_docker_desktop_never_gets_a_user_flag(
+    monkeypatch: pytest.MonkeyPatch, seen: list[list[str]], tmp_path: Path
+) -> None:
+    """The class docstring's own rule, applied to the platform it was wrong about.
+
+    It reads: "On Linux the container's root would own every cloned file, so
+    the current uid/gid is passed through; on Docker Desktop the file-sharing
+    layer already maps ownership to the logged-in user and `os.getuid` does not
+    exist, which is the same condition."
+
+    `os.getuid` does not exist on WINDOWS. It exists on macOS, so every Mac got
+    `--user <uid>:<gid>` that the design says Docker Desktop must not get — and
+    the condition the sentence relies on, the file-sharing layer doing the
+    mapping, is exactly what a `--user` overrides. The tester's container sees
+    the bind mount as `root:root` (2026-08-27):
+
+        $ docker run --rm --entrypoint ls -v /Users/js/wow3:/git ... -la /git
+        drwxr-xr-x    2 root     root            64 ...
+
+    A container running as 501 cannot create `.git` in that, and failing to
+    create `.git` is how every macOS install has ended.
+
+    Pinned per platform rather than on `hasattr(os, "getuid")`, because that is
+    the test that read "Windows" and answered "not macOS".
+    """
+    dest = tmp_path / "core"
+    spec = git.CloneSpec(url="https://example/core.git", dest=dest, depth=None)
+    # Present for every case, so the PLATFORM is the only thing deciding. Without
+    # this the test passes on a Windows dev box for the wrong reason — no
+    # `os.getuid` there, so no branch is exercised and macOS looks fixed while
+    # it is not. That is the same blind spot the code had.
+    monkeypatch.setattr(git.os, "getuid", lambda: 501, raising=False)
+    monkeypatch.setattr(git.os, "getgid", lambda: 20, raising=False)
+
+    monkeypatch.setattr(git.platform, "detect", lambda: "macos")
+    git.ContainerGit().clone(spec)
+    assert "--user" not in seen[-1], "Docker Desktop maps ownership; a --user overrides it"
+
+    monkeypatch.setattr(git.platform, "detect", lambda: "windows")
+    git.ContainerGit().clone(spec)
+    assert "--user" not in seen[-1]
+
+    monkeypatch.setattr(git.platform, "detect", lambda: "linux")
+    git.ContainerGit().clone(spec)
+    argv = seen[-1]
+    assert argv[argv.index("--user") + 1] == "501:20", "Linux still needs it, or root owns all"
+
+
 def test_is_unmodified_tells_upstreams_own_file_from_one_somebody_edited(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

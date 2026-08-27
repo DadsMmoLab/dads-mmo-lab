@@ -327,8 +327,14 @@ class ContainerGit:
 
     On Linux the container's root would own every cloned file, so the current
     uid/gid is passed through; on Docker Desktop the file-sharing layer already
-    maps ownership to the logged-in user and `os.getuid` does not exist, which
-    is the same condition.
+    maps ownership to the logged-in user, so no `--user` is passed and one must
+    not be — it overrides the mapping this relies on.
+
+    That second half read "and `os.getuid` does not exist, which is the same
+    condition" until 2026-08-27, and `_user_args()` implemented it that way.
+    `os.getuid` does not exist on Windows; it exists on macOS. So every Mac got
+    a `--user` the rule excludes, the container saw the bind mount as
+    `root:root`, and git could not create `.git`.
     """
 
     image: str = _CONTAINER_GIT_IMAGE
@@ -486,6 +492,24 @@ class ContainerGit:
 
     @staticmethod
     def _user_args() -> list[str]:
+        """`--user <uid>:<gid>` on Linux only. Docker Desktop must not get one.
+
+        The rule is the class docstring's, and this is the line that did not
+        obey it. `hasattr(os, "getuid")` is a test for WINDOWS wearing the name
+        of a test for Docker Desktop: macOS has `os.getuid`, so every Mac was
+        handed a `--user` — and a `--user` overrides the very file-sharing
+        mapping the docstring relies on to make the flag unnecessary there.
+
+        What that cost: the tester's container sees the bind mount as
+        `root:root` (2026-08-27), so git running as 501 could not create `.git`
+        and every macOS install ended in `/git/.git: No such file or directory`.
+
+        Asking `platform.detect()` says what is meant. The old spelling was
+        right about Windows by accident and wrong about macOS for the same
+        reason — one question that happened to answer a different one.
+        """
+        if platform.detect() != "linux":
+            return []
         getuid = getattr(os, "getuid", None)
         getgid = getattr(os, "getgid", None)
         if getuid is None or getgid is None:
