@@ -8,6 +8,7 @@ silent), and the early exit when a daemon already answers.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import threading
@@ -657,6 +658,76 @@ def test_a_healthy_machine_still_gets_the_plain_name(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(platform.sys, "platform", "win32")
     monkeypatch.setattr(platform, "_which", lambda name, path=None: r"C:\bin\docker.exe")
     assert platform.docker_program() == "docker"
+
+
+def _off_path_which(name: str, path: str | None = None) -> str | None:
+    """`docker` resolves nowhere; any absolute candidate confirms itself."""
+    return None if name == "docker" else name
+
+
+def test_the_found_cli_puts_its_own_directory_on_this_processs_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """argv[0] was only half the fix: the CLI shells out to helpers BY NAME.
+
+    Reported from a Mac (2026-08-26). `docker` was found inside the bundle and
+    every command started; the first one that had to reach a registry died:
+
+        the bind-mount probe of /Users/js/Documents failed: Unable to find
+        image 'alpine/git@sha256:c028...' locally
+        docker: error getting credentials - err: exec:
+        "docker-credential-desktop": executable file not found in $PATH
+
+    `docker` resolves its credential helper through PATH, and the PATH a
+    Finder-launched .app inherits from launchd is the same one that could not
+    name `docker` in the first place. So no pull could authenticate, the
+    bind-mount probe read the failed pull as a failed mount, and preflight
+    refused the install with "a container could not see <folder>" — about a
+    folder that was shared, on a machine where the same command worked from
+    Terminal.
+    """
+    bin_dir = tmp_path / "Docker.app" / "Contents" / "Resources" / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "docker").write_text("", encoding="utf-8")
+    _unresolved(monkeypatch)
+    monkeypatch.setattr(platform.sys, "platform", "darwin")
+    monkeypatch.setattr(platform, "_which", _off_path_which)
+    monkeypatch.setattr(platform, "_macos_docker_bins", lambda: (bin_dir,))
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/bin", "/usr/sbin", "/sbin"]))
+
+    assert platform.docker_program() == str(bin_dir / "docker")
+    entries = os.environ["PATH"].split(os.pathsep)
+    assert entries[0] == str(bin_dir)
+    assert "/usr/bin" in entries, "the inherited PATH was replaced instead of extended"
+
+
+def test_a_plain_docker_leaves_the_path_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bare name has no directory to adopt, and a working PATH nothing to fix."""
+    _unresolved(monkeypatch)
+    monkeypatch.setattr(platform.sys, "platform", "darwin")
+    monkeypatch.setattr(platform, "_which", lambda name, path=None: "/usr/local/bin/docker")
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/local/bin", "/usr/bin"]))
+
+    assert platform.docker_program() == "docker"
+    assert os.environ["PATH"] == os.pathsep.join(["/usr/local/bin", "/usr/bin"])
+
+
+def test_a_directory_already_on_the_path_is_not_added_twice(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Resolution re-runs on every miss; the PATH must not grow an entry per call."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "docker").write_text("", encoding="utf-8")
+    _unresolved(monkeypatch)
+    monkeypatch.setattr(platform.sys, "platform", "darwin")
+    monkeypatch.setattr(platform, "_which", _off_path_which)
+    monkeypatch.setattr(platform, "_macos_docker_bins", lambda: (bin_dir,))
+    before = os.pathsep.join([str(bin_dir), "/usr/bin"])
+    monkeypatch.setenv("PATH", before)
+
+    platform.docker_program()
+    assert os.environ["PATH"] == before
 
 
 def test_a_host_with_no_docker_at_all_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
