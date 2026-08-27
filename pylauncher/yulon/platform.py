@@ -781,12 +781,49 @@ def _windows_docker_programs() -> tuple[str, ...]:
     return tuple(found)
 
 
+def _macos_docker_bins() -> tuple[Path, ...]:
+    """Where Docker Desktop's CLI lives on a Mac, whatever PATH this process got.
+
+    The symlink Docker Desktop writes on first run, the Homebrew prefix on
+    Apple silicon, and the binary inside the bundle itself - the one that is
+    there the moment `Docker.app` has been copied into /Applications, before
+    it has ever been opened.
+    """
+    return (
+        Path("/usr/local/bin"),
+        Path("/opt/homebrew/bin"),
+        Path("/Applications/Docker.app/Contents/Resources/bin"),
+    )
+
+
+def _macos_docker_programs() -> tuple[str, ...]:
+    """Absolute `docker` paths to try when the live PATH holds none (macOS).
+
+    Same shape as `_windows_docker_programs()`, and `()` the moment plain
+    `docker` resolves, so a launcher started from a terminal pays nothing.
+    """
+    if _which("docker") is not None:
+        return ()
+    found = [str(d / "docker") for d in _macos_docker_bins() if (d / "docker").is_file()]
+    if found:
+        logger.info(f"docker is not on this process's PATH; found it at {found[0]}")
+    return tuple(found)
+
+
 def docker_programs() -> tuple[str, ...]:
     """Every way of naming the `docker` CLI worth trying on this host, best first.
 
-    Off Windows this is exactly `("docker",)` and nothing else runs: PATH means
+    On Linux this is exactly `("docker",)` and nothing else runs: PATH means
     the same thing to a running process as it does to the shell that started it,
     so `shutil.which` is correct and sufficient there.
+
+    macOS is the Windows case with a different mechanism. A `.app` opened from
+    Finder is a child of launchd, not of any shell, and launchd's PATH is
+    `/usr/bin:/bin:/usr/sbin:/sbin` - `/usr/local/bin`, where Docker Desktop
+    symlinks its CLI, is not on it. The first Mac to run a release (2026-08-25)
+    had Docker Desktop installed and running, and the install still spent 180
+    seconds polling a `docker` that raised `FileNotFoundError` on every try,
+    then failed with "Docker isn't available". `_macos_docker_programs()`.
 
     On Windows it is not, and the gap is structural rather than unlucky. A
     process inherits its environment at creation and Windows never updates a
@@ -816,7 +853,10 @@ def docker_programs() -> tuple[str, ...]:
     entire point — so `_wait_docker_ready()`'s poll re-asks every few seconds
     and picks up the PATH entry the installer writes mid-wait.
     """
-    if detect() != "windows":
+    here = detect()
+    if here == "macos":
+        return ("docker", *_macos_docker_programs())
+    if here != "windows":
         return ("docker",)
     return ("docker", *_windows_docker_programs())
 
@@ -2502,6 +2542,22 @@ def server_dir_problem(server_dir: Path) -> str | None:
     """
     text = str(server_dir)
     if text.startswith("\\\\") or text.startswith("//"):
+        # A WSL path is a network path to Windows and emphatically not one to
+        # the user - it is their own machine, one virtualisation layer over.
+        # Telling them to "pick a folder on this machine's own disk" answers a
+        # question they did not ask, so this case gets its own words (tester
+        # report, 2026-08-26). Docker Desktop refuses it either way: measured on
+        # Windows 11, `docker run -v \\\\wsl.localhost\\...:/probe` fails with
+        # "is not a valid Windows path".
+        head = text.replace("/", "\\").lower()
+        if head.startswith("\\\\wsl.localhost\\") or head.startswith("\\\\wsl$\\"):
+            return (
+                f"{server_dir} is inside WSL. Docker Desktop cannot bind-mount a WSL path from "
+                "Windows, so the containers would see an empty folder. If that server was "
+                "installed by the DML Launcher it already has its own Docker inside that "
+                "distro - manage it from there, or install a separate server here with a "
+                "folder on the Windows side."
+            )
         return (
             f"{server_dir} is a network path. Docker Desktop cannot share one with its Linux "
             "VM, so the install would appear to work and the containers would see an empty "

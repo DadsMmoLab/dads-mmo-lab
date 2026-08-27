@@ -241,11 +241,22 @@ class Install(_Strict):
 
 
 class Containers(_Strict):
-    """The three container names the controller manages, and the import job's service."""
+    """The three container names the controller manages, their services, and the import job."""
 
     db: str = Field(min_length=1)
     auth: str = Field(min_length=1)
     world: str = Field(min_length=1)
+    services: tuple[str, str, str] | None = Field(
+        default=None,
+        description=(
+            "Compose SERVICE names for db/auth/world, in that order, when they differ from the "
+            "container names above. AzerothCore names a service and its container the same thing "
+            "and may leave this out; every CMaNGOS game does not — its services are "
+            "db/realmd/mangosd while its containers are <game>-db/-realmd/-mangosd — and "
+            "MUST say so. `docker compose up` takes services, and a container name it does not "
+            "know fails outright with `no such service` (Discord report, 2026-08-26)."
+        ),
+    )
     db_import: str | None = Field(
         default=None,
         min_length=1,
@@ -442,6 +453,7 @@ class CatalogEntry(_Strict):
             auth=self.containers.auth,
             world=self.containers.world,
             ports=(self.ports.auth, self.ports.world),
+            services=self.containers.services or (),
             import_service=self.containers.db_import or "",
         )
 

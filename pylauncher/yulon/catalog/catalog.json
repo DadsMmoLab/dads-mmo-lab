@@ -106,7 +106,8 @@
       "containers": {
         "db": "tbc-db",
         "auth": "tbc-realmd",
-        "world": "tbc-mangosd"
+        "world": "tbc-mangosd",
+        "services": ["db", "realmd", "mangosd"]
       },
       "ports": {
         "auth": 3724,
@@ -172,7 +173,8 @@
       "containers": {
         "db": "vanilla-db",
         "auth": "vanilla-realmd",
-        "world": "vanilla-mangosd"
+        "world": "vanilla-mangosd",
+        "services": ["db", "realmd", "mangosd"]
       },
       "ports": {
         "auth": 3724,
@@ -232,7 +234,8 @@
       "containers": {
         "db": "tortoise-db",
         "auth": "tortoise-realmd",
-        "world": "tortoise-mangosd"
+        "world": "tortoise-mangosd",
+        "services": ["db", "realmd", "mangosd"]
       },
       "ports": {
         "auth": 3724,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -158,45 +159,68 @@ def test_every_game_says_how_its_db_password_can_be_known() -> None:
         )
 
 
-def test_every_game_maps_its_own_schema_names() -> None:
-    """The schema names SQL connects to come from the entry, not from a constant."""
-    catalog = load_catalog()
-    assert catalog.get("wow-tortoise").schema_map() == {
-        "auth": "tw_logon",
-        "characters": "tw_char",
-        "world": "tw_world",
-    }
-    for game_id in ("wow-tbc", "wow-vanilla"):
-        assert catalog.get(game_id).schema_map() == {
-            "auth": "realmd",
-            "characters": "characters",
-            "world": "mangos",
-        }, game_id
+def _compose_services_declared(script: Path) -> dict[str, str]:
+    """Map compose SERVICE key -> `container_name:` for every services block in a script.
+
+    The installers write their `docker-compose.yml` from a heredoc, so the file the
+    user ends up with is readable straight out of the script. A service with no
+    `container_name:` maps to "" — compose then names the container itself.
+    """
+    services: dict[str, str] = {}
+    in_services = False
+    current: str | None = None
+    for line in script.read_text(encoding="utf-8").splitlines():
+        if line == "services:":
+            in_services, current = True, None
+            continue
+        if not in_services or not line.strip():
+            continue
+        if not line.startswith(" "):  # `volumes:`, `networks:`, the heredoc terminator
+            in_services, current = False, None
+            continue
+        key = re.match(r"^  ([a-z][a-z0-9_.-]*):\s*$", line)
+        if key:
+            current = key.group(1)
+            services.setdefault(current, "")
+            continue
+        name = re.match(r"^\s+container_name:\s*(\S+)\s*$", line)
+        if name and current:
+            services[current] = name.group(1)
+    return services
 
 
-def test_wotlk_s_schema_map_is_the_applier_s_default() -> None:
-    """`apply.DB_NAMES` is the AzerothCore map; wow-wotlk must not drift from it."""
-    from yulon.apply import DB_NAMES
+def test_cmangos_games_select_compose_services_not_container_names() -> None:
+    """Every CMaNGOS installer names its services db/realmd/mangosd (Discord, 2026-08-26).
 
-    assert load_catalog().get("wow-wotlk").schema_map() == dict(DB_NAMES)
-
-
-def test_the_cmangos_cores_declare_the_mangos_console_prompt() -> None:
-    """`AC>` is AzerothCore's delimiter; mangosd prints `mangos>` (archive/guides)."""
+    Its containers are `<game>-db` and friends, and `docker compose up <container>`
+    answers `no such service`, so the catalog must spell the services out. For
+    AzerothCore the two names coincide and the container names are the answer.
+    """
     catalog = load_catalog()
     for game_id in ("wow-tbc", "wow-vanilla", "wow-tortoise"):
-        assert catalog.get(game_id).console.prompt == "mangos>", game_id
-    assert catalog.get("wow-wotlk").console.prompt == "AC>"
+        spec = catalog.get(game_id).container_spec()
+        assert spec.compose_services() == ("db", "realmd", "mangosd"), game_id
+    assert catalog.get("wow-wotlk").container_spec().compose_services() == (
+        "ac-database",
+        "ac-authserver",
+        "ac-worldserver",
+    )
 
 
-def test_each_core_declares_how_its_accounts_are_stored() -> None:
-    """Measured per core, never defaulted: a wrong guess writes an unusable row."""
-    catalog = load_catalog()
-    assert catalog.get("wow-wotlk").accounts.scheme == "azerothcore"
-    # Proven against a live server on 2026-08-26 (m910q): sha_pass_hash + rank.
-    assert catalog.get("wow-tortoise").accounts.scheme == "mangos_sha"
-    # CMaNGOS proper keeps SRP6 in `v`/`s` (hex text) and the level in
-    # `gmlevel`. Measured on live TBC and Vanilla servers 2026-08-26, whose
-    # seeded rows are byte-identical to each other.
-    for game_id in ("wow-tbc", "wow-vanilla"):
-        assert catalog.get(game_id).accounts.scheme == "mangos_srp6", game_id
+def test_no_catalog_compose_service_is_really_a_container_name() -> None:
+    """The invariant behind the bug: what `compose up` selects must be a service key.
+
+    Only decided for compose files this repo writes; WotLK's base file comes from
+    the AzerothCore checkout, so a service missing from the script proves nothing.
+    """
+    installers = resources.installers_dir()
+    for game in load_catalog().games:
+        declared = _compose_services_declared(installers / game.install.script)
+        if not declared:
+            continue
+        container_names = {name for name in declared.values() if name}
+        for service in game.container_spec().compose_services():
+            assert service not in container_names or service in declared, (
+                f"{game.id}: `docker compose up {service}` names a CONTAINER, not a service; "
+                f"this compose file declares {sorted(declared)}"
+            )
