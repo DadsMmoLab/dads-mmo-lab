@@ -2899,6 +2899,58 @@ def test_a_mount_the_daemon_refused_with_the_image_in_hand_is_still_a_refusal(
     assert docker.bind_mount_ok(tmp_path / "wow", "alpine/git") is False
 
 
+def test_a_listing_with_entries_in_it_is_a_listing_however_ls_exited(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The probe's question is answered by stdout. The exit code is not the answer.
+
+    This refused EVERY macOS install whose chosen folder was new, which is
+    every first install. The chosen folder is empty or absent at preflight
+    time, so the probe walks up to the nearest populated ancestor — routinely
+    the user's home directory — and on a Mac `ls -A` of a home directory prints
+    a full listing AND exits non-zero, because Docker Desktop cannot stat the
+    TCC-protected entries in it. The tester's own run, pasted verbatim
+    (2026-08-26):
+
+        $ docker run --rm --entrypoint ls -v /Users/js:/probe:ro alpine/git@… -A /probe
+        ls: /probe/.Trash: No such file or directory
+        ls: /probe/Documents: No such file or directory
+        .CFUserTextEncoding
+        …
+        wow-wotlk
+
+    busybox `ls` exits non-zero when it could not stat something, so this
+    listing — 15 entries the container plainly saw, including the folder he
+    picked — was read as "Docker cannot see that folder". He re-added the
+    folder to file sharing, added its parent, tried several other folders and
+    read a file back out of a container against that exact path; nothing could
+    have made it pass, because nothing he could do would make `.Trash`
+    stat-able.
+
+    So stdout is asked first. Entries in it mean the container saw the folder,
+    whatever `ls` thought of the parts it could not reach. Only an EMPTY
+    listing sends the question to the exit code — which is the silently-empty
+    mount this check exists for, and it still refuses.
+    """
+    (tmp_path / "already-here.txt").write_text("x", encoding="utf-8")
+    partial = (
+        "ls: /probe/.Trash: No such file or directory\n"
+        "ls: /probe/Documents: No such file or directory\n"
+    )
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if argv[1:3] == ["image", "inspect"]:
+            return _completed(stdout="sha256:abc")
+        return _completed(
+            returncode=1,
+            stdout=".CFUserTextEncoding\nDesktop\nDownloads\nLibrary\nwow-server\n",
+            stderr=partial,
+        )
+
+    monkeypatch.setattr(docker.runner, "run", run)
+    assert docker.bind_mount_ok(tmp_path / "wow-server", "alpine/git") is True
+
+
 def test_the_bind_mount_probe_catches_the_silently_empty_mount_it_exists_for(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -2431,6 +2431,33 @@ def bind_mount_ok(
     )
     if _cli_missing(proc):
         return None
+    # **stdout first, and the exit code second.** The question is whether a
+    # container sees what the host sees, and the answer to that is the listing;
+    # `ls`'s opinion of the parts it could not reach is not the answer.
+    #
+    # Asking the other way round refused EVERY macOS install whose chosen folder
+    # was new — which is every first install. The chosen folder is empty or
+    # absent at preflight time, so the probe walks up to the nearest populated
+    # ancestor, routinely the user's home directory, and on a Mac `ls -A` of a
+    # home directory prints a full listing AND exits non-zero: Docker Desktop
+    # cannot stat the TCC-protected entries in it, busybox `ls` returns failure
+    # when it could not stat something. The tester's own run (2026-08-26) shows
+    # both halves at once — two `No such file or directory` lines for `.Trash`
+    # and `Documents`, then fifteen entries including the folder he had picked.
+    # Nothing he could do would make that pass: he re-added the folder to file
+    # sharing, added its parent, tried other folders and read a file back out of
+    # a container against that exact path, and none of it makes `.Trash`
+    # stat-able.
+    if any(line.strip() for line in proc.stdout.splitlines()):
+        if proc.returncode != 0:
+            logger.info(
+                f"a container listed {mount} and `ls` still exited {proc.returncode}; the "
+                f"listing is the answer. What it could not reach: {proc.stderr.strip()}"
+            )
+        return True
+    # From here the listing was EMPTY, which is the silently-empty mount this
+    # check exists for — and the case where the exit code is worth reading.
+    #
     # A non-zero exit is the daemon answering "no", which IS an answer — unless
     # it never answered at all. `runner.run()` reports a timeout as 124 with the
     # reason in stderr rather than raising, so that case has to be separated out
@@ -2464,8 +2491,6 @@ def bind_mount_ok(
             )
             return None
         return False
-    if any(line.strip() for line in proc.stdout.splitlines()):
-        return True
     logger.warning(
         f"a container saw {mount} as empty although the host sees files in it — Docker is not "
         "sharing that folder"
