@@ -164,6 +164,26 @@ def _depth_args(depth: int | None) -> list[str]:
     return [] if depth is None else ["--depth", str(depth)]
 
 
+def _empty_directory(path: Path) -> None:
+    """Make `path` an existing, empty directory without ever replacing it.
+
+    The identity of the directory is what matters, not just its emptiness — see
+    `ContainerGit.clone()`, which bind-mounts this exact path immediately
+    afterwards and cannot survive it being handed a new inode.
+
+    A symlink is unlinked rather than followed: `rmtree` on one raises anyway,
+    and following it would delete somebody else's tree.
+    """
+    if not path.exists():
+        path.mkdir(parents=True, exist_ok=True)
+        return
+    for item in path.iterdir():
+        if item.is_dir() and not item.is_symlink():
+            shutil.rmtree(item)
+        else:
+            item.unlink()
+
+
 def git_available(run: RunCmd | None = None) -> bool:
     """True if the host has a `git` that can actually run, without prompting.
 
@@ -382,9 +402,26 @@ class ContainerGit:
             )
             self._run(spec, ["reset", "--hard", "FETCH_HEAD"])
             return
-        if spec.dest.exists():
-            shutil.rmtree(spec.dest)
-        spec.dest.mkdir(parents=True, exist_ok=True)
+        # EMPTIED, not replaced, and the difference is the whole bug.
+        #
+        # `shutil.rmtree(dest)` followed by `dest.mkdir()` gives the path a NEW
+        # inode microseconds before that same path is bind-mounted. Docker
+        # Desktop's file-sharing layer resolves the old one, `/git` mounts as
+        # something whose contents cannot be reached, and every operation inside
+        # it answers ENOENT. git's first act is to create `.git`, so what the
+        # user saw was `/git/.git: No such file or directory` — on every install
+        # attempt, on a Mac where the identical `docker run` typed by hand
+        # always worked (2026-08-26). It always worked because he made a fresh
+        # directory each time and nothing had deleted it.
+        #
+        # Only this implementation is exposed: `RunnerGit` does the same removal
+        # and bind-mounts nothing, so the two platforms that need a
+        # containerized git are the two that could not use it.
+        #
+        # The leftovers still go. That is what the removal was for — a
+        # destination with files in it that is not a checkout — and clearing the
+        # contents removes them just as completely.
+        _empty_directory(spec.dest)
         argv = [
             "clone",
             *_LINE_ENDING_CONFIG,
