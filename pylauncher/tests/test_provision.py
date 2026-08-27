@@ -544,15 +544,56 @@ def test_a_docker_on_the_live_path_costs_nothing_extra(monkeypatch: pytest.Monke
     assert platform.docker_programs() == ("docker",)
 
 
-@pytest.mark.parametrize(("sys_platform", "expected"), [("linux", "linux"), ("darwin", "macos")])
+def test_macos_falls_back_to_docker_desktops_own_cli(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A Finder-launched .app runs with launchd's PATH, which never names docker.
+
+    `/usr/bin:/bin:/usr/sbin:/sbin` is what a double-clicked `Yulon.app` gets,
+    and Docker Desktop's CLI is a symlink in `/usr/local/bin` - so plain
+    `docker` was a `FileNotFoundError`, `ensure_docker()` opened Docker.app and
+    polled for 180 seconds, and the install failed with Docker fully running
+    (macOS gate, 2026-08-25). The Windows fix of 2026-08-23, on a second OS.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "docker").write_text("", encoding="utf-8")
+    monkeypatch.setattr(platform.sys, "platform", "darwin")
+    monkeypatch.setattr(platform, "_which", lambda name, path=None: None)
+    monkeypatch.setattr(platform, "_macos_docker_bins", lambda: (tmp_path / "missing", bin_dir))
+    assert platform.docker_programs() == ("docker", str(bin_dir / "docker"))
+
+
+def test_macos_with_docker_on_the_live_path_stats_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom() -> tuple[Path, ...]:
+        raise AssertionError("the fallback directories were read on a machine that did not need it")
+
+    monkeypatch.setattr(platform.sys, "platform", "darwin")
+    monkeypatch.setattr(platform, "_which", lambda name, path=None: "/usr/local/bin/docker")
+    monkeypatch.setattr(platform, "_macos_docker_bins", _boom)
+    assert platform.docker_programs() == ("docker",)
+
+
+def test_the_macos_fallback_directories_are_where_docker_desktop_puts_its_cli() -> None:
+    assert platform._macos_docker_bins() == (
+        Path("/usr/local/bin"),
+        Path("/opt/homebrew/bin"),
+        Path("/Applications/Docker.app/Contents/Resources/bin"),
+    )
+
+
+@pytest.mark.parametrize(("sys_platform", "expected"), [("linux", "linux")])
 def test_off_windows_nothing_changes(
     monkeypatch: pytest.MonkeyPatch, sys_platform: str, expected: str
 ) -> None:
-    """`shutil.which` is correct and sufficient off Windows, so no extra machinery runs.
+    """`shutil.which` is correct and sufficient on Linux, so no extra machinery runs.
 
     Asserted as "the registry is never touched and exactly one command runs",
-    not merely as a return value: a PATH re-read would be meaningless on Linux
-    and macOS, where a shell exports PATH to the children it starts.
+    not merely as a return value: a PATH re-read would be meaningless on Linux,
+    where a shell exports PATH to the children it starts. macOS used to be in
+    this parametrization; see `test_macos_falls_back_to_docker_desktops_own_cli`.
     """
 
     def _boom() -> str:

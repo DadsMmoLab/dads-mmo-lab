@@ -17,7 +17,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from yulon.docker import ContainerSpec
-from yulon.manifest import Source
+from yulon.manifest import Db, Source
 from yulon.platform import PlatformId
 
 CATALOG_FILE = Path(__file__).resolve().with_name("catalog.json")
@@ -241,11 +241,22 @@ class Install(_Strict):
 
 
 class Containers(_Strict):
-    """The three container names the controller manages, and the import job's service."""
+    """The three container names the controller manages, their services, and the import job."""
 
     db: str = Field(min_length=1)
     auth: str = Field(min_length=1)
     world: str = Field(min_length=1)
+    services: tuple[str, str, str] | None = Field(
+        default=None,
+        description=(
+            "Compose SERVICE names for db/auth/world, in that order, when they differ from the "
+            "container names above. AzerothCore names a service and its container the same thing "
+            "and may leave this out; every CMaNGOS game does not — its services are "
+            "db/realmd/mangosd while its containers are <game>-db/-realmd/-mangosd — and "
+            "MUST say so. `docker compose up` takes services, and a container name it does not "
+            "know fails outright with `no such service` (Discord report, 2026-08-26)."
+        ),
+    )
     db_import: str | None = Field(
         default=None,
         min_length=1,
@@ -283,6 +294,45 @@ class Databases(_Strict):
     characters: str = Field(min_length=1)
     world: str = Field(min_length=1)
     extra: tuple[str, ...] = ()
+    playerbots: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "The playerbots schema, for the cores that keep one. Named separately from `extra` "
+            "because the applier addresses it by the manifest key `playerbots`, and a name in a "
+            "list cannot be looked up by key."
+        ),
+    )
+    ale: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "The ALE (Paragon) schema, same reasoning as `playerbots`. Created by the module "
+            "rather than by the installer, so it is a name this core WOULD use, not a promise "
+            "the schema exists."
+        ),
+    )
+
+    def schema_map(self) -> dict[Db, str]:
+        """Manifest `db` key → this core's schema name, for `apply.DockerSql`.
+
+        Only the databases this core actually names appear. A key that is absent
+        is a database this game does not have, and `DockerSql` refuses it by
+        name rather than connecting to somebody else's schema — which is exactly
+        the failure this map exists to end: every SQL-backed control used to
+        address AzerothCore's `acore_auth` on a CMaNGOS install and die with
+        `ERROR 1049 Unknown database` (Discord report, 2026-08-26).
+        """
+        named: dict[Db, str] = {
+            "auth": self.auth,
+            "characters": self.characters,
+            "world": self.world,
+        }
+        if self.playerbots:
+            named["playerbots"] = self.playerbots
+        if self.ale:
+            named["ale"] = self.ale
+        return named
 
 
 class Realmlist(_Strict):
@@ -294,6 +344,63 @@ class Realmlist(_Strict):
         default="localAddress", description="None for cores whose realmlist has no LAN column."
     )
     realm_id: int = 1
+
+
+class Accounts(_Strict):
+    """Whether this app can create an account on this core by writing the row itself.
+
+    Three shapes, one per core family. AzerothCore uses `salt`/`verifier` with
+    the level in `account_access`. Tortoise uses `sha_pass_hash` with the level
+    in `account.rank` — measured against a live server on 2026-08-26, where the
+    core logged its own INSERT and `SHA1(UPPER(user):UPPER(pass))` matched it
+    exactly. CMaNGOS proper (TBC, Vanilla) keeps SRP6 in `v`/`s` with the level
+    in `gmlevel`, which is a THIRD shape and has not been measured, so it is
+    declared unsupported rather than assumed to be tortoise's.
+
+    Getting this wrong does not fail loudly — it inserts a row that looks
+    correct and can never log in.
+    """
+
+    scheme: Literal["azerothcore", "mangos_sha", "mangos_srp6"] | None = Field(
+        default="azerothcore",
+        description=(
+            "How this core stores an account: `azerothcore` is SRP6 in binary salt/verifier "
+            "with the level in account_access; `mangos_sha` is sha_pass_hash with the level "
+            "in account.rank; `mangos_srp6` is the same SRP6 as AzerothCore stored as hex "
+            "text in v/s with the level in account.gmlevel. None means this app does not "
+            "write accounts for this core and "
+            "the Accounts tab points at `console_command` instead. Never defaulted onto a "
+            "core that has not been measured — a wrong scheme inserts a row that looks "
+            "correct and can never log in."
+        ),
+    )
+    console_command: str = Field(
+        default="account create <name> <password>",
+        min_length=1,
+        description="What to type on the worldserver console when `by_sql` is False.",
+    )
+
+
+class Console(_Strict):
+    """How this core's worldserver console delimits the answer to a command.
+
+    Two facts, because the string alone is not enough. AzerothCore reads its
+    console with GNU readline, which redisplays the prompt in FRONT of what it
+    is about to print; CMaNGOS and tortoise read with `fgets` and print theirs
+    only after the command finished. Same delimiter, the answer on opposite
+    sides of it — so a core that declared only the string would have every reply
+    parsed as empty (research, 2026-08-26).
+    """
+
+    prompt: str = Field(
+        default="AC>",
+        min_length=1,
+        description="What the console prints when it is ready for the next command.",
+    )
+    prompt_precedes_answer: bool = Field(
+        default=True,
+        description="True for a readline console (AzerothCore), False for an `fgets` one.",
+    )
 
 
 class Client(_Strict):
@@ -319,9 +426,25 @@ class CatalogEntry(_Strict):
     databases: Databases
     client: Client
     realmlist: Realmlist = Realmlist()
+    console: Console = Console()
+    accounts: Accounts = Accounts()
     has_manifests: bool = Field(
         default=False, description="Whether manifests/<id>/ exists for module management."
     )
+
+    def schema_map(self) -> dict[Db, str]:
+        """This game's `manifest db key → schema name` map (see `Databases.schema_map`)."""
+        return self.databases.schema_map()
+
+    def core_databases(self) -> tuple[str, str, str]:
+        """The three schemas whose absence is an alarm, in this core's own names.
+
+        `maintenance.backup()` reports what it could not find; asked of the
+        entry so the alarm names schemas this install could plausibly have. The
+        module-level default is AzerothCore's, which is why a Tortoise backup
+        reported `acore_auth` missing on a dump that had taken everything.
+        """
+        return (self.databases.auth, self.databases.characters, self.databases.world)
 
     def container_spec(self) -> ContainerSpec:
         """The `ContainerSpec` a controller for this game would be built from."""
@@ -330,6 +453,7 @@ class CatalogEntry(_Strict):
             auth=self.containers.auth,
             world=self.containers.world,
             ports=(self.ports.auth, self.ports.world),
+            services=self.containers.services or (),
             import_service=self.containers.db_import or "",
         )
 

@@ -568,3 +568,25 @@ def test_wsl_linux_path_is_none_for_a_path_that_is_not_in_wsl() -> None:
 def test_wsl_linux_path_keeps_the_distro_root_itself() -> None:
     """The share root is the distro's `/`."""
     assert platform.wsl_linux_path(Path(r"\\wsl.localhost\dml-arch")) == "/"
+def test_a_wsl_path_is_refused_in_words_that_fit_what_happened() -> None:
+    """`\\\\wsl.localhost\\...` is a network path to Windows, but not to the user.
+
+    A tester's server, installed by the DML Launcher, lives inside a WSL distro.
+    The generic refusal told them to "pick a folder on this machine's own disk" -
+    which it IS. Docker Desktop cannot bind-mount it ("is not a valid Windows
+    path", measured on Windows 11), so the refusal is right and only the wording
+    was wrong.
+    """
+    for text in (r"\\wsl.localhost\dml-arch\home\dml\games\srv", r"\\wsl$\Ubuntu\srv"):
+        problem = platform.server_dir_problem(Path(text))
+        assert problem is not None, f"{text} was accepted"
+        assert "WSL" in problem, f"the WSL case is not named in: {problem}"
+        assert "own disk" not in problem, "the generic network wording leaked into the WSL case"
+
+
+def test_an_ordinary_unc_path_keeps_the_network_wording() -> None:
+    """A real file share is still a file share."""
+    problem = platform.server_dir_problem(Path(r"\\nas\media\srv"))
+    assert problem is not None
+    assert "network path" in problem
+    assert "WSL" not in problem

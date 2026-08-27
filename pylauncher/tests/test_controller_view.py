@@ -1198,3 +1198,113 @@ def test_for_wotlk_defaults_to_no_distro(qapp: object, tmp_path: Path) -> None:
     """An ordinary local install is unchanged by any of this."""
     entry = load_catalog().get("wow-wotlk")
     assert ControllerServices.for_wotlk(entry, tmp_path).controller.wsl_distro is None
+def test_a_cmangos_install_s_account_path_addresses_its_own_schema(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wiring, not the seam: what `Accounts → Create` really sends for Tortoise.
+
+    `for_wotlk()` builds the `DockerSql` every SQL-backed control uses, and it is
+    the one place that holds the catalog entry. Testing `DockerSql(schemas=...)`
+    alone would have passed while this call site still handed it nothing — which
+    is how `acore_auth` reached a CMaNGOS install in the first place.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    seen: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        # "" first, so the username reads as free; a row afterwards, so the
+        # read-back that follows the INSERT finds the account it just made.
+        return subprocess.CompletedProcess(argv, 0, "" if len(seen) == 1 else "1", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    services = ControllerServices.for_wotlk(tortoise, tmp_path, None)
+    services.create_account("bob", "hunter2", 0)
+
+    assert seen, "nothing was sent to mysql at all"
+    schemas = {argv[-1] for argv in seen}
+    assert schemas == {"tw_logon"}, schemas
+    assert not any("acore" in " ".join(argv) for argv in seen)
+
+
+def test_a_cmangos_backup_is_told_which_schemas_that_core_has(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The call site, not the function: `backup()` takes the names, someone must pass them."""
+    tortoise = load_catalog().get("wow-tortoise")
+    seen: dict[str, object] = {}
+
+    def fake_backup(*args: object, **kwargs: object) -> object:
+        seen.update(kwargs)
+        return None
+
+    monkeypatch.setattr(controller_view_module.wotlk_maintenance, "backup", fake_backup)
+    ControllerServices.for_wotlk(tortoise, tmp_path, None).backup()
+    assert seen.get("core_databases") == ("tw_logon", "tw_char", "tw_world"), seen
+
+
+def test_a_cmangos_console_is_sent_its_own_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The parser takes the core's prompt; this is the call site that supplies it."""
+    tortoise = load_catalog().get("wow-tortoise")
+    seen: dict[str, object] = {}
+
+    def fake_send(command: str, **kwargs: object) -> object:
+        seen.update(kwargs)
+        return ConsoleReply(command, ())
+
+    monkeypatch.setattr(controller_view_module.wotlk_console, "send_command", fake_send)
+    ControllerServices.for_wotlk(tortoise, tmp_path, None).send_console("server info")
+    assert seen.get("prompt") == "mangos>", seen
+    assert seen.get("prompt_precedes_answer") is False, seen
+    assert seen.get("container") == "tortoise-mangosd", seen
+
+
+def test_a_core_that_cannot_be_given_an_account_by_sql_says_so_instead_of_failing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Better a disabled button with the working command than one that writes a dead row.
+
+    Every game in the catalog can be given an account by SQL today, so the
+    subject here is a synthetic entry rather than a real one: this pins the
+    BEHAVIOUR for the next core added before anyone has measured how it stores a
+    password. Guessing that wrong does not fail loudly -- it inserts a row that
+    looks correct and can never log in -- so the tab refuses and names the
+    console command instead.
+    """
+    catalog = load_catalog()
+    for entry in catalog.games:
+        assert entry.accounts.scheme is not None, f"{entry.id} lost its scheme"
+
+    unmeasured = WOTLK.model_copy(
+        update={"accounts": WOTLK.accounts.model_copy(update={"scheme": None})}
+    )
+    view = ControllerView(unmeasured, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert view.create_account_button.isEnabled() is False
+    said = view.account_report.text()
+    assert "account create" in said, said
+    assert "Console" in said, said
+
+    # The measured cores are untouched: AzerothCore, tortoise, and now the two
+    # CMaNGOS games whose scheme was solved from rows their own servers wrote.
+    for game_id in ("wow-wotlk", "wow-tortoise", "wow-tbc", "wow-vanilla"):
+        other = ControllerView(catalog.get(game_id), _services(ps, tmp_path, []), status_poll_ms=0)
+        assert other.create_account_button.isEnabled() is True, game_id
+        assert other.account_report.text() == "", game_id
+
+
+def test_a_tortoise_account_is_created_with_that_core_s_own_scheme(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The call site again: `create_account()` takes a scheme, someone must pass it."""
+    tortoise = load_catalog().get("wow-tortoise")
+    seen: dict[str, object] = {}
+
+    def fake_create(*args: object, **kwargs: object) -> object:
+        seen.update(kwargs)
+        return AccountResult(username="BOB", account_id=1, created=True, gm_level=0)
+
+    monkeypatch.setattr(controller_view_module.wotlk_accounts, "create_account", fake_create)
+    ControllerServices.for_wotlk(tortoise, tmp_path, None).create_account("bob", "pw", 0)
+    assert seen.get("scheme") == "mangos_sha", seen

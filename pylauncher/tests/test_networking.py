@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from yulon import docker, networking, platform, runner
+from yulon.apply import ApplyError
 from yulon.catalog.catalog import load_catalog
 
 WOTLK = load_catalog().get("wow-wotlk")
@@ -539,3 +540,49 @@ def test_a_mac_is_told_what_a_loopback_binding_actually_means(_on_a_mac: None) -
     assert "No firewall change can fix a loopback binding" in loopback[0]
     assert "portproxy" not in loopback[0]  # that is the WSL remedy, not a Mac one
     assert plan.portproxy_commands == ()
+
+
+class _FailingSql(_RecordingSql):
+    """A `SqlRunner` whose realmlist UPDATE fails the way a wrong schema name does."""
+
+    def run_statement(self, db: str, statement: str) -> None:
+        super().run_statement(db, statement)
+        raise ApplyError("SQL failed (inline -> tw_logon): ERROR 1054 Unknown column")
+
+
+def test_a_failed_realmlist_update_does_not_throw_away_the_firewall_report() -> None:
+    """The rules already applied are the half the user must not lose.
+
+    Every other failure in `apply()` lands in `skipped`; the realmlist UPDATE
+    raised straight out of the function, so a report of what DID run — ports
+    opened, portproxy added, some of it needing a manual retry — went with it.
+    """
+    p = networking.plan(
+        WOTLK, "lan", lan_ip="192.168.1.25", firewall="ufw", steamos=False, wsl=False
+    )
+    sql = _FailingSql()
+    report = networking.apply(
+        p, sql=sql, run=lambda argv: subprocess.CompletedProcess(argv, 0, "", "")
+    )
+    assert report.done[:2] == ("ufw allow 3724/tcp", "ufw allow 8085/tcp")
+    assert sql.statements == [("auth", p.realmlist_sql)], "it must still have tried"
+    assert any("realmlist not updated" in s and "Unknown column" in s for s in report.skipped)
+    assert report.restart_required is False
+    assert not any("realmlist →" in d for d in report.done)
+
+
+def test_the_cmangos_cores_get_no_local_address_column_either() -> None:
+    """CMaNGOS's realmlist has the MaNGOS column set, which has no `localAddress`.
+
+    Tortoise already said so; TBC and Vanilla inherited AzerothCore's default and
+    would have written a column their realmd schema does not have, failing with
+    `ERROR 1054 Unknown column 'localAddress'` the moment the schema-name fix
+    let the statement reach the server at all.
+    """
+    catalog = load_catalog()
+    for game_id in ("wow-tbc", "wow-vanilla"):
+        entry = catalog.get(game_id)
+        assert entry.realmlist.local_address_column is None, game_id
+        assert networking.realmlist_sql(entry, "98.24.105.7", "192.168.1.25") == (
+            "UPDATE realmd.realmlist SET address='98.24.105.7' WHERE id=1;"
+        ), game_id

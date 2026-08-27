@@ -596,77 +596,105 @@ def test_output_that_is_not_utf8_does_not_escape_as_a_decode_error(
     assert "ok" in out, out
 
 
-# ------------------------------------------------------- WSL-resident servers
+def test_docker_sql_addresses_the_game_s_own_schemas(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A CMaNGOS install has no `acore_auth`; the schema name is the game's, not a constant.
+
+    Discord report, 2026-08-26: every SQL-backed control on Tortoise/TBC/Vanilla died with
+    `ERROR 1049 (42000): Unknown database 'acore_auth'` because the schema was a module
+    constant. Asserted at argv level, where the defect actually lived.
+    """
+    import subprocess
+
+    seen: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    sql = DockerSql(
+        "tortoise-db",
+        "hunter2",
+        schemas={"auth": "tw_logon", "characters": "tw_char", "world": "tw_world"},
+    )
+    sql.run_statement("auth", "SELECT 1")
+    sql.query("world", "SELECT 1")
+    assert [argv[-1] for argv in seen] == ["tw_logon", "tw_world"]
+    assert not any("acore" in " ".join(argv) for argv in seen)
 
 
-def test_the_sql_runner_reaches_the_distros_own_docker(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A WSL-resident server's database answers only to that distro's docker."""
-    monkeypatch.setattr(apply_module.platform, "_which", lambda name, path=None: "wsl.exe")
-    runner_ = DockerSql("ac-database", "hunter2", wsl_distro="dml-arch")
-    argv = runner_._argv("auth")
-    assert argv[:5] == ["wsl.exe", "-d", "dml-arch", "--", "docker"]
-    assert "exec" in argv and "ac-database" in argv
-
-
-def test_the_password_still_never_enters_argv_through_wsl(
+def test_docker_sql_refuses_a_database_this_game_does_not_have(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The one rule that must survive the crossing.
+    """Refuse by name rather than raise KeyError or connect to somebody else's schema."""
+    import subprocess
 
-    `docker exec -e MYSQL_PWD` names the variable and not its value precisely so
-    the secret stays out of a command line every local process can read. Routing
-    through `wsl.exe` must not quietly turn that into `-e MYSQL_PWD=hunter2`.
-    """
-    monkeypatch.setattr(apply_module.platform, "_which", lambda name, path=None: "wsl.exe")
-    argv = DockerSql("ac-database", "hunter2", wsl_distro="dml-arch")._argv("auth")
-    assert "MYSQL_PWD" in argv
-    assert not any("hunter2" in part for part in argv), f"the password is in argv: {argv}"
+    seen: list[list[str]] = []
 
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
 
-def test_mysql_env_names_the_password_in_wslenv_for_a_distro() -> None:
-    """Without WSLENV the variable crosses EMPTY, and mysql reports a bad password.
-
-    Measured 2026-08-26: a variable set on the Windows side arrives as `[]`
-    inside the distro unless WSLENV names it. The failure is an authentication
-    error, not a missing-setting error, which is the worst kind to debug - so it
-    is set in `mysql_env()`, the one place this codebase decides how the
-    password is handed over.
-    """
-    env = apply_module.mysql_env("hunter2", wsl_distro="dml-arch")
-    assert env["MYSQL_PWD"] == "hunter2"
-    assert "MYSQL_PWD" in env["WSLENV"].split(":")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    sql = DockerSql("tortoise-db", "hunter2", schemas={"auth": "tw_logon"})
+    with pytest.raises(ApplyError) as excinfo:
+        sql.run_statement("playerbots", "SELECT 1")
+    assert "playerbots" in str(excinfo.value)
+    assert seen == [], "it must not run mysql at all"
 
 
-def test_mysql_env_adds_no_wslenv_for_a_local_install() -> None:
-    """Nothing crosses a boundary, so nothing needs announcing."""
-    env = apply_module.mysql_env("hunter2")
-    assert env["MYSQL_PWD"] == "hunter2"
-    assert "WSLENV" not in env or "MYSQL_PWD" not in env.get("WSLENV", "")
+def test_docker_sql_still_defaults_to_the_azerothcore_schemas() -> None:
+    """Every existing caller passes no map and must keep addressing acore_*."""
+    assert DockerSql("ac-database", "hunter2").schemas == apply_module.DB_NAMES
 
 
-def test_the_sql_runner_announces_the_password_through_its_own_env(
+def test_the_client_probe_finds_mariadb_when_there_is_no_mysql(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Through `DockerSql`, not through `mysql_env` - that is the whole point.
+    """mariadb:11 ships `mariadb`/`mariadb-dump` and neither `mysql` nor `mysqldump`.
 
-    The first WSLENV test called `mysql_env()` directly and passed, while
-    `DockerSql._env()` called it WITHOUT the distro. So the function was right,
-    the only caller that matters was wrong, and the password crossed into the
-    distro empty: an authentication failure against a healthy database, which is
-    the exact symptom the crossing exists to prevent.
-
-    Asserting through the object is the fix for the test as much as for the code.
+    wow-tbc and wow-vanilla run that image, so every statement this app sent
+    them died before it reached a database. wow-tortoise pins mariadb:10.6,
+    which still has the symlinks — which is why it worked and hid this
+    (measured on a live TBC server, 2026-08-26).
     """
-    monkeypatch.setattr(apply_module.platform, "_which", lambda name, path=None: "wsl.exe")
-    env = DockerSql("ac-database", "hunter2", wsl_distro="dml-arch")._env()
-    assert env["MYSQL_PWD"] == "hunter2"
-    assert "MYSQL_PWD" in env.get("WSLENV", "").split(
-        ":"
-    ), "the password will arrive EMPTY inside the distro"
+    apply_module._client_cache.clear()
+    monkeypatch.setattr(
+        apply_module,
+        "_probe_client",
+        lambda container, candidates: "mariadb" if candidates[0] == "mysql" else "mariadb-dump",
+    )
+    assert apply_module.mysql_client("tbc-db") == "mariadb"
+    assert apply_module.mysql_client("tbc-db", "mysqldump") == "mariadb-dump"
 
 
-def test_a_local_sql_runner_announces_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Nothing crosses a boundary, so nothing needs announcing."""
-    env = DockerSql("ac-database", "hunter2")._env()
-    assert env["MYSQL_PWD"] == "hunter2"
-    assert "MYSQL_PWD" not in env.get("WSLENV", "").split(":")
+def test_a_container_that_has_mysql_keeps_using_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AzerothCore and tortoise images have the classic names; nothing changes for them."""
+    apply_module._client_cache.clear()
+    monkeypatch.setattr(apply_module, "_probe_client", lambda container, candidates: "mysql")
+    assert apply_module.mysql_client("ac-database") == "mysql"
+
+
+def test_an_unanswerable_probe_falls_back_to_the_classic_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A daemon hiccup must produce the failure it always did, not a new one."""
+    apply_module._client_cache.clear()
+    monkeypatch.setattr(apply_module, "_probe_client", lambda container, candidates: None)
+    assert apply_module.mysql_client("whatever") == "mysql"
+    assert apply_module.mysql_client("whatever", "mysqldump") == "mysqldump"
+
+
+def test_the_probe_is_asked_once_per_container(monkeypatch: pytest.MonkeyPatch) -> None:
+    """It cannot change without the container being replaced, and SQL is on a hot path."""
+    apply_module._client_cache.clear()
+    asked: list[str] = []
+
+    def probe(container: str, candidates: tuple[str, ...]) -> str:
+        asked.append(container)
+        return "mariadb"
+
+    monkeypatch.setattr(apply_module, "_probe_client", probe)
+    for _ in range(3):
+        apply_module.mysql_client("tbc-db")
+    assert asked == ["tbc-db"], asked

@@ -62,7 +62,9 @@
         "world": "acore_world",
         "extra": [
           "acore_playerbots"
-        ]
+        ],
+        "playerbots": "acore_playerbots",
+        "ale": "acore_ale"
       },
       "client": {
         "version": "3.3.5a",
@@ -104,7 +106,8 @@
       "containers": {
         "db": "tbc-db",
         "auth": "tbc-realmd",
-        "world": "tbc-mangosd"
+        "world": "tbc-mangosd",
+        "services": ["db", "realmd", "mangosd"]
       },
       "ports": {
         "auth": 3724,
@@ -118,6 +121,18 @@
         "extra": [
           "logs"
         ]
+      },
+      "realmlist": {
+        "table": "realmlist",
+        "address_column": "address",
+        "local_address_column": null
+      },
+      "accounts": {
+        "scheme": "mangos_srp6"
+      },
+      "console": {
+        "prompt": "mangos>",
+        "prompt_precedes_answer": false
       },
       "client": {
         "version": "2.4.3",
@@ -158,7 +173,8 @@
       "containers": {
         "db": "vanilla-db",
         "auth": "vanilla-realmd",
-        "world": "vanilla-mangosd"
+        "world": "vanilla-mangosd",
+        "services": ["db", "realmd", "mangosd"]
       },
       "ports": {
         "auth": 3724,
@@ -172,6 +188,18 @@
         "extra": [
           "logs"
         ]
+      },
+      "realmlist": {
+        "table": "realmlist",
+        "address_column": "address",
+        "local_address_column": null
+      },
+      "accounts": {
+        "scheme": "mangos_srp6"
+      },
+      "console": {
+        "prompt": "mangos>",
+        "prompt_precedes_answer": false
       },
       "client": {
         "version": "1.12.1",
@@ -206,7 +234,8 @@
       "containers": {
         "db": "tortoise-db",
         "auth": "tortoise-realmd",
-        "world": "tortoise-mangosd"
+        "world": "tortoise-mangosd",
+        "services": ["db", "realmd", "mangosd"]
       },
       "ports": {
         "auth": 3724,
@@ -225,6 +254,13 @@
         "table": "realmlist",
         "address_column": "address",
         "local_address_column": null
+      },
+      "accounts": {
+        "scheme": "mangos_sha"
+      },
+      "console": {
+        "prompt": "mangos>",
+        "prompt_precedes_answer": false
       },
       "client": {
         "version": "1.18.1",

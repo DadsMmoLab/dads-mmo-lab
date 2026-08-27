@@ -16,7 +16,9 @@ There are **three `README.md`s**, each with a distinct audience, plus three `pyp
 | `pylauncher/README.md` | **User-facing**: what the shipped app does under the hood. |
 | `pyplan/style-guide.md` | **The code rules**: *how* to write it. Precedence on style. |
 | `pyplan/roadmap.md` | **The execution plan**: *what order* to do it in. Clean plan only — no decisions or notes. |
-| `pyplan/phase6-decisions.md` | **The decisions log ("why")**: reasoning, rejections, incident history. |
+| `pyplan/phase6-decisions.md` | **The Phase 6 decisions log ("why")**: reasoning, rejections, incident history. |
+| `pyplan/phase7-decisions.md` | **The Phase 7 decisions log**: one install engine for all four servers; what it overturns in the pages above, by name. |
+| `pyplan/phase7-plans/` | **The Phase 7 implementation plans**, one per gated step (7.1, 7.2, 7.3 so far): bite-sized TDD tasks with the code, against the interface contract each plan embeds. Executed task by task; ticked in the checklist. |
 | `pyplan/checklist.md` | **The checkable progress tracker**: completed `[x]` / pending `[ ]` items per phase. |
 
 **Precedence (restated once, here and in the other two):** `README.md` wins on *what/why*;
@@ -79,7 +81,14 @@ provisions Docker Desktop and drives `docker compose` against it. The kernel con
 satisfied by Docker Desktop itself; no bespoke VM/WSL2 manager is built. (Full rationale in
 `pyplan/phase6-decisions.md`.)
 
-This means each installer carries platform-specific "ensure a Linux container environment exists" logic, but the **application code remains 100% shared**.
+This means the provisioning layer (`platform.ensure_docker()`) carries platform-specific "ensure
+a Linux container environment exists" logic, but the **application code remains 100% shared** —
+including the installer. From Phase 7 (`pyplan/phase7-decisions.md`; a target as of 2026-08-26,
+landing step by step from 7.1) there is **one typed Python install engine for every server on
+every platform**: a shared staged/resumable spine and
+one engine per emulator family (AzerothCore for WotLK; CMaNGOS for TBC, Vanilla and Tortoise),
+with every per-game fact in `catalog.json` and templates. The bash installers that Phases 3–6
+wrapped on Linux are retired, one live gate at a time.
 
 ---
 
@@ -169,12 +178,21 @@ pylauncher/
 │   ├── __init__.py
 │   ├── catalog/
 │   │   ├── __init__.py
-│   │   ├── catalog.json          # the four v1 servers: emulator sources, install script, containers, ports, DBs, client (Phase 3.1)
+│   │   ├── catalog.json          # the four v1 servers: emulator sources (+ dest), install family + native blocks, containers, ports, DBs, client (Phase 3.1 → 7.3; `script` fields gone at 7.2)
 │   │   ├── catalog.py            # typed Catalog/CatalogEntry models + load_catalog(); entry.container_spec() feeds the controller
-│   │   ├── installer.py          # Phase 3.2 orchestrator: answers the install-*.sh prompts via runner.interact, streams output; graceful DockerUnavailableError (3.2/3.3)
-│   │   ├── native.py             # the native install engine: same contract as Installer, no shell script; staged + resumable, macOS today and Windows next (Phase 6.2/6.3)
-│   │   ├── preflight.py          # gather() the machine's facts, pure evaluate() against catalog.json's floors → refuse / warn / unchecked / pass (Phase 6.2)
-│   │   └── composegen.py         # pure generation of the three compose files + .env keys from catalog/installers/<game>/native/ templates (Phase 6.2)
+│   │   ├── installer.py          # InstallOptions, the error types, the InstallEngine protocol, installer_for() (dispatch by family); never runs a subprocess itself (Phase 3.2 → 7.2)
+│   │   ├── native.py             # the install SPINE: StagedInstaller, Stage, Seams, state file + hint semantics, guard, preflight lines, generic clone/compose/build/start/ready stage bodies (Phase 6.2 → 7.1)
+│   │   ├── families/             # one engine per emulator family; stage ORDER is Python here, stage PARAMETERS are catalog data (Phase 7)
+│   │   │   ├── __init__.py       # FAMILIES: the one place a family id becomes a class
+│   │   │   ├── azerothcore.py    # AzerothCoreInstaller — WotLK's stages, names unchanged and pinned by a test
+│   │   │   ├── cmangos.py        # CmangosInstaller — TBC, Vanilla and Tortoise from one class and three catalog entries
+│   │   │   ├── clientdir.py      # pure validation of the user's client folder → preflight Checks (refuse / warn)
+│   │   │   ├── dockerfile.py     # render the per-game Dockerfile.tmpl with the generated-file marker
+│   │   │   ├── extract.py        # client-data extraction: one docker run per tool, client mounted :ro, per-tool evidence; the mmaps stage
+│   │   │   ├── conf.py           # ini-style .conf patching (pure patch() + materialise from the image once)
+│   │   │   └── sqlplan.py        # ordered SQL plan over docker exec -i, per-phase error policy, completion marker, MarkerGate probe/reset
+│   │   ├── preflight.py          # gather() the machine's facts, pure evaluate() against catalog.json's floors → refuse / warn / unchecked / pass (Phase 6.2; client folder + SELinux facts → 7.1/7.3)
+│   │   └── composegen.py         # pure generation of the three compose files + .env keys from templates; tokens and image refs come from the entry (Phase 6.2 → 7.3)
 │   ├── controller_wow_wotlk/     # each server has its own controller package for siloing
 │   │   ├── __init__.py
 │   │   ├── controller.py         # WotlkController(Controller) — supplies SPEC, inherits the rest (Phase 1.4)
@@ -185,7 +203,8 @@ pylauncher/
 │   │   ├── accounts.py           # writes the SRP6 registration row through DockerSql — the one account path that works on all three platforms (Phase 6.5)
 │   │   └── repair.py             # answers docker.ImportProbe: does this install's database look imported? (Phase 6.5 repair / re-import)
 │   ├── controller.py             # base Controller: ContainerSpec + server dir, start guarded by §12 (Phase 1.4)
-│   ├── runner.py                 # subprocess streaming (stream/run) + interact(): answer prompts of an interactive child (shared by all)
+│   ├── install_wiring.py         # installer_for_app(): the one place the AC import probe/reset is wired into an engine; also the CLI harness `python -m yulon.install_wiring` (Phase 7.1)
+│   ├── runner.py                 # subprocess streaming (stream/run) + interact(): a pty with a marker-recognised prompt (used by the script path today; by provisioning's once-only sudo-password step → 7.1)
 │   ├── docker.py                 # shared Docker lifecycle + port-conflict check (shared)
 │   ├── git.py                    # clone/update git sources: RunnerGit (the host's git) or ContainerGit (git in a container, for hosts without one) (Phase 6.2)
 │   ├── platform.py               # OS detection, config_dir, §13 helpers (firewall/IP/portproxy/CGNAT) + 5.1 provisioning: ensure_docker()/ensure_wsl2() → ProvisionReport (Docker Engine via pacman/apt/dnf/zypper, WSL2 + Docker Desktop on Windows, Docker Desktop on macOS; dry_run plans)
@@ -207,11 +226,13 @@ pylauncher/
 │           ├── job.py            # ThreadedJobRunner: one-shot background jobs, so a long service call never runs on the GUI thread
 │           └── prompt.py         # asks the user for a line a subprocess wants (sudo's password): worker → GUI thread → back (Phase 6.1.5)
 ├── catalog/                      # data the app EXECUTES (roadmap 6.0; archive/guides is for humans)
-│   └── installers/               # install-*.sh per game + the helpers they ship (dml-start.sh, wow-manage.sh)
-│       ├── wow-wotlk/            # install-wow-wotlk{,-ubuntu,-fedora}.sh, dml-start.sh, wow-manage.sh
-│       ├── wow-tbc/
-│       ├── wow-vanilla/
-│       └── wow-tortoise/
+│   └── installers/               # templates per game; NO install-*.sh after Phase 7.2 (they are deleted, not archived)
+│       ├── shared/cmangos/       # base/override/build.yml.tmpl for the whole CMaNGOS family, tokenised (Phase 7.3)
+│       ├── steam-deck/           # setup-gaming-mode.sh — the one surviving shell script (Steam Deck launcher), not an install stage
+│       ├── wow-wotlk/native/     # base/override/build.yml.tmpl (Phase 6.2)
+│       ├── wow-tbc/native/       # Dockerfile.tmpl + dockerignore.tmpl
+│       ├── wow-vanilla/native/   # Dockerfile.tmpl + dockerignore.tmpl
+│       └── wow-tortoise/native/  # Dockerfile.tmpl (compiles inside the image) + dockerignore.tmpl
 ├── manifests/                    # module/mod JSON (synced from GitHub)
 │   ├── schema/
 │   │   └── manifest.schema.json  # JSON Schema generated from yulon/manifest.py (Phase 2.1)
@@ -233,7 +254,16 @@ pylauncher/
 │   ├── test_manifest_store.py    # covers yulon/manifest_store.py + the WotLK modules.py binding (Phase 2.3)
 │   ├── test_apply.py             # covers yulon/apply.py (Phase 2.3)
 │   ├── test_catalog.py           # covers yulon/catalog/catalog.py + catalog.json (Phase 3.1)
-│   ├── test_installer.py         # covers runner.interact (real bash) + catalog/installer.py seams (Phase 3.2/3.3)
+│   ├── test_installer.py         # covers catalog/installer.py dispatch + options (the script-path half is deleted in Phase 7.2)
+│   ├── test_spine.py             # covers catalog/native.py: state file, guard, ask forwarding (Phase 7.1)
+│   ├── test_families_azerothcore.py  # the WotLK engine; pins the stage-name tuple (Phase 7.1)
+│   ├── test_families_cmangos.py  # the CMaNGOS engine against a Recorder machine + tmp server dir (Phase 7.3)
+│   ├── test_clientdir.py         # pure client-folder validation rules (Phase 7.3)
+│   ├── test_conf.py              # byte-for-byte ini patching incl. match_commented (Phase 7.3)
+│   ├── test_sqlplan.py           # glob expansion, natural sort == ls -v, gzip, into_each, marker hash (Phase 7.3)
+│   ├── test_extract.py           # per-tool completion records + count evidence, evidence-file mismatch, retry trigger (Phase 7.3)
+│   ├── test_dockerfile.py        # marker rule for the rendered Dockerfile (Phase 7.3)
+│   ├── test_catalog_invariants.py  # every entry: templates exist, ports in one file, BIND_LABEL on every host bind, no game literal in the family module (Phase 7.3)
 │   ├── test_networking.py        # covers yulon/networking.py + platform §13 helpers + docker.published_bindings (Phase 3.4)
 │   ├── conftest.py               # offscreen QApplication fixture (QT_QPA_PLATFORM=offscreen) for the UI tests
 │   ├── test_state.py             # covers yulon/state.py
@@ -262,14 +292,17 @@ pylauncher/
 └── release.yml                   # build matrix → AppImage/dmg/Windows zip
 ```
 
-**Status as of this writing:** only `controller_wow_wotlk/` exists. Catalog entries exist for all
-four: `catalog.json` describes WotLK, TBC, Vanilla and Tortoise (Phase 3.1). What the other three
-v1 servers (§1 goal 5's "four servers") — WoW, WoW TBC, and WoW Tortoise — do **not** have is
-controller packages or manifests; `manifests/` holds `wow-wotlk/` only. That work is Phase 7
-(`roadmap.md` §7.1–7.3). Each will get its own `controller_<acronym>/` package
-(`controller_wow_tbc/`, `controller_wow_vanilla/`, `controller_wow_tortoise/`) following the same
-file layout and underscore naming, in the order that section sets, before any server outside v1's
-four-server scope is considered (see style-guide §6 for acronym conventions).
+**Status as of this writing (2026-08-26):** the tree above shows the Phase 7 target; the
+`families/` package, `install_wiring.py`, `catalog/installers/shared/` and the new tests do not
+exist yet (nor do the client/SELinux facts in `preflight.py` or provisioning's use of
+`runner.interact()`), and the six `install-*.sh` scripts still do. Only `controller_wow_wotlk/` exists.
+Catalog entries exist for all four (Phase 3.1). What the other three v1 servers do **not** have is
+controller packages or manifests; `manifests/` holds `wow-wotlk/` only. Phase 7
+(`pyplan/phase7-decisions.md`) first makes every server *installable* through the one engine,
+Linux first, then gives each its own `controller_<acronym>/` package (`controller_wow_tbc/`,
+`controller_wow_vanilla/`, `controller_wow_tortoise/`) following the same file layout and
+underscore naming — a controller needs a server to control. No server outside v1's four is
+considered before that (see style-guide §6 for acronym conventions).
 
 ---
 
@@ -362,10 +395,10 @@ servers and before the v1 Alpha, each owing its own step and definition of done 
 - **My Party / bot group builder** — was in The Lab; requires in-game/DB work, not script-wrapping.
 - **Item database + in-game mail** — separate later milestone.
 - **Teleport / GM in-game tools** — later.
-- **Full native reimplementation of installers on Linux** — Linux keeps wrapping the existing bash
-  scripts (the native install engine covers macOS/Windows). WotLK's `catalog.json` entry already
-  lists `macos` in `install.platforms` (`roadmap.md` §6.2/6.3); the native engine is written but
-  has not been run against a real daemon on macOS or Windows.
+- ~~**Full native reimplementation of installers on Linux**~~ — **no longer out of scope.**
+  Overturned 2026-08-26 by the owner: Phase 7 puts every server on the one Python engine on every
+  platform, Linux included, and deletes the bash installers (`pyplan/phase7-decisions.md`, "What
+  this overturns, by name"). Kept here struck through so the reversal is visible.
 - **Code signing / notarization** — accept OS gatekeeper warnings for v1; revisit later (see §8).
 
 ---

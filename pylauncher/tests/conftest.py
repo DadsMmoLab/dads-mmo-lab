@@ -7,6 +7,7 @@ from collections.abc import Iterator
 
 import pytest
 
+from yulon import apply as apply_module
 from yulon import platform
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -68,3 +69,18 @@ def _no_modal_dialogs(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in ("warning", "information", "critical", "about"):
         monkeypatch.setattr(QMessageBox, name, lambda *a, **k: QMessageBox.StandardButton.Ok)
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No)
+
+
+@pytest.fixture(autouse=True)
+def _classic_mysql_client_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answer the client probe without touching the seam the tests assert on.
+
+    `apply.mysql_client()` asks the database container whether it has `mysql` or
+    only `mariadb` (mariadb:11 dropped the mysql* symlinks). That probe is a
+    `docker exec` like every other call in these modules, so left real it would
+    appear in argv assertions that are about SQL. Answering None here means the
+    classic names are used, which is what every test written before the probe
+    existed expects; `test_apply.py` drives the resolver itself directly.
+    """
+    monkeypatch.setattr(apply_module, "_probe_client", lambda container, candidates: None)
+    apply_module._client_cache.clear()
