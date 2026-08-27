@@ -2812,11 +2812,91 @@ def test_the_bind_mount_probe_mounts_the_folder_and_tells_no_from_no_answer(
         "/probe",
     ]
     assert not server_dir.exists()
-    monkeypatch.setattr(docker.runner, "run", answer(1, stderr="invalid mount config"))
+
+    def refuse_the_mount(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        # The image is in hand — `docker run` pulls before it mounts — so this
+        # non-zero exit really is Docker answering about the folder. Without
+        # that half the fake, a failure the probe never reached the mount for
+        # would be indistinguishable from this one; see
+        # `test_a_probe_that_never_reached_the_mount_is_unchecked_not_a_refusal`.
+        if argv[1:3] == ["image", "inspect"]:
+            return _completed(stdout="sha256:abc")
+        return _completed(returncode=1, stderr="invalid mount config")
+
+    monkeypatch.setattr(docker.runner, "run", refuse_the_mount)
     assert docker.bind_mount_ok(server_dir, "alpine/git") is False
     # 124 is what `runner.run()` reports for a command that never answered.
     monkeypatch.setattr(docker.runner, "run", answer(124, stderr="timed out after 30.0s"))
     assert docker.bind_mount_ok(server_dir, "alpine/git") is None
+
+
+def test_a_probe_that_never_reached_the_mount_is_unchecked_not_a_refusal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`docker run` also fails BEFORE it mounts anything, and that is not an answer.
+
+    Reported from a Mac (2026-08-26), where every failure mode below was the
+    same one: the app found `docker` inside Docker Desktop's bundle but ran it
+    with launchd's PATH, so the CLI could not exec `docker-credential-desktop`,
+    so the probe's first-ever pull of `alpine/git` died at authentication:
+
+        docker: error getting credentials - err: exec:
+        "docker-credential-desktop": executable file not found in $PATH
+
+    A non-zero exit was read as "Docker says it cannot see that folder", and
+    preflight refused the install with "a container could not see
+    /Users/js/wow-wotlk" — a folder that WAS in Docker Desktop's file-sharing
+    list, on a machine where the same `docker run` worked from Terminal. The
+    user re-added the folder, tried others, and verified read/write inside a
+    container before sending the log that named the real error.
+
+    The exit code cannot tell the two apart — a denied mount and a failed pull
+    both exit non-zero — so the daemon is asked a second question: is the image
+    here? `docker run` pulls before it mounts, so an image that never arrived
+    proves the mount was never attempted. Present means the failure really was
+    the mount, and the refusal stands.
+    """
+    (tmp_path / "already-here.txt").write_text("x", encoding="utf-8")
+    server_dir = tmp_path / "wow"
+    asked: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        asked.append(argv)
+        if argv[1:3] == ["image", "inspect"]:
+            return _completed(returncode=1, stderr="Error: No such image: alpine/git")
+        return _completed(
+            returncode=125,
+            stderr=(
+                "Unable to find image 'alpine/git' locally\n"
+                "docker: error getting credentials - err: exec: "
+                '"docker-credential-desktop": executable file not found in $PATH'
+            ),
+        )
+
+    monkeypatch.setattr(docker.runner, "run", run)
+    assert docker.bind_mount_ok(server_dir, "alpine/git") is None
+    assert [a[1:3] for a in asked] == [["run", "--rm"], ["image", "inspect"]]
+
+
+def test_a_mount_the_daemon_refused_with_the_image_in_hand_is_still_a_refusal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The case the check exists for must survive the fix above.
+
+    Docker Desktop answers an unshared path with a non-zero exit and a "mounts
+    denied" line. The image is local by then — `docker run` pulls first — so the
+    second question separates it from the pull failure without either of them
+    having to match on error wording.
+    """
+    (tmp_path / "already-here.txt").write_text("x", encoding="utf-8")
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if argv[1:3] == ["image", "inspect"]:
+            return _completed(stdout="sha256:abc")
+        return _completed(returncode=125, stderr="Mounts denied: the path is not shared from OS X")
+
+    monkeypatch.setattr(docker.runner, "run", run)
+    assert docker.bind_mount_ok(tmp_path / "wow", "alpine/git") is False
 
 
 def test_the_bind_mount_probe_catches_the_silently_empty_mount_it_exists_for(

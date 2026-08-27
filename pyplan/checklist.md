@@ -655,6 +655,57 @@ not answering, that setup can take a few minutes with no output. Still unverifie
 run-sheet's remaining steps, and whether `xcode-select -p` on Baerthe's box makes the clone go through
 the container git. Ask for `~/Library/Application Support/yulon/yulon.log` on the next run.
 
+### The second macOS run: finding the CLI was only half of it (2026-08-26)
+
+A tester on Discord ran the release on a Mac and preflight refused the install with
+
+> sharing the folder with Docker: a container could not see /Users/j/wow-wotlk, so the server
+> files would be invisible to it
+
+He added the folder to Docker Desktop's file sharing, verified it, added its parent too, created
+and read a file inside a container against that exact path, and tried several other folders. All
+of it worked; the app kept refusing. `~/Library/Application Support/yulon/yulon.log` named the
+real failure in one line:
+
+```
+INFO  [yulon.platform] docker is not on this process's PATH; found it at
+      /Applications/Docker.app/Contents/Resources/bin/docker
+WARNING [yulon.docker] the bind-mount probe of /Users/js/Documents failed: Unable to find image
+      'alpine/git@sha256:c028...' locally
+docker: error getting credentials - err: exec: "docker-credential-desktop": executable file not
+      found in $PATH
+```
+
+**Root cause: the 2026-08-25 fix above resolved argv[0] and stopped there.** `docker` is not one
+program. It execs `docker-credential-<store>` and its `cli-plugins` **by name, through the PATH of
+the process that started it** — and that PATH is launchd's `/usr/bin:/bin:/usr/sbin:/sbin`, in
+which `/usr/local/bin/docker-credential-desktop` is exactly as invisible as the `docker` symlink
+beside it. So every command that had to reach a registry died at authentication. Confirmed by the
+tester: launching the same `.app` as `PATH="/usr/local/bin:…" open /Applications/Yulon.app` got
+past preflight and into the install.
+
+`docker_program()` now adopts the directory it resolved the CLI from into `os.environ["PATH"]`
+(`_adopt_cli_directory()`), which fixes every docker invocation at once rather than threading an
+environment through the nine call sites that spell one. Windows gets it too, for the same reason:
+`docker-credential-desktop.exe` sits next to the `docker.exe` the registry lookup found.
+
+**Second defect, found while reading that log: `bind_mount_ok()` reported a failed pull as an
+unshared folder.** Any non-zero exit from the probe was `False`, and `False` is a hard refusal. The
+exit code cannot separate the two — a denied mount and a failed pull are both non-zero — and
+matching on error wording would be a list of every message Docker has ever printed. It now asks the
+daemon a second question on the failure path: `docker run` pulls before it mounts, so an image that
+is not on the daemon proves the mount was never reached, and that is `None` (*unchecked*), never a
+refusal. With the image in hand the refusal stands, which is the case the check exists for.
+
+**Still open, from the same tester, once past preflight:** the containerized clone failed with
+`Cloning into '.'... /git/.git: No such file or directory`, while the identical `docker run` he
+typed by hand succeeded. The one difference we know of is `ContainerGit._user_args()`, which passes
+`--user <uid>:<gid>` whenever `os.getuid` exists — and its docstring's premise ("on Docker Desktop
+… `os.getuid` does not exist, which is the same condition") is simply false on macOS, so Darwin
+gets the Linux branch the author meant to exclude. Not yet fixed: nobody has confirmed that the
+flag is what breaks it, and the isolating run (his working command plus `--user $(id -u):$(id -g)`)
+is what would.
+
 ### Two things the first button-driven install found (2026-08-24)
 
 **1. A first-run failure whose diagnosis did not survive being tested, and a message that sends

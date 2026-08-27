@@ -2398,10 +2398,12 @@ def bind_mount_ok(
     pass and never a refusal — a caller that read it as False would refuse an
     install that would have worked.
 
-    Unverified on macOS, and this is the check most in need of the first gate:
-    that Docker Desktop mounts an unshared folder as empty rather than failing
-    is inherited from the Rust launcher, and what a Mac actually does with an
-    unshared path is exactly what nobody here can run.
+    Still unverified on macOS in the way that matters: that Docker Desktop
+    mounts an unshared folder as empty rather than failing is inherited from
+    the Rust launcher, and what a Mac actually does with an unshared path is
+    exactly what nobody here can run. What a Mac HAS now produced (2026-08-26)
+    is the other half — this function refusing a folder that was shared —
+    which is what the second question below exists for.
     """
     mount = _first_populated_ancestor(server_dir)
     if mount is None:
@@ -2438,7 +2440,29 @@ def bind_mount_ok(
         logger.warning(f"the bind-mount probe of {mount} did not answer within {timeout:.0f}s")
         return None
     if proc.returncode != 0:
+        # A non-zero exit is Docker answering "no" only if Docker got as far as
+        # the mount. It also fails BEFORE that — and on the first install of a
+        # first run, the way it fails there is the probe's own image pull. A Mac
+        # (2026-08-26) ran the CLI out of Docker Desktop's bundle with launchd's
+        # PATH, so `docker` could not exec `docker-credential-desktop`, so every
+        # pull died at authentication; this line read that as an unshared folder
+        # and preflight refused an install whose folder WAS shared, on a machine
+        # where the same command worked from Terminal.
+        #
+        # The exit code cannot separate them: a denied mount and a failed pull
+        # are both non-zero, and matching on error wording would be a list of
+        # every message Docker has ever printed. So the daemon is asked a second
+        # question instead, and one it answers unambiguously. `docker run` pulls
+        # before it mounts, so an image that is not here proves the mount was
+        # never reached, which is `None` — preflight's *unchecked*, never a
+        # refusal. An image in hand means the failure really was the mount.
         logger.warning(f"the bind-mount probe of {mount} failed: {proc.stderr.strip()}")
+        if images_built((image,)) is not True:
+            logger.warning(
+                f"{image} could not be confirmed on this daemon, so that failure was the "
+                "probe's own pull rather than an answer about the folder"
+            )
+            return None
         return False
     if any(line.strip() for line in proc.stdout.splitlines()):
         return True

@@ -944,9 +944,57 @@ def docker_program() -> str | None:
         return _resolved_docker_cli
     for candidate in docker_programs():
         if _which(candidate) is not None:
+            _adopt_cli_directory(candidate)
             _resolved_docker_cli = candidate
             return candidate
     return None
+
+
+def _adopt_cli_directory(program: str) -> None:
+    """Put the directory an off-PATH `docker` was found in onto this process's PATH.
+
+    Naming the binary is only half of the fix, and the missing half cost a Mac
+    tester an evening (2026-08-26). `docker` is not one program: it resolves
+    `docker-credential-<store>` and its `cli-plugins` **by name, through the
+    PATH of the process that started it**. A `.app` opened from Finder is a
+    child of launchd, whose PATH is `/usr/bin:/bin:/usr/sbin:/sbin`, so
+    `/usr/local/bin/docker-credential-desktop` is exactly as invisible as the
+    `docker` symlink beside it. Every command that touched a registry died:
+
+        docker: error getting credentials - err: exec:
+        "docker-credential-desktop": executable file not found in $PATH
+
+    and because the first such command is the bind-mount probe's image pull,
+    preflight reported it as "a container could not see <your folder>" and
+    refused an install on a machine where the identical command worked in
+    Terminal. Prepending the directory here fixes every docker invocation at
+    once — `os.environ` is what `subprocess` hands a child — instead of
+    threading an environment through the nine call sites that spell a docker
+    command, one of which a tenth would forget.
+
+    Prepended, not appended, for the same reason the candidate was preferred
+    over the bare name: this directory is the one Docker Desktop actually
+    installed. The rest of the inherited PATH is kept, because git, the shell
+    and everything else a child may want still live on it.
+
+    A bare `docker` has no directory to adopt (`dirname` is empty) and needs
+    none — it resolved on the PATH we already have. Windows gets the same
+    treatment for the same reason: `docker-credential-desktop.exe` sits next to
+    the `docker.exe` the registry lookup found, and neither is on the PATH the
+    running process inherited.
+    """
+    parent = Path(program).parent
+    if parent == Path("."):
+        # A bare `docker`, or anything else with no directory part. `Path` is
+        # the house rule for paths (style-guide §2) and `os.pathsep` is the
+        # exception it cannot cover: PATH is a string of them, not one path.
+        return
+    directory = str(parent)
+    entries = [entry for entry in os.environ.get("PATH", "").split(os.pathsep) if entry]
+    if directory in entries:
+        return
+    os.environ["PATH"] = os.pathsep.join([directory, *entries])
+    logger.info(f"added {directory} to this process's PATH so docker's own helpers resolve too")
 
 
 # ------------------------------------------------------------ WSL-resident servers
