@@ -1365,8 +1365,20 @@ install_server() {
             sudo rm -rf "$SERVER_DIR"
             print_success "Old install removed"
         else
-            print_info "Keeping existing install — exiting."
-            exit 0
+            # NOT `exit 0`. Nothing was installed, and a zero exit is read
+            # as SUCCESS by the caller: `catalog_view.py` pins a compose
+            # project name into this folder and grows a tab for a server
+            # that was never built - and `docker.py` records that such a pin
+            # is inherited by any COPY of the folder, so Stop in the copy can
+            # stop the original's server. Reproduced on yulon-arch
+            # 2026-08-28: a killed build was retried into the same folder and
+            # the run reported success having done nothing.
+            #
+            # Declining is a legitimate choice; calling it an install is not.
+            print_error "Nothing was installed."
+            print_info "$SERVER_DIR already holds files, and no completed build was found in it."
+            print_info "Choose an empty folder, or remove this one, and run the install again."
+            exit 1
         fi
     fi
 

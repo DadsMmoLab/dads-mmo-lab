@@ -1625,6 +1625,69 @@ def _shell_function_bodies(lines: list[str]) -> dict[str, range]:
     return bodies
 
 
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_declining_to_start_fresh_is_not_reported_as_a_successful_install(
+    script_name: str,
+) -> None:
+    """Answering "n" to "Remove it and start fresh?" must not exit 0.
+
+    A zero exit is read as SUCCESS by the caller. `catalog_view.py` then pins a
+    compose project name into a folder holding no server and grows a tab for
+    one that was never built - and `docker.py` records that such a pin is
+    inherited by any COPY of the folder, so Stop in the copy can stop the
+    original's server. Reproduced on yulon-arch (2026-08-28): a build killed
+    mid-compile was retried into the same folder, and the run logged "install
+    finished" having done nothing at all.
+
+    Structural rather than behavioural, deliberately and with the cost stated:
+    the branch sits inside `install_server()` after `install_docker`/
+    `install_git`, so reaching it for real means running an installer. What is
+    asserted instead is the shape that carries the bug - which exit follows the
+    decline - with comments stripped first, because a test that a comment can
+    satisfy is how 80fb68a9 earned a green run for a fix it had not made.
+    """
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    lines = script.read_text(encoding="utf-8").splitlines()
+    body = _shell_function_bodies(lines).get("install_server")
+    assert body is not None, f"{script_name}: no install_server() to read"
+
+    code = [
+        (number, lines[number - 1].strip())
+        for number in body
+        if lines[number - 1].strip() and not lines[number - 1].strip().startswith("#")
+    ]
+    asked = [
+        i for i, (_, text) in enumerate(code) if 'ask_yes_no "Remove it and start fresh?"' in text
+    ]
+    assert len(asked) == 1, f"{script_name}: expected one start-fresh prompt, found {len(asked)}"
+
+    after = code[asked[0] :]
+    else_at = next(i for i, (_, text) in enumerate(after) if text == "else")
+    exit_number, exit_text = next(
+        (number, text) for number, text in after[else_at:] if text.startswith("exit ")
+    )
+
+    assert exit_text != "exit 0", (
+        f"{script_name}:{exit_number}: declining exits 0, so a caller records an install "
+        f"that never happened"
+    )
+    assert exit_text == "exit 1", f"{script_name}:{exit_number}: unexpected exit {exit_text!r}"
+
+    # Reported as an error, not as information: the app shows the script's last
+    # words verbatim when it exits non-zero (`installer.py`'s CalledProcessError
+    # branch), so this is the sentence the user is left holding.
+    said = [text for _, text in after[else_at:]]
+    assert any(text.startswith("print_error ") for text in said), (
+        f"{script_name}: the decline branch never calls print_error, so a failure "
+        f"is announced in the tone of a status update"
+    )
+
+
 def _catalog_installers() -> list[Path]:
     from yulon import resources
 
