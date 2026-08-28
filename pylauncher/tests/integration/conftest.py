@@ -4,8 +4,17 @@ Two layers of opt-in, both deliberate:
 
 - **Docker reachable** — every test here is skipped (not failed) when
   `docker info` cannot reach a daemon or the `docker` binary is missing. This
-  is what keeps the default `pytest` run green in CI without Docker
-  (roadmap 1.5 definition of done).
+  is what keeps a bare `pytest` green on a developer machine with no daemon
+  running (roadmap 1.5 definition of done).
+
+  It is NOT what keeps this suite out of CI's fast job, and for a long time
+  nothing did. `ubuntu-latest` ships a *running* Docker daemon, so this gate
+  waves the whole file through: measured on run 33134621630 (2026-08-28), a
+  plain `pytest -q` on the runner took 41m36s, of which 22 seconds was the
+  other 959 tests. `.github/workflows/ci.yml` now selects on the `integration`
+  marker instead — `-m "not integration"` for the fast job, `-m integration`
+  for a job of its own — so a reachable daemon can never again quietly add
+  forty minutes to every push.
 - **A throwaway compose project** (`throwaway_project`) — three tiny `busybox`
   containers shaped like an install (db with a HEALTHCHECK, auth + world that
   print the same ready markers `yulon.docker.wait_ready()` looks for, all
