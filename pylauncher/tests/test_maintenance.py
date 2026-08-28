@@ -292,6 +292,63 @@ def test_verify_dump_accepts_a_mariadb_dump_that_opens_with_the_sandbox_directiv
     assert verify_dump(path, "acore_world") == path.stat().st_size
 
 
+def test_verify_dump_refuses_a_file_that_merely_contains_dump_shaped_text(
+    tmp_path: Path,
+) -> None:
+    r"""A banner buried in row data is the content's, not the file's.
+
+    Accepting the MariaDB sandbox directive meant matching the banner at any
+    line start rather than at byte 0 — and left there, that also accepts a file
+    that is not a dump at all. A table of support tickets, GM notes or chat logs
+    whose free-text column holds pasted dump output near the top satisfies the
+    banner, the `USE` line and the trailer, all three, and `verify_dump()` is
+    what gates restore.
+
+    Found by an adversarial review (2026-08-28) with the working bypass below,
+    against an implementation whose own tests were green: the companion test
+    only covered a file with no banner ANYWHERE, so a banner in the wrong place
+    went unexamined.
+    """
+    path = tmp_path / "20260101_000000_acore_world.sql"
+    path.write_bytes(
+        b"-- Some other tool export, not mysqldump at all\n"
+        b"INSERT INTO support_tickets VALUES (1, 42, 'Customer pasted:\n"
+        b"-- MySQL dump 10.13  Distrib 10.6.28-MariaDB, for Linux (x86_64)\n\n"
+        b"USE `acore_world`;\n');\n"
+        b"-- filler " + b"x" * 200 + b"\n"
+        b"-- Dump completed on 2026-01-01 12:00:00\n"
+    )
+
+    # Both spellings: the database-identity check is not what stops this either.
+    with pytest.raises(MaintenanceError, match="does not start like a mysqldump"):
+        verify_dump(path)
+    with pytest.raises(MaintenanceError, match="does not start like a mysqldump"):
+        verify_dump(path, "acore_world")
+
+
+def test_verify_dump_accepts_a_banner_behind_comments_but_not_behind_sql(
+    tmp_path: Path,
+) -> None:
+    r"""What may precede the banner is exactly what a dump itself writes there.
+
+    Executable comments (`/*M!...*/`, `/*!...*/`) and `--` lines are a dump's
+    own preamble and must not disqualify it. One line of SQL in front of the
+    banner means the file started as something else.
+    """
+    commented = tmp_path / "20260101_000000_acore_auth.sql"
+    commented.write_bytes(
+        b"/*!999999 an executable comment */\n"
+        b"-- a plain comment line\n"
+        b"\n" + good_dump("acore_auth")
+    )
+    assert verify_dump(commented, "acore_auth") == commented.stat().st_size
+
+    sql_first = tmp_path / "20260101_000000_acore_world.sql"
+    sql_first.write_bytes(b"SET foreign_key_checks=0;\n" + good_dump("acore_world"))
+    with pytest.raises(MaintenanceError, match="does not start like a mysqldump"):
+        verify_dump(sql_first, "acore_world")
+
+
 def test_verify_dump_still_refuses_a_file_with_no_banner_anywhere(tmp_path: Path) -> None:
     """Matching the banner at any line start must not degrade into matching nothing.
 

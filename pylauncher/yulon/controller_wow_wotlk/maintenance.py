@@ -584,7 +584,7 @@ def verify_dump(path: Path, database: str | None = None) -> int:
         raise MaintenanceError(f"could not read {path}: {exc}") from exc
     if size == 0:
         raise MaintenanceError(f"{path.name} is empty, so nothing was dumped")
-    if not _DUMP_HEADER.search(head):
+    if not _banner_is_the_files_own(head):
         raise MaintenanceError(
             f"{path.name} does not start like a mysqldump, so it is not a database backup"
         )
@@ -598,6 +598,31 @@ def verify_dump(path: Path, database: str | None = None) -> int:
             f"{path.name} does not name {database}; it is a dump of something else"
         )
     return size
+
+
+def _banner_is_the_files_own(head: bytes) -> bool:
+    """Is the dump banner this file's OWN opening, or just text inside it?
+
+    Matching the banner at any line start is what lets a MariaDB dump through
+    (10.6+ writes a sandbox directive ahead of it). Left at that, it also lets
+    through a file that merely CONTAINS dump-shaped text - a table of support
+    tickets or chat logs whose free-text column holds pasted dump output near
+    the top would satisfy the banner, the `USE` line and the trailer, and
+    `verify_dump()` gates restore. Found by an adversarial review, 2026-08-28,
+    with a working bypass.
+
+    So the banner may be preceded only by what a dump itself writes there:
+    executable comments (`/*M!...*/`, `/*!...*/`) and `--` comment lines, blank
+    or otherwise. One line of SQL or free text in front of it means the banner
+    belongs to the content, not to the file.
+    """
+    match = _DUMP_HEADER.search(head)
+    if match is None:
+        return False
+    return all(
+        not line.strip() or line.lstrip().startswith((b"--", b"/*"))
+        for line in head[: match.start()].splitlines()
+    )
 
 
 def _read_edge(path: Path, offset: int) -> bytes:
