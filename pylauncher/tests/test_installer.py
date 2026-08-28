@@ -815,6 +815,138 @@ def test_the_image_name_is_read_from_the_compose_file(tmp_path: Path, script_nam
     ), f"{script_name}: did not inspect the image the compose file named: {asked}"
 
 
+_FOREIGN_PROBE = """
+set -u
+print_error() { echo "ERROR $*"; }
+print_info() { echo "INFO $*"; }
+docker() { echo "$*" >>"$CALLS"; %(stub)s; }
+%(body)s
+refuse_foreign_containers "$1"; echo "STATUS=$?"
+"""
+
+
+def _refuse_foreign_containers(
+    script: Path, target: Path, calls: Path, *, stub: str
+) -> tuple[int, str, list[str]]:
+    """Run the installer's own `refuse_foreign_containers` against a stubbed docker."""
+    body = script.read_text(encoding="utf-8")
+    start = body.index("refuse_foreign_containers() {")
+    end = body.index("\n}", start) + 2
+    calls.write_text("", encoding="utf-8")
+    probe = _FOREIGN_PROBE % {"stub": stub, "body": body[start:end]}
+    out = subprocess.run(
+        ["bash", "-c", probe, "probe", str(target)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={"PATH": os.environ.get("PATH", ""), "CALLS": str(calls)},
+    )
+    assert "command not found" not in out.stderr, (
+        f"{script.name}: the probe is missing a function the shipped code calls:"
+        f"\n{out.stderr.strip()}"
+    )
+    status = next(
+        (
+            int(line.removeprefix("STATUS="))
+            for line in out.stdout.splitlines()
+            if line.startswith("STATUS=")
+        ),
+        out.returncode,  # `exit 1` inside the function ends the probe before STATUS prints
+    )
+    asked = [line for line in calls.read_text(encoding="utf-8").splitlines() if line]
+    return status, out.stdout, asked
+
+
+# What `docker compose config` prints for a stack that pins two names, and the
+# label answers `docker container inspect` gives for each ownership case.
+_CONFIG = (
+    'echo "services:"; echo "  db:"; echo "    container_name: ac-database"; '
+    'echo "  world:"; echo "    container_name: ac-worldserver"'
+)
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_a_name_held_by_another_install_is_refused_and_the_other_install_is_named(
+    tmp_path: Path, script_name: str
+) -> None:
+    """The daemon's error names a container; the user needs the other server's folder.
+
+    Two installs of the same game cannot coexist while `container_name:` pins
+    the names host-wide, and the second one only finds out after a 2-4 hour
+    build, from "Conflict. The container name "/ac-database" is already in
+    use". Hit on yulon-ubuntu and yulon-arch the same day (2026-08-28), both
+    from a stopped stack left by an earlier install. Refuse BEFORE the build,
+    and say whose it is.
+    """
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    target = tmp_path / "new-install"
+    target.mkdir()
+    stub = (
+        f'case "$*" in "compose config") {_CONFIG};; '
+        '"container inspect ac-database") return 0;; '
+        '"container inspect ac-database --format"*) echo /home/pk/other-install;; '
+        '"container inspect ac-worldserver") return 1;; '
+        "esac"
+    )
+
+    status, said, asked = _refuse_foreign_containers(script, target, tmp_path / "calls", stub=stub)
+
+    assert status == 1, f"{script_name}: a foreign container was not refused:\n{said}"
+    assert "ERROR" in said and "ac-database" in said
+    assert "/home/pk/other-install" in said, f"{script_name}: did not name the owner:\n{said}"
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_this_installs_own_containers_do_not_refuse_it(tmp_path: Path, script_name: str) -> None:
+    """Ownership is the compose working-dir label, so the same folder is never "foreign"."""
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    target = tmp_path / "mine"
+    target.mkdir()
+    here = str(target.resolve())
+    stub = (
+        f'case "$*" in "compose config") {_CONFIG};; '
+        '"container inspect "*" --format"*) echo ' + here + ";; "
+        '"container inspect "*) return 0;; '
+        "esac"
+    )
+
+    status, said, _ = _refuse_foreign_containers(script, target, tmp_path / "calls", stub=stub)
+
+    assert status == 0, f"{script_name}: refused its own containers:\n{said}"
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_names_nobody_holds_pass_straight_through(tmp_path: Path, script_name: str) -> None:
+    """The ordinary first install: names declared, none exist yet."""
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    target = tmp_path / "fresh"
+    target.mkdir()
+    stub = f'case "$*" in "compose config") {_CONFIG};; "container inspect "*) return 1;; esac'
+
+    status, said, asked = _refuse_foreign_containers(script, target, tmp_path / "calls", stub=stub)
+
+    assert status == 0, f"{script_name}: a clean host was refused:\n{said}"
+    assert any(a.startswith("container inspect ac-database") for a in asked)
+
+
 _SELINUX_PROBE = """
 set -u
 print_info() { :; }

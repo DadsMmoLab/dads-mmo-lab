@@ -250,6 +250,47 @@ compiled_images_present() {
     return 1
 }
 
+# Refuse to build into a folder whose container names another install holds.
+#
+# The compose file pins `container_name:` for every service, and Docker keeps
+# those names global to the host - so a second install of the same game, even
+# into a brand-new empty folder, fails at `docker compose up` with
+#   Conflict. The container name "/ac-database" is already in use
+# from the daemon, after the 2-4 hour build. Hit on yulon-ubuntu AND yulon-arch
+# on the same day (2026-08-28), both times from a stopped, not removed, stack
+# left by an earlier install elsewhere on the box. Naming the other install is
+# the whole value here; the daemon's message names a container.
+#
+# "Another install" is decided by the container's own compose label, NOT by a
+# guess at the project name: `com.docker.compose.project.working_dir` is
+# written by compose on every container it creates, and comparing it with
+# THIS folder is the only test that is right for both an install that pinned
+# COMPOSE_PROJECT_NAME and one that did not. A name with no such label was not
+# created by compose at all, and is reported the same way.
+refuse_foreign_containers() {
+    local dir="$1" names name owner
+    names=$(cd "$dir" 2>/dev/null && docker compose config 2>/dev/null         | sed -n 's/^[[:space:]]*container_name:[[:space:]]*//p')
+    [ -n "$names" ] || return 0
+    local here
+    here=$(cd "$dir" 2>/dev/null && pwd -P)
+    for name in $names; do
+        docker container inspect "$name" >/dev/null 2>&1 || continue
+        owner=$(docker container inspect "$name"             --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' 2>/dev/null)
+        if [ "$owner" != "$here" ]; then
+            print_error "A container named '$name' already exists, and it is not this install's."
+            if [ -n "$owner" ]; then
+                print_info "It belongs to the server in: $owner"
+                print_info "Stop and remove that server first (its data volumes are kept), or install this one"
+                print_info "on a machine that is not already running it. Nothing has been changed."
+            else
+                print_info "It was not created by this installer. Remove it, then run the install again."
+            fi
+            exit 1
+        fi
+    done
+}
+
+
 
 
 # Let containers write to the bind-mounted server folder on SELinux systems.
@@ -1509,6 +1550,7 @@ OVERRIDE
 
     selinux_label_for_containers "$SERVER_DIR"
 
+    refuse_foreign_containers "$SERVER_DIR"
     cd "$SERVER_DIR"
     docker compose up -d --build 2>&1 | tee ~/playerbots-build.log
 
