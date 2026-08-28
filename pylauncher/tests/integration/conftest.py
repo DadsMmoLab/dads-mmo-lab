@@ -144,10 +144,45 @@ services:
 # The same project with a database that can never report healthy: the
 # fail-closed case. A worldserver started against a dead database is the
 # outcome the health gate exists to prevent.
-_NEVER_HEALTHY_YML = _COMPOSE_YML.replace(
-    'command: ["sh", "-c", "sleep 2 && touch /tmp/ready && sleep 600"]',
-    'command: ["sh", "-c", "sleep 600"]',  # /tmp/ready is never created
+# /tmp/ready is never created. Same trap-and-wait shape as the healthy one, so
+# the teardown is still instant. Built by replacing the healthy command and
+# CHECKED to have changed something: this used to be a bare `.replace()`, and
+# when the healthy command was rewritten to trap SIGTERM the replace silently
+# matched nothing, the "never healthy" database came up healthy, and CI failed
+# with "DID NOT RAISE DockerCommandError" (run 33201823461, 2026-08-28).
+_HEALTHY_DB_COMMAND = (
+    "command: ["
+    + chr(34)
+    + "sh"
+    + chr(34)
+    + ", "
+    + chr(34)
+    + "-c"
+    + chr(34)
+    + ", "
+    + chr(34)
+    + "trap 'exit 0' TERM; sleep 2 && touch /tmp/ready; sleep 600 & wait"
+    + chr(34)
+    + "]"
 )
+_NEVER_HEALTHY_DB_COMMAND = (
+    "command: ["
+    + chr(34)
+    + "sh"
+    + chr(34)
+    + ", "
+    + chr(34)
+    + "-c"
+    + chr(34)
+    + ", "
+    + chr(34)
+    + "trap 'exit 0' TERM; sleep 600 & wait"
+    + chr(34)
+    + "]"
+)
+assert _HEALTHY_DB_COMMAND in _COMPOSE_YML, "the healthy db command moved; update both constants"
+_NEVER_HEALTHY_YML = _COMPOSE_YML.replace(_HEALTHY_DB_COMMAND, _NEVER_HEALTHY_DB_COMMAND)
+assert _NEVER_HEALTHY_YML != _COMPOSE_YML
 
 
 def docker_available() -> bool:
