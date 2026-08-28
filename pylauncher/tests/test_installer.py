@@ -1084,12 +1084,12 @@ def test_the_generated_override_labels_every_bind_mount_it_shares(script_name: s
     for service in ("ac-worldserver", "ac-authserver", "ac-db-import"):
         assert service in services, f"{script_name}: {service} missing from the override"
         mounts = services[service]
-        assert (
-            "${DOCKER_VOL_ETC:-./env/dist/etc}:/azerothcore/env/dist/etc:z" in mounts
-        ), f"{script_name}: {service} has no labelled etc mount, only {mounts}"
-        assert (
-            "${DOCKER_VOL_LOGS:-./env/dist/logs}:/azerothcore/env/dist/logs:z" in mounts
-        ), f"{script_name}: {service} has no labelled logs mount, only {mounts}"
+        assert "${DOCKER_VOL_ETC:-./env/dist/etc}:/azerothcore/env/dist/etc:z" in mounts, (
+            f"{script_name}: {service} has no labelled etc mount, only {mounts}"
+        )
+        assert "${DOCKER_VOL_LOGS:-./env/dist/logs}:/azerothcore/env/dist/logs:z" in mounts, (
+            f"{script_name}: {service} has no labelled logs mount, only {mounts}"
+        )
     # Spelled with the base file's own default so Compose merges by target path
     # rather than adding a second mount of the same directory.
     assert all(
@@ -1122,9 +1122,9 @@ def test_the_relabel_also_runs_on_the_branch_that_reuses_an_existing_build(
     text = script.read_text(encoding="utf-8")
     reuse = text[text.index("Skipping compile") : text.index("Skipping compile") + 1200]
     reuse = reuse[: reuse.index("return 0")]
-    assert (
-        'selinux_label_for_containers "$SERVER_DIR"' in reuse
-    ), f"{script_name}: the reuse branch brings the stack up without relabelling"
+    assert 'selinux_label_for_containers "$SERVER_DIR"' in reuse, (
+        f"{script_name}: the reuse branch brings the stack up without relabelling"
+    )
     assert reuse.index('selinux_label_for_containers "$SERVER_DIR"') < reuse.index(
         "docker compose up"
     ), f"{script_name}: the relabel must run BEFORE the stack comes up"
@@ -1435,3 +1435,109 @@ def test_no_installer_escalates_privileges_without_asking() -> None:
     # Forbidden outright, not merely gated: membership already is root, so the
     # rule buys nothing and is pure attack surface.
     assert not sudoers, f"a passwordless sudo rule is written at: {sudoers}"
+
+
+def test_every_installer_asks_where_to_install() -> None:
+    """The folder the user picked only reaches a script that asks for it.
+
+    `InstallOptions.server_dir` has exactly one channel into a script: the
+    `Install path:` rule in `PROMPT_RULES` types it in when the script asks.
+    `script_env()` does not export it, and `run()` passes no arguments — so a
+    script that never prints that prompt silently installs into its own
+    hardcoded `$HOME/<default>` and the picker is decoration.
+
+    Reported from a Steam Deck (2026-08-28): a tester made
+    `~/wow-server-tortoise`, chose it, and watched Tortoise install into
+    `~/tortoise-wow-server`. TBC and Vanilla had the same hole; only the WotLK
+    scripts had ever grown `choose_install_dir()`. Worse than a wrong folder:
+    `catalog_view._on_run_finished()` then looks for a compose file in the
+    folder the user chose, finds none, and calls a good install failed.
+
+    A grep rather than a run, for the reason the docker-group audit above gives:
+    these scripts install OS packages and cannot be executed in a test.
+    """
+    from yulon import resources
+
+    rule = next(r for r in PROMPT_RULES if "Install path" in r.pattern)
+    prompt = re.compile(rule.pattern, re.IGNORECASE)
+
+    scripts = sorted(resources.installers_dir().rglob("install-*.sh"))
+    assert len(scripts) >= 5, f"expected the catalog's installers, found {scripts}"
+
+    silent = [
+        script.name
+        for script in scripts
+        if not any(prompt.search(line) for line in script.read_text(encoding="utf-8").splitlines())
+    ]
+    assert not silent, (
+        f"these installers never print the prompt {rule.pattern!r}, so the folder "
+        f"the user picked is discarded: {silent}"
+    )
+
+
+def test_every_installer_calls_choose_install_dir_before_it_uses_the_folder() -> None:
+    """Printing the prompt is half of it; the answer has to reach the install.
+
+    The test above is satisfied by a script that defines `choose_install_dir()`
+    and never runs it — the prompt would be in the file, the app would never see
+    it, and `SERVER_DIR` would keep its hardcoded default. So this asserts the
+    call happens in the MAIN block, and that it comes before every other
+    top-level call whose function reads `$SERVER_DIR`. Order is the half with
+    teeth: placed after `show_summary` the summary names the wrong folder, and
+    placed after the existing-install check the script offers to `rm -rf` it.
+
+    Only top-level call order can be checked this way — a `$SERVER_DIR` inside a
+    function definition runs when the function is CALLED, not where it is
+    written, which is what made the first version of this test inert (its
+    ordering branch passed a script whose call had been moved to the end).
+    """
+    from yulon import resources
+
+    scripts = sorted(resources.installers_dir().rglob("install-*.sh"))
+    assert len(scripts) >= 5, f"expected the catalog's installers, found {scripts}"
+
+    problems: list[str] = []
+    for script in scripts:
+        lines = script.read_text(encoding="utf-8").splitlines()
+        bodies = _shell_function_bodies(lines)
+        # The MAIN block: bare top-level calls, in the order bash runs them.
+        in_a_body = {n for span in bodies.values() for n in span}
+        calls = [
+            (n, line.strip())
+            for n, line in enumerate(lines, 1)
+            if re.fullmatch(r"[a-z_][a-z0-9_]*", line.strip()) and n not in in_a_body
+        ]
+        chosen = next((n for n, name in calls if name == "choose_install_dir"), None)
+        if chosen is None:
+            problems.append(f"{script.name}: never calls choose_install_dir")
+            continue
+        for number, name in calls:
+            if number >= chosen or name not in bodies:
+                continue
+            if any("$SERVER_DIR" in lines[n - 1] for n in bodies[name]):
+                problems.append(
+                    f"{script.name}: {name}() uses $SERVER_DIR at line {number}, "
+                    f"before it is chosen at line {chosen}"
+                )
+
+    assert not problems, f"the chosen folder is not in effect where it is used: {problems}"
+
+
+def _shell_function_bodies(lines: list[str]) -> dict[str, range]:
+    """`name -> the 1-based line numbers of its body`, for `name() {` at column 0.
+
+    Good enough for these scripts and no more: they are written in one style,
+    every definition opens with `name() {` unindented and closes with a `}`
+    unindented. A parser would be the wrong trade for a shape that has held
+    across six installers.
+    """
+    bodies: dict[str, range] = {}
+    opened: tuple[str, int] | None = None
+    for number, line in enumerate(lines, 1):
+        match = re.fullmatch(r"([a-z_][a-z0-9_]*)\(\) \{", line)
+        if match and opened is None:
+            opened = (match.group(1), number)
+        elif line == "}" and opened is not None:
+            bodies[opened[0]] = range(opened[1], number + 1)
+            opened = None
+    return bodies
