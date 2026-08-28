@@ -1,8 +1,63 @@
 name: ci
 
+# WHY THIS FILE IS SPLIT IN TWO. Measured on run 33134621630 (2026-08-28):
+# `pytest -q` reported `975 passed, 7 skipped in 2496.46s` - 41m36s - while
+# every other step in the job (checkout, apt, pip, ruff, black, three mypy
+# passes) totalled 60 seconds. The whole suite runs in 39s on a developer's
+# machine. The difference is `tests/integration/`: its own conftest says the
+# marker gate "keeps the default `pytest` run green in CI without Docker", and
+# that assumption is simply wrong - `ubuntu-latest` ships a running Docker
+# daemon, so the live-Docker suite has been executing on every push and every
+# pull request since it was written. The runner's own log localises it: the
+# first progress line (tests 1-72, which is where `tests/integration` sorts)
+# printed 41 minutes in, and the remaining 910 of the 982 printed in the 22
+# seconds after it.
+#
+# So the fast checks no longer wait behind Docker. `lint-type-test` deselects
+# the marker and answers in about 80 seconds; `integration` runs the same 16
+# tests it always did, in parallel, on its own runner.
+#
+# The 41 minutes turned out not to be inherent to those tests either - it was
+# four of them waiting out a stop grace, fixed in tests/integration/conftest.py.
+# Measured end to end on the fork: run 33203168304 (before) had the live-Docker
+# job at 2508s; run 33210874877 (after) has it at 112s, same 11 passed and 5
+# skipped. The split still earns its keep - it is what stops a future slow
+# integration test from ever again being charged to every push.
+
 on:
+  # Not a bare `push:`. Every topic branch here becomes a pull request, and a
+  # bare `push` plus `pull_request` starts TWO full runs for each commit on one
+  # - visible in the run list as a `push` run and a `pull_request` run seconds
+  # apart on the same SHA. Naming refs keeps the push trigger where nothing
+  # else covers it and leaves topic branches to their PR run.
+  #
+  # `release/**` and `v*` are NOT decoration, and dropping them was a real
+  # regression this list exists to prevent (review, 2026-08-28). Six
+  # `release/v0.6.5x` branches and eight `v0.6.5x` tags exist, none of them has
+  # ever been opened as a pull request, and `v0.6.59` is an ancestor of neither
+  # `main` nor `Yulon` - so a `branches: [main, Yulon]` filter alone leaves the
+  # exact commits `release.yml` builds and ships with no lint, type or test run
+  # from any trigger in this repository.
+  #
+  # The trade that remains: a topic branch with no PR open gets no CI. Open the
+  # PR (draft is enough) and it does.
   push:
+    branches: [main, Yulon, "release/**"]
+    tags: ["v*"]
   pull_request:
+
+# Five pushes to `Yulon` inside three minutes each started their own 42-minute
+# run (2026-08-28 00:20-00:23). Only the newest tree's verdict is worth having,
+# and the older runs were still holding runners while it queued.
+#
+# One case this does not dedupe, because the two events land in different
+# groups: a pull request whose HEAD branch is `Yulon` itself (`Yulon` -> `main`)
+# would get both a `push` run and a `pull_request` run per commit. `Yulon` is
+# the branch other work is merged INTO rather than one that is PR'd out of, so
+# the case is unreached today; it is written down so it is not re-discovered.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 defaults:
   run:
@@ -11,6 +66,7 @@ defaults:
 jobs:
   lint-type-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Two versions, not one. Pinning only 3.11 hid a red suite for a day:
     # `shutil.which` grew a `_winapi` call in 3.12, so tests that fake
     # sys.platform="win32" — which changes it for the whole stdlib, not just the
@@ -29,6 +85,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          # `defaults.run.working-directory` applies to `run:` steps only, never
+          # to an action's inputs, so this path is from the repository root.
+          cache: pip
+          # BOTH files. requirements-dev.txt opens with `-r requirements.txt`,
+          # so a key hashed over the dev file alone would keep serving a cache
+          # built before a runtime pin changed - the one failure mode that makes
+          # a caching bug look like a code bug.
+          cache-dependency-path: |
+            pylauncher/requirements-dev.txt
+            pylauncher/requirements.txt
 
       # PySide6's Qt libraries need these even for QT_QPA_PLATFORM=offscreen (the UI tests).
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq libegl1 libgl1 libxkbcommon0 libdbus-1-3
@@ -56,5 +122,52 @@ jobs:
       - name: mypy (types, as macOS)
         run: python -m mypy --platform darwin yulon main.py
 
+      # `not integration` is the whole point of the split - see the header.
       - name: pytest (tests)
-        run: python -m pytest -q
+        run: python -m pytest -q -m "not integration"
+
+  # The live-Docker suite, on its own runner so it blocks nothing else.
+  integration:
+    runs-on: ubuntu-latest
+    # Measured at 112s once the fixture stopped waiting out the stop grace
+    # (run 33210874877). 15 is over 8x that, so it cannot trip on a slow
+    # runner, and it means the failure mode this job actually has - a container
+    # that never answers, waiting out a 300s grace per dependency wave - costs
+    # a quarter of an hour rather than GitHub's six-hour default.
+    timeout-minutes: 15
+    name: integration (live Docker)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          # BOTH files. requirements-dev.txt opens with `-r requirements.txt`,
+          # so a key hashed over the dev file alone would keep serving a cache
+          # built before a runtime pin changed - the one failure mode that makes
+          # a caching bug look like a code bug.
+          cache-dependency-path: |
+            pylauncher/requirements-dev.txt
+            pylauncher/requirements.txt
+
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq libegl1 libgl1 libxkbcommon0 libdbus-1-3
+
+      - run: pip install -r requirements-dev.txt
+
+      # The daemon must be REACHED, not assumed. Every test in this job skips
+      # itself when `docker info` fails, so a runner image that dropped Docker
+      # would turn this job into a green no-op - which is exactly the silence
+      # that let the suite run unnoticed inside `lint-type-test` for weeks.
+      - name: A daemon has to be there for this job to mean anything
+        run: docker info > /dev/null
+
+      # `-v --durations=0` stays. It was added to answer "which of these 16
+      # tests eats 41 minutes", and it did: run 33203168304 named four tests at
+      # ~600s each - 2 x `docker.STOP_GRACE_SECONDS` waited out by fixture
+      # containers that ignored SIGTERM (the fix and the measurement are in
+      # tests/integration/conftest.py). It stays because the job is now short
+      # enough that durations cost nothing, and because a silent regression
+      # here is worth forty minutes.
+      - name: pytest (live Docker)
+        run: python -m pytest -v --durations=0 -m integration
