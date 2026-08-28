@@ -94,6 +94,25 @@ def test_send_command_explains_itself_where_there_is_no_pty() -> None:
         console.send_command("server info", container="ac-worldserver")
 
 
+@pytest.fixture
+def reachable_distro(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pretend this box can reach a distro, whatever OS the suite is running on.
+
+    `wsl_prefix()` looks for `wsl.exe` on PATH and finds none on CI's Ubuntu,
+    so without this the four tests below pass on Windows and fail on Linux with
+    "Docker could not be found on this machine" - before the fake client is
+    ever reached. That is not what they are about: the transport is the subject,
+    and whether THIS host has wsl.exe is `wsl_prefix()`'s own business, tested
+    in `test_platform.py`. `test_docker.py::_wsl_prefix` pins the same fact for
+    the same reason (found by CI, 2026-08-28).
+    """
+    monkeypatch.setattr(
+        console.platform,
+        "wsl_prefix",
+        lambda wsl_distro, inside=None: ("wsl.exe", "-d", wsl_distro, "--"),
+    )
+
+
 class _FakePipeProc:
     """A `docker attach` whose stdin is a pipe, the way the in-distro path runs it.
 
@@ -160,7 +179,7 @@ def _distro_send(command: str = "server info", **kwargs: Any) -> tuple[Any, _Fak
     return reply, made[0]
 
 
-def test_a_wsl_console_allocates_its_pty_inside_the_distro() -> None:
+def test_a_wsl_console_allocates_its_pty_inside_the_distro(reachable_distro: None) -> None:
     """Windows has no pty to give docker; the distro does, and script(1) opens it.
 
     Measured 2026-08-27 against a real tty container, from Windows: a plain
@@ -180,7 +199,7 @@ def test_a_wsl_console_allocates_its_pty_inside_the_distro() -> None:
     )
 
 
-def test_a_wsl_console_detaches_and_never_kills_its_client() -> None:
+def test_a_wsl_console_detaches_and_never_kills_its_client(reachable_distro: None) -> None:
     """The teardown that the POSIX path uses would stop the worldserver here.
 
     Measured 2026-08-27, Windows -> WSL, on a container whose PID 1 reads its
@@ -194,6 +213,7 @@ def test_a_wsl_console_detaches_and_never_kills_its_client() -> None:
 
 
 def test_a_wsl_console_that_will_not_detach_is_killed_and_says_so(
+    reachable_distro: None,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A client that ignores the detach keys is still let go of, loudly.
@@ -209,7 +229,7 @@ def test_a_wsl_console_that_will_not_detach_is_killed_and_says_so(
     assert any("did not detach" in r.message for r in caplog.records), caplog.text
 
 
-def test_a_wsl_console_still_parses_the_reply_out_of_the_window() -> None:
+def test_a_wsl_console_still_parses_the_reply_out_of_the_window(reachable_distro: None) -> None:
     """The transport changed; what counts as an answer did not."""
     reply, _proc = _distro_send("account create dad pw")
     assert reply.lines == ("Account created: dad",)
