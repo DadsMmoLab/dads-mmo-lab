@@ -20,6 +20,7 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, 
 
 from yulon import runner
 from yulon.log import get_logger
+from yulon.ui.widgets.job import in_flight
 
 logger = get_logger(__name__)
 
@@ -178,9 +179,13 @@ class LogPanel(QWidget):
         self._stop_requested = False
         self._status.setText(title)
         self._stop_button.setEnabled(True)
-        thread = QThread(self)
+        # No parent, and held by `in_flight()` until finished: a panel dropped
+        # between `start()` and the OS scheduling the thread must not take the
+        # worker down with it - see `job.InFlight`.
+        thread = QThread()
         worker = _StreamWorker(source)
         worker.moveToThread(thread)
+        in_flight().hold(thread, worker)
         thread.started.connect(worker.run)
         worker.line.connect(self.append)
         worker.finished.connect(self._on_finished)

@@ -506,6 +506,12 @@ def _stop_background_threads(window: object) -> None:
     if isinstance(thread, QThread) and thread.isRunning():
         thread.quit()
         thread.wait(8000)
+    # Whatever the panels and runners above did not own any more: `job.InFlight`
+    # keeps every started pair alive until its thread has finished, so this is
+    # the join for a worker whose panel is already gone.
+    from yulon.ui.widgets.job import in_flight
+
+    in_flight().wait_all(8000)
 
 
 if __name__ == "__main__":
