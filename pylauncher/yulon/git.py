@@ -492,6 +492,14 @@ class ContainerGit:
             raise GitError(platform.DOCKER_CLI_MISSING_HELP) from exc
         if proc.returncode != 0:
             raise GitError(
+                # The exit code, which `_run_git()` has always reported and this
+                # path never did. The Mac clone (2026-08-27) died in under a
+                # second with git's stderr ending at `Cloning into '.'...` and
+                # nothing after it — and a process that was killed looks exactly
+                # like one that failed when the only evidence is the words it
+                # got out first. 137 and 128 are different investigations.
+                f"containerized git {' '.join(git_args)} in {dest} exited "
+                f"{proc.returncode}: {proc.stderr.strip()}"
                 f"containerized git {' '.join(git_args)} in {dest} failed: {proc.stderr.strip()}"
             )
         return proc

@@ -232,6 +232,12 @@ def test_a_failed_clone_names_the_directory_it_mounted(
         )
     assert str(dest) in str(raised.value), "the message must say where it was cloning to"
     assert "/git/.git: No such file or directory" in str(raised.value)
+    # And the exit code, which `RunnerGit` has always reported and this path
+    # never did. The Mac clone died in under a second with git's stderr cut off
+    # after `Cloning into '.'...` and nothing after it — a killed process and a
+    # failed one look identical without the number, and 137 means something
+    # very different from 128 here.
+    assert "128" in str(raised.value), "a failure with no exit code cannot be told apart"
     logged = "\n".join(r.message for r in caplog.records)
     assert f"{dest}:/git" in logged, "the mount belongs in the log, at the level the app runs at"
 
