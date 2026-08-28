@@ -244,9 +244,17 @@ check_system() {
     # measured $HOME and then said "Docker images live on the main disk" was
     # describing a number it had not taken (review, 2026-08-28).
     AVAILABLE_GB=$(df -BG "$HOME" 2>/dev/null | awk 'NR==2 {print $4}' | sed 's/G//' | tr -d ' ')
+    # `df` prints `-` for Avail on some filesystems, so "not empty" is not "is a
+    # number". Normalise anything non-numeric to empty, and let the unreadable
+    # branch below own it (review, 2026-08-28).
+    case "$AVAILABLE_GB" in ''|*[!0-9]*) AVAILABLE_GB="" ;; esac
     DOCKER_DISK="/var/lib/docker"
     [ -d "$DOCKER_DISK" ] || DOCKER_DISK="/"
     DOCKER_GB=$(df -BG "$DOCKER_DISK" 2>/dev/null | awk 'NR==2 {print $4}' | sed 's/G//' | tr -d ' ')
+    # `df` prints `-` for Avail on some filesystems, so "not empty" is not "is a
+    # number". Normalise anything non-numeric to empty, and let the unreadable
+    # branch below own it (review, 2026-08-28).
+    case "$DOCKER_GB" in ''|*[!0-9]*) DOCKER_GB="" ;; esac
 
     # Warnings, not gates. Exiting here refused the very install choose_install_dir()
     # exists to allow: on a 64 GB Steam Deck the installer offered the SD card and
@@ -1152,6 +1160,10 @@ choose_install_dir() {
 
     local avail_gb
     avail_gb=$(df -BG "$_space_probe" 2>/dev/null | awk 'NR==2 {print $4}' | sed 's/G//' | tr -d ' ') || true
+    # `df` prints `-` for Avail on some filesystems, so "not empty" is not "is a
+    # number". Normalise anything non-numeric to empty, and let the unreadable
+    # branch below own it (review, 2026-08-28).
+    case "$avail_gb" in ''|*[!0-9]*) avail_gb="" ;; esac
     if [[ -z "$avail_gb" ]]; then
         print_error "Could not determine free space at ${_space_probe}. Cannot verify the 20 GB requirement."
         exit 1
