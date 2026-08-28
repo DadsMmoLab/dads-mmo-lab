@@ -479,14 +479,22 @@ check_system() {
     if [ -n "$AVAILABLE_GB" ] && [ "$AVAILABLE_GB" -lt 15 ] 2>/dev/null; then
         print_warning "Only ${AVAILABLE_GB}GB free on ${HOME}."
         print_info "The server files can go on another drive - you will be asked where in a moment, and that location is checked on its own."
+    elif [ -z "$AVAILABLE_GB" ]; then
+        # Unreadable is not OK. Printing "unknownGB available" as a success was
+        # rounding a missing measurement up to a pass (review-of-review, 2026-08-28).
+        print_warning "Could not read free space on ${HOME}."
     else
-        print_success "Disk space OK on ${HOME} (${AVAILABLE_GB:-unknown}GB available)"
+        print_success "Disk space OK on ${HOME} (${AVAILABLE_GB}GB available)"
     fi
     if [ -n "$DOCKER_GB" ] && [ "$DOCKER_GB" -lt 15 ] 2>/dev/null; then
         print_warning "Only ${DOCKER_GB}GB free on ${DOCKER_DISK}, where Docker keeps its images."
         print_info "That disk fills up wherever you put the server files. Free some space there if the build stops partway."
+    elif [ -z "$DOCKER_GB" ]; then
+        # Unreadable is not OK. Printing "unknownGB available" as a success was
+        # rounding a missing measurement up to a pass (review-of-review, 2026-08-28).
+        print_warning "Could not read free space on ${DOCKER_DISK}."
     else
-        print_success "Disk space OK on ${DOCKER_DISK} (${DOCKER_GB:-unknown}GB available, Docker's images)"
+        print_success "Disk space OK on ${DOCKER_DISK} (${DOCKER_GB}GB available, Docker's images)"
     fi
 
     if ! ping -c 1 github.com &>/dev/null; then

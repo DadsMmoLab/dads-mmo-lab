@@ -1473,6 +1473,13 @@ def _catalog_installers() -> list[Path]:
 # ordinary thing to write (review, 2026-08-28).
 SERVER_DIR_READ = re.compile(r"\$\{?SERVER_DIR\}?")
 
+# Same tolerance for the probe these scripts take of $HOME. The guard clause
+# in the Docker-disk test below used a bare literal, so a braced spelling made
+# it `continue` — not "runs and is fooled" but "never runs at all", which is
+# the worse of the two. Fixed for `$SERVER_DIR` in the same commit that left it
+# here (review-of-review, 2026-08-28).
+HOME_PROBE = re.compile(r'df -BG "\$\{?HOME\}?"')
+
 
 def test_every_installer_asks_where_to_install() -> None:
     """The folder the user picked only reaches a script that asks for it.
@@ -1519,8 +1526,31 @@ def test_every_installer_asks_where_to_install() -> None:
         )
         if asked is None:
             silent.append(f"{script.name}: choose_install_dir() never prints {rule.pattern!r}")
-        elif not any(line.strip().startswith("read -r") for line in lines[asked : body.stop - 1]):
+            continue
+        # Not just "a `read -r` happens" — the variable it fills has to be one the
+        # function then uses. `read -r _stray` leaves the answer in a name nobody
+        # reads, so `[[ -z "$user_input" ]]` is always true and SERVER_DIR keeps
+        # its default: the exact bug this branch exists to fix, and it survived
+        # the first rewrite (review-of-review, 2026-08-28).
+        read_line = next(
+            (
+                n
+                for n in range(asked, body.stop)
+                if lines[n - 1].strip().startswith("read -r")
+                and not lines[n - 1].lstrip().startswith("#")
+            ),
+            None,
+        )
+        if read_line is None:
             silent.append(f"{script.name}: prints the prompt at {asked} and reads no answer")
+            continue
+        answer = lines[read_line - 1].split()[2]
+        used = re.compile(r"\$\{?" + re.escape(answer) + r"\}?")
+        if not any(used.search(lines[n - 1]) for n in range(read_line + 1, body.stop)):
+            silent.append(
+                f"{script.name}: reads the answer into ${answer} at line {read_line}, "
+                "which nothing after it uses"
+            )
 
     assert not silent, (
         f"the app types the chosen folder in answer to {rule.pattern!r}; these "
@@ -1559,6 +1589,19 @@ def test_every_installer_calls_choose_install_dir_before_it_uses_the_folder() ->
         if chosen is None:
             problems.append(f"{script.name}: never calls choose_install_dir")
             continue
+        # A read does not have to be inside a function. `SUMMARY_DIR="$SERVER_DIR"`
+        # in the MAIN block above the call copies the DEFAULT, and every later use
+        # of the alias names the folder the user did not pick — the same wrong
+        # folder, laundered through a second variable, and invisible to the
+        # per-function scan below (review-of-review, 2026-08-28).
+        for number, line in enumerate(lines, 1):
+            if number >= chosen or number in in_a_body or line.lstrip().startswith("#"):
+                continue
+            if SERVER_DIR_READ.search(line):
+                problems.append(
+                    f"{script.name}: line {number} reads SERVER_DIR before it is "
+                    f"chosen at line {chosen}: {line.strip()}"
+                )
         for number, name in calls:
             if number >= chosen or name not in bodies:
                 continue
@@ -1590,10 +1633,7 @@ def test_no_installer_refuses_to_run_over_free_space_on_the_wrong_disk() -> None
     refusing: list[str] = []
     for script in _catalog_installers():
         lines = script.read_text(encoding="utf-8").splitlines()
-        probe = next(
-            (n for n, line in enumerate(lines) if re.search(r'df -BG "\$\{?HOME\}?"', line)),
-            None,
-        )
+        probe = next((n for n, line in enumerate(lines) if HOME_PROBE.search(line)), None)
         if probe is None:
             continue
         # From the probe to the `fi` that closes the branch testing it. `exit`
@@ -1631,7 +1671,7 @@ def test_the_main_disk_warning_measures_the_disk_docker_actually_uses() -> None:
     for script in _catalog_installers():
         lines = script.read_text(encoding="utf-8").splitlines()
         body = _shell_function_bodies(lines).get("check_system")
-        if body is None or not any('df -BG "$HOME"' in lines[n - 1] for n in body):
+        if body is None or not any(HOME_PROBE.search(lines[n - 1]) for n in body):
             continue
         # Non-comment lines only. The first version of this counted the comment
         # explaining the probe as the probe — the same vacuity that made the
@@ -1646,3 +1686,38 @@ def test_the_main_disk_warning_measures_the_disk_docker_actually_uses() -> None:
             f"{script.name}: check_system() warns about Docker's images but only "
             "measures $HOME, which on a Steam Deck is a different partition"
         )
+
+
+def test_a_disk_the_installer_could_not_measure_is_not_reported_as_fine() -> None:
+    """An unreadable `df` is not a pass.
+
+    `AVAILABLE_GB=$(df ... )` yields an empty string when `df` fails or prints
+    no second line, and `[ -n "$X" ]` then sends the empty case to the `else`
+    branch — which used to `print_success "... (unknownGB available)"`. That
+    rounds a measurement nobody took up to an OK, the inverse of the mistake
+    `preflight.py` warns about in its own docstring. Reaching for `/var/lib/docker`,
+    which may exist and be unreadable, made it likelier than it had been for
+    `$HOME` (review-of-review, 2026-08-28).
+
+    So every `df` probe in `check_system()` needs a branch of its own for the
+    empty case.
+    """
+    unhandled: list[str] = []
+    for script in _catalog_installers():
+        lines = script.read_text(encoding="utf-8").splitlines()
+        body = _shell_function_bodies(lines).get("check_system")
+        if body is None:
+            continue
+        for number in body:
+            probed = re.match(r"\s*([A-Z_]+)=\$\(df ", lines[number - 1])
+            if probed is None:
+                continue
+            variable = probed.group(1)
+            empty_case = re.compile(r"-z\s+\"\$\{?" + re.escape(variable) + r"\}?\"")
+            if not any(empty_case.search(lines[n - 1]) for n in body):
+                unhandled.append(f"{script.name}:{number} ({variable})")
+
+    assert not unhandled, (
+        "these disk probes report an unreadable disk as fine, because nothing "
+        f"tests the empty case: {unhandled}"
+    )
