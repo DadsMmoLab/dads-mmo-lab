@@ -1435,3 +1435,356 @@ def test_no_installer_escalates_privileges_without_asking() -> None:
     # Forbidden outright, not merely gated: membership already is root, so the
     # rule buys nothing and is pure attack surface.
     assert not sudoers, f"a passwordless sudo rule is written at: {sudoers}"
+
+
+def _shell_function_bodies(lines: list[str]) -> dict[str, range]:
+    """`name -> the 1-based line numbers of its body`, for `name() {` at column 0.
+
+    Good enough for these scripts and no more: every definition is unindented
+    and closes with a `}` unindented. A parser would be the wrong trade for a
+    shape that has held across six installers.
+
+    All three spellings bash accepts, though — `name() {`, `function name() {`
+    and `function name {`. Recognising only the first turned an ordinary style
+    choice into a CI failure that read like a regression: the unrecognised
+    body fell out of `in_a_body` and its lines were then scanned as MAIN-block
+    code, so one renamed definition produced a dozen bogus "reads SERVER_DIR
+    before it is chosen" errors (review, 2026-08-28).
+    """
+    bodies: dict[str, range] = {}
+    opened: tuple[str, int] | None = None
+    for number, line in enumerate(lines, 1):
+        match = re.fullmatch(r"(?:function\s+)?([a-z_][a-z0-9_]*)\s*(?:\(\))?\s*\{", line)
+        if match and opened is None:
+            opened = (match.group(1), number)
+        elif line == "}" and opened is not None:
+            bodies[opened[0]] = range(opened[1], number + 1)
+            opened = None
+    return bodies
+
+
+def _catalog_installers() -> list[Path]:
+    from yulon import resources
+
+    scripts = sorted(resources.installers_dir().rglob("install-*.sh"))
+    assert len(scripts) >= 5, f"expected the catalog's installers, found {scripts}"
+    return scripts
+
+
+# `$SERVER_DIR` and `${SERVER_DIR}` are the same read, and these scripts use
+# both. A bare `"$SERVER_DIR" in line` sees only the first — which was true of
+# the first version of the ordering test below, and harmless only by accident:
+# every function that touches the variable happens to use the bare form at
+# least once today. Nothing enforces that, and `${SERVER_DIR}` throughout is an
+# ordinary thing to write (review, 2026-08-28).
+SERVER_DIR_READ = re.compile(r"\$\{?SERVER_DIR\}?")
+
+# Same tolerance for the probe these scripts take of $HOME. The guard clause
+# in the Docker-disk test below used a bare literal, so a braced spelling made
+# it `continue` — not "runs and is fooled" but "never runs at all", which is
+# the worse of the two. Fixed for `$SERVER_DIR` in the same commit that left it
+# here (review-of-review, 2026-08-28).
+HOME_PROBE = re.compile(r'df -BG "\$\{?HOME\}?"')
+
+# Bash keywords are valid identifiers, so a bare `fi` or `done` on its own
+# line looks exactly like a call to a function of that name. Two `fi`s in
+# TBC's MAIN block are picked up today; they are harmless only because no
+# function happens to be called `fi`, which is one unlucky name away from
+# corrupting the ordering scan (review, 2026-08-28).
+SHELL_KEYWORDS = frozenset(
+    "if then elif else fi for while until do done case esac function select time in".split()
+)
+
+
+def test_every_installer_asks_where_to_install() -> None:
+    """The folder the user picked only reaches a script that asks for it.
+
+    `InstallOptions.server_dir` has exactly one channel into a script: the
+    `Install path:` rule in `PROMPT_RULES` types it in when the script asks.
+    `script_env()` does not export it, and `run()` passes no arguments — so a
+    script that never prints that prompt silently installs into its own
+    hardcoded `$HOME/<default>` and the picker is decoration.
+
+    Reported from a Steam Deck (2026-08-28): a tester made
+    `~/wow-server-tortoise`, chose it, and watched Tortoise install into
+    `~/tortoise-wow-server`. TBC and Vanilla had the same hole; only the WotLK
+    scripts had ever grown `choose_install_dir()`. Worse than a wrong folder:
+    `catalog_view._on_run_finished()` then looks for a compose file in the
+    folder the user chose, finds none, and calls a good install failed.
+
+    The prompt has to be PRINTED, by the function that reads the answer. A grep
+    of the whole file for the string was vacuous: the comment above
+    `choose_install_dir()` quotes `Install path:` to explain the contract, so
+    renaming the real `echo` — a script that would hang forever, since
+    `PROMPT_RULES` would never recognise its prompt — passed it. Proven with
+    that exact mutant before this was rewritten (review, 2026-08-28).
+    """
+    rule = next(r for r in PROMPT_RULES if "Install path" in r.pattern)
+    prompt = re.compile(rule.pattern, re.IGNORECASE)
+
+    silent: list[str] = []
+    for script in _catalog_installers():
+        lines = script.read_text(encoding="utf-8").splitlines()
+        body = _shell_function_bodies(lines).get("choose_install_dir")
+        if body is None:
+            silent.append(f"{script.name}: has no choose_install_dir()")
+            continue
+        asked = next(
+            (
+                n
+                for n in body
+                if prompt.search(lines[n - 1])
+                and not lines[n - 1].lstrip().startswith("#")
+                and re.search(r"\b(echo|printf)\b", lines[n - 1])
+            ),
+            None,
+        )
+        if asked is None:
+            silent.append(f"{script.name}: choose_install_dir() never prints {rule.pattern!r}")
+            continue
+        # Not just "a `read -r` happens" — the variable it fills has to be one the
+        # function then uses. `read -r _stray` leaves the answer in a name nobody
+        # reads, so `[[ -z "$user_input" ]]` is always true and SERVER_DIR keeps
+        # its default: the exact bug this branch exists to fix, and it survived
+        # the first rewrite (review-of-review, 2026-08-28).
+        read_line = next(
+            (
+                n
+                for n in range(asked, body.stop)
+                if lines[n - 1].strip().startswith("read -r")
+                and not lines[n - 1].lstrip().startswith("#")
+            ),
+            None,
+        )
+        if read_line is None:
+            silent.append(f"{script.name}: prints the prompt at {asked} and reads no answer")
+            continue
+        answer = lines[read_line - 1].split()[2]
+        used = re.compile(r"\$\{?" + re.escape(answer) + r"\}?")
+        if not any(used.search(lines[n - 1]) for n in range(read_line + 1, body.stop)):
+            silent.append(
+                f"{script.name}: reads the answer into ${answer} at line {read_line}, "
+                "which nothing after it uses"
+            )
+
+    assert not silent, (
+        f"the app types the chosen folder in answer to {rule.pattern!r}; these "
+        f"installers will not hear it: {silent}"
+    )
+
+
+def test_every_installer_calls_choose_install_dir_before_it_uses_the_folder() -> None:
+    """Printing the prompt is half of it; the answer has to reach the install.
+
+    The test above is satisfied by a script that defines `choose_install_dir()`
+    and never runs it — the prompt would be in the file, the app would never see
+    it, and `SERVER_DIR` would keep its hardcoded default. So this asserts the
+    call happens in the MAIN block, and that it comes before every other
+    top-level call whose function reads `SERVER_DIR`. Order is the half with
+    teeth: placed after `show_summary` the summary names the wrong folder, and
+    placed after the existing-install check the script offers to `rm -rf` it.
+
+    Only top-level call order can be checked this way — a read inside a function
+    definition happens when the function is CALLED, not where it is written,
+    which is what made the first version of this test inert (its ordering branch
+    passed a script whose call had been moved to the end).
+    """
+    problems: list[str] = []
+    for script in _catalog_installers():
+        lines = script.read_text(encoding="utf-8").splitlines()
+        bodies = _shell_function_bodies(lines)
+        # The MAIN block: bare top-level calls, in the order bash runs them.
+        in_a_body = {n for span in bodies.values() for n in span}
+        calls = [
+            (n, line.strip())
+            for n, line in enumerate(lines, 1)
+            if re.fullmatch(r"[a-z_][a-z0-9_]*", line.strip())
+            and line.strip() not in SHELL_KEYWORDS
+            and n not in in_a_body
+        ]
+        chosen = next((n for n, name in calls if name == "choose_install_dir"), None)
+        if chosen is None:
+            problems.append(f"{script.name}: never calls choose_install_dir")
+            continue
+        # A read does not have to be inside a function. `SUMMARY_DIR="$SERVER_DIR"`
+        # in the MAIN block above the call copies the DEFAULT, and every later use
+        # of the alias names the folder the user did not pick — the same wrong
+        # folder, laundered through a second variable, and invisible to the
+        # per-function scan below (review-of-review, 2026-08-28).
+        for number, line in enumerate(lines, 1):
+            if number >= chosen or number in in_a_body or line.lstrip().startswith("#"):
+                continue
+            if SERVER_DIR_READ.search(line):
+                problems.append(
+                    f"{script.name}: line {number} reads SERVER_DIR before it is "
+                    f"chosen at line {chosen}: {line.strip()}"
+                )
+        for number, name in calls:
+            if number >= chosen or name not in bodies:
+                continue
+            if any(SERVER_DIR_READ.search(lines[n - 1]) for n in bodies[name]):
+                problems.append(
+                    f"{script.name}: {name}() reads SERVER_DIR at line {number}, "
+                    f"before it is chosen at line {chosen}"
+                )
+
+    assert not problems, f"the chosen folder is not in effect where it is used: {problems}"
+
+
+def test_no_installer_refuses_to_run_over_free_space_on_the_wrong_disk() -> None:
+    """`check_system()` probes $HOME; the server files may not go there.
+
+    `choose_install_dir()` exists so the server files can live on an SD card or
+    an external drive — it says so, in those words, and then probes free space at
+    the folder that was actually chosen. But `check_system()` runs first and
+    hard-exited when $HOME had less than 15-20 GB, so on a 64 GB Steam Deck the
+    installer offered the SD card and then refused the install because the
+    internal disk was full. The prompt and the gate contradicted each other
+    inside one run.
+
+    $HOME is still worth a word — Docker's images go there whatever the user
+    picks — so the check stays and warns. The authority on whether there is room
+    for the server files is `choose_install_dir()`, which is the only one of the
+    two that knows where they are going.
+    """
+    refusing: list[str] = []
+    for script in _catalog_installers():
+        lines = script.read_text(encoding="utf-8").splitlines()
+        probe = next((n for n, line in enumerate(lines) if HOME_PROBE.search(line)), None)
+        if probe is None:
+            continue
+        # From the probe to the `fi` that closes the branch testing it. `exit`
+        # anywhere on the line, not only alone on it: `[ ... ] && exit 1` and
+        # `exit 1  # bail` are the same refusal (review, 2026-08-28).
+        for line in lines[probe:]:
+            if line.strip() == "fi":
+                break
+            if re.search(r"\bexit\b", line) and not line.lstrip().startswith("#"):
+                refusing.append(f"{script.name}:{probe + 1}")
+                break
+
+    assert not refusing, (
+        "these installers abort on free space in $HOME, which is not where the "
+        f"server files necessarily go: {refusing}"
+    )
+
+
+def test_the_main_disk_warning_measures_the_disk_docker_actually_uses() -> None:
+    """ "Docker images live on the main disk" has to measure that disk.
+
+    `check_system()` probes `$HOME`. `platform.docker_desktop_data_root()` says
+    Docker's disk on Linux is `/var/lib/docker` — and on a Steam Deck `/home`
+    is a different partition from `/`, so the number the warning printed was
+    not the number its sentence described. Introduced by the commit that turned
+    the gate into a warning; caught reviewing it (2026-08-28).
+
+    Not a floor. This project has measured free-space floors for exactly one
+    build — WotLK's native path, `min_data_root_gb` in catalog.py — and they do
+    not transfer to a script that bind-mounts its checkout into the server
+    folder. Refusing an install on a number nobody measured is how the bug
+    above happened. So: measure both disks, say which is which, and let the
+    person decide.
+    """
+    for script in _catalog_installers():
+        lines = script.read_text(encoding="utf-8").splitlines()
+        body = _shell_function_bodies(lines).get("check_system")
+        if body is None or not any(HOME_PROBE.search(lines[n - 1]) for n in body):
+            continue
+        # Non-comment lines only. The first version of this counted the comment
+        # explaining the probe as the probe — the same vacuity that made the
+        # `Install path:` test above pass a script whose prompt had been renamed.
+        # Caught by the mutation battery, not by reading it (2026-08-28).
+        probed = [
+            lines[n - 1]
+            for n in body
+            if "/var/lib/docker" in lines[n - 1] and not lines[n - 1].lstrip().startswith("#")
+        ]
+        assert probed, (
+            f"{script.name}: check_system() warns about Docker's images but only "
+            "measures $HOME, which on a Steam Deck is a different partition"
+        )
+
+
+def test_a_disk_the_installer_could_not_measure_is_not_reported_as_fine() -> None:
+    """An unreadable `df` is not a pass, and neither is an unreadable number.
+
+    `X=$(df ... )` yields an empty string when `df` fails or prints no second
+    line, and `[ -n "$X" ]` then sent the empty case to the `else` branch —
+    which used to `print_success "... (unknownGB available)"`. That rounds a
+    measurement nobody took up to an OK, the inverse of the mistake
+    `preflight.py` warns about in its own docstring.
+
+    Empty was only half of it. `df` prints `-` for Avail on some filesystems,
+    so after `sed 's/G//'` the variable holds a non-empty non-number: the `-z`
+    branch does not fire, `[ "-" -lt 20 ]` errors instead of comparing, and the
+    `else` branch reports "Disk space OK (-GB available)". In
+    `choose_install_dir()` it is louder — that comparison has no
+    `2>/dev/null` — and it still proceeds (review, 2026-08-28).
+
+    So every `df` probe, in both functions, normalises a non-number to empty
+    and then handles empty.
+    """
+    unhandled: list[str] = []
+    for script in _catalog_installers():
+        lines = script.read_text(encoding="utf-8").splitlines()
+        bodies = _shell_function_bodies(lines)
+        for function in ("check_system", "choose_install_dir"):
+            body = bodies.get(function)
+            if body is None:
+                continue
+            for number in body:
+                probed = re.match(r"\s*([A-Za-z_]+)=\$\(df ", lines[number - 1])
+                if probed is None:
+                    continue
+                variable = probed.group(1)
+                reference = r"\$\{?" + re.escape(variable) + r"\}?"
+                empty_case = re.compile(r"-z\s+\"" + reference + r"\"")
+                # `case "$X" in ''|*[!0-9]*)` — the one idiom these scripts use
+                # to say "not a number", and the only one this looks for.
+                numeric = re.compile(r"case\s+\"" + reference + r"\".*\[!0-9\]")
+                if not any(empty_case.search(lines[n - 1]) for n in body):
+                    unhandled.append(f"{script.name}:{number} ({variable}: no empty case)")
+                if not any(numeric.search(lines[n - 1]) for n in body):
+                    unhandled.append(f"{script.name}:{number} ({variable}: no non-number case)")
+
+    assert not unhandled, (
+        "these disk probes report an unmeasurable disk as fine, because nothing "
+        f"rejects what came back: {unhandled}"
+    )
+
+
+def test_choose_install_dir_refuses_by_failing() -> None:
+    """Every refusal in `choose_install_dir()` has to exit non-zero.
+
+    `Installer.run()` raises on a non-zero exit and that is the only signal it
+    has; `exit 0` after a `print_error` means the app is told the script
+    finished normally. `catalog_view._on_run_finished()` does catch the specific
+    shape that follows — a clean exit with no compose file in the chosen folder
+    — so this is defence in depth rather than the only guard, but the message
+    the user gets from that path describes an existing install, not the disk or
+    the folder that was actually refused.
+
+    Found by mutating the free-space refusal to `exit 0` and watching the whole
+    file stay green (review, 2026-08-28).
+    """
+    surrendering: list[str] = []
+    for script in _catalog_installers():
+        lines = script.read_text(encoding="utf-8").splitlines()
+        body = _shell_function_bodies(lines).get("choose_install_dir")
+        assert body is not None, f"{script.name}: has no choose_install_dir()"
+        refusing = False
+        for number in body:
+            line = lines[number - 1].strip()
+            if line.startswith("#"):
+                continue
+            if line.startswith("print_error"):
+                refusing = True
+                continue
+            if line.startswith("exit "):
+                # The one deliberate `exit 0`: declining the confirm prompt is a
+                # choice, not a failure, and it follows a print_info.
+                if refusing and line != "exit 1":
+                    surrendering.append(f"{script.name}:{number} {line!r} after print_error")
+                refusing = False
+
+    assert not surrendering, f"these refusals report success: {surrendering}"

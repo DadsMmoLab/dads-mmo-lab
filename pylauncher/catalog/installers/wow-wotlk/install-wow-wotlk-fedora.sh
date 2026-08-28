@@ -5,7 +5,7 @@
 #
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 #
-#  Version: 1.3.9 - Fedora
+#  Version: 1.4.0 - Fedora
 #
 #  Usage:
 #    chmod +x install-wow.sh
@@ -20,6 +20,15 @@
 #    6. Sets up the Gaming Mode launcher
 #
 #  Changelog:
+#    1.4.0 — Free space is checked where the server files go
+#      - check_system() no longer exits when $HOME is short of space. It probes
+#        $HOME, which is not necessarily where the server files are headed:
+#        choose_install_dir() offers an SD card or external drive and checks
+#        free space at the folder actually chosen. On a 64 GB Steam Deck the
+#        two contradicted each other — the prompt offered the card, the gate
+#        then quit over the internal disk.
+#      - The $HOME figure is now a warning. Docker's images land on the main
+#        disk whatever the user picks, so it is still worth saying.
 #    1.3.7 — Custom server files install location
 #      - Added choose_install_dir(): prompts user for a custom SERVER_DIR
 #        before the install begins (blank = keep default ~/wow-server-playerbots)
@@ -451,6 +460,10 @@ choose_install_dir() {
 
     local avail_gb
     avail_gb=$(df -BG "$_space_probe" 2>/dev/null | awk 'NR==2 {print $4}' | sed 's/G//' | tr -d ' ') || true
+    # `df` prints `-` for Avail on some filesystems, so "not empty" is not "is a
+    # number". Normalise anything non-numeric to empty, and let the unreadable
+    # branch below own it (review, 2026-08-28).
+    case "$avail_gb" in ''|*[!0-9]*) avail_gb="" ;; esac
     if [[ -z "$avail_gb" ]]; then
         print_error "Could not determine free space at ${_space_probe}. Cannot verify the 15 GB requirement."
         exit 1
@@ -531,12 +544,51 @@ check_system() {
         exit 1
     fi
 
+    # Two disks, because they are two disks. $HOME is where the server files go
+    # if the user keeps the default; /var/lib/docker is where the images and the
+    # build cache go no matter what they pick. On a Steam Deck those are
+    # different partitions, so one df cannot answer for both — a warning that
+    # measured $HOME and then said "Docker images live on the main disk" was
+    # describing a number it had not taken (review, 2026-08-28).
     AVAILABLE_GB=$(df -BG "$HOME" 2>/dev/null | awk 'NR==2 {print $4}' | sed 's/G//' | tr -d ' ')
+    # `df` prints `-` for Avail on some filesystems, so "not empty" is not "is a
+    # number". Normalise anything non-numeric to empty, and let the unreadable
+    # branch below own it (review, 2026-08-28).
+    case "$AVAILABLE_GB" in ''|*[!0-9]*) AVAILABLE_GB="" ;; esac
+    DOCKER_DISK="/var/lib/docker"
+    [ -d "$DOCKER_DISK" ] || DOCKER_DISK="/"
+    DOCKER_GB=$(df -BG "$DOCKER_DISK" 2>/dev/null | awk 'NR==2 {print $4}' | sed 's/G//' | tr -d ' ')
+    # `df` prints `-` for Avail on some filesystems, so "not empty" is not "is a
+    # number". Normalise anything non-numeric to empty, and let the unreadable
+    # branch below own it (review, 2026-08-28).
+    case "$DOCKER_GB" in ''|*[!0-9]*) DOCKER_GB="" ;; esac
+
+    # Warnings, not gates. Exiting here refused the very install choose_install_dir()
+    # exists to allow: on a 64 GB Steam Deck the installer offered the SD card and
+    # then quit over the internal disk. The only free-space floors this project has
+    # measured are for WotLK's native build (min_data_root_gb in catalog.py) and do
+    # not transfer to a script that bind-mounts its checkout into the server folder,
+    # so nothing here refuses on a number nobody took.
     if [ -n "$AVAILABLE_GB" ] && [ "$AVAILABLE_GB" -lt 15 ] 2>/dev/null; then
-        print_error "Not enough disk space. You have ${AVAILABLE_GB}GB free, need at least 15GB."
-        exit 1
+        print_warning "Only ${AVAILABLE_GB}GB free on ${HOME}."
+        print_info "The server files can go on another drive - you will be asked where in a moment, and that location is checked on its own."
+    elif [ -z "$AVAILABLE_GB" ]; then
+        # Unreadable is not OK. Printing "unknownGB available" as a success was
+        # rounding a missing measurement up to a pass (review-of-review, 2026-08-28).
+        print_warning "Could not read free space on ${HOME}."
+    else
+        print_success "Disk space OK on ${HOME} (${AVAILABLE_GB}GB available)"
     fi
-    print_success "Disk space OK (${AVAILABLE_GB:-unknown}GB available)"
+    if [ -n "$DOCKER_GB" ] && [ "$DOCKER_GB" -lt 15 ] 2>/dev/null; then
+        print_warning "Only ${DOCKER_GB}GB free on ${DOCKER_DISK}, where Docker keeps its images."
+        print_info "That disk fills up wherever you put the server files. Free some space there if the build stops partway."
+    elif [ -z "$DOCKER_GB" ]; then
+        # Unreadable is not OK. Printing "unknownGB available" as a success was
+        # rounding a missing measurement up to a pass (review-of-review, 2026-08-28).
+        print_warning "Could not read free space on ${DOCKER_DISK}."
+    else
+        print_success "Disk space OK on ${DOCKER_DISK} (${DOCKER_GB}GB available, Docker's images)"
+    fi
 
     if ! ping -c 1 github.com &>/dev/null; then
         print_error "No internet connection. Please connect and try again."
