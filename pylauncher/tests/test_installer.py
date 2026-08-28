@@ -1084,12 +1084,12 @@ def test_the_generated_override_labels_every_bind_mount_it_shares(script_name: s
     for service in ("ac-worldserver", "ac-authserver", "ac-db-import"):
         assert service in services, f"{script_name}: {service} missing from the override"
         mounts = services[service]
-        assert "${DOCKER_VOL_ETC:-./env/dist/etc}:/azerothcore/env/dist/etc:z" in mounts, (
-            f"{script_name}: {service} has no labelled etc mount, only {mounts}"
-        )
-        assert "${DOCKER_VOL_LOGS:-./env/dist/logs}:/azerothcore/env/dist/logs:z" in mounts, (
-            f"{script_name}: {service} has no labelled logs mount, only {mounts}"
-        )
+        assert (
+            "${DOCKER_VOL_ETC:-./env/dist/etc}:/azerothcore/env/dist/etc:z" in mounts
+        ), f"{script_name}: {service} has no labelled etc mount, only {mounts}"
+        assert (
+            "${DOCKER_VOL_LOGS:-./env/dist/logs}:/azerothcore/env/dist/logs:z" in mounts
+        ), f"{script_name}: {service} has no labelled logs mount, only {mounts}"
     # Spelled with the base file's own default so Compose merges by target path
     # rather than adding a second mount of the same directory.
     assert all(
@@ -1122,9 +1122,9 @@ def test_the_relabel_also_runs_on_the_branch_that_reuses_an_existing_build(
     text = script.read_text(encoding="utf-8")
     reuse = text[text.index("Skipping compile") : text.index("Skipping compile") + 1200]
     reuse = reuse[: reuse.index("return 0")]
-    assert 'selinux_label_for_containers "$SERVER_DIR"' in reuse, (
-        f"{script_name}: the reuse branch brings the stack up without relabelling"
-    )
+    assert (
+        'selinux_label_for_containers "$SERVER_DIR"' in reuse
+    ), f"{script_name}: the reuse branch brings the stack up without relabelling"
     assert reuse.index('selinux_label_for_containers "$SERVER_DIR"') < reuse.index(
         "docker compose up"
     ), f"{script_name}: the relabel must run BEFORE the stack comes up"
