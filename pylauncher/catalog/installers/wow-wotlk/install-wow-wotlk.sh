@@ -164,6 +164,32 @@ dir_is_reusable() {
     return 0
 }
 
+# Are this install's images actually built? Ask the IMAGE STORE, not the
+# container list.
+#
+# `docker compose images` reports the images of a project's EXISTING
+# CONTAINERS. A folder whose build finished but whose `up` never ran - or whose
+# containers were removed - has no containers, so that command answers nothing
+# and a COMPLETE build reads as "nothing was built". Measured on yulon-arch
+# 2026-08-28: `up` failed on a container-name collision, so zero containers
+# existed, and the branch below then offered to delete a good ~35-minute build.
+# In a directory with no containers `docker compose images` failed outright
+# (missing env file) while `config --images` still answered.
+#
+# `config --images` reads the compose FILE, so the image name is derived from
+# this install rather than hardcoded here, and `docker image inspect` then asks
+# the store whether that image exists. Both halves matter: deriving the name
+# keeps this correct if the tag or repository changes, and inspecting the store
+# is the only question whose answer does not depend on containers.
+compiled_images_present() {
+    [ -d "$1" ] || return 1
+    local image
+    image=$(cd "$1" && docker compose config --images 2>/dev/null | grep -i "worldserver" | head -1)
+    [ -n "$image" ] || return 1
+    docker image inspect "$image" >/dev/null 2>&1
+}
+
+
 # Let containers write to the bind-mounted server folder on SELinux systems.
 #
 # AzerothCore's compose mounts env/dist WITHOUT the `:z` suffix that would make
@@ -1266,8 +1292,7 @@ install_server() {
     # If they already exist in $SERVER_DIR, skip the 2-4 hour compile
     # and just start the server — the rest of the install continues
     # normally (account creation, launcher setup, etc.).
-    if [ -d "$SERVER_DIR" ] && \
-       (cd "$SERVER_DIR" && docker compose images 2>/dev/null | grep -qi "worldserver"); then
+    if compiled_images_present "$SERVER_DIR"; then
         print_success "Compiled images already found in $SERVER_DIR"
         print_info "Skipping compile — reusing your existing build."
         print_info "To force a fresh compile, remove the server folder:"

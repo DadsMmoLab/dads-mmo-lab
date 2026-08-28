@@ -553,6 +553,168 @@ def test_the_installers_reusable_check_fails_closed(tmp_path: Path, script_name:
     assert _dir_is_reusable(script, tmp_path / "does-not-exist") == "PROTECTED"
 
 
+# `docker` stubs for the probe below: what the compose FILE names, with the
+# image-store answer left to each test.
+_STUB_BUILT = (
+    'case "$*" in ' '"compose config --images") echo acore/ac-wotlk-worldserver:master;; ' "esac"
+)
+_STUB_RENAMED = (
+    'case "$*" in ' '"compose config --images") echo example.test/renamed-worldserver:v9;; ' "esac"
+)
+
+
+_IMAGES_PROBE = """
+set -u
+docker() { echo "$*" >>"$CALLS"; %(stub)s; }
+%(body)s
+if compiled_images_present "$1"; then echo YES; else echo NO; fi
+"""
+
+
+def _compiled_images_present(
+    script: Path, target: Path, calls: Path, *, stub: str
+) -> tuple[str, list[str]]:
+    """Run the installer's own `compiled_images_present`, and report what it ASKED.
+
+    Lifted out of the shipped script, like `_dir_is_reusable` above, so this
+    cannot pass against a copy that has drifted. The argv matters as much as the
+    answer here: the bug being pinned is not a wrong verdict but the wrong
+    QUESTION - `docker compose images` asks about a project's containers when
+    what is meant is "does this image exist".
+    """
+    body = script.read_text(encoding="utf-8")
+    start = body.index("compiled_images_present() {")
+    end = body.index("\n}", start) + 2
+    calls.write_text("", encoding="utf-8")
+    probe = _IMAGES_PROBE % {"stub": stub, "body": body[start:end]}
+    out = subprocess.run(
+        ["bash", "-c", probe, "probe", str(target)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={"PATH": os.environ.get("PATH", ""), "CALLS": str(calls)},
+    )
+    # An unlifted callee is `command not found`, and bash's 127 is
+    # indistinguishable from an honest "no" to every caller here.
+    assert "command not found" not in out.stderr, (
+        f"{script.name}: the probe is missing a function the shipped code calls, "
+        f"so its result means nothing:\n{out.stderr.strip()}"
+    )
+    return out.stdout.strip(), [
+        line for line in calls.read_text(encoding="utf-8").splitlines() if line
+    ]
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_a_finished_build_is_recognised_when_no_containers_exist(
+    tmp_path: Path, script_name: str
+) -> None:
+    """A build with no containers must not read as "nothing was built".
+
+    `docker compose images` reports the images of a project's EXISTING
+    CONTAINERS, not the image store. A folder whose compile finished but whose
+    `up` never ran has no containers, so it answered nothing - and the branch
+    downstream then offers to delete the folder and recompile. Measured on
+    yulon-arch (2026-08-28): `up` failed on a container-name collision and the
+    installer offered to throw away a good 35-minute build.
+
+    The three scripts are separate files that have diverged before, so all three
+    are checked.
+    """
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    target = tmp_path / "server"
+    target.mkdir()
+
+    answer, asked = _compiled_images_present(
+        script,
+        target,
+        tmp_path / "calls",
+        stub=_STUB_BUILT,
+    )
+
+    assert answer == "YES", f"{script_name}: a finished build was not recognised"
+    assert any(
+        call.startswith("image inspect ") for call in asked
+    ), f"{script_name}: never asked the image store; it asked {asked}"
+    assert not any(
+        "compose images" in call for call in asked
+    ), f"{script_name}: still asks `compose images`, which answers about containers: {asked}"
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_a_folder_with_no_build_is_still_reported_as_unbuilt(
+    tmp_path: Path, script_name: str
+) -> None:
+    """The companion: asking the store must not become "yes" to everything.
+
+    Without this, the fix above would skip the compile on a folder that has
+    never been built - which is the same class of damage in the other
+    direction. `docker image inspect` exits non-zero for an image that is not
+    there, and that has to stay a "no".
+    """
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    target = tmp_path / "server"
+    target.mkdir()
+
+    answer, asked = _compiled_images_present(
+        script,
+        target,
+        tmp_path / "calls",
+        stub=(
+            'case "$*" in '
+            '"compose config --images") echo acore/ac-wotlk-worldserver:master;; '
+            '"image inspect acore/ac-wotlk-worldserver:master") return 1;; '
+            "esac"
+        ),
+    )
+
+    assert answer == "NO", f"{script_name}: an unbuilt folder was reported as built"
+    assert any(call.startswith("image inspect ") for call in asked)
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_the_image_name_is_read_from_the_compose_file(tmp_path: Path, script_name: str) -> None:
+    """The name is derived from the install, not written down here.
+
+    Hardcoding `acore/ac-wotlk-worldserver:master` in the script would go stale
+    the first time upstream moved the tag, and the failure would present as
+    "your build vanished, recompile for 2-4 hours".
+    """
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    target = tmp_path / "server"
+    target.mkdir()
+
+    answer, asked = _compiled_images_present(
+        script,
+        target,
+        tmp_path / "calls",
+        stub=_STUB_RENAMED,
+    )
+
+    assert answer == "YES"
+    assert (
+        "image inspect example.test/renamed-worldserver:v9" in asked
+    ), f"{script_name}: did not inspect the image the compose file named: {asked}"
+
+
 _SELINUX_PROBE = """
 set -u
 print_info() { :; }
