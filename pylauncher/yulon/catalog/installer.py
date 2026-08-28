@@ -738,6 +738,28 @@ def installer_for(
     return Installer(entry, installers_root=installers_root, platform_id=platform_id)
 
 
+def _terminal_prompter(prompt: str) -> str:
+    """Answer the one prompt `run()` forwards - sudo's - from the terminal.
+
+    The CLI passed no `ask` at all, and `runner.interact()` writes nothing for
+    a missing answer, so on any box where sudo wants a password the CLI parked
+    at the prompt forever: no timeout, no error, a process that never exits.
+    Reproduced on yulon-arch (2026-08-28), which is not passwordless.
+
+    Never returns None. Off a terminal there is nothing to type, and an empty
+    answer is the failure path that ENDS: sudo refuses it, retries, gives up,
+    and the script's own guard exits non-zero with "Could not cache sudo
+    credentials". A failure the user can read beats a hang they cannot.
+    """
+    import getpass
+    import sys
+
+    if sys.stdin.isatty():
+        return getpass.getpass(prompt + " ")
+    sys.stderr.write("sudo asked for a password and there is no terminal to type one on\n")
+    return ""
+
+
 def _main(argv: list[str] | None = None) -> int:
     """CLI entry point: `python -m yulon.catalog.installer <game-id> [options]`.
 
@@ -762,12 +784,16 @@ def _main(argv: list[str] | None = None) -> int:
     except KeyError:
         sys.stderr.write(f"unknown game {args.game!r}\n")
         return 2
-    installer = Installer(entry, installers_root=args.installers_root)
+    # `installer_for()`, not `Installer(...)`: the CLI used to construct the
+    # script engine directly, so it could never exercise `NativeInstaller` on
+    # any platform, and "I ran the install through the CLI" proved less than it
+    # sounded like it did. It now dispatches exactly as the Install button does.
+    installer = installer_for(entry, installers_root=args.installers_root)
     options = InstallOptions(
         server_dir=args.server_dir, client_dir=args.client_dir, reinstall=args.reinstall
     )
     try:
-        for line in installer.run(options):
+        for line in installer.run(options, ask=_terminal_prompter):
             sys.stdout.write(line + "\n")
             sys.stdout.flush()
     except InstallerError as exc:
