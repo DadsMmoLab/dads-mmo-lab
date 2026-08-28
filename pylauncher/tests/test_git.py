@@ -246,6 +246,8 @@ def test_docker_desktop_never_gets_a_user_flag(
     git.ContainerGit().clone(spec)
     argv = seen[-1]
     assert argv[argv.index("--user") + 1] == "501:20", "Linux still needs it, or root owns all"
+
+
 def test_a_failed_clone_names_the_directory_it_mounted(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path
 ) -> None:
