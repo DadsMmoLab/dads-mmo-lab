@@ -170,7 +170,7 @@ dir_is_reusable() {
 compiled_images_present() {
     [ -d "$1" ] || return 1
     local image
-    image=$(cd "$1" && docker compose config --images 2>/dev/null | grep -i "worldserver" | head -1)
+    image=$(cd "$1" 2>/dev/null && docker compose config --images 2>/dev/null | grep -i "worldserver" | head -1)
     [ -n "$image" ] || return 1
     docker image inspect "$image" >/dev/null 2>&1
 }
