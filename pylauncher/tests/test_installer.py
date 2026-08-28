@@ -1541,3 +1541,47 @@ def _shell_function_bodies(lines: list[str]) -> dict[str, range]:
             bodies[opened[0]] = range(opened[1], number + 1)
             opened = None
     return bodies
+
+
+def test_no_installer_refuses_to_run_over_free_space_on_the_wrong_disk() -> None:
+    """`check_system()` probes $HOME; the server files may not go there.
+
+    `choose_install_dir()` exists so the server files can live on an SD card or
+    an external drive — it says so, in those words, and then probes free space
+    at the folder that was actually chosen. But `check_system()` runs first and
+    hard-exits when $HOME has less than 15-20 GB, so on a 64 GB Steam Deck the
+    installer offers the SD card and then refuses the install because the
+    internal disk is full. The prompt and the gate contradict each other inside
+    one run.
+
+    $HOME is still worth a word — Docker's images go there whatever the user
+    picks — so the check stays and becomes a warning. The authority on whether
+    there is room for the server files is `choose_install_dir()`, which is the
+    only one of the two that knows where they are going.
+    """
+    from yulon import resources
+
+    scripts = sorted(resources.installers_dir().rglob("install-*.sh"))
+    assert len(scripts) >= 5, f"expected the catalog's installers, found {scripts}"
+
+    refusing: list[str] = []
+    for script in scripts:
+        lines = script.read_text(encoding="utf-8").splitlines()
+        probe = next(
+            (n for n, line in enumerate(lines) if 'df -BG "$HOME"' in line),
+            None,
+        )
+        if probe is None:
+            continue
+        # From the probe to the `fi` that closes the branch testing it.
+        for line in lines[probe:]:
+            if line.strip() == "fi":
+                break
+            if re.fullmatch(r"\s*exit\s+\d+", line):
+                refusing.append(f"{script.name}:{probe + 1}")
+                break
+
+    assert not refusing, (
+        "these installers abort on free space in $HOME, which is not where the "
+        f"server files necessarily go: {refusing}"
+    )

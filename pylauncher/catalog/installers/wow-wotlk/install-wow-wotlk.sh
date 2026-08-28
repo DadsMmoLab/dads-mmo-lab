@@ -5,7 +5,7 @@
 #
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 #
-#  Version: 1.2.8
+#  Version: 1.3.0
 #
 #  Usage:
 #    chmod +x install-wow.sh
@@ -20,6 +20,15 @@
 #    6. Sets up the Gaming Mode launcher
 #
 #  Changelog:
+#    1.3.0 — Free space is checked where the server files go
+#      - check_system() no longer exits when $HOME is short of space. It probes
+#        $HOME, which is not necessarily where the server files are headed:
+#        choose_install_dir() offers an SD card or external drive and checks
+#        free space at the folder actually chosen. On a 64 GB Steam Deck the
+#        two contradicted each other — the prompt offered the card, the gate
+#        then quit over the internal disk.
+#      - The $HOME figure is now a warning. Docker's images land on the main
+#        disk whatever the user picks, so it is still worth saying.
 #    1.2.9 — Remove passwordless sudoers rule; add docker group consent
 #      - Removed the /etc/sudoers.d/docker-nopasswd NOPASSWD write. Membership
 #        in the docker group already grants root-equivalent access, so the
@@ -451,11 +460,20 @@ check_system() {
     print_success "Linux detected"
 
     AVAILABLE_GB=$(df -BG "$HOME" 2>/dev/null | awk 'NR==2 {print $4}' | sed 's/G//' | tr -d ' ')
+    # A warning, not a gate. Docker's images land on the main disk whatever the
+    # user picks, so this number still matters — but the server files themselves
+    # may be headed for an SD card or an external drive, and choose_install_dir()
+    # checks free space where they are ACTUALLY going. Exiting here refused the
+    # very install that prompt exists to allow: on a 64 GB Steam Deck the
+    # installer offered the SD card and then quit over the internal disk
+    # (found while fixing the ignored-folder bug, 2026-08-28).
     if [ -n "$AVAILABLE_GB" ] && [ "$AVAILABLE_GB" -lt 15 ] 2>/dev/null; then
-        print_error "Not enough disk space. You have ${AVAILABLE_GB}GB free, need at least 15GB."
-        exit 1
+        print_warning "Only ${AVAILABLE_GB}GB free on your main disk (${HOME})."
+        print_info "Docker images always live on the main disk and need several GB."
+        print_info "The server files can go elsewhere - you will be asked where, and that location is checked on its own."
+    else
+        print_success "Disk space OK (${AVAILABLE_GB:-unknown}GB available)"
     fi
-    print_success "Disk space OK (${AVAILABLE_GB:-unknown}GB available)"
 
     if ! ping -c 1 github.com &>/dev/null; then
         print_error "No internet connection. Please connect and try again."
