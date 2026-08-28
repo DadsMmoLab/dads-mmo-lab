@@ -1036,20 +1036,38 @@ def docker_prefix(
     if wsl_distro is None:
         program = docker_program()
         return (program,) if program is not None else None
-    launcher = _which(WSL_PROGRAM)
-    if launcher is None:
-        logger.debug(f"no {WSL_PROGRAM} on this host; cannot reach docker in {wsl_distro!r}")
+    prefix = wsl_prefix(wsl_distro, inside=inside)
+    if prefix is None:
         return None
-    # `--cd` is an argument to wsl.exe and MUST precede the `--` separator:
-    # everything after `--` is the command line handed to the distro's shell, so
-    # a `--cd` placed there arrives at bash, which answers "--: invalid option".
-    # Measured against a real distro, which is the only reason this is right -
-    # the first version put it after the separator, and the unit test, which
-    # asserted only that `--cd` was present, passed a command that could not run.
-    location = ("--cd", inside) if inside else ()
     # `docker` unqualified on purpose: it is resolved by the distro's own PATH,
     # by its own shell, where this process's PATH means nothing.
-    return (launcher, "-d", wsl_distro, *location, "--", "docker")
+    return (*prefix, "docker")
+
+
+def wsl_prefix(wsl_distro: str, *, inside: str | None = None) -> tuple[str, ...] | None:
+    """The argv that runs ANY command inside `wsl_distro`, or None without wsl.exe.
+
+        wsl_prefix("dml-arch") -> ("wsl", "-d", "dml-arch", "--")
+
+    Split out of `docker_prefix()` because docker is no longer the only thing
+    the app runs in there. The worldserver console needs a pseudo-terminal that
+    Windows cannot provide, and the distro can: `script(1)` opens one INSIDE it
+    (`console.distro_attach_argv()`). That command is not `docker <args>`, so it
+    cannot use a prefix ending in `docker`.
+
+    `--cd` is an argument to wsl.exe and MUST precede the `--` separator:
+    everything after `--` is the command line handed to the distro's shell, so
+    a `--cd` placed there arrives at bash, which answers "--: invalid option".
+    Measured against a real distro, which is the only reason this is right -
+    the first version put it after the separator, and the unit test, which
+    asserted only that `--cd` was present, passed a command that could not run.
+    """
+    launcher = _which(WSL_PROGRAM)
+    if launcher is None:
+        logger.debug(f"no {WSL_PROGRAM} on this host; cannot reach {wsl_distro!r}")
+        return None
+    location = ("--cd", inside) if inside else ()
+    return (launcher, "-d", wsl_distro, *location, "--")
 
 
 def wsl_env(extra: dict[str, str] | None = None) -> dict[str, str]:
