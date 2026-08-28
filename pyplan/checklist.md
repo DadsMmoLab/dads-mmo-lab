@@ -655,6 +655,84 @@ not answering, that setup can take a few minutes with no output. Still unverifie
 run-sheet's remaining steps, and whether `xcode-select -p` on Baerthe's box makes the clone go through
 the container git. Ask for `~/Library/Application Support/yulon/yulon.log` on the next run.
 
+### The Mac clone: eight hypotheses, eight refutations, and the two real bugs found on the way (2026-08-27)
+
+One tester on Discord, one Mac, one failure that is still open:
+
+```
+containerized git clone … --branch Playerbot https://github.com/mod-playerbots/azerothcore-wotlk.git .
+  in /Users/js/wow3 exited 1: Cloning into '.'...
+/git/.git: No such file or directory
+```
+
+Recorded because the refuted list is the useful part. Every hypothesis below
+was plausible, several fit every observation available at the time, and each
+was killed by a **run** rather than by an argument — which is the only reason
+the list is short enough to write down.
+
+**What was actually wrong, and is fixed.** Two real defects surfaced while
+chasing this, neither of them the clone:
+
+1. **The credential helper was not on PATH (#113, merged).** `docker_program()`
+   resolved argv[0] out of Docker Desktop's bundle and stopped there. `docker`
+   execs `docker-credential-<store>` *by name* through its parent's PATH, and a
+   `.app` opened from Finder has launchd's — so every registry pull died at
+   authentication, and the bind-mount probe reported that as an unshared
+   folder. The user was told to add a folder that was already shared.
+2. **The bind-mount probe read `ls`'s exit code instead of its listing
+   (#115).** A Mac home directory has entries Docker Desktop cannot stat
+   (`.Trash`, `Documents`), so busybox `ls` prints a full listing **and** exits
+   non-zero. The chosen folder is empty at preflight time by construction, so
+   the probe walks up to the nearest populated ancestor — home — and every
+   first install on macOS was refused. Nothing the user could do would pass:
+   he re-added the folder to file sharing, added its parent, tried other
+   folders, and read a file back out of a container against that exact path.
+
+Two instruments came out of it as well: #114 logs the resolved `docker run`
+argv and the destination at INFO, and #117 puts the exit code in
+`ContainerGit`'s error the way `_run_git()` always had. Both exist because this
+investigation spent three Discord round trips recovering a string the process
+already held, and a fourth deciding whether the process had been killed.
+
+**The refuted list, for the clone failure itself.**
+
+| # | Hypothesis | Killed by |
+|---|---|---|
+| 1 | `--user <uid>:<gid>` breaks the write | his clone WITH the flag, verified by `ls .git` |
+| 2 | the folder was under `~/Documents` (TCC) | he had moved off it before the first report |
+| 3 | the failed pull was the mount failing | #113 fixed the pull; the clone failure survived |
+| 4 | `rmtree` + `mkdir` hands Docker a stale inode | `rm -rf`, recreate, clone — works on his Mac (#116, closed) |
+| 5 | the app's argv differs from his | #114 logged it; he ran it verbatim; it cloned |
+| 6 | the environment or the docker binary | `env -i` + the bundle's own `docker`; it cloned |
+| 7 | the mount is `root:root`, so 501 cannot create `.git` | `touch` **and** `mkdir /git/.git` as `501:20` both exit 0 |
+| 8 | recreate + `--user` **together** (the last untested cell) | the app's exact argv, recreated folder, `--user 501:20`: exit 0, `.git` present |
+
+Hypothesis 1 is worth its own line. It was raised on day one, dropped on the
+tester's "looks like its working", and returned as #119 five days later with
+what looked like hard evidence — a container listing showing the mount as
+`root:root`. That evidence was itself wrong: Docker Desktop presents that
+ownership and permits the write anyway. **A report of "it worked" that nobody
+verified cost five days**, and the fix for that is in how the tests are asked
+for, not in the code: every request since has ended "paste the exit line and
+the `ls`", and hypothesis 8 died the same hour.
+
+#119 is left open and explicitly labelled not-a-fix. The change it makes is
+still right — `ContainerGit`'s docstring says Docker Desktop must not get a
+`--user`, and `hasattr(os, "getuid")` is a test for *Windows* wearing the name
+of a test for Docker Desktop — but it must be judged as a correctness-of-intent
+change and must not be described in a release as fixing the macOS install.
+
+**Where it stands.** The command is exonerated in every dimension reachable
+from a Discord thread: argv, destination lifecycle, uid, environment, binary,
+and the daemon's view of the mount. The remaining difference is the process
+that spawns it — a frozen PyInstaller `.app`, a launchd child, running the
+subprocess off the GUI thread with `capture_output=True` and an inherited
+stdin. None of that can be bisected without a Mac, and this project has none.
+The handoff brief is `pyplan/macos-clone-handoff.md`; the first thing it asks
+for is the run-sheet's Step 1, because **nothing in this project has ever run
+on a Darwin interpreter**, and a machine that can run the app from source ends
+the four-release-round-trip loop this investigation has been stuck in.
+
 ### The second macOS run: finding the CLI was only half of it (2026-08-26)
 
 A tester on Discord ran the release on a Mac and preflight refused the install with
