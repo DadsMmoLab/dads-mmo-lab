@@ -273,6 +273,42 @@ def test_verify_dump_rejects_a_dump_of_a_different_database(tmp_path: Path) -> N
         verify_dump(path, "acore_world")
 
 
+def test_verify_dump_accepts_a_mariadb_dump_that_opens_with_the_sandbox_directive(
+    tmp_path: Path,
+) -> None:
+    r"""MariaDB 10.6+ writes a line BEFORE the banner, and it is still a real dump.
+
+    `mariadb-dump` emits `/*M!999999\- enable the sandbox mode */` as the very
+    first line, so the banner is no longer at byte 0. The header pattern was
+    anchored there, which made `verify_dump()` call every MariaDB backup "not a
+    database backup" — and because `plan_restore()`/`restore()`/`_safety_backup()`
+    share this gate, restore failed for the same reason. Found on a live Tortoise
+    server (mariadb-dump 10.6.28) on a dump that was complete, named its database
+    and ended with its trailer.
+    """
+    path = tmp_path / "20260828_150338_tw_char.sql"
+    path.write_bytes(rb"/*M!999999\- enable the sandbox mode */" + b"\n" + good_dump("acore_world"))
+
+    assert verify_dump(path, "acore_world") == path.stat().st_size
+
+
+def test_verify_dump_still_refuses_a_file_with_no_banner_anywhere(tmp_path: Path) -> None:
+    """Matching the banner at any line start must not degrade into matching nothing.
+
+    The companion to the test above: loosening the anchor is only safe while a
+    file that never says "MySQL dump"/"MariaDB dump" is still refused.
+    """
+    path = tmp_path / "20260828_150338_acore_world.sql"
+    path.write_bytes(
+        b"CREATE DATABASE `acore_world`;" + b"\n"
+        b"USE `acore_world`;" + b"\n"
+        b"-- Dump completed on 2026-08-28 15:03:38" + b"\n"
+    )
+
+    with pytest.raises(MaintenanceError, match="does not start like a mysqldump"):
+        verify_dump(path, "acore_world")
+
+
 # ----------------------------------------------------------------- restore
 
 

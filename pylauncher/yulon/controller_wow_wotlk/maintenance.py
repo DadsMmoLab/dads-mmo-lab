@@ -144,7 +144,16 @@ CLIENT_CACHE_NOTE = (
 # can exit 0 on a dump that stopped early, and the guide already knows the file
 # has to be checked ("If the file is missing or 0 bytes, something went wrong").
 # A size check alone passes a dump that died after the first table.
-_DUMP_HEADER = re.compile(rb"^--\s+(MySQL|MariaDB)\s+dump\s")
+#
+# The banner is matched at ANY line start, not at byte 0, because it is no longer
+# the first thing in the file. MariaDB 10.6+ writes a sandbox-mode directive ahead
+# of it - `/*M!999999\- enable the sandbox mode */` - so an anchored match rejected
+# every backup taken against a MariaDB server as "not a database backup", and
+# `verify_dump()` gates restore as well as backup. Observed on a live Tortoise
+# server (mariadb-dump 10.6.28, 2026-08-28) on a dump that was complete and ended
+# with its trailer. `_USE_LINE` and `_CREATE_DB_LINE` below already spell a
+# line-start this way.
+_DUMP_HEADER = re.compile(rb"(?:\A|\n)--\s+(MySQL|MariaDB)\s+dump\s")
 _DUMP_TRAILER = b"-- Dump completed"
 
 # Which schemas a dump file will write into. `USE` is what `--databases` always
@@ -575,7 +584,7 @@ def verify_dump(path: Path, database: str | None = None) -> int:
         raise MaintenanceError(f"could not read {path}: {exc}") from exc
     if size == 0:
         raise MaintenanceError(f"{path.name} is empty, so nothing was dumped")
-    if not _DUMP_HEADER.match(head):
+    if not _DUMP_HEADER.search(head):
         raise MaintenanceError(
             f"{path.name} does not start like a mysqldump, so it is not a database backup"
         )
