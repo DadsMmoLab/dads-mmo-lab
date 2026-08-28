@@ -90,11 +90,36 @@ THROWAWAY_SPEC = docker.ContainerSpec(
 )
 THROWAWAY_REALM_PORT = THROWAWAY_PORTS[1]
 
+# `init: true` ON EVERY SERVICE, AND IT IS WORTH 40 MINUTES OF CI.
+#
+# Measured on GitHub Actions run 33203168304 (2026-08-28), `--durations=0`: four
+# tests took 605.22s, 604.37s, 602.75s and 602.40s. They are exactly the four
+# that stop a running project through the product's own path, and 2400 of the
+# suite's 2475 seconds were those four.
+#
+# 600 is 2 x `docker.STOP_GRACE_SECONDS`, which is 300 and correct: a populated
+# worldserver spends 52-86s draining its character save queue, and Docker's own
+# 10s default was measured SIGKILLing one mid-save. The grace is PER CONTAINER,
+# and compose stops in dependency waves - `auth` and `world` together, then the
+# `db` they depend on - so a project whose containers never answer SIGTERM pays
+# it twice.
+#
+# And these never answered. `sh -c "... sleep 600"` runs as PID 1, where the
+# kernel drops any signal the process has installed no handler for; SIGTERM is
+# discarded, and every stop waited out the full grace before SIGKILL. So the
+# suite was not testing the stop path - it was measuring a timeout, four times.
+#
+# `init: true` puts docker-init at PID 1 instead. It forwards SIGTERM to the
+# shell, which - no longer PID 1 - takes the default action and exits. That is
+# also what a real worldserver does, so the fixture models production MORE
+# closely than it did, not less. The grace stays 300; nothing about the product
+# changes.
 _COMPOSE_YML = f"""\
 services:
   db:
     image: busybox:1.36
     container_name: {THROWAWAY_SPEC.db}
+    init: true
     command: ["sh", "-c", "sleep 2 && touch /tmp/ready && sleep 600"]
     healthcheck:
       test: ["CMD", "test", "-f", "/tmp/ready"]
@@ -106,6 +131,7 @@ services:
   auth:
     image: busybox:1.36
     container_name: {THROWAWAY_SPEC.auth}
+    init: true
     depends_on:
       db:
         condition: service_healthy
@@ -118,6 +144,7 @@ services:
   world:
     image: busybox:1.36
     container_name: {THROWAWAY_SPEC.world}
+    init: true
     depends_on:
       db:
         condition: service_healthy

@@ -152,8 +152,12 @@ jobs:
       - name: A daemon has to be there for this job to mean anything
         run: docker info > /dev/null
 
-      # `-v --durations=0` on purpose: 16 tests taking 41 minutes is a defect in
-      # its own right, and nothing in the repo currently records WHICH of them
-      # is slow. Trim this to `-q` once that is answered.
+      # `-v --durations=0` stays. It was added to answer "which of these 16
+      # tests eats 41 minutes", and it did: run 33203168304 named four tests at
+      # ~600s each - 2 x `docker.STOP_GRACE_SECONDS` waited out by fixture
+      # containers that ignored SIGTERM (the fix and the measurement are in
+      # tests/integration/conftest.py). It stays because the job is now short
+      # enough that durations cost nothing, and because a silent regression
+      # here is worth forty minutes.
       - name: pytest (live Docker)
         run: python -m pytest -v --durations=0 -m integration
