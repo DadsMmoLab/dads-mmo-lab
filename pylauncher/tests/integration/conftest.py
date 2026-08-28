@@ -10,8 +10,10 @@ Two layers of opt-in, both deliberate:
   It is NOT what keeps this suite out of CI's fast job, and for a long time
   nothing did. `ubuntu-latest` ships a *running* Docker daemon, so this gate
   waves the whole file through: measured on run 33134621630 (2026-08-28), a
-  plain `pytest -q` on the runner took 41m36s, of which 22 seconds was the
-  other 959 tests. `.github/workflows/ci.yml` now selects on the `integration`
+  plain `pytest -q` on the runner took 41m36s, and the runner's log puts 22 of
+  those seconds in the last 910 of the 982 tests - i.e. essentially all of it
+  is spent before this directory is done. `.github/workflows/ci.yml` now
+  selects on the `integration`
   marker instead — `-m "not integration"` for the fast job, `-m integration`
   for a job of its own — so a reachable daemon can never again quietly add
   forty minutes to every push.

@@ -10,29 +10,44 @@ name: ci
 # daemon, so the live-Docker suite has been executing on every push and every
 # pull request since it was written. The runner's own log localises it: the
 # first progress line (tests 1-72, which is where `tests/integration` sorts)
-# printed 41 minutes in, and the remaining 903 tests printed in the 22 seconds
-# after it.
+# printed 41 minutes in, and the remaining 910 of the 982 printed in the 22
+# seconds after it.
 #
 # So the fast checks no longer wait behind Docker. `lint-type-test` deselects
 # the marker and answers in about two minutes; `integration` runs the same 16
 # tests it always did, in parallel, on its own runner.
 
 on:
-  # Not a bare `push:`. Every branch here becomes a pull request, and a bare
-  # `push` plus `pull_request` starts TWO full runs for each commit on one -
-  # visible in the run list as a `push` run and a `pull_request` run seconds
-  # apart on the same SHA. Naming the integration branches keeps the push
-  # trigger for the trunk and leaves topic branches to their PR run.
+  # Not a bare `push:`. Every topic branch here becomes a pull request, and a
+  # bare `push` plus `pull_request` starts TWO full runs for each commit on one
+  # - visible in the run list as a `push` run and a `pull_request` run seconds
+  # apart on the same SHA. Naming refs keeps the push trigger where nothing
+  # else covers it and leaves topic branches to their PR run.
   #
-  # The trade: a topic branch with no PR open gets no CI. Open the PR (draft is
-  # enough) and it does.
+  # `release/**` and `v*` are NOT decoration, and dropping them was a real
+  # regression this list exists to prevent (review, 2026-08-28). Six
+  # `release/v0.6.5x` branches and eight `v0.6.5x` tags exist, none of them has
+  # ever been opened as a pull request, and `v0.6.59` is an ancestor of neither
+  # `main` nor `Yulon` - so a `branches: [main, Yulon]` filter alone leaves the
+  # exact commits `release.yml` builds and ships with no lint, type or test run
+  # from any trigger in this repository.
+  #
+  # The trade that remains: a topic branch with no PR open gets no CI. Open the
+  # PR (draft is enough) and it does.
   push:
-    branches: [main, Yulon]
+    branches: [main, Yulon, "release/**"]
+    tags: ["v*"]
   pull_request:
 
 # Five pushes to `Yulon` inside three minutes each started their own 42-minute
 # run (2026-08-28 00:20-00:23). Only the newest tree's verdict is worth having,
 # and the older runs were still holding runners while it queued.
+#
+# One case this does not dedupe, because the two events land in different
+# groups: a pull request whose HEAD branch is `Yulon` itself (`Yulon` -> `main`)
+# would get both a `push` run and a `pull_request` run per commit. `Yulon` is
+# the branch other work is merged INTO rather than one that is PR'd out of, so
+# the case is unreached today; it is written down so it is not re-discovered.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
