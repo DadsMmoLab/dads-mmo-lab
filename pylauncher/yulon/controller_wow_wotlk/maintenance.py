@@ -619,10 +619,26 @@ def _banner_is_the_files_own(head: bytes) -> bool:
     match = _DUMP_HEADER.search(head)
     if match is None:
         return False
-    return all(
-        not line.strip() or line.lstrip().startswith((b"--", b"/*"))
-        for line in head[: match.start()].splitlines()
-    )
+    # `/* ... */` is tracked as a BLOCK, not a line: a `/*` with no `*/` on its
+    # own line opens a comment that runs to the closing `*/`, and a banner inside
+    # an open comment is content, not the file's opening (review, 2026-08-28).
+    # mysqldump's own preamble only ever uses the single-line `/*!...*/` form, so
+    # a real dump never opens a block here.
+    in_block = False
+    for line in head[: match.start()].splitlines():
+        text = line.strip()
+        if in_block:
+            if b"*/" in text:
+                in_block = False
+            continue
+        if not text or text.startswith(b"--"):
+            continue
+        if text.startswith(b"/*"):
+            if b"*/" not in text:
+                in_block = True
+            continue
+        return False
+    return not in_block
 
 
 def _read_edge(path: Path, offset: int) -> bytes:

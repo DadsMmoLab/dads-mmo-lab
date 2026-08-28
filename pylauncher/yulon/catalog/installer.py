@@ -90,6 +90,13 @@ _ERROR_TAIL_LINES = 12
 DEFAULT_TERM = "xterm-256color"
 
 
+# The stable half of `Installer.sudo_marker`. The token after it is random and
+# per-install, so this prefix is the only part a module-level prompter can match
+# on - and matching is what keeps sudo's prompt hidden while the two y/n consent
+# rules stay visible (review, 2026-08-28).
+SUDO_PROMPT_PREFIX = "[sudo via Yu'lon "
+
+
 class InstallerError(RuntimeError):
     """The install could not start or did not finish (message is user-readable)."""
 
@@ -461,7 +468,7 @@ class Installer:
         # token matters too: this string is the LABEL of the one dialog in the
         # app that asks for the user's password, so it has to read as sudo
         # asking, not as a bare hex token (review, 2026-08-22).
-        self.sudo_marker = f"[sudo via Yu'lon {secrets.token_hex(8)}] password:"
+        self.sudo_marker = f"{SUDO_PROMPT_PREFIX}{secrets.token_hex(8)}] password:"
 
     @property
     def script(self) -> Path:
@@ -739,7 +746,7 @@ def installer_for(
 
 
 def _terminal_prompter(prompt: str) -> str:
-    """Answer the one prompt `run()` forwards - sudo's - from the terminal.
+    """Answer the prompts `run()` forwards, from the terminal.
 
     The CLI passed no `ask` at all, and `runner.interact()` writes nothing for
     a missing answer, so on any box where sudo wants a password the CLI parked
@@ -749,15 +756,24 @@ def _terminal_prompter(prompt: str) -> str:
     Never returns None. Off a terminal there is nothing to type, and an empty
     answer is the failure path that ENDS: sudo refuses it, retries, gives up,
     and the script's own guard exits non-zero with "Could not cache sudo
-    credentials". A failure the user can read beats a hang they cannot.
+    credentials"; a y/n rule reads it as "no". A failure the user can read beats
+    a hang they cannot.
     """
     import getpass
     import sys
 
-    if sys.stdin.isatty():
+    # Only sudo's own prompt is hidden. `ask` is consulted for EVERY ASK_THE_USER
+    # rule, and the other two are consent questions - "Add '$USER' to the docker
+    # group (grants root-equivalent access)?" and "Install Docker via rpm-ostree
+    # and reboot now?" - which a person must be able to see themselves answering.
+    # `script_env()` builds sudo's prompt with a random marker, so the two are
+    # told apart exactly rather than guessed (review, 2026-08-28).
+    if not sys.stdin.isatty():
+        sys.stderr.write(f"no terminal to answer {prompt.strip()!r}; declining\n")
+        return ""
+    if SUDO_PROMPT_PREFIX in prompt:
         return getpass.getpass(prompt + " ")
-    sys.stderr.write("sudo asked for a password and there is no terminal to type one on\n")
-    return ""
+    return input(prompt + " ")
 
 
 def _main(argv: list[str] | None = None) -> int:

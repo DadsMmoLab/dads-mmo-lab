@@ -111,12 +111,25 @@ class InFlight(QObject):
         self._pairs = [pair for pair in self._pairs if pair[0].isRunning()]
 
     def wait_all(self, timeout_ms: int = 10_000) -> bool:
-        """Join everything still running (app shutdown). True if all finished in time."""
+        """Join everything still running (app shutdown). True if all finished in time.
+
+        `quit()` ends an event loop; it cannot interrupt a `run()` still inside
+        its work - a blocked `subprocess.run`, a `docker logs -f` with no new
+        line. A pair that does not finish is left held, and Qt's abort at
+        interpreter exit (a QThread destroyed while running) follows. That is
+        the pre-existing contract and this class does not change it; what it
+        can do is put a name in the log first, so the abort is not a mystery.
+        """
         done = True
-        for thread, _worker in list(self._pairs):
+        for thread, worker in list(self._pairs):
             if thread.isRunning():
                 thread.quit()
-                done = bool(thread.wait(timeout_ms)) and done
+                if not thread.wait(timeout_ms):
+                    done = False
+                    logger.warning(
+                        f"a background job did not finish within {timeout_ms} ms at exit: "
+                        f"{type(worker).__name__}; Qt will abort when it is destroyed"
+                    )
         self.sweep()
         return done
 

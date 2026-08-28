@@ -15,7 +15,6 @@ from pathlib import Path
 
 from yulon import platform
 from yulon.log import configure, get_logger
-from yulon.ui.widgets.job import in_flight
 
 logger = get_logger(__name__)
 
@@ -310,6 +309,12 @@ def build_window() -> object:
     # end of test_main.py where a window is dropped. `in_flight()` owns the pair
     # until the thread has finished; the properties stay for
     # `_stop_background_threads`, which joins by them.
+    # Imported here, not at module scope: `main.py` keeps every Qt import inside
+    # the functions that build a window, so `--provision` runs on a box with no
+    # Qt at all. A module-level import of this contradicted the file's own
+    # lazy-import comments (review, 2026-08-28).
+    from yulon.ui.widgets.job import in_flight
+
     in_flight().hold(update_thread, update_worker)
     window.setProperty("update_thread", update_thread)
     window.setProperty("update_worker", update_worker)
@@ -520,6 +525,8 @@ def _stop_background_threads(window: object) -> None:
     # Whatever the panels and runners above did not own any more: `job.InFlight`
     # keeps every started pair alive until its thread has finished, so this is
     # the join for a worker whose panel is already gone.
+    from yulon.ui.widgets.job import in_flight
+
     in_flight().wait_all(8000)
 
 

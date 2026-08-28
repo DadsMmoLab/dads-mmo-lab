@@ -1514,14 +1514,40 @@ def test_the_relabel_also_runs_on_the_branch_that_reuses_an_existing_build(
         Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
     )
     text = script.read_text(encoding="utf-8")
-    reuse = text[text.index("Skipping compile") : text.index("Skipping compile") + 1200]
-    reuse = reuse[: reuse.index("return 0")]
+    # Anchored on the branch CONDITION, not on the message it prints. This test
+    # used to find the branch by the words "Skipping compile", and a reword
+    # broke it - a test that a copy edit can fail is testing the copy.
+    start = text.index('if [ "$images_state" -eq 0 ]; then')
+    # End on the `return 0` STATEMENT, not the first occurrence of the string -
+    # the branch's own comments quote it, and a substring search stops there.
+    reuse = text[start : text.index(chr(10) + "        return 0" + chr(10), start)]
     assert (
         'selinux_label_for_containers "$SERVER_DIR"' in reuse
     ), f"{script_name}: the reuse branch brings the stack up without relabelling"
     assert reuse.index('selinux_label_for_containers "$SERVER_DIR"') < reuse.index(
         "docker compose up"
     ), f"{script_name}: the relabel must run BEFORE the stack comes up"
+
+    # The same branch must not report success when `up` failed: it is the only
+    # `docker compose up` in the file that had no PIPESTATUS check, and on the
+    # fedora script (`set -o pipefail`, no `-e`) it fell through to `return 0`
+    # while `wait_for_server` greps `docker ps` host-globally and certifies the
+    # OTHER install's container (review, 2026-08-28).
+    assert (
+        "PIPESTATUS" in reuse
+    ), f"{script_name}: the reuse branch returns 0 whatever `docker compose up` did"
+    assert reuse.index("docker compose up") < reuse.index(
+        "PIPESTATUS"
+    ), f"{script_name}: the status check must come after the `up` it checks"
+    assert (
+        'refuse_foreign_containers "$SERVER_DIR"' in reuse
+    ), f"{script_name}: a failed reuse `up` does not say whose containers took the names"
+    # ...and only as a diagnosis, after the failure. An unconditional guard here
+    # would refuse a MOVED install folder, naming a path that no longer exists.
+    assert reuse.index("PIPESTATUS") < reuse.index('refuse_foreign_containers "$SERVER_DIR"'), (
+        f"{script_name}: the ownership check runs before `up` fails, so it gates the "
+        f"recovery path instead of explaining it"
+    )
 
 
 def test_installer_refuses_a_reserved_folder_before_asking_for_a_password(

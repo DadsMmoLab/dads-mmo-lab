@@ -45,7 +45,18 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],
-    excludes=["tkinter", "PySide6.QtWebEngineCore", "PySide6.Qt3DCore", "PySide6.QtQuick3D"],
+    # `yulon.__main__` is the `python -m yulon` redirect for a CHECKOUT; it does
+    # `from main import main`, so collect_submodules("yulon") would carry it into
+    # the bundle and pull main.py in a second time as a library module named
+    # `main` beside the real entry point (review, 2026-08-28). The frozen exe IS
+    # main.py and never runs `-m yulon`.
+    excludes=[
+        "tkinter",
+        "PySide6.QtWebEngineCore",
+        "PySide6.Qt3DCore",
+        "PySide6.QtQuick3D",
+        "yulon.__main__",
+    ],
     noarchive=False,
     cipher=block_cipher,
 )
