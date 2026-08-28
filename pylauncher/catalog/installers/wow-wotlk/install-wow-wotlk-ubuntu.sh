@@ -201,8 +201,9 @@ compiled_images_present() {
     (cd "$1" >/dev/null 2>&1) || return 2
     docker image ls >/dev/null 2>&1 || return 2
 
-    local image
-    image=$(cd "$1" 2>/dev/null && docker compose config --images 2>/dev/null | grep -i "worldserver" | head -1)
+    local image images prefix candidate
+    images=$(cd "$1" 2>/dev/null && docker compose config --images 2>/dev/null)
+    image=$(echo "$images" | grep -i "worldserver" | head -1)
     if [ -z "$image" ]; then
         # No image name to test. A folder with no compose file at all has
         # genuinely never been built; a folder that HAS one which compose would
@@ -214,7 +215,7 @@ compiled_images_present() {
         # test for this branch on its first run.
         # A compose file that names no worldserver image at all is somebody
         # else's project, not an unbuilt server and not an unanswered question.
-        if [ -n "$(cd "$1" 2>/dev/null && docker compose config --images 2>/dev/null)" ]; then
+        if [ -n "$images" ]; then
             return 3
         fi
         for candidate in compose.yaml compose.yml docker-compose.yml docker-compose.yaml; do
@@ -222,8 +223,33 @@ compiled_images_present() {
         done
         return 1
     fi
-    docker image inspect "$image" >/dev/null 2>&1 && return 0
-    return 1
+    # EVERY image this build produces, not just the worldserver one. A prune that
+    # took `ac-db-import` but left `ac-worldserver` used to answer "built", and
+    # the caller's reuse path then runs `up` with no `--build` - so the stack
+    # comes up against a missing or foreign image having deliberately skipped a
+    # 2-4 hour compile. Found by an independent adversarial review (Codex),
+    # 2026-08-28.
+    #
+    # Siblings are recognised by the prefix the worldserver image itself carries
+    # (`acore/ac-wotlk-`), which keeps third-party images in the same compose
+    # file out of it: `mysql:8.0` is PULLED, not built, so requiring it to be on
+    # the machine would report a good build as missing every time it was pruned -
+    # and that is the delete prompt.
+    prefix=${image%worldserver*}
+    if [ "$prefix" = "$image" ]; then
+        # No `worldserver` component to strip, so no prefix can be derived and
+        # the single-image question is the only one available.
+        docker image inspect "$image" >/dev/null 2>&1 && return 0
+        return 1
+    fi
+    for candidate in $images; do
+        case "$candidate" in
+            "$prefix"*)
+                docker image inspect "$candidate" >/dev/null 2>&1 || return 1
+                ;;
+        esac
+    done
+    return 0
 }
 
 # Refuse to build into a folder whose container names another install holds.
@@ -1262,6 +1288,15 @@ install_server() {
         print_error "Could not check whether $SERVER_DIR already holds a built server."
         print_info "Docker did not answer, or the compose file in that folder could not be read."
         print_info "Nothing has been changed. Start Docker, or fix that folder, and run this again."
+        exit 1
+    fi
+    if [ "$images_state" -eq 3 ]; then
+        # Without a branch of its own this fell through to "Remove it and start
+        # fresh?", which offers `rm -rf` on a folder we have just identified as
+        # somebody else's project. Never offer that (review, 2026-08-29).
+        print_error "$SERVER_DIR holds a docker compose project that is not this server."
+        print_info "Its compose file names no worldserver image, so nothing in it was built here."
+        print_info "Nothing has been changed. Choose a different folder and run this again."
         exit 1
     fi
     if [ "$images_state" -eq 0 ]; then

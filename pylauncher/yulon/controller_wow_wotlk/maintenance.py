@@ -619,26 +619,47 @@ def _banner_is_the_files_own(head: bytes) -> bool:
     match = _DUMP_HEADER.search(head)
     if match is None:
         return False
-    # `/* ... */` is tracked as a BLOCK, not a line: a `/*` with no `*/` on its
-    # own line opens a comment that runs to the closing `*/`, and a banner inside
-    # an open comment is content, not the file's opening (review, 2026-08-28).
-    # mysqldump's own preamble only ever uses the single-line `/*!...*/` form, so
-    # a real dump never opens a block here.
-    in_block = False
-    for line in head[: match.start()].splitlines():
-        text = line.strip()
-        if in_block:
-            if b"*/" in text:
-                in_block = False
-            continue
-        if not text or text.startswith(b"--"):
-            continue
-        if text.startswith(b"/*"):
-            if b"*/" not in text:
-                in_block = True
-            continue
-        return False
-    return not in_block
+    return _only_dump_preamble(head[: match.start()])
+
+
+def _only_dump_preamble(prefix: bytes) -> bool:
+    """Is everything above the banner a comment a dump itself would write?
+
+    Scanned as BYTES, not line by line. The line-based version this replaces
+    accepted `/* anything */ DROP DATABASE other;` - it saw a line that both
+    opened and closed a comment, skipped the whole line, and never looked at the
+    SQL after the terminator. So a file could carry executable statements above a
+    banner that `verify_dump()` then vouched for, against a database the census
+    below never names and `plan_restore()` therefore takes no safety dump of.
+    Found by an independent adversarial review (Codex), 2026-08-28, with a
+    working bypass.
+
+    Walking the bytes means every `*/` hands the scan back where it stopped, and
+    whatever follows it has to be whitespace or another comment in its own right.
+    """
+    index, end = 0, len(prefix)
+    while index < end:
+        if prefix[index : index + 1].isspace():
+            index += 1
+        elif prefix.startswith(b"--", index):
+            newline = prefix.find(b"\n", index)
+            if newline == -1:
+                # `_DUMP_HEADER` matches at `\A` or after a newline, and the
+                # newline is part of the match - so a `--` comment with no line
+                # break left in the prefix ends exactly where the banner's own
+                # line begins. There is nothing after it to check.
+                return True
+            index = newline + 1
+        elif prefix.startswith(b"/*", index):
+            close = prefix.find(b"*/", index + 2)
+            if close == -1:
+                # An unterminated block comment swallows the banner: it is text
+                # inside a comment, not the file's own opening.
+                return False
+            index = close + 2
+        else:
+            return False
+    return True
 
 
 def _read_edge(path: Path, offset: int) -> bytes:

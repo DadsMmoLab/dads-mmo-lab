@@ -2305,3 +2305,63 @@ def test_declining_to_start_fresh_exits_non_zero(tmp_path: Path, script_name: st
         "REACHED THE END OF THE BLOCK" not in out.stdout
     ), f"{script_name}: the branch fell through instead of exiting"
     assert "SUDO rm" not in out.stdout, f"{script_name}: declining deleted the folder anyway"
+
+
+# A compose file that names two BUILT images and one PULLED one - which is the
+# shape of AzerothCore's - with the image store answering differently per image.
+_STUB_PARTIAL_BUILD = (
+    'case "$*" in '
+    '"compose config --images") '
+    "echo acore/ac-wotlk-worldserver:master; "
+    "echo acore/ac-wotlk-db-import:master; "
+    "echo mysql:8.0;; "
+    '"image inspect acore/ac-wotlk-db-import:master") return 1;; '
+    "esac"
+)
+_STUB_THIRD_PARTY_PRUNED = (
+    'case "$*" in '
+    '"compose config --images") '
+    "echo acore/ac-wotlk-worldserver:master; "
+    "echo acore/ac-wotlk-db-import:master; "
+    "echo mysql:8.0;; "
+    '"image inspect mysql:8.0") return 1;; '
+    "esac"
+)
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_a_half_built_image_set_is_not_a_finished_build(tmp_path: Path, script_name: str) -> None:
+    """One surviving worldserver image is not the same thing as a finished build.
+
+    The probe used to test the FIRST image whose name contains "worldserver" and
+    nothing else, so a prune that took `ac-db-import` still answered "built" -
+    and the caller then skips a 2-4 hour compile and runs `up` with no `--build`.
+    Found by an independent adversarial review (Codex), 2026-08-28.
+
+    The second half is the half that constrains the fix: `mysql:8.0` is PULLED,
+    not built, so requiring EVERY image in the compose file to be on the machine
+    would report a good build as missing whenever that one was pruned - and that
+    is the branch which offers to delete the folder.
+    """
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    target = tmp_path / "server"
+    target.mkdir()
+
+    half_built, _asked = _compiled_images_present(
+        script, target, tmp_path / "calls-partial", stub=_STUB_PARTIAL_BUILD
+    )
+    assert half_built == 1, f"{script_name}: a missing db-import image still read as built"
+
+    pulled_away, _asked = _compiled_images_present(
+        script, target, tmp_path / "calls-pulled", stub=_STUB_THIRD_PARTY_PRUNED
+    )
+    assert pulled_away == 0, (
+        f"{script_name}: a pruned third-party image reported a real build as missing, "
+        "which is the folder-delete prompt"
+    )

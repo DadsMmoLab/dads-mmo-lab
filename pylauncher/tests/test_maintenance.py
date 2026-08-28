@@ -366,6 +366,34 @@ def test_verify_dump_still_refuses_a_file_with_no_banner_anywhere(tmp_path: Path
         verify_dump(path, "acore_world")
 
 
+def test_verify_dump_refuses_sql_hiding_after_a_closed_block_comment(tmp_path: Path) -> None:
+    """A `*/` mid-line hands the scan back, and what follows still has to justify itself.
+
+    The line-based preamble scan skipped any line that both opened AND closed a
+    comment, so it never looked past the terminator. That let
+    `/* ... */ DROP DATABASE unrelated;` sit above a real banner and pass
+    `verify_dump()` - and since `plan_restore()` takes its safety dump only for
+    the databases the census names on their own lines, that DROP had no backup
+    behind it. Found by an independent adversarial review (Codex), 2026-08-28.
+    """
+    path = tmp_path / "20260101_000000_acore_auth.sql"
+    path.write_bytes(
+        b"/* harmless-looking comment */ DROP DATABASE unrelated;\n" + good_dump("acore_auth")
+    )
+
+    with pytest.raises(MaintenanceError, match="does not start like a mysqldump"):
+        verify_dump(path, "acore_auth")
+
+
+def test_verify_dump_refuses_a_banner_inside_an_unterminated_comment(tmp_path: Path) -> None:
+    """An open `/*` swallows the banner, so the banner is not the file's own opening."""
+    path = tmp_path / "20260101_000000_acore_auth.sql"
+    path.write_bytes(b"/* opened and never closed\n" + good_dump("acore_auth"))
+
+    with pytest.raises(MaintenanceError, match="does not start like a mysqldump"):
+        verify_dump(path, "acore_auth")
+
+
 # ----------------------------------------------------------------- restore
 
 
