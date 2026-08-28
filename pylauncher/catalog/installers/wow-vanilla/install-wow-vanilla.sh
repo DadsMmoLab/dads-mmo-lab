@@ -237,20 +237,34 @@ check_system() {
     print_success "Linux detected"
 
     # Need ~20GB for source + build + extracted client data + Docker layers
+    # Two disks, because they are two disks. $HOME is where the server files go
+    # if the user keeps the default; /var/lib/docker is where the images and the
+    # build cache go no matter what they pick. On a Steam Deck those are
+    # different partitions, so one df cannot answer for both — a warning that
+    # measured $HOME and then said "Docker images live on the main disk" was
+    # describing a number it had not taken (review, 2026-08-28).
     AVAILABLE_GB=$(df -BG "$HOME" 2>/dev/null | awk 'NR==2 {print $4}' | sed 's/G//' | tr -d ' ')
-    # A warning, not a gate. Docker's images land on the main disk whatever the
-    # user picks, so this number still matters — but the server files themselves
-    # may be headed for an SD card or an external drive, and choose_install_dir()
-    # checks free space where they are ACTUALLY going. Exiting here refused the
-    # very install that prompt exists to allow: on a 64 GB Steam Deck the
-    # installer offered the SD card and then quit over the internal disk
-    # (found while fixing the ignored-folder bug, 2026-08-28).
+    DOCKER_DISK="/var/lib/docker"
+    [ -d "$DOCKER_DISK" ] || DOCKER_DISK="/"
+    DOCKER_GB=$(df -BG "$DOCKER_DISK" 2>/dev/null | awk 'NR==2 {print $4}' | sed 's/G//' | tr -d ' ')
+
+    # Warnings, not gates. Exiting here refused the very install choose_install_dir()
+    # exists to allow: on a 64 GB Steam Deck the installer offered the SD card and
+    # then quit over the internal disk. The only free-space floors this project has
+    # measured are for WotLK's native build (min_data_root_gb in catalog.py) and do
+    # not transfer to a script that bind-mounts its checkout into the server folder,
+    # so nothing here refuses on a number nobody took.
     if [ -n "$AVAILABLE_GB" ] && [ "$AVAILABLE_GB" -lt 20 ] 2>/dev/null; then
-        print_warning "Only ${AVAILABLE_GB}GB free on your main disk (${HOME})."
-        print_info "Docker images always live on the main disk and need several GB."
-        print_info "The server files can go elsewhere - you will be asked where, and that location is checked on its own."
+        print_warning "Only ${AVAILABLE_GB}GB free on ${HOME}."
+        print_info "The server files can go on another drive - you will be asked where in a moment, and that location is checked on its own."
     else
-        print_success "Disk space OK (${AVAILABLE_GB:-unknown}GB available)"
+        print_success "Disk space OK on ${HOME} (${AVAILABLE_GB:-unknown}GB available)"
+    fi
+    if [ -n "$DOCKER_GB" ] && [ "$DOCKER_GB" -lt 20 ] 2>/dev/null; then
+        print_warning "Only ${DOCKER_GB}GB free on ${DOCKER_DISK}, where Docker keeps its images."
+        print_info "That disk fills up wherever you put the server files. Free some space there if the build stops partway."
+    else
+        print_success "Disk space OK on ${DOCKER_DISK} (${DOCKER_GB:-unknown}GB available, Docker's images)"
     fi
 
     if ! ping -c 1 github.com &>/dev/null; then
