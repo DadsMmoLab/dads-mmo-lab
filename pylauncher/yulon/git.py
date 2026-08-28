@@ -477,6 +477,16 @@ class ContainerGit:
             *_HTTP_VERSION_ARGS,
             *git_args,
         ]
+        # At INFO, and the mount is the point. A Mac tester's clone failed with
+        # `/git/.git: No such file or directory` (2026-08-26) and the one fact
+        # needed to diagnose it — which host directory was mounted at `/git` —
+        # was in neither the error nor the log: `git_args` name the destination
+        # `.`, and `runner.run()` logs the argv at DEBUG while the app runs at
+        # INFO. Three rounds of asking over Discord went into recovering a
+        # string this process already held. Same shape as
+        # `docker.build_staged()`, and safe to print: these URLs come from the
+        # manifest allow-list and carry no credentials.
+        logger.info(f"containerized git: `{' '.join(argv[1:])}` into {dest}")
         try:
             proc = runner.run(argv, env=_no_prompt_env())
         except OSError as exc:
@@ -487,7 +497,17 @@ class ContainerGit:
             logger.warning(f"{argv[0]} could not be started: {exc}")
             raise GitError(platform.DOCKER_CLI_MISSING_HELP) from exc
         if proc.returncode != 0:
-            raise GitError(f"containerized git {' '.join(git_args)} failed: {proc.stderr.strip()}")
+            raise GitError(
+                # The exit code, which `_run_git()` has always reported and this
+                # path never did. The Mac clone (2026-08-27) died in under a
+                # second with git's stderr ending at `Cloning into '.'...` and
+                # nothing after it — and a process that was killed looks exactly
+                # like one that failed when the only evidence is the words it
+                # got out first. 137 and 128 are different investigations.
+                f"containerized git {' '.join(git_args)} in {dest} exited "
+                f"{proc.returncode}: {proc.stderr.strip()}"
+                f"containerized git {' '.join(git_args)} in {dest} failed: {proc.stderr.strip()}"
+            )
         return proc
 
     @staticmethod

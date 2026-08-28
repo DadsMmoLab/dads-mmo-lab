@@ -805,7 +805,7 @@ class ControllerView(QWidget):
         self.console_note.setWordWrap(True)
         self.console_note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.console_note.setVisible(False)
-        if not wotlk_console.pty_supported():
+        if not self._console_available():
             # Checklist 6.5 asks for this gap to be re-scoped, "not left silently
             # broken". Refusing on click and printing the error afterwards is not
             # the same as saying so up front: the catalog tile already disables
@@ -866,10 +866,22 @@ class ControllerView(QWidget):
             self._console_failed,
         )
 
+    def _console_available(self) -> bool:
+        """Can this host type at this server's console?
+
+        Not `pty_supported()` any more, and the difference is a whole platform.
+        A Windows box managing a WSL-resident server has no pty of its own and
+        can still send: the distro opens one (`console.distro_attach_argv()`).
+        Asked of the controller because that is where the distro is already
+        recorded — a second copy on `ControllerServices` would be one more
+        thing that can disagree with the seam actually doing the work.
+        """
+        return wotlk_console.can_send(wsl_distro=self.services.controller.wsl_distro)
+
     def _console_idle(self) -> None:
-        """Re-arm Send — never where there is no pty (see `_build_console_tab()`)."""
+        """Re-arm Send — never where it cannot send (see `_build_console_tab()`)."""
         self._console_pending = False
-        self.send_button.setEnabled(wotlk_console.pty_supported())
+        self.send_button.setEnabled(self._console_available())
 
     @Slot(object)
     def _console_reply(self, result: object) -> None:

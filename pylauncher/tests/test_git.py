@@ -246,6 +246,46 @@ def test_docker_desktop_never_gets_a_user_flag(
     git.ContainerGit().clone(spec)
     argv = seen[-1]
     assert argv[argv.index("--user") + 1] == "501:20", "Linux still needs it, or root owns all"
+def test_a_failed_clone_names_the_directory_it_mounted(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    """A failure nobody can reconstruct the command for costs a day of round trips.
+
+    A Mac tester (2026-08-26) reported
+
+        containerized git clone --config core.autocrlf=false … . failed:
+        Cloning into '.'...
+        /git/.git: No such file or directory
+
+    and the one fact needed to diagnose it — WHICH host directory was mounted
+    at `/git` — was in neither the message nor the log. `git_args` alone name
+    `.`, the mount is the only place the destination appears, and
+    `runner.run()` logs the argv at DEBUG while the app runs at INFO. Three
+    rounds of asking over Discord went into recovering a string the process
+    already had.
+    """
+    dest = tmp_path / "core"
+    dest.mkdir()
+
+    def fail(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return _completed(returncode=128, stderr="/git/.git: No such file or directory")
+
+    monkeypatch.setattr(runner, "run", fail)
+    caplog.set_level("INFO")
+    with pytest.raises(git.GitError) as raised:
+        git.ContainerGit().clone(
+            git.CloneSpec(url="https://example/core.git", dest=dest, depth=None)
+        )
+    assert str(dest) in str(raised.value), "the message must say where it was cloning to"
+    assert "/git/.git: No such file or directory" in str(raised.value)
+    # And the exit code, which `RunnerGit` has always reported and this path
+    # never did. The Mac clone died in under a second with git's stderr cut off
+    # after `Cloning into '.'...` and nothing after it — a killed process and a
+    # failed one look identical without the number, and 137 means something
+    # very different from 128 here.
+    assert "128" in str(raised.value), "a failure with no exit code cannot be told apart"
+    logged = "\n".join(r.message for r in caplog.records)
+    assert f"{dest}:/git" in logged, "the mount belongs in the log, at the level the app runs at"
 
 
 def test_is_unmodified_tells_upstreams_own_file_from_one_somebody_edited(

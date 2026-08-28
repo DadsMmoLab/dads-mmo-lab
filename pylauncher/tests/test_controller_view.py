@@ -374,6 +374,26 @@ def test_the_console_says_why_it_is_disabled_where_there_is_no_pty(
     assert view.follow_button.isEnabled(), "following the log needs no pty"
 
 
+def test_a_wsl_console_is_usable_on_a_host_that_has_no_pty_of_its_own(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows + a server inside WSL: no pty here, and Send still works.
+
+    The tab used to ask `pty_supported()`, which is a fact about THIS process
+    and not about whether the console can be reached. The distro can open a
+    terminal even where Windows cannot (measured 2026-08-27), so the question
+    the button asks had to change with the transport - otherwise the fix ships
+    behind a button that is still greyed out.
+    """
+    monkeypatch.setattr(console, "pty_supported", lambda: False)
+    services = _services(ps, tmp_path, [])
+    services.controller = Controller(WOTLK.container_spec(), tmp_path, wsl_distro="dml-arch")
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.send_button.isEnabled()
+    assert view.command_edit.isEnabled()
+    assert view.console_note.text() == "", view.console_note.text()
+
+
 def test_a_restore_will_not_run_without_a_plan(qapp: object, ps: _Ps, tmp_path: Path) -> None:
     """The button is disabled, and the slot refuses anyway.
 

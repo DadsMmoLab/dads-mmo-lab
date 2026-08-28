@@ -30,6 +30,7 @@ answer, and this one was handing back several times more log noise than reply.
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import threading
 import time
@@ -123,6 +124,84 @@ NO_TTY_HELP = (
 )
 
 
+DETACH_KEYS = "ctrl-p,ctrl-q"
+"""Docker's default detach sequence, pinned rather than assumed.
+
+The in-distro transport DEPENDS on it: that path leaves the console by typing
+these keys, so a `detachKeys` set in the distro's own ~/.docker/config.json
+would otherwise mean the keys we send are not the keys that detach, and the
+fallback below is `kill()` - which stops the container.
+"""
+
+DETACH_SEQUENCE = b""
+"""Ctrl+P, Ctrl+Q as bytes: what `DETACH_KEYS` spells on the wire."""
+
+_DETACH_GRACE_SECONDS = 5.0
+"""How long the client gets to leave on its own before it is killed.
+
+Measured 2026-08-27: a real client answered the keys within a second
+(`read escape sequence`, exit 1). The margin is for a loaded host, not for a
+client that is going to ignore them.
+"""
+
+NO_SCRIPT_HELP = (
+    "The worldserver console needs `script` inside {distro}, and there is none. "
+    "It comes with util-linux (`sudo apt install bsdutils` on Debian/Ubuntu, "
+    "`sudo pacman -S util-linux` on Arch). Until then use the console in a "
+    "terminal: `wsl -d {distro} -- docker attach --sig-proxy=false {container}` "
+    "(Ctrl+P then Ctrl+Q to leave it running)."
+)
+
+
+def can_send(wsl_distro: str | None = None) -> bool:
+    """Can this host type at that server's console?
+
+    Two ways to satisfy docker's "stdin must be a terminal": open a pty here
+    (POSIX), or have the distro open one (`distro_attach_argv()`). The second
+    is why this is not simply `pty_supported()` — a Windows box managing a
+    WSL-resident server has no pty of its own and can still send.
+    """
+    return wsl_distro is not None or pty_supported()
+
+
+def distro_attach_argv(container: str, wsl_distro: str) -> list[str]:
+    """`docker attach`, with the pseudo-terminal allocated INSIDE the distro.
+
+    Windows cannot hand docker a terminal, so it borrows the distro's:
+    `script(1)` opens a pty there, runs `docker attach` on it, and relays this
+    process's ordinary pipe through it. Measured 2026-08-27 against a tty
+    container, from Windows: the bare `wsl -d D -- docker attach` answers
+    "cannot attach stdin to a TTY-enabled container because stdin is not a
+    terminal", and this argv answers the command.
+
+    `/dev/null` is `script`'s transcript file — the typescript is not wanted,
+    only the terminal it has to create in order to write one.
+
+    The container name is `shlex.quote`d because it lands inside a string that
+    the distro's shell parses, which is a different place than the argv list
+    every other docker call in this app builds.
+
+    Raises:
+        ConsoleError: no wsl.exe on this host, so the distro cannot be reached
+            at all — the same sentence `attach_argv()` raises, for the same
+            reason (it is `docker_prefix()`'s None, one layer down).
+    """
+    prefix = platform.wsl_prefix(wsl_distro)
+    if prefix is None:
+        raise ConsoleError(platform.DOCKER_CLI_MISSING_HELP)
+    inner = " ".join(
+        shlex.quote(part)
+        for part in (
+            "docker",
+            "attach",
+            "--sig-proxy=false",
+            f"--detach-keys={DETACH_KEYS}",
+            container,
+        )
+    )
+    return [*prefix, "script", "-qec", inner, "/dev/null"]
+
+
 def attach_argv(container: str, *, wsl_distro: str | None = None) -> list[str]:
     """The exact `docker attach` invocation used (pinned by tests).
 
@@ -180,8 +259,18 @@ def send_command(
     if any(ch in command.strip("\n") for ch in ("\n", "\r")) or not command.strip():
         raise ValueError("send_command() takes exactly one non-empty command line")
     logger.info(f"console → {container}: {command.split(' ', 2)[0:2]}")  # never log passwords
-    if not pty_supported():
+    if not can_send(wsl_distro):
         raise ConsoleError(NO_TTY_HELP.format(container=container))
+    if wsl_distro is not None:
+        # A pty this process cannot open, opened where it can be: inside the
+        # distro. Everything after the transport — the window, the prompt, the
+        # parse — is shared with the pty path below.
+        raw = _send_inside_distro(
+            command, container=container, wsl_distro=wsl_distro, window=window, popen=popen
+        )
+        return _parse_reply(
+            raw, command, prompt=prompt, prompt_precedes_answer=prompt_precedes_answer
+        )
     # Resolve the CLI BEFORE the pty exists. `attach_argv()` can raise, and the
     # `except OSError` below would not catch a ConsoleError — the master/slave
     # pair would leak one fd per attempt.
@@ -221,16 +310,7 @@ def send_command(
         logger.warning(f"{argv[0]} could not be started: {exc}")
         raise ConsoleError(platform.DOCKER_CLI_MISSING_HELP) from exc
     os.close(slave)  # the child holds its own copy
-    assert proc.stdout is not None
-    out: list[str] = []
-
-    def _pump() -> None:
-        assert proc.stdout is not None
-        for raw in proc.stdout:
-            out.append(raw.decode("utf-8", errors="replace").rstrip("\r\n"))
-
-    reader = threading.Thread(target=_pump, daemon=True)
-    reader.start()
+    out, reader = _pump(proc)
     # Give docker a moment to attach, or the first command is written into the
     # void before the console is listening.
     time.sleep(_ATTACH_SETTLE_SECONDS)
@@ -253,6 +333,122 @@ def send_command(
     return _parse_reply(
         list(out), command, prompt=prompt, prompt_precedes_answer=prompt_precedes_answer
     )
+
+
+def _pump(proc: subprocess.Popen[bytes]) -> tuple[list[str], threading.Thread]:
+    """Drain the client's output into a list on a daemon thread.
+
+    Shared by both transports: nothing here reads the stream while it is
+    arriving, so the window is a clock either way (see `_parse_reply()`).
+    """
+    assert proc.stdout is not None
+    out: list[str] = []
+
+    def _drain() -> None:
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            out.append(raw.decode("utf-8", errors="replace").rstrip("\r\n"))
+
+    reader = threading.Thread(target=_drain, daemon=True)
+    reader.start()
+    return out, reader
+
+
+def _send_inside_distro(
+    command: str,
+    *,
+    container: str,
+    wsl_distro: str,
+    window: float,
+    popen: type[subprocess.Popen[bytes]],
+) -> list[str]:
+    """One command through a pty the distro opens; returns the raw window.
+
+    Stdin here is an ordinary pipe, not a pty — `script(1)` on the other side
+    of wsl.exe is what makes docker see a terminal, and it relays this pipe
+    into it. That is the whole reason this path works on a host with no
+    `os.openpty()`.
+    """
+    argv = distro_attach_argv(container, wsl_distro)
+    try:
+        proc = popen(
+            argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=0,
+            env=runner.child_env(),
+            creationflags=runner.creationflags(),
+        )
+    except OSError as exc:
+        logger.warning(f"{argv[0]} could not be started: {exc}")
+        raise ConsoleError(platform.DOCKER_CLI_MISSING_HELP) from exc
+    out, reader = _pump(proc)
+    time.sleep(_ATTACH_SETTLE_SECONDS)
+    try:
+        _write(proc, (command.strip("\n") + "\n").encode("utf-8"))
+    except OSError as exc:
+        _detach_console(proc, reader)
+        raise ConsoleError(f"could not write to the worldserver console: {exc}") from exc
+    time.sleep(window)
+    _detach_console(proc, reader)
+    lines = list(out)
+    # The one failure this transport has that the pty path does not: a distro
+    # with no util-linux. Recognised rather than handed back as a reply,
+    # because "script: command not found" in the console panel reads as the
+    # SERVER refusing something.
+    if any("script" in line and "not found" in line for line in lines):
+        raise ConsoleError(NO_SCRIPT_HELP.format(distro=wsl_distro, container=container))
+    return lines
+
+
+def _write(proc: subprocess.Popen[bytes], data: bytes) -> None:
+    """Write to the client's stdin pipe and flush it (raises `OSError`)."""
+    assert proc.stdin is not None
+    proc.stdin.write(data)
+    proc.stdin.flush()
+
+
+def _detach_console(proc: subprocess.Popen[bytes], reader: threading.Thread) -> None:
+    """Leave the console by typing docker's detach keys — never by killing it.
+
+    This is the opposite of `_close_console()` below, and the difference was
+    measured rather than reasoned about (2026-08-27, Windows → WSL, against a
+    container whose PID 1 reads its tty): killing the client stopped the
+    container, even on a run that had written nothing to it at all, while the
+    detach keys left it running on the same PID. The same kill is harmless on
+    Linux, where the pty path still uses it — which is exactly why this had to
+    be measured on the platform it ships to rather than reasoned from the one
+    it was written on.
+
+    `kill()` stays as the fallback, because leaving a client attached is not
+    the safer option it looks like: a second client on the same tty puts
+    foreign prompts and echoes inside the next command's window (see
+    `_PROMPT`). The warning names the risk that is then being taken.
+    """
+    if proc.poll() is None:
+        try:
+            _write(proc, DETACH_SEQUENCE)
+        except OSError as exc:  # pragma: no cover - the pipe is already gone
+            logger.warning(f"the detach keys could not be sent: {exc}")
+    try:
+        proc.wait(timeout=_DETACH_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "the console client did not detach; killing it, which through wsl.exe has been "
+            "measured to stop the container as well"
+        )
+        proc.kill()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:  # pragma: no cover - kill() not honoured
+            logger.warning("docker attach did not exit after kill()")
+    if proc.stdin is not None:
+        try:
+            proc.stdin.close()
+        except OSError:  # pragma: no cover - already closed
+            pass
+    reader.join(timeout=2)
 
 
 def _close_console(proc: subprocess.Popen[bytes], master: int, reader: threading.Thread) -> None:

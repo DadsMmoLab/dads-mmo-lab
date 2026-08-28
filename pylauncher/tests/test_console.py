@@ -94,6 +94,133 @@ def test_send_command_explains_itself_where_there_is_no_pty() -> None:
         console.send_command("server info", container="ac-worldserver")
 
 
+class _FakePipeProc:
+    """A `docker attach` whose stdin is a pipe, the way the in-distro path runs it.
+
+    Records every byte written, so a test can tell a command from the detach
+    keys, and exits when it is sent them — which is what the real client does
+    (`read escape sequence`, measured 2026-08-27). `ignores_detach=True` models
+    the one that does not.
+    """
+
+    def __init__(self, argv: list[str], **kwargs: Any) -> None:
+        self.argv = argv
+        self.written = b""
+        self.killed = False
+        self.ignores_detach = False
+        self.stdin = self
+        self.stdout = io.BytesIO(b"AC> \r\nAccount created: dad\r\n")
+        self._rc: int | None = None
+
+    # -- the stdin pipe --------------------------------------------------
+    def write(self, data: bytes) -> int:
+        self.written += data
+        if console.DETACH_SEQUENCE in data and not self.ignores_detach:
+            self._rc = 1  # docker attach exits 1 after `read escape sequence`
+        return len(data)
+
+    def flush(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    # -- the process -----------------------------------------------------
+    def kill(self) -> None:
+        self.killed = True
+        self._rc = -9
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self._rc is None:
+            raise subprocess.TimeoutExpired("docker attach", timeout or 0)
+        return self._rc
+
+    def poll(self) -> int | None:
+        return self._rc
+
+
+def _distro_send(command: str = "server info", **kwargs: Any) -> tuple[Any, _FakePipeProc]:
+    """`send_command()` against a WSL-resident server, with the client faked."""
+    made: list[_FakePipeProc] = []
+
+    def popen(argv: list[str], **kw: Any) -> _FakePipeProc:
+        proc = _FakePipeProc(argv, **kw)
+        for name, value in kwargs.items():
+            setattr(proc, name, value)
+        made.append(proc)
+        return proc
+
+    reply = console.send_command(
+        command,
+        container="ac-worldserver",
+        wsl_distro="dml-arch",
+        window=0.01,
+        popen=popen,  # type: ignore[arg-type]
+    )
+    return reply, made[0]
+
+
+def test_a_wsl_console_allocates_its_pty_inside_the_distro() -> None:
+    """Windows has no pty to give docker; the distro does, and script(1) opens it.
+
+    Measured 2026-08-27 against a real tty container, from Windows: a plain
+    `wsl -d D -- docker attach` answers "cannot attach stdin to a TTY-enabled
+    container because stdin is not a terminal", and this argv answers the
+    command. `--detach-keys` is pinned rather than left to docker's default
+    because the teardown depends on it and a `detachKeys` in the distro's own
+    ~/.docker/config.json would otherwise change it out from under us.
+    """
+    _reply, proc = _distro_send()
+    assert proc.argv[1:4] == ["-d", "dml-arch", "--"], proc.argv
+    assert proc.argv[4] == "script"
+    assert proc.argv[5] == "-qec"
+    assert proc.argv[7] == "/dev/null"
+    assert proc.argv[6] == (
+        "docker attach --sig-proxy=false --detach-keys=ctrl-p,ctrl-q ac-worldserver"
+    )
+
+
+def test_a_wsl_console_detaches_and_never_kills_its_client() -> None:
+    """The teardown that the POSIX path uses would stop the worldserver here.
+
+    Measured 2026-08-27, Windows -> WSL, on a container whose PID 1 reads its
+    tty: killing the client stopped the container even when nothing had been
+    written to it, while the detach keys left it running on the same PID. So
+    this path detaches, and `kill()` is the fallback rather than the method.
+    """
+    _reply, proc = _distro_send("server info")
+    assert proc.written == b"server info\n" + console.DETACH_SEQUENCE, proc.written
+    assert proc.killed is False, "killing the client can stop the worldserver"
+
+
+def test_a_wsl_console_that_will_not_detach_is_killed_and_says_so(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A client that ignores the detach keys is still let go of, loudly.
+
+    Leaving it attached is not the safer option it looks like: a second client
+    on the same tty puts foreign prompts and echoes inside the next reply's
+    window (see `console._PROMPT`). So it is killed - and because that can take
+    the container with it, the log says which risk was taken.
+    """
+    with caplog.at_level(logging.WARNING):
+        _reply, proc = _distro_send(ignores_detach=True)
+    assert proc.killed is True
+    assert any("did not detach" in r.message for r in caplog.records), caplog.text
+
+
+def test_a_wsl_console_still_parses_the_reply_out_of_the_window() -> None:
+    """The transport changed; what counts as an answer did not."""
+    reply, _proc = _distro_send("account create dad pw")
+    assert reply.lines == ("Account created: dad",)
+
+
+def test_a_distro_console_is_available_where_no_pty_is() -> None:
+    """The Send button asks this, and on Windows the answer used to be no."""
+    assert console.can_send("dml-arch") is True
+    assert console.can_send(None) is console.pty_supported()
+
+
 def test_send_command_rejects_multiline_or_empty() -> None:
     with pytest.raises(ValueError):
         console.send_command("a\nb", popen=_FakeProc)  # type: ignore[arg-type]
