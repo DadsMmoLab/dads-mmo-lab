@@ -428,6 +428,7 @@ def backup(
     spec: docker.ContainerSpec = docker_ctl.SPEC,
     core_databases: Sequence[str] = CORE_DATABASES,
     running: RunningNames | None = None,
+    wsl_distro: str | None = None,
     now: datetime | None = None,
 ) -> BackupReport:
     """Dump every database this install has into `backups_dir(server_dir)`.
@@ -447,6 +448,9 @@ def backup(
             the copy taken automatically before a restore is not mistaken for
             one the user asked for (`wow-manage.sh` does the same with
             `pre_restore`).
+        wsl_distro: Which daemon holds this install's containers, for the
+            census. `mysql` carries the same fact for the dump itself; both are
+            needed, because they are two different questions asked of docker.
         now: The timestamp in the filenames; defaults to the clock.
 
     Raises:
@@ -457,7 +461,7 @@ def backup(
             they are complete and verified, and deleting them would be the
             second mistake.
     """
-    names = _census(running)
+    names = _census(running, wsl_distro=wsl_distro)
     if spec.db not in names:
         raise MaintenanceError(
             f"{spec.db} is not running, so there is no database to back up. Start the server "
@@ -759,6 +763,7 @@ def plan_restore(
     *,
     spec: docker.ContainerSpec = docker_ctl.SPEC,
     running: RunningNames | None = None,
+    wsl_distro: str | None = None,
 ) -> RestorePlan:
     """Work out what restoring `backup_file` would do, without doing any of it.
 
@@ -809,7 +814,7 @@ def plan_restore(
                 )
 
     try:
-        names = _census(running)
+        names = _census(running, wsl_distro=wsl_distro)
     except MaintenanceError as exc:
         refusals.append(str(exc))
     else:
@@ -848,6 +853,7 @@ def restore(
     confirm: str,
     spec: docker.ContainerSpec = docker_ctl.SPEC,
     running: RunningNames | None = None,
+    wsl_distro: str | None = None,
     now: datetime | None = None,
 ) -> RestoreReport:
     """Overwrite the databases `plan.backup` names. This destroys player data.
@@ -890,7 +896,9 @@ def restore(
         raise MaintenanceError(
             "the restore was not confirmed against this backup, so nothing was changed"
         )
-    fresh = plan_restore(plan.backup, plan.server_dir, spec=spec, running=running)
+    fresh = plan_restore(
+        plan.backup, plan.server_dir, spec=spec, running=running, wsl_distro=wsl_distro
+    )
     if fresh.refusals:
         raise MaintenanceError(f"restore refused: {' '.join(fresh.refusals)}")
     if fresh.token != plan.token:
@@ -915,7 +923,9 @@ def restore(
             "only copy there would otherwise be."
         )
     kept = _usable_copies(earlier)
-    safety = _safety_backup(plan, mysql, kept, spec=spec, running=running, now=now)
+    safety = _safety_backup(
+        plan, mysql, kept, spec=spec, running=running, wsl_distro=wsl_distro, now=now
+    )
     unresolved = _still_unresolved(earlier, plan, kept)
 
     # The record carries what this restore is doing AND whatever an earlier
@@ -1025,6 +1035,7 @@ def _safety_backup(
     *,
     spec: docker.ContainerSpec,
     running: RunningNames | None,
+    wsl_distro: str | None,
     now: datetime | None,
 ) -> tuple[Path, ...]:
     """A copy of every database this restore will overwrite, so it can be put back.
@@ -1066,6 +1077,7 @@ def _safety_backup(
             label="pre-restore",
             spec=spec,
             running=running,
+            wsl_distro=wsl_distro,
             now=now,
         )
         covered.update({dump.database: dump.path for dump in report.dumps})
@@ -1164,7 +1176,7 @@ def _databases_named_in_bytes(data: bytes) -> list[str]:
     return found
 
 
-def _census(running: RunningNames | None) -> set[str]:
+def _census(running: RunningNames | None, *, wsl_distro: str | None = None) -> set[str]:
     """What is running, by container name; a Docker that will not answer is fatal.
 
     `docker.status()` raises rather than degrading, which is what this wants:
@@ -1172,13 +1184,26 @@ def _census(running: RunningNames | None) -> set[str]:
     and "Docker did not say" must never read as "nothing is running" (that
     mistake is written up in `docker._refuse_without_an_identity()`).
     """
+
     # `docker_ctl.status`, not `docker.status`: this package re-exports the
     # shared operations so its callers have one entry point, and reaching past
     # that from inside the package would make the rule advice rather than
     # practice (style guide §3/§4; review, 2026-08-23). The two names below are
     # a type and an exception rather than operations, and `docker_ctl` does not
     # re-export those.
-    source = running if running is not None else docker_ctl.status
+    #
+    # `wsl_distro` is the same fact `DockerMysql` already carries, spelled again
+    # because this asks a DIFFERENT question of docker: the dump goes through
+    # `docker exec` into the distro, the census through `docker ps` — and until
+    # 2026-08-27 only the first of those was told where the daemon lives. A user
+    # whose server lives inside WSL, with no Docker Desktop on the Windows side,
+    # therefore had a Console tab that attached and streamed and a Back-up
+    # button that answered "Docker could not be found on this machine"
+    # (Discord report, 2026-08-27).
+    def census() -> list[str]:
+        return docker_ctl.status(wsl_distro=wsl_distro)
+
+    source = running if running is not None else census
     try:
         return set(source())
     except docker.DockerCommandError as exc:
