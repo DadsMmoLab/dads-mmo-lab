@@ -182,12 +182,39 @@ dir_is_reusable() {
 # keeps this correct if the tag or repository changes, and inspecting the store
 # is the only question whose answer does not depend on containers.
 compiled_images_present() {
+    # 0 = built.  1 = definitely not built.  2 = could not find out.
+    #
+    # The third answer is the point. The caller's next step offers to DELETE
+    # this folder, so "I could not ask" must never be spelled the same way as
+    # "there is nothing here". A daemon that is not up yet after boot, one
+    # restarted for maintenance, or a compose file that cannot be read would
+    # otherwise all arrive at that prompt under the message "no completed build
+    # was found in it" - which in those cases is not true, and the folder it
+    # offers to remove may hold hours of compiling. Found by an adversarial
+    # review, 2026-08-28, on a real daemon.
     [ -d "$1" ] || return 1
+    docker image ls >/dev/null 2>&1 || return 2
+
     local image
     image=$(cd "$1" 2>/dev/null && docker compose config --images 2>/dev/null | grep -i "worldserver" | head -1)
-    [ -n "$image" ] || return 1
-    docker image inspect "$image" >/dev/null 2>&1
+    if [ -z "$image" ]; then
+        # No image name to test. A folder with no compose file at all has
+        # genuinely never been built; a folder that HAS one which compose would
+        # not read is a question we failed to ask.
+        #
+        # One name at a time, NOT `ls a b c d`: that exits non-zero when ANY of
+        # the four is missing, so a folder holding docker-compose.yml and
+        # nothing else read as holding no compose file at all. Caught by the
+        # test for this branch on its first run.
+        for candidate in compose.yaml compose.yml docker-compose.yml docker-compose.yaml; do
+            [ -f "$1/$candidate" ] && return 2
+        done
+        return 1
+    fi
+    docker image inspect "$image" >/dev/null 2>&1 && return 0
+    return 1
 }
+
 
 
 # Let containers write to the bind-mounted server folder on SELinux systems.
@@ -1292,7 +1319,15 @@ install_server() {
     # If they already exist in $SERVER_DIR, skip the 2-4 hour compile
     # and just start the server — the rest of the install continues
     # normally (account creation, launcher setup, etc.).
-    if compiled_images_present "$SERVER_DIR"; then
+    images_state=0
+    compiled_images_present "$SERVER_DIR" || images_state=$?
+    if [ "$images_state" -eq 2 ]; then
+        print_error "Could not check whether $SERVER_DIR already holds a built server."
+        print_info "Docker did not answer, or the compose file in that folder could not be read."
+        print_info "Nothing has been changed. Start Docker, or fix that folder, and run this again."
+        exit 1
+    fi
+    if [ "$images_state" -eq 0 ]; then
         print_success "Compiled images already found in $SERVER_DIR"
         print_info "Skipping compile — reusing your existing build."
         print_info "To force a fresh compile, remove the server folder:"

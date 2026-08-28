@@ -567,13 +567,13 @@ _IMAGES_PROBE = """
 set -u
 docker() { echo "$*" >>"$CALLS"; %(stub)s; }
 %(body)s
-if compiled_images_present "$1"; then echo YES; else echo NO; fi
+compiled_images_present "$1"; echo "STATUS=$?"
 """
 
 
 def _compiled_images_present(
     script: Path, target: Path, calls: Path, *, stub: str
-) -> tuple[str, list[str]]:
+) -> tuple[int, list[str]]:
     """Run the installer's own `compiled_images_present`, and report what it ASKED.
 
     Lifted out of the shipped script, like `_dir_is_reusable` above, so this
@@ -600,9 +600,12 @@ def _compiled_images_present(
         f"{script.name}: the probe is missing a function the shipped code calls, "
         f"so its result means nothing:\n{out.stderr.strip()}"
     )
-    return out.stdout.strip(), [
-        line for line in calls.read_text(encoding="utf-8").splitlines() if line
-    ]
+    status = next(
+        int(line.removeprefix("STATUS="))
+        for line in out.stdout.splitlines()
+        if line.startswith("STATUS=")
+    )
+    return status, [line for line in calls.read_text(encoding="utf-8").splitlines() if line]
 
 
 @pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
@@ -638,7 +641,7 @@ def test_a_finished_build_is_recognised_when_no_containers_exist(
         stub=_STUB_BUILT,
     )
 
-    assert answer == "YES", f"{script_name}: a finished build was not recognised"
+    assert answer == 0, f"{script_name}: a finished build was not recognised"
     assert any(
         call.startswith("image inspect ") for call in asked
     ), f"{script_name}: never asked the image store; it asked {asked}"
@@ -680,8 +683,105 @@ def test_a_folder_with_no_build_is_still_reported_as_unbuilt(
         ),
     )
 
-    assert answer == "NO", f"{script_name}: an unbuilt folder was reported as built"
+    assert answer == 1, f"{script_name}: an unbuilt folder was reported as built"
     assert any(call.startswith("image inspect ") for call in asked)
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_a_daemon_that_will_not_answer_is_not_reported_as_an_unbuilt_folder(
+    tmp_path: Path, script_name: str
+) -> None:
+    """ "Could not ask" must not be spelled the same way as "nothing is here".
+
+    The caller's next step offers to DELETE the folder. A daemon that is not up
+    yet after boot, or one restarted for maintenance, would otherwise arrive at
+    that prompt under the message "no completed build was found in it" - untrue
+    in that case, about a folder that may hold hours of compiling. Found by an
+    adversarial review (2026-08-28) against a real daemon, by pointing
+    DOCKER_HOST at a socket that does not exist.
+    """
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    target = tmp_path / "server"
+    target.mkdir()
+    (target / "docker-compose.yml").write_text("services: {}", encoding="utf-8")
+
+    answer, _asked = _compiled_images_present(
+        script, target, tmp_path / "calls", stub="return 1"  # every docker call fails
+    )
+
+    assert answer == 2, (
+        f"{script_name}: an unreachable daemon answered {answer}, which the caller reads as "
+        f"a verdict rather than a failure to reach one"
+    )
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_a_compose_file_that_cannot_be_read_is_not_reported_as_an_unbuilt_folder(
+    tmp_path: Path, script_name: str
+) -> None:
+    """A compose file that compose itself will not parse is a question we failed to ask.
+
+    The daemon answers, so the failure is narrower than the test above: the
+    folder has a compose file, and `config --images` still yields no image
+    name. That is "could not find out", not "nothing was built".
+    """
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    target = tmp_path / "server"
+    target.mkdir()
+    (target / "docker-compose.yml").write_text("this: is: not: valid: yaml:", encoding="utf-8")
+
+    answer, _asked = _compiled_images_present(
+        script,
+        target,
+        tmp_path / "calls",
+        # `image ls` succeeds (daemon is up); `compose config` fails.
+        stub='case "$*" in "compose config --images") return 1;; esac',
+    )
+
+    assert answer == 2, f"{script_name}: an unreadable compose file answered {answer}"
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_a_folder_with_no_compose_file_is_a_verdict_not_a_failure(
+    tmp_path: Path, script_name: str
+) -> None:
+    """The companion to the two above: "cannot tell" must not swallow the real "no".
+
+    A folder with no compose file in it has genuinely never held a built
+    server, and saying so is what lets a first install proceed. If every
+    uncertain-looking case answered 2, the install would refuse to start.
+    """
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    target = tmp_path / "server"
+    target.mkdir()
+    (target / "leftover.txt").write_text("x", encoding="utf-8")
+
+    answer, _asked = _compiled_images_present(
+        script,
+        target,
+        tmp_path / "calls",
+        stub='case "$*" in "compose config --images") return 1;; esac',
+    )
+
+    assert answer == 1, f"{script_name}: a folder with no compose file answered {answer}"
 
 
 @pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
@@ -709,7 +809,7 @@ def test_the_image_name_is_read_from_the_compose_file(tmp_path: Path, script_nam
         stub=_STUB_RENAMED,
     )
 
-    assert answer == "YES"
+    assert answer == 0
     assert (
         "image inspect example.test/renamed-worldserver:v9" in asked
     ), f"{script_name}: did not inspect the image the compose file named: {asked}"
