@@ -500,6 +500,7 @@ class ContainerGit:
                 # got out first. 137 and 128 are different investigations.
                 f"containerized git {' '.join(git_args)} in {dest} exited "
                 f"{proc.returncode}: {proc.stderr.strip()}"
+                f"containerized git {' '.join(git_args)} in {dest} failed: {proc.stderr.strip()}"
             )
         return proc
 
