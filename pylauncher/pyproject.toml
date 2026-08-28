@@ -10,12 +10,18 @@ target-version = "py311"
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.mypy]
+# `mypy .` and CI's `mypy yulon main.py` (`ci.yml`) now check the same set.
+# `tests/` is excluded rather than listed under `files`, because an explicit
+# path on the command line REPLACES `files` and `.` is what everyone types -
+# so `files` left the bare command walking tests/, where `strict` turns mock
+# fakes into 375 attr-defined errors CI never gates on. Four boxes reported
+# that identical number in one day before anyone compared the two commands.
 python_version = "3.11"
 strict = true
 warn_unused_ignores = true
 disallow_untyped_defs = true
 disallow_any_generics = true
-exclude = ["build/"]
+exclude = ["build/", "tests/"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
