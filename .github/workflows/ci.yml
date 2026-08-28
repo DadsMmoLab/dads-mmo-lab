@@ -14,8 +14,15 @@ name: ci
 # seconds after it.
 #
 # So the fast checks no longer wait behind Docker. `lint-type-test` deselects
-# the marker and answers in about two minutes; `integration` runs the same 16
+# the marker and answers in about 80 seconds; `integration` runs the same 16
 # tests it always did, in parallel, on its own runner.
+#
+# The 41 minutes turned out not to be inherent to those tests either - it was
+# four of them waiting out a stop grace, fixed in tests/integration/conftest.py.
+# Measured end to end on the fork: run 33203168304 (before) had the live-Docker
+# job at 2508s; run 33210874877 (after) has it at 112s, same 11 passed and 5
+# skipped. The split still earns its keep - it is what stops a future slow
+# integration test from ever again being charged to every push.
 
 on:
   # Not a bare `push:`. Every topic branch here becomes a pull request, and a
@@ -122,9 +129,12 @@ jobs:
   # The live-Docker suite, on its own runner so it blocks nothing else.
   integration:
     runs-on: ubuntu-latest
-    # It has taken ~41 minutes; anything past an hour is a hang, not a slow
-    # test, and a hang should not hold a runner for GitHub's six-hour default.
-    timeout-minutes: 60
+    # Measured at 112s once the fixture stopped waiting out the stop grace
+    # (run 33210874877). 15 is over 8x that, so it cannot trip on a slow
+    # runner, and it means the failure mode this job actually has - a container
+    # that never answers, waiting out a 300s grace per dependency wave - costs
+    # a quarter of an hour rather than GitHub's six-hour default.
+    timeout-minutes: 15
     name: integration (live Docker)
     steps:
       - uses: actions/checkout@v4
