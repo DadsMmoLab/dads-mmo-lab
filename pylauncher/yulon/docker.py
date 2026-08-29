@@ -455,6 +455,7 @@ def _env_value(raw: str) -> str:
 
 
 PROJECT_LABEL = "com.docker.compose.project"
+WORKING_DIR_LABEL = "com.docker.compose.project.working_dir"
 
 
 UNREADABLE = "\x00unreadable"
@@ -479,6 +480,26 @@ def container_project(container: str, *, wsl_distro: str | None = None) -> str |
     proc = _docker(["inspect", container, "--format", fmt], wsl_distro=wsl_distro)
     if proc.returncode != 0:
         logger.warning(f"could not read the compose project of {container}: {proc.stderr.strip()}")
+        return UNREADABLE
+    return proc.stdout.strip() or None
+
+
+def container_working_dir(container: str, *, wsl_distro: str | None = None) -> str | None:
+    """Which directory the compose project owning this container was brought up from.
+
+    `container_project()` answers WHO owns it; this answers WHERE, which is what
+    a person actually needs when they are told to go and stop something. Compose
+    bakes the label in at container creation, so a moved install reports the path
+    it was created at rather than where it lives now - worth knowing when the
+    answer looks wrong, and still better than naming nothing at all.
+
+    Returns `None` for a container carrying no such label, and `UNREADABLE` when
+    Docker could not be asked, on the same reasoning as `container_project()`.
+    """
+    fmt = '{{index .Config.Labels "' + WORKING_DIR_LABEL + '"}}'
+    proc = _docker(["inspect", container, "--format", fmt], wsl_distro=wsl_distro)
+    if proc.returncode != 0:
+        logger.warning(f"could not read the working dir of {container}: {proc.stderr.strip()}")
         return UNREADABLE
     return proc.stdout.strip() or None
 
@@ -681,6 +702,16 @@ def _project_containers(project: str, *, wsl_distro: str | None = None) -> list[
         logger.warning(f"could not list containers for project {project}: {proc.stderr.strip()}")
         return None
     return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def project_containers(project: str, *, wsl_distro: str | None = None) -> list[str] | None:
+    """Which containers belong to a compose project. `None` if Docker could not be asked.
+
+    The public form of `_project_containers()`, for the one caller outside this
+    module that needs it: stopping a server that is holding our ports has to stop
+    the whole project, not only the containers that publish those ports.
+    """
+    return _project_containers(project, wsl_distro=wsl_distro)
 
 
 def remove_staged(spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | None = None) -> bool:
@@ -1489,6 +1520,32 @@ def _stranger_message(
             "installs out from their own folders first."
         )
     return " ".join(lines)
+
+
+def stop_containers(containers: list[str], *, wsl_distro: str | None = None) -> None:
+    """Stop these containers, the worldserver-ish ones first.
+
+    The public form of `_run_docker_stop()`, for the case where the containers
+    are NOT ours: another install is holding the ports and the user has asked
+    for it to be stopped so this one can start.
+
+    Order matters and cannot be read off a name with certainty, so this is a
+    best effort rather than a promise: anything whose name mentions the world is
+    stopped before anything that mentions the database, because a worldserver
+    losing its database mid-save is how character saves are lost. For a container
+    this project did not create, the name is the only hint there is.
+    """
+
+    def rank(name: str) -> int:
+        lowered = name.lower()
+        if any(hint in lowered for hint in ("world", "mangosd")):
+            return 0
+        if any(hint in lowered for hint in ("auth", "realmd", "logon")):
+            return 1
+        return 2
+
+    for name in sorted(containers, key=rank):
+        _run_docker_stop(name, wsl_distro=wsl_distro)
 
 
 def stop_staged(spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | None = None) -> bool:

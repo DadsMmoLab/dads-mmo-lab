@@ -197,6 +197,19 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
     PromptRule(r"Open the GitHub README", "n"),
     PromptRule(r"Download wow-manage\.sh", "n"),
     PromptRule(r"stop the server now\?", "n"),
+    # Declined on purpose, and it must sit above the `(y/n)` catch-all that
+    # would otherwise answer "y". The installer scripts now OFFER to stop
+    # whatever is holding the server ports, which is the right question to put
+    # to a person at a terminal - but not one the app may answer on their
+    # behalf: the thing it would stop is a server someone may be playing on
+    # this second, and no install is worth that. The GUI makes the same offer
+    # itself, on the tab, where the user can see what they are agreeing to
+    # (`controller_view._offer_to_stop_the_other_server`).
+    PromptRule(
+        r"Stop the other server and continue\?",
+        "n",
+        "the app never stops a running server to get an install through",
+    ),
     # Must sit ABOVE the `(y/n)` catch-all, which would otherwise answer "y" and
     # grant root-equivalent access without anyone being asked — exactly what
     # upstream's 1.4.4 security change exists to prevent (it removed the

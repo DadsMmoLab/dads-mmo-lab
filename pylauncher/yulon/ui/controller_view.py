@@ -364,6 +364,12 @@ class ControllerView(QWidget):
         # install — the installer imports on every healthy path.
         self.repair_button = QPushButton(REPAIR_IDLE, tab)
         self.repair_button.setVisible(False)
+        # Hidden until a Start is actually refused for the ports. Every v1
+        # server publishes the same ones, so only one can be live at a time -
+        # and refusing while leaving the user to go and find the other install
+        # themselves is correct and unhelpful. This is the offer to do it.
+        self.stop_other_button = QPushButton("Stop the other server and start this one", tab)
+        self.stop_other_button.setVisible(False)
         self.repair_label = QLabel("", tab)
         self.repair_label.setWordWrap(True)
         self.repair_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -373,6 +379,7 @@ class ControllerView(QWidget):
         self.refresh_button.clicked.connect(self.recheck)
         self.remove_button.clicked.connect(self.remove_containers)
         self.repair_button.clicked.connect(self.repair_import)
+        self.stop_other_button.clicked.connect(self.stop_other_and_start)
         row = QHBoxLayout()
         for b in (
             self.start_button,
@@ -386,6 +393,7 @@ class ControllerView(QWidget):
         box.addWidget(self.status_label)
         box.addLayout(row)
         box.addWidget(self.problem_label)
+        box.addWidget(self.stop_other_button)
         box.addWidget(self.repair_label)
         box.addStretch(1)
         self._tabs.addTab(tab, "Server")
@@ -625,15 +633,60 @@ class ControllerView(QWidget):
     def _start_failed(self, exc: object) -> None:
         self._set_busy(False)
         if isinstance(exc, PortConflictError):
-            msg = (
-                f"Another server is already using ports {exc.ports}: {', '.join(exc.containers)}. "
-                "Stop it first — only one server can run at a time."
-            )
-        else:
-            msg = str(exc)
+            self._offer_to_stop_the_other_server(exc)
+            return
+        self._hide_stop_other()
+        msg = str(exc)
         self.problem_label.setText(msg)
         self.action_failed.emit(msg)
         self.refresh_status()
+
+    def _offer_to_stop_the_other_server(self, exc: PortConflictError) -> None:
+        """Name the install holding the ports, and offer to stop it.
+
+        This used to end at "Stop it first", which is true and leaves the user to
+        work out WHICH install that is and go and do it. `PortConflictError` now
+        carries the compose `working_dir` label of each blocking container, so
+        the offer can name the folder, and the button does the stopping.
+
+        The offer is a control on the tab rather than a modal dialog, in this
+        view's own idiom: what is being agreed to stays readable while agreeing,
+        and a test can press it.
+        """
+        ports = ", ".join(str(port) for port in exc.ports)
+        names = ", ".join(exc.containers)
+        msg = (
+            f"This server needs port(s) {ports}, which {exc.owner_summary()} is "
+            f"using ({names}). Only one server can run at a time."
+        )
+        self.problem_label.setText(msg)
+        self.stop_other_button.setVisible(True)
+        self.stop_other_button.setEnabled(True)
+        self.action_failed.emit(msg)
+        self.refresh_status()
+
+    def _hide_stop_other(self) -> None:
+        """The offer only stands while the collision does."""
+        self.stop_other_button.setVisible(False)
+
+    @Slot()
+    def stop_other_and_start(self) -> None:
+        """Stop whatever holds our ports, then start this install.
+
+        One job, not two: a stop that succeeded followed by a start that was
+        never issued is the failure mode this replaces, and the two halves are
+        only meaningful together.
+        """
+        self._disarm_actions()
+        self._hide_stop_other()
+        self.problem_label.setText("")
+        self._set_busy(True)
+        self.status_label.setText("status: stopping the other server…")
+        self._run(
+            self.services.controller.stop_conflicting_and_start,
+            self._server_action_done,
+            self._start_failed,
+        )
 
     @Slot(object)
     def _stop_failed(self, exc: object) -> None:
@@ -689,9 +742,10 @@ class ControllerView(QWidget):
         self.repair_button.setText(REPAIR_IDLE)
 
     def _disarm_actions(self) -> None:
-        """Any other server action means the user moved on from both of them."""
+        """Any other server action means the user moved on from all of them."""
         self._disarm_remove()
         self._disarm_repair()
+        self._hide_stop_other()
 
     @Slot(object)
     def _remove_done(self, result: object) -> None:
