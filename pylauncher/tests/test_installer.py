@@ -2365,3 +2365,357 @@ def test_a_half_built_image_set_is_not_a_finished_build(tmp_path: Path, script_n
         f"{script_name}: a pruned third-party image reported a real build as missing, "
         "which is the folder-delete prompt"
     )
+
+
+# ---------------------------------------------------------------- port guard
+
+# One row per installer that carries the guard. The fields are the things that
+# have actually gone wrong here, each of them once:
+#   ports    - what the guard must check. Checking a port the compose never
+#              publishes refuses installs for nothing (found on yulon-win11).
+#   before   - the step it must precede. It was written after `do_compile` in
+#              two scripts, so it refused having just paid for the compile it
+#              exists to avoid (found on m910q, confirmed on yulon-fedora).
+#   own_compose - whether this script WRITES the compose file. The three WotLK
+#              scripts do not - AzerothCore's own compose does - so they have no
+#              port to override and must not offer one.
+_PORT_SCRIPTS = [
+    ("wow-vanilla", "install-wow-vanilla.sh", ("3724", "8085"), ("do_compile",), True),
+    ("wow-tbc", "install-wow-tbc.sh", ("3724", "8085"), ("do_compile",), True),
+    (
+        "wow-tortoise",
+        "install-tortoise-wow-wsl.sh",
+        ("3724", "8090", "3306"),
+        ("clone_source", "do_compile"),
+        True,
+    ),
+    (
+        "wow-wotlk",
+        "install-wow-wotlk.sh",
+        ("3724", "8085", "7878", "3306"),
+        ("install_server",),
+        False,
+    ),
+    (
+        "wow-wotlk",
+        "install-wow-wotlk-ubuntu.sh",
+        ("3724", "8085", "7878", "3306"),
+        ("install_server",),
+        False,
+    ),
+    (
+        "wow-wotlk",
+        "install-wow-wotlk-fedora.sh",
+        ("3724", "8085", "7878", "3306"),
+        ("install_server",),
+        False,
+    ),
+]
+
+# `ss` is reached through `command -v`, and a shell FUNCTION satisfies that as
+# surely as a binary on PATH - so the probe can hand the function under test any
+# listener table it likes without touching the machine's real sockets.
+_PORTS_PROBE = """
+set -u
+print_error()   { echo "ERR: $*"; }
+print_info()    { echo "INFO: $*"; }
+print_warning() { echo "WARN: $*"; }
+print_success() { echo "OK: $*"; }
+ask_yes_no() { echo "ASKED: $*"; return %(answer)s; }
+docker() { echo "$*" >>"$CALLS"; %(docker)s; }
+%(ss)s
+%(body)s
+( check_ports_free %(ports)s ); echo "STATUS=$?"
+"""
+
+_SS_NOTHING_LISTENING = 'ss() { echo "State Recv-Q Send-Q Local:Port Peer:Port"; }'
+
+
+def _ss_taken(port: str) -> str:
+    return (
+        'ss() { echo "State Recv-Q Send-Q Local:Port Peer:Port"; '
+        'echo "LISTEN 0 4096 0.0.0.0:' + port + ' 0.0.0.0:*"; }'
+    )
+
+
+_DOCKER_SILENT = "true"
+
+
+def _docker_holding(port: str) -> str:
+    """A neighbour whose compose project is bigger than the port it publishes.
+
+    The blocker is ac-worldserver; ac-database is in the same project and holds
+    none of our ports. Case order matters: the working_dir label and the
+    project-filtered listing both contain "compose.project", so the more
+    specific patterns have to come first.
+    """
+    return (
+        'case "$*" in '
+        '"ps -q") echo deadbeef;; '
+        '"port deadbeef") echo "' + port + "/tcp -> 0.0.0.0:" + port + '";; '
+        "*working_dir*) echo /home/pk/wow-server-playerbots;; "
+        "*compose.project=*) echo ac-worldserver; echo ac-database;; "
+        "*compose.project*) echo their-project;; "
+        "*Name*) echo /ac-worldserver;; "
+        "esac"
+    )
+
+
+def _ports_script(folder: str, name: str) -> Path:
+    return Path(__file__).resolve().parents[1] / "catalog" / "installers" / folder / name
+
+
+def _run_port_guard(script, calls, *, ss, docker, ports, path=None, answer=1):
+    """Run the installer's OWN check_ports_free, lifted out of the shipped file.
+
+    `answer` is what the stubbed `ask_yes_no` returns for the offer to stop the
+    other server: 1 (declined) by default, 0 to accept it.
+    """
+    body = script.read_text(encoding="utf-8")
+    start = body.index("port_is_taken() {")
+    end = body.index(chr(10) + "}", body.index("check_ports_free() {")) + 2
+    calls.write_text("", encoding="utf-8")
+    probe = _PORTS_PROBE % {
+        "ss": ss,
+        "docker": docker,
+        "body": body[start:end],
+        "ports": ports,
+        "answer": answer,
+    }
+    env = {"PATH": path if path is not None else os.environ.get("PATH", ""), "CALLS": str(calls)}
+    out = subprocess.run(["bash", "-c", probe], capture_output=True, text=True, timeout=30, env=env)
+    assert "command not found" not in out.stderr, (
+        script.name + ": the probe is missing something the shipped code calls, "
+        "so its result means nothing:" + chr(10) + out.stderr.strip()
+    )
+    status = next(
+        int(line.removeprefix("STATUS="))
+        for line in out.stdout.splitlines()
+        if line.startswith("STATUS=")
+    )
+    return status, out.stdout
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize("folder,name,ports,before,own_compose", _PORT_SCRIPTS)
+def test_free_ports_do_not_block_the_install(
+    tmp_path: Path, folder: str, name: str, ports, before, own_compose: bool
+) -> None:
+    """Nothing listening means the guard says nothing and gets out of the way."""
+    status, out = _run_port_guard(
+        _ports_script(folder, name),
+        tmp_path / "calls",
+        ss=_SS_NOTHING_LISTENING,
+        docker=_DOCKER_SILENT,
+        ports=" ".join(ports),
+    )
+
+    assert status == 0, name + ": a clean machine was refused:" + chr(10) + out
+    assert "ERR:" not in out, name + ": complained about free ports:" + chr(10) + out
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize("folder,name,ports,before,own_compose", _PORT_SCRIPTS)
+def test_a_taken_port_names_its_owner_and_offers_to_stop_it(
+    tmp_path: Path, folder: str, name: str, ports, before, own_compose: bool
+) -> None:
+    """The collision that cost a whole build is caught, named, and offered a way out.
+
+    Measured on yulon-fedora, 2026-08-29: a Vanilla install cloned, compiled,
+    extracted and imported, and only THEN died on `Bind for 0.0.0.0:8085 failed`,
+    against the WotLK stack already on that box. A refusal is only useful if it
+    says which install to go and stop - and better still if it offers to do it.
+    """
+    world = ports[1]
+    status, out = _run_port_guard(
+        _ports_script(folder, name),
+        tmp_path / "calls",
+        ss=_ss_taken(world),
+        docker=_docker_holding(world),
+        ports=" ".join(ports),
+    )
+
+    assert status == 1, name + ": a taken port did not stop the install:" + chr(10) + out
+    assert "Port " + world + " is already in use" in out, out
+    assert "ac-worldserver" in out, name + ": the refusal did not name the container"
+    assert "/home/pk/wow-server-playerbots" in out, (
+        name + ": the refusal did not name the install that owns the port:" + chr(10) + out
+    )
+    assert "ASKED: Stop the other server and continue?" in out, (
+        name + ": refused without offering to stop the other server:" + chr(10) + out
+    )
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize("folder,name,ports,before,own_compose", _PORT_SCRIPTS)
+def test_accepting_the_offer_stops_the_other_server_and_carries_on(
+    tmp_path: Path, folder: str, name: str, ports, before, own_compose: bool
+) -> None:
+    """Saying yes has to actually stop it, and then let the install proceed.
+
+    The listener table is the one the guard sees on its FIRST pass; the stub
+    `ss` keeps answering "taken", so this also pins the re-check: if the stop
+    did not free the port, the guard must not wave the install through.
+    """
+    world = ports[1]
+    calls = tmp_path / "calls"
+    status, out = _run_port_guard(
+        _ports_script(folder, name),
+        calls,
+        ss=_ss_taken(world),
+        docker=_docker_holding(world),
+        ports=" ".join(ports),
+        answer=0,
+    )
+
+    issued = calls.read_text(encoding="utf-8")
+    assert "stop ac-worldserver" in issued, (
+        name + ": accepting the offer never stopped anything:" + chr(10) + issued
+    )
+    # The whole server, not just the container that published the port. Seen in
+    # the field twice: on yulon-fedora ac-worldserver was left looping after its
+    # database was stopped, and on yulon-arch tbc-mangosd and tbc-db were left up
+    # after tbc-realmd went. A project member that publishes nothing is still
+    # part of the server being stopped.
+    assert "stop ac-database" in issued, (
+        name
+        + ": stopped the port holder and left the rest of that server running:"
+        + chr(10)
+        + issued
+    )
+    assert status == 1, (
+        name + ": the port was still held after the stop and the install continued anyway"
+    )
+    assert "still in use after stopping" in out, out
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize("folder,name,ports,before,own_compose", _PORT_SCRIPTS)
+def test_being_unable_to_check_is_not_the_same_as_free(
+    tmp_path: Path, folder: str, name: str, ports, before, own_compose: bool
+) -> None:
+    """With neither `ss` nor `netstat`, the guard says so rather than staying silent.
+
+    The same distinction `compiled_images_present` was taught: "I could not find
+    out" must not be spelled like an answer. Here it must not BLOCK either - a box
+    with no `ss` is not a box with a collision - so it warns and continues, and
+    the warning is what this asserts.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for tool in ("bash", "awk", "sed", "grep", "cat"):
+        found = shutil.which(tool)
+        if found:
+            (bindir / tool).symlink_to(found)
+    assert shutil.which("ss", path=str(bindir)) is None, "the stripped PATH still has ss"
+    assert shutil.which("netstat", path=str(bindir)) is None, "the stripped PATH still has netstat"
+
+    status, out = _run_port_guard(
+        _ports_script(folder, name),
+        tmp_path / "calls",
+        ss="",
+        docker=_DOCKER_SILENT,
+        ports=" ".join(ports),
+        path=str(bindir),
+    )
+
+    assert status == 0, name + ": an unanswerable question blocked the install"
+    assert "WARN:" in out, name + ": could not check, and said nothing about it"
+
+
+@pytest.mark.parametrize("folder,name,ports,before,own_compose", _PORT_SCRIPTS)
+def test_the_port_guard_runs_before_anything_expensive(
+    folder: str, name: str, ports, before, own_compose: bool
+) -> None:
+    """A guard that runs after the compile is not a guard, it is a postmortem.
+
+    The first version landed AFTER `do_compile` in two of the three scripts that
+    had it, so it refused the install having just spent 30-70 minutes building
+    it, while printing "no compile was started". Found on m910q and confirmed
+    independently on yulon-fedora, which watched a full 24-minute compile finish
+    before the refusal printed. The tests at the time all passed, because they
+    proved the FUNCTION worked and said nothing about where it was called.
+    """
+    lines = _ports_script(folder, name).read_text(encoding="utf-8").splitlines()
+
+    def line_of(call: str) -> int:
+        hits = [
+            i for i, line in enumerate(lines) if line.strip() == call or line.startswith(call + " ")
+        ]
+        assert hits, name + ": the main sequence never calls " + call
+        return hits[-1]
+
+    guard = line_of("check_ports_free")
+    for step in before:
+        assert guard < line_of(step), (
+            name + ": check_ports_free runs AFTER " + step + ", so the refusal arrives "
+            "once the expensive work is already paid for"
+        )
+
+
+@pytest.mark.parametrize("folder,name,ports,before,own_compose", _PORT_SCRIPTS)
+def test_the_guard_checks_exactly_the_ports_that_script_publishes(
+    folder: str, name: str, ports, before, own_compose: bool
+) -> None:
+    """Refusing over a port you never bind is a false alarm, not caution.
+
+    The first version passed DB_PORT for all three games that had the guard, but
+    only Tortoise's compose has a `ports:` key on its db service - Vanilla's and
+    TBC's db talks to the other services over the internal compose network and
+    binds nothing on the host. A stray MySQL on 3306 refused a TBC install over a
+    port that install would never have touched. Found on yulon-win11.
+
+    The WotLK scripts are checked against the table instead: their compose comes
+    from AzerothCore upstream, so there is no `ports:` mapping here to read.
+    """
+    body = _ports_script(folder, name).read_text(encoding="utf-8")
+
+    call = [line for line in body.splitlines() if line.startswith("check_ports_free ")]
+    assert len(call) == 1, name + ": expected exactly one call in the main sequence"
+
+    names = {
+        "3724": "AUTH_PORT",
+        "8085": "WORLD_PORT",
+        "8090": "WORLD_PORT",
+        "7878": "SOAP_PORT",
+        "3306": "DB_PORT",
+    }
+    expected = {names[port] for port in ports}
+    checked = {var for var in set(names.values()) if "$" + var in call[0]}
+    assert checked == expected, (
+        name + ": the guard checks " + str(sorted(checked)) + ", expected " + str(sorted(expected))
+    )
+
+    if own_compose:
+        published = {var for var in set(names.values()) if '"${' + var + "}:" in body}
+        assert checked == published, (
+            name
+            + ": checks "
+            + str(sorted(checked))
+            + " but publishes "
+            + str(sorted(published))
+            + " - a port that is checked and never bound is a false refusal"
+        )
+
+
+@pytest.mark.parametrize("folder,name,ports,before,own_compose", _PORT_SCRIPTS)
+def test_only_the_scripts_that_write_their_compose_offer_a_port_override(
+    folder: str, name: str, ports, before, own_compose: bool
+) -> None:
+    """Do not print a remedy the script cannot carry out.
+
+    The WotLK installers do not write their compose file, so `YULON_WORLD_PORT`
+    would change nothing for them; offering it would be advice that silently
+    fails. `PORT_OVERRIDES` decides which half of the refusal is printed, and
+    this pins it to the same fact the table records.
+    """
+    body = _ports_script(folder, name).read_text(encoding="utf-8")
+    assert ("PORT_OVERRIDES=1" in body) is own_compose, (
+        name + ": PORT_OVERRIDES disagrees with whether this script writes its own compose"
+    )
+    if own_compose:
+        assert '"${AUTH_PORT}:' in body, name + ": claims overrides but hardcodes the auth port"
+    else:
+        assert "YULON_AUTH_PORT" not in body.split("PORT_OVERRIDES=0")[0], (
+            name + ": reads an override it cannot honour"
+        )

@@ -206,6 +206,152 @@ detect_lan_ip() {
 # ─────────────────────────────────────────
 # SYSTEM CHECKS
 # ─────────────────────────────────────────
+
+# ── server ports ────────────────────────────────────────────────────────
+# Three of the four games in the catalog declare the SAME ports (auth 3724,
+# world 8085, db 3306), so a second install on one machine collides by design.
+# The collision used to surface only at `docker compose up`, which is the LAST
+# step - after 30-70 minutes of compiling. Measured on yulon-fedora 2026-08-29.
+PORT_OVERRIDES=1
+AUTH_PORT="${YULON_AUTH_PORT:-3724}"
+WORLD_PORT="${YULON_WORLD_PORT:-8090}"
+DB_PORT="${YULON_DB_PORT:-3306}"
+
+# Is a host port already listening? Answers 0 = taken, 1 = free, 2 = COULD NOT
+# ASK. The third answer matters: this function gates an install, and "I could
+# not find out" must never be spelled the same way as "it is free".
+port_is_taken() {
+    local port="$1"
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltn 2>/dev/null | awk -v p="$port" 'NR > 1 { n = split($4, a, ":"); if (a[n] == p) hit = 1 } END { exit !hit }'
+        return $?
+    fi
+    if command -v netstat >/dev/null 2>&1; then
+        netstat -ltn 2>/dev/null | awk -v p="$port" '/^tcp/ { n = split($4, a, ":"); if (a[n] == p) hit = 1 } END { exit !hit }'
+        return $?
+    fi
+    return 2
+}
+
+# Which container, if any, publishes that port - so the refusal can name the
+# install the user has to go and stop, rather than just the number.
+port_holder() {
+    local port="$1" cid
+    for cid in $(docker ps -q 2>/dev/null); do
+        if docker port "$cid" 2>/dev/null | awk -F: -v p="$port" '$NF == p { hit = 1 } END { exit !hit }'; then
+            printf '%s' "$cid"
+            return 0
+        fi
+    done
+    return 1
+}
+
+check_ports_free() {
+    local port cid name dir busy=0 unknown=0 blockers=""
+    local project siblings victim stopped=""
+    for port in "$@"; do
+        port_is_taken "$port"
+        case $? in
+            0) ;;
+            1) continue ;;
+            *) unknown=1; continue ;;
+        esac
+        busy=1
+        print_error "Port $port is already in use on this machine."
+        if cid=$(port_holder "$port"); then
+            name=$(docker inspect -f '{{.Name}}' "$cid" 2>/dev/null | sed 's|^/||')
+            dir=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$cid" 2>/dev/null)
+            [ -n "$name" ] && print_info "It is published by the container '$name'."
+            if [ -n "$dir" ] && [ "$dir" != "<no value>" ]; then
+                print_info "That container belongs to the install in $dir."
+            fi
+            # One name can hold several of our ports, so keep the list unique.
+            case " $blockers " in
+                *" $name "*) ;;
+                *) [ -n "$name" ] && blockers="$blockers $name" ;;
+            esac
+        fi
+    done
+    if [ "$busy" -eq 0 ]; then
+        if [ "$unknown" -eq 1 ]; then
+            print_warning "Could not check whether the server ports are free (no 'ss', no 'netstat')."
+            print_info "Continuing anyway; a collision would then surface at 'docker compose up'."
+        fi
+        return 0
+    fi
+    print_error "Two WoW servers cannot publish the same port on one machine."
+    print_info "Checked here, before the expensive part, on purpose: this used to be"
+    print_info "discovered at 'docker compose up' - the last step, after 30-70 minutes."
+    print_info ""
+
+    # The offer, not just the refusal. Every game in the catalog publishes the
+    # same ports, so "only one server live at a time" is the design rather than a
+    # limitation - which makes stopping the other one the ordinary answer, and
+    # leaving the user to go and find it themselves the unhelpful one.
+    #
+    # `docker stop`, never `compose down`: stopping is reversible and keeps the
+    # other install's containers, so ITS next start is still the staged one that
+    # does not re-run its database import.
+    if [ -n "$blockers" ] && ask_yes_no "Stop the other server and continue?"; then
+        # Stop the whole SERVER, not just the container publishing the port.
+        # Measured on yulon-fedora 2026-08-29: stopping ac-authserver and
+        # ac-database left ac-worldserver running with its database gone from
+        # under it, and `restart: unless-stopped` looped it - RestartCount 18
+        # and climbing. It published only 8085 and 7878, so it was correctly not
+        # a blocker, and just as correctly part of the same server. Seen again
+        # on yulon-arch, where tbc-mangosd and tbc-db were left up after
+        # tbc-realmd was stopped out from under them.
+        for name in $blockers; do
+            project=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$name" 2>/dev/null)
+            if [ -n "$project" ] && [ "$project" != "<no value>" ]; then
+                siblings=$(docker ps -a --filter "label=com.docker.compose.project=$project" --format '{{.Names}}' 2>/dev/null)
+            else
+                # Started outside compose: there is nothing to widen to, and
+                # widening on a guess would stop things that are not involved.
+                siblings="$name"
+            fi
+            for victim in $siblings; do
+                case " $stopped " in
+                    *" $victim "*) continue ;;
+                esac
+                print_info "Stopping $victim ..."
+                docker stop "$victim" >/dev/null 2>&1 || print_warning "Could not stop $victim."
+                stopped="$stopped $victim"
+            done
+        done
+        busy=0
+        for port in "$@"; do
+            if port_is_taken "$port"; then
+                busy=1
+                print_error "Port $port is still in use after stopping."
+            fi
+        done
+        if [ "$busy" -eq 0 ]; then
+            print_success "The other server is stopped; carrying on."
+            return 0
+        fi
+        print_error "Something other than that server is still holding a port."
+    fi
+
+    if [ "${PORT_OVERRIDES:-1}" -eq 1 ]; then
+        print_info "Either stop the other server first, or give this one different ports:"
+        print_info "  YULON_AUTH_PORT=3725 YULON_WORLD_PORT=8086 YULON_DB_PORT=3307 $0"
+        print_info ""
+        print_info "One caveat worth knowing before you move them: the AUTH port is the one"
+        print_info "the game client dials, and it reads it from realmlist.wtf - so moving that"
+        print_info "one means editing the client too. The world and db ports move freely; the"
+        print_info "client is told the world port by the realm row in the database."
+    else
+        print_info "Stop the other server first, then run this again."
+        print_info ""
+        print_info "There is no port override for this game: its compose file comes from"
+        print_info "AzerothCore upstream rather than being written here, so pointing it at a"
+        print_info "different port is not something this installer can do for you."
+    fi
+    print_info "No compile was started, and no server was built."
+    exit 1
+}
+
 check_system() {
     print_step "Checking System Requirements"
 
@@ -820,7 +966,7 @@ services:
       MARIADB_USER: mangos
       MARIADB_PASSWORD: ${DB_PASSWORD}
     ports:
-      - "3306:3306"
+      - "${DB_PORT}:3306"
     volumes:
       - dbdata:/var/lib/mysql
     networks: [tortoise-net]
@@ -838,7 +984,7 @@ services:
     depends_on:
       db: { condition: service_healthy }
     ports:
-      - "3724:3724"
+      - "${AUTH_PORT}:3724"
     volumes:
       - ./install:/opt/tortoise
       - ./etc/realmd.conf:/opt/tortoise/bin/realmd.conf:ro
@@ -854,7 +1000,7 @@ services:
     depends_on:
       db: { condition: service_healthy }
     ports:
-      - "8090:8090"
+      - "${WORLD_PORT}:8090"
     volumes:
       - ./install:/opt/tortoise
       - ./etc/mangosd.conf:/opt/tortoise/bin/mangosd.conf:ro
@@ -1195,6 +1341,7 @@ locate_client
 choose_install_dir
 show_summary
 install_docker
+check_ports_free "$AUTH_PORT" "$WORLD_PORT" "$DB_PORT"
 clone_source
 do_compile
 extract_client_data
