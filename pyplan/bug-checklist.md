@@ -200,6 +200,19 @@ recorded here so nobody "fixes" them again.
 
 ### 6. Decisions — not bugs to fix
 
+- [x] **DECIDED 2026-08-29, by the owner: only one server runs at a time.** Every game in the
+  catalog publishes the same ports, so this is the design rather than a limitation, and it means
+  the ports never have to move. Both guards now say so and act on it: the installer asks
+  "Stop the other server and continue?" before the compile, and the launcher offers the same on
+  the tab when Start is refused. Accepting stops the whole compose project of the install holding
+  the ports, not just the containers publishing them.
+  The `YULON_AUTH_PORT` / `YULON_WORLD_PORT` / `YULON_DB_PORT` overrides stay as an escape hatch
+  for anyone who genuinely wants two live at once — proven working on yulon-fedora, where Vanilla
+  and WotLK ran side by side — but they are no longer the advertised answer. The reason that is
+  an escape hatch rather than the default: **the game client dials the AUTH port out of
+  `realmlist.wtf`**, so moving it silently would produce a server nobody could log in to.
+  See [#128](https://github.com/DadsMmoLab/dads-mmo-lab/pull/128).
+
 - [ ] **Self-update has never worked for anyone.** `update.py:26` calls `/releases/latest`, which by
   definition excludes prereleases — and **every** upstream release is flagged `Pre-release`
   (`v0.6.57Public`, `v0.6.55Public`, `v0.6.53`). Two independent fixes, not exclusive:
