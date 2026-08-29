@@ -234,6 +234,17 @@ class RunnerGit:
             return None
         return proc.stdout.strip() or None
 
+    def is_unmodified(self, dest: Path, relative_path: str) -> bool | None:
+        """Is `relative_path` exactly what this checkout's HEAD committed? None = cannot ask."""
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = _run_git(["git", "status", "--porcelain", "--", relative_path], cwd=dest)
+        except GitError as exc:
+            logger.debug(f"could not ask git about {relative_path} in {dest}: {exc}")
+            return None
+        return not proc.stdout.strip()
+
     def clone(self, spec: CloneSpec) -> None:
         if (spec.dest / ".git").is_dir():
             self._update(spec)
@@ -333,8 +344,18 @@ class ContainerGit:
     That second half read "and `os.getuid` does not exist, which is the same
     condition" until 2026-08-27, and `_user_args()` implemented it that way.
     `os.getuid` does not exist on Windows; it exists on macOS. So every Mac got
-    a `--user` the rule excludes, the container saw the bind mount as
-    `root:root`, and git could not create `.git`.
+    a `--user` the rule excludes, and the container saw the bind mount as
+    `root:root`.
+
+    **That was a real defect and it was not the macOS clone failure**, though
+    it was recorded here as its cause. Measured 2026-08-29 against this exact
+    pinned image: a root-owned mount plus `--user <uid>:<gid>` makes git print
+    `/git/.git: Permission denied`. The tester reported
+    `/git/.git: No such file or directory` — EACCES against ENOENT, which is
+    not the same failure and not the same investigation. ENOENT there means
+    the container's `/git` had no directory behind it at `mkdir` time, and
+    what a Mac's file-sharing layer does to a bind mount is the one thing
+    nobody on this project can run. The macOS failure is still open.
     """
 
     image: str = _CONTAINER_GIT_IMAGE
@@ -383,11 +404,21 @@ class ContainerGit:
 
     def clone(self, spec: CloneSpec) -> None:
         if (spec.dest / ".git").is_dir():
-            self._run(
-                spec, ["fetch", *_pull_depth_args(spec.depth), "origin", spec.branch or "HEAD"]
-            )
-            self._run(spec, ["reset", "--hard", "FETCH_HEAD"])
-            return
+            try:
+                self._run(
+                    spec, ["fetch", *_pull_depth_args(spec.depth), "origin", spec.branch or "HEAD"]
+                )
+                self._run(spec, ["reset", "--hard", "FETCH_HEAD"])
+                return
+            except GitError as exc:
+                if platform.DOCKER_CLI_MISSING_HELP not in str(exc) and git_available():
+                    logger.warning(
+                        f"containerized git update failed in {spec.dest} ({exc}); "
+                        "falling back to host git"
+                    )
+                    RunnerGit().clone(spec)
+                    return
+                raise
         if spec.dest.exists():
             shutil.rmtree(spec.dest)
         spec.dest.mkdir(parents=True, exist_ok=True)
@@ -402,7 +433,17 @@ class ContainerGit:
         if spec.sparse_path is not None:
             argv += ["--filter=blob:none", "--sparse"]
         # The clone target is `.` because the mount point *is* the destination.
-        self._run(spec, [*argv, spec.url, "."])
+        try:
+            self._run(spec, [*argv, spec.url, "."])
+        except GitError as exc:
+            if platform.DOCKER_CLI_MISSING_HELP not in str(exc) and git_available():
+                logger.warning(
+                    f"containerized git clone failed in {spec.dest} ({exc}); "
+                    "falling back to host git"
+                )
+                RunnerGit().clone(spec)
+                return
+            raise
         if spec.sparse_path is not None:
             # --no-cone, or this checks out a DIFFERENT tree than RunnerGit.
             # `clone --sparse` turns cone mode on, and cone mode materializes
@@ -488,7 +529,7 @@ class ContainerGit:
         # manifest allow-list and carry no credentials.
         logger.info(f"containerized git: `{' '.join(argv[1:])}` into {dest}")
         try:
-            proc = runner.run(argv, env=_no_prompt_env())
+            proc = runner.run(argv, env=_no_prompt_env(), stdin=subprocess.DEVNULL)
         except OSError as exc:
             # Logged with the real errno first, the way `docker._docker()` does, so a
             # docker.exe blocked by an ACL or by AV leaves evidence instead of being
@@ -504,9 +545,13 @@ class ContainerGit:
                 # nothing after it — and a process that was killed looks exactly
                 # like one that failed when the only evidence is the words it
                 # got out first. 137 and 128 are different investigations.
+                # One sentence, and the comma-less concatenation of the two
+                # spellings that shipped in v0.6.57 is what the extra assertion
+                # in `test_a_containerized_failure_is_reported_once` guards:
+                # every macOS failure reached the tester printed twice, run
+                # together with no separator.
                 f"containerized git {' '.join(git_args)} in {dest} exited "
                 f"{proc.returncode}: {proc.stderr.strip()}"
-                f"containerized git {' '.join(git_args)} in {dest} failed: {proc.stderr.strip()}"
             )
         return proc
 
@@ -520,9 +565,11 @@ class ContainerGit:
         handed a `--user` — and a `--user` overrides the very file-sharing
         mapping the docstring relies on to make the flag unnecessary there.
 
-        What that cost: the tester's container sees the bind mount as
-        `root:root` (2026-08-27), so git running as 501 could not create `.git`
-        and every macOS install ended in `/git/.git: No such file or directory`.
+        What that cost: the tester's container saw the bind mount as
+        `root:root` (2026-08-27), so git running as 501 could not create
+        `.git`. It was written up as the cause of the reported macOS failure
+        and it is not — see the class docstring for the measurement that
+        separates `Permission denied` from `No such file or directory`.
 
         Asking `platform.detect()` says what is meant. The old spelling was
         right about Windows by accident and wrong about macOS for the same

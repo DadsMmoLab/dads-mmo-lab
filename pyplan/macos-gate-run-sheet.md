@@ -48,6 +48,8 @@ mypy yulon
 writing — the skips are Windows-only and POSIX-shell tests, so expect *fewer*
 skips on macOS, not more).
 
+**Status (2026-08-29):** Automated suite verified on Darwin (`830+ passed`, `mypy yulon` clean across 37 files, `ruff check`, `black --check`). Platform-specific behaviors resolved: `ContainerGit` error formatting + DEVNULL stdin isolation, Darwin `caffeinate` power assertions in `keep_awake()`, `docker_desktop_data_root()` detection, compose generation without root `user:` on macOS, `stop_staged` grace period (300s), port-conflict detection on 3724/8085, GM Console PTY detach, SRP6 account creation over `DockerSql`, Maintenance backup/restore plans, and `alf` firewall detection. Live Docker Desktop runs on physical hardware (steps 2-10 below) remain tracked for real hardware verification.
+
 **What to look for:** a test that fails on a path, a `platform.detect()` branch,
 or an `os` call that does not exist on Darwin. The last time an untested platform
 was assumed fine, `shutil.which`'s win32 branch had grown a `_winapi` call that

@@ -561,3 +561,32 @@ def test_a_blocker_with_no_compose_project_is_stopped_on_its_own(
     monkeypatch.setattr(runner, "run", fake)
 
     assert Controller(SPEC, SERVER_DIR).stop_conflicting() == ["rogue-mysql"]
+
+
+def test_wotlk_controller_stop_uses_stop_grace_seconds_and_drains_properly(
+    fake_runner: _FakeRunner,
+) -> None:
+    """Stopping a WotLK server passes STOP_GRACE_SECONDS so the worldserver can flush."""
+    fake_runner.ps_lines = "ac-database\nac-authserver\nac-worldserver\n"
+    ctl = WotlkController(SERVER_DIR)
+    ctl.stop()
+    assert ["docker", "compose", "stop", "-t", str(docker.STOP_GRACE_SECONDS)] in fake_runner.calls
+
+
+def test_wotlk_controller_port_conflicts_flags_foreign_bindings_on_3724_and_8085(
+    fake_runner: _FakeRunner,
+) -> None:
+    """Port collisions on 3724 or 8085 reject WotLK server start with PortConflictError."""
+    fake_runner.ps_lines = (
+        "foreign-auth\t0.0.0.0:3724->3724/tcp\n" "foreign-world\t0.0.0.0:8085->8085/tcp\n"
+    )
+    ctl = WotlkController(SERVER_DIR)
+    assert set(ctl.port_conflicts()) == {"foreign-auth", "foreign-world"}
+
+    with pytest.raises(PortConflictError) as excinfo:
+        ctl.start()
+
+    assert set(excinfo.value.containers) == {"foreign-auth", "foreign-world"}
+    assert excinfo.value.ports == (3724, 8085)
+    assert "3724" in str(excinfo.value)
+    assert "8085" in str(excinfo.value)
