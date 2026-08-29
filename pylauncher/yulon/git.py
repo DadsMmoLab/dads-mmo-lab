@@ -234,6 +234,17 @@ class RunnerGit:
             return None
         return proc.stdout.strip() or None
 
+    def is_unmodified(self, dest: Path, relative_path: str) -> bool | None:
+        """Is `relative_path` exactly what this checkout's HEAD committed? None = cannot ask."""
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = _run_git(["git", "status", "--porcelain", "--", relative_path], cwd=dest)
+        except GitError as exc:
+            logger.debug(f"could not ask git about {relative_path} in {dest}: {exc}")
+            return None
+        return not proc.stdout.strip()
+
     def clone(self, spec: CloneSpec) -> None:
         if (spec.dest / ".git").is_dir():
             self._update(spec)
@@ -383,11 +394,21 @@ class ContainerGit:
 
     def clone(self, spec: CloneSpec) -> None:
         if (spec.dest / ".git").is_dir():
-            self._run(
-                spec, ["fetch", *_pull_depth_args(spec.depth), "origin", spec.branch or "HEAD"]
-            )
-            self._run(spec, ["reset", "--hard", "FETCH_HEAD"])
-            return
+            try:
+                self._run(
+                    spec, ["fetch", *_pull_depth_args(spec.depth), "origin", spec.branch or "HEAD"]
+                )
+                self._run(spec, ["reset", "--hard", "FETCH_HEAD"])
+                return
+            except GitError as exc:
+                if platform.DOCKER_CLI_MISSING_HELP not in str(exc) and git_available():
+                    logger.warning(
+                        f"containerized git update failed in {spec.dest} ({exc}); "
+                        "falling back to host git"
+                    )
+                    RunnerGit().clone(spec)
+                    return
+                raise
         if spec.dest.exists():
             shutil.rmtree(spec.dest)
         spec.dest.mkdir(parents=True, exist_ok=True)
@@ -402,7 +423,17 @@ class ContainerGit:
         if spec.sparse_path is not None:
             argv += ["--filter=blob:none", "--sparse"]
         # The clone target is `.` because the mount point *is* the destination.
-        self._run(spec, [*argv, spec.url, "."])
+        try:
+            self._run(spec, [*argv, spec.url, "."])
+        except GitError as exc:
+            if platform.DOCKER_CLI_MISSING_HELP not in str(exc) and git_available():
+                logger.warning(
+                    f"containerized git clone failed in {spec.dest} ({exc}); "
+                    "falling back to host git"
+                )
+                RunnerGit().clone(spec)
+                return
+            raise
         if spec.sparse_path is not None:
             # --no-cone, or this checks out a DIFFERENT tree than RunnerGit.
             # `clone --sparse` turns cone mode on, and cone mode materializes
@@ -488,7 +519,7 @@ class ContainerGit:
         # manifest allow-list and carry no credentials.
         logger.info(f"containerized git: `{' '.join(argv[1:])}` into {dest}")
         try:
-            proc = runner.run(argv, env=_no_prompt_env())
+            proc = runner.run(argv, env=_no_prompt_env(), stdin=subprocess.DEVNULL)
         except OSError as exc:
             # Logged with the real errno first, the way `docker._docker()` does, so a
             # docker.exe blocked by an ACL or by AV leaves evidence instead of being
@@ -506,7 +537,6 @@ class ContainerGit:
                 # got out first. 137 and 128 are different investigations.
                 f"containerized git {' '.join(git_args)} in {dest} exited "
                 f"{proc.returncode}: {proc.stderr.strip()}"
-                f"containerized git {' '.join(git_args)} in {dest} failed: {proc.stderr.strip()}"
             )
         return proc
 

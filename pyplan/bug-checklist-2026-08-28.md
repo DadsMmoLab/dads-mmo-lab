@@ -94,6 +94,24 @@ These are shared fixes: found on one platform, they affect all of them.
   on Ubuntu and Arch. Now refused **before** the build, naming the folder that owns the name.
   *Coexistence itself is still open — see Decisions.*
 
+- [x] **ContainerGit error formatting produced glued string literals on failures**
+  `yulon/git.py:507-510`
+  `_capture()` had two adjacent f-strings without separator, causing exit codes and error messages
+  to implicitly concatenate into garbled strings. Fixed with single clean error formatting.
+  *Verified with unit tests in `test_git.py`.*
+
+- [x] **ContainerGit inherited launchd file descriptors from GUI processes on macOS**
+  `yulon/git.py:501`
+  Running containerized git from Finder/.app spawned subprocesses inheriting non-standard stdin,
+  which could interfere with docker child execution. Fixed by passing `stdin=subprocess.DEVNULL` to `runner.run()`.
+  *Verified with unit tests in `test_git.py`.*
+
+- [x] **Darwin sleep assertions failed to terminate on worker exit**
+  `yulon/platform.py`
+  `platform.keep_awake()` spawns `caffeinate -dims -w <pid>` on macOS; verified proper process
+  lifecycle termination upon context exit.
+  *Verified with unit tests in `test_platform.py`.*
+
 ---
 
 ## 2. Found by review, patch drafted, not yet applied

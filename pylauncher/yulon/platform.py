@@ -2524,7 +2524,14 @@ def vm_resources(run: RunCmd | None = None) -> VmResources | None:
     return VmResources(memory, cpus)
 
 
-_DOCKER_DESKTOP_SETTINGS_KEYS = ("dataFolder", "DataFolder", "diskPath", "DiskPath")
+_DOCKER_DESKTOP_SETTINGS_KEYS = (
+    "dataFolder",
+    "DataFolder",
+    "diskPath",
+    "DiskPath",
+    "virtualDiskPath",
+    "VirtualDiskPath",
+)
 """Keys Docker Desktop is believed to store its data root under.
 
 Four spellings because the file has been through several: `rust-prior-art.md`
@@ -2559,13 +2566,9 @@ def docker_desktop_settings_file() -> Path | None:
         store = base / "Docker" / "settings-store.json"
         return store if store.is_file() else base / "Docker" / "settings.json"
     if here == "macos":
-        return (
-            Path.home()
-            / "Library"
-            / "Group Containers"
-            / "group.com.docker"
-            / "settings-store.json"
-        )
+        base = Path.home() / "Library" / "Group Containers" / "group.com.docker"
+        store = base / "settings-store.json"
+        return store if store.is_file() else base / "settings.json"
     return None
 
 
@@ -2676,6 +2679,10 @@ _RESERVED_SERVER_DIRS = (
     "/proc",
     "/sys",
     "/dev",
+    "/private",
+    "/private/tmp",
+    "/private/var",
+    "/private/etc",
 )
 # Windows has no shell installer to mirror, so this list answers to nothing but
 # the same rule: a reinstall removes the folder it was given, and these are
@@ -2921,7 +2928,10 @@ def keep_awake(
         try:
             yield
         finally:
-            child.terminate()
+            try:
+                child.terminate()
+            except OSError:
+                pass
         return
     if here == "windows":
         if threading.current_thread() is threading.main_thread():

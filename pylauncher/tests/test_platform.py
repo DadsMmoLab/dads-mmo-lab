@@ -160,10 +160,36 @@ def test_the_macos_data_root_prefers_the_settings_store_and_falls_back_to_docker
     monkeypatch.setattr(platform, "docker_desktop_settings_file", lambda: store)
     assert platform.docker_desktop_data_root() == Path("/Volumes/Big/docker-data")
 
+    store.write_text('{"virtualDiskPath": "/Volumes/Fast/Docker.raw"}', encoding="utf-8")
+    assert platform.docker_desktop_data_root() == Path("/Volumes/Fast/Docker.raw")
+
     store.write_text("{ not json", encoding="utf-8")
     assert platform.docker_desktop_data_root() == Path(
         "/Users/deck/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw"
     )
+
+
+def test_docker_desktop_settings_file_on_macos_prefers_settings_store_and_falls_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(platform, "detect", lambda: "macos")
+    monkeypatch.setattr(platform.Path, "home", lambda: tmp_path)
+
+    group_dir = tmp_path / "Library" / "Group Containers" / "group.com.docker"
+    group_dir.mkdir(parents=True)
+
+    # When neither exists, default to settings-store.json
+    assert platform.docker_desktop_settings_file() == group_dir / "settings.json"
+
+    # When settings.json exists
+    settings_old = group_dir / "settings.json"
+    settings_old.write_text('{"diskPath": "/data"}', encoding="utf-8")
+    assert platform.docker_desktop_settings_file() == settings_old
+
+    # When settings-store.json exists, it takes precedence
+    settings_new = group_dir / "settings-store.json"
+    settings_new.write_text('{"diskPath": "/data2"}', encoding="utf-8")
+    assert platform.docker_desktop_settings_file() == settings_new
 
 
 def test_the_docker_data_root_on_linux_is_the_host_directory(
@@ -254,6 +280,34 @@ def test_keep_awake_on_macos_spawns_a_caffeinate_that_dies_with_us() -> None:
         assert spawned == [["caffeinate", "-dims", "-w", str(os.getpid())]]
         assert stopped == []
     assert stopped == ["terminated"]
+
+
+def test_keep_awake_on_macos_handles_already_terminated_child() -> None:
+    class DeadChild:
+        def terminate(self) -> None:
+            raise ProcessLookupError("process already dead")
+
+    with platform.keep_awake(
+        platform_id=lambda: "macos",
+        spawn=lambda _argv: DeadChild(),  # type: ignore[arg-type,return-value]
+    ):
+        pass
+
+
+def test_keep_awake_on_macos_works_on_a_worker_thread() -> None:
+    outcome: list[str] = []
+
+    def work() -> None:
+        try:
+            with platform.keep_awake(platform_id=lambda: "macos"):
+                outcome.append("held")
+        except Exception as exc:  # pragma: no cover
+            outcome.append(f"failed: {exc}")
+
+    worker = threading.Thread(target=work)
+    worker.start()
+    worker.join()
+    assert outcome == ["held"]
 
 
 def test_keep_awake_on_macos_survives_a_caffeinate_that_will_not_start() -> None:
