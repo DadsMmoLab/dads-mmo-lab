@@ -1073,3 +1073,54 @@ def test_the_native_engine_never_hands_a_prompter_to_provisioning(tmp_path: Path
 
     assert seen, "ensure_docker was never reached"
     assert seen[0].get("ask") is None
+
+
+def test_macos_native_installer_full_run_and_compose_generation(tmp_path: Path) -> None:
+    """Full WotLK native install workflow on macOS produces compose files and starts services."""
+    rec = Recorder(images=False)
+    server_dir = tmp_path / "wow-macos"
+    lines = install(rec, server_dir)
+
+    # All three compose files exist on disk
+    base_file = server_dir / composegen.BASE_FILE
+    override_file = server_dir / composegen.OVERRIDE_FILE
+    build_file = server_dir / composegen.BUILD_FILE
+
+    assert base_file.is_file()
+    assert override_file.is_file()
+    assert build_file.is_file()
+
+    # macOS leaves user to image rather than root
+    base_content = base_file.read_text(encoding="utf-8")
+    assert 'user: "0:0"' not in base_content
+    assert "# user: left to the image (acore)" in base_content
+
+    # Images in base compose file match expected tags
+    refs = composegen.built_image_refs(server_dir, platform_id=lambda: "macos")
+    assert any(ref in base_content for ref in refs)
+
+    # Build overlay specifies build contexts and Dockerfiles
+    build_content = build_file.read_text(encoding="utf-8")
+    assert "apps/docker/Dockerfile" in build_content
+
+    # Full stage progression through import and start
+    assert rec.calls == [
+        "gather",
+        f"clone:{ENTRY.emulator.sources[0].url}",
+        f"clone:{ENTRY.emulator.sources[1].url}",
+        "build",
+        "one-shot:ac-client-data-init",
+        "start-db",
+        "probe",
+        "one-shot:ac-db-import",
+        "verify",
+        "start",
+    ]
+    assert any("The server is up." in line for line in lines)
+
+
+def test_macos_native_installer_handles_db_healthy_timeout(tmp_path: Path) -> None:
+    """If the database never reaches healthy during ready stage, fail with log advice."""
+    rec = Recorder(images=False, db_healthy=False)
+    with pytest.raises(InstallerError, match="The database never reported healthy"):
+        install(rec, tmp_path / "wow-macos-db-unhealthy")

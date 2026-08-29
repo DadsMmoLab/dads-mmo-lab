@@ -28,7 +28,7 @@ def seen(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     calls: list[list[str]] = []
 
     def fake_run(
-        argv: list[str], cwd: Path | None = None, env: object = None
+        argv: list[str], cwd: Path | None = None, env: object = None, **kwargs: object
     ) -> subprocess.CompletedProcess[str]:
         calls.append(argv)
         return _completed()
@@ -286,6 +286,7 @@ def test_a_failed_clone_names_the_directory_it_mounted(
     # failed one look identical without the number, and 137 means something
     # very different from 128 here.
     assert "128" in str(raised.value), "a failure with no exit code cannot be told apart"
+    assert str(raised.value).count("containerized git") == 1, "no duplicate error prefix"
     logged = "\n".join(r.message for r in caplog.records)
     assert f"{dest}:/git" in logged, "the mount belongs in the log, at the level the app runs at"
 
@@ -407,7 +408,9 @@ def test_container_git_reports_a_failure_as_a_git_error(
     monkeypatch.setattr(
         runner,
         "run",
-        lambda argv, cwd=None, env=None: _completed(returncode=1, stderr="could not resolve"),
+        lambda argv, cwd=None, env=None, **kwargs: _completed(
+            returncode=1, stderr="could not resolve"
+        ),
     )
     with pytest.raises(git.GitError, match="could not resolve"):
         git.ContainerGit().clone(

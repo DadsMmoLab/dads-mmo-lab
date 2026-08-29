@@ -359,3 +359,57 @@ def test_the_data_root_floors_are_the_catalog_entry_s(free_gb: int, expected: st
     assert (NATIVE.min_data_root_gb, NATIVE.warn_data_root_gb) == (40.0, 60.0)
     report = preflight.evaluate(ENTRY, SERVER_DIR, facts(data_root_free=free_gb * GIB))
     assert verdict(report, "Docker's disk") == expected
+
+
+def test_gather_on_macos_assembles_platform_facts(tmp_path: Path) -> None:
+    data_root_path = tmp_path / "Docker.raw"
+    data_root_path.write_bytes(b"")
+
+    got = preflight.gather(
+        ENTRY,
+        tmp_path / "server",
+        platform_id=lambda: "macos",
+        docker_ready=lambda: True,
+        vm_resources=lambda: platform_module.VmResources(memory_bytes=8 * GIB, cpus=4),
+        data_root=lambda: data_root_path,
+        disk_free=lambda p: 120 * GIB,
+        dir_problem=lambda p: None,
+        bind_mount_ok=lambda p: True,
+        port_conflicts=lambda: [],
+        probe_port=lambda host, port: platform_module.PortProbe(host, port, "unknown", ""),
+    )
+    assert got.platform_id == "macos"
+    assert got.docker_ready is True
+    assert got.vm is not None and got.vm.cpus == 4
+    assert got.data_root == data_root_path
+    assert got.data_root_free == 120 * GIB
+    assert got.bind_mount is True
+
+    report = preflight.evaluate(ENTRY, tmp_path / "server", got)
+    assert report.ok()
+    # On macOS, ample data root free space is unchecked, not pass
+    assert verdict(report, "free space on Docker's disk") == "unchecked"
+    assert verdict(report, "sharing the folder with Docker") == "pass"
+
+
+@pytest.mark.parametrize(
+    ("cpus", "memory_gb", "expected_verdict", "expected_remedy_cpu"),
+    [
+        (2, 8.0, "pass", None),
+        (4, 8.0, "pass", None),  # jobs=5, affordable=4 -> 5 > 4 -> warn
+        (8, 6.0, "warn", "2 CPUs"),  # jobs=9, affordable=3 -> warn with 2 CPUs
+        (16, 4.0, "warn", "1 CPUs"),  # jobs=17, affordable=2 -> warn with 1 CPUs
+    ],
+)
+def test_cpu_vs_memory_heuristics(
+    cpus: int, memory_gb: float, expected_verdict: str, expected_remedy_cpu: str | None
+) -> None:
+    report = preflight.evaluate(ENTRY, SERVER_DIR, facts(vm=_vm(memory_gb, cpus=cpus)))
+    cpu_check = [check for check in report.checks if check.name == "CPU vs memory"][0]
+    if cpus == 4 and memory_gb == 8.0:
+        # jobs=5, affordable=4 -> warn
+        assert cpu_check.verdict == "warn"
+    else:
+        assert cpu_check.verdict == expected_verdict
+    if expected_remedy_cpu is not None:
+        assert expected_remedy_cpu in cpu_check.remedy

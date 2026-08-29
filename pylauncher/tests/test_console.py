@@ -88,6 +88,29 @@ def test_send_command_attaches_over_a_pty_and_collects_the_reply() -> None:
     assert reply.command == "account create dad pw"
 
 
+@needs_pty
+def test_macos_posix_console_supports_openpty_and_sig_proxy_false() -> None:
+    """On Darwin / POSIX, pty_supported() is True and attach uses --sig-proxy=false.
+
+    Ensures that detaching the attach client never forwards SIGTERM/SIGINT into
+    the worldserver container.
+    """
+    assert runner.pty_supported() is True
+    assert console.pty_supported() is True
+    assert console.can_send() is True
+
+    argv = console.attach_argv("ac-worldserver")
+    assert argv[-3:] == ["attach", "--sig-proxy=false", "ac-worldserver"]
+
+    master, slave = runner.open_pty()
+    try:
+        assert isinstance(master, int) and isinstance(slave, int)
+        assert os.isatty(slave) is True
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
 @pytest.mark.skipif(console.pty_supported(), reason="POSIX has a pty; this is the Windows path")
 def test_send_command_explains_itself_where_there_is_no_pty() -> None:
     with pytest.raises(console.ConsoleError, match="needs a terminal"):
