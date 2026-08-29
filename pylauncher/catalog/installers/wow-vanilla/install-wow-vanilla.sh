@@ -733,7 +733,10 @@ install_git() {
 # step - after 30-70 minutes of compiling. Measured on yulon-fedora 2026-08-29.
 AUTH_PORT="${YULON_AUTH_PORT:-3724}"
 WORLD_PORT="${YULON_WORLD_PORT:-8085}"
-DB_PORT="${YULON_DB_PORT:-3306}"
+# No DB_PORT here on purpose: this game's compose publishes only realmd and
+# mangosd. Its db service has no ports key at all, so gating on 3306 would
+# refuse an install over a port it never binds (found on yulon-win11,
+# 2026-08-29). Tortoise DOES publish 3306, and keeps its DB_PORT.
 
 # Is a host port already listening? Answers 0 = taken, 1 = free, 2 = COULD NOT
 # ASK. The third answer matters: this function gates an install, and "I could
@@ -796,7 +799,7 @@ check_ports_free() {
     print_info "at 'docker compose up' - the very last step, after 30-70 minutes of building."
     print_info ""
     print_info "Either stop the other server first, or give this one different ports:"
-    print_info "  YULON_AUTH_PORT=3725 YULON_WORLD_PORT=8086 YULON_DB_PORT=3307 $0"
+    print_info "  YULON_AUTH_PORT=3725 YULON_WORLD_PORT=8086 $0"
     print_info ""
     print_info "One caveat worth knowing before you move them: the AUTH port is the one"
     print_info "the game client dials, and it reads it from realmlist.wtf - so moving that"
@@ -2754,7 +2757,7 @@ locate_client
 choose_install_dir
 show_summary
 preflight_check
-check_ports_free "$AUTH_PORT" "$WORLD_PORT" "$DB_PORT"
+check_ports_free "$AUTH_PORT" "$WORLD_PORT"
 do_compile
 extract_client_data
 write_compose_and_configs

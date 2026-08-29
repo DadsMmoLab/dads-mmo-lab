@@ -2369,10 +2369,13 @@ def test_a_half_built_image_set_is_not_a_finished_build(tmp_path: Path, script_n
 
 # ---------------------------------------------------------------- port guard
 
+# The third field is the world port; the fourth is the db port, which ONLY
+# Tortoise publishes. Vanilla's and TBC's db service has no `ports:` key, so
+# gating them on 3306 refused installs over a port they never bind.
 _SCRIPTS_WITH_PORTS = [
-    ("wow-vanilla", "install-wow-vanilla.sh", "8085"),
-    ("wow-tbc", "install-wow-tbc.sh", "8085"),
-    ("wow-tortoise", "install-tortoise-wow-wsl.sh", "8090"),
+    ("wow-vanilla", "install-wow-vanilla.sh", "8085", None),
+    ("wow-tbc", "install-wow-tbc.sh", "8085", None),
+    ("wow-tortoise", "install-tortoise-wow-wsl.sh", "8090", "3306"),
 ]
 
 # `ss` is reached through `command -v`, and a shell FUNCTION satisfies that as
@@ -2413,6 +2416,11 @@ def _docker_holding(port: str) -> str:
     )
 
 
+def _ports_for(world: str, db: str | None) -> str:
+    """The ports a given script actually publishes, and therefore checks."""
+    return "3724 " + world + (" " + db if db else "")
+
+
 def _ports_script(folder: str, name: str) -> Path:
     return Path(__file__).resolve().parents[1] / "catalog" / "installers" / folder / name
 
@@ -2444,9 +2452,9 @@ def _run_port_guard(script, calls, *, ss, docker, ports, path=None):
 
 
 @pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
-@pytest.mark.parametrize("folder,name,world", _SCRIPTS_WITH_PORTS)
+@pytest.mark.parametrize("folder,name,world,db", _SCRIPTS_WITH_PORTS)
 def test_free_ports_do_not_block_the_install(
-    tmp_path: Path, folder: str, name: str, world: str
+    tmp_path: Path, folder: str, name: str, world: str, db: str | None
 ) -> None:
     """Nothing listening means the guard says nothing and gets out of the way."""
     status, out = _run_port_guard(
@@ -2454,7 +2462,7 @@ def test_free_ports_do_not_block_the_install(
         tmp_path / "calls",
         ss=_SS_NOTHING_LISTENING,
         docker=_DOCKER_SILENT,
-        ports="3724 " + world + " 3306",
+        ports=_ports_for(world, db),
     )
 
     assert status == 0, name + ": a clean machine was refused:" + chr(10) + out
@@ -2462,9 +2470,9 @@ def test_free_ports_do_not_block_the_install(
 
 
 @pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
-@pytest.mark.parametrize("folder,name,world", _SCRIPTS_WITH_PORTS)
+@pytest.mark.parametrize("folder,name,world,db", _SCRIPTS_WITH_PORTS)
 def test_a_taken_port_is_refused_before_the_compile_and_names_its_owner(
-    tmp_path: Path, folder: str, name: str, world: str
+    tmp_path: Path, folder: str, name: str, world: str, db: str | None
 ) -> None:
     """The collision that cost a whole build is now caught before the build starts.
 
@@ -2479,7 +2487,7 @@ def test_a_taken_port_is_refused_before_the_compile_and_names_its_owner(
         tmp_path / "calls",
         ss=_ss_taken(world),
         docker=_docker_holding(world),
-        ports="3724 " + world + " 3306",
+        ports=_ports_for(world, db),
     )
 
     assert status == 1, name + ": a taken port did not stop the install:" + chr(10) + out
@@ -2493,9 +2501,9 @@ def test_a_taken_port_is_refused_before_the_compile_and_names_its_owner(
 
 
 @pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
-@pytest.mark.parametrize("folder,name,world", _SCRIPTS_WITH_PORTS)
+@pytest.mark.parametrize("folder,name,world,db", _SCRIPTS_WITH_PORTS)
 def test_being_unable_to_check_is_not_the_same_as_free(
-    tmp_path: Path, folder: str, name: str, world: str
+    tmp_path: Path, folder: str, name: str, world: str, db: str | None
 ) -> None:
     """With neither `ss` nor `netstat`, the guard says so rather than staying silent.
 
@@ -2518,7 +2526,7 @@ def test_being_unable_to_check_is_not_the_same_as_free(
         tmp_path / "calls",
         ss="",
         docker=_DOCKER_SILENT,
-        ports="3724 " + world + " 3306",
+        ports=_ports_for(world, db),
         path=str(bindir),
     )
 
@@ -2527,9 +2535,9 @@ def test_being_unable_to_check_is_not_the_same_as_free(
 
 
 @pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
-@pytest.mark.parametrize("folder,name,world", _SCRIPTS_WITH_PORTS)
+@pytest.mark.parametrize("folder,name,world,db", _SCRIPTS_WITH_PORTS)
 def test_the_published_ports_come_from_the_overridable_variables(
-    folder: str, name: str, world: str
+    folder: str, name: str, world: str, db: str | None
 ) -> None:
     """A second install can be given different ports without editing the script.
 
@@ -2544,19 +2552,23 @@ def test_the_published_ports_come_from_the_overridable_variables(
         for line in body.splitlines()
         if line.startswith(("AUTH_PORT=", "WORLD_PORT=", "DB_PORT="))
     ]
-    assert len(assignments) == 3, (
-        name + ": expected three port assignments, got " + str(len(assignments))
+    expected = 3 if db else 2
+    assert len(assignments) == expected, (
+        name + ": expected " + str(expected) + " port assignments, got " + str(len(assignments))
     )
 
-    probe = chr(10).join(assignments) + chr(10) + 'echo "$AUTH_PORT $WORLD_PORT $DB_PORT"'
+    echo = 'echo "$AUTH_PORT $WORLD_PORT' + (' $DB_PORT"' if db else '"')
+    probe = chr(10).join(assignments) + chr(10) + echo
     bare = subprocess.run(["bash", "-c", probe], capture_output=True, text=True, timeout=15)
-    assert bare.stdout.strip() == "3724 " + world + " 3306", bare.stdout
+    assert bare.stdout.strip() == _ports_for(world, db), bare.stdout
 
     env = dict(os.environ, YULON_AUTH_PORT="3725", YULON_WORLD_PORT="8086", YULON_DB_PORT="3307")
     moved = subprocess.run(
         ["bash", "-c", probe], capture_output=True, text=True, timeout=15, env=env
     )
-    assert moved.stdout.strip() == "3725 8086 3307", moved.stdout
+    assert moved.stdout.strip() == _ports_for("8086", "3307" if db else None).replace(
+        "3724", "3725", 1
+    ), moved.stdout
 
     # And the compose the script writes has to USE them, or moving them changes nothing.
     assert '"${AUTH_PORT}:3724"' in body, name + ": auth port is still hardcoded in the compose"
@@ -2604,3 +2616,42 @@ def test_the_port_guard_runs_before_anything_expensive(
             name + ": check_ports_free runs AFTER " + step + ", so the refusal arrives "
             "once the expensive work is already paid for"
         )
+
+
+@pytest.mark.parametrize("folder,name,world,db", _SCRIPTS_WITH_PORTS)
+def test_the_guard_only_checks_ports_the_compose_actually_publishes(
+    folder: str, name: str, world: str, db: str | None
+) -> None:
+    """Refusing over a port you never bind is a false alarm, not caution.
+
+    The first version of this guard passed DB_PORT for all three games. Only
+    Tortoise's compose has a `ports:` key on its db service; Vanilla's and TBC's
+    db talks to realmd and mangosd over the internal compose network and binds
+    nothing on the host. So a stray MySQL on 3306 refused a TBC install over a
+    port that install would never have touched. Found on yulon-win11, 2026-08-29.
+
+    The rule this pins: every port handed to check_ports_free must appear on the
+    left of a `ports:` mapping in the compose the same script writes.
+    """
+    body = _ports_script(folder, name).read_text(encoding="utf-8")
+
+    call = [line for line in body.splitlines() if line.startswith("check_ports_free ")]
+    assert len(call) == 1, name + ": expected exactly one call in the main sequence"
+    checked = {
+        var
+        for var in ("AUTH_PORT", "WORLD_PORT", "DB_PORT")
+        if "$" + var in call[0] or "${" + var + "}" in call[0]
+    }
+
+    published = {
+        var for var in ("AUTH_PORT", "WORLD_PORT", "DB_PORT") if '"${' + var + "}:" in body
+    }
+
+    assert checked == published, (
+        name
+        + ": the guard checks "
+        + str(sorted(checked))
+        + " but the compose publishes "
+        + str(sorted(published))
+        + " - a port that is checked and never bound is a false refusal"
+    )
