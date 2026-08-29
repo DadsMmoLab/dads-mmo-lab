@@ -768,7 +768,7 @@ port_holder() {
 }
 
 check_ports_free() {
-    local port cid name dir busy=0 unknown=0
+    local port cid name dir busy=0 unknown=0 blockers=""
     for port in "$@"; do
         port_is_taken "$port"
         case $? in
@@ -785,6 +785,11 @@ check_ports_free() {
             if [ -n "$dir" ] && [ "$dir" != "<no value>" ]; then
                 print_info "That container belongs to the install in $dir."
             fi
+            # One name can hold several of our ports, so keep the list unique.
+            case " $blockers " in
+                *" $name "*) ;;
+                *) [ -n "$name" ] && blockers="$blockers $name" ;;
+            esac
         fi
     done
     if [ "$busy" -eq 0 ]; then
@@ -795,9 +800,37 @@ check_ports_free() {
         return 0
     fi
     print_error "Two WoW servers cannot publish the same port on one machine."
-    print_info "Checked here, before the compile, on purpose: this used to be discovered"
-    print_info "at 'docker compose up' - the very last step, after 30-70 minutes of building."
+    print_info "Checked here, before the expensive part, on purpose: this used to be"
+    print_info "discovered at 'docker compose up' - the last step, after 30-70 minutes."
     print_info ""
+
+    # The offer, not just the refusal. Every game in the catalog publishes the
+    # same ports, so "only one server live at a time" is the design rather than a
+    # limitation - which makes stopping the other one the ordinary answer, and
+    # leaving the user to go and find it themselves the unhelpful one.
+    #
+    # `docker stop`, never `compose down`: stopping is reversible and keeps the
+    # other install's containers, so ITS next start is still the staged one that
+    # does not re-run its database import.
+    if [ -n "$blockers" ] && ask_yes_no "Stop the other server and continue?"; then
+        for name in $blockers; do
+            print_info "Stopping $name ..."
+            docker stop "$name" >/dev/null 2>&1 || print_warning "Could not stop $name."
+        done
+        busy=0
+        for port in "$@"; do
+            if port_is_taken "$port"; then
+                busy=1
+                print_error "Port $port is still in use after stopping."
+            fi
+        done
+        if [ "$busy" -eq 0 ]; then
+            print_success "The other server is stopped; carrying on."
+            return 0
+        fi
+        print_error "Something other than that server is still holding a port."
+    fi
+
     print_info "Either stop the other server first, or give this one different ports:"
     print_info "  YULON_AUTH_PORT=3725 YULON_WORLD_PORT=8086 $0"
     print_info ""

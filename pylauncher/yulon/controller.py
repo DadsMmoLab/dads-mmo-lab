@@ -40,13 +40,31 @@ class PortConflictError(RuntimeError):
     of surfacing a raw port-in-use error from Docker.
     """
 
-    def __init__(self, containers: list[str], ports: tuple[int, ...]) -> None:
+    def __init__(
+        self,
+        containers: list[str],
+        ports: tuple[int, ...],
+        owners: dict[str, str | None] | None = None,
+    ) -> None:
         self.containers = containers
         self.ports = ports
+        # Container name -> the directory its compose project was brought up
+        # from, so the offer to stop it can say WHICH install that is. Optional
+        # because the ports can be held by something that is not compose at all.
+        self.owners = owners or {}
         joined = ", ".join(containers)
         super().__init__(
             f"cannot start: port(s) {ports} already bound by running container(s): {joined}"
         )
+
+    def owner_summary(self) -> str:
+        """One line naming the install to stop, for a person rather than a log."""
+        dirs = sorted({d for d in self.owners.values() if d and d != docker.UNREADABLE})
+        if len(dirs) == 1:
+            return f"the install in {dirs[0]}"
+        if dirs:
+            return "the installs in " + ", ".join(dirs)
+        return "another server"
 
 
 @dataclass(frozen=True)
@@ -186,12 +204,46 @@ class Controller:
         conflicts = self.port_conflicts()
         if conflicts:
             logger.warning(f"start() refused: ports {self.spec.ports} bound by {conflicts}")
-            raise PortConflictError(conflicts, self.spec.ports)
+            raise PortConflictError(conflicts, self.spec.ports, self._owners_of(conflicts))
         # No `wait_healthy` closure: `start_staged()` deleted the argument on
         # entry, so the lambda that used to be built here was dead code reading
         # like a health wait that no longer happens. Compose does the waiting
         # now, through the project's own `service_healthy` conditions.
         docker.start_staged(self.spec, self.server_dir, wsl_distro=self.wsl_distro)
+
+    def _owners_of(self, containers: list[str]) -> dict[str, str | None]:
+        """Where each blocking container came from, best effort and never fatal."""
+        owners: dict[str, str | None] = {}
+        for name in containers:
+            try:
+                owners[name] = docker.container_working_dir(name, wsl_distro=self.wsl_distro)
+            except docker.DockerCommandError:
+                owners[name] = None
+        return owners
+
+    def stop_conflicting(self) -> list[str]:
+        """Stop whatever is holding our ports, and say what was stopped.
+
+        Every v1 server publishes the same ports, so only one can be live at a
+        time. Both guards used to stop at "no" and leave the user to go and find
+        the other install themselves; this is the doing half of the offer.
+
+        Containers are stopped BY NAME, not with `compose down`: stopping is
+        reversible and keeps the other install's containers, so its next start
+        is still the staged one that does not re-run its database import.
+        """
+        conflicts = self.port_conflicts()
+        if not conflicts:
+            return []
+        logger.info(f"stopping the containers holding {self.spec.ports}: {conflicts}")
+        docker.stop_containers(conflicts, wsl_distro=self.wsl_distro)
+        return conflicts
+
+    def stop_conflicting_and_start(self) -> list[str]:
+        """Stop the server holding our ports, then start this one."""
+        stopped = self.stop_conflicting()
+        self.start()
+        return stopped
 
     def stop(self) -> bool:
         """Stop the install, keeping its containers so the next start is staged.

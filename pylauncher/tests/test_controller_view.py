@@ -191,14 +191,24 @@ def test_server_tab_status_start_and_port_conflict_message(
     failures: list[str] = []
     view.action_failed.connect(failures.append)
     view.start_server()
-    assert "only one server can run at a time" in view.problem_label.text()
+    assert "Only one server can run at a time" in view.problem_label.text()
+    assert "3724" in view.problem_label.text(), "the message does not say which port"
     assert "tbc-realmd" in failures[0]
     assert not any(c[:4] == ["docker", "compose", "up", "-d"] for c in ps.calls)
+
+    # The offer, not just the refusal: naming the blocker and leaving the user to
+    # go and stop it themselves was the old dead end. The button appears with the
+    # collision and goes away with it.
+    # isHidden(), not isVisible(): nothing shows this window in a test, so every
+    # widget in it is invisible either way. isHidden() answers the question that
+    # was actually asked - did the code hide it or not.
+    assert not view.stop_other_button.isHidden(), "the offer to stop never appeared"
 
     ps.ports = ""
     view.start_server()
     assert any(c[:5] == ["docker", "compose", "up", "-d", "--no-deps"] for c in ps.calls)
     assert view.problem_label.text() == ""
+    assert view.stop_other_button.isHidden(), "the offer outlived the collision"
     view.stop_server()
     # Stop keeps the containers (`compose stop`), so the next start stays staged.
     assert any(c[:3] == ["docker", "compose", "stop"] for c in ps.calls)
