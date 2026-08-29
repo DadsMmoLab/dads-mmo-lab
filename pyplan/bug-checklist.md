@@ -684,6 +684,36 @@ met the situation it was written for.
 
 ---
 
+### 16. Fixed by Baerthe — macOS, 2026-08-29
+
+Found and fixed independently of the four-platform hunt, on the platform none of these boxes
+can reach. Recorded here in his own words, with his own verification notes, because this is one
+list across every round and that has to include the rounds other people ran.
+
+- [x] **ContainerGit error formatting produced glued string literals on failures**
+  `yulon/git.py:507-510`
+  `_capture()` had two adjacent f-strings without separator, causing exit codes and error messages
+  to implicitly concatenate into garbled strings. Fixed with single clean error formatting.
+  *Verified with unit tests in `test_git.py`.*
+- [x] **ContainerGit inherited launchd file descriptors from GUI processes on macOS**
+  `yulon/git.py:501`
+  Running containerized git from Finder/.app spawned subprocesses inheriting non-standard stdin,
+  which could interfere with docker child execution. Fixed by passing `stdin=subprocess.DEVNULL`
+  to `runner.run()`.
+  *Verified with unit tests in `test_git.py`.*
+- [x] **Darwin sleep assertions failed to terminate on worker exit**
+  `yulon/platform.py`
+  `platform.keep_awake()` spawns `caffeinate -dims -w <pid>` on macOS; verified proper process
+  lifecycle termination upon context exit.
+  *Verified with unit tests in `test_platform.py`.*
+
+The same commit added `WotlkController` tests for `STOP_GRACE_SECONDS` teardown and for the
+port-conflict guard on 3724 and 8085. Those tests and the port work in
+[#128](https://github.com/DadsMmoLab/dads-mmo-lab/pull/128) landed in the same file from two
+directions on the same day; both are kept.
+
+---
+
 ### One thing worth keeping
 
 Three of these have an obvious fix that is **wrong**, and two of them arm a worse bug:
