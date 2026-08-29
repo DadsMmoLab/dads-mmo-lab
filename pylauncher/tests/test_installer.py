@@ -2561,3 +2561,46 @@ def test_the_published_ports_come_from_the_overridable_variables(
     # And the compose the script writes has to USE them, or moving them changes nothing.
     assert '"${AUTH_PORT}:3724"' in body, name + ": auth port is still hardcoded in the compose"
     assert '"${WORLD_PORT}:' + world + '"' in body, name + ": world port is still hardcoded"
+
+
+# The expensive step each script must not reach before the port guard has run.
+# Vanilla and TBC clone inside do_compile; Tortoise clones in a step of its own.
+_GUARD_MUST_PRECEDE = [
+    ("wow-vanilla", "install-wow-vanilla.sh", ["do_compile"]),
+    ("wow-tbc", "install-wow-tbc.sh", ["do_compile"]),
+    ("wow-tortoise", "install-tortoise-wow-wsl.sh", ["clone_source", "do_compile"]),
+]
+
+
+@pytest.mark.parametrize("folder,name,expensive", _GUARD_MUST_PRECEDE)
+def test_the_port_guard_runs_before_anything_expensive(
+    folder: str, name: str, expensive: list[str]
+) -> None:
+    """A guard that runs after the compile is not a guard, it is a postmortem.
+
+    This test exists because the first version of the fix was written into the
+    wrong line of the main sequence: `check_ports_free` landed AFTER `do_compile`
+    in two of the three scripts, so it would have refused the install having just
+    spent 30-70 minutes building it - while printing "no compile was started".
+    Found on m910q, 2026-08-29, by the hunt rather than by the tests, because the
+    tests at the time proved the FUNCTION worked and said nothing about where it
+    was called. That is the same gap this project has hit before.
+
+    So this asserts the call SITE, in the shipped file, by line order.
+    """
+    script = _ports_script(folder, name)
+    lines = script.read_text(encoding="utf-8").splitlines()
+
+    def line_of(call: str) -> int:
+        hits = [
+            i for i, line in enumerate(lines) if line.strip() == call or line.startswith(call + " ")
+        ]
+        assert hits, name + ": the main sequence never calls " + call
+        return hits[-1]
+
+    guard = line_of("check_ports_free")
+    for step in expensive:
+        assert guard < line_of(step), (
+            name + ": check_ports_free runs AFTER " + step + ", so the refusal arrives "
+            "once the expensive work is already paid for"
+        )

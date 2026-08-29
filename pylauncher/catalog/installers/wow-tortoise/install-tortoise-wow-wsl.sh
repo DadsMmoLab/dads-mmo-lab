@@ -283,7 +283,7 @@ check_ports_free() {
     print_info "the game client dials, and it reads it from realmlist.wtf - so moving that"
     print_info "one means editing the client too. The world and db ports move freely; the"
     print_info "client is told the world port by the realm row in the database."
-    print_info "Nothing has been changed, and no compile was started."
+    print_info "No compile was started, and no server was built."
     exit 1
 }
 
@@ -1276,8 +1276,8 @@ locate_client
 choose_install_dir
 show_summary
 install_docker
-clone_source
 check_ports_free "$AUTH_PORT" "$WORLD_PORT" "$DB_PORT"
+clone_source
 do_compile
 extract_client_data
 write_compose_and_configs
