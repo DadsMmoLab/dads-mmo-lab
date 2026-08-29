@@ -1106,6 +1106,7 @@ port_holder() {
 
 check_ports_free() {
     local port cid name dir busy=0 unknown=0 blockers=""
+    local project siblings victim stopped=""
     for port in "$@"; do
         port_is_taken "$port"
         case $? in
@@ -1150,9 +1151,31 @@ check_ports_free() {
     # other install's containers, so ITS next start is still the staged one that
     # does not re-run its database import.
     if [ -n "$blockers" ] && ask_yes_no "Stop the other server and continue?"; then
+        # Stop the whole SERVER, not just the container publishing the port.
+        # Measured on yulon-fedora 2026-08-29: stopping ac-authserver and
+        # ac-database left ac-worldserver running with its database gone from
+        # under it, and `restart: unless-stopped` looped it - RestartCount 18
+        # and climbing. It published only 8085 and 7878, so it was correctly not
+        # a blocker, and just as correctly part of the same server. Seen again
+        # on yulon-arch, where tbc-mangosd and tbc-db were left up after
+        # tbc-realmd was stopped out from under them.
         for name in $blockers; do
-            print_info "Stopping $name ..."
-            docker stop "$name" >/dev/null 2>&1 || print_warning "Could not stop $name."
+            project=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$name" 2>/dev/null)
+            if [ -n "$project" ] && [ "$project" != "<no value>" ]; then
+                siblings=$(docker ps -a --filter "label=com.docker.compose.project=$project" --format '{{.Names}}' 2>/dev/null)
+            else
+                # Started outside compose: there is nothing to widen to, and
+                # widening on a guess would stop things that are not involved.
+                siblings="$name"
+            fi
+            for victim in $siblings; do
+                case " $stopped " in
+                    *" $victim "*) continue ;;
+                esac
+                print_info "Stopping $victim ..."
+                docker stop "$victim" >/dev/null 2>&1 || print_warning "Could not stop $victim."
+                stopped="$stopped $victim"
+            done
         done
         busy=0
         for port in "$@"; do

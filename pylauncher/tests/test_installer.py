@@ -2442,12 +2442,21 @@ _DOCKER_SILENT = "true"
 
 
 def _docker_holding(port: str) -> str:
+    """A neighbour whose compose project is bigger than the port it publishes.
+
+    The blocker is ac-worldserver; ac-database is in the same project and holds
+    none of our ports. Case order matters: the working_dir label and the
+    project-filtered listing both contain "compose.project", so the more
+    specific patterns have to come first.
+    """
     return (
         'case "$*" in '
         '"ps -q") echo deadbeef;; '
         '"port deadbeef") echo "' + port + "/tcp -> 0.0.0.0:" + port + '";; '
-        "*Name*) echo /ac-worldserver;; "
         "*working_dir*) echo /home/pk/wow-server-playerbots;; "
+        "*compose.project=*) echo ac-worldserver; echo ac-database;; "
+        "*compose.project*) echo their-project;; "
+        "*Name*) echo /ac-worldserver;; "
         "esac"
     )
 
@@ -2562,6 +2571,17 @@ def test_accepting_the_offer_stops_the_other_server_and_carries_on(
     issued = calls.read_text(encoding="utf-8")
     assert "stop ac-worldserver" in issued, (
         name + ": accepting the offer never stopped anything:" + chr(10) + issued
+    )
+    # The whole server, not just the container that published the port. Seen in
+    # the field twice: on yulon-fedora ac-worldserver was left looping after its
+    # database was stopped, and on yulon-arch tbc-mangosd and tbc-db were left up
+    # after tbc-realmd went. A project member that publishes nothing is still
+    # part of the server being stopped.
+    assert "stop ac-database" in issued, (
+        name
+        + ": stopped the port holder and left the rest of that server running:"
+        + chr(10)
+        + issued
     )
     assert status == 1, (
         name + ": the port was still held after the stop and the install continued anyway"
