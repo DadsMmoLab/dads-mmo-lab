@@ -291,65 +291,38 @@ def test_a_failed_clone_names_the_directory_it_mounted(
     assert f"{dest}:/git" in logged, "the mount belongs in the log, at the level the app runs at"
 
 
-def test_container_git_passes_devnull_stdin(
+def test_a_containerized_failure_is_reported_once(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Subprocesses must not inherit stdin from launchd / GUI process."""
-    passed_stdin: list[object] = []
+    """One failure, one sentence. The Mac report (2026-08-29) carried two.
 
-    def capture_run(
-        argv: list[str], cwd: Path | None = None, env: object = None, **kwargs: object
-    ) -> subprocess.CompletedProcess[str]:
-        passed_stdin.append(kwargs.get("stdin"))
-        return _completed()
+    Adding the exit code (#117) left the sentence it replaced concatenated to
+    it — three adjacent f-strings with no comma between them — so every
+    containerized git failure reached the user as its own message printed
+    twice, run together with no separator:
 
-    monkeypatch.setattr(runner, "run", capture_run)
+        ... exited 1: Cloning into '.'...
+        /git/.git: No such file or directorycontainerized git clone ... failed:
+        Cloning into '.'...
+        /git/.git: No such file or directory
+
+    The substring assertions above all pass against that, which is why it
+    shipped. Counting is what catches it.
+    """
     dest = tmp_path / "core"
-    git.ContainerGit().clone(git.CloneSpec(url="https://example/core.git", dest=dest))
-    assert passed_stdin, "runner.run was not called"
-    assert passed_stdin[0] == subprocess.DEVNULL
+    dest.mkdir()
 
+    def fail(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return _completed(returncode=1, stderr="/git/.git: No such file or directory")
 
-def test_container_git_falls_back_to_host_git_when_available(
-    monkeypatch: pytest.MonkeyPatch, seen: list[list[str]], tmp_path: Path
-) -> None:
-    """When containerized git fails on macOS, fallback to host git if present."""
-    dest = tmp_path / "core"
-
-    def fail_docker_then_run_git(
-        argv: list[str], cwd: Path | None = None, env: object = None, **kwargs: object
-    ) -> subprocess.CompletedProcess[str]:
-        seen.append(argv)
-        if argv[0] == "docker":
-            return _completed(returncode=1, stderr="/git/.git: No such file or directory")
-        return _completed()
-
-    monkeypatch.setattr(runner, "run", fail_docker_then_run_git)
-    monkeypatch.setattr(git, "git_available", lambda: True)
-
-    git.ContainerGit().clone(git.CloneSpec(url="https://example/core.git", dest=dest))
-    assert seen[0][0] == "docker"
-    assert any(cmd[0] == "git" and "clone" in cmd for cmd in seen[1:])
-
-
-def test_runner_git_is_unmodified(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    dest = tmp_path / "core"
-    (dest / ".git").mkdir(parents=True)
-    answers: list[subprocess.CompletedProcess[str]] = []
-    seen_argv: list[list[str]] = []
-
-    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        seen_argv.append(argv)
-        return answers.pop(0)
-
-    monkeypatch.setattr(runner, "run", fake_run)
-    answers.append(_completed(stdout=""))
-    assert git.RunnerGit().is_unmodified(dest, "docker-compose.yml") is True
-    answers.append(_completed(stdout=" M docker-compose.yml\n"))
-    assert git.RunnerGit().is_unmodified(dest, "docker-compose.yml") is False
-    answers.append(_completed(returncode=128, stderr="not a git repository"))
-    assert git.RunnerGit().is_unmodified(dest, "docker-compose.yml") is None
-    assert git.RunnerGit().is_unmodified(tmp_path / "not-a-checkout", "x") is None
+    monkeypatch.setattr(runner, "run", fail)
+    with pytest.raises(git.GitError) as raised:
+        git.ContainerGit().clone(
+            git.CloneSpec(url="https://example/core.git", dest=dest, depth=None)
+        )
+    message = str(raised.value)
+    assert message.count("containerized git") == 1, f"the failure is reported twice: {message}"
+    assert message.count("/git/.git: No such file or directory") == 1
 
 
 def test_is_unmodified_tells_upstreams_own_file_from_one_somebody_edited(

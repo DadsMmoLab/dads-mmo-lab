@@ -344,8 +344,18 @@ class ContainerGit:
     That second half read "and `os.getuid` does not exist, which is the same
     condition" until 2026-08-27, and `_user_args()` implemented it that way.
     `os.getuid` does not exist on Windows; it exists on macOS. So every Mac got
-    a `--user` the rule excludes, the container saw the bind mount as
-    `root:root`, and git could not create `.git`.
+    a `--user` the rule excludes, and the container saw the bind mount as
+    `root:root`.
+
+    **That was a real defect and it was not the macOS clone failure**, though
+    it was recorded here as its cause. Measured 2026-08-29 against this exact
+    pinned image: a root-owned mount plus `--user <uid>:<gid>` makes git print
+    `/git/.git: Permission denied`. The tester reported
+    `/git/.git: No such file or directory` — EACCES against ENOENT, which is
+    not the same failure and not the same investigation. ENOENT there means
+    the container's `/git` had no directory behind it at `mkdir` time, and
+    what a Mac's file-sharing layer does to a bind mount is the one thing
+    nobody on this project can run. The macOS failure is still open.
     """
 
     image: str = _CONTAINER_GIT_IMAGE
@@ -535,6 +545,11 @@ class ContainerGit:
                 # nothing after it — and a process that was killed looks exactly
                 # like one that failed when the only evidence is the words it
                 # got out first. 137 and 128 are different investigations.
+                # One sentence, and the comma-less concatenation of the two
+                # spellings that shipped in v0.6.57 is what the extra assertion
+                # in `test_a_containerized_failure_is_reported_once` guards:
+                # every macOS failure reached the tester printed twice, run
+                # together with no separator.
                 f"containerized git {' '.join(git_args)} in {dest} exited "
                 f"{proc.returncode}: {proc.stderr.strip()}"
             )
@@ -550,9 +565,11 @@ class ContainerGit:
         handed a `--user` — and a `--user` overrides the very file-sharing
         mapping the docstring relies on to make the flag unnecessary there.
 
-        What that cost: the tester's container sees the bind mount as
-        `root:root` (2026-08-27), so git running as 501 could not create `.git`
-        and every macOS install ended in `/git/.git: No such file or directory`.
+        What that cost: the tester's container saw the bind mount as
+        `root:root` (2026-08-27), so git running as 501 could not create
+        `.git`. It was written up as the cause of the reported macOS failure
+        and it is not — see the class docstring for the measurement that
+        separates `Permission denied` from `No such file or directory`.
 
         Asking `platform.detect()` says what is meant. The old spelling was
         right about Windows by accident and wrong about macOS for the same
