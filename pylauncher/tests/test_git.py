@@ -290,6 +290,40 @@ def test_a_failed_clone_names_the_directory_it_mounted(
     assert f"{dest}:/git" in logged, "the mount belongs in the log, at the level the app runs at"
 
 
+def test_a_containerized_failure_is_reported_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """One failure, one sentence. The Mac report (2026-08-29) carried two.
+
+    Adding the exit code (#117) left the sentence it replaced concatenated to
+    it — three adjacent f-strings with no comma between them — so every
+    containerized git failure reached the user as its own message printed
+    twice, run together with no separator:
+
+        ... exited 1: Cloning into '.'...
+        /git/.git: No such file or directorycontainerized git clone ... failed:
+        Cloning into '.'...
+        /git/.git: No such file or directory
+
+    The substring assertions above all pass against that, which is why it
+    shipped. Counting is what catches it.
+    """
+    dest = tmp_path / "core"
+    dest.mkdir()
+
+    def fail(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return _completed(returncode=1, stderr="/git/.git: No such file or directory")
+
+    monkeypatch.setattr(runner, "run", fail)
+    with pytest.raises(git.GitError) as raised:
+        git.ContainerGit().clone(
+            git.CloneSpec(url="https://example/core.git", dest=dest, depth=None)
+        )
+    message = str(raised.value)
+    assert message.count("containerized git") == 1, f"the failure is reported twice: {message}"
+    assert message.count("/git/.git: No such file or directory") == 1
+
+
 def test_is_unmodified_tells_upstreams_own_file_from_one_somebody_edited(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
