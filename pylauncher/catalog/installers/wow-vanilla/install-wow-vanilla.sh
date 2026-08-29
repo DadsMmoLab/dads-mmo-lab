@@ -725,6 +725,87 @@ install_git() {
 # ─────────────────────────────────────────
 # PREFLIGHT CHECK — SYSTEM DEPENDENCIES
 # ─────────────────────────────────────────
+
+# ── server ports ────────────────────────────────────────────────────────
+# Three of the four games in the catalog declare the SAME ports (auth 3724,
+# world 8085, db 3306), so a second install on one machine collides by design.
+# The collision used to surface only at `docker compose up`, which is the LAST
+# step - after 30-70 minutes of compiling. Measured on yulon-fedora 2026-08-29.
+AUTH_PORT="${YULON_AUTH_PORT:-3724}"
+WORLD_PORT="${YULON_WORLD_PORT:-8085}"
+DB_PORT="${YULON_DB_PORT:-3306}"
+
+# Is a host port already listening? Answers 0 = taken, 1 = free, 2 = COULD NOT
+# ASK. The third answer matters: this function gates an install, and "I could
+# not find out" must never be spelled the same way as "it is free".
+port_is_taken() {
+    local port="$1"
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltn 2>/dev/null | awk -v p="$port" 'NR > 1 { n = split($4, a, ":"); if (a[n] == p) hit = 1 } END { exit !hit }'
+        return $?
+    fi
+    if command -v netstat >/dev/null 2>&1; then
+        netstat -ltn 2>/dev/null | awk -v p="$port" '/^tcp/ { n = split($4, a, ":"); if (a[n] == p) hit = 1 } END { exit !hit }'
+        return $?
+    fi
+    return 2
+}
+
+# Which container, if any, publishes that port - so the refusal can name the
+# install the user has to go and stop, rather than just the number.
+port_holder() {
+    local port="$1" cid
+    for cid in $(docker ps -q 2>/dev/null); do
+        if docker port "$cid" 2>/dev/null | awk -F: -v p="$port" '$NF == p { hit = 1 } END { exit !hit }'; then
+            printf '%s' "$cid"
+            return 0
+        fi
+    done
+    return 1
+}
+
+check_ports_free() {
+    local port cid name dir busy=0 unknown=0
+    for port in "$@"; do
+        port_is_taken "$port"
+        case $? in
+            0) ;;
+            1) continue ;;
+            *) unknown=1; continue ;;
+        esac
+        busy=1
+        print_error "Port $port is already in use on this machine."
+        if cid=$(port_holder "$port"); then
+            name=$(docker inspect -f '{{.Name}}' "$cid" 2>/dev/null | sed 's|^/||')
+            dir=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$cid" 2>/dev/null)
+            [ -n "$name" ] && print_info "It is published by the container '$name'."
+            if [ -n "$dir" ] && [ "$dir" != "<no value>" ]; then
+                print_info "That container belongs to the install in $dir."
+            fi
+        fi
+    done
+    if [ "$busy" -eq 0 ]; then
+        if [ "$unknown" -eq 1 ]; then
+            print_warning "Could not check whether the server ports are free (no 'ss', no 'netstat')."
+            print_info "Continuing anyway; a collision would then surface at 'docker compose up'."
+        fi
+        return 0
+    fi
+    print_error "Two WoW servers cannot publish the same port on one machine."
+    print_info "Checked here, before the compile, on purpose: this used to be discovered"
+    print_info "at 'docker compose up' - the very last step, after 30-70 minutes of building."
+    print_info ""
+    print_info "Either stop the other server first, or give this one different ports:"
+    print_info "  YULON_AUTH_PORT=3725 YULON_WORLD_PORT=8086 YULON_DB_PORT=3307 $0"
+    print_info ""
+    print_info "One caveat worth knowing before you move them: the AUTH port is the one"
+    print_info "the game client dials, and it reads it from realmlist.wtf - so moving that"
+    print_info "one means editing the client too. The world and db ports move freely; the"
+    print_info "client is told the world port by the realm row in the database."
+    print_info "Nothing has been changed, and no compile was started."
+    exit 1
+}
+
 preflight_check() {
     print_step "Preflight Check — System Dependencies"
 
@@ -1707,7 +1788,7 @@ services:
       db:
         condition: service_healthy
     ports:
-      - "3724:3724"
+      - "${AUTH_PORT}:3724"
     volumes:
       - ./etc:/opt/mangos/etc
       - ./data:/opt/mangos/data
@@ -1723,7 +1804,7 @@ services:
       db:
         condition: service_healthy
     ports:
-      - "8085:8085"
+      - "${WORLD_PORT}:8085"
     volumes:
       - ./etc:/opt/mangos/etc
       - ./data:/opt/mangos/data
@@ -2674,6 +2755,7 @@ choose_install_dir
 show_summary
 preflight_check
 do_compile
+check_ports_free "$AUTH_PORT" "$WORLD_PORT" "$DB_PORT"
 extract_client_data
 write_compose_and_configs
 setup_database
