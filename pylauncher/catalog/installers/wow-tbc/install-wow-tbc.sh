@@ -714,6 +714,7 @@ install_git() {
 # world 8085, db 3306), so a second install on one machine collides by design.
 # The collision used to surface only at `docker compose up`, which is the LAST
 # step - after 30-70 minutes of compiling. Measured on yulon-fedora 2026-08-29.
+PORT_OVERRIDES=1
 AUTH_PORT="${YULON_AUTH_PORT:-3724}"
 WORLD_PORT="${YULON_WORLD_PORT:-8085}"
 # No DB_PORT here on purpose: this game's compose publishes only realmd and
@@ -814,13 +815,21 @@ check_ports_free() {
         print_error "Something other than that server is still holding a port."
     fi
 
-    print_info "Either stop the other server first, or give this one different ports:"
-    print_info "  YULON_AUTH_PORT=3725 YULON_WORLD_PORT=8086 $0"
-    print_info ""
-    print_info "One caveat worth knowing before you move them: the AUTH port is the one"
-    print_info "the game client dials, and it reads it from realmlist.wtf - so moving that"
-    print_info "one means editing the client too. The world and db ports move freely; the"
-    print_info "client is told the world port by the realm row in the database."
+    if [ "${PORT_OVERRIDES:-1}" -eq 1 ]; then
+        print_info "Either stop the other server first, or give this one different ports:"
+        print_info "  YULON_AUTH_PORT=3725 YULON_WORLD_PORT=8086 $0"
+        print_info ""
+        print_info "One caveat worth knowing before you move them: the AUTH port is the one"
+        print_info "the game client dials, and it reads it from realmlist.wtf - so moving that"
+        print_info "one means editing the client too. The world and db ports move freely; the"
+        print_info "client is told the world port by the realm row in the database."
+    else
+        print_info "Stop the other server first, then run this again."
+        print_info ""
+        print_info "There is no port override for this game: its compose file comes from"
+        print_info "AzerothCore upstream rather than being written here, so pointing it at a"
+        print_info "different port is not something this installer can do for you."
+    fi
     print_info "No compile was started, and no server was built."
     exit 1
 }
