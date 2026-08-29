@@ -326,6 +326,18 @@ def _pull_depth_args(depth: int | None) -> list[str]:
     return [] if depth is None else [f"--depth={depth}"]
 
 
+def _is_fresh_mount_race(message: str) -> bool:
+    """True only for the exact "clone started, then ENOENT under /git" shape.
+
+    Both substrings, not either alone: "No such file or directory" on its own
+    also fires on a genuinely missing parent path, and "Cloning into" alone
+    fires on ordinary successful output baked into a different error. Together
+    they are git's own words for "I started, and the bind mount was not there
+    yet" - see `ContainerGit._clone_with_mount_race_retry()`.
+    """
+    return "Cloning into" in message and "No such file or directory" in message
+
+
 @dataclass(frozen=True)
 class ContainerGit:
     """`Git` that runs git inside a container, for hosts without one.
@@ -434,7 +446,7 @@ class ContainerGit:
             argv += ["--filter=blob:none", "--sparse"]
         # The clone target is `.` because the mount point *is* the destination.
         try:
-            self._run(spec, [*argv, spec.url, "."])
+            self._clone_with_mount_race_retry(spec, [*argv, spec.url, "."])
         except GitError as exc:
             if platform.DOCKER_CLI_MISSING_HELP not in str(exc) and git_available():
                 logger.warning(
@@ -458,6 +470,35 @@ class ContainerGit:
     def _run(self, spec: CloneSpec, git_args: list[str]) -> None:
         """One containerized `git` invocation against this spec's destination."""
         self._capture(spec.dest, git_args)
+
+    def _clone_with_mount_race_retry(self, spec: CloneSpec, git_args: list[str]) -> None:
+        """The initial clone, retried once against the exact bind-mount race in the class docstring.
+
+        Reproduced live on macOS/Docker Desktop 2026-08-29: git starts (`Cloning
+        into '.'...`) against a directory that was `mkdir`'d immediately before
+        the `docker run`, then fails `/git/.git: No such file or directory` —
+        the container's view of a brand-new bind mount had not caught up with
+        the host's. Twelve immediate repeats of the identical command, on the
+        identical machine, all succeeded; the failure did not recur once. That
+        is the signature of a mount-propagation race, not a real clone failure,
+        so one immediate retry is tried before falling back to host git — a
+        fallback this class exists specifically to let a Mac without Xcode's
+        Command Line Tools avoid needing.
+
+        Deliberately narrow: only the exact "started, then ENOENT under /git"
+        shape retries. Anything else (auth, network, a bad branch) raises on
+        the first attempt exactly as before.
+        """
+        try:
+            self._capture(spec.dest, git_args)
+        except GitError as exc:
+            if not _is_fresh_mount_race(str(exc)):
+                raise
+            logger.warning(
+                f"containerized git clone hit the fresh-mount race in {spec.dest} ({exc}); "
+                "retrying once before falling back to host git"
+            )
+            self._capture(spec.dest, git_args)
 
     def _capture(self, dest: Path, git_args: list[str]) -> subprocess.CompletedProcess[str]:
         """One containerized `git` invocation, or `GitError` if it fails.

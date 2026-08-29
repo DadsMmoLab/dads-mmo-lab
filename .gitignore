@@ -1,6 +1,9 @@
 .DS_store
 .vscode
 .venv/
+.idea/
+.junie/
+.ruff_cache/
 
 # Generated trees that show up in `git status` on every branch, because they are
 # left on disk by whichever branch last built them.

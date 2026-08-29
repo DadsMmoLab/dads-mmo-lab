@@ -804,7 +804,34 @@ def _main(argv: list[str] | None = None) -> int:
     # script engine directly, so it could never exercise `NativeInstaller` on
     # any platform, and "I ran the install through the CLI" proved less than it
     # sounded like it did. It now dispatches exactly as the Install button does.
-    installer = installer_for(entry, installers_root=args.installers_root)
+    #
+    # The import seams are wired the same way `main.py`'s `make_installer()`
+    # wires them for the GUI - without this, a native install of an entry with
+    # an `import_service` (WoW WotLK) refuses at preflight with "this installer
+    # was built without a way to check it", on every platform, before a single
+    # container is created. Local imports for the same reason `native.py`
+    # imports `installer` inside its own function: `catalog/` must not import a
+    # controller package at module scope.
+    import_probe = None
+    reset_unfinished = None
+    spec = entry.container_spec()
+    if spec.import_service:
+        from yulon.apply import DockerSql
+        from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
+        from yulon.controller_wow_wotlk import modules as wotlk_modules
+        from yulon.controller_wow_wotlk import repair as wotlk_repair
+
+        password = entry.install.db_root_password or wotlk_modules.DEFAULT_DB_ROOT_PASSWORD
+        sql = DockerSql(spec.db, password, schemas=entry.schema_map())
+        mysql = wotlk_maintenance.DockerMysql(spec.db, password)
+        import_probe = lambda: wotlk_repair.import_state(sql, mysql)  # noqa: E731
+        reset_unfinished = lambda: wotlk_repair.reset_unfinished(sql, mysql)  # noqa: E731
+    installer = installer_for(
+        entry,
+        installers_root=args.installers_root,
+        import_probe=import_probe,
+        reset_unfinished=reset_unfinished,
+    )
     options = InstallOptions(
         server_dir=args.server_dir, client_dir=args.client_dir, reinstall=args.reinstall
     )
