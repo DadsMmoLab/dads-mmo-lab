@@ -481,3 +481,83 @@ def test_polling_status_asks_docker_when_the_distro_is_up(
     ctl = Controller(SPEC, SERVER_DIR, wsl_distro="dml-arch")
     # `status()` returns an InstallStatus, not a list of names.
     assert ctl.status().any_running
+
+
+class _ForeignProjectRunner(_FakeRunner):
+    """A neighbour install whose stack is bigger than the ports it publishes.
+
+    Its `stranger-auth` holds one of our ports; `stranger-world` holds none of
+    them and is still part of the same server. Answering the project-filtered
+    `docker ps -a` honestly is the whole point - the base fake returns every
+    name it knows, which would make this test pass for the wrong reason.
+    """
+
+    theirs = ("stranger-db", "stranger-auth", "stranger-world")
+
+    def __call__(self, cmd, cwd=None, timeout=None):
+        if cmd[:3] == ["docker", "ps", "-a"] and any("their-project" in arg for arg in cmd):
+            self.calls.append(cmd)
+            self.cwds.append(cwd)
+            return _completed(0, "".join(name + "\n" for name in self.theirs))
+        if cmd[:2] == ["docker", "inspect"] and any(docker.PROJECT_LABEL in arg for arg in cmd):
+            self.calls.append(cmd)
+            self.cwds.append(cwd)
+            return _completed(0, "their-project\n")
+        return super().__call__(cmd, cwd, timeout)
+
+
+def test_stopping_a_conflict_stops_that_whole_server_not_just_the_port_holders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pulling the database out from under a worldserver is not "stopping the server".
+
+    Measured on yulon-fedora, 2026-08-29. The guard stopped `ac-authserver` and
+    `ac-database`, which published the two colliding ports, and left
+    `ac-worldserver` running with its database gone: it published only 8085 and
+    7878, so it was correctly not a blocker, and `restart: unless-stopped` then
+    looped it - RestartCount 18 and climbing.
+
+    So the unit is the compose PROJECT. This asserts the container that was never
+    a blocker gets stopped too, which is exactly what the first version did not do.
+    """
+    fake = _ForeignProjectRunner(
+        "stranger-auth\t0.0.0.0:1111->1111/tcp\n" "stranger-world\t0.0.0.0:9999->9999/tcp\n"
+    )
+    monkeypatch.setattr(runner, "run", fake)
+
+    stopped = Controller(SPEC, SERVER_DIR).stop_conflicting()
+
+    assert "stranger-auth" in stopped, "the blocker itself was not stopped"
+    assert (
+        "stranger-world" in stopped
+    ), "the rest of that server was left running against a stack that is gone"
+    assert "stranger-db" in stopped, "a project member that publishes nothing was skipped"
+
+    issued = [cmd for cmd in fake.calls if cmd[:2] == ["docker", "stop"]]
+    stopped_names = {cmd[-1] for cmd in issued}
+    assert stopped_names == set(_ForeignProjectRunner.theirs), "the stops issued were " + str(
+        sorted(stopped_names)
+    )
+
+
+def test_a_blocker_with_no_compose_project_is_stopped_on_its_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Something started outside compose has no project to widen to, and is stopped alone.
+
+    The widening must not become a licence to stop unrelated things: a container
+    with no project label is exactly one container.
+    """
+
+    class _NoProject(_FakeRunner):
+        def __call__(self, cmd, cwd=None, timeout=None):
+            if cmd[:2] == ["docker", "inspect"] and any(docker.PROJECT_LABEL in arg for arg in cmd):
+                self.calls.append(cmd)
+                self.cwds.append(cwd)
+                return _completed(0, "\n")  # no label at all
+            return super().__call__(cmd, cwd, timeout)
+
+    fake = _NoProject("rogue-mysql\t0.0.0.0:1111->1111/tcp\n")
+    monkeypatch.setattr(runner, "run", fake)
+
+    assert Controller(SPEC, SERVER_DIR).stop_conflicting() == ["rogue-mysql"]

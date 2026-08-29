@@ -704,6 +704,16 @@ def _project_containers(project: str, *, wsl_distro: str | None = None) -> list[
     return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
+def project_containers(project: str, *, wsl_distro: str | None = None) -> list[str] | None:
+    """Which containers belong to a compose project. `None` if Docker could not be asked.
+
+    The public form of `_project_containers()`, for the one caller outside this
+    module that needs it: stopping a server that is holding our ports has to stop
+    the whole project, not only the containers that publish those ports.
+    """
+    return _project_containers(project, wsl_distro=wsl_distro)
+
+
 def remove_staged(spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | None = None) -> bool:
     """Stop this install and REMOVE its containers. Volumes are never touched.
 
