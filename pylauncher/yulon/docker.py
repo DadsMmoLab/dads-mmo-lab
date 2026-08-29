@@ -215,7 +215,11 @@ def _cli_missing(proc: subprocess.CompletedProcess[str]) -> bool:
 
 
 def _run(
-    argv: list[str], cwd: Path | None = None, *, wsl_distro: str | None = None
+    argv: list[str],
+    cwd: Path | None = None,
+    *,
+    timeout: float | None = None,
+    wsl_distro: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run `docker <argv...>`; raise `DockerCommandError` on non-zero exit.
 
@@ -225,7 +229,7 @@ def _run(
     in front of the sentence is noise to the user reading it in a dialog, and
     `_docker()` has already put the command in the log at DEBUG.
     """
-    proc = _docker(argv, cwd=cwd, wsl_distro=wsl_distro)
+    proc = _docker(argv, cwd=cwd, timeout=timeout, wsl_distro=wsl_distro)
     if _cli_missing(proc):
         raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP)
     if proc.returncode != 0:
@@ -786,6 +790,21 @@ def remove_staged(spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | No
 
     logger.info(f"remove_staged(): removed {len(before)} container(s); volumes untouched")
     return True
+
+
+# How long `status()` waits for `docker ps`. It is a local call, so a healthy
+# daemon answers in milliseconds and a cold Docker Desktop in a few seconds -
+# but an unhealthy one has no upper bound, and without a deadline the GUI's
+# five-second poll wedges PERMANENTLY rather than slowly: `refresh_status()` sets
+# `_status_pending` and clears it only from a callback, so a call that never
+# returns makes every later poll return early at the guard, and the Server tab
+# reads "status: unknown" until the app is restarted. Measured on yulon-win11
+# 2026-08-28: `docker ps` hung 8+ minutes under memory pressure, and 125 seconds
+# on an earlier run there. 30s is six polls - far above a slow honest answer and
+# far below either of those. A timeout arrives as a non-zero CompletedProcess
+# (see `_docker`), so it becomes DockerCommandError, so `_status_failed()` clears
+# the flag and names the reason, and the next poll simply tries again.
+STATUS_TIMEOUT_SECONDS = 30.0
 
 
 STOP_GRACE_SECONDS = 300
@@ -1622,7 +1641,9 @@ def status(*, wsl_distro: str | None = None) -> list[str]:
             `_status_safe()`/the polling helpers below instead.
     """
     logger.debug("status() called")
-    proc = _run(["ps", "--format", "{{.Names}}"], wsl_distro=wsl_distro)
+    proc = _run(
+        ["ps", "--format", "{{.Names}}"], timeout=STATUS_TIMEOUT_SECONDS, wsl_distro=wsl_distro
+    )
     return [name for name in proc.stdout.splitlines() if name.strip()]
 
 

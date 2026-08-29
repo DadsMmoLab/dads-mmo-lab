@@ -77,6 +77,55 @@ def test_status_returns_running_container_names(monkeypatch: pytest.MonkeyPatch)
     assert docker.status() == ["ac-database", "ac-worldserver"]
 
 
+def test_status_gives_docker_ps_a_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`docker ps` must not be allowed to hang the five-second status poll forever.
+
+    `refresh_status()` sets `_status_pending` and clears it only from a
+    callback, so a call that never returns is not a slow poll - it is a
+    permanently wedged Server tab, reading "status: unknown" until the app is
+    restarted, with every later poll returning early at the guard. Measured on
+    yulon-win11 (2026-08-28): `docker ps` hung 8+ minutes under memory
+    pressure, and 125 seconds on an earlier run.
+
+    Asserted on the timeout that reaches the run seam rather than on the
+    constant, because the bug was never the value - it was that no value was
+    passed at all.
+    """
+    seen: list[float | None] = []
+
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        seen.append(timeout)
+        return _completed(0, "ac-worldserver\n", "")
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+
+    assert docker.status() == ["ac-worldserver"]
+    assert seen and seen[0] is not None, "docker ps was run with no deadline at all"
+    assert 0 < seen[0] <= 120, f"deadline of {seen[0]}s is not a bound worth having"
+
+
+def test_a_status_timeout_surfaces_as_an_error_the_poll_can_recover_from(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timed-out `docker ps` must raise, not return an empty list.
+
+    `runner.run()` reports a timeout as a non-zero `CompletedProcess`, the same
+    shape as a missing CLI. If `status()` swallowed that it would answer "no
+    containers are running", which reads as a stopped server rather than an
+    unreachable daemon - and `_status_failed()`, the callback that clears
+    `_status_pending`, would never fire.
+    """
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        lambda cmd, cwd=None, timeout=None: _completed(1, "", "timed out after 30.0s"),
+    )
+    with pytest.raises(docker.DockerCommandError):
+        docker.status()
+
+
 def test_health_returns_status_or_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
     """`health()` returns the inspect status, or `unknown` on failure/empty."""
     monkeypatch.setattr(

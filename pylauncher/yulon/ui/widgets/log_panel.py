@@ -20,6 +20,7 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, 
 
 from yulon import runner
 from yulon.log import get_logger
+from yulon.ui.widgets.job import in_flight
 
 logger = get_logger(__name__)
 
@@ -173,22 +174,69 @@ class LogPanel(QWidget):
         if self.running:
             logger.debug("log panel busy; run() ignored")
             return False
+        self._dispose_last_job()
         self._cancel = cancel
         self._stop_requested = False
         self._status.setText(title)
         self._stop_button.setEnabled(True)
-        thread = QThread(self)
+        # No parent, and held by `in_flight()` until finished: a panel dropped
+        # between `start()` and the OS scheduling the thread must not take the
+        # worker down with it - see `job.InFlight`.
+        thread = QThread()
         worker = _StreamWorker(source)
         worker.moveToThread(thread)
+        in_flight().hold(thread, worker)
         thread.started.connect(worker.run)
         worker.line.connect(self.append)
         worker.finished.connect(self._on_finished)
         worker.finished.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
+        # Deliberately NOT `thread.finished.connect(worker.deleteLater)`, the
+        # textbook pattern - see `_dispose_last_job()` for why it is the segfault.
         self._thread, self._worker = thread, worker
         thread.start()
         self.run_started.emit()
         return True
+
+    def _dispose_last_job(self) -> None:
+        """Delete the previous job's worker HERE, on the GUI thread, once its thread is gone.
+
+        This used to be `thread.finished.connect(worker.deleteLater)` - the
+        textbook Qt pattern, and it is the segfault. `deleteLater` posts the
+        delete to the object's OWN thread, and Qt runs it inside that thread's
+        final cleanup (`QThreadPrivate::finish`) - on the worker thread.
+        `_StreamWorker` is a Python subclass, so tearing it down needs the GIL.
+        If the GUI thread holds the GIL at that instant and is inside Qt's
+        connection mutex - delivering a signal into a Python slot, which is
+        most of what a GUI thread does - each side holds what the other needs.
+
+        gdb on yulon-ubuntu, 2026-08-28: the main thread in
+        `cleanOrphanedConnectionsImpl` -> `QBasicMutex::lockInternal`, reached
+        from a slider `rangeChanged` into a Python slot; a thread named
+        "QThread" in `~QObject()` -> `Shiboken::GilState::acquire`. That is the
+        deadlock. The same race that does not deadlock corrupts memory instead:
+        9 of 20 GUI-only runs died with SIGSEGV or SIGBUS, always at the
+        boundary where one test module's last worker finished while the next
+        module's fixture was building a window. Removing `processEvents()` from
+        that fixture's teardown changed nothing, which is how the suspect moved
+        from the fixture to here.
+
+        And the panel already held `self._worker`, so the deferred delete was
+        destroying the C++ side of an object Python still pointed at.
+
+        Deleting from the GUI thread is safe once the worker's thread has
+        finished: an object whose thread is gone has no affinity, and Qt permits
+        its destruction from any thread. `running` is false to reach here, and
+        `wait()` turns "not running" into "fully exited" rather than "about to".
+        The QThread object itself lives on the GUI thread - it was created here -
+        so ITS deferred delete is a GUI-thread event and is fine.
+        """
+        thread, worker = self._thread, self._worker
+        self._thread = self._worker = None
+        if thread is None:
+            return
+        thread.wait(5000)
+        thread.deleteLater()
+        del worker  # the last Python reference; the C++ object goes with it, on this thread
 
     @Slot()
     def stop(self) -> None:

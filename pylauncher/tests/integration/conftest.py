@@ -120,7 +120,7 @@ services:
     image: busybox:1.36
     container_name: {THROWAWAY_SPEC.db}
     init: true
-    command: ["sh", "-c", "sleep 2 && touch /tmp/ready && sleep 600"]
+    command: ["sh", "-c", "trap 'exit 0' TERM; sleep 2 && touch /tmp/ready; sleep 600 & wait"]
     healthcheck:
       test: ["CMD", "test", "-f", "/tmp/ready"]
       interval: 1s
@@ -138,7 +138,10 @@ services:
     command:
       - sh
       - -c
-      - echo 'Added realm "Yulon" at {THROWAWAY_REALM_HOST}:{THROWAWAY_REALM_PORT}'; sleep 600
+      - >-
+        trap 'exit 0' TERM;
+        echo 'Added realm "Yulon" at {THROWAWAY_REALM_HOST}:{THROWAWAY_REALM_PORT}';
+        sleep 600 & wait
     ports:
       - "{THROWAWAY_REALM_HOST}:{THROWAWAY_REALM_PORT}:{THROWAWAY_REALM_PORT}"
   world:
@@ -148,8 +151,25 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    command: ["sh", "-c", "echo 'World initialized, ready...'; sleep 600"]
+    command:
+      - sh
+      - -c
+      - trap 'exit 0' TERM; echo 'World initialized, ready...'; sleep 600 & wait
 """
+# Every stand-in traps SIGTERM and waits on a BACKGROUNDED sleep. Both halves are
+# required, and without them the suite pays five minutes twice.
+#
+# `sleep` as PID 1 does not die on SIGTERM: the kernel gives PID 1 no default
+# action for it, so `docker compose stop -t 300` waits out the whole grace period
+# (`docker.STOP_GRACE_SECONDS`, correct at 300 for a real worldserver draining its
+# save queue) and then SIGKILLs. Measured on yulon-fedora 2026-08-28:
+# `time docker stop -t 300` on `busybox sh -c "sleep 600"` took 5m0.748s, and two
+# tests do it, which is most of a 32-42 minute local run.
+#
+# The trap alone is not enough. A foreground `sleep` blocks the shell from
+# running the handler until it returns, so the sleep is backgrounded and `wait`
+# holds the shell in a signal-interruptible state.
+
 # The `depends_on: condition: service_healthy` edges above are not decoration.
 # `start_staged()` deleted its Python health-wait on the grounds that compose
 # owns the dependency graph and fails closed when the database never becomes
@@ -162,10 +182,45 @@ services:
 # The same project with a database that can never report healthy: the
 # fail-closed case. A worldserver started against a dead database is the
 # outcome the health gate exists to prevent.
-_NEVER_HEALTHY_YML = _COMPOSE_YML.replace(
-    'command: ["sh", "-c", "sleep 2 && touch /tmp/ready && sleep 600"]',
-    'command: ["sh", "-c", "sleep 600"]',  # /tmp/ready is never created
+# /tmp/ready is never created. Same trap-and-wait shape as the healthy one, so
+# the teardown is still instant. Built by replacing the healthy command and
+# CHECKED to have changed something: this used to be a bare `.replace()`, and
+# when the healthy command was rewritten to trap SIGTERM the replace silently
+# matched nothing, the "never healthy" database came up healthy, and CI failed
+# with "DID NOT RAISE DockerCommandError" (run 33201823461, 2026-08-28).
+_HEALTHY_DB_COMMAND = (
+    "command: ["
+    + chr(34)
+    + "sh"
+    + chr(34)
+    + ", "
+    + chr(34)
+    + "-c"
+    + chr(34)
+    + ", "
+    + chr(34)
+    + "trap 'exit 0' TERM; sleep 2 && touch /tmp/ready; sleep 600 & wait"
+    + chr(34)
+    + "]"
 )
+_NEVER_HEALTHY_DB_COMMAND = (
+    "command: ["
+    + chr(34)
+    + "sh"
+    + chr(34)
+    + ", "
+    + chr(34)
+    + "-c"
+    + chr(34)
+    + ", "
+    + chr(34)
+    + "trap 'exit 0' TERM; sleep 600 & wait"
+    + chr(34)
+    + "]"
+)
+assert _HEALTHY_DB_COMMAND in _COMPOSE_YML, "the healthy db command moved; update both constants"
+_NEVER_HEALTHY_YML = _COMPOSE_YML.replace(_HEALTHY_DB_COMMAND, _NEVER_HEALTHY_DB_COMMAND)
+assert _NEVER_HEALTHY_YML != _COMPOSE_YML
 
 
 def docker_available() -> bool:

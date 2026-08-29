@@ -64,6 +64,87 @@ class _JobWorker(QObject):
             self.done.emit(result)
 
 
+class InFlight(QObject):
+    """Owns every started (thread, worker) pair until the thread has FINISHED.
+
+    The crash this exists for, from a native backtrace on yulon-ubuntu
+    (2026-08-28): a worker QThread is scheduled by the OS, emits `started`,
+    PySide dispatches it to `worker.run` - and dies in `QMetaMethod::name()`
+    because the worker's C++ object is already gone. Between `thread.start()`
+    and the OS actually running the thread there is a window, and in it the
+    panel or view that held the only Python reference to the worker can be
+    garbage-collected. Python owns an unparented QObject, so the worker is
+    deleted with it; the thread then wakes and calls a method on freed memory.
+    SIGSEGV or SIGBUS, single Python frame on the main thread (it was waiting
+    for the GIL the dying thread held), no frame on the worker thread at all.
+
+    Load-dependent, because the window is scheduling latency: 1 in 20 runs on
+    an idle box, 9 in 20 with a worldserver running beside it, and 100% under
+    gdb, which is what finally produced the backtrace. The same sequence in
+    the app is closing a tab right after pressing "Follow worldserver log".
+
+    So a started pair is held HERE, by an object that lives on the GUI thread
+    and outlives any panel, until `finished` says the thread is done - and only
+    then dropped, on this thread, where deleting a QObject whose thread has
+    exited is safe. `sweep()` is a Slot, so `thread.finished` reaches it as a
+    queued call on the GUI thread rather than on the thread that is finishing;
+    dropping the pair from the worker thread itself would be the OTHER crash
+    (see `LogPanel._dispose_last_job`).
+
+    The threads are also created without a parent. A QThread parented to a
+    panel is destroyed with the panel, and a QThread destroyed while running
+    ends the process rather than warning - so the panel must not be able to
+    take the thread down with it either.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._pairs: list[tuple[QThread, QObject]] = []
+
+    def hold(self, thread: QThread, worker: QObject) -> None:
+        self._pairs.append((thread, worker))
+        thread.finished.connect(self.sweep)
+
+    @Slot()
+    def sweep(self) -> None:
+        """Drop every pair whose thread has finished. Runs on the GUI thread."""
+        self._pairs = [pair for pair in self._pairs if pair[0].isRunning()]
+
+    def wait_all(self, timeout_ms: int = 10_000) -> bool:
+        """Join everything still running (app shutdown). True if all finished in time.
+
+        `quit()` ends an event loop; it cannot interrupt a `run()` still inside
+        its work - a blocked `subprocess.run`, a `docker logs -f` with no new
+        line. A pair that does not finish is left held, and Qt's abort at
+        interpreter exit (a QThread destroyed while running) follows. That is
+        the pre-existing contract and this class does not change it; what it
+        can do is put a name in the log first, so the abort is not a mystery.
+        """
+        done = True
+        for thread, worker in list(self._pairs):
+            if thread.isRunning():
+                thread.quit()
+                if not thread.wait(timeout_ms):
+                    done = False
+                    logger.warning(
+                        f"a background job did not finish within {timeout_ms} ms at exit: "
+                        f"{type(worker).__name__}; Qt will abort when it is destroyed"
+                    )
+        self.sweep()
+        return done
+
+
+_in_flight: InFlight | None = None
+
+
+def in_flight() -> InFlight:
+    """The process-wide holder, made on first use so it lives on the GUI thread."""
+    global _in_flight
+    if _in_flight is None:
+        _in_flight = InFlight()
+    return _in_flight
+
+
 class ThreadedJobRunner:
     """Runs each call on its own `QThread`; call it like a function.
 
@@ -78,10 +159,12 @@ class ThreadedJobRunner:
 
     def __call__(self, work: Work, on_done: OnDone, on_error: OnError) -> None:
         self._prune()
-        thread = QThread(self._parent)
+        # No parent, and held by `in_flight()` until finished - see `InFlight`.
+        thread = QThread()
         worker = _JobWorker(work)
         worker.moveToThread(thread)
         self._live.append((thread, worker))
+        in_flight().hold(thread, worker)
         thread.started.connect(worker.run)
         worker.done.connect(on_done)
         worker.failed.connect(on_error)
