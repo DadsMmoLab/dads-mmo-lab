@@ -1,6 +1,6 @@
 """Application self-update check (README §10, roadmap 5.4): check + notify only.
 
-Asks the GitHub Releases API for the latest release tag, compares it with the
+Asks the GitHub Releases API for the newest published release, compares it with the
 running `yulon.__version__`, and returns a typed `UpdateCheck` the UI can turn
 into a non-blocking banner with a download link. Nothing is downloaded or
 replaced — v1 scope is check + notify. The HTTP call is a seam, so the check is
@@ -23,7 +23,7 @@ from yulon.platform import verify_context
 
 logger = get_logger(__name__)
 
-RELEASES_API = "https://api.github.com/repos/DadsMmoLab/dads-mmo-lab/releases/latest"
+RELEASES_API = "https://api.github.com/repos/DadsMmoLab/dads-mmo-lab/releases?per_page=5"
 RELEASES_PAGE = "https://github.com/DadsMmoLab/dads-mmo-lab/releases/latest"
 
 _VERSION = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)")
@@ -74,6 +74,28 @@ def _urllib_get_text(url: str) -> str:
         return str(resp.read().decode("utf-8", errors="replace"))
 
 
+def _newest_published(feed: object) -> dict[str, object] | None:
+    """The first release in the feed that a user could actually download, or None.
+
+    Not `/releases/latest`: that endpoint means "latest non-prerelease", and every
+    release this project has ever cut is flagged `Pre-release`, so it answered 404
+    for every user the check ever ran for. `/releases` lists them all, and a
+    prerelease here is a normal download — only a draft is invisible, so a draft is
+    all we skip.
+
+    What this relies on: `/releases` is ordered newest-first *by creation date*,
+    which is not the same as by version, so a re-cut of an old tag can arrive at the
+    top. That is why the caller still asks `is_newer` — the feed says what is newest,
+    the version comparison decides whether it is an upgrade.
+    """
+    if not isinstance(feed, list):
+        return None
+    for entry in feed:
+        if isinstance(entry, dict) and not entry.get("draft"):
+            return entry
+    return None
+
+
 def check_for_update(
     current: str = __version__,
     *,
@@ -82,12 +104,17 @@ def check_for_update(
 ) -> UpdateCheck:
     """Compare the running version with the latest GitHub release. Never raises."""
     try:
-        payload = json.loads(http_get(api_url))
-        tag = str(payload.get("tag_name") or "")
-        url = str(payload.get("html_url") or RELEASES_PAGE)
+        release = _newest_published(json.loads(http_get(api_url)))
     except (urllib.error.URLError, OSError, ValueError, AttributeError) as exc:
         logger.info(f"update check skipped: {exc}")
         return UpdateCheck(current, None, False, RELEASES_PAGE, error=str(exc))
+    if release is None:
+        # An empty repo, or an answer that is not a feed at all — a rate-limit
+        # body is valid JSON too.
+        logger.info("update check: no published release in the feed")
+        return UpdateCheck(current, None, False, RELEASES_PAGE, error="no published release")
+    tag = str(release.get("tag_name") or "")
+    url = str(release.get("html_url") or RELEASES_PAGE)
     if parse_version(tag) is None:
         logger.info(f"update check: unrecognized tag {tag!r}")
         return UpdateCheck(current, tag or None, False, url, error=f"unrecognized tag {tag!r}")

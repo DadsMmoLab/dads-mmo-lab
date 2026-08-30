@@ -699,7 +699,7 @@ def test_the_manifest_refresh_verifies(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_the_update_check_verifies(monkeypatch: pytest.MonkeyPatch) -> None:
     """It decides which version the user is told to install, from a response it must trust."""
-    fake = _patch_urlopen(monkeypatch, b'{"tag_name": "v9.9.9"}')
+    fake = _patch_urlopen(monkeypatch, b'[{"tag_name": "v9.9.9"}]')
 
     assert update.check_for_update("0.1.4").latest == "v9.9.9"
 
