@@ -117,12 +117,17 @@ def test_already_running_docker_short_circuits(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_linux_engine_plan_per_package_manager() -> None:
-    """Every list that will run `compose build` carries BuildKit.
+    """Every list that will run `compose build` carries BuildKit — under each distro's own name.
 
     The apt list has since the Ubuntu gate (`docker.io` ships no plugin); the
     Fedora and Arch scripts that passed installed it by hand
     (`docker-buildx-plugin`, `docker-buildx`), so the dnf and pacman lists
-    must too, or gate 7.1 there is the first build without it.
+    must too, or gate 7.1 there is the first build without it. The pacman and
+    dnf packages are asserted as two SEPARATE full-argv equalities, and the
+    two argvs genuinely differ in their last element (`docker-buildx` vs.
+    `docker-buildx-plugin`) — that is the real, distro-specific package name in
+    each case, not a typo one of them should be "fixed" to match the other
+    (see the comment on the dnf branch in `docker_engine_commands()`).
     """
     assert platform.docker_engine_commands("pacman", steamos=True) == [
         ["steamos-readonly", "disable"],
@@ -139,7 +144,7 @@ def test_linux_engine_plan_per_package_manager() -> None:
         "install",
         "moby-engine",
         "docker-compose",
-        "docker-buildx",
+        "docker-buildx-plugin",
     ]
     # The group join is not in any plan, on purpose: the argv exists only
     # inside the consent branch, so there is no ungated construction site.

@@ -1428,9 +1428,18 @@ def docker_engine_commands(pm: PackageManager, *, steamos: bool) -> list[list[st
             ["apt-get", "install", "-y", "docker.io", "docker-compose-v2", "docker-buildx"],
         ]
     elif pm == "dnf":
-        # docker-buildx too: the Fedora script that passed the gate installed it
-        # by hand (`docker-buildx-plugin`), and `compose build` needs BuildKit.
-        install = [["dnf", "-y", "install", "moby-engine", "docker-compose", "docker-buildx"]]
+        # docker-buildx-plugin, NOT docker-buildx: that is pacman's package name,
+        # not dnf's, and the two are not interchangeable — `docker-buildx` does
+        # not exist in Fedora's repos, and `dnf install` fails outright on it.
+        # The passing Fedora gate script installs `docker-buildx-plugin` by hand
+        # (install-wow-wotlk-fedora.sh:879) and every diagnostic in it queries
+        # that same rpm name (install-wow-wotlk-fedora.sh:825,827,901); the
+        # passing Arch script installs the bare `docker-buildx`
+        # (install-wow-wotlk.sh:765). Two different real package names for the
+        # same plugin on two distros — resist "fixing" this back to one spelling.
+        install = [
+            ["dnf", "-y", "install", "moby-engine", "docker-compose", "docker-buildx-plugin"]
+        ]
     else:
         install = [["zypper", "--non-interactive", "install", "docker", "docker-compose"]]
     return [*install, ["systemctl", "enable", "--now", "docker"]]
