@@ -282,7 +282,9 @@ def test_ready_spec_defaults_and_the_azerothcore_builder() -> None:
     assert spec.interval == docker._POLL_INTERVAL_SECONDS
     assert spec.restart_loop == 4
     ac = docker.azerothcore_ready("127.0.0.1", 8085, timeout=5.0, interval=0.1)
-    assert ac.world == docker.AZEROTHCORE_READY_WORLD == "ready..."
+    # Escaped, not the bare literal: `ready...` unescaped matches `ready up`
+    # inside `already up-to-date`, which a loading worldserver prints.
+    assert ac.world == re.escape(docker.AZEROTHCORE_READY_WORLD) == r"ready\.\.\."
     assert ac.auth == re.escape("127.0.0.1:8085")
     assert ac.timeout == 5.0 and ac.interval == 0.1 and ac.restart_loop == 4
     assert re.search(ac.auth, "Added realm at 127.0.0.1:8085")
@@ -352,6 +354,87 @@ def test_wait_ready_matches_the_escaped_auth_marker_against_a_real_log_line(
     ready = docker.azerothcore_ready("127.0.0.1", 8085, timeout=1.0, interval=0.01)
     assert "\\." in ready.auth, "the builder is supposed to escape the host"
     assert docker.wait_ready(SPEC.auth, SPEC.world, ready) is True
+
+
+def test_wait_ready_does_not_read_already_up_to_date_as_the_ready_banner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dots in `ready...` are literal dots, not three wildcards.
+
+    Real line from a worldserver that is still loading, with no ready banner in
+    sight: `>> Database is already up-to-date! Containing 0 new and 1245
+    archived updates.` Unescaped, `ready...` matches `ready up` inside
+    `alREADY UP-to-date`, and the wait calls a loading server up — the ready
+    stage succeeds, the install is recorded complete, and the user meets a
+    world that has not finished loading. That polarity is the twin of the
+    never-ready defect, and worse for being silent.
+
+    All four shipped bash scripts escaped these dots on purpose
+    (`dml-start.sh`'s `_wait_ready` greps `ready\\.\\.\\.`, as do the three
+    `install-wow-wotlk*.sh`); the port dropped what its own lineage carried.
+    """
+    _ready_fakes(
+        monkeypatch,
+        world_log=">> Database is already up-to-date! Containing 0 new and 1245 archived.\n",
+    )
+    ready = docker.azerothcore_ready("127.0.0.1", 8085, timeout=0.05, interval=0.01)
+    assert docker.wait_ready(SPEC.auth, SPEC.world, ready) is False
+
+
+def test_the_fatal_warning_quotes_what_the_server_printed_not_the_pattern(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A catalogue `fatal` is an alternation; echoing it back tells the user nothing.
+
+    The fatal test below cannot see this, because there the pattern and the
+    matching line are the same string. With a real pattern they are not, and
+    the server's own words are the whole point of the message.
+    """
+    _ready_fakes(
+        monkeypatch,
+        world_log="FATAL: could not open configuration file 'worldserver.conf'\n",
+    )
+    spec = docker.ReadySpec(
+        world="ready", fatal=r"Could not connect|FATAL:.*", timeout=60.0, interval=0.01
+    )
+    with caplog.at_level("WARNING", logger="yulon.docker"):
+        assert docker.wait_ready(SPEC.auth, SPEC.world, spec) is False
+    assert "could not open configuration file 'worldserver.conf'" in caplog.text
+
+
+def test_wait_ready_does_not_latch_the_restart_count_from_a_failed_inspect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An inspect that failed said nothing — not "this container has restarted 0 times".
+
+    `container_state()` degrades an unreadable inspect to an empty
+    `ContainerState`, whose `restart_count` is 0. Latch that as the baseline
+    and the next successful read of a server with an ordinary restart history
+    reads as "it restarted 97 times while we watched", so a healthy server is
+    refused on the second poll. The `world.status` guard on the latch is the
+    only thing standing between those two, and without this test it can be
+    simplified away with the suite still green.
+    """
+    monkeypatch.setattr(docker.time, "sleep", lambda _seconds: None)
+    inspects = {"n": 0}
+
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        if cmd[:2] == ["docker", "ps"]:
+            return _completed(stdout=f"{SPEC.auth}\n{SPEC.world}\n")
+        if cmd[:2] == ["docker", "inspect"]:
+            inspects["n"] += 1
+            if inspects["n"] == 1:
+                return _completed(returncode=1, stderr="Cannot connect to the Docker daemon")
+            return _completed(stdout="running\t2026-08-22T01:24:53Z\t97\n")
+        if cmd[:2] == ["docker", "logs"]:
+            return _completed(stdout="World initialized, ready...\n")
+        return _completed()
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    spec = docker.ReadySpec(world="ready", timeout=1.0, interval=0.01)
+    assert docker.wait_ready(SPEC.auth, SPEC.world, spec) is True
 
 
 def test_wait_ready_with_no_auth_marker_never_reads_the_auth_log(

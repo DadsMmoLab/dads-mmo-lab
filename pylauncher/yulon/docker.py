@@ -1985,6 +1985,10 @@ AZEROTHCORE_READY_WORLD = "ready..."
 Verified against the three shipped installers (`wait_for_server` greps
 `ready\\.\\.\\.` in the worldserver log), `dml-start.sh`'s `_wait_ready`, and
 `catalog.json`'s `install.native.ready.world` — the same literal in all four.
+
+A LITERAL, which is why `azerothcore_ready()` `re.escape`s it before putting it
+in a `ReadySpec`: the four greps that verify it escape the dots too, and
+unescaped it matches `already up-to-date` in a log that has no ready banner.
 """
 
 
@@ -1995,13 +1999,23 @@ def azerothcore_ready(realm_host: str, realm_port: int, **kwargs: float) -> Read
     `docker_ctl.wait_server_ready()`, whose callers forward `timeout`/`interval`
     exactly as they always did. Only those two are accepted: `restart_loop` is
     an int and anything else is a typo, so both are refused rather than dropped.
-    The auth marker is escaped here, always: a host is a literal, not a regex.
+
+    BOTH markers are escaped here, always. The host is the obvious one — it is
+    a literal, not a regex. The world marker is the one that bit: `ready...`
+    fed to `re.search()` is `ready` plus any three characters, and a still
+    loading worldserver prints `>> Database is already up-to-date!`, in which
+    `alREADY UP-to-date` matches. The wait then reported a loading server as
+    up, the ready stage passed, and the install was recorded complete. Every
+    one of the four shipped bash scripts greps `ready\\.\\.\\.` with the dots
+    escaped; this is the port catching up with its own lineage. Amendment A5
+    has the spine escape catalogue markers the same way unless the `ready`
+    block says `regex: true`, so nothing here is the odd one out.
     """
     unknown = set(kwargs) - {"timeout", "interval"}
     if unknown:
         raise TypeError(f"azerothcore_ready() accepts timeout/interval only, not {sorted(unknown)}")
     return ReadySpec(
-        world=AZEROTHCORE_READY_WORLD,
+        world=re.escape(AZEROTHCORE_READY_WORLD),
         auth=re.escape(f"{realm_host}:{realm_port}"),
         timeout=kwargs.get("timeout", _READY_TIMEOUT_SECONDS),
         interval=kwargs.get("interval", _POLL_INTERVAL_SECONDS),
@@ -2087,9 +2101,14 @@ def wait_ready(
                 since=world.started_at,
                 wsl_distro=wsl_distro,
             )
-            if spec.fatal is not None and re.search(spec.fatal, world_log):
+            fatal = re.search(spec.fatal, world_log) if spec.fatal is not None else None
+            if fatal is not None:
+                # The LINE, not the pattern. A catalogue `fatal` is an
+                # alternation, and showing the user `Could not connect|FATAL:`
+                # tells them nothing about what their server actually said.
                 logger.warning(
-                    f"{world_container} printed a fatal line ({spec.fatal!r}); giving up"
+                    f"{world_container} printed a line that means it will never be ready: "
+                    f"{fatal.group(0)!r} (matched {spec.fatal!r}); giving up"
                 )
                 return False
             if (
