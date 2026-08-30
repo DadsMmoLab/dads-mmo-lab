@@ -174,17 +174,31 @@ class ControllerServices:
             create_account=lambda name, pw, gm: wotlk_accounts.create_account(
                 sql, name, pw, gm_level=gm, scheme=entry.accounts.scheme or "azerothcore"
             ),
+            # `wsl_distro=` as well as the distro-aware `mysql`: the dump goes
+            # through `docker exec`, but before it runs, maintenance censuses
+            # the containers with `docker ps` — a second question, to the same
+            # daemon, that was going to the Windows host. On a machine whose
+            # only Docker is inside the distro that is the one with no Docker on
+            # it, so Back up now answered "Docker could not be found on this
+            # machine" while the Console tab, one seam over, was attached and
+            # streaming (Discord report, 2026-08-27).
             backup=lambda: wotlk_maintenance.backup(
-                server_dir, mysql, spec=spec, core_databases=entry.core_databases()
+                server_dir,
+                mysql,
+                spec=spec,
+                core_databases=entry.core_databases(),
+                wsl_distro=wsl_distro,
             ),
             backups_dir=lambda: wotlk_maintenance.backups_dir(server_dir),
-            plan_restore=lambda path: wotlk_maintenance.plan_restore(path, server_dir, spec=spec),
+            plan_restore=lambda path: wotlk_maintenance.plan_restore(
+                path, server_dir, spec=spec, wsl_distro=wsl_distro
+            ),
             # `confirm=plan.token` is not a rubber stamp: the token can only come
             # from a plan, a plan can only come from a real file, and the human
             # confirmation is the dialog the view puts in front of this call.
             # What the token buys is that no confirmation can be spelled `True`.
             restore=lambda plan: wotlk_maintenance.restore(
-                plan, mysql, confirm=plan.token, spec=spec
+                plan, mysql, confirm=plan.token, spec=spec, wsl_distro=wsl_distro
             ),
             interrupted_restore=lambda: wotlk_maintenance.interrupted_restore(server_dir),
             forget_interrupted=lambda: wotlk_maintenance.forget_interrupted_restore(server_dir),
@@ -350,6 +364,12 @@ class ControllerView(QWidget):
         # install — the installer imports on every healthy path.
         self.repair_button = QPushButton(REPAIR_IDLE, tab)
         self.repair_button.setVisible(False)
+        # Hidden until a Start is actually refused for the ports. Every v1
+        # server publishes the same ones, so only one can be live at a time -
+        # and refusing while leaving the user to go and find the other install
+        # themselves is correct and unhelpful. This is the offer to do it.
+        self.stop_other_button = QPushButton("Stop the other server and start this one", tab)
+        self.stop_other_button.setVisible(False)
         self.repair_label = QLabel("", tab)
         self.repair_label.setWordWrap(True)
         self.repair_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -359,6 +379,7 @@ class ControllerView(QWidget):
         self.refresh_button.clicked.connect(self.recheck)
         self.remove_button.clicked.connect(self.remove_containers)
         self.repair_button.clicked.connect(self.repair_import)
+        self.stop_other_button.clicked.connect(self.stop_other_and_start)
         row = QHBoxLayout()
         for b in (
             self.start_button,
@@ -372,6 +393,7 @@ class ControllerView(QWidget):
         box.addWidget(self.status_label)
         box.addLayout(row)
         box.addWidget(self.problem_label)
+        box.addWidget(self.stop_other_button)
         box.addWidget(self.repair_label)
         box.addStretch(1)
         self._tabs.addTab(tab, "Server")
@@ -611,15 +633,60 @@ class ControllerView(QWidget):
     def _start_failed(self, exc: object) -> None:
         self._set_busy(False)
         if isinstance(exc, PortConflictError):
-            msg = (
-                f"Another server is already using ports {exc.ports}: {', '.join(exc.containers)}. "
-                "Stop it first — only one server can run at a time."
-            )
-        else:
-            msg = str(exc)
+            self._offer_to_stop_the_other_server(exc)
+            return
+        self._hide_stop_other()
+        msg = str(exc)
         self.problem_label.setText(msg)
         self.action_failed.emit(msg)
         self.refresh_status()
+
+    def _offer_to_stop_the_other_server(self, exc: PortConflictError) -> None:
+        """Name the install holding the ports, and offer to stop it.
+
+        This used to end at "Stop it first", which is true and leaves the user to
+        work out WHICH install that is and go and do it. `PortConflictError` now
+        carries the compose `working_dir` label of each blocking container, so
+        the offer can name the folder, and the button does the stopping.
+
+        The offer is a control on the tab rather than a modal dialog, in this
+        view's own idiom: what is being agreed to stays readable while agreeing,
+        and a test can press it.
+        """
+        ports = ", ".join(str(port) for port in exc.ports)
+        names = ", ".join(exc.containers)
+        msg = (
+            f"This server needs port(s) {ports}, which {exc.owner_summary()} is "
+            f"using ({names}). Only one server can run at a time."
+        )
+        self.problem_label.setText(msg)
+        self.stop_other_button.setVisible(True)
+        self.stop_other_button.setEnabled(True)
+        self.action_failed.emit(msg)
+        self.refresh_status()
+
+    def _hide_stop_other(self) -> None:
+        """The offer only stands while the collision does."""
+        self.stop_other_button.setVisible(False)
+
+    @Slot()
+    def stop_other_and_start(self) -> None:
+        """Stop whatever holds our ports, then start this install.
+
+        One job, not two: a stop that succeeded followed by a start that was
+        never issued is the failure mode this replaces, and the two halves are
+        only meaningful together.
+        """
+        self._disarm_actions()
+        self._hide_stop_other()
+        self.problem_label.setText("")
+        self._set_busy(True)
+        self.status_label.setText("status: stopping the other server…")
+        self._run(
+            self.services.controller.stop_conflicting_and_start,
+            self._server_action_done,
+            self._start_failed,
+        )
 
     @Slot(object)
     def _stop_failed(self, exc: object) -> None:
@@ -675,9 +742,10 @@ class ControllerView(QWidget):
         self.repair_button.setText(REPAIR_IDLE)
 
     def _disarm_actions(self) -> None:
-        """Any other server action means the user moved on from both of them."""
+        """Any other server action means the user moved on from all of them."""
         self._disarm_remove()
         self._disarm_repair()
+        self._hide_stop_other()
 
     @Slot(object)
     def _remove_done(self, result: object) -> None:
@@ -805,7 +873,7 @@ class ControllerView(QWidget):
         self.console_note.setWordWrap(True)
         self.console_note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.console_note.setVisible(False)
-        if not wotlk_console.pty_supported():
+        if not self._console_available():
             # Checklist 6.5 asks for this gap to be re-scoped, "not left silently
             # broken". Refusing on click and printing the error afterwards is not
             # the same as saying so up front: the catalog tile already disables
@@ -866,10 +934,22 @@ class ControllerView(QWidget):
             self._console_failed,
         )
 
+    def _console_available(self) -> bool:
+        """Can this host type at this server's console?
+
+        Not `pty_supported()` any more, and the difference is a whole platform.
+        A Windows box managing a WSL-resident server has no pty of its own and
+        can still send: the distro opens one (`console.distro_attach_argv()`).
+        Asked of the controller because that is where the distro is already
+        recorded — a second copy on `ControllerServices` would be one more
+        thing that can disagree with the seam actually doing the work.
+        """
+        return wotlk_console.can_send(wsl_distro=self.services.controller.wsl_distro)
+
     def _console_idle(self) -> None:
-        """Re-arm Send — never where there is no pty (see `_build_console_tab()`)."""
+        """Re-arm Send — never where it cannot send (see `_build_console_tab()`)."""
         self._console_pending = False
-        self.send_button.setEnabled(wotlk_console.pty_supported())
+        self.send_button.setEnabled(self._console_available())
 
     @Slot(object)
     def _console_reply(self, result: object) -> None:

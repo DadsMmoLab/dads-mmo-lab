@@ -5,7 +5,7 @@
 #
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 #
-#  Version: 1.3.9 - Fedora
+#  Version: 1.4.0 - Fedora
 #
 #  Usage:
 #    chmod +x install-wow.sh
@@ -20,6 +20,15 @@
 #    6. Sets up the Gaming Mode launcher
 #
 #  Changelog:
+#    1.4.0 — Free space is checked where the server files go
+#      - check_system() no longer exits when $HOME is short of space. It probes
+#        $HOME, which is not necessarily where the server files are headed:
+#        choose_install_dir() offers an SD card or external drive and checks
+#        free space at the folder actually chosen. On a 64 GB Steam Deck the
+#        two contradicted each other — the prompt offered the card, the gate
+#        then quit over the internal disk.
+#      - The $HOME figure is now a warning. Docker's images land on the main
+#        disk whatever the user picks, so it is still worth saying.
 #    1.3.7 — Custom server files install location
 #      - Added choose_install_dir(): prompts user for a custom SERVER_DIR
 #        before the install begins (blank = keep default ~/wow-server-playerbots)
@@ -189,6 +198,165 @@ dir_is_reusable() {
     [ -n "$(find "$1" -maxdepth 0 -empty 2>/dev/null)" ] || return 1
     return 0
 }
+
+# Are this install's images actually built? Ask the IMAGE STORE, not the
+# container list.
+#
+# `docker compose images` reports the images of a project's EXISTING
+# CONTAINERS. A folder whose build finished but whose `up` never ran - or whose
+# containers were removed - has no containers, so that command answers nothing
+# and a COMPLETE build reads as "nothing was built". Measured on yulon-arch
+# 2026-08-28: `up` failed on a container-name collision, so zero containers
+# existed, and the branch below then offered to delete a good ~35-minute build.
+# In a directory with no containers `docker compose images` failed outright
+# (missing env file) while `config --images` still answered.
+#
+# `config --images` reads the compose FILE, so the image name is derived from
+# this install rather than hardcoded here, and `docker image inspect` then asks
+# the store whether that image exists. Both halves matter: deriving the name
+# keeps this correct if the tag or repository changes, and inspecting the store
+# is the only question whose answer does not depend on containers.
+#
+# SCOPE, deliberately narrower than the name suggests: AzerothCore's compose
+# pins `image:` with no project prefix, so this answers "the image this install
+# needs is on this machine", NOT "this folder built it". On a box with two
+# installs of the same game, a folder holding only a clone answers yes. That is
+# why the caller below says "on this machine" rather than naming the folder,
+# and why a name collision is caught at `up` rather than assumed away here.
+#
+# Do NOT "fix" the scope by matching the image's `com.docker.compose.project`
+# label against this folder's project. `catalog_view._pin_compose_project()`
+# writes COMPOSE_PROJECT_NAME into `.env` AFTER a successful install, so the
+# label (the directory-derived name at build time) and the current project name
+# legitimately differ - and the match would report a real build as missing,
+# which is the delete prompt. Confirmed 2026-08-28 that compose does label built
+# images with the project, so the trap is reachable, not hypothetical.
+compiled_images_present() {
+    # 0 = built.  1 = definitely not built.  2 = could not find out.
+    #
+    # The third answer is the point. The caller's next step offers to DELETE
+    # this folder, so "I could not ask" must never be spelled the same way as
+    # "there is nothing here". A daemon that is not up yet after boot, one
+    # restarted for maintenance, or a compose file that cannot be read would
+    # otherwise all arrive at that prompt under the message "no completed build
+    # was found in it" - which in those cases is not true, and the folder it
+    # offers to remove may hold hours of compiling. Found by an adversarial
+    # review, 2026-08-28, on a real daemon.
+    [ -d "$1" ] || return 1
+    # A folder that exists but cannot be entered - root-owned 700 from an
+    # earlier sudo run - is a question we failed to ask, not an empty answer.
+    # Without this, `cd` failed quietly below and the verdict was "not built",
+    # which is the delete prompt (review, 2026-08-28).
+    (cd "$1" >/dev/null 2>&1) || return 2
+    docker image ls >/dev/null 2>&1 || return 2
+
+    local image images prefix candidate
+    images=$(cd "$1" 2>/dev/null && docker compose config --images 2>/dev/null)
+    image=$(echo "$images" | grep -i "worldserver" | head -1)
+    if [ -z "$image" ]; then
+        # No image name to test. A folder with no compose file at all has
+        # genuinely never been built; a folder that HAS one which compose would
+        # not read is a question we failed to ask.
+        #
+        # One name at a time, NOT `ls a b c d`: that exits non-zero when ANY of
+        # the four is missing, so a folder holding docker-compose.yml and
+        # nothing else read as holding no compose file at all. Caught by the
+        # test for this branch on its first run.
+        # A compose file that names no worldserver image at all is somebody
+        # else's project, not an unbuilt server and not an unanswered question.
+        if [ -n "$images" ]; then
+            return 3
+        fi
+        for candidate in compose.yaml compose.yml docker-compose.yml docker-compose.yaml; do
+            [ -f "$1/$candidate" ] && return 2
+        done
+        return 1
+    fi
+    # EVERY image this build produces, not just the worldserver one. A prune that
+    # took `ac-db-import` but left `ac-worldserver` used to answer "built", and
+    # the caller's reuse path then runs `up` with no `--build` - so the stack
+    # comes up against a missing or foreign image having deliberately skipped a
+    # 2-4 hour compile. Found by an independent adversarial review (Codex),
+    # 2026-08-28.
+    #
+    # Siblings are recognised by the prefix the worldserver image itself carries
+    # (`acore/ac-wotlk-`), which keeps third-party images in the same compose
+    # file out of it: `mysql:8.0` is PULLED, not built, so requiring it to be on
+    # the machine would report a good build as missing every time it was pruned -
+    # and that is the delete prompt.
+    prefix=${image%worldserver*}
+    if [ "$prefix" = "$image" ]; then
+        # No `worldserver` component to strip, so no prefix can be derived and
+        # the single-image question is the only one available.
+        docker image inspect "$image" >/dev/null 2>&1 && return 0
+        return 1
+    fi
+    for candidate in $images; do
+        case "$candidate" in
+            "$prefix"*)
+                docker image inspect "$candidate" >/dev/null 2>&1 || return 1
+                ;;
+        esac
+    done
+    return 0
+}
+
+# Refuse to build into a folder whose container names another install holds.
+#
+# The compose file pins `container_name:` for every service, and Docker keeps
+# those names global to the host - so a second install of the same game, even
+# into a brand-new empty folder, fails at `docker compose up` with
+#   Conflict. The container name "/ac-database" is already in use
+# from the daemon, after the 2-4 hour build. Hit on yulon-ubuntu AND yulon-arch
+# on the same day (2026-08-28), both times from a stopped, not removed, stack
+# left by an earlier install elsewhere on the box. Naming the other install is
+# the whole value here; the daemon's message names a container.
+#
+# "Another install" is decided by the container's own compose label, NOT by a
+# guess at the project name: `com.docker.compose.project.working_dir` is
+# written by compose on every container it creates, and comparing it with
+# THIS folder is the only test that is right for both an install that pinned
+# COMPOSE_PROJECT_NAME and one that did not. A name with no such label was not
+# created by compose at all, and is reported the same way.
+refuse_foreign_containers() {
+    local dir="$1" config names name owner
+    # `config`'s own exit status, separately from the names it yields: an
+    # unreadable compose file used to look exactly like "pins no names", and the
+    # guard passed silently - the same "could not ask" spelled as "nothing here"
+    # that compiled_images_present was taught to report (review, 2026-08-28).
+    if ! config=$(cd "$dir" 2>/dev/null && docker compose config 2>/dev/null); then
+        print_error "Could not read the compose file in $dir, so its container names"
+        print_error "could not be checked against the containers already on this machine."
+        exit 1
+    fi
+    names=$(printf '%s\n' "$config" | sed -n 's/^[[:space:]]*container_name:[[:space:]]*//p')
+    [ -n "$names" ] || return 0
+    local here
+    here=$(cd "$dir" 2>/dev/null && pwd -P)
+    for name in $names; do
+        docker container inspect "$name" >/dev/null 2>&1 || continue
+        owner=$(docker container inspect "$name"             --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' 2>/dev/null)
+        if [ "$owner" != "$here" ]; then
+            print_error "A container named '$name' already exists, and it is not this install's."
+            if [ -n "$owner" ]; then
+                print_info "It belongs to the server in: $owner"
+                print_info "Stop and remove that server first (its data volumes are kept), or install this one"
+                print_info "on a machine that is not already running it."
+                # NOT "nothing has been changed": this guard needs a compose file
+                # to read container names from, so it can only run AFTER the clone -
+                # the source tree and the generated override are already in $dir by
+                # now (review, 2026-08-28).
+                print_info "The source in $dir was left as it is; nothing was built or started."
+            else
+                print_info "It was not created by this installer. Remove it, then run the install again."
+            fi
+            exit 1
+        fi
+    done
+}
+
+
+
 
 # Let containers write to the bind-mounted server folder on SELinux systems.
 #
@@ -451,6 +619,10 @@ choose_install_dir() {
 
     local avail_gb
     avail_gb=$(df -BG "$_space_probe" 2>/dev/null | awk 'NR==2 {print $4}' | sed 's/G//' | tr -d ' ') || true
+    # `df` prints `-` for Avail on some filesystems, so "not empty" is not "is a
+    # number". Normalise anything non-numeric to empty, and let the unreadable
+    # branch below own it (review, 2026-08-28).
+    case "$avail_gb" in ''|*[!0-9]*) avail_gb="" ;; esac
     if [[ -z "$avail_gb" ]]; then
         print_error "Could not determine free space at ${_space_probe}. Cannot verify the 15 GB requirement."
         exit 1
@@ -531,12 +703,51 @@ check_system() {
         exit 1
     fi
 
+    # Two disks, because they are two disks. $HOME is where the server files go
+    # if the user keeps the default; /var/lib/docker is where the images and the
+    # build cache go no matter what they pick. On a Steam Deck those are
+    # different partitions, so one df cannot answer for both — a warning that
+    # measured $HOME and then said "Docker images live on the main disk" was
+    # describing a number it had not taken (review, 2026-08-28).
     AVAILABLE_GB=$(df -BG "$HOME" 2>/dev/null | awk 'NR==2 {print $4}' | sed 's/G//' | tr -d ' ')
+    # `df` prints `-` for Avail on some filesystems, so "not empty" is not "is a
+    # number". Normalise anything non-numeric to empty, and let the unreadable
+    # branch below own it (review, 2026-08-28).
+    case "$AVAILABLE_GB" in ''|*[!0-9]*) AVAILABLE_GB="" ;; esac
+    DOCKER_DISK="/var/lib/docker"
+    [ -d "$DOCKER_DISK" ] || DOCKER_DISK="/"
+    DOCKER_GB=$(df -BG "$DOCKER_DISK" 2>/dev/null | awk 'NR==2 {print $4}' | sed 's/G//' | tr -d ' ')
+    # `df` prints `-` for Avail on some filesystems, so "not empty" is not "is a
+    # number". Normalise anything non-numeric to empty, and let the unreadable
+    # branch below own it (review, 2026-08-28).
+    case "$DOCKER_GB" in ''|*[!0-9]*) DOCKER_GB="" ;; esac
+
+    # Warnings, not gates. Exiting here refused the very install choose_install_dir()
+    # exists to allow: on a 64 GB Steam Deck the installer offered the SD card and
+    # then quit over the internal disk. The only free-space floors this project has
+    # measured are for WotLK's native build (min_data_root_gb in catalog.py) and do
+    # not transfer to a script that bind-mounts its checkout into the server folder,
+    # so nothing here refuses on a number nobody took.
     if [ -n "$AVAILABLE_GB" ] && [ "$AVAILABLE_GB" -lt 15 ] 2>/dev/null; then
-        print_error "Not enough disk space. You have ${AVAILABLE_GB}GB free, need at least 15GB."
-        exit 1
+        print_warning "Only ${AVAILABLE_GB}GB free on ${HOME}."
+        print_info "The server files can go on another drive - you will be asked where in a moment, and that location is checked on its own."
+    elif [ -z "$AVAILABLE_GB" ]; then
+        # Unreadable is not OK. Printing "unknownGB available" as a success was
+        # rounding a missing measurement up to a pass (review-of-review, 2026-08-28).
+        print_warning "Could not read free space on ${HOME}."
+    else
+        print_success "Disk space OK on ${HOME} (${AVAILABLE_GB}GB available)"
     fi
-    print_success "Disk space OK (${AVAILABLE_GB:-unknown}GB available)"
+    if [ -n "$DOCKER_GB" ] && [ "$DOCKER_GB" -lt 15 ] 2>/dev/null; then
+        print_warning "Only ${DOCKER_GB}GB free on ${DOCKER_DISK}, where Docker keeps its images."
+        print_info "That disk fills up wherever you put the server files. Free some space there if the build stops partway."
+    elif [ -z "$DOCKER_GB" ]; then
+        # Unreadable is not OK. Printing "unknownGB available" as a success was
+        # rounding a missing measurement up to a pass (review-of-review, 2026-08-28).
+        print_warning "Could not read free space on ${DOCKER_DISK}."
+    else
+        print_success "Disk space OK on ${DOCKER_DISK} (${DOCKER_GB}GB available, Docker's images)"
+    fi
 
     if ! ping -c 1 github.com &>/dev/null; then
         print_error "No internet connection. Please connect and try again."
@@ -992,6 +1203,156 @@ install_git() {
 # ─────────────────────────────────────────
 # PREFLIGHT CHECK — SYSTEM DEPENDENCIES
 # ─────────────────────────────────────────
+# ── server ports ────────────────────────────────────────────────
+# Read off a running stack rather than guessed: ac-authserver publishes 3724,
+# ac-worldserver publishes 8085 AND 7878 (SOAP), ac-database publishes 3306.
+# All four are real host bindings, so all four can collide.
+#
+# PORT_OVERRIDES=0 because this installer does not write the compose file -
+# AzerothCore's own compose does - so there is nothing here to point at a
+# different port, and the refusal must not offer one. Promising a remedy that
+# does nothing is the defect this flag exists to avoid.
+PORT_OVERRIDES=0
+AUTH_PORT=3724
+WORLD_PORT=8085
+SOAP_PORT=7878
+DB_PORT=3306
+
+# Is a host port already listening? Answers 0 = taken, 1 = free, 2 = COULD NOT
+# ASK. The third answer matters: this function gates an install, and "I could
+# not find out" must never be spelled the same way as "it is free".
+port_is_taken() {
+    local port="$1"
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltn 2>/dev/null | awk -v p="$port" 'NR > 1 { n = split($4, a, ":"); if (a[n] == p) hit = 1 } END { exit !hit }'
+        return $?
+    fi
+    if command -v netstat >/dev/null 2>&1; then
+        netstat -ltn 2>/dev/null | awk -v p="$port" '/^tcp/ { n = split($4, a, ":"); if (a[n] == p) hit = 1 } END { exit !hit }'
+        return $?
+    fi
+    return 2
+}
+
+# Which container, if any, publishes that port - so the refusal can name the
+# install the user has to go and stop, rather than just the number.
+port_holder() {
+    local port="$1" cid
+    for cid in $(docker ps -q 2>/dev/null); do
+        if docker port "$cid" 2>/dev/null | awk -F: -v p="$port" '$NF == p { hit = 1 } END { exit !hit }'; then
+            printf '%s' "$cid"
+            return 0
+        fi
+    done
+    return 1
+}
+
+check_ports_free() {
+    local port cid name dir busy=0 unknown=0 blockers=""
+    local project siblings victim stopped=""
+    for port in "$@"; do
+        port_is_taken "$port"
+        case $? in
+            0) ;;
+            1) continue ;;
+            *) unknown=1; continue ;;
+        esac
+        busy=1
+        print_error "Port $port is already in use on this machine."
+        if cid=$(port_holder "$port"); then
+            name=$(docker inspect -f '{{.Name}}' "$cid" 2>/dev/null | sed 's|^/||')
+            dir=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$cid" 2>/dev/null)
+            [ -n "$name" ] && print_info "It is published by the container '$name'."
+            if [ -n "$dir" ] && [ "$dir" != "<no value>" ]; then
+                print_info "That container belongs to the install in $dir."
+            fi
+            # One name can hold several of our ports, so keep the list unique.
+            case " $blockers " in
+                *" $name "*) ;;
+                *) [ -n "$name" ] && blockers="$blockers $name" ;;
+            esac
+        fi
+    done
+    if [ "$busy" -eq 0 ]; then
+        if [ "$unknown" -eq 1 ]; then
+            print_warning "Could not check whether the server ports are free (no 'ss', no 'netstat')."
+            print_info "Continuing anyway; a collision would then surface at 'docker compose up'."
+        fi
+        return 0
+    fi
+    print_error "Two WoW servers cannot publish the same port on one machine."
+    print_info "Checked here, before the expensive part, on purpose: this used to be"
+    print_info "discovered at 'docker compose up' - the last step, after 30-70 minutes."
+    print_info ""
+
+    # The offer, not just the refusal. Every game in the catalog publishes the
+    # same ports, so "only one server live at a time" is the design rather than a
+    # limitation - which makes stopping the other one the ordinary answer, and
+    # leaving the user to go and find it themselves the unhelpful one.
+    #
+    # `docker stop`, never `compose down`: stopping is reversible and keeps the
+    # other install's containers, so ITS next start is still the staged one that
+    # does not re-run its database import.
+    if [ -n "$blockers" ] && ask_yes_no "Stop the other server and continue?"; then
+        # Stop the whole SERVER, not just the container publishing the port.
+        # Measured on yulon-fedora 2026-08-29: stopping ac-authserver and
+        # ac-database left ac-worldserver running with its database gone from
+        # under it, and `restart: unless-stopped` looped it - RestartCount 18
+        # and climbing. It published only 8085 and 7878, so it was correctly not
+        # a blocker, and just as correctly part of the same server. Seen again
+        # on yulon-arch, where tbc-mangosd and tbc-db were left up after
+        # tbc-realmd was stopped out from under them.
+        for name in $blockers; do
+            project=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$name" 2>/dev/null)
+            if [ -n "$project" ] && [ "$project" != "<no value>" ]; then
+                siblings=$(docker ps -a --filter "label=com.docker.compose.project=$project" --format '{{.Names}}' 2>/dev/null)
+            else
+                # Started outside compose: there is nothing to widen to, and
+                # widening on a guess would stop things that are not involved.
+                siblings="$name"
+            fi
+            for victim in $siblings; do
+                case " $stopped " in
+                    *" $victim "*) continue ;;
+                esac
+                print_info "Stopping $victim ..."
+                docker stop "$victim" >/dev/null 2>&1 || print_warning "Could not stop $victim."
+                stopped="$stopped $victim"
+            done
+        done
+        busy=0
+        for port in "$@"; do
+            if port_is_taken "$port"; then
+                busy=1
+                print_error "Port $port is still in use after stopping."
+            fi
+        done
+        if [ "$busy" -eq 0 ]; then
+            print_success "The other server is stopped; carrying on."
+            return 0
+        fi
+        print_error "Something other than that server is still holding a port."
+    fi
+
+    if [ "${PORT_OVERRIDES:-1}" -eq 1 ]; then
+        print_info "Either stop the other server first, or give this one different ports:"
+        print_info "  YULON_AUTH_PORT=3725 YULON_WORLD_PORT=8086 $0"
+        print_info ""
+        print_info "One caveat worth knowing before you move them: the AUTH port is the one"
+        print_info "the game client dials, and it reads it from realmlist.wtf - so moving that"
+        print_info "one means editing the client too. The world and db ports move freely; the"
+        print_info "client is told the world port by the realm row in the database."
+    else
+        print_info "Stop the other server first, then run this again."
+        print_info ""
+        print_info "There is no port override for this game: its compose file comes from"
+        print_info "AzerothCore upstream rather than being written here, so pointing it at a"
+        print_info "different port is not something this installer can do for you."
+    fi
+    print_info "No compile was started, and no server was built."
+    exit 1
+}
+
 preflight_check() {
     print_step "Preflight Check — System Dependencies"
 
@@ -1256,10 +1617,26 @@ install_server() {
     # If they already exist in $SERVER_DIR, skip the 2-4 hour compile
     # and just start the server — the rest of the install continues
     # normally (account creation, launcher setup, etc.).
-    if [ -d "$SERVER_DIR" ] && \
-       (cd "$SERVER_DIR" && docker compose images 2>/dev/null | grep -qi "worldserver"); then
-        print_success "Compiled images already found in $SERVER_DIR"
-        print_info "Skipping compile — reusing your existing build."
+    images_state=0
+    compiled_images_present "$SERVER_DIR" || images_state=$?
+    if [ "$images_state" -eq 2 ]; then
+        print_error "Could not check whether $SERVER_DIR already holds a built server."
+        print_info "Docker did not answer, or the compose file in that folder could not be read."
+        print_info "Nothing has been changed. Start Docker, or fix that folder, and run this again."
+        exit 1
+    fi
+    if [ "$images_state" -eq 3 ]; then
+        # Without a branch of its own this fell through to "Remove it and start
+        # fresh?", which offers `rm -rf` on a folder we have just identified as
+        # somebody else's project. Never offer that (review, 2026-08-29).
+        print_error "$SERVER_DIR holds a docker compose project that is not this server."
+        print_info "Its compose file names no worldserver image, so nothing in it was built here."
+        print_info "Nothing has been changed. Choose a different folder and run this again."
+        exit 1
+    fi
+    if [ "$images_state" -eq 0 ]; then
+        print_success "The images this server needs are already on this machine"
+        print_info "Skipping the compile and starting them."
         print_info "To force a fresh compile, remove the server folder:"
         print_info "  sudo rm -rf $SERVER_DIR"
         # Also here, not only on the fresh-build path. This branch is how a user
@@ -1272,6 +1649,22 @@ install_server() {
         selinux_label_for_containers "$SERVER_DIR"
         cd "$SERVER_DIR" || exit 1
         docker compose up -d 2>&1 | tail -5
+        # The build path has checked this since it was written; this one never
+        # did. On fedora (`set -o pipefail`, no `-e`) a failed `up` fell through
+        # to `return 0`, and `wait_for_server` greps `docker ps` HOST-GLOBALLY -
+        # so the container that made `up` fail on a name conflict is a running
+        # `ac-worldserver` belonging to the OTHER install, and the loop finds it
+        # "ready...", prints "Server is READY!" and exits 0 (review, 2026-08-28).
+        if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+            print_error "The build is already here, but starting it failed."
+            # A diagnosis AFTER the failure, never a gate before it: this branch
+            # is how a MOVED install folder recovers, and compose bakes
+            # `working_dir` into a container at creation - so an unconditional
+            # ownership check here would refuse the move, naming a folder that no
+            # longer exists, with nothing to do about it.
+            refuse_foreign_containers "$SERVER_DIR"
+            exit 1
+        fi
         return 0
     fi
 
@@ -1288,8 +1681,20 @@ install_server() {
             sudo rm -rf "$SERVER_DIR"
             print_success "Old install removed"
         else
-            print_info "Keeping existing install — exiting."
-            exit 0
+            # NOT `exit 0`. Nothing was installed, and a zero exit is read
+            # as SUCCESS by the caller: `catalog_view.py` pins a compose
+            # project name into this folder and grows a tab for a server
+            # that was never built - and `docker.py` records that such a pin
+            # is inherited by any COPY of the folder, so Stop in the copy can
+            # stop the original's server. Reproduced on yulon-arch
+            # 2026-08-28: a killed build was retried into the same folder and
+            # the run reported success having done nothing.
+            #
+            # Declining is a legitimate choice; calling it an install is not.
+            print_error "Nothing was installed."
+            print_info "$SERVER_DIR already holds files, and no completed build was found in it."
+            print_info "Choose an empty folder, or remove this one, and run the install again."
+            exit 1
         fi
     fi
 
@@ -1385,6 +1790,7 @@ OVERRIDE
 
     selinux_label_for_containers "$SERVER_DIR"
 
+    refuse_foreign_containers "$SERVER_DIR"
     cd "$SERVER_DIR"
     docker compose up -d --build 2>&1 | tee ~/playerbots-build.log
 
@@ -1875,6 +2281,7 @@ trap "kill $SUDO_KEEPALIVE_PID 2>/dev/null; exit" EXIT INT TERM
 preflight_check
 choose_install_dir
 show_summary
+check_ports_free "$AUTH_PORT" "$WORLD_PORT" "$SOAP_PORT" "$DB_PORT"
 install_server
 wait_for_server
 create_accounts

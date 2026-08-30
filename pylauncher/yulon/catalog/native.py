@@ -386,6 +386,11 @@ class NativeInstaller:
             # would be refused by the record of the failure it is retrying.
             self._record_error(server_dir, state, str(exc))
             raise
+        # The bash path logs `install of <id> finished` (installer.py); this path
+        # logged nothing at the end, so the only sign a run had ended was the
+        # compose-project pin - which is how a tester on yulon-win11 (2026-08-28)
+        # read a seven-minute readiness wait as "the install was not remembered".
+        logger.info(f"install of {self.entry.id} finished")
         yield f"{self.entry.name} is installed and running in {server_dir}"
 
     # -- preflight -------------------------------------------------------

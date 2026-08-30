@@ -300,7 +300,23 @@ def build_window() -> object:
     update_thread.started.connect(update_worker.run)
     update_worker.done.connect(banner_host.show_update)
     update_worker.done.connect(update_thread.quit)
-    window.setProperty("update_thread", update_thread)  # keep references alive with the window
+    # `setProperty` does NOT keep a Python object alive - a Qt property holds a
+    # QObject*, not a reference - so `update_worker` used to die the moment this
+    # function returned, and the thread started three lines down then called
+    # `run` on freed memory whenever the OS got round to scheduling it. Native
+    # backtrace on yulon-ubuntu (2026-08-28): `QThread::started` ->
+    # `SignalManager::qt_metacall` -> SIGBUS in `QMetaMethod::name()`, at the
+    # end of test_main.py where a window is dropped. `in_flight()` owns the pair
+    # until the thread has finished; the properties stay for
+    # `_stop_background_threads`, which joins by them.
+    # Imported here, not at module scope: `main.py` keeps every Qt import inside
+    # the functions that build a window, so `--provision` runs on a box with no
+    # Qt at all. A module-level import of this contradicted the file's own
+    # lazy-import comments (review, 2026-08-28).
+    from yulon.ui.widgets.job import in_flight
+
+    in_flight().hold(update_thread, update_worker)
+    window.setProperty("update_thread", update_thread)
     window.setProperty("update_worker", update_worker)
     update_thread.start()
     window.resize(1100, 750)
@@ -506,6 +522,12 @@ def _stop_background_threads(window: object) -> None:
     if isinstance(thread, QThread) and thread.isRunning():
         thread.quit()
         thread.wait(8000)
+    # Whatever the panels and runners above did not own any more: `job.InFlight`
+    # keeps every started pair alive until its thread has finished, so this is
+    # the join for a worker whose panel is already gone.
+    from yulon.ui.widgets.job import in_flight
+
+    in_flight().wait_all(8000)
 
 
 if __name__ == "__main__":

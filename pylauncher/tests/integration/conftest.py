@@ -4,8 +4,19 @@ Two layers of opt-in, both deliberate:
 
 - **Docker reachable** — every test here is skipped (not failed) when
   `docker info` cannot reach a daemon or the `docker` binary is missing. This
-  is what keeps the default `pytest` run green in CI without Docker
-  (roadmap 1.5 definition of done).
+  is what keeps a bare `pytest` green on a developer machine with no daemon
+  running (roadmap 1.5 definition of done).
+
+  It is NOT what keeps this suite out of CI's fast job, and for a long time
+  nothing did. `ubuntu-latest` ships a *running* Docker daemon, so this gate
+  waves the whole file through: measured on run 33134621630 (2026-08-28), a
+  plain `pytest -q` on the runner took 41m36s, and the runner's log puts 22 of
+  those seconds in the last 910 of the 982 tests - i.e. essentially all of it
+  is spent before this directory is done. `.github/workflows/ci.yml` now
+  selects on the `integration`
+  marker instead — `-m "not integration"` for the fast job, `-m integration`
+  for a job of its own — so a reachable daemon can never again quietly add
+  forty minutes to every push.
 - **A throwaway compose project** (`throwaway_project`) — three tiny `busybox`
   containers shaped like an install (db with a HEALTHCHECK, auth + world that
   print the same ready markers `yulon.docker.wait_ready()` looks for, all
@@ -79,12 +90,37 @@ THROWAWAY_SPEC = docker.ContainerSpec(
 )
 THROWAWAY_REALM_PORT = THROWAWAY_PORTS[1]
 
+# `init: true` ON EVERY SERVICE, AND IT IS WORTH 40 MINUTES OF CI.
+#
+# Measured on GitHub Actions run 33203168304 (2026-08-28), `--durations=0`: four
+# tests took 605.22s, 604.37s, 602.75s and 602.40s. They are exactly the four
+# that stop a running project through the product's own path, and 2400 of the
+# suite's 2475 seconds were those four.
+#
+# 600 is 2 x `docker.STOP_GRACE_SECONDS`, which is 300 and correct: a populated
+# worldserver spends 52-86s draining its character save queue, and Docker's own
+# 10s default was measured SIGKILLing one mid-save. The grace is PER CONTAINER,
+# and compose stops in dependency waves - `auth` and `world` together, then the
+# `db` they depend on - so a project whose containers never answer SIGTERM pays
+# it twice.
+#
+# And these never answered. `sh -c "... sleep 600"` runs as PID 1, where the
+# kernel drops any signal the process has installed no handler for; SIGTERM is
+# discarded, and every stop waited out the full grace before SIGKILL. So the
+# suite was not testing the stop path - it was measuring a timeout, four times.
+#
+# `init: true` puts docker-init at PID 1 instead. It forwards SIGTERM to the
+# shell, which - no longer PID 1 - takes the default action and exits. That is
+# also what a real worldserver does, so the fixture models production MORE
+# closely than it did, not less. The grace stays 300; nothing about the product
+# changes.
 _COMPOSE_YML = f"""\
 services:
   db:
     image: busybox:1.36
     container_name: {THROWAWAY_SPEC.db}
-    command: ["sh", "-c", "sleep 2 && touch /tmp/ready && sleep 600"]
+    init: true
+    command: ["sh", "-c", "trap 'exit 0' TERM; sleep 2 && touch /tmp/ready; sleep 600 & wait"]
     healthcheck:
       test: ["CMD", "test", "-f", "/tmp/ready"]
       interval: 1s
@@ -95,23 +131,45 @@ services:
   auth:
     image: busybox:1.36
     container_name: {THROWAWAY_SPEC.auth}
+    init: true
     depends_on:
       db:
         condition: service_healthy
     command:
       - sh
       - -c
-      - echo 'Added realm "Yulon" at {THROWAWAY_REALM_HOST}:{THROWAWAY_REALM_PORT}'; sleep 600
+      - >-
+        trap 'exit 0' TERM;
+        echo 'Added realm "Yulon" at {THROWAWAY_REALM_HOST}:{THROWAWAY_REALM_PORT}';
+        sleep 600 & wait
     ports:
       - "{THROWAWAY_REALM_HOST}:{THROWAWAY_REALM_PORT}:{THROWAWAY_REALM_PORT}"
   world:
     image: busybox:1.36
     container_name: {THROWAWAY_SPEC.world}
+    init: true
     depends_on:
       db:
         condition: service_healthy
-    command: ["sh", "-c", "echo 'World initialized, ready...'; sleep 600"]
+    command:
+      - sh
+      - -c
+      - trap 'exit 0' TERM; echo 'World initialized, ready...'; sleep 600 & wait
 """
+# Every stand-in traps SIGTERM and waits on a BACKGROUNDED sleep. Both halves are
+# required, and without them the suite pays five minutes twice.
+#
+# `sleep` as PID 1 does not die on SIGTERM: the kernel gives PID 1 no default
+# action for it, so `docker compose stop -t 300` waits out the whole grace period
+# (`docker.STOP_GRACE_SECONDS`, correct at 300 for a real worldserver draining its
+# save queue) and then SIGKILLs. Measured on yulon-fedora 2026-08-28:
+# `time docker stop -t 300` on `busybox sh -c "sleep 600"` took 5m0.748s, and two
+# tests do it, which is most of a 32-42 minute local run.
+#
+# The trap alone is not enough. A foreground `sleep` blocks the shell from
+# running the handler until it returns, so the sleep is backgrounded and `wait`
+# holds the shell in a signal-interruptible state.
+
 # The `depends_on: condition: service_healthy` edges above are not decoration.
 # `start_staged()` deleted its Python health-wait on the grounds that compose
 # owns the dependency graph and fails closed when the database never becomes
@@ -124,10 +182,45 @@ services:
 # The same project with a database that can never report healthy: the
 # fail-closed case. A worldserver started against a dead database is the
 # outcome the health gate exists to prevent.
-_NEVER_HEALTHY_YML = _COMPOSE_YML.replace(
-    'command: ["sh", "-c", "sleep 2 && touch /tmp/ready && sleep 600"]',
-    'command: ["sh", "-c", "sleep 600"]',  # /tmp/ready is never created
+# /tmp/ready is never created. Same trap-and-wait shape as the healthy one, so
+# the teardown is still instant. Built by replacing the healthy command and
+# CHECKED to have changed something: this used to be a bare `.replace()`, and
+# when the healthy command was rewritten to trap SIGTERM the replace silently
+# matched nothing, the "never healthy" database came up healthy, and CI failed
+# with "DID NOT RAISE DockerCommandError" (run 33201823461, 2026-08-28).
+_HEALTHY_DB_COMMAND = (
+    "command: ["
+    + chr(34)
+    + "sh"
+    + chr(34)
+    + ", "
+    + chr(34)
+    + "-c"
+    + chr(34)
+    + ", "
+    + chr(34)
+    + "trap 'exit 0' TERM; sleep 2 && touch /tmp/ready; sleep 600 & wait"
+    + chr(34)
+    + "]"
 )
+_NEVER_HEALTHY_DB_COMMAND = (
+    "command: ["
+    + chr(34)
+    + "sh"
+    + chr(34)
+    + ", "
+    + chr(34)
+    + "-c"
+    + chr(34)
+    + ", "
+    + chr(34)
+    + "trap 'exit 0' TERM; sleep 600 & wait"
+    + chr(34)
+    + "]"
+)
+assert _HEALTHY_DB_COMMAND in _COMPOSE_YML, "the healthy db command moved; update both constants"
+_NEVER_HEALTHY_YML = _COMPOSE_YML.replace(_HEALTHY_DB_COMMAND, _NEVER_HEALTHY_DB_COMMAND)
+assert _NEVER_HEALTHY_YML != _COMPOSE_YML
 
 
 def docker_available() -> bool:

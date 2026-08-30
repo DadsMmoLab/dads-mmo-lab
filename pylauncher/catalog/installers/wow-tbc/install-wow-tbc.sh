@@ -47,7 +47,7 @@
 #    - 3-5 hours of wall-clock time (mostly hands-off)
 # ============================================================
 
-INSTALLER_VERSION="1.1.4"
+INSTALLER_VERSION="1.1.5"
 
 set -o pipefail
 
@@ -231,12 +231,51 @@ check_system() {
     fi
     print_success "Linux detected"
 
+    # Two disks, because they are two disks. $HOME is where the server files go
+    # if the user keeps the default; /var/lib/docker is where the images and the
+    # build cache go no matter what they pick. On a Steam Deck those are
+    # different partitions, so one df cannot answer for both — a warning that
+    # measured $HOME and then said "Docker images live on the main disk" was
+    # describing a number it had not taken (review, 2026-08-28).
     AVAILABLE_GB=$(df -BG "$HOME" 2>/dev/null | awk 'NR==2 {print $4}' | sed 's/G//' | tr -d ' ')
+    # `df` prints `-` for Avail on some filesystems, so "not empty" is not "is a
+    # number". Normalise anything non-numeric to empty, and let the unreadable
+    # branch below own it (review, 2026-08-28).
+    case "$AVAILABLE_GB" in ''|*[!0-9]*) AVAILABLE_GB="" ;; esac
+    DOCKER_DISK="/var/lib/docker"
+    [ -d "$DOCKER_DISK" ] || DOCKER_DISK="/"
+    DOCKER_GB=$(df -BG "$DOCKER_DISK" 2>/dev/null | awk 'NR==2 {print $4}' | sed 's/G//' | tr -d ' ')
+    # `df` prints `-` for Avail on some filesystems, so "not empty" is not "is a
+    # number". Normalise anything non-numeric to empty, and let the unreadable
+    # branch below own it (review, 2026-08-28).
+    case "$DOCKER_GB" in ''|*[!0-9]*) DOCKER_GB="" ;; esac
+
+    # Warnings, not gates. Exiting here refused the very install choose_install_dir()
+    # exists to allow: on a 64 GB Steam Deck the installer offered the SD card and
+    # then quit over the internal disk. The only free-space floors this project has
+    # measured are for WotLK's native build (min_data_root_gb in catalog.py) and do
+    # not transfer to a script that bind-mounts its checkout into the server folder,
+    # so nothing here refuses on a number nobody took.
     if [ -n "$AVAILABLE_GB" ] && [ "$AVAILABLE_GB" -lt 20 ] 2>/dev/null; then
-        print_error "Need 20GB free for compile + client data. You have ${AVAILABLE_GB}GB."
-        exit 1
+        print_warning "Only ${AVAILABLE_GB}GB free on ${HOME}."
+        print_info "The server files can go on another drive - you will be asked where in a moment, and that location is checked on its own."
+    elif [ -z "$AVAILABLE_GB" ]; then
+        # Unreadable is not OK. Printing "unknownGB available" as a success was
+        # rounding a missing measurement up to a pass (review-of-review, 2026-08-28).
+        print_warning "Could not read free space on ${HOME}."
+    else
+        print_success "Disk space OK on ${HOME} (${AVAILABLE_GB}GB available)"
     fi
-    print_success "Disk space OK (${AVAILABLE_GB:-unknown}GB available)"
+    if [ -n "$DOCKER_GB" ] && [ "$DOCKER_GB" -lt 20 ] 2>/dev/null; then
+        print_warning "Only ${DOCKER_GB}GB free on ${DOCKER_DISK}, where Docker keeps its images."
+        print_info "That disk fills up wherever you put the server files. Free some space there if the build stops partway."
+    elif [ -z "$DOCKER_GB" ]; then
+        # Unreadable is not OK. Printing "unknownGB available" as a success was
+        # rounding a missing measurement up to a pass (review-of-review, 2026-08-28).
+        print_warning "Could not read free space on ${DOCKER_DISK}."
+    else
+        print_success "Disk space OK on ${DOCKER_DISK} (${DOCKER_GB}GB available, Docker's images)"
+    fi
 
     if ! ping -c 1 github.com &>/dev/null; then
         print_error "No internet. Please connect and try again."
@@ -669,6 +708,155 @@ install_git() {
 # ─────────────────────────────────────────
 # PREFLIGHT CHECK — SYSTEM DEPENDENCIES
 # ─────────────────────────────────────────
+
+# ── server ports ────────────────────────────────────────────────────────
+# Three of the four games in the catalog declare the SAME ports (auth 3724,
+# world 8085, db 3306), so a second install on one machine collides by design.
+# The collision used to surface only at `docker compose up`, which is the LAST
+# step - after 30-70 minutes of compiling. Measured on yulon-fedora 2026-08-29.
+PORT_OVERRIDES=1
+AUTH_PORT="${YULON_AUTH_PORT:-3724}"
+WORLD_PORT="${YULON_WORLD_PORT:-8085}"
+# No DB_PORT here on purpose: this game's compose publishes only realmd and
+# mangosd. Its db service has no ports key at all, so gating on 3306 would
+# refuse an install over a port it never binds (found on yulon-win11,
+# 2026-08-29). Tortoise DOES publish 3306, and keeps its DB_PORT.
+
+# Is a host port already listening? Answers 0 = taken, 1 = free, 2 = COULD NOT
+# ASK. The third answer matters: this function gates an install, and "I could
+# not find out" must never be spelled the same way as "it is free".
+port_is_taken() {
+    local port="$1"
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltn 2>/dev/null | awk -v p="$port" 'NR > 1 { n = split($4, a, ":"); if (a[n] == p) hit = 1 } END { exit !hit }'
+        return $?
+    fi
+    if command -v netstat >/dev/null 2>&1; then
+        netstat -ltn 2>/dev/null | awk -v p="$port" '/^tcp/ { n = split($4, a, ":"); if (a[n] == p) hit = 1 } END { exit !hit }'
+        return $?
+    fi
+    return 2
+}
+
+# Which container, if any, publishes that port - so the refusal can name the
+# install the user has to go and stop, rather than just the number.
+port_holder() {
+    local port="$1" cid
+    for cid in $(docker ps -q 2>/dev/null); do
+        if docker port "$cid" 2>/dev/null | awk -F: -v p="$port" '$NF == p { hit = 1 } END { exit !hit }'; then
+            printf '%s' "$cid"
+            return 0
+        fi
+    done
+    return 1
+}
+
+check_ports_free() {
+    local port cid name dir busy=0 unknown=0 blockers=""
+    local project siblings victim stopped=""
+    for port in "$@"; do
+        port_is_taken "$port"
+        case $? in
+            0) ;;
+            1) continue ;;
+            *) unknown=1; continue ;;
+        esac
+        busy=1
+        print_error "Port $port is already in use on this machine."
+        if cid=$(port_holder "$port"); then
+            name=$(docker inspect -f '{{.Name}}' "$cid" 2>/dev/null | sed 's|^/||')
+            dir=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$cid" 2>/dev/null)
+            [ -n "$name" ] && print_info "It is published by the container '$name'."
+            if [ -n "$dir" ] && [ "$dir" != "<no value>" ]; then
+                print_info "That container belongs to the install in $dir."
+            fi
+            # One name can hold several of our ports, so keep the list unique.
+            case " $blockers " in
+                *" $name "*) ;;
+                *) [ -n "$name" ] && blockers="$blockers $name" ;;
+            esac
+        fi
+    done
+    if [ "$busy" -eq 0 ]; then
+        if [ "$unknown" -eq 1 ]; then
+            print_warning "Could not check whether the server ports are free (no 'ss', no 'netstat')."
+            print_info "Continuing anyway; a collision would then surface at 'docker compose up'."
+        fi
+        return 0
+    fi
+    print_error "Two WoW servers cannot publish the same port on one machine."
+    print_info "Checked here, before the expensive part, on purpose: this used to be"
+    print_info "discovered at 'docker compose up' - the last step, after 30-70 minutes."
+    print_info ""
+
+    # The offer, not just the refusal. Every game in the catalog publishes the
+    # same ports, so "only one server live at a time" is the design rather than a
+    # limitation - which makes stopping the other one the ordinary answer, and
+    # leaving the user to go and find it themselves the unhelpful one.
+    #
+    # `docker stop`, never `compose down`: stopping is reversible and keeps the
+    # other install's containers, so ITS next start is still the staged one that
+    # does not re-run its database import.
+    if [ -n "$blockers" ] && ask_yes_no "Stop the other server and continue?"; then
+        # Stop the whole SERVER, not just the container publishing the port.
+        # Measured on yulon-fedora 2026-08-29: stopping ac-authserver and
+        # ac-database left ac-worldserver running with its database gone from
+        # under it, and `restart: unless-stopped` looped it - RestartCount 18
+        # and climbing. It published only 8085 and 7878, so it was correctly not
+        # a blocker, and just as correctly part of the same server. Seen again
+        # on yulon-arch, where tbc-mangosd and tbc-db were left up after
+        # tbc-realmd was stopped out from under them.
+        for name in $blockers; do
+            project=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$name" 2>/dev/null)
+            if [ -n "$project" ] && [ "$project" != "<no value>" ]; then
+                siblings=$(docker ps -a --filter "label=com.docker.compose.project=$project" --format '{{.Names}}' 2>/dev/null)
+            else
+                # Started outside compose: there is nothing to widen to, and
+                # widening on a guess would stop things that are not involved.
+                siblings="$name"
+            fi
+            for victim in $siblings; do
+                case " $stopped " in
+                    *" $victim "*) continue ;;
+                esac
+                print_info "Stopping $victim ..."
+                docker stop "$victim" >/dev/null 2>&1 || print_warning "Could not stop $victim."
+                stopped="$stopped $victim"
+            done
+        done
+        busy=0
+        for port in "$@"; do
+            if port_is_taken "$port"; then
+                busy=1
+                print_error "Port $port is still in use after stopping."
+            fi
+        done
+        if [ "$busy" -eq 0 ]; then
+            print_success "The other server is stopped; carrying on."
+            return 0
+        fi
+        print_error "Something other than that server is still holding a port."
+    fi
+
+    if [ "${PORT_OVERRIDES:-1}" -eq 1 ]; then
+        print_info "Either stop the other server first, or give this one different ports:"
+        print_info "  YULON_AUTH_PORT=3725 YULON_WORLD_PORT=8086 $0"
+        print_info ""
+        print_info "One caveat worth knowing before you move them: the AUTH port is the one"
+        print_info "the game client dials, and it reads it from realmlist.wtf - so moving that"
+        print_info "one means editing the client too. The world and db ports move freely; the"
+        print_info "client is told the world port by the realm row in the database."
+    else
+        print_info "Stop the other server first, then run this again."
+        print_info ""
+        print_info "There is no port override for this game: its compose file comes from"
+        print_info "AzerothCore upstream rather than being written here, so pointing it at a"
+        print_info "different port is not something this installer can do for you."
+    fi
+    print_info "No compile was started, and no server was built."
+    exit 1
+}
+
 preflight_check() {
     print_step "Preflight Check — System Dependencies"
 
@@ -1018,6 +1206,133 @@ locate_client() {
 # ─────────────────────────────────────────
 # SHOW SUMMARY BEFORE COMPILE
 # ─────────────────────────────────────────
+# ─────────────────────────────────────────
+# INSTALL LOCATION
+# Ported from install-wow-wotlk.sh, which was the only installer that asked.
+# The others hardcoded $HOME/<name>, which silently discarded the folder the
+# Yu'lon launcher's picker had already asked for — reported from a Steam Deck
+# on 2026-08-28 (chose ~/wow-server-tortoise, got ~/tortoise-wow-server, and
+# the app then called the finished install a failure because it looked for the
+# compose file in the folder the user chose). The prompt string "Install path:"
+# is a contract with `PROMPT_RULES` in yulon/catalog/installer.py: that is the
+# line the app watches for, and it types the chosen path in answer.
+# ─────────────────────────────────────────
+choose_install_dir() {
+    print_step "Choose Server Files Location"
+
+    local default_dir="$HOME/wow-tbc-server"
+
+    echo ""
+    echo -e "  ${WHITE}${BOLD}Where should the server files be installed?${NC}"
+    echo ""
+    echo -e "  ${DIM}Default:${NC} ${CYAN}${default_dir}${NC}"
+    echo ""
+    echo -e "  ${WHITE}You can install the server files to a different location,${NC}"
+    echo -e "  ${WHITE}such as an external drive or SD card, to save space on${NC}"
+    echo -e "  ${WHITE}your main disk.${NC}"
+    echo ""
+    echo -e "  ${YELLOW}⚠️  Note: Docker containers (the compiled server images)${NC}"
+    echo -e "  ${YELLOW}always live on your main disk regardless of this choice.${NC}"
+    echo -e "  ${YELLOW}Only the source code, configs, and data files go here.${NC}"
+    echo ""
+    echo -e "  ${DIM}Leave blank and press ENTER to use the default location.${NC}"
+    echo -e "  ${DIM}Example custom path: /run/media/deck/mysd/wow-server${NC}"
+    echo ""
+    echo -ne "  ${WHITE}Install path: ${NC}"
+    read -r user_input
+
+    if [[ -z "$user_input" ]]; then
+        SERVER_DIR="$default_dir"
+        print_info "Using default location: ${SERVER_DIR}"
+    else
+        # Expand ~ and ensure the path is absolute
+        user_input="${user_input/#\~/$HOME}"
+        if [[ "$user_input" != /* ]]; then
+            user_input="$(pwd)/$user_input"
+        fi
+        SERVER_DIR="$user_input"
+        print_info "Using custom location: ${SERVER_DIR}"
+    fi
+
+    # Canonicalize (resolves .., repeated slashes, trailing slash) so the safety
+    # checks below correctly handle /tmp/.., /, /tmp/ etc.
+    SERVER_DIR=$(realpath -m -- "$SERVER_DIR")
+    local _canon_default
+    _canon_default=$(realpath -m -- "$default_dir")
+
+    # Reject dangerous / well-known system roots
+    case "$SERVER_DIR" in
+        /|"$HOME"|/home|/root|/tmp|/var|/etc|/usr|/boot|/proc|/sys|/dev|/media|/mnt|/opt|/srv)
+            print_error "Cannot use '${SERVER_DIR}' as the install location."
+            print_info "Choose a dedicated subdirectory (e.g. ${default_dir})."
+            exit 1
+            ;;
+    esac
+
+    # Reject if the destination already exists and is not a directory (incl. dangling symlinks)
+    if [[ ( -e "$SERVER_DIR" || -L "$SERVER_DIR" ) && ! -d "$SERVER_DIR" ]]; then
+        print_error "Install path exists but is not a directory: $SERVER_DIR"
+        exit 1
+    fi
+
+    # For custom (non-default) paths: require the parent to already exist.
+    # Don't silently mkdir deep paths — if a drive isn't mounted, that would
+    # install onto the main disk instead.
+    local parent_dir
+    parent_dir="$(dirname "$SERVER_DIR")"
+
+    if [[ "$SERVER_DIR" == "$_canon_default" ]]; then
+        mkdir -p "$parent_dir" 2>/dev/null || {
+            print_error "Cannot create directory: $parent_dir"
+            exit 1
+        }
+    elif [[ ! -d "$parent_dir" ]]; then
+        print_error "Parent directory does not exist: $parent_dir"
+        print_info "Make sure your external drive or SD card is mounted first, then re-run."
+        exit 1
+    fi
+
+    # Write probe using mktemp to avoid clobbering any existing user files
+    local _write_probe
+    _write_probe=$(mktemp "$parent_dir/.dml_probe_XXXXXX" 2>/dev/null) || {
+        print_error "Cannot write to: $parent_dir"
+        print_info "Check permissions or ensure the drive is mounted before running the installer."
+        exit 1
+    }
+    rm -f "$_write_probe"
+
+    # Check free space — probe SERVER_DIR if it already exists (may be a separate
+    # mount point with a different filesystem than its parent); otherwise probe parent.
+    local _space_probe
+    [[ -d "$SERVER_DIR" ]] && _space_probe="$SERVER_DIR" || _space_probe="$parent_dir"
+
+    local avail_gb
+    avail_gb=$(df -BG "$_space_probe" 2>/dev/null | awk 'NR==2 {print $4}' | sed 's/G//' | tr -d ' ') || true
+    # `df` prints `-` for Avail on some filesystems, so "not empty" is not "is a
+    # number". Normalise anything non-numeric to empty, and let the unreadable
+    # branch below own it (review, 2026-08-28).
+    case "$avail_gb" in ''|*[!0-9]*) avail_gb="" ;; esac
+    if [[ -z "$avail_gb" ]]; then
+        print_error "Could not determine free space at ${_space_probe}. Cannot verify the 20 GB requirement."
+        exit 1
+    fi
+    if [[ "$avail_gb" -lt 20 ]]; then
+        print_error "Not enough space at ${_space_probe}. Need at least 20 GB, found ${avail_gb} GB."
+        exit 1
+    fi
+    print_success "Install location OK — ${avail_gb} GB available at ${_space_probe}"
+
+    echo ""
+    echo -e "  ${WHITE}${BOLD}Server files will be installed to:${NC}"
+    echo -e "  ${CYAN}${SERVER_DIR}${NC}"
+    echo ""
+    if ! ask_yes_no "Confirm this install location?"; then
+        echo ""
+        print_info "Re-run the installer to choose a different location."
+        exit 0
+    fi
+}
+
 show_summary() {
     print_header
     print_step "STEP 2/5 — Pre-Compile Summary"
@@ -1417,7 +1732,7 @@ services:
       db:
         condition: service_healthy
     ports:
-      - "3724:3724"
+      - "${AUTH_PORT}:3724"
     volumes:
       - ./etc:/opt/mangos/etc
       - ./data:/opt/mangos/data
@@ -1433,7 +1748,7 @@ services:
       db:
         condition: service_healthy
     ports:
-      - "8085:8085"
+      - "${WORLD_PORT}:8085"
     volumes:
       - ./etc:/opt/mangos/etc
       - ./data:/opt/mangos/data
@@ -2269,8 +2584,10 @@ SUDO_KEEPALIVE_PID=$!
 trap "kill $SUDO_KEEPALIVE_PID 2>/dev/null; exit" EXIT INT TERM
 
 locate_client
+choose_install_dir
 show_summary
 preflight_check
+check_ports_free "$AUTH_PORT" "$WORLD_PORT"
 do_compile
 extract_client_data
 write_compose_and_configs

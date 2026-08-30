@@ -144,7 +144,16 @@ CLIENT_CACHE_NOTE = (
 # can exit 0 on a dump that stopped early, and the guide already knows the file
 # has to be checked ("If the file is missing or 0 bytes, something went wrong").
 # A size check alone passes a dump that died after the first table.
-_DUMP_HEADER = re.compile(rb"^--\s+(MySQL|MariaDB)\s+dump\s")
+#
+# The banner is matched at ANY line start, not at byte 0, because it is no longer
+# the first thing in the file. MariaDB 10.6+ writes a sandbox-mode directive ahead
+# of it - `/*M!999999\- enable the sandbox mode */` - so an anchored match rejected
+# every backup taken against a MariaDB server as "not a database backup", and
+# `verify_dump()` gates restore as well as backup. Observed on a live Tortoise
+# server (mariadb-dump 10.6.28, 2026-08-28) on a dump that was complete and ended
+# with its trailer. `_USE_LINE` and `_CREATE_DB_LINE` below already spell a
+# line-start this way.
+_DUMP_HEADER = re.compile(rb"(?:\A|\n)--\s+(MySQL|MariaDB)\s+dump\s")
 _DUMP_TRAILER = b"-- Dump completed"
 
 # Which schemas a dump file will write into. `USE` is what `--databases` always
@@ -428,6 +437,7 @@ def backup(
     spec: docker.ContainerSpec = docker_ctl.SPEC,
     core_databases: Sequence[str] = CORE_DATABASES,
     running: RunningNames | None = None,
+    wsl_distro: str | None = None,
     now: datetime | None = None,
 ) -> BackupReport:
     """Dump every database this install has into `backups_dir(server_dir)`.
@@ -447,6 +457,9 @@ def backup(
             the copy taken automatically before a restore is not mistaken for
             one the user asked for (`wow-manage.sh` does the same with
             `pre_restore`).
+        wsl_distro: Which daemon holds this install's containers, for the
+            census. `mysql` carries the same fact for the dump itself; both are
+            needed, because they are two different questions asked of docker.
         now: The timestamp in the filenames; defaults to the clock.
 
     Raises:
@@ -457,7 +470,7 @@ def backup(
             they are complete and verified, and deleting them would be the
             second mistake.
     """
-    names = _census(running)
+    names = _census(running, wsl_distro=wsl_distro)
     if spec.db not in names:
         raise MaintenanceError(
             f"{spec.db} is not running, so there is no database to back up. Start the server "
@@ -571,7 +584,7 @@ def verify_dump(path: Path, database: str | None = None) -> int:
         raise MaintenanceError(f"could not read {path}: {exc}") from exc
     if size == 0:
         raise MaintenanceError(f"{path.name} is empty, so nothing was dumped")
-    if not _DUMP_HEADER.match(head):
+    if not _banner_is_the_files_own(head):
         raise MaintenanceError(
             f"{path.name} does not start like a mysqldump, so it is not a database backup"
         )
@@ -585,6 +598,68 @@ def verify_dump(path: Path, database: str | None = None) -> int:
             f"{path.name} does not name {database}; it is a dump of something else"
         )
     return size
+
+
+def _banner_is_the_files_own(head: bytes) -> bool:
+    """Is the dump banner this file's OWN opening, or just text inside it?
+
+    Matching the banner at any line start is what lets a MariaDB dump through
+    (10.6+ writes a sandbox directive ahead of it). Left at that, it also lets
+    through a file that merely CONTAINS dump-shaped text - a table of support
+    tickets or chat logs whose free-text column holds pasted dump output near
+    the top would satisfy the banner, the `USE` line and the trailer, and
+    `verify_dump()` gates restore. Found by an adversarial review, 2026-08-28,
+    with a working bypass.
+
+    So the banner may be preceded only by what a dump itself writes there:
+    executable comments (`/*M!...*/`, `/*!...*/`) and `--` comment lines, blank
+    or otherwise. One line of SQL or free text in front of it means the banner
+    belongs to the content, not to the file.
+    """
+    match = _DUMP_HEADER.search(head)
+    if match is None:
+        return False
+    return _only_dump_preamble(head[: match.start()])
+
+
+def _only_dump_preamble(prefix: bytes) -> bool:
+    """Is everything above the banner a comment a dump itself would write?
+
+    Scanned as BYTES, not line by line. The line-based version this replaces
+    accepted `/* anything */ DROP DATABASE other;` - it saw a line that both
+    opened and closed a comment, skipped the whole line, and never looked at the
+    SQL after the terminator. So a file could carry executable statements above a
+    banner that `verify_dump()` then vouched for, against a database the census
+    below never names and `plan_restore()` therefore takes no safety dump of.
+    Found by an independent adversarial review (Codex), 2026-08-28, with a
+    working bypass.
+
+    Walking the bytes means every `*/` hands the scan back where it stopped, and
+    whatever follows it has to be whitespace or another comment in its own right.
+    """
+    index, end = 0, len(prefix)
+    while index < end:
+        if prefix[index : index + 1].isspace():
+            index += 1
+        elif prefix.startswith(b"--", index):
+            newline = prefix.find(b"\n", index)
+            if newline == -1:
+                # `_DUMP_HEADER` matches at `\A` or after a newline, and the
+                # newline is part of the match - so a `--` comment with no line
+                # break left in the prefix ends exactly where the banner's own
+                # line begins. There is nothing after it to check.
+                return True
+            index = newline + 1
+        elif prefix.startswith(b"/*", index):
+            close = prefix.find(b"*/", index + 2)
+            if close == -1:
+                # An unterminated block comment swallows the banner: it is text
+                # inside a comment, not the file's own opening.
+                return False
+            index = close + 2
+        else:
+            return False
+    return True
 
 
 def _read_edge(path: Path, offset: int) -> bytes:
@@ -759,6 +834,7 @@ def plan_restore(
     *,
     spec: docker.ContainerSpec = docker_ctl.SPEC,
     running: RunningNames | None = None,
+    wsl_distro: str | None = None,
 ) -> RestorePlan:
     """Work out what restoring `backup_file` would do, without doing any of it.
 
@@ -809,7 +885,7 @@ def plan_restore(
                 )
 
     try:
-        names = _census(running)
+        names = _census(running, wsl_distro=wsl_distro)
     except MaintenanceError as exc:
         refusals.append(str(exc))
     else:
@@ -848,6 +924,7 @@ def restore(
     confirm: str,
     spec: docker.ContainerSpec = docker_ctl.SPEC,
     running: RunningNames | None = None,
+    wsl_distro: str | None = None,
     now: datetime | None = None,
 ) -> RestoreReport:
     """Overwrite the databases `plan.backup` names. This destroys player data.
@@ -890,7 +967,9 @@ def restore(
         raise MaintenanceError(
             "the restore was not confirmed against this backup, so nothing was changed"
         )
-    fresh = plan_restore(plan.backup, plan.server_dir, spec=spec, running=running)
+    fresh = plan_restore(
+        plan.backup, plan.server_dir, spec=spec, running=running, wsl_distro=wsl_distro
+    )
     if fresh.refusals:
         raise MaintenanceError(f"restore refused: {' '.join(fresh.refusals)}")
     if fresh.token != plan.token:
@@ -915,7 +994,9 @@ def restore(
             "only copy there would otherwise be."
         )
     kept = _usable_copies(earlier)
-    safety = _safety_backup(plan, mysql, kept, spec=spec, running=running, now=now)
+    safety = _safety_backup(
+        plan, mysql, kept, spec=spec, running=running, wsl_distro=wsl_distro, now=now
+    )
     unresolved = _still_unresolved(earlier, plan, kept)
 
     # The record carries what this restore is doing AND whatever an earlier
@@ -1025,6 +1106,7 @@ def _safety_backup(
     *,
     spec: docker.ContainerSpec,
     running: RunningNames | None,
+    wsl_distro: str | None,
     now: datetime | None,
 ) -> tuple[Path, ...]:
     """A copy of every database this restore will overwrite, so it can be put back.
@@ -1066,6 +1148,7 @@ def _safety_backup(
             label="pre-restore",
             spec=spec,
             running=running,
+            wsl_distro=wsl_distro,
             now=now,
         )
         covered.update({dump.database: dump.path for dump in report.dumps})
@@ -1164,7 +1247,7 @@ def _databases_named_in_bytes(data: bytes) -> list[str]:
     return found
 
 
-def _census(running: RunningNames | None) -> set[str]:
+def _census(running: RunningNames | None, *, wsl_distro: str | None = None) -> set[str]:
     """What is running, by container name; a Docker that will not answer is fatal.
 
     `docker.status()` raises rather than degrading, which is what this wants:
@@ -1172,13 +1255,26 @@ def _census(running: RunningNames | None) -> set[str]:
     and "Docker did not say" must never read as "nothing is running" (that
     mistake is written up in `docker._refuse_without_an_identity()`).
     """
+
     # `docker_ctl.status`, not `docker.status`: this package re-exports the
     # shared operations so its callers have one entry point, and reaching past
     # that from inside the package would make the rule advice rather than
     # practice (style guide §3/§4; review, 2026-08-23). The two names below are
     # a type and an exception rather than operations, and `docker_ctl` does not
     # re-export those.
-    source = running if running is not None else docker_ctl.status
+    #
+    # `wsl_distro` is the same fact `DockerMysql` already carries, spelled again
+    # because this asks a DIFFERENT question of docker: the dump goes through
+    # `docker exec` into the distro, the census through `docker ps` — and until
+    # 2026-08-27 only the first of those was told where the daemon lives. A user
+    # whose server lives inside WSL, with no Docker Desktop on the Windows side,
+    # therefore had a Console tab that attached and streamed and a Back-up
+    # button that answered "Docker could not be found on this machine"
+    # (Discord report, 2026-08-27).
+    def census() -> list[str]:
+        return docker_ctl.status(wsl_distro=wsl_distro)
+
+    source = running if running is not None else census
     try:
         return set(source())
     except docker.DockerCommandError as exc:

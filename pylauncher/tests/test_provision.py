@@ -263,6 +263,9 @@ def test_macos_plan_downloads_dmg_and_copies_the_app(
 ) -> None:
     monkeypatch.setattr(platform.sys, "platform", "darwin")
     monkeypatch.setattr(platform, "config_dir", lambda: tmp_path)
+    # Pin absent so a dev box that already has Docker.app in /Applications
+    # doesn't silently take the "already installed" short circuit here.
+    monkeypatch.setattr(platform.Path, "exists", lambda self: False)
     run = _Run()
     report = platform.ensure_docker(run=run, download=lambda u, d: d, dry_run=True)
     assert report.platform == "macos"

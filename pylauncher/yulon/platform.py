@@ -1036,20 +1036,38 @@ def docker_prefix(
     if wsl_distro is None:
         program = docker_program()
         return (program,) if program is not None else None
-    launcher = _which(WSL_PROGRAM)
-    if launcher is None:
-        logger.debug(f"no {WSL_PROGRAM} on this host; cannot reach docker in {wsl_distro!r}")
+    prefix = wsl_prefix(wsl_distro, inside=inside)
+    if prefix is None:
         return None
-    # `--cd` is an argument to wsl.exe and MUST precede the `--` separator:
-    # everything after `--` is the command line handed to the distro's shell, so
-    # a `--cd` placed there arrives at bash, which answers "--: invalid option".
-    # Measured against a real distro, which is the only reason this is right -
-    # the first version put it after the separator, and the unit test, which
-    # asserted only that `--cd` was present, passed a command that could not run.
-    location = ("--cd", inside) if inside else ()
     # `docker` unqualified on purpose: it is resolved by the distro's own PATH,
     # by its own shell, where this process's PATH means nothing.
-    return (launcher, "-d", wsl_distro, *location, "--", "docker")
+    return (*prefix, "docker")
+
+
+def wsl_prefix(wsl_distro: str, *, inside: str | None = None) -> tuple[str, ...] | None:
+    """The argv that runs ANY command inside `wsl_distro`, or None without wsl.exe.
+
+        wsl_prefix("dml-arch") -> ("wsl", "-d", "dml-arch", "--")
+
+    Split out of `docker_prefix()` because docker is no longer the only thing
+    the app runs in there. The worldserver console needs a pseudo-terminal that
+    Windows cannot provide, and the distro can: `script(1)` opens one INSIDE it
+    (`console.distro_attach_argv()`). That command is not `docker <args>`, so it
+    cannot use a prefix ending in `docker`.
+
+    `--cd` is an argument to wsl.exe and MUST precede the `--` separator:
+    everything after `--` is the command line handed to the distro's shell, so
+    a `--cd` placed there arrives at bash, which answers "--: invalid option".
+    Measured against a real distro, which is the only reason this is right -
+    the first version put it after the separator, and the unit test, which
+    asserted only that `--cd` was present, passed a command that could not run.
+    """
+    launcher = _which(WSL_PROGRAM)
+    if launcher is None:
+        logger.debug(f"no {WSL_PROGRAM} on this host; cannot reach {wsl_distro!r}")
+        return None
+    location = ("--cd", inside) if inside else ()
+    return (launcher, "-d", wsl_distro, *location, "--")
 
 
 def wsl_env(extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -2506,7 +2524,14 @@ def vm_resources(run: RunCmd | None = None) -> VmResources | None:
     return VmResources(memory, cpus)
 
 
-_DOCKER_DESKTOP_SETTINGS_KEYS = ("dataFolder", "DataFolder", "diskPath", "DiskPath")
+_DOCKER_DESKTOP_SETTINGS_KEYS = (
+    "dataFolder",
+    "DataFolder",
+    "diskPath",
+    "DiskPath",
+    "virtualDiskPath",
+    "VirtualDiskPath",
+)
 """Keys Docker Desktop is believed to store its data root under.
 
 Four spellings because the file has been through several: `rust-prior-art.md`
@@ -2541,13 +2566,9 @@ def docker_desktop_settings_file() -> Path | None:
         store = base / "Docker" / "settings-store.json"
         return store if store.is_file() else base / "Docker" / "settings.json"
     if here == "macos":
-        return (
-            Path.home()
-            / "Library"
-            / "Group Containers"
-            / "group.com.docker"
-            / "settings-store.json"
-        )
+        base = Path.home() / "Library" / "Group Containers" / "group.com.docker"
+        store = base / "settings-store.json"
+        return store if store.is_file() else base / "settings.json"
     return None
 
 
@@ -2658,6 +2679,10 @@ _RESERVED_SERVER_DIRS = (
     "/proc",
     "/sys",
     "/dev",
+    "/private",
+    "/private/tmp",
+    "/private/var",
+    "/private/etc",
 )
 # Windows has no shell installer to mirror, so this list answers to nothing but
 # the same rule: a reinstall removes the folder it was given, and these are
@@ -2903,7 +2928,10 @@ def keep_awake(
         try:
             yield
         finally:
-            child.terminate()
+            try:
+                child.terminate()
+            except OSError:
+                pass
         return
     if here == "windows":
         if threading.current_thread() is threading.main_thread():

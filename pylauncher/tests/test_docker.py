@@ -77,6 +77,55 @@ def test_status_returns_running_container_names(monkeypatch: pytest.MonkeyPatch)
     assert docker.status() == ["ac-database", "ac-worldserver"]
 
 
+def test_status_gives_docker_ps_a_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`docker ps` must not be allowed to hang the five-second status poll forever.
+
+    `refresh_status()` sets `_status_pending` and clears it only from a
+    callback, so a call that never returns is not a slow poll - it is a
+    permanently wedged Server tab, reading "status: unknown" until the app is
+    restarted, with every later poll returning early at the guard. Measured on
+    yulon-win11 (2026-08-28): `docker ps` hung 8+ minutes under memory
+    pressure, and 125 seconds on an earlier run.
+
+    Asserted on the timeout that reaches the run seam rather than on the
+    constant, because the bug was never the value - it was that no value was
+    passed at all.
+    """
+    seen: list[float | None] = []
+
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        seen.append(timeout)
+        return _completed(0, "ac-worldserver\n", "")
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+
+    assert docker.status() == ["ac-worldserver"]
+    assert seen and seen[0] is not None, "docker ps was run with no deadline at all"
+    assert 0 < seen[0] <= 120, f"deadline of {seen[0]}s is not a bound worth having"
+
+
+def test_a_status_timeout_surfaces_as_an_error_the_poll_can_recover_from(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timed-out `docker ps` must raise, not return an empty list.
+
+    `runner.run()` reports a timeout as a non-zero `CompletedProcess`, the same
+    shape as a missing CLI. If `status()` swallowed that it would answer "no
+    containers are running", which reads as a stopped server rather than an
+    unreachable daemon - and `_status_failed()`, the callback that clears
+    `_status_pending`, would never fire.
+    """
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        lambda cmd, cwd=None, timeout=None: _completed(1, "", "timed out after 30.0s"),
+    )
+    with pytest.raises(docker.DockerCommandError):
+        docker.status()
+
+
 def test_health_returns_status_or_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
     """`health()` returns the inspect status, or `unknown` on failure/empty."""
     monkeypatch.setattr(
@@ -2897,6 +2946,58 @@ def test_a_mount_the_daemon_refused_with_the_image_in_hand_is_still_a_refusal(
 
     monkeypatch.setattr(docker.runner, "run", run)
     assert docker.bind_mount_ok(tmp_path / "wow", "alpine/git") is False
+
+
+def test_a_listing_with_entries_in_it_is_a_listing_however_ls_exited(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The probe's question is answered by stdout. The exit code is not the answer.
+
+    This refused EVERY macOS install whose chosen folder was new, which is
+    every first install. The chosen folder is empty or absent at preflight
+    time, so the probe walks up to the nearest populated ancestor — routinely
+    the user's home directory — and on a Mac `ls -A` of a home directory prints
+    a full listing AND exits non-zero, because Docker Desktop cannot stat the
+    TCC-protected entries in it. The tester's own run, pasted verbatim
+    (2026-08-26):
+
+        $ docker run --rm --entrypoint ls -v /Users/js:/probe:ro alpine/git@… -A /probe
+        ls: /probe/.Trash: No such file or directory
+        ls: /probe/Documents: No such file or directory
+        .CFUserTextEncoding
+        …
+        wow-wotlk
+
+    busybox `ls` exits non-zero when it could not stat something, so this
+    listing — 15 entries the container plainly saw, including the folder he
+    picked — was read as "Docker cannot see that folder". He re-added the
+    folder to file sharing, added its parent, tried several other folders and
+    read a file back out of a container against that exact path; nothing could
+    have made it pass, because nothing he could do would make `.Trash`
+    stat-able.
+
+    So stdout is asked first. Entries in it mean the container saw the folder,
+    whatever `ls` thought of the parts it could not reach. Only an EMPTY
+    listing sends the question to the exit code — which is the silently-empty
+    mount this check exists for, and it still refuses.
+    """
+    (tmp_path / "already-here.txt").write_text("x", encoding="utf-8")
+    partial = (
+        "ls: /probe/.Trash: No such file or directory\n"
+        "ls: /probe/Documents: No such file or directory\n"
+    )
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if argv[1:3] == ["image", "inspect"]:
+            return _completed(stdout="sha256:abc")
+        return _completed(
+            returncode=1,
+            stdout=".CFUserTextEncoding\nDesktop\nDownloads\nLibrary\nwow-server\n",
+            stderr=partial,
+        )
+
+    monkeypatch.setattr(docker.runner, "run", run)
+    assert docker.bind_mount_ok(tmp_path / "wow-server", "alpine/git") is True
 
 
 def test_the_bind_mount_probe_catches_the_silently_empty_mount_it_exists_for(

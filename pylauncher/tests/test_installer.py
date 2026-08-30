@@ -553,6 +553,400 @@ def test_the_installers_reusable_check_fails_closed(tmp_path: Path, script_name:
     assert _dir_is_reusable(script, tmp_path / "does-not-exist") == "PROTECTED"
 
 
+# `docker` stubs for the probe below: what the compose FILE names, with the
+# image-store answer left to each test.
+_STUB_BUILT = (
+    'case "$*" in ' '"compose config --images") echo acore/ac-wotlk-worldserver:master;; ' "esac"
+)
+_STUB_RENAMED = (
+    'case "$*" in ' '"compose config --images") echo example.test/renamed-worldserver:v9;; ' "esac"
+)
+
+
+_IMAGES_PROBE = """
+set -u
+docker() { echo "$*" >>"$CALLS"; %(stub)s; }
+%(body)s
+compiled_images_present "$1"; echo "STATUS=$?"
+"""
+
+
+def _compiled_images_present(
+    script: Path, target: Path, calls: Path, *, stub: str
+) -> tuple[int, list[str]]:
+    """Run the installer's own `compiled_images_present`, and report what it ASKED.
+
+    Lifted out of the shipped script, like `_dir_is_reusable` above, so this
+    cannot pass against a copy that has drifted. The argv matters as much as the
+    answer here: the bug being pinned is not a wrong verdict but the wrong
+    QUESTION - `docker compose images` asks about a project's containers when
+    what is meant is "does this image exist".
+    """
+    body = script.read_text(encoding="utf-8")
+    start = body.index("compiled_images_present() {")
+    end = body.index("\n}", start) + 2
+    calls.write_text("", encoding="utf-8")
+    probe = _IMAGES_PROBE % {"stub": stub, "body": body[start:end]}
+    out = subprocess.run(
+        ["bash", "-c", probe, "probe", str(target)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={"PATH": os.environ.get("PATH", ""), "CALLS": str(calls)},
+    )
+    # An unlifted callee is `command not found`, and bash's 127 is
+    # indistinguishable from an honest "no" to every caller here.
+    assert "command not found" not in out.stderr, (
+        f"{script.name}: the probe is missing a function the shipped code calls, "
+        f"so its result means nothing:\n{out.stderr.strip()}"
+    )
+    status = next(
+        int(line.removeprefix("STATUS="))
+        for line in out.stdout.splitlines()
+        if line.startswith("STATUS=")
+    )
+    return status, [line for line in calls.read_text(encoding="utf-8").splitlines() if line]
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_a_finished_build_is_recognised_when_no_containers_exist(
+    tmp_path: Path, script_name: str
+) -> None:
+    """A build with no containers must not read as "nothing was built".
+
+    `docker compose images` reports the images of a project's EXISTING
+    CONTAINERS, not the image store. A folder whose compile finished but whose
+    `up` never ran has no containers, so it answered nothing - and the branch
+    downstream then offers to delete the folder and recompile. Measured on
+    yulon-arch (2026-08-28): `up` failed on a container-name collision and the
+    installer offered to throw away a good 35-minute build.
+
+    The three scripts are separate files that have diverged before, so all three
+    are checked.
+    """
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    target = tmp_path / "server"
+    target.mkdir()
+
+    answer, asked = _compiled_images_present(
+        script,
+        target,
+        tmp_path / "calls",
+        stub=_STUB_BUILT,
+    )
+
+    assert answer == 0, f"{script_name}: a finished build was not recognised"
+    assert any(
+        call.startswith("image inspect ") for call in asked
+    ), f"{script_name}: never asked the image store; it asked {asked}"
+    assert not any(
+        "compose images" in call for call in asked
+    ), f"{script_name}: still asks `compose images`, which answers about containers: {asked}"
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_a_folder_with_no_build_is_still_reported_as_unbuilt(
+    tmp_path: Path, script_name: str
+) -> None:
+    """The companion: asking the store must not become "yes" to everything.
+
+    Without this, the fix above would skip the compile on a folder that has
+    never been built - which is the same class of damage in the other
+    direction. `docker image inspect` exits non-zero for an image that is not
+    there, and that has to stay a "no".
+    """
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    target = tmp_path / "server"
+    target.mkdir()
+
+    answer, asked = _compiled_images_present(
+        script,
+        target,
+        tmp_path / "calls",
+        stub=(
+            'case "$*" in '
+            '"compose config --images") echo acore/ac-wotlk-worldserver:master;; '
+            '"image inspect acore/ac-wotlk-worldserver:master") return 1;; '
+            "esac"
+        ),
+    )
+
+    assert answer == 1, f"{script_name}: an unbuilt folder was reported as built"
+    assert any(call.startswith("image inspect ") for call in asked)
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_a_daemon_that_will_not_answer_is_not_reported_as_an_unbuilt_folder(
+    tmp_path: Path, script_name: str
+) -> None:
+    """ "Could not ask" must not be spelled the same way as "nothing is here".
+
+    The caller's next step offers to DELETE the folder. A daemon that is not up
+    yet after boot, or one restarted for maintenance, would otherwise arrive at
+    that prompt under the message "no completed build was found in it" - untrue
+    in that case, about a folder that may hold hours of compiling. Found by an
+    adversarial review (2026-08-28) against a real daemon, by pointing
+    DOCKER_HOST at a socket that does not exist.
+    """
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    target = tmp_path / "server"
+    target.mkdir()
+    (target / "docker-compose.yml").write_text("services: {}", encoding="utf-8")
+
+    answer, _asked = _compiled_images_present(
+        script, target, tmp_path / "calls", stub="return 1"  # every docker call fails
+    )
+
+    assert answer == 2, (
+        f"{script_name}: an unreachable daemon answered {answer}, which the caller reads as "
+        f"a verdict rather than a failure to reach one"
+    )
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_a_compose_file_that_cannot_be_read_is_not_reported_as_an_unbuilt_folder(
+    tmp_path: Path, script_name: str
+) -> None:
+    """A compose file that compose itself will not parse is a question we failed to ask.
+
+    The daemon answers, so the failure is narrower than the test above: the
+    folder has a compose file, and `config --images` still yields no image
+    name. That is "could not find out", not "nothing was built".
+    """
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    target = tmp_path / "server"
+    target.mkdir()
+    (target / "docker-compose.yml").write_text("this: is: not: valid: yaml:", encoding="utf-8")
+
+    answer, _asked = _compiled_images_present(
+        script,
+        target,
+        tmp_path / "calls",
+        # `image ls` succeeds (daemon is up); `compose config` fails.
+        stub='case "$*" in "compose config --images") return 1;; esac',
+    )
+
+    assert answer == 2, f"{script_name}: an unreadable compose file answered {answer}"
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_a_folder_with_no_compose_file_is_a_verdict_not_a_failure(
+    tmp_path: Path, script_name: str
+) -> None:
+    """The companion to the two above: "cannot tell" must not swallow the real "no".
+
+    A folder with no compose file in it has genuinely never held a built
+    server, and saying so is what lets a first install proceed. If every
+    uncertain-looking case answered 2, the install would refuse to start.
+    """
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    target = tmp_path / "server"
+    target.mkdir()
+    (target / "leftover.txt").write_text("x", encoding="utf-8")
+
+    answer, _asked = _compiled_images_present(
+        script,
+        target,
+        tmp_path / "calls",
+        stub='case "$*" in "compose config --images") return 1;; esac',
+    )
+
+    assert answer == 1, f"{script_name}: a folder with no compose file answered {answer}"
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_the_image_name_is_read_from_the_compose_file(tmp_path: Path, script_name: str) -> None:
+    """The name is derived from the install, not written down here.
+
+    Hardcoding `acore/ac-wotlk-worldserver:master` in the script would go stale
+    the first time upstream moved the tag, and the failure would present as
+    "your build vanished, recompile for 2-4 hours".
+    """
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    target = tmp_path / "server"
+    target.mkdir()
+
+    answer, asked = _compiled_images_present(
+        script,
+        target,
+        tmp_path / "calls",
+        stub=_STUB_RENAMED,
+    )
+
+    assert answer == 0
+    assert (
+        "image inspect example.test/renamed-worldserver:v9" in asked
+    ), f"{script_name}: did not inspect the image the compose file named: {asked}"
+
+
+_FOREIGN_PROBE = """
+set -u
+print_error() { echo "ERROR $*"; }
+print_info() { echo "INFO $*"; }
+docker() { echo "$*" >>"$CALLS"; %(stub)s; }
+%(body)s
+refuse_foreign_containers "$1"; echo "STATUS=$?"
+"""
+
+
+def _refuse_foreign_containers(
+    script: Path, target: Path, calls: Path, *, stub: str
+) -> tuple[int, str, list[str]]:
+    """Run the installer's own `refuse_foreign_containers` against a stubbed docker."""
+    body = script.read_text(encoding="utf-8")
+    start = body.index("refuse_foreign_containers() {")
+    end = body.index("\n}", start) + 2
+    calls.write_text("", encoding="utf-8")
+    probe = _FOREIGN_PROBE % {"stub": stub, "body": body[start:end]}
+    out = subprocess.run(
+        ["bash", "-c", probe, "probe", str(target)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={"PATH": os.environ.get("PATH", ""), "CALLS": str(calls)},
+    )
+    assert "command not found" not in out.stderr, (
+        f"{script.name}: the probe is missing a function the shipped code calls:"
+        f"\n{out.stderr.strip()}"
+    )
+    status = next(
+        (
+            int(line.removeprefix("STATUS="))
+            for line in out.stdout.splitlines()
+            if line.startswith("STATUS=")
+        ),
+        out.returncode,  # `exit 1` inside the function ends the probe before STATUS prints
+    )
+    asked = [line for line in calls.read_text(encoding="utf-8").splitlines() if line]
+    return status, out.stdout, asked
+
+
+# What `docker compose config` prints for a stack that pins two names, and the
+# label answers `docker container inspect` gives for each ownership case.
+_CONFIG = (
+    'echo "services:"; echo "  db:"; echo "    container_name: ac-database"; '
+    'echo "  world:"; echo "    container_name: ac-worldserver"'
+)
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_a_name_held_by_another_install_is_refused_and_the_other_install_is_named(
+    tmp_path: Path, script_name: str
+) -> None:
+    """The daemon's error names a container; the user needs the other server's folder.
+
+    Two installs of the same game cannot coexist while `container_name:` pins
+    the names host-wide, and the second one only finds out after a 2-4 hour
+    build, from "Conflict. The container name "/ac-database" is already in
+    use". Hit on yulon-ubuntu and yulon-arch the same day (2026-08-28), both
+    from a stopped stack left by an earlier install. Refuse BEFORE the build,
+    and say whose it is.
+    """
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    target = tmp_path / "new-install"
+    target.mkdir()
+    stub = (
+        f'case "$*" in "compose config") {_CONFIG};; '
+        '"container inspect ac-database") return 0;; '
+        '"container inspect ac-database --format"*) echo /home/pk/other-install;; '
+        '"container inspect ac-worldserver") return 1;; '
+        "esac"
+    )
+
+    status, said, asked = _refuse_foreign_containers(script, target, tmp_path / "calls", stub=stub)
+
+    assert status == 1, f"{script_name}: a foreign container was not refused:\n{said}"
+    assert "ERROR" in said and "ac-database" in said
+    assert "/home/pk/other-install" in said, f"{script_name}: did not name the owner:\n{said}"
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_this_installs_own_containers_do_not_refuse_it(tmp_path: Path, script_name: str) -> None:
+    """Ownership is the compose working-dir label, so the same folder is never "foreign"."""
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    target = tmp_path / "mine"
+    target.mkdir()
+    here = str(target.resolve())
+    stub = (
+        f'case "$*" in "compose config") {_CONFIG};; '
+        '"container inspect "*" --format"*) echo ' + here + ";; "
+        '"container inspect "*) return 0;; '
+        "esac"
+    )
+
+    status, said, _ = _refuse_foreign_containers(script, target, tmp_path / "calls", stub=stub)
+
+    assert status == 0, f"{script_name}: refused its own containers:\n{said}"
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_names_nobody_holds_pass_straight_through(tmp_path: Path, script_name: str) -> None:
+    """The ordinary first install: names declared, none exist yet."""
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    target = tmp_path / "fresh"
+    target.mkdir()
+    stub = f'case "$*" in "compose config") {_CONFIG};; "container inspect "*) return 1;; esac'
+
+    status, said, asked = _refuse_foreign_containers(script, target, tmp_path / "calls", stub=stub)
+
+    assert status == 0, f"{script_name}: a clean host was refused:\n{said}"
+    assert any(a.startswith("container inspect ac-database") for a in asked)
+
+
 _SELINUX_PROBE = """
 set -u
 print_info() { :; }
@@ -1120,14 +1514,40 @@ def test_the_relabel_also_runs_on_the_branch_that_reuses_an_existing_build(
         Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
     )
     text = script.read_text(encoding="utf-8")
-    reuse = text[text.index("Skipping compile") : text.index("Skipping compile") + 1200]
-    reuse = reuse[: reuse.index("return 0")]
+    # Anchored on the branch CONDITION, not on the message it prints. This test
+    # used to find the branch by the words "Skipping compile", and a reword
+    # broke it - a test that a copy edit can fail is testing the copy.
+    start = text.index('if [ "$images_state" -eq 0 ]; then')
+    # End on the `return 0` STATEMENT, not the first occurrence of the string -
+    # the branch's own comments quote it, and a substring search stops there.
+    reuse = text[start : text.index(chr(10) + "        return 0" + chr(10), start)]
     assert (
         'selinux_label_for_containers "$SERVER_DIR"' in reuse
     ), f"{script_name}: the reuse branch brings the stack up without relabelling"
     assert reuse.index('selinux_label_for_containers "$SERVER_DIR"') < reuse.index(
         "docker compose up"
     ), f"{script_name}: the relabel must run BEFORE the stack comes up"
+
+    # The same branch must not report success when `up` failed: it is the only
+    # `docker compose up` in the file that had no PIPESTATUS check, and on the
+    # fedora script (`set -o pipefail`, no `-e`) it fell through to `return 0`
+    # while `wait_for_server` greps `docker ps` host-globally and certifies the
+    # OTHER install's container (review, 2026-08-28).
+    assert (
+        "PIPESTATUS" in reuse
+    ), f"{script_name}: the reuse branch returns 0 whatever `docker compose up` did"
+    assert reuse.index("docker compose up") < reuse.index(
+        "PIPESTATUS"
+    ), f"{script_name}: the status check must come after the `up` it checks"
+    assert (
+        'refuse_foreign_containers "$SERVER_DIR"' in reuse
+    ), f"{script_name}: a failed reuse `up` does not say whose containers took the names"
+    # ...and only as a diagnosis, after the failure. An unconditional guard here
+    # would refuse a MOVED install folder, naming a path that no longer exists.
+    assert reuse.index("PIPESTATUS") < reuse.index('refuse_foreign_containers "$SERVER_DIR"'), (
+        f"{script_name}: the ownership check runs before `up` fails, so it gates the "
+        f"recovery path instead of explaining it"
+    )
 
 
 def test_installer_refuses_a_reserved_folder_before_asking_for_a_password(
@@ -1435,3 +1855,867 @@ def test_no_installer_escalates_privileges_without_asking() -> None:
     # Forbidden outright, not merely gated: membership already is root, so the
     # rule buys nothing and is pure attack surface.
     assert not sudoers, f"a passwordless sudo rule is written at: {sudoers}"
+
+
+def _shell_function_bodies(lines: list[str]) -> dict[str, range]:
+    """`name -> the 1-based line numbers of its body`, for `name() {` at column 0.
+
+    Good enough for these scripts and no more: every definition is unindented
+    and closes with a `}` unindented. A parser would be the wrong trade for a
+    shape that has held across six installers.
+
+    All three spellings bash accepts, though — `name() {`, `function name() {`
+    and `function name {`. Recognising only the first turned an ordinary style
+    choice into a CI failure that read like a regression: the unrecognised
+    body fell out of `in_a_body` and its lines were then scanned as MAIN-block
+    code, so one renamed definition produced a dozen bogus "reads SERVER_DIR
+    before it is chosen" errors (review, 2026-08-28).
+    """
+    bodies: dict[str, range] = {}
+    opened: tuple[str, int] | None = None
+    for number, line in enumerate(lines, 1):
+        match = re.fullmatch(r"(?:function\s+)?([a-z_][a-z0-9_]*)\s*(?:\(\))?\s*\{", line)
+        if match and opened is None:
+            opened = (match.group(1), number)
+        elif line == "}" and opened is not None:
+            bodies[opened[0]] = range(opened[1], number + 1)
+            opened = None
+    return bodies
+
+
+def _catalog_installers() -> list[Path]:
+    from yulon import resources
+
+    scripts = sorted(resources.installers_dir().rglob("install-*.sh"))
+    assert len(scripts) >= 5, f"expected the catalog's installers, found {scripts}"
+    return scripts
+
+
+# `$SERVER_DIR` and `${SERVER_DIR}` are the same read, and these scripts use
+# both. A bare `"$SERVER_DIR" in line` sees only the first — which was true of
+# the first version of the ordering test below, and harmless only by accident:
+# every function that touches the variable happens to use the bare form at
+# least once today. Nothing enforces that, and `${SERVER_DIR}` throughout is an
+# ordinary thing to write (review, 2026-08-28).
+SERVER_DIR_READ = re.compile(r"\$\{?SERVER_DIR\}?")
+
+# Same tolerance for the probe these scripts take of $HOME. The guard clause
+# in the Docker-disk test below used a bare literal, so a braced spelling made
+# it `continue` — not "runs and is fooled" but "never runs at all", which is
+# the worse of the two. Fixed for `$SERVER_DIR` in the same commit that left it
+# here (review-of-review, 2026-08-28).
+HOME_PROBE = re.compile(r'df -BG "\$\{?HOME\}?"')
+
+# Bash keywords are valid identifiers, so a bare `fi` or `done` on its own
+# line looks exactly like a call to a function of that name. Two `fi`s in
+# TBC's MAIN block are picked up today; they are harmless only because no
+# function happens to be called `fi`, which is one unlucky name away from
+# corrupting the ordering scan (review, 2026-08-28).
+SHELL_KEYWORDS = frozenset(
+    "if then elif else fi for while until do done case esac function select time in".split()
+)
+
+
+def test_every_installer_asks_where_to_install() -> None:
+    """The folder the user picked only reaches a script that asks for it.
+
+    `InstallOptions.server_dir` has exactly one channel into a script: the
+    `Install path:` rule in `PROMPT_RULES` types it in when the script asks.
+    `script_env()` does not export it, and `run()` passes no arguments — so a
+    script that never prints that prompt silently installs into its own
+    hardcoded `$HOME/<default>` and the picker is decoration.
+
+    Reported from a Steam Deck (2026-08-28): a tester made
+    `~/wow-server-tortoise`, chose it, and watched Tortoise install into
+    `~/tortoise-wow-server`. TBC and Vanilla had the same hole; only the WotLK
+    scripts had ever grown `choose_install_dir()`. Worse than a wrong folder:
+    `catalog_view._on_run_finished()` then looks for a compose file in the
+    folder the user chose, finds none, and calls a good install failed.
+
+    The prompt has to be PRINTED, by the function that reads the answer. A grep
+    of the whole file for the string was vacuous: the comment above
+    `choose_install_dir()` quotes `Install path:` to explain the contract, so
+    renaming the real `echo` — a script that would hang forever, since
+    `PROMPT_RULES` would never recognise its prompt — passed it. Proven with
+    that exact mutant before this was rewritten (review, 2026-08-28).
+    """
+    rule = next(r for r in PROMPT_RULES if "Install path" in r.pattern)
+    prompt = re.compile(rule.pattern, re.IGNORECASE)
+
+    silent: list[str] = []
+    for script in _catalog_installers():
+        lines = script.read_text(encoding="utf-8").splitlines()
+        body = _shell_function_bodies(lines).get("choose_install_dir")
+        if body is None:
+            silent.append(f"{script.name}: has no choose_install_dir()")
+            continue
+        asked = next(
+            (
+                n
+                for n in body
+                if prompt.search(lines[n - 1])
+                and not lines[n - 1].lstrip().startswith("#")
+                and re.search(r"\b(echo|printf)\b", lines[n - 1])
+            ),
+            None,
+        )
+        if asked is None:
+            silent.append(f"{script.name}: choose_install_dir() never prints {rule.pattern!r}")
+            continue
+        # Not just "a `read -r` happens" — the variable it fills has to be one the
+        # function then uses. `read -r _stray` leaves the answer in a name nobody
+        # reads, so `[[ -z "$user_input" ]]` is always true and SERVER_DIR keeps
+        # its default: the exact bug this branch exists to fix, and it survived
+        # the first rewrite (review-of-review, 2026-08-28).
+        read_line = next(
+            (
+                n
+                for n in range(asked, body.stop)
+                if lines[n - 1].strip().startswith("read -r")
+                and not lines[n - 1].lstrip().startswith("#")
+            ),
+            None,
+        )
+        if read_line is None:
+            silent.append(f"{script.name}: prints the prompt at {asked} and reads no answer")
+            continue
+        answer = lines[read_line - 1].split()[2]
+        used = re.compile(r"\$\{?" + re.escape(answer) + r"\}?")
+        if not any(used.search(lines[n - 1]) for n in range(read_line + 1, body.stop)):
+            silent.append(
+                f"{script.name}: reads the answer into ${answer} at line {read_line}, "
+                "which nothing after it uses"
+            )
+
+    assert not silent, (
+        f"the app types the chosen folder in answer to {rule.pattern!r}; these "
+        f"installers will not hear it: {silent}"
+    )
+
+
+def test_every_installer_calls_choose_install_dir_before_it_uses_the_folder() -> None:
+    """Printing the prompt is half of it; the answer has to reach the install.
+
+    The test above is satisfied by a script that defines `choose_install_dir()`
+    and never runs it — the prompt would be in the file, the app would never see
+    it, and `SERVER_DIR` would keep its hardcoded default. So this asserts the
+    call happens in the MAIN block, and that it comes before every other
+    top-level call whose function reads `SERVER_DIR`. Order is the half with
+    teeth: placed after `show_summary` the summary names the wrong folder, and
+    placed after the existing-install check the script offers to `rm -rf` it.
+
+    Only top-level call order can be checked this way — a read inside a function
+    definition happens when the function is CALLED, not where it is written,
+    which is what made the first version of this test inert (its ordering branch
+    passed a script whose call had been moved to the end).
+    """
+    problems: list[str] = []
+    for script in _catalog_installers():
+        lines = script.read_text(encoding="utf-8").splitlines()
+        bodies = _shell_function_bodies(lines)
+        # The MAIN block: bare top-level calls, in the order bash runs them.
+        in_a_body = {n for span in bodies.values() for n in span}
+        calls = [
+            (n, line.strip())
+            for n, line in enumerate(lines, 1)
+            if re.fullmatch(r"[a-z_][a-z0-9_]*", line.strip())
+            and line.strip() not in SHELL_KEYWORDS
+            and n not in in_a_body
+        ]
+        chosen = next((n for n, name in calls if name == "choose_install_dir"), None)
+        if chosen is None:
+            problems.append(f"{script.name}: never calls choose_install_dir")
+            continue
+        # A read does not have to be inside a function. `SUMMARY_DIR="$SERVER_DIR"`
+        # in the MAIN block above the call copies the DEFAULT, and every later use
+        # of the alias names the folder the user did not pick — the same wrong
+        # folder, laundered through a second variable, and invisible to the
+        # per-function scan below (review-of-review, 2026-08-28).
+        for number, line in enumerate(lines, 1):
+            if number >= chosen or number in in_a_body or line.lstrip().startswith("#"):
+                continue
+            if SERVER_DIR_READ.search(line):
+                problems.append(
+                    f"{script.name}: line {number} reads SERVER_DIR before it is "
+                    f"chosen at line {chosen}: {line.strip()}"
+                )
+        for number, name in calls:
+            if number >= chosen or name not in bodies:
+                continue
+            if any(SERVER_DIR_READ.search(lines[n - 1]) for n in bodies[name]):
+                problems.append(
+                    f"{script.name}: {name}() reads SERVER_DIR at line {number}, "
+                    f"before it is chosen at line {chosen}"
+                )
+
+    assert not problems, f"the chosen folder is not in effect where it is used: {problems}"
+
+
+def test_no_installer_refuses_to_run_over_free_space_on_the_wrong_disk() -> None:
+    """`check_system()` probes $HOME; the server files may not go there.
+
+    `choose_install_dir()` exists so the server files can live on an SD card or
+    an external drive — it says so, in those words, and then probes free space at
+    the folder that was actually chosen. But `check_system()` runs first and
+    hard-exited when $HOME had less than 15-20 GB, so on a 64 GB Steam Deck the
+    installer offered the SD card and then refused the install because the
+    internal disk was full. The prompt and the gate contradicted each other
+    inside one run.
+
+    $HOME is still worth a word — Docker's images go there whatever the user
+    picks — so the check stays and warns. The authority on whether there is room
+    for the server files is `choose_install_dir()`, which is the only one of the
+    two that knows where they are going.
+    """
+    refusing: list[str] = []
+    for script in _catalog_installers():
+        lines = script.read_text(encoding="utf-8").splitlines()
+        probe = next((n for n, line in enumerate(lines) if HOME_PROBE.search(line)), None)
+        if probe is None:
+            continue
+        # From the probe to the `fi` that closes the branch testing it. `exit`
+        # anywhere on the line, not only alone on it: `[ ... ] && exit 1` and
+        # `exit 1  # bail` are the same refusal (review, 2026-08-28).
+        for line in lines[probe:]:
+            if line.strip() == "fi":
+                break
+            if re.search(r"\bexit\b", line) and not line.lstrip().startswith("#"):
+                refusing.append(f"{script.name}:{probe + 1}")
+                break
+
+    assert not refusing, (
+        "these installers abort on free space in $HOME, which is not where the "
+        f"server files necessarily go: {refusing}"
+    )
+
+
+def test_the_main_disk_warning_measures_the_disk_docker_actually_uses() -> None:
+    """ "Docker images live on the main disk" has to measure that disk.
+
+    `check_system()` probes `$HOME`. `platform.docker_desktop_data_root()` says
+    Docker's disk on Linux is `/var/lib/docker` — and on a Steam Deck `/home`
+    is a different partition from `/`, so the number the warning printed was
+    not the number its sentence described. Introduced by the commit that turned
+    the gate into a warning; caught reviewing it (2026-08-28).
+
+    Not a floor. This project has measured free-space floors for exactly one
+    build — WotLK's native path, `min_data_root_gb` in catalog.py — and they do
+    not transfer to a script that bind-mounts its checkout into the server
+    folder. Refusing an install on a number nobody measured is how the bug
+    above happened. So: measure both disks, say which is which, and let the
+    person decide.
+    """
+    for script in _catalog_installers():
+        lines = script.read_text(encoding="utf-8").splitlines()
+        body = _shell_function_bodies(lines).get("check_system")
+        if body is None or not any(HOME_PROBE.search(lines[n - 1]) for n in body):
+            continue
+        # Non-comment lines only. The first version of this counted the comment
+        # explaining the probe as the probe — the same vacuity that made the
+        # `Install path:` test above pass a script whose prompt had been renamed.
+        # Caught by the mutation battery, not by reading it (2026-08-28).
+        probed = [
+            lines[n - 1]
+            for n in body
+            if "/var/lib/docker" in lines[n - 1] and not lines[n - 1].lstrip().startswith("#")
+        ]
+        assert probed, (
+            f"{script.name}: check_system() warns about Docker's images but only "
+            "measures $HOME, which on a Steam Deck is a different partition"
+        )
+
+
+def test_a_disk_the_installer_could_not_measure_is_not_reported_as_fine() -> None:
+    """An unreadable `df` is not a pass, and neither is an unreadable number.
+
+    `X=$(df ... )` yields an empty string when `df` fails or prints no second
+    line, and `[ -n "$X" ]` then sent the empty case to the `else` branch —
+    which used to `print_success "... (unknownGB available)"`. That rounds a
+    measurement nobody took up to an OK, the inverse of the mistake
+    `preflight.py` warns about in its own docstring.
+
+    Empty was only half of it. `df` prints `-` for Avail on some filesystems,
+    so after `sed 's/G//'` the variable holds a non-empty non-number: the `-z`
+    branch does not fire, `[ "-" -lt 20 ]` errors instead of comparing, and the
+    `else` branch reports "Disk space OK (-GB available)". In
+    `choose_install_dir()` it is louder — that comparison has no
+    `2>/dev/null` — and it still proceeds (review, 2026-08-28).
+
+    So every `df` probe, in both functions, normalises a non-number to empty
+    and then handles empty.
+    """
+    unhandled: list[str] = []
+    for script in _catalog_installers():
+        lines = script.read_text(encoding="utf-8").splitlines()
+        bodies = _shell_function_bodies(lines)
+        for function in ("check_system", "choose_install_dir"):
+            body = bodies.get(function)
+            if body is None:
+                continue
+            for number in body:
+                probed = re.match(r"\s*([A-Za-z_]+)=\$\(df ", lines[number - 1])
+                if probed is None:
+                    continue
+                variable = probed.group(1)
+                reference = r"\$\{?" + re.escape(variable) + r"\}?"
+                empty_case = re.compile(r"-z\s+\"" + reference + r"\"")
+                # `case "$X" in ''|*[!0-9]*)` — the one idiom these scripts use
+                # to say "not a number", and the only one this looks for.
+                numeric = re.compile(r"case\s+\"" + reference + r"\".*\[!0-9\]")
+                if not any(empty_case.search(lines[n - 1]) for n in body):
+                    unhandled.append(f"{script.name}:{number} ({variable}: no empty case)")
+                if not any(numeric.search(lines[n - 1]) for n in body):
+                    unhandled.append(f"{script.name}:{number} ({variable}: no non-number case)")
+
+    assert not unhandled, (
+        "these disk probes report an unmeasurable disk as fine, because nothing "
+        f"rejects what came back: {unhandled}"
+    )
+
+
+def test_choose_install_dir_refuses_by_failing() -> None:
+    """Every refusal in `choose_install_dir()` has to exit non-zero.
+
+    `Installer.run()` raises on a non-zero exit and that is the only signal it
+    has; `exit 0` after a `print_error` means the app is told the script
+    finished normally. `catalog_view._on_run_finished()` does catch the specific
+    shape that follows — a clean exit with no compose file in the chosen folder
+    — so this is defence in depth rather than the only guard, but the message
+    the user gets from that path describes an existing install, not the disk or
+    the folder that was actually refused.
+
+    Found by mutating the free-space refusal to `exit 0` and watching the whole
+    file stay green (review, 2026-08-28).
+    """
+    surrendering: list[str] = []
+    for script in _catalog_installers():
+        lines = script.read_text(encoding="utf-8").splitlines()
+        body = _shell_function_bodies(lines).get("choose_install_dir")
+        assert body is not None, f"{script.name}: has no choose_install_dir()"
+        refusing = False
+        for number in body:
+            line = lines[number - 1].strip()
+            if line.startswith("#"):
+                continue
+            if line.startswith("print_error"):
+                refusing = True
+                continue
+            if line.startswith("exit "):
+                # The one deliberate `exit 0`: declining the confirm prompt is a
+                # choice, not a failure, and it follows a print_info.
+                if refusing and line != "exit 1":
+                    surrendering.append(f"{script.name}:{number} {line!r} after print_error")
+                refusing = False
+
+    assert not surrendering, f"these refusals report success: {surrendering}"
+
+
+_DECLINE_PROBE = """
+set -u
+print_header() { :; }
+print_step() { :; }
+print_info() { echo "INFO $*"; }
+print_warning() { echo "WARN $*"; }
+print_error() { echo "ERROR $*"; }
+print_success() { echo "OK $*"; }
+ask_yes_no() { echo "ASKED $*"; return 1; }   # the user says NO
+docker() { echo "DOCKER $*"; }
+sudo() { echo "SUDO $*"; }
+SERVER_DIR="$1"
+%(reusable)s
+%(block)s
+echo "REACHED THE END OF THE BLOCK"
+"""
+
+
+def _decline_block(script: Path) -> str:
+    """The existing-folder branch, taken verbatim out of the shipped script.
+
+    From `if [ -d "$SERVER_DIR" ] && ! dir_is_reusable` to the `fi` that closes
+    it at the same indentation.
+    """
+    lines = script.read_text(encoding="utf-8").splitlines()
+    start = next(
+        i
+        for i, text in enumerate(lines)
+        if text.strip().startswith('if [ -d "$SERVER_DIR" ] && ! dir_is_reusable')
+    )
+    indent = len(lines[start]) - len(lines[start].lstrip())
+    end = next(
+        i
+        for i in range(start + 1, len(lines))
+        if lines[i].strip() == "fi" and (len(lines[i]) - len(lines[i].lstrip())) == indent
+    )
+    return "\n".join(lines[start : end + 1])
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_declining_to_start_fresh_exits_non_zero(tmp_path: Path, script_name: str) -> None:
+    """RUN the decline branch and read its exit status. Do not read its shape.
+
+    A zero exit is success to whoever is reading it. `catalog_view.py` pinned a
+    compose project name into a folder holding no server and grew a tab for one
+    that was never built; `docker.py` records that such a pin is inherited by
+    any COPY of the folder, so Stop in the copy can stop the original's server.
+    Reproduced on yulon-arch (2026-08-28) end to end through `Installer.run()`.
+
+    This replaces a structural version that scanned for "the first `exit` after
+    the first `else`". An adversarial review defeated it in one move: an
+    unreachable `if false; then exit 1; fi` placed before a live `exit 0` made
+    it pass against the very bug it existed to catch. Line order is not control
+    flow. So the branch is lifted out of the shipped script and executed, with
+    `ask_yes_no` answering no — the same answer `PROMPT_RULES` gives, since
+    nothing sets `InstallOptions.reinstall`.
+    """
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    occupied = tmp_path / "server"
+    occupied.mkdir()
+    (occupied / "docker-compose.yml").write_text("x", encoding="utf-8")
+
+    body = script.read_text(encoding="utf-8")
+    reusable = body[
+        body.index("dir_is_reusable() {") : body.index("\n}", body.index("dir_is_reusable() {")) + 2
+    ]
+    probe = _DECLINE_PROBE % {"reusable": reusable, "block": _decline_block(script)}
+    out = subprocess.run(
+        ["bash", "-c", probe, "probe", str(occupied)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert "command not found" not in out.stderr, (
+        f"{script_name}: the probe is missing a function the shipped code calls, "
+        f"so its result means nothing:\n{out.stderr.strip()}"
+    )
+    assert (
+        "ASKED" in out.stdout
+    ), f"{script_name}: the branch never reached the prompt:\n{out.stdout}"
+    assert out.returncode == 1, (
+        f"{script_name}: declining exited {out.returncode}, so a caller records an install "
+        f"that never happened. Output was:\n{out.stdout}"
+    )
+    assert (
+        "REACHED THE END OF THE BLOCK" not in out.stdout
+    ), f"{script_name}: the branch fell through instead of exiting"
+    assert "SUDO rm" not in out.stdout, f"{script_name}: declining deleted the folder anyway"
+
+
+# A compose file that names two BUILT images and one PULLED one - which is the
+# shape of AzerothCore's - with the image store answering differently per image.
+_STUB_PARTIAL_BUILD = (
+    'case "$*" in '
+    '"compose config --images") '
+    "echo acore/ac-wotlk-worldserver:master; "
+    "echo acore/ac-wotlk-db-import:master; "
+    "echo mysql:8.0;; "
+    '"image inspect acore/ac-wotlk-db-import:master") return 1;; '
+    "esac"
+)
+_STUB_THIRD_PARTY_PRUNED = (
+    'case "$*" in '
+    '"compose config --images") '
+    "echo acore/ac-wotlk-worldserver:master; "
+    "echo acore/ac-wotlk-db-import:master; "
+    "echo mysql:8.0;; "
+    '"image inspect mysql:8.0") return 1;; '
+    "esac"
+)
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize(
+    "script_name",
+    ["install-wow-wotlk.sh", "install-wow-wotlk-fedora.sh", "install-wow-wotlk-ubuntu.sh"],
+)
+def test_a_half_built_image_set_is_not_a_finished_build(tmp_path: Path, script_name: str) -> None:
+    """One surviving worldserver image is not the same thing as a finished build.
+
+    The probe used to test the FIRST image whose name contains "worldserver" and
+    nothing else, so a prune that took `ac-db-import` still answered "built" -
+    and the caller then skips a 2-4 hour compile and runs `up` with no `--build`.
+    Found by an independent adversarial review (Codex), 2026-08-28.
+
+    The second half is the half that constrains the fix: `mysql:8.0` is PULLED,
+    not built, so requiring EVERY image in the compose file to be on the machine
+    would report a good build as missing whenever that one was pruned - and that
+    is the branch which offers to delete the folder.
+    """
+    script = (
+        Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk" / script_name
+    )
+    target = tmp_path / "server"
+    target.mkdir()
+
+    half_built, _asked = _compiled_images_present(
+        script, target, tmp_path / "calls-partial", stub=_STUB_PARTIAL_BUILD
+    )
+    assert half_built == 1, f"{script_name}: a missing db-import image still read as built"
+
+    pulled_away, _asked = _compiled_images_present(
+        script, target, tmp_path / "calls-pulled", stub=_STUB_THIRD_PARTY_PRUNED
+    )
+    assert pulled_away == 0, (
+        f"{script_name}: a pruned third-party image reported a real build as missing, "
+        "which is the folder-delete prompt"
+    )
+
+
+# ---------------------------------------------------------------- port guard
+
+# One row per installer that carries the guard. The fields are the things that
+# have actually gone wrong here, each of them once:
+#   ports    - what the guard must check. Checking a port the compose never
+#              publishes refuses installs for nothing (found on yulon-win11).
+#   before   - the step it must precede. It was written after `do_compile` in
+#              two scripts, so it refused having just paid for the compile it
+#              exists to avoid (found on m910q, confirmed on yulon-fedora).
+#   own_compose - whether this script WRITES the compose file. The three WotLK
+#              scripts do not - AzerothCore's own compose does - so they have no
+#              port to override and must not offer one.
+_PORT_SCRIPTS = [
+    ("wow-vanilla", "install-wow-vanilla.sh", ("3724", "8085"), ("do_compile",), True),
+    ("wow-tbc", "install-wow-tbc.sh", ("3724", "8085"), ("do_compile",), True),
+    (
+        "wow-tortoise",
+        "install-tortoise-wow-wsl.sh",
+        ("3724", "8090", "3306"),
+        ("clone_source", "do_compile"),
+        True,
+    ),
+    (
+        "wow-wotlk",
+        "install-wow-wotlk.sh",
+        ("3724", "8085", "7878", "3306"),
+        ("install_server",),
+        False,
+    ),
+    (
+        "wow-wotlk",
+        "install-wow-wotlk-ubuntu.sh",
+        ("3724", "8085", "7878", "3306"),
+        ("install_server",),
+        False,
+    ),
+    (
+        "wow-wotlk",
+        "install-wow-wotlk-fedora.sh",
+        ("3724", "8085", "7878", "3306"),
+        ("install_server",),
+        False,
+    ),
+]
+
+# `ss` is reached through `command -v`, and a shell FUNCTION satisfies that as
+# surely as a binary on PATH - so the probe can hand the function under test any
+# listener table it likes without touching the machine's real sockets.
+_PORTS_PROBE = """
+set -u
+print_error()   { echo "ERR: $*"; }
+print_info()    { echo "INFO: $*"; }
+print_warning() { echo "WARN: $*"; }
+print_success() { echo "OK: $*"; }
+ask_yes_no() { echo "ASKED: $*"; return %(answer)s; }
+docker() { echo "$*" >>"$CALLS"; %(docker)s; }
+%(ss)s
+%(body)s
+( check_ports_free %(ports)s ); echo "STATUS=$?"
+"""
+
+_SS_NOTHING_LISTENING = 'ss() { echo "State Recv-Q Send-Q Local:Port Peer:Port"; }'
+
+
+def _ss_taken(port: str) -> str:
+    return (
+        'ss() { echo "State Recv-Q Send-Q Local:Port Peer:Port"; '
+        'echo "LISTEN 0 4096 0.0.0.0:' + port + ' 0.0.0.0:*"; }'
+    )
+
+
+_DOCKER_SILENT = "true"
+
+
+def _docker_holding(port: str) -> str:
+    """A neighbour whose compose project is bigger than the port it publishes.
+
+    The blocker is ac-worldserver; ac-database is in the same project and holds
+    none of our ports. Case order matters: the working_dir label and the
+    project-filtered listing both contain "compose.project", so the more
+    specific patterns have to come first.
+    """
+    return (
+        'case "$*" in '
+        '"ps -q") echo deadbeef;; '
+        '"port deadbeef") echo "' + port + "/tcp -> 0.0.0.0:" + port + '";; '
+        "*working_dir*) echo /home/pk/wow-server-playerbots;; "
+        "*compose.project=*) echo ac-worldserver; echo ac-database;; "
+        "*compose.project*) echo their-project;; "
+        "*Name*) echo /ac-worldserver;; "
+        "esac"
+    )
+
+
+def _ports_script(folder: str, name: str) -> Path:
+    return Path(__file__).resolve().parents[1] / "catalog" / "installers" / folder / name
+
+
+def _run_port_guard(script, calls, *, ss, docker, ports, path=None, answer=1):
+    """Run the installer's OWN check_ports_free, lifted out of the shipped file.
+
+    `answer` is what the stubbed `ask_yes_no` returns for the offer to stop the
+    other server: 1 (declined) by default, 0 to accept it.
+    """
+    body = script.read_text(encoding="utf-8")
+    start = body.index("port_is_taken() {")
+    end = body.index(chr(10) + "}", body.index("check_ports_free() {")) + 2
+    calls.write_text("", encoding="utf-8")
+    probe = _PORTS_PROBE % {
+        "ss": ss,
+        "docker": docker,
+        "body": body[start:end],
+        "ports": ports,
+        "answer": answer,
+    }
+    env = {"PATH": path if path is not None else os.environ.get("PATH", ""), "CALLS": str(calls)}
+    out = subprocess.run(["bash", "-c", probe], capture_output=True, text=True, timeout=30, env=env)
+    assert "command not found" not in out.stderr, (
+        script.name + ": the probe is missing something the shipped code calls, "
+        "so its result means nothing:" + chr(10) + out.stderr.strip()
+    )
+    status = next(
+        int(line.removeprefix("STATUS="))
+        for line in out.stdout.splitlines()
+        if line.startswith("STATUS=")
+    )
+    return status, out.stdout
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize("folder,name,ports,before,own_compose", _PORT_SCRIPTS)
+def test_free_ports_do_not_block_the_install(
+    tmp_path: Path, folder: str, name: str, ports, before, own_compose: bool
+) -> None:
+    """Nothing listening means the guard says nothing and gets out of the way."""
+    status, out = _run_port_guard(
+        _ports_script(folder, name),
+        tmp_path / "calls",
+        ss=_SS_NOTHING_LISTENING,
+        docker=_DOCKER_SILENT,
+        ports=" ".join(ports),
+    )
+
+    assert status == 0, name + ": a clean machine was refused:" + chr(10) + out
+    assert "ERR:" not in out, name + ": complained about free ports:" + chr(10) + out
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize("folder,name,ports,before,own_compose", _PORT_SCRIPTS)
+def test_a_taken_port_names_its_owner_and_offers_to_stop_it(
+    tmp_path: Path, folder: str, name: str, ports, before, own_compose: bool
+) -> None:
+    """The collision that cost a whole build is caught, named, and offered a way out.
+
+    Measured on yulon-fedora, 2026-08-29: a Vanilla install cloned, compiled,
+    extracted and imported, and only THEN died on `Bind for 0.0.0.0:8085 failed`,
+    against the WotLK stack already on that box. A refusal is only useful if it
+    says which install to go and stop - and better still if it offers to do it.
+    """
+    world = ports[1]
+    status, out = _run_port_guard(
+        _ports_script(folder, name),
+        tmp_path / "calls",
+        ss=_ss_taken(world),
+        docker=_docker_holding(world),
+        ports=" ".join(ports),
+    )
+
+    assert status == 1, name + ": a taken port did not stop the install:" + chr(10) + out
+    assert "Port " + world + " is already in use" in out, out
+    assert "ac-worldserver" in out, name + ": the refusal did not name the container"
+    assert "/home/pk/wow-server-playerbots" in out, (
+        name + ": the refusal did not name the install that owns the port:" + chr(10) + out
+    )
+    assert "ASKED: Stop the other server and continue?" in out, (
+        name + ": refused without offering to stop the other server:" + chr(10) + out
+    )
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize("folder,name,ports,before,own_compose", _PORT_SCRIPTS)
+def test_accepting_the_offer_stops_the_other_server_and_carries_on(
+    tmp_path: Path, folder: str, name: str, ports, before, own_compose: bool
+) -> None:
+    """Saying yes has to actually stop it, and then let the install proceed.
+
+    The listener table is the one the guard sees on its FIRST pass; the stub
+    `ss` keeps answering "taken", so this also pins the re-check: if the stop
+    did not free the port, the guard must not wave the install through.
+    """
+    world = ports[1]
+    calls = tmp_path / "calls"
+    status, out = _run_port_guard(
+        _ports_script(folder, name),
+        calls,
+        ss=_ss_taken(world),
+        docker=_docker_holding(world),
+        ports=" ".join(ports),
+        answer=0,
+    )
+
+    issued = calls.read_text(encoding="utf-8")
+    assert "stop ac-worldserver" in issued, (
+        name + ": accepting the offer never stopped anything:" + chr(10) + issued
+    )
+    # The whole server, not just the container that published the port. Seen in
+    # the field twice: on yulon-fedora ac-worldserver was left looping after its
+    # database was stopped, and on yulon-arch tbc-mangosd and tbc-db were left up
+    # after tbc-realmd went. A project member that publishes nothing is still
+    # part of the server being stopped.
+    assert "stop ac-database" in issued, (
+        name
+        + ": stopped the port holder and left the rest of that server running:"
+        + chr(10)
+        + issued
+    )
+    assert status == 1, (
+        name + ": the port was still held after the stop and the install continued anyway"
+    )
+    assert "still in use after stopping" in out, out
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="needs a POSIX shell")
+@pytest.mark.parametrize("folder,name,ports,before,own_compose", _PORT_SCRIPTS)
+def test_being_unable_to_check_is_not_the_same_as_free(
+    tmp_path: Path, folder: str, name: str, ports, before, own_compose: bool
+) -> None:
+    """With neither `ss` nor `netstat`, the guard says so rather than staying silent.
+
+    The same distinction `compiled_images_present` was taught: "I could not find
+    out" must not be spelled like an answer. Here it must not BLOCK either - a box
+    with no `ss` is not a box with a collision - so it warns and continues, and
+    the warning is what this asserts.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for tool in ("bash", "awk", "sed", "grep", "cat"):
+        found = shutil.which(tool)
+        if found:
+            (bindir / tool).symlink_to(found)
+    assert shutil.which("ss", path=str(bindir)) is None, "the stripped PATH still has ss"
+    assert shutil.which("netstat", path=str(bindir)) is None, "the stripped PATH still has netstat"
+
+    status, out = _run_port_guard(
+        _ports_script(folder, name),
+        tmp_path / "calls",
+        ss="",
+        docker=_DOCKER_SILENT,
+        ports=" ".join(ports),
+        path=str(bindir),
+    )
+
+    assert status == 0, name + ": an unanswerable question blocked the install"
+    assert "WARN:" in out, name + ": could not check, and said nothing about it"
+
+
+@pytest.mark.parametrize("folder,name,ports,before,own_compose", _PORT_SCRIPTS)
+def test_the_port_guard_runs_before_anything_expensive(
+    folder: str, name: str, ports, before, own_compose: bool
+) -> None:
+    """A guard that runs after the compile is not a guard, it is a postmortem.
+
+    The first version landed AFTER `do_compile` in two of the three scripts that
+    had it, so it refused the install having just spent 30-70 minutes building
+    it, while printing "no compile was started". Found on m910q and confirmed
+    independently on yulon-fedora, which watched a full 24-minute compile finish
+    before the refusal printed. The tests at the time all passed, because they
+    proved the FUNCTION worked and said nothing about where it was called.
+    """
+    lines = _ports_script(folder, name).read_text(encoding="utf-8").splitlines()
+
+    def line_of(call: str) -> int:
+        hits = [
+            i for i, line in enumerate(lines) if line.strip() == call or line.startswith(call + " ")
+        ]
+        assert hits, name + ": the main sequence never calls " + call
+        return hits[-1]
+
+    guard = line_of("check_ports_free")
+    for step in before:
+        assert guard < line_of(step), (
+            name + ": check_ports_free runs AFTER " + step + ", so the refusal arrives "
+            "once the expensive work is already paid for"
+        )
+
+
+@pytest.mark.parametrize("folder,name,ports,before,own_compose", _PORT_SCRIPTS)
+def test_the_guard_checks_exactly_the_ports_that_script_publishes(
+    folder: str, name: str, ports, before, own_compose: bool
+) -> None:
+    """Refusing over a port you never bind is a false alarm, not caution.
+
+    The first version passed DB_PORT for all three games that had the guard, but
+    only Tortoise's compose has a `ports:` key on its db service - Vanilla's and
+    TBC's db talks to the other services over the internal compose network and
+    binds nothing on the host. A stray MySQL on 3306 refused a TBC install over a
+    port that install would never have touched. Found on yulon-win11.
+
+    The WotLK scripts are checked against the table instead: their compose comes
+    from AzerothCore upstream, so there is no `ports:` mapping here to read.
+    """
+    body = _ports_script(folder, name).read_text(encoding="utf-8")
+
+    call = [line for line in body.splitlines() if line.startswith("check_ports_free ")]
+    assert len(call) == 1, name + ": expected exactly one call in the main sequence"
+
+    names = {
+        "3724": "AUTH_PORT",
+        "8085": "WORLD_PORT",
+        "8090": "WORLD_PORT",
+        "7878": "SOAP_PORT",
+        "3306": "DB_PORT",
+    }
+    expected = {names[port] for port in ports}
+    checked = {var for var in set(names.values()) if "$" + var in call[0]}
+    assert checked == expected, (
+        name + ": the guard checks " + str(sorted(checked)) + ", expected " + str(sorted(expected))
+    )
+
+    if own_compose:
+        published = {var for var in set(names.values()) if '"${' + var + "}:" in body}
+        assert checked == published, (
+            name
+            + ": checks "
+            + str(sorted(checked))
+            + " but publishes "
+            + str(sorted(published))
+            + " - a port that is checked and never bound is a false refusal"
+        )
+
+
+@pytest.mark.parametrize("folder,name,ports,before,own_compose", _PORT_SCRIPTS)
+def test_only_the_scripts_that_write_their_compose_offer_a_port_override(
+    folder: str, name: str, ports, before, own_compose: bool
+) -> None:
+    """Do not print a remedy the script cannot carry out.
+
+    The WotLK installers do not write their compose file, so `YULON_WORLD_PORT`
+    would change nothing for them; offering it would be advice that silently
+    fails. `PORT_OVERRIDES` decides which half of the refusal is printed, and
+    this pins it to the same fact the table records.
+    """
+    body = _ports_script(folder, name).read_text(encoding="utf-8")
+    assert ("PORT_OVERRIDES=1" in body) is own_compose, (
+        name + ": PORT_OVERRIDES disagrees with whether this script writes its own compose"
+    )
+    if own_compose:
+        assert '"${AUTH_PORT}:' in body, name + ": claims overrides but hardcodes the auth port"
+    else:
+        assert "YULON_AUTH_PORT" not in body.split("PORT_OVERRIDES=0")[0], (
+            name + ": reads an override it cannot honour"
+        )

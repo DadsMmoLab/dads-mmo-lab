@@ -90,6 +90,13 @@ _ERROR_TAIL_LINES = 12
 DEFAULT_TERM = "xterm-256color"
 
 
+# The stable half of `Installer.sudo_marker`. The token after it is random and
+# per-install, so this prefix is the only part a module-level prompter can match
+# on - and matching is what keeps sudo's prompt hidden while the two y/n consent
+# rules stay visible (review, 2026-08-28).
+SUDO_PROMPT_PREFIX = "[sudo via Yu'lon "
+
+
 class InstallerError(RuntimeError):
     """The install could not start or did not finish (message is user-readable)."""
 
@@ -190,6 +197,19 @@ PROMPT_RULES: tuple[PromptRule, ...] = (
     PromptRule(r"Open the GitHub README", "n"),
     PromptRule(r"Download wow-manage\.sh", "n"),
     PromptRule(r"stop the server now\?", "n"),
+    # Declined on purpose, and it must sit above the `(y/n)` catch-all that
+    # would otherwise answer "y". The installer scripts now OFFER to stop
+    # whatever is holding the server ports, which is the right question to put
+    # to a person at a terminal - but not one the app may answer on their
+    # behalf: the thing it would stop is a server someone may be playing on
+    # this second, and no install is worth that. The GUI makes the same offer
+    # itself, on the tab, where the user can see what they are agreeing to
+    # (`controller_view._offer_to_stop_the_other_server`).
+    PromptRule(
+        r"Stop the other server and continue\?",
+        "n",
+        "the app never stops a running server to get an install through",
+    ),
     # Must sit ABOVE the `(y/n)` catch-all, which would otherwise answer "y" and
     # grant root-equivalent access without anyone being asked — exactly what
     # upstream's 1.4.4 security change exists to prevent (it removed the
@@ -461,7 +481,7 @@ class Installer:
         # token matters too: this string is the LABEL of the one dialog in the
         # app that asks for the user's password, so it has to read as sudo
         # asking, not as a bare hex token (review, 2026-08-22).
-        self.sudo_marker = f"[sudo via Yu'lon {secrets.token_hex(8)}] password:"
+        self.sudo_marker = f"{SUDO_PROMPT_PREFIX}{secrets.token_hex(8)}] password:"
 
     @property
     def script(self) -> Path:
@@ -738,6 +758,37 @@ def installer_for(
     return Installer(entry, installers_root=installers_root, platform_id=platform_id)
 
 
+def _terminal_prompter(prompt: str) -> str:
+    """Answer the prompts `run()` forwards, from the terminal.
+
+    The CLI passed no `ask` at all, and `runner.interact()` writes nothing for
+    a missing answer, so on any box where sudo wants a password the CLI parked
+    at the prompt forever: no timeout, no error, a process that never exits.
+    Reproduced on yulon-arch (2026-08-28), which is not passwordless.
+
+    Never returns None. Off a terminal there is nothing to type, and an empty
+    answer is the failure path that ENDS: sudo refuses it, retries, gives up,
+    and the script's own guard exits non-zero with "Could not cache sudo
+    credentials"; a y/n rule reads it as "no". A failure the user can read beats
+    a hang they cannot.
+    """
+    import getpass
+    import sys
+
+    # Only sudo's own prompt is hidden. `ask` is consulted for EVERY ASK_THE_USER
+    # rule, and the other two are consent questions - "Add '$USER' to the docker
+    # group (grants root-equivalent access)?" and "Install Docker via rpm-ostree
+    # and reboot now?" - which a person must be able to see themselves answering.
+    # `script_env()` builds sudo's prompt with a random marker, so the two are
+    # told apart exactly rather than guessed (review, 2026-08-28).
+    if not sys.stdin.isatty():
+        sys.stderr.write(f"no terminal to answer {prompt.strip()!r}; declining\n")
+        return ""
+    if SUDO_PROMPT_PREFIX in prompt:
+        return getpass.getpass(prompt + " ")
+    return input(prompt + " ")
+
+
 def _main(argv: list[str] | None = None) -> int:
     """CLI entry point: `python -m yulon.catalog.installer <game-id> [options]`.
 
@@ -762,12 +813,43 @@ def _main(argv: list[str] | None = None) -> int:
     except KeyError:
         sys.stderr.write(f"unknown game {args.game!r}\n")
         return 2
-    installer = Installer(entry, installers_root=args.installers_root)
+    # `installer_for()`, not `Installer(...)`: the CLI used to construct the
+    # script engine directly, so it could never exercise `NativeInstaller` on
+    # any platform, and "I ran the install through the CLI" proved less than it
+    # sounded like it did. It now dispatches exactly as the Install button does.
+    #
+    # The import seams are wired the same way `main.py`'s `make_installer()`
+    # wires them for the GUI - without this, a native install of an entry with
+    # an `import_service` (WoW WotLK) refuses at preflight with "this installer
+    # was built without a way to check it", on every platform, before a single
+    # container is created. Local imports for the same reason `native.py`
+    # imports `installer` inside its own function: `catalog/` must not import a
+    # controller package at module scope.
+    import_probe = None
+    reset_unfinished = None
+    spec = entry.container_spec()
+    if spec.import_service:
+        from yulon.apply import DockerSql
+        from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
+        from yulon.controller_wow_wotlk import modules as wotlk_modules
+        from yulon.controller_wow_wotlk import repair as wotlk_repair
+
+        password = entry.install.db_root_password or wotlk_modules.DEFAULT_DB_ROOT_PASSWORD
+        sql = DockerSql(spec.db, password, schemas=entry.schema_map())
+        mysql = wotlk_maintenance.DockerMysql(spec.db, password)
+        import_probe = lambda: wotlk_repair.import_state(sql, mysql)  # noqa: E731
+        reset_unfinished = lambda: wotlk_repair.reset_unfinished(sql, mysql)  # noqa: E731
+    installer = installer_for(
+        entry,
+        installers_root=args.installers_root,
+        import_probe=import_probe,
+        reset_unfinished=reset_unfinished,
+    )
     options = InstallOptions(
         server_dir=args.server_dir, client_dir=args.client_dir, reinstall=args.reinstall
     )
     try:
-        for line in installer.run(options):
+        for line in installer.run(options, ask=_terminal_prompter):
             sys.stdout.write(line + "\n")
             sys.stdout.flush()
     except InstallerError as exc:

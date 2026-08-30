@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 from tests.conftest import process_events
 from yulon.ui.widgets.log_panel import LogPanel
@@ -178,3 +178,164 @@ def test_the_thread_can_be_joined_without_an_event_loop(qapp: object) -> None:
     panel.run(lambda: iter(["one", "two"]))
     assert panel.wait(5000) is True, "the join timed out with nothing pumping the main thread"
     assert panel.running is False
+
+
+def test_the_worker_is_destroyed_on_the_gui_thread_not_its_own(qapp: object) -> None:
+    """Which thread runs `~QObject()` for the worker is the whole bug, so assert on it.
+
+    `thread.finished.connect(worker.deleteLater)` - the textbook pattern - ran
+    the worker's destructor on the WORKER thread during Qt's thread teardown.
+    `_StreamWorker` is a Python subclass, so that destructor needs the GIL; if
+    the GUI thread held it inside Qt's connection mutex at that instant, each
+    side held what the other needed. gdb on yulon-ubuntu (2026-08-28) caught
+    exactly that deadlock, and the same race that does not deadlock corrupted
+    memory: SIGSEGV or SIGBUS in 9 of 20 GUI-only runs under load.
+
+    A race is not a test, so this pins the invariant behind it instead:
+    `destroyed` fires from inside the destructor, on whatever thread is running
+    it, and a direct connection delivers it there. Old code: the worker's
+    thread. Fixed code: this one.
+    """
+    import threading
+
+    from PySide6.QtCore import Qt
+
+    from yulon.ui.widgets.log_panel import LogPanel
+
+    panel = LogPanel()
+    assert panel.run(lambda: iter(["one line"]), title="t")
+    assert panel.wait(5000)
+    worker = panel._worker
+    assert worker is not None, "the panel must still own its worker after the job"
+
+    destroyed_on: list[int] = []
+    worker.destroyed.connect(
+        lambda *_: destroyed_on.append(threading.get_ident()),
+        Qt.ConnectionType.DirectConnection,
+    )
+    del worker
+
+    # A second run disposes of the panel's reference; `job.InFlight` drops its
+    # own once `finished` reaches `sweep()` on the GUI thread - a queued slot,
+    # so the loop has to be pumped for the destructor to run at all.
+    assert panel.run(lambda: iter(["two"]), title="t")
+    assert panel.wait(5000)
+    _pump_until(qapp, lambda: bool(destroyed_on))
+
+    assert destroyed_on, "the first worker was never destroyed"
+    assert (
+        destroyed_on[0] == threading.get_ident()
+    ), "the worker was destroyed on a thread other than the GUI thread"
+
+
+def test_a_finished_job_leaves_a_live_worker_not_a_dangling_wrapper(qapp: object) -> None:
+    """The panel kept `self._worker` AND handed it to `deleteLater` - one had to give.
+
+    Under the old code the deferred delete destroyed the C++ object while the
+    Python attribute still pointed at it; shiboken then reports the wrapper as
+    invalid. Now Python is the sole owner until `_dispose_last_job()`.
+    """
+    import shiboken6
+
+    from yulon.ui.widgets.log_panel import LogPanel
+
+    panel = LogPanel()
+    assert panel.run(lambda: iter(["x"]), title="t")
+    assert panel.wait(5000)
+    qapp.processEvents()  # type: ignore[attr-defined]  # give any deferred delete its chance to run
+
+    assert panel._worker is not None
+    assert shiboken6.isValid(panel._worker), "the worker's C++ side was deleted out from under it"
+
+
+def _pump_until(qapp: object, done: Callable[[], bool], tries: int = 50) -> None:
+    """Pump the GUI event loop until `done()` - queued slots need a running loop."""
+    for _ in range(tries):
+        qapp.processEvents()  # type: ignore[attr-defined]
+        if done():
+            return
+
+
+def test_a_panel_dropped_before_its_thread_runs_does_not_leave_the_worker_dead(
+    qapp: object,
+) -> None:
+    """The crash, from a native backtrace: `QThread::started` -> `worker.run` on freed memory.
+
+    Between `thread.start()` and the OS scheduling the thread there is a window,
+    and in it the panel holding the only reference to the worker can be
+    garbage-collected. Python owns an unparented QObject, so the worker dies
+    with the panel; the thread then wakes, PySide looks `run` up on it, and
+    `QMetaMethod::name()` reads freed memory. SIGBUS on yulon-ubuntu under gdb
+    (2026-08-28), 100% of runs; 1 in 20 idle, 9 in 20 under load - the window
+    is scheduling latency. Closing a tab right after "Follow worldserver log" is
+    the same sequence in the app.
+
+    Held open here with a gate the source blocks on, so the panel can be dropped
+    while the job is provably still in flight. Under the old code this test does
+    not fail - the process dies.
+    """
+    import gc
+    import threading
+    import weakref
+
+    from yulon.ui.widgets.log_panel import LogPanel
+
+    gate = threading.Event()
+
+    def source() -> Iterator[str]:
+        gate.wait(5.0)
+        yield "released"
+
+    panel = LogPanel()
+    assert panel.run(source, title="t")
+    thread = panel._thread
+    assert thread is not None
+    worker_ref = weakref.ref(panel._worker)  # type: ignore[arg-type]
+    del panel
+    gc.collect()
+
+    assert worker_ref() is not None, "the worker died with the panel while its thread was live"
+
+    gate.set()
+    assert thread.wait(5000), "the thread never finished"
+    _pump_until(qapp, lambda: worker_ref() is None)
+    assert worker_ref() is None, "the worker was not released once its thread finished"
+
+
+def test_a_runner_dropped_before_its_thread_runs_does_not_leave_the_worker_dead(
+    qapp: object,
+) -> None:
+    """`ThreadedJobRunner` had the identical window: `_live` died with the view."""
+    import gc
+    import threading
+    import weakref
+
+    from PySide6.QtCore import QObject
+
+    from yulon.ui.widgets.job import ThreadedJobRunner
+
+    gate = threading.Event()
+
+    def work() -> int:
+        gate.wait(5.0)
+        return 1
+
+    owner = QObject()
+    runner = ThreadedJobRunner(owner)
+    runner(work, lambda _r: None, lambda _e: None)
+    thread, worker = runner._live[0]
+    worker_ref = weakref.ref(worker)
+    del worker, runner, owner
+    gc.collect()
+
+    assert worker_ref() is not None, "the worker died with the runner while its thread was live"
+
+    gate.set()
+    # `_JobWorker` ends its thread through `done -> thread.quit`, a queued slot
+    # on the GUI thread, so the loop must be pumped for the thread to exit at
+    # all - which is what the app does, and what `ThreadedJobRunner.wait()`
+    # sidesteps by quitting explicitly. A bare `thread.wait()` here just times out.
+    _pump_until(qapp, lambda: not thread.isRunning(), tries=500)
+    assert not thread.isRunning(), "the job thread never exited"
+    _pump_until(qapp, lambda: worker_ref() is None)
+    assert worker_ref() is None

@@ -215,7 +215,11 @@ def _cli_missing(proc: subprocess.CompletedProcess[str]) -> bool:
 
 
 def _run(
-    argv: list[str], cwd: Path | None = None, *, wsl_distro: str | None = None
+    argv: list[str],
+    cwd: Path | None = None,
+    *,
+    timeout: float | None = None,
+    wsl_distro: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run `docker <argv...>`; raise `DockerCommandError` on non-zero exit.
 
@@ -225,7 +229,7 @@ def _run(
     in front of the sentence is noise to the user reading it in a dialog, and
     `_docker()` has already put the command in the log at DEBUG.
     """
-    proc = _docker(argv, cwd=cwd, wsl_distro=wsl_distro)
+    proc = _docker(argv, cwd=cwd, timeout=timeout, wsl_distro=wsl_distro)
     if _cli_missing(proc):
         raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP)
     if proc.returncode != 0:
@@ -451,6 +455,7 @@ def _env_value(raw: str) -> str:
 
 
 PROJECT_LABEL = "com.docker.compose.project"
+WORKING_DIR_LABEL = "com.docker.compose.project.working_dir"
 
 
 UNREADABLE = "\x00unreadable"
@@ -475,6 +480,26 @@ def container_project(container: str, *, wsl_distro: str | None = None) -> str |
     proc = _docker(["inspect", container, "--format", fmt], wsl_distro=wsl_distro)
     if proc.returncode != 0:
         logger.warning(f"could not read the compose project of {container}: {proc.stderr.strip()}")
+        return UNREADABLE
+    return proc.stdout.strip() or None
+
+
+def container_working_dir(container: str, *, wsl_distro: str | None = None) -> str | None:
+    """Which directory the compose project owning this container was brought up from.
+
+    `container_project()` answers WHO owns it; this answers WHERE, which is what
+    a person actually needs when they are told to go and stop something. Compose
+    bakes the label in at container creation, so a moved install reports the path
+    it was created at rather than where it lives now - worth knowing when the
+    answer looks wrong, and still better than naming nothing at all.
+
+    Returns `None` for a container carrying no such label, and `UNREADABLE` when
+    Docker could not be asked, on the same reasoning as `container_project()`.
+    """
+    fmt = '{{index .Config.Labels "' + WORKING_DIR_LABEL + '"}}'
+    proc = _docker(["inspect", container, "--format", fmt], wsl_distro=wsl_distro)
+    if proc.returncode != 0:
+        logger.warning(f"could not read the working dir of {container}: {proc.stderr.strip()}")
         return UNREADABLE
     return proc.stdout.strip() or None
 
@@ -679,6 +704,16 @@ def _project_containers(project: str, *, wsl_distro: str | None = None) -> list[
     return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
+def project_containers(project: str, *, wsl_distro: str | None = None) -> list[str] | None:
+    """Which containers belong to a compose project. `None` if Docker could not be asked.
+
+    The public form of `_project_containers()`, for the one caller outside this
+    module that needs it: stopping a server that is holding our ports has to stop
+    the whole project, not only the containers that publish those ports.
+    """
+    return _project_containers(project, wsl_distro=wsl_distro)
+
+
 def remove_staged(spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | None = None) -> bool:
     """Stop this install and REMOVE its containers. Volumes are never touched.
 
@@ -786,6 +821,21 @@ def remove_staged(spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | No
 
     logger.info(f"remove_staged(): removed {len(before)} container(s); volumes untouched")
     return True
+
+
+# How long `status()` waits for `docker ps`. It is a local call, so a healthy
+# daemon answers in milliseconds and a cold Docker Desktop in a few seconds -
+# but an unhealthy one has no upper bound, and without a deadline the GUI's
+# five-second poll wedges PERMANENTLY rather than slowly: `refresh_status()` sets
+# `_status_pending` and clears it only from a callback, so a call that never
+# returns makes every later poll return early at the guard, and the Server tab
+# reads "status: unknown" until the app is restarted. Measured on yulon-win11
+# 2026-08-28: `docker ps` hung 8+ minutes under memory pressure, and 125 seconds
+# on an earlier run there. 30s is six polls - far above a slow honest answer and
+# far below either of those. A timeout arrives as a non-zero CompletedProcess
+# (see `_docker`), so it becomes DockerCommandError, so `_status_failed()` clears
+# the flag and names the reason, and the next poll simply tries again.
+STATUS_TIMEOUT_SECONDS = 30.0
 
 
 STOP_GRACE_SECONDS = 300
@@ -1472,6 +1522,32 @@ def _stranger_message(
     return " ".join(lines)
 
 
+def stop_containers(containers: list[str], *, wsl_distro: str | None = None) -> None:
+    """Stop these containers, the worldserver-ish ones first.
+
+    The public form of `_run_docker_stop()`, for the case where the containers
+    are NOT ours: another install is holding the ports and the user has asked
+    for it to be stopped so this one can start.
+
+    Order matters and cannot be read off a name with certainty, so this is a
+    best effort rather than a promise: anything whose name mentions the world is
+    stopped before anything that mentions the database, because a worldserver
+    losing its database mid-save is how character saves are lost. For a container
+    this project did not create, the name is the only hint there is.
+    """
+
+    def rank(name: str) -> int:
+        lowered = name.lower()
+        if any(hint in lowered for hint in ("world", "mangosd")):
+            return 0
+        if any(hint in lowered for hint in ("auth", "realmd", "logon")):
+            return 1
+        return 2
+
+    for name in sorted(containers, key=rank):
+        _run_docker_stop(name, wsl_distro=wsl_distro)
+
+
 def stop_staged(spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | None = None) -> bool:
     """Stop this install without destroying its containers.
 
@@ -1622,7 +1698,9 @@ def status(*, wsl_distro: str | None = None) -> list[str]:
             `_status_safe()`/the polling helpers below instead.
     """
     logger.debug("status() called")
-    proc = _run(["ps", "--format", "{{.Names}}"], wsl_distro=wsl_distro)
+    proc = _run(
+        ["ps", "--format", "{{.Names}}"], timeout=STATUS_TIMEOUT_SECONDS, wsl_distro=wsl_distro
+    )
     return [name for name in proc.stdout.splitlines() if name.strip()]
 
 
@@ -2431,6 +2509,33 @@ def bind_mount_ok(
     )
     if _cli_missing(proc):
         return None
+    # **stdout first, and the exit code second.** The question is whether a
+    # container sees what the host sees, and the answer to that is the listing;
+    # `ls`'s opinion of the parts it could not reach is not the answer.
+    #
+    # Asking the other way round refused EVERY macOS install whose chosen folder
+    # was new — which is every first install. The chosen folder is empty or
+    # absent at preflight time, so the probe walks up to the nearest populated
+    # ancestor, routinely the user's home directory, and on a Mac `ls -A` of a
+    # home directory prints a full listing AND exits non-zero: Docker Desktop
+    # cannot stat the TCC-protected entries in it, busybox `ls` returns failure
+    # when it could not stat something. The tester's own run (2026-08-26) shows
+    # both halves at once — two `No such file or directory` lines for `.Trash`
+    # and `Documents`, then fifteen entries including the folder he had picked.
+    # Nothing he could do would make that pass: he re-added the folder to file
+    # sharing, added its parent, tried other folders and read a file back out of
+    # a container against that exact path, and none of it makes `.Trash`
+    # stat-able.
+    if any(line.strip() for line in proc.stdout.splitlines()):
+        if proc.returncode != 0:
+            logger.info(
+                f"a container listed {mount} and `ls` still exited {proc.returncode}; the "
+                f"listing is the answer. What it could not reach: {proc.stderr.strip()}"
+            )
+        return True
+    # From here the listing was EMPTY, which is the silently-empty mount this
+    # check exists for — and the case where the exit code is worth reading.
+    #
     # A non-zero exit is the daemon answering "no", which IS an answer — unless
     # it never answered at all. `runner.run()` reports a timeout as 124 with the
     # reason in stderr rather than raising, so that case has to be separated out
@@ -2464,8 +2569,6 @@ def bind_mount_ok(
             )
             return None
         return False
-    if any(line.strip() for line in proc.stdout.splitlines()):
-        return True
     logger.warning(
         f"a container saw {mount} as empty although the host sees files in it — Docker is not "
         "sharing that folder"

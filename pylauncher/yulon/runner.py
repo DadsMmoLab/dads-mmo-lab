@@ -239,6 +239,8 @@ def run(
     cwd: Path | None = None,
     env: Mapping[str, str] | None = None,
     timeout: float | None = None,
+    *,
+    stdin: int | None = subprocess.DEVNULL,
 ) -> subprocess.CompletedProcess[str]:
     """Run a command to completion and return the completed process.
 
@@ -261,6 +263,7 @@ def run(
             There is nothing sound to default this to — a `compose up` may take
             minutes — so it is per-call, and the callers that need one are the
             ones running on the GUI thread.
+        stdin: Optional standard input stream or descriptor (defaults to DEVNULL).
 
     Returns:
         The completed process (stdout/stderr available as strings). Does not
@@ -279,6 +282,7 @@ def run(
             check=False,
             timeout=timeout,
             creationflags=creationflags(),
+            stdin=stdin,
         )
     except subprocess.TimeoutExpired as exc:
         logger.warning(f"{command[0]} did not answer within {timeout}s; giving up")

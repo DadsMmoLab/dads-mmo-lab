@@ -18,6 +18,7 @@ from yulon.controller_wow_wotlk.console import ConsoleReply
 from yulon.controller_wow_wotlk.maintenance import (
     BackupReport,
     InterruptedRestore,
+    MaintenanceError,
     RestorePlan,
     RestoreReport,
 )
@@ -190,14 +191,24 @@ def test_server_tab_status_start_and_port_conflict_message(
     failures: list[str] = []
     view.action_failed.connect(failures.append)
     view.start_server()
-    assert "only one server can run at a time" in view.problem_label.text()
+    assert "Only one server can run at a time" in view.problem_label.text()
+    assert "3724" in view.problem_label.text(), "the message does not say which port"
     assert "tbc-realmd" in failures[0]
     assert not any(c[:4] == ["docker", "compose", "up", "-d"] for c in ps.calls)
+
+    # The offer, not just the refusal: naming the blocker and leaving the user to
+    # go and stop it themselves was the old dead end. The button appears with the
+    # collision and goes away with it.
+    # isHidden(), not isVisible(): nothing shows this window in a test, so every
+    # widget in it is invisible either way. isHidden() answers the question that
+    # was actually asked - did the code hide it or not.
+    assert not view.stop_other_button.isHidden(), "the offer to stop never appeared"
 
     ps.ports = ""
     view.start_server()
     assert any(c[:5] == ["docker", "compose", "up", "-d", "--no-deps"] for c in ps.calls)
     assert view.problem_label.text() == ""
+    assert view.stop_other_button.isHidden(), "the offer outlived the collision"
     view.stop_server()
     # Stop keeps the containers (`compose stop`), so the next start stays staged.
     assert any(c[:3] == ["docker", "compose", "stop"] for c in ps.calls)
@@ -372,6 +383,26 @@ def test_the_console_says_why_it_is_disabled_where_there_is_no_pty(
     assert view.console_note.isVisible() or view.console_note.text()
     assert "terminal" in view.console_note.text()
     assert view.follow_button.isEnabled(), "following the log needs no pty"
+
+
+def test_a_wsl_console_is_usable_on_a_host_that_has_no_pty_of_its_own(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows + a server inside WSL: no pty here, and Send still works.
+
+    The tab used to ask `pty_supported()`, which is a fact about THIS process
+    and not about whether the console can be reached. The distro can open a
+    terminal even where Windows cannot (measured 2026-08-27), so the question
+    the button asks had to change with the transport - otherwise the fix ships
+    behind a button that is still greyed out.
+    """
+    monkeypatch.setattr(console, "pty_supported", lambda: False)
+    services = _services(ps, tmp_path, [])
+    services.controller = Controller(WOTLK.container_spec(), tmp_path, wsl_distro="dml-arch")
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.send_button.isEnabled()
+    assert view.command_edit.isEnabled()
+    assert view.console_note.text() == "", view.console_note.text()
 
 
 def test_a_restore_will_not_run_without_a_plan(qapp: object, ps: _Ps, tmp_path: Path) -> None:
@@ -1128,6 +1159,50 @@ def test_for_wotlk_wires_the_distro_into_every_seam_that_talks_to_docker(
     )
     services.network_plan("lan")
     assert asked == ["dml-arch"], f"the port scan addressed the wrong daemon: {asked}"
+
+
+def test_the_maintenance_tab_asks_the_distro_s_docker_what_is_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Backup and restore census the containers, and that census has a daemon too.
+
+    Reported from a WSL-resident install (2026-08-27): the Console tab attached
+    and its log streamed, while `Maintenance -> Back up now` answered "could not
+    ask Docker what is running ... Docker could not be found on this machine".
+    One machine, one daemon, two answers - because the census went to the
+    Windows host, which is exactly the box with no Docker on it.
+
+    The seam scan below walked past this: `maintenance` spells "which daemon"
+    as an injectable `running` callable rather than as `wsl_distro`, so three
+    call sites that pass neither were invisible to a scan that looks for the
+    name. Asked here through the callables the view really calls, down to the
+    argv the census would have run.
+    """
+    asked: list[str | None] = []
+
+    def fake_prefix(wsl_distro: str | None = None, *, inside: str | None = None) -> tuple[str, ...]:
+        asked.append(wsl_distro)
+        return ("wsl.exe", "-d", str(wsl_distro), "--", "docker")
+
+    monkeypatch.setattr(docker.platform, "docker_prefix", fake_prefix)
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        lambda cmd, cwd=None, timeout=None: subprocess.CompletedProcess(cmd, 0, "", ""),
+    )
+    services = ControllerServices.for_wotlk(WOTLK, tmp_path, None, "dml-arch")
+
+    # Nothing is running in this fake, so both calls end in their own ordinary
+    # refusal ("ac-database is not running"). What is under test is which
+    # daemon was asked before they got there.
+    with pytest.raises(MaintenanceError):
+        services.backup()
+    assert asked == ["dml-arch"], f"the backup census addressed the wrong daemon: {asked}"
+
+    asked.clear()
+    plan = services.plan_restore(tmp_path / "there-is-no-such-dump.sql")
+    assert asked == ["dml-arch"], f"the restore census addressed the wrong daemon: {asked}"
+    assert not any("could not be found on this machine" in r for r in plan.refusals), plan.refusals
 
 
 def test_every_seam_for_wotlk_builds_says_which_daemon_it_means() -> None:

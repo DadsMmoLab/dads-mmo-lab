@@ -234,6 +234,17 @@ class RunnerGit:
             return None
         return proc.stdout.strip() or None
 
+    def is_unmodified(self, dest: Path, relative_path: str) -> bool | None:
+        """Is `relative_path` exactly what this checkout's HEAD committed? None = cannot ask."""
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = _run_git(["git", "status", "--porcelain", "--", relative_path], cwd=dest)
+        except GitError as exc:
+            logger.debug(f"could not ask git about {relative_path} in {dest}: {exc}")
+            return None
+        return not proc.stdout.strip()
+
     def clone(self, spec: CloneSpec) -> None:
         if (spec.dest / ".git").is_dir():
             self._update(spec)
@@ -315,6 +326,18 @@ def _pull_depth_args(depth: int | None) -> list[str]:
     return [] if depth is None else [f"--depth={depth}"]
 
 
+def _is_fresh_mount_race(message: str) -> bool:
+    """True only for the exact "clone started, then ENOENT under /git" shape.
+
+    Both substrings, not either alone: "No such file or directory" on its own
+    also fires on a genuinely missing parent path, and "Cloning into" alone
+    fires on ordinary successful output baked into a different error. Together
+    they are git's own words for "I started, and the bind mount was not there
+    yet" - see `ContainerGit._clone_with_mount_race_retry()`.
+    """
+    return "Cloning into" in message and "No such file or directory" in message
+
+
 @dataclass(frozen=True)
 class ContainerGit:
     """`Git` that runs git inside a container, for hosts without one.
@@ -327,8 +350,24 @@ class ContainerGit:
 
     On Linux the container's root would own every cloned file, so the current
     uid/gid is passed through; on Docker Desktop the file-sharing layer already
-    maps ownership to the logged-in user and `os.getuid` does not exist, which
-    is the same condition.
+    maps ownership to the logged-in user, so no `--user` is passed and one must
+    not be — it overrides the mapping this relies on.
+
+    That second half read "and `os.getuid` does not exist, which is the same
+    condition" until 2026-08-27, and `_user_args()` implemented it that way.
+    `os.getuid` does not exist on Windows; it exists on macOS. So every Mac got
+    a `--user` the rule excludes, and the container saw the bind mount as
+    `root:root`.
+
+    **That was a real defect and it was not the macOS clone failure**, though
+    it was recorded here as its cause. Measured 2026-08-29 against this exact
+    pinned image: a root-owned mount plus `--user <uid>:<gid>` makes git print
+    `/git/.git: Permission denied`. The tester reported
+    `/git/.git: No such file or directory` — EACCES against ENOENT, which is
+    not the same failure and not the same investigation. ENOENT there means
+    the container's `/git` had no directory behind it at `mkdir` time, and
+    what a Mac's file-sharing layer does to a bind mount is the one thing
+    nobody on this project can run. The macOS failure is still open.
     """
 
     image: str = _CONTAINER_GIT_IMAGE
@@ -377,11 +416,21 @@ class ContainerGit:
 
     def clone(self, spec: CloneSpec) -> None:
         if (spec.dest / ".git").is_dir():
-            self._run(
-                spec, ["fetch", *_pull_depth_args(spec.depth), "origin", spec.branch or "HEAD"]
-            )
-            self._run(spec, ["reset", "--hard", "FETCH_HEAD"])
-            return
+            try:
+                self._run(
+                    spec, ["fetch", *_pull_depth_args(spec.depth), "origin", spec.branch or "HEAD"]
+                )
+                self._run(spec, ["reset", "--hard", "FETCH_HEAD"])
+                return
+            except GitError as exc:
+                if platform.DOCKER_CLI_MISSING_HELP not in str(exc) and git_available():
+                    logger.warning(
+                        f"containerized git update failed in {spec.dest} ({exc}); "
+                        "falling back to host git"
+                    )
+                    RunnerGit().clone(spec)
+                    return
+                raise
         if spec.dest.exists():
             shutil.rmtree(spec.dest)
         spec.dest.mkdir(parents=True, exist_ok=True)
@@ -396,7 +445,17 @@ class ContainerGit:
         if spec.sparse_path is not None:
             argv += ["--filter=blob:none", "--sparse"]
         # The clone target is `.` because the mount point *is* the destination.
-        self._run(spec, [*argv, spec.url, "."])
+        try:
+            self._clone_with_mount_race_retry(spec, [*argv, spec.url, "."])
+        except GitError as exc:
+            if platform.DOCKER_CLI_MISSING_HELP not in str(exc) and git_available():
+                logger.warning(
+                    f"containerized git clone failed in {spec.dest} ({exc}); "
+                    "falling back to host git"
+                )
+                RunnerGit().clone(spec)
+                return
+            raise
         if spec.sparse_path is not None:
             # --no-cone, or this checks out a DIFFERENT tree than RunnerGit.
             # `clone --sparse` turns cone mode on, and cone mode materializes
@@ -411,6 +470,35 @@ class ContainerGit:
     def _run(self, spec: CloneSpec, git_args: list[str]) -> None:
         """One containerized `git` invocation against this spec's destination."""
         self._capture(spec.dest, git_args)
+
+    def _clone_with_mount_race_retry(self, spec: CloneSpec, git_args: list[str]) -> None:
+        """The initial clone, retried once against the exact bind-mount race in the class docstring.
+
+        Reproduced live on macOS/Docker Desktop 2026-08-29: git starts (`Cloning
+        into '.'...`) against a directory that was `mkdir`'d immediately before
+        the `docker run`, then fails `/git/.git: No such file or directory` —
+        the container's view of a brand-new bind mount had not caught up with
+        the host's. Twelve immediate repeats of the identical command, on the
+        identical machine, all succeeded; the failure did not recur once. That
+        is the signature of a mount-propagation race, not a real clone failure,
+        so one immediate retry is tried before falling back to host git — a
+        fallback this class exists specifically to let a Mac without Xcode's
+        Command Line Tools avoid needing.
+
+        Deliberately narrow: only the exact "started, then ENOENT under /git"
+        shape retries. Anything else (auth, network, a bad branch) raises on
+        the first attempt exactly as before.
+        """
+        try:
+            self._capture(spec.dest, git_args)
+        except GitError as exc:
+            if not _is_fresh_mount_race(str(exc)):
+                raise
+            logger.warning(
+                f"containerized git clone hit the fresh-mount race in {spec.dest} ({exc}); "
+                "retrying once before falling back to host git"
+            )
+            self._capture(spec.dest, git_args)
 
     def _capture(self, dest: Path, git_args: list[str]) -> subprocess.CompletedProcess[str]:
         """One containerized `git` invocation, or `GitError` if it fails.
@@ -482,7 +570,7 @@ class ContainerGit:
         # manifest allow-list and carry no credentials.
         logger.info(f"containerized git: `{' '.join(argv[1:])}` into {dest}")
         try:
-            proc = runner.run(argv, env=_no_prompt_env())
+            proc = runner.run(argv, env=_no_prompt_env(), stdin=subprocess.DEVNULL)
         except OSError as exc:
             # Logged with the real errno first, the way `docker._docker()` does, so a
             # docker.exe blocked by an ACL or by AV leaves evidence instead of being
@@ -492,12 +580,44 @@ class ContainerGit:
             raise GitError(platform.DOCKER_CLI_MISSING_HELP) from exc
         if proc.returncode != 0:
             raise GitError(
-                f"containerized git {' '.join(git_args)} in {dest} failed: {proc.stderr.strip()}"
+                # The exit code, which `_run_git()` has always reported and this
+                # path never did. The Mac clone (2026-08-27) died in under a
+                # second with git's stderr ending at `Cloning into '.'...` and
+                # nothing after it — and a process that was killed looks exactly
+                # like one that failed when the only evidence is the words it
+                # got out first. 137 and 128 are different investigations.
+                # One sentence, and the comma-less concatenation of the two
+                # spellings that shipped in v0.6.57 is what the extra assertion
+                # in `test_a_containerized_failure_is_reported_once` guards:
+                # every macOS failure reached the tester printed twice, run
+                # together with no separator.
+                f"containerized git {' '.join(git_args)} in {dest} exited "
+                f"{proc.returncode}: {proc.stderr.strip()}"
             )
         return proc
 
     @staticmethod
     def _user_args() -> list[str]:
+        """`--user <uid>:<gid>` on Linux only. Docker Desktop must not get one.
+
+        The rule is the class docstring's, and this is the line that did not
+        obey it. `hasattr(os, "getuid")` is a test for WINDOWS wearing the name
+        of a test for Docker Desktop: macOS has `os.getuid`, so every Mac was
+        handed a `--user` — and a `--user` overrides the very file-sharing
+        mapping the docstring relies on to make the flag unnecessary there.
+
+        What that cost: the tester's container saw the bind mount as
+        `root:root` (2026-08-27), so git running as 501 could not create
+        `.git`. It was written up as the cause of the reported macOS failure
+        and it is not — see the class docstring for the measurement that
+        separates `Permission denied` from `No such file or directory`.
+
+        Asking `platform.detect()` says what is meant. The old spelling was
+        right about Windows by accident and wrong about macOS for the same
+        reason — one question that happened to answer a different one.
+        """
+        if platform.detect() != "linux":
+            return []
         getuid = getattr(os, "getuid", None)
         getgid = getattr(os, "getgid", None)
         if getuid is None or getgid is None:
