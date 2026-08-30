@@ -598,28 +598,25 @@ class ContainerGit:
 
     @staticmethod
     def _user_args() -> list[str]:
-        """`--user <uid>:<gid>` on Linux only. Docker Desktop must not get one.
+        """`platform.container_user_args()` — the policy lives there, not here.
 
-        The rule is the class docstring's, and this is the line that did not
-        obey it. `hasattr(os, "getuid")` is a test for WINDOWS wearing the name
-        of a test for Docker Desktop: macOS has `os.getuid`, so every Mac was
-        handed a `--user` — and a `--user` overrides the very file-sharing
-        mapping the docstring relies on to make the flag unnecessary there.
-
-        What that cost: the tester's container saw the bind mount as
+        The rule is the class docstring's, and the line that used to be here
+        did not obey it. `hasattr(os, "getuid")` is a test for WINDOWS wearing
+        the name of a test for Docker Desktop: macOS has `os.getuid`, so every
+        Mac was handed a `--user` — and a `--user` overrides the very
+        file-sharing mapping the docstring relies on to make the flag
+        unnecessary there. The tester's container saw the bind mount as
         `root:root` (2026-08-27), so git running as 501 could not create
-        `.git`. It was written up as the cause of the reported macOS failure
-        and it is not — see the class docstring for the measurement that
-        separates `Permission denied` from `No such file or directory`.
+        `.git`.
 
-        Asking `platform.detect()` says what is meant. The old spelling was
-        right about Windows by accident and wrong about macOS for the same
-        reason — one question that happened to answer a different one.
+        `docker.run_container()` (7.3) needs the same three lines, so they now
+        live once, in `platform`, and this asks rather than decides.
+
+        `platform.detect` is handed over explicitly even though it is also the
+        parameter's default: a default is bound when `platform` is imported, so
+        the seam would be dead — a test replacing `platform.detect` would keep
+        getting the real host's answer, and `test_docker_desktop_never_gets_a_user_flag`
+        would silently stop exercising macOS on a Windows dev box. That is the
+        same shape of blind spot the `hasattr` had.
         """
-        if platform.detect() != "linux":
-            return []
-        getuid = getattr(os, "getuid", None)
-        getgid = getattr(os, "getgid", None)
-        if getuid is None or getgid is None:
-            return []
-        return ["--user", f"{getuid()}:{getgid()}"]
+        return platform.container_user_args(platform_id=platform.detect)

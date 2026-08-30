@@ -1551,6 +1551,75 @@ def bind_label(*, enforcing: bool | None, fs_type: str | None) -> str:
     return ":z" if enforcing is True and selinux_labels_supported(fs_type) else ""
 
 
+def relabel_for_containers(
+    path: Path,
+    *,
+    run: RunCmd | None = None,
+    which: Callable[[str], str | None] | None = None,
+) -> bool:
+    """`chcon -Rt container_file_t <path>` — label our own files so a container may read them.
+
+    No sudo, no `chown`, no `pkexec`: the server directory is the user's, so the
+    user may relabel it, and an install must never reach for privilege it was
+    not granted through the consent path.
+
+    A failure is a warning and `False`, never an error — the `:z` on the bind
+    lines is the mechanism that carries the install; this is belt and braces for
+    the files that already exist before compose runs.
+
+    The single `False` is NOT the collapsed "could not ask" the probes above
+    exist to avoid. This function reports what it DID, and "the files are not
+    labelled" is equally true whether `chcon` is missing, would not start, or
+    exited non-zero. The three still say different things in the log, because
+    they send a reader to different places.
+    """
+    find = which if which is not None else _which
+    if find("chcon") is None:
+        logger.warning(f"could not relabel {path}: chcon is not installed")
+        return False
+    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv, timeout=600.0))
+    try:
+        proc = do(["chcon", "-Rt", "container_file_t", str(path)])
+    except OSError as exc:
+        logger.warning(f"could not relabel {path}: chcon could not be started: {exc}")
+        return False
+    if proc.returncode != 0:
+        logger.warning(
+            f"could not relabel {path}: chcon exited {proc.returncode}: {proc.stderr.strip()}"
+        )
+        return False
+    return True
+
+
+def container_user_args(*, platform_id: Callable[[], PlatformId] = detect) -> list[str]:
+    """`["--user", "uid:gid"]` for `docker run` on Linux; `[]` on Docker Desktop.
+
+    The one home for this policy (phase7-decisions, Extraction): on Linux a bind
+    mount written by the image's root is owned by root on the host and the user
+    cannot delete their own install; Docker Desktop maps ownership to the
+    logged-in user, so there the image's user is right and `--user` would only
+    break images that expect to be root. `git.ContainerGit` and 7.3's
+    `docker.run_container()` both ask here rather than deciding for themselves.
+
+    A Linux without `os.getuid` cannot happen on CPython, and that is exactly
+    why it is logged rather than passed over: the empty list it produces is the
+    same empty list Docker Desktop gets for the opposite reason, so without the
+    warning the two are indistinguishable afterwards.
+
+    Note for callers: `platform_id`'s default is bound at import, so a test that
+    replaces `platform.detect` is NOT seen here. Pass the seam through
+    explicitly if you need one — `git.ContainerGit._user_args()` does.
+    """
+    if platform_id() != "linux":
+        return []
+    getuid = getattr(os, "getuid", None)
+    getgid = getattr(os, "getgid", None)
+    if getuid is None or getgid is None:
+        logger.warning("this host says it is linux but has no os.getuid; passing no --user")
+        return []
+    return ["--user", f"{getuid()}:{getgid()}"]
+
+
 # ------------------------------------------------------------------ downloads
 # The Windows/macOS provisioning paths fetch a Docker Desktop installer — 629 MB
 # (659,189,680 bytes, measured 2026-08-23) — and then run it ELEVATED. So the

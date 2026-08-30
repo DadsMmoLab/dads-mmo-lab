@@ -521,3 +521,29 @@ def test_the_sparse_clone_path_carries_the_http_policy_too(
     pull = next(argv for argv in seen if "pull" in argv)
     assert "http.version=HTTP/1.1" in pull
     assert pull.index("-c") < pull.index("pull")
+
+
+def test_container_git_takes_its_user_args_from_platform(
+    seen: list[list[str]], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`git.py` no longer decides the uid:gid policy; `platform.container_user_args()` does.
+
+    The stand-in swallows keyword arguments because the call site hands the
+    platform seam through explicitly — see `ContainerGit._user_args()` for why
+    it has to. What is asserted is the wiring: whatever `platform` answers is
+    what lands in the argv, and it lands before the image, where a `docker run`
+    flag has to be.
+    """
+
+    def four_two(**kwargs: object) -> list[str]:
+        return ["--user", "4242:4242"]
+
+    monkeypatch.setattr(git.platform, "container_user_args", four_two)
+    git.ContainerGit().clone(git.CloneSpec(url="https://example/core.git", dest=tmp_path / "core"))
+    argv = seen[0]
+    assert argv[argv.index("--user") + 1] == "4242:4242"
+    assert argv.index("--user") < argv.index(git.CONTAINER_GIT_IMAGE)
+
+    monkeypatch.setattr(git.platform, "container_user_args", lambda **kwargs: [])
+    git.ContainerGit().clone(git.CloneSpec(url="https://example/core.git", dest=tmp_path / "core2"))
+    assert "--user" not in seen[1]

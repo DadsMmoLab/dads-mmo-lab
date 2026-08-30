@@ -884,3 +884,101 @@ def test_bind_label_answers_only_the_two_strings_composegen_will_splice() -> Non
         for fs_type in fs_types
     }
     assert answers <= {"", ":z"}, answers
+
+
+# ------------------------------------------------- relabelling and --user args
+# `relabel_for_containers()` reports what it DID, not what it learned, so its
+# single `False` is not the collapsed "could not ask" the probes above refuse:
+# a missing `chcon`, a `chcon` that would not start and a `chcon` that exited
+# non-zero all leave the same fact behind — the files are unlabelled — and each
+# one says so in the log. `:z` on the bind lines is what carries the install.
+
+
+def test_relabel_for_containers_runs_chcon_without_sudo(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The Fedora script's `selinux_label_for_containers`, ported.
+
+    Recursive, our own files, no sudo.
+    """
+    calls: list[list[str]] = []
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return _done()
+
+    def which(name: str) -> str | None:
+        return "/usr/bin/chcon" if name == "chcon" else None
+
+    assert platform.relabel_for_containers(tmp_path, run=run, which=which) is True
+    assert calls == [["chcon", "-Rt", "container_file_t", str(tmp_path)]]
+    with caplog.at_level("WARNING"):
+        assert (
+            platform.relabel_for_containers(tmp_path, run=lambda a: _done("", 1), which=which)
+            is False
+        )
+        assert platform.relabel_for_containers(tmp_path, run=run, which=_no_tools) is False
+
+        def refuse(argv: list[str]) -> subprocess.CompletedProcess[str]:
+            raise OSError("no such file")
+
+        assert platform.relabel_for_containers(tmp_path, run=refuse, which=which) is False
+    assert caplog.text.count("could not relabel") == 3
+    # The three failures are three different sentences, because "chcon is not
+    # installed" and "chcon exit 1" send the reader to different places.
+    assert len(set(caplog.text.splitlines())) == 3
+
+
+def test_relabel_for_containers_asks_for_no_privilege_at_all(tmp_path: Path) -> None:
+    """Privilege transparency is asserted on the ARGV, not on the sentence describing it.
+
+    The server directory is the user's own, so labelling it needs nothing but
+    the user. A `sudo`, a `pkexec` or a `chown` sneaking in here would be a
+    silent privilege ask in the middle of an install — the one thing this
+    project never does without the explicit consent path.
+    """
+    calls: list[list[str]] = []
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return _done()
+
+    platform.relabel_for_containers(tmp_path, run=run, which=lambda name: f"/usr/bin/{name}")
+    assert calls, "nothing was run at all, so this proves nothing"
+    forbidden = {"sudo", "pkexec", "doas", "su", "chown", "chmod", "setfacl", "usermod"}
+    for argv in calls:
+        assert not forbidden & set(argv), argv
+
+
+def test_container_user_args_is_uid_gid_on_linux_and_nothing_elsewhere(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One home for the `docker run` uid:gid policy.
+
+    Linux only; Docker Desktop runs as the image's user.
+    """
+    monkeypatch.setattr(platform.os, "getuid", lambda: 1000, raising=False)
+    monkeypatch.setattr(platform.os, "getgid", lambda: 1000, raising=False)
+    assert platform.container_user_args(platform_id=lambda: "linux") == ["--user", "1000:1000"]
+    assert platform.container_user_args(platform_id=lambda: "macos") == []
+    assert platform.container_user_args(platform_id=lambda: "windows") == []
+
+
+def test_container_user_args_leaves_evidence_when_it_cannot_ask_for_a_uid(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A Linux with no `os.getuid` is a contradiction, and silence would hide it.
+
+    The empty list is the only safe answer — a `--user` cannot be spelled
+    without the numbers — but it is the same empty list Docker Desktop gets for
+    a completely different reason, so the log is what tells the two apart.
+    """
+    monkeypatch.delattr(platform.os, "getuid", raising=False)
+    monkeypatch.delattr(platform.os, "getgid", raising=False)
+    with caplog.at_level("WARNING"):
+        assert platform.container_user_args(platform_id=lambda: "linux") == []
+    assert "getuid" in caplog.text
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        assert platform.container_user_args(platform_id=lambda: "windows") == []
+    assert caplog.text == "", "Docker Desktop having no getuid is normal, not a warning"
