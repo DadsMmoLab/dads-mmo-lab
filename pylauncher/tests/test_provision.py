@@ -8,11 +8,13 @@ silent), and the early exit when a daemon already answers.
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import sys
 import threading
 import time
+import traceback
 from collections.abc import Callable
 from pathlib import Path
 
@@ -1518,3 +1520,220 @@ def test_provisioning_bounds_the_probe_and_not_the_install(
     steps = [bound for argv, bound in seen if argv[:1] == ["sudo"]]
     assert probes and all(isinstance(b, float) for b in probes), f"unbounded probe: {probes}"
     assert steps and all(b is None for b in steps), f"the install steps were bounded: {steps}"
+
+
+# ------------------------------------------------ the sudo password, asked once (7.1)
+
+
+class _FeedRecorder:
+    """A `RunWithInput` that accepts exactly one password and records every feed.
+
+    Records `(argv, stdin_text)` so a test can assert the shape of every fed
+    step BY FIELD — argv parsed, not grepped — and that the password reached the
+    child only on stdin, never as an argv element.
+    """
+
+    def __init__(self, accept: str = "hunter2") -> None:
+        self.calls: list[tuple[list[str], str]] = []
+        self.accept = accept
+
+    def __call__(self, argv: list[str], text: str) -> subprocess.CompletedProcess[str]:
+        self.calls.append((argv, text))
+        if text == self.accept + "\n":
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return subprocess.CompletedProcess(argv, 1, "", "Sorry, try again.")
+
+
+def _never_feeds(argv: list[str], text: str) -> subprocess.CompletedProcess[str]:
+    raise AssertionError(f"a password was fed to {argv} when nobody could have asked for one")
+
+
+def _counting_ask(reply: str | None) -> tuple[list[str], Callable[[str], str | None]]:
+    asked: list[str] = []
+
+    def ask(question: str) -> str | None:
+        asked.append(question)
+        return reply
+
+    return asked, ask
+
+
+def test_sudo_session_argv_is_sudo_s_with_an_empty_prompt() -> None:
+    """`sudo -S -p ''` reads the password from stdin and prints no prompt; every fed step has it."""
+    session = platform.SudoSession(lambda _q: "hunter2", _FeedRecorder())
+    assert session.argv(["apt-get", "update"]) == ["sudo", "-S", "-p", "", "apt-get", "update"]
+
+
+def test_sudo_session_asks_once_and_feeds_every_later_step() -> None:
+    asked, ask = _counting_ask("hunter2")
+    feed = _FeedRecorder("hunter2")
+    session = platform.SudoSession(ask, feed)
+
+    assert session.verify() is True
+    assert session.verify() is True  # a second verify costs nothing and asks nobody
+    assert session.asked == 1 and len(asked) == 1
+    assert feed.calls == [(["sudo", "-S", "-p", "", "-v"], "hunter2\n")]
+
+    proc = session.run(["usermod", "-aG", "docker", "pk"])
+    assert proc.returncode == 0
+    assert feed.calls[-1] == (
+        ["sudo", "-S", "-p", "", "usermod", "-aG", "docker", "pk"],
+        "hunter2\n",
+    )
+    # The password travels on stdin only. Not one argv element carries it.
+    assert not [argv for argv, _text in feed.calls if "hunter2" in argv], feed.calls
+
+
+def test_a_wrong_sudo_password_is_re_asked_three_times_then_declined() -> None:
+    asked, ask = _counting_ask("wrong")
+    feed = _FeedRecorder("hunter2")
+    session = platform.SudoSession(ask, feed)
+
+    assert session.verify() is False
+    assert session.asked == 3 and len(asked) == 3
+    assert [argv for argv, _text in feed.calls] == [["sudo", "-S", "-p", "", "-v"]] * 3
+    # A decline is remembered: the next step must not open the dialog again.
+    assert session.verify() is False
+    assert session.asked == 3
+
+
+@pytest.mark.parametrize("reply", [None, ""])
+def test_a_dismissed_or_empty_password_declines_without_running_sudo(reply: str | None) -> None:
+    asked, ask = _counting_ask(reply)
+    feed = _FeedRecorder()
+    session = platform.SudoSession(ask, feed)
+    assert session.verify() is False
+    assert session.asked == 1
+    assert feed.calls == []
+
+
+def test_sudo_session_refuses_to_run_a_step_before_it_verified() -> None:
+    session = platform.SudoSession(lambda _q: "hunter2", _FeedRecorder())
+    with pytest.raises(platform.ProvisionError):
+        session.run(["apt-get", "update"])
+
+
+def test_a_missing_sudo_binary_reads_as_a_decline() -> None:
+    """No `sudo` on the box: the session says no, and provisioning reports the skip as today."""
+
+    def no_sudo(argv: list[str], text: str) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError("sudo")
+
+    session = platform.SudoSession(lambda _q: "hunter2", no_sudo)
+    assert session.verify() is False
+    assert session.asked == 1
+
+
+def test_the_four_ways_of_not_having_a_password_are_four_different_answers() -> None:
+    """`verify()` is a bool, so the two "could not ask" cases must be legible elsewhere.
+
+    Four events and `False` for three of them: the user dismissed the dialog,
+    the machine refused every password they typed, and `sudo` could not be run
+    at all. Only the middle one is the machine saying no; the other two are
+    nobody having answered, and a report that calls them all "wrong password"
+    sends the user to fix something that is not broken. `outcome` keeps them
+    apart, and a session nobody has asked yet is a fifth state that is not any
+    kind of no.
+    """
+    fresh = platform.SudoSession(lambda _q: "hunter2", _FeedRecorder())
+    assert fresh.outcome == "unasked"
+
+    good = platform.SudoSession(lambda _q: "hunter2", _FeedRecorder("hunter2"))
+    good.verify()
+    assert good.outcome == "verified"
+
+    dismissed = platform.SudoSession(lambda _q: None, _FeedRecorder())
+    dismissed.verify()
+    assert dismissed.outcome == "declined"
+
+    wrong = platform.SudoSession(lambda _q: "nope", _FeedRecorder("hunter2"))
+    wrong.verify()
+    assert wrong.outcome == "refused"
+
+    def no_sudo(argv: list[str], text: str) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError(2, "No such file or directory", "sudo")
+
+    missing = platform.SudoSession(lambda _q: "hunter2", no_sudo)
+    missing.verify()
+    assert missing.outcome == "unavailable"
+
+    outcomes = {s.outcome for s in (fresh, good, dismissed, wrong, missing)}
+    assert len(outcomes) == 5, outcomes
+
+
+def test_an_unaskable_session_is_never_recorded_as_a_wrong_password() -> None:
+    """`attempts=0` is nobody being asked, not everybody being refused."""
+    session = platform.SudoSession(lambda _q: "hunter2", _never_feeds, attempts=0)
+    assert session.verify() is False
+    assert session.asked == 0
+    assert session.outcome == "unavailable"
+
+
+def test_the_sudo_password_never_reaches_a_log_an_exception_a_repr_or_a_traceback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`/proc/<pid>/cmdline` is world-readable and logs get pasted into issues.
+
+    The four channels a secret escapes through in this codebase's experience:
+    argv, a log line, the text of something raised, and `repr()` — a plain
+    `@dataclass` renders every field, which is why `SudoSession` is not one and
+    spells its own `__repr__` anyway. A full traceback is checked too: that is
+    what a crash handler prints, and it renders the exception chain, not just
+    the message.
+    """
+    canary = "Hunter2!Canary"
+    feed = _FeedRecorder(canary)
+    everything: list[str] = []
+
+    with caplog.at_level(logging.DEBUG):
+        session = platform.SudoSession(lambda _q: canary, feed)
+        assert session.verify() is True
+        proc = session.run(["apt-get", "update"])
+        stale = platform.SudoSession(lambda _q: None, feed)
+        stale.verify()
+        try:
+            stale.run(["apt-get", "update"])
+        except platform.ProvisionError as exc:
+            everything += [str(exc), repr(exc), "".join(traceback.format_exception(exc))]
+        else:  # pragma: no cover - run() must refuse an unverified session
+            raise AssertionError("an unverified session ran a step")
+
+    everything += [record.getMessage() for record in caplog.records]
+    everything += [repr(session), str(session), repr(stale), repr(proc), str(proc)]
+    everything += [repr(vars(session)), repr(session.__dict__)]
+    everything += [" ".join(argv) for argv, _text in feed.calls]
+    for text in everything:
+        assert canary not in text, text
+    # …and the one place it IS allowed: stdin, with the newline sudo reads to.
+    assert [text for _argv, text in feed.calls] == [canary + "\n", canary + "\n"]
+
+
+def test_the_sudo_question_is_masked_by_the_prompt_widget() -> None:
+    """The wording is what makes the dialog echo dots — assert that, do not assume it."""
+    from yulon.ui.widgets import prompt
+
+    assert prompt.is_secret(platform.SUDO_PASSWORD_QUESTION) is True
+    assert "sudo password" in platform.SUDO_PASSWORD_QUESTION
+
+
+def test_the_default_run_with_input_feeds_stdin_and_pins_the_locale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_run_with_input()` is the real seam: stdin, captured output, C locale, no `check`."""
+    seen: dict[str, object] = {}
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen["argv"] = argv
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(platform.subprocess, "run", fake_run)
+    proc = platform._run_with_input(["sudo", "-S", "-p", "", "-v"], "hunter2\n")
+
+    assert proc.returncode == 0
+    assert seen["argv"] == ["sudo", "-S", "-p", "", "-v"]
+    assert seen["input"] == "hunter2\n"
+    assert seen["text"] is True and seen["capture_output"] is True and seen["check"] is False
+    env = seen["env"]
+    assert isinstance(env, dict) and env["LC_ALL"] == "C" and env["LANGUAGE"] == ""
+    assert "hunter2" not in seen["argv"], seen["argv"]

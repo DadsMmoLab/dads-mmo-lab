@@ -2106,6 +2106,181 @@ def _c_locale_env() -> dict[str, str]:
     return env
 
 
+# ------------------------------------------- the sudo password, asked once (7.1)
+
+RunWithInput = Callable[[list[str], str], subprocess.CompletedProcess[str]]
+"""Run argv to completion with `text` on its stdin. The seam `SudoSession` feeds through.
+
+A separate alias from `RunCmd` rather than an optional argument on it, because
+the two carry different things: `RunCmd` runs a command, this one hands a
+command a SECRET. Keeping them apart means a fake for one cannot be handed
+the other by accident, and the argv-level tests can record them separately.
+"""
+
+SUDO_PASSWORD_QUESTION = (
+    "Installing Docker needs administrator rights. Enter your sudo password "
+    "(leave it empty to skip the steps that need it):"
+)
+"""The one sudo question. Asked at most once per provisioning run.
+
+No `path`/`folder`/`(y/n)` wording on purpose: `ui/widgets/prompt.py`'s
+`is_secret()` masks everything that is not recognisably harmless, so this text
+is echoed as dots without the widget knowing anything about sudo. That is a
+claim about another module's regex, so it is asserted rather than assumed —
+`test_the_sudo_question_is_masked_by_the_prompt_widget`.
+"""
+
+SudoOutcome = Literal["unasked", "verified", "declined", "refused", "unavailable"]
+"""Where a `SudoSession` stands. One yes, one no, and three kinds of no-answer.
+
+`verify()` has to be a `bool` (the contract says so, and every caller wants a
+yes/no), and a bool is exactly where this project has lost the third outcome
+before: `docker_group` needed six names for the same reason, because "the user
+said no", "nobody was there to ask" and "the machine could not tell us" are
+different events that a single False makes indistinguishable.
+
+- `unasked` — nothing has been probed yet. Not an answer of any kind.
+- `verified` — a password was accepted by `sudo -v`. The only yes.
+- `declined` — the person was asked and gave nothing (dismissed, or empty).
+- `refused` — they answered and `sudo` rejected every attempt. The machine's no.
+- `unavailable` — `sudo` itself could not be run, so the question was never
+  actually put to anyone. Telling this user their password was wrong sends
+  them to fix something that is not broken.
+
+Only `refused` may be reported as a bad password; only `verified` may be
+reported as working sudo. The rest are "we do not know", and 7.1's provisioning
+report is what turns that into the right sentence for the user.
+"""
+
+
+def _run_with_input(argv: list[str], text: str) -> subprocess.CompletedProcess[str]:
+    """The default `RunWithInput`: `subprocess.run` with `text` on stdin, locale pinned to C.
+
+    `runner.run()` has no stdin parameter and this is the one caller that needs
+    one, so it calls `subprocess.run` directly — the same §3 deviation
+    `apply.DockerSql._mysql()` documents. Output is captured, never streamed:
+    a package install under `sudo -S` is a fire-and-collect call whose exit
+    code is the answer. `_c_locale_env()` for the same reason `ensure_docker()`
+    uses it: sudo's own stderr is read for "password is required".
+
+    `check=False` is deliberate and load-bearing, not a default written out for
+    tidiness: `check=True` raises `CalledProcessError`, whose `repr()` renders
+    the arguments it was built with, and a raise from here travels through a
+    traceback into a log. The exit code is the answer; nothing needs to throw.
+    """
+    return subprocess.run(
+        argv, input=text, text=True, capture_output=True, env=_c_locale_env(), check=False
+    )
+
+
+class SudoSession:
+    """Asked once. `sudo -S -p ''` reads the password from stdin; every step gets it that way.
+
+    Provisioning runs each package step as its own `sudo -n <cmd>`, and sudo's
+    per-tty timestamp does not carry between them from a GUI process — so on a
+    password-sudo box (clean Fedora, Arch) every step used to fail the same way.
+    The bash path asked exactly once (`sudo -v` on one pty). This is that, without
+    the pty: on the first "a password is required" the password is asked for
+    through `ask`, checked with `sudo -S -p '' -v`, and then fed on stdin to every
+    remaining privileged step. It never touches argv (`/proc/<pid>/cmdline` is
+    world-readable), is never logged, and lives only as long as this object.
+
+    Deliberately NOT a dataclass, it spells its own `__repr__`, and it does not
+    hold the password in an attribute at all — see `_authorise()`. A
+    `@dataclass` renders every field it has, so the generated `repr()` of this
+    object would print the password into any log line, assertion or traceback
+    that happens to render it.
+
+    `asked` counts calls to `ask` and is a test seam: the promise "at most one
+    dialog per `ensure_docker()`" is asserted on it, not inferred. `outcome`
+    carries WHY there is no password, which a `bool` cannot (see `SudoOutcome`).
+    """
+
+    def __init__(self, ask: runner.Prompter, run_input: RunWithInput, *, attempts: int = 3) -> None:
+        self._ask = ask
+        self._run_input = run_input
+        self._attempts = attempts
+        self._authorised: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None
+        self.asked = 0
+        self.outcome: SudoOutcome = "unasked"
+
+    def __repr__(self) -> str:
+        """Everything about this session except the one thing that must never be shown."""
+        return f"SudoSession(asked={self.asked}, outcome={self.outcome!r})"
+
+    def _authorise(self, password: str) -> None:
+        """Keep the accepted password in a closure cell rather than in an attribute.
+
+        `__repr__` closes the repr channel; this closes every channel that walks
+        the instance dictionary instead — `vars(obj)`, `obj.__dict__`, a
+        debugger's variable pane, any generic "dump this object" helper. The
+        first version of this class stored it as `self._password`, and the
+        canary test found it in `vars(session)` on the first run (2026-08-31).
+        What is left there afterwards is a function object whose repr is a name
+        and an address.
+        """
+
+        def feed(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+            return self._run_input(self.argv(cmd), password + "\n")
+
+        self._authorised = feed
+
+    def argv(self, cmd: list[str]) -> list[str]:
+        """`["sudo", "-S", "-p", "", *cmd]`: stdin password, empty prompt, no tty."""
+        return ["sudo", "-S", "-p", "", *cmd]
+
+    def run(self, cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        """Run `cmd` under sudo, verified password on stdin (plus the newline sudo reads to).
+
+        Raises rather than returning a failed `CompletedProcess` when there is
+        no verified password: a caller that reads an exit code would record
+        "this step failed" for a session that was never able to try, which is
+        the same collapse `SudoOutcome` exists to prevent one level up. The
+        message names the outcome, never the password.
+        """
+        if self._authorised is None:
+            raise ProvisionError(f"sudo session has no verified password ({self.outcome})")
+        return self._authorised(cmd)
+
+    def verify(self) -> bool:
+        """Ask for the password (up to `attempts` times) and prove it with `sudo -v`.
+
+        True once a password has been accepted — repeat calls neither ask nor
+        run anything. False when the user dismissed the dialog or left it empty,
+        when every attempt was refused, or when `sudo` itself cannot run; that
+        answer is remembered so the next privileged step does not re-open the
+        dialog — that would ask more than once, which is the promise this class
+        exists to keep. `outcome` says which of the four it was.
+        """
+        if self.outcome != "unasked":
+            return self.outcome == "verified"
+        for attempt in range(1, self._attempts + 1):
+            self.asked += 1
+            reply = self._ask(SUDO_PASSWORD_QUESTION)
+            if not reply:
+                logger.info("sudo password: declined by the user")
+                self.outcome = "declined"
+                return False
+            try:
+                proc = self._run_input(self.argv(["-v"]), reply + "\n")
+            except OSError as exc:
+                # Safe to interpolate: the password is on stdin, so nothing sudo
+                # was called with — and therefore nothing this error names — is it.
+                logger.warning(f"sudo could not be run: {exc}")
+                self.outcome = "unavailable"
+                return False
+            if proc.returncode == 0:
+                logger.info(f"sudo password accepted (attempt {attempt})")
+                self._authorise(reply)
+                self.outcome = "verified"
+                return True
+            logger.info(f"sudo password refused (attempt {attempt} of {self._attempts})")
+        # `asked == 0` means the loop never ran (`attempts=0`): nobody was asked,
+        # so this is a could-not-ask, not the machine refusing a password.
+        self.outcome = "refused" if self.asked else "unavailable"
+        return False
+
+
 def _run_steps(
     do: RunCmd, commands: list[list[str]], *, sudo: bool, dry_run: bool
 ) -> tuple[list[str], list[str]]:
