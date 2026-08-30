@@ -452,6 +452,35 @@ def test_a_tab_that_is_mid_import_is_not_torn_down_to_change_its_distro(
     assert "next time" in told[0], "the user was not told when it will take effect"
 
 
+def test_two_installs_under_different_parents_do_not_get_the_same_tab_title(
+    window: Any, tmp_path: Any
+) -> None:
+    """The tab strip was titled with the leaf folder alone, which is the one part that repeats.
+
+    The installer suggests the same folder name to everybody, so a second
+    server installed next to a first - a different disk, a different parent,
+    the same suggested leaf - produced two tabs reading exactly the same thing.
+    Nothing is lost (Stop is ownership-checked against the compose labels and
+    refuses across installs), but the user cannot tell which tab drives which
+    server, and both halves have to change: the older tab is just as wrong as
+    the new one, so its title has to grow too.
+    """
+    first = tmp_path / "on-the-ssd" / "DadsMmoLab"
+    second = tmp_path / "on-the-spinner" / "DadsMmoLab"
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-wotlk", first, None)
+    catalog.installed.emit("wow-wotlk", second, None)
+
+    tabs = window.property("tabs")
+    titles = [tabs.tabText(tabs.indexOf(_tab_for(window, d))) for d in (first, second)]
+
+    assert titles[0] != titles[1], f"both tabs read {titles[0]!r}"
+    assert "on-the-ssd" in titles[0] and "on-the-spinner" in titles[1]
+    # Distinguishing them must not mean printing the path: only the folders that
+    # actually differ are added, so the tmp_path above them stays out of it.
+    assert str(tmp_path) not in titles[0]
+
+
 def test_a_tab_opened_after_startup_is_still_joined_when_the_window_closes(
     window: Any, tmp_path: Any
 ) -> None:
