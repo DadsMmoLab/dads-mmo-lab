@@ -204,7 +204,7 @@ class Recorder:
             start_db=self.start_db,
             start=self.start,
             wait_db_healthy=lambda spec: self.db_healthy,
-            wait_ready=lambda spec, host, port: self.ready,
+            wait_ready=lambda spec, ready: self.ready,
             keep_awake=lambda: nullcontext(),
         )
         for key, value in overrides.items():

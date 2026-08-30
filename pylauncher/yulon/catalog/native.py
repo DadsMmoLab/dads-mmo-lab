@@ -282,7 +282,7 @@ class Seams:
     start_db: Callable[[docker.ContainerSpec, Path], None] = docker.start_database
     start: Callable[[docker.ContainerSpec, Path], bool] = docker.start_staged
     wait_db_healthy: Callable[[docker.ContainerSpec], bool] = docker.wait_db_healthy_for
-    wait_ready: Callable[[docker.ContainerSpec, str, int], bool] = docker.wait_ready_for
+    wait_ready: Callable[[docker.ContainerSpec, docker.ReadySpec], bool] = docker.wait_ready_for
     keep_awake: Callable[[], AbstractContextManager[None]] = platform.keep_awake
 
 
@@ -944,7 +944,8 @@ class NativeInstaller:
                 f"{spec.service_for(spec.db)}` in {server_dir} will say why."
             )
         yield "Waiting for the world server to finish loading (this can take many minutes)."
-        if not self._seams.wait_ready(spec, _READY_REALM_HOST, self.entry.ports.world):
+        ready = docker.azerothcore_ready(_READY_REALM_HOST, self.entry.ports.world)
+        if not self._seams.wait_ready(spec, ready):
             raise InstallerError(
                 f"The server started but never reported ready. `docker compose logs "
                 f"{spec.service_for(spec.world)}` in {server_dir} has what it printed."

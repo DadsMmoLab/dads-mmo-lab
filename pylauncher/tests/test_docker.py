@@ -215,7 +215,9 @@ def test_wait_ready_returns_true_once_markers_present(monkeypatch: pytest.Monkey
     monkeypatch.setattr(docker.runner, "run", fake_run)
     assert (
         docker.wait_ready(
-            "ac-authserver", "ac-worldserver", "127.0.0.1", 3724, timeout=10, interval=0.01
+            "ac-authserver",
+            "ac-worldserver",
+            docker.azerothcore_ready("127.0.0.1", 3724, timeout=10, interval=0.01),
         )
         is True
     )
@@ -253,7 +255,9 @@ def test_wait_ready_tolerates_transient_docker_ps_failure(
     # Must not raise DockerCommandError despite the first docker ps failing.
     assert (
         docker.wait_ready(
-            "ac-authserver", "ac-worldserver", "127.0.0.1", 3724, timeout=10, interval=0.01
+            "ac-authserver",
+            "ac-worldserver",
+            docker.azerothcore_ready("127.0.0.1", 3724, timeout=10, interval=0.01),
         )
         is True
     )
@@ -263,7 +267,7 @@ def test_wait_ready_tolerates_transient_docker_ps_failure(
 def test_wait_ready_rejects_non_positive_interval() -> None:
     """A zero/negative interval is rejected rather than busy-looping."""
     with pytest.raises(ValueError):
-        docker.wait_ready("a", "w", "127.0.0.1", 3724, interval=0)
+        docker.wait_ready("a", "w", docker.ReadySpec(world="ready...", interval=0))
 
 
 def test_ready_spec_defaults_and_the_azerothcore_builder() -> None:
@@ -286,6 +290,160 @@ def test_ready_spec_defaults_and_the_azerothcore_builder() -> None:
     assert docker.azerothcore_ready("127.0.0.1", 8085).timeout == docker._READY_TIMEOUT_SECONDS
     with pytest.raises(TypeError, match="restart_loop"):
         docker.azerothcore_ready("127.0.0.1", 8085, restart_loop=2)
+
+
+def _ready_fakes(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    world_log: str,
+    auth_log: str = "Added realm at 127.0.0.1:8085\n",
+    inspect: Callable[[], str] | None = None,
+) -> list[list[str]]:
+    """A running auth+world pair whose logs and inspect answer are the test's choice."""
+    monkeypatch.setattr(docker.time, "sleep", lambda _seconds: None)
+    seen: list[list[str]] = []
+    state = inspect if inspect is not None else (lambda: "running\t2026-08-22T01:24:53Z\t0\n")
+
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        seen.append(cmd)
+        if cmd[:2] == ["docker", "ps"]:
+            return _completed(stdout=f"{SPEC.auth}\n{SPEC.world}\n")
+        if cmd[:2] == ["docker", "inspect"]:
+            return _completed(stdout=state())
+        if cmd[:2] == ["docker", "logs"]:
+            return _completed(stdout=auth_log if cmd[-1] == SPEC.auth else world_log)
+        return _completed()
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    return seen
+
+
+def test_wait_ready_matches_the_world_marker_as_a_regex(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A CMaNGOS-style marker (`Avg Diff:`) and an anchored one both work; no literal search.
+
+    The log line is what a worldserver really prints, not a string built from
+    the pattern, so a `wait_ready()` that had gone back to `pattern in log`
+    would fail both halves rather than pass the first by accident.
+    """
+    _ready_fakes(monkeypatch, world_log="Server: Avg Diff: 12 ms\n")
+    spec = docker.ReadySpec(world=r"Avg Diff:\s+\d+", timeout=1.0, interval=0.01)
+    assert docker.wait_ready(SPEC.auth, SPEC.world, spec) is True
+    # `^` binds to the start of the whole log, and this line is not there.
+    spec = docker.ReadySpec(world=r"^Avg Diff", timeout=0.05, interval=0.01)
+    assert docker.wait_ready(SPEC.auth, SPEC.world, spec) is False
+
+
+def test_wait_ready_matches_the_escaped_auth_marker_against_a_real_log_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`azerothcore_ready()` escapes its host, so the match MUST be a regex one.
+
+    A substring search for `127\\.0\\.0\\.1:8085` can never succeed against a
+    log that says `127.0.0.1:8085`; readiness would poll out its timeout on a
+    server that came up. This project shipped that defect twice.
+    """
+    _ready_fakes(
+        monkeypatch,
+        auth_log="Added realm at 127.0.0.1:8085\n",
+        world_log="World initialized in 2 minutes 5 seconds. ready...\n",
+    )
+    ready = docker.azerothcore_ready("127.0.0.1", 8085, timeout=1.0, interval=0.01)
+    assert "\\." in ready.auth, "the builder is supposed to escape the host"
+    assert docker.wait_ready(SPEC.auth, SPEC.world, ready) is True
+
+
+def test_wait_ready_with_no_auth_marker_never_reads_the_auth_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`auth=None` means "do not wait on auth": its log is not read and its absence is fine."""
+    monkeypatch.setattr(docker.time, "sleep", lambda _seconds: None)
+    seen: list[list[str]] = []
+
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        seen.append(cmd)
+        if cmd[:2] == ["docker", "ps"]:
+            return _completed(stdout=f"{SPEC.world}\n")  # no auth container at all
+        if cmd[:2] == ["docker", "inspect"]:
+            return _completed(stdout="running\t2026-08-22T01:24:53Z\t0\n")
+        if cmd[:2] == ["docker", "logs"]:
+            return _completed(stdout="World initialized, ready...\n")
+        return _completed()
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    spec = docker.ReadySpec(world="ready", auth=None, timeout=1.0, interval=0.01)
+    assert docker.wait_ready(SPEC.auth, SPEC.world, spec) is True
+    assert not [c for c in seen if c[-1] == SPEC.auth], "the auth container was consulted"
+
+
+def test_wait_ready_stops_at_once_on_a_fatal_line(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A line that means "never" ends the wait now, not after the timeout, and says why."""
+    seen = _ready_fakes(monkeypatch, world_log="Could not connect to the database\n")
+    spec = docker.ReadySpec(
+        world="ready", fatal="Could not connect to the database", timeout=60.0, interval=0.01
+    )
+    with caplog.at_level("WARNING", logger="yulon.docker"):
+        assert docker.wait_ready(SPEC.auth, SPEC.world, spec) is False
+    assert len([c for c in seen if c[:2] == ["docker", "ps"]]) == 1, "it kept polling"
+    assert "Could not connect to the database" in caplog.text
+
+
+def test_wait_ready_declares_a_crash_loop_when_the_restart_count_keeps_growing(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`RestartCount` growing by `restart_loop` since the first look is a loop, not a slow start.
+
+    Growth is measured from the first observation, not from zero: a server that
+    restarted twice last week and is now loading fine must not be refused. The
+    poll count is asserted because giving up on the 60s timeout instead of on
+    the restart count is a different, much slower behaviour with the same
+    return value.
+    """
+    counter = {"n": 10}
+
+    def inspect() -> str:
+        counter["n"] += 1
+        return f"running\t2026-08-22T01:24:53Z\t{counter['n']}\n"
+
+    seen = _ready_fakes(monkeypatch, world_log="loading...\n", inspect=inspect)
+    spec = docker.ReadySpec(world="ready", restart_loop=3, timeout=60.0, interval=0.01)
+    with caplog.at_level("WARNING", logger="yulon.docker"):
+        assert docker.wait_ready(SPEC.auth, SPEC.world, spec) is False
+    polls = len([c for c in seen if c[:2] == ["docker", "ps"]])
+    assert polls == 4, f"polled {polls} times; the loop was not detected on the fourth look"
+    assert "restart" in caplog.text.lower()
+
+
+def test_wait_ready_does_not_call_a_server_that_restarted_last_week_a_crash_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Growth is measured from the first look, so a high but STILL count is fine."""
+    _ready_fakes(monkeypatch, world_log="ready...\n", inspect=lambda: "running\tT\t97\n")
+    spec = docker.ReadySpec(world="ready", restart_loop=1, timeout=1.0, interval=0.01)
+    assert docker.wait_ready(SPEC.auth, SPEC.world, spec) is True
+
+
+def test_wait_ready_for_hands_the_spec_containers_and_the_ready_spec_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`wait_ready_for()` unpacks the container spec and still names the daemon."""
+    seen: list[tuple[str, str, docker.ReadySpec, str | None]] = []
+    ready = docker.ReadySpec(world="ready")
+
+    def fake_wait_ready(
+        auth: str, world: str, spec: docker.ReadySpec, *, wsl_distro: str | None = None
+    ) -> bool:
+        seen.append((auth, world, spec, wsl_distro))
+        return True
+
+    monkeypatch.setattr(docker, "wait_ready", fake_wait_ready)
+    assert docker.wait_ready_for(SPEC, ready, wsl_distro="dml-arch") is True
+    assert seen == [(SPEC.auth, SPEC.world, ready, "dml-arch")]
 
 
 def test_container_state_reads_the_restart_count_in_the_same_inspect(
@@ -574,7 +732,11 @@ def test_wait_ready_ignores_the_previous_runs_ready_marker(
 
     monkeypatch.setattr(docker.runner, "run", fake_run)
     assert (
-        docker.wait_ready(SPEC.auth, SPEC.world, "127.0.0.1", 8085, timeout=0.2, interval=0.1)
+        docker.wait_ready(
+            SPEC.auth,
+            SPEC.world,
+            docker.azerothcore_ready("127.0.0.1", 8085, timeout=0.2, interval=0.1),
+        )
         is False
     )
     assert any("--since" in cmd for cmd in seen), "readiness must scope logs to the current run"
@@ -604,7 +766,11 @@ def test_wait_ready_still_succeeds_when_this_run_is_actually_ready(
 
     monkeypatch.setattr(docker.runner, "run", fake_run)
     assert (
-        docker.wait_ready(SPEC.auth, SPEC.world, "127.0.0.1", 8085, timeout=2.0, interval=0.1)
+        docker.wait_ready(
+            SPEC.auth,
+            SPEC.world,
+            docker.azerothcore_ready("127.0.0.1", 8085, timeout=2.0, interval=0.1),
+        )
         is True
     )
 
@@ -1367,7 +1533,11 @@ def test_wait_ready_is_not_fooled_by_a_container_in_restart_backoff(
 
     monkeypatch.setattr(docker.runner, "run", fake_run)
     assert (
-        docker.wait_ready(SPEC.auth, SPEC.world, "127.0.0.1", 8085, timeout=0.3, interval=0.1)
+        docker.wait_ready(
+            SPEC.auth,
+            SPEC.world,
+            docker.azerothcore_ready("127.0.0.1", 8085, timeout=0.3, interval=0.1),
+        )
         is False
     )
 
@@ -1729,7 +1899,12 @@ def test_the_polls_say_why_and_stop_when_this_host_has_no_docker_cli(
     """
     monkeypatch.setattr(docker, "_CLI_MISSING_GRACE_SECONDS", 0.2)
     for label, poll in (
-        ("wait_ready()", lambda: docker.wait_ready("a", "w", "h", 1, timeout=60.0, interval=0.02)),
+        (
+            "wait_ready()",
+            lambda: docker.wait_ready(
+                "a", "w", docker.azerothcore_ready("h", 1, timeout=60.0, interval=0.02)
+            ),
+        ),
         ("wait_db_healthy()", lambda: docker.wait_db_healthy("db", timeout=60.0, interval=0.02)),
     ):
         caplog.clear()
@@ -1769,7 +1944,8 @@ def test_a_readiness_poll_still_rides_out_a_docker_that_only_stumbles(
         return _completed(stdout="realm.example:3724 ready...")
 
     monkeypatch.setattr(docker.runner, "run", fake_run)
-    assert docker.wait_ready(SPEC.auth, SPEC.world, "realm.example", 3724, 5.0, 0.01) is True
+    ready = docker.azerothcore_ready("realm.example", 3724, timeout=5.0, interval=0.01)
+    assert docker.wait_ready(SPEC.auth, SPEC.world, ready) is True
 
 
 # ------------------------------------------------- remove_staged (teardown)

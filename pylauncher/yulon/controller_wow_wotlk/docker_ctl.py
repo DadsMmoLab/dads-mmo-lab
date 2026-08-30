@@ -52,7 +52,8 @@ def wait_server_ready(
     realm_host: str, realm_port: int, *, wsl_distro: str | None = None, **kwargs: float
 ) -> bool:
     """`wait_ready()` pre-bound to `SPEC`'s auth/world containers."""
-    return docker.wait_ready_for(SPEC, realm_host, realm_port, wsl_distro=wsl_distro, **kwargs)
+    ready = docker.azerothcore_ready(realm_host, realm_port, **kwargs)
+    return docker.wait_ready_for(SPEC, ready, wsl_distro=wsl_distro)
 
 
 def port_conflicts_here() -> list[str]:

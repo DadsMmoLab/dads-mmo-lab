@@ -357,6 +357,5 @@ class Controller:
 
     def wait_ready(self, realm_host: str, realm_port: int, **kwargs: float) -> bool:
         """Poll until auth+world are up and ready. `kwargs` forward timeout/interval."""
-        return docker.wait_ready_for(
-            self.spec, realm_host, realm_port, wsl_distro=self.wsl_distro, **kwargs
-        )
+        ready = docker.azerothcore_ready(realm_host, realm_port, **kwargs)
+        return docker.wait_ready_for(self.spec, ready, wsl_distro=self.wsl_distro)

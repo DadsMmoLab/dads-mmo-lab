@@ -2011,46 +2011,50 @@ def azerothcore_ready(realm_host: str, realm_port: int, **kwargs: float) -> Read
 def wait_ready(
     auth_container: str,
     world_container: str,
-    realm_host: str,
-    realm_port: int,
-    timeout: float = _READY_TIMEOUT_SECONDS,
-    interval: float = _POLL_INTERVAL_SECONDS,
+    spec: ReadySpec,
     *,
     wsl_distro: str | None = None,
 ) -> bool:
-    """Poll until auth+world are up and both have emitted their ready markers.
+    """Poll until the server is up, or until it is clear it never will be.
 
-    Mirrors `dml-start.sh`'s `_wait_ready`: the auth log must contain
-    `<realm_host>:<realm_port>` and the world log must contain `ready...`. A
-    transient `docker ps`/CLI failure during polling is treated as "not ready
-    this iteration" and retried, never raised — see `_status_safe()`.
+    Ready means: every container the spec waits on is listed by `docker ps`
+    AND running (not in restart backoff), and this run's log matches
+    `spec.auth` (when set) / `spec.world`. Not-ready-ever means one of three
+    things, each returning False at once: `spec.fatal` matched in the world
+    log; `RestartCount` grew by `spec.restart_loop` since the first look (a
+    crash loop under `restart: unless-stopped`, which `docker ps` never shows
+    — review, 2026-08-22); or the timeout ran out.
 
-    A missing docker CLI is not treated as transient. It still does not raise —
-    the answer is `False`, as it is for every other way a server fails to come
-    up — but it is said out loud at WARNING and it stops within
-    `_CLI_MISSING_GRACE_SECONDS` instead of polling out the default 480s with
-    nothing above DEBUG to show for it (this happened; fixed 2026-08-23).
+    Logs are read into Python and matched here with `re.search`, never through
+    a shell pipeline: the Tortoise script recorded `pipefail` + `grep -q`
+    SIGPIPEing `docker logs` into false negatives. It is a regex search and not
+    a substring one for a second reason too — `azerothcore_ready()` escapes the
+    realm address it looks for, so `127\\.0\\.0\\.1:8085` is the pattern and
+    `127.0.0.1:8085` is the log; a literal `in` can never match the two, and a
+    readiness check that cannot succeed reports a dead server as an install.
 
-    Both markers are looked for in the CURRENT run's logs only. Docker keeps a
-    container's output across restarts, so a restarted server still carries the
-    previous run's `ready...`; reading the whole log made this return True
-    instantly on every restart, while the server was in fact still loading.
+    Both markers are looked for in the CURRENT run's logs only (see `_logs()`):
+    Docker keeps output across restarts, and reading the whole log returned True
+    on every restart while the server was in fact still loading.
 
-    Note: worst-case wall-clock time before returning `False` is
-    `timeout + interval`, same caveat as `wait_db_healthy()`.
+    A transient `docker ps`/CLI failure is "not ready this iteration" and
+    retried, never raised — see `_status_safe()`. A missing docker CLI is not
+    transient: still `False`, said out loud at WARNING, and it stops within
+    `_CLI_MISSING_GRACE_SECONDS` (fixed 2026-08-23).
 
-    Args:
-        interval: Must be positive (see `wait_db_healthy()`).
+    Worst-case wall-clock before `False` is `timeout + interval`, as for
+    `wait_db_healthy()`. `spec.interval` must be positive (same reason).
     """
-    if interval <= 0:
-        raise ValueError(f"interval must be positive, got {interval!r}")
+    if spec.interval <= 0:
+        raise ValueError(f"interval must be positive, got {spec.interval!r}")
     logger.debug(
         f"wait_ready() called: auth_container={auth_container} "
-        f"world_container={world_container} realm={realm_host}:{realm_port}"
+        f"world_container={world_container} spec={spec}"
     )
-    target = f"{realm_host}:{realm_port}"
-    deadline = time.monotonic() + timeout
+    wanted = [world_container] if spec.auth is None else [auth_container, world_container]
+    deadline = time.monotonic() + spec.timeout
     cli_missing_since: float | None = None
+    first_restarts: int | None = None
     while time.monotonic() < deadline:
         try:
             running = _status_safe(wsl_distro=wsl_distro)
@@ -2058,34 +2062,57 @@ def wait_ready(
             cli_missing_since, give_up = _cli_missing_run(cli_missing_since, "wait_ready()")
             if give_up:
                 return False
-            time.sleep(interval)
+            time.sleep(spec.interval)
             continue
         cli_missing_since = None
-        listed = running is not None and auth_container in running and world_container in running
-        if listed:
+        if running is not None and all(name in running for name in wanted):
             # `docker ps` lists a container in restart backoff, so being listed
             # is not the same as being up. One inspect per container answers
-            # both that and "when did THIS run start".
-            auth = container_state(auth_container, wsl_distro=wsl_distro)
+            # that, "when did THIS run start" and "how often has it died".
             world = container_state(world_container, wsl_distro=wsl_distro)
+            if first_restarts is None and world.status:
+                first_restarts = world.restart_count
             if (
-                auth.settled
-                and world.settled
-                and target
-                in _logs(
-                    auth_container, this_run_only=True, since=auth.started_at, wsl_distro=wsl_distro
+                first_restarts is not None
+                and world.restart_count - first_restarts >= spec.restart_loop
+            ):
+                logger.warning(
+                    f"{world_container} restarted {world.restart_count - first_restarts} times "
+                    "while being waited on; that is a crash loop, not a slow start"
                 )
-                and "ready..."
-                in _logs(
-                    world_container,
-                    this_run_only=True,
-                    since=world.started_at,
-                    wsl_distro=wsl_distro,
+                return False
+            world_log = _logs(
+                world_container,
+                this_run_only=True,
+                since=world.started_at,
+                wsl_distro=wsl_distro,
+            )
+            if spec.fatal is not None and re.search(spec.fatal, world_log):
+                logger.warning(
+                    f"{world_container} printed a fatal line ({spec.fatal!r}); giving up"
                 )
+                return False
+            if (
+                world.settled
+                and re.search(spec.world, world_log)
+                and _auth_ready(auth_container, spec, wsl_distro=wsl_distro)
             ):
                 return True
-        time.sleep(interval)
+        time.sleep(spec.interval)
     return False
+
+
+def _auth_ready(auth_container: str, spec: ReadySpec, *, wsl_distro: str | None = None) -> bool:
+    """The auth half of `wait_ready()`: trivially true when the spec does not wait on auth."""
+    if spec.auth is None:
+        return True
+    auth = container_state(auth_container, wsl_distro=wsl_distro)
+    if not auth.settled:
+        return False
+    auth_log = _logs(
+        auth_container, this_run_only=True, since=auth.started_at, wsl_distro=wsl_distro
+    )
+    return re.search(spec.auth, auth_log) is not None
 
 
 def port_conflicts(ports: tuple[int, ...], *, wsl_distro: str | None = None) -> list[str]:
@@ -2123,18 +2150,9 @@ def wait_db_healthy_for(
     return wait_db_healthy(spec.db, **kwargs, wsl_distro=wsl_distro)
 
 
-def wait_ready_for(
-    spec: ContainerSpec,
-    realm_host: str,
-    realm_port: int,
-    *,
-    wsl_distro: str | None = None,
-    **kwargs: float,
-) -> bool:
-    """`wait_ready()` for `spec.auth`/`spec.world`. `kwargs` forwards timeout/interval."""
-    return wait_ready(
-        spec.auth, spec.world, realm_host, realm_port, **kwargs, wsl_distro=wsl_distro
-    )
+def wait_ready_for(spec: ContainerSpec, ready: ReadySpec, *, wsl_distro: str | None = None) -> bool:
+    """`wait_ready()` for `spec.auth`/`spec.world` with the game's `ReadySpec`."""
+    return wait_ready(spec.auth, spec.world, ready, wsl_distro=wsl_distro)
 
 
 def port_conflicts_for(spec: ContainerSpec, *, wsl_distro: str | None = None) -> list[str]:
