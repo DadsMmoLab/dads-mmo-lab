@@ -117,19 +117,29 @@ def test_already_running_docker_short_circuits(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_linux_engine_plan_per_package_manager() -> None:
+    """Every list that will run `compose build` carries BuildKit.
+
+    The apt list has since the Ubuntu gate (`docker.io` ships no plugin); the
+    Fedora and Arch scripts that passed installed it by hand
+    (`docker-buildx-plugin`, `docker-buildx`), so the dnf and pacman lists
+    must too, or gate 7.1 there is the first build without it.
+    """
     assert platform.docker_engine_commands("pacman", steamos=True) == [
         ["steamos-readonly", "disable"],
-        ["pacman", "-Sy", "--noconfirm", "docker", "docker-compose"],
+        ["pacman", "-Sy", "--noconfirm", "docker", "docker-compose", "docker-buildx"],
         ["steamos-readonly", "enable"],
         ["systemctl", "enable", "--now", "docker"],
     ]
     apt = platform.docker_engine_commands("apt", steamos=False)
     assert apt[0] == ["apt-get", "update"] and "docker.io" in apt[1]
     assert "docker-buildx" in apt[1]  # compose build needs BuildKit; docker.io lacks it
-    assert platform.docker_engine_commands("dnf", steamos=False)[0][:3] == [
+    assert platform.docker_engine_commands("dnf", steamos=False)[0] == [
         "dnf",
         "-y",
         "install",
+        "moby-engine",
+        "docker-compose",
+        "docker-buildx",
     ]
     # The group join is not in any plan, on purpose: the argv exists only
     # inside the consent branch, so there is no ungated construction site.

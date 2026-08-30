@@ -1415,7 +1415,9 @@ def docker_engine_commands(pm: PackageManager, *, steamos: bool) -> list[list[st
     """
     install: list[list[str]]
     if pm == "pacman":
-        install = [["pacman", "-Sy", "--noconfirm", "docker", "docker-compose"]]
+        # docker-buildx too: the Arch script that passed the gate installed it by
+        # hand, and `compose build` needs BuildKit same as every other manager here.
+        install = [["pacman", "-Sy", "--noconfirm", "docker", "docker-compose", "docker-buildx"]]
         if steamos:
             install = [["steamos-readonly", "disable"], *install, ["steamos-readonly", "enable"]]
     elif pm == "apt":
@@ -1426,7 +1428,9 @@ def docker_engine_commands(pm: PackageManager, *, steamos: bool) -> list[list[st
             ["apt-get", "install", "-y", "docker.io", "docker-compose-v2", "docker-buildx"],
         ]
     elif pm == "dnf":
-        install = [["dnf", "-y", "install", "moby-engine", "docker-compose"]]
+        # docker-buildx too: the Fedora script that passed the gate installed it
+        # by hand (`docker-buildx-plugin`), and `compose build` needs BuildKit.
+        install = [["dnf", "-y", "install", "moby-engine", "docker-compose", "docker-buildx"]]
     else:
         install = [["zypper", "--non-interactive", "install", "docker", "docker-compose"]]
     return [*install, ["systemctl", "enable", "--now", "docker"]]
