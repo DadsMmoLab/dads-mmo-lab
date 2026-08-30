@@ -98,6 +98,7 @@ def build_window() -> object:
     from yulon.state import KnownInstall, load_state
     from yulon.ui.catalog_view import CatalogView
     from yulon.ui.controller_view import ControllerServices, ControllerView
+    from yulon.ui.tab_titles import retitle_controller_tabs
     from yulon.ui.widgets.log_panel import LogPanel
     from yulon.update import UpdateCheck, check_for_update
 
@@ -277,7 +278,15 @@ def build_window() -> object:
         controllers[key] = view
         controller_views.append(view)
         panels.append(view.console_log)
-        tabs.addTab(view, f"{entry.name} — {server_dir.name}")
+        tabs.addTab(view, entry.name)
+        # The leaf folder alone was the title, and it is the one part of the
+        # path that repeats: the installer suggests the same name every time,
+        # so two installs under different parents both read "WoW WotLK —
+        # DadsMmoLab". The whole strip is re-titled and not just this tab,
+        # because what tells them apart is the shortest tail they do NOT share
+        # - a fact about the set, so opening the second tab is what makes the
+        # first one's title wrong.
+        retitle_controller_tabs(tabs, controllers.values())
         tabs.setCurrentWidget(view)
 
     for install in state.installs:
