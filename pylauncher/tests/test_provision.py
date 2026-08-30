@@ -1387,3 +1387,119 @@ def test_declining_does_not_promise_an_engine_that_was_never_installed(
     assert not [m for m in report.manual_steps if "Docker Engine is installed" in m]
     # The decline itself is still explained, and still says how to change it.
     assert any("You said no" in m and "usermod -aG docker pk" in m for m in report.manual_steps)
+
+
+# ------------------------------------------------- the probe answers, or stops
+# `docker info` is a probe, and every probe in this module is bounded — see
+# `detect_alf_state()`, which says so in a comment. This one was not: the
+# default runner passed no `timeout`, so a Docker CLI that never returned held
+# whoever asked for as long as it liked. Measured against a `docker` stub that
+# ran `ping -n 999`: a five-second budget was still inside the first call
+# thirty-two seconds later. The tests below pin the two halves of the fix — the
+# bound lives where the probe is, and the poll's deadline bounds the call in
+# progress rather than only the gaps between calls.
+
+
+class _Hangs:
+    """A `runner.run` that answers only when it is told how long it may take.
+
+    Stands in for a wedged Docker CLI, and behaves like the real
+    `subprocess.run`: given a `timeout` it gives up after it and reports exit
+    124, given none it blocks for `seconds`. `seconds` is long enough that an
+    unbounded caller cannot pass the elapsed-time assertions below by being
+    quick, and short enough that a RED run still finishes.
+    """
+
+    def __init__(self, seconds: float = 3.0) -> None:
+        self.seconds = seconds
+        self.bounds: list[float | None] = []
+
+    def __call__(
+        self, argv: list[str], *args: object, timeout: float | None = None, **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        self.bounds.append(timeout)
+        waited = self.seconds if timeout is None else min(timeout, self.seconds)
+        time.sleep(waited)
+        if timeout is not None and waited >= timeout:
+            return subprocess.CompletedProcess(argv, 124, "", f"timed out after {timeout}s")
+        return subprocess.CompletedProcess(argv, 1, "", "")
+
+
+def test_docker_ready_bounds_its_own_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A caller who asks for nothing still gets a bound — that is where it belongs.
+
+    `catalog/installer.py`, `catalog/native.py` and `catalog/preflight.py` all
+    reach this function through its bare no-argument form, which is the real GUI
+    install path, so a bound that only exists at a call site protects nobody.
+    """
+    hangs = _Hangs()
+    monkeypatch.setattr(platform.runner, "run", hangs)
+    monkeypatch.setattr(platform, "docker_programs", lambda: ("docker",))
+
+    assert platform.docker_ready() is False
+
+    assert hangs.bounds and all(
+        isinstance(bound, float) for bound in hangs.bounds
+    ), f"the probe ran with {hangs.bounds}"
+
+
+def test_docker_ready_shares_one_budget_across_the_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two candidate CLIs are one probe's budget, not two — Windows offers both."""
+    hangs = _Hangs()
+    monkeypatch.setattr(platform.runner, "run", hangs)
+    monkeypatch.setattr(platform, "docker_programs", lambda: ("docker", r"C:\docker.exe"))
+
+    began = time.monotonic()
+    assert platform.docker_ready(timeout=0.5) is False
+    elapsed = time.monotonic() - began
+
+    assert elapsed < 1.0, f"the budget was spent once per candidate ({elapsed:.1f}s)"
+
+
+def test_the_ready_poll_cannot_overshoot_by_one_hung_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deadline tested only between calls is not a deadline.
+
+    `_wait_docker_ready()` checked `time.monotonic()` before each probe and
+    `cancel` after one returned, so neither bounded the call in progress: the
+    budget could only be honoured by a `docker info` that came back.
+    """
+    hangs = _Hangs()
+    monkeypatch.setattr(platform.runner, "run", hangs)
+    monkeypatch.setattr(platform, "docker_programs", lambda: ("docker",))
+
+    began = time.monotonic()
+    assert platform._wait_docker_ready(None, 0.5, 0.1) is False
+    elapsed = time.monotonic() - began
+
+    assert elapsed < 1.5, f"a 0.5s budget spent {elapsed:.1f}s inside a hung probe"
+
+
+def test_provisioning_bounds_the_probe_and_not_the_install(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The step runner must stay unbounded; the probe it also carries must not.
+
+    `ensure_docker()`'s default runner runs `apt-get install docker-ce`, which
+    takes as long as it takes, and `docker info`, which does not. Lending the
+    first one's patience to the second is how the bound was lost on the path
+    that injects no runner at all — the only path a user is ever on.
+    """
+    _linux(monkeypatch)
+    seen: list[tuple[list[str], object]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append((argv, kwargs.get("timeout")))
+        return subprocess.CompletedProcess(argv, 1, "", "")
+
+    monkeypatch.setattr(platform.runner, "run", fake_run)
+    monkeypatch.setattr(platform, "docker_programs", lambda: ("docker",))
+    platform.ensure_docker(which=_which("apt-get"), user="pk", wait_seconds=0.0, ask=lambda _q: "n")
+
+    probes = [bound for argv, bound in seen if argv[:2] == ["docker", "info"]]
+    steps = [bound for argv, bound in seen if argv[:1] == ["sudo"]]
+    assert probes and all(isinstance(b, float) for b in probes), f"unbounded probe: {probes}"
+    assert steps and all(b is None for b in steps), f"the install steps were bounded: {steps}"

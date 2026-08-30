@@ -142,6 +142,25 @@ def test_vm_resources_reports_nothing_rather_than_a_fabricated_zero(
     assert platform.vm_resources(lambda _argv: answer) is None
 
 
+def test_vm_resources_bounds_the_other_docker_info(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Preflight's `docker info` is a probe too, and hangs the same way.
+
+    Same defect as `docker_ready()`'s, one function further down: the default
+    runner passed no `timeout`, so a wedged Docker CLI held the preflight that
+    is only trying to find out how big the VM is.
+    """
+    monkeypatch.setattr(platform, "docker_program", lambda: "docker")
+    seen: list[object] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(kwargs.get("timeout"))
+        return _completed(returncode=124)
+
+    monkeypatch.setattr(platform.runner, "run", fake_run)
+    assert platform.vm_resources() is None
+    assert seen and all(isinstance(bound, float) for bound in seen), f"unbounded probe: {seen}"
+
+
 def test_the_macos_data_root_prefers_the_settings_store_and_falls_back_to_docker_raw(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
