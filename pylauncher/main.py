@@ -18,6 +18,16 @@ from yulon.log import configure, get_logger
 
 logger = get_logger(__name__)
 
+DEFAULT_WINDOW_SIZE = (1100, 750)
+"""The size the window opens at, and the width every tab has to fit into.
+
+A named constant rather than a literal at the `resize()` call because it is the
+budget the catalog tiles are measured against: `test_catalog_view.py` asserts
+that every Install button is inside the viewport at exactly this width, and a
+test that carried its own copy of the number would keep passing if someone
+shrank the window.
+"""
+
 
 def build_window() -> object:
     """Create the main window (imports Qt lazily so `--help`-style tooling stays cheap)."""
@@ -319,7 +329,7 @@ def build_window() -> object:
     window.setProperty("update_thread", update_thread)
     window.setProperty("update_worker", update_worker)
     update_thread.start()
-    window.resize(1100, 750)
+    window.resize(*DEFAULT_WINDOW_SIZE)
     window.setProperty("tabs", tabs)
     # The live lists themselves, not a copy of either - see `_Window`.
     window.yulon_log_panels = panels
