@@ -9,6 +9,7 @@ real AzerothCore compose project gets exercised.
 from __future__ import annotations
 
 import ast
+import re
 import subprocess
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
@@ -263,6 +264,51 @@ def test_wait_ready_rejects_non_positive_interval() -> None:
     """A zero/negative interval is rejected rather than busy-looping."""
     with pytest.raises(ValueError):
         docker.wait_ready("a", "w", "127.0.0.1", 3724, interval=0)
+
+
+def test_ready_spec_defaults_and_the_azerothcore_builder() -> None:
+    """`ReadySpec` is data; `azerothcore_ready()` is the legacy wrapper's two strings.
+
+    The auth marker is `<host>:<port>` escaped, because `.` in a host is a regex
+    wildcard and `10.0.0.1:8085` must not match `10x0y0z1:8085`.
+    """
+    spec = docker.ReadySpec(world="Avg Diff:")
+    assert spec.auth is None and spec.fatal is None
+    assert spec.timeout == docker._READY_TIMEOUT_SECONDS
+    assert spec.interval == docker._POLL_INTERVAL_SECONDS
+    assert spec.restart_loop == 4
+    ac = docker.azerothcore_ready("127.0.0.1", 8085, timeout=5.0, interval=0.1)
+    assert ac.world == docker.AZEROTHCORE_READY_WORLD == "ready..."
+    assert ac.auth == re.escape("127.0.0.1:8085")
+    assert ac.timeout == 5.0 and ac.interval == 0.1 and ac.restart_loop == 4
+    assert re.search(ac.auth, "Added realm at 127.0.0.1:8085")
+    assert not re.search(ac.auth, "Added realm at 127x0x0x1:8085")
+    assert docker.azerothcore_ready("127.0.0.1", 8085).timeout == docker._READY_TIMEOUT_SECONDS
+    with pytest.raises(TypeError, match="restart_loop"):
+        docker.azerothcore_ready("127.0.0.1", 8085, restart_loop=2)
+
+
+def test_container_state_reads_the_restart_count_in_the_same_inspect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One `docker inspect` answers status, StartedAt AND RestartCount — never a second call."""
+    seen: list[list[str]] = []
+
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        seen.append(cmd)
+        return _completed(stdout="restarting\t2026-08-22T01:24:53Z\t7\n")
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    state = docker.container_state("ac-worldserver")
+    assert state == docker.ContainerState("restarting", "2026-08-22T01:24:53Z", 7)
+    assert len(seen) == 1 and "{{.RestartCount}}" in seen[0][-1]
+    # A two-field answer (older fakes, an unreadable count) still parses, count 0.
+    monkeypatch.setattr(
+        docker.runner, "run", lambda cmd, cwd=None, timeout=None: _completed(stdout="running\tT\n")
+    )
+    assert docker.container_state("x") == docker.ContainerState("running", "T", 0)
 
 
 def test_wait_db_healthy_for_uses_spec_db_container(monkeypatch: pytest.MonkeyPatch) -> None:

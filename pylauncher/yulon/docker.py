@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -1763,10 +1764,11 @@ def _health(container: str, *, wsl_distro: str | None = None) -> tuple[str, bool
 
 @dataclass(frozen=True)
 class ContainerState:
-    """A container's status and the start time of its current run."""
+    """A container's status, the start time of its current run, and its restart count."""
 
     status: str = ""
     started_at: str = ""
+    restart_count: int = 0
 
     @property
     def settled(self) -> bool:
@@ -1783,21 +1785,28 @@ class ContainerState:
 
 
 def container_state(container: str, *, wsl_distro: str | None = None) -> ContainerState:
-    """Status and current-run start time in ONE `docker inspect`.
+    """Status, current-run start time and restart count in ONE `docker inspect`.
 
-    One call, not two, because `wait_ready()` asks for both every two seconds
-    for up to eight minutes and a `docker inspect` costs about 0.3s of CLI
-    startup on its own — two of them per container per poll took a healthy poll
-    from five docker invocations to seven, enough to overrun the interval it
-    names (review, 2026-08-22).
+    One call, not two, because `wait_ready()` asks for all of it every two
+    seconds for up to eight minutes and a `docker inspect` costs about 0.3s of
+    CLI startup on its own — two of them per container per poll took a healthy
+    poll from five docker invocations to seven, enough to overrun the interval
+    it names (review, 2026-08-22). `RestartCount` rides along for the same
+    price: it is how `wait_ready()` tells a crash loop from a slow start.
+
+    A short answer still parses. Only this module writes the format string, but
+    an unreadable count (an older docker, a fake in a test) must not turn a
+    running container into an empty `ContainerState` — the missing fields are
+    read as `""`/`0`, which is what a container that has never restarted says.
     """
-    fmt = "{{.State.Status}}\t{{.State.StartedAt}}"
+    fmt = "{{.State.Status}}\t{{.State.StartedAt}}\t{{.RestartCount}}"
     proc = _docker(["inspect", container, "--format", fmt], wsl_distro=wsl_distro)
     if proc.returncode != 0:
         logger.warning(f"could not read the state of {container}: {proc.stderr.strip()}")
         return ContainerState()
-    status, _, started = proc.stdout.strip().partition("\t")
-    return ContainerState(status.strip(), started.strip())
+    fields = [part.strip() for part in proc.stdout.strip().split("\t")]
+    status, started, count = (fields + ["", "", ""])[:3]
+    return ContainerState(status, started, int(count) if count.isdigit() else 0)
 
 
 def started_at(container: str, *, wsl_distro: str | None = None) -> str:
@@ -1937,6 +1946,66 @@ def wait_db_healthy(
                 return True
         time.sleep(interval)
     return False
+
+
+@dataclass(frozen=True)
+class ReadySpec:
+    """What "the server is up" means for one game, as data (phase7-decisions, Ready).
+
+    Every string is a regex applied with `re.search` to the CURRENT run's log
+    only. `auth=None` means the game has no separate auth container worth
+    waiting on; `fatal` names a line that means the server will never become
+    ready, so the wait ends at once instead of polling out its timeout;
+    `restart_loop` is how much `RestartCount` may grow before a crash loop is
+    declared. The AzerothCore values come from `azerothcore_ready()`, every
+    other family's from `catalog.json`'s `ready` block (the spine `re.escape`s
+    those unless the block says `regex: true` — contract amendment A5).
+
+    On the two timeouts: this default is `_READY_TIMEOUT_SECONDS` (480s), which
+    is what `dml-start.sh`'s `_wait_ready` has always waited — 240 polls at 2s —
+    while `catalog.ReadyMarkers.timeout_s` defaults to 600. They do not need to
+    agree and neither was adopted over the other. A spec built from a catalogue
+    `ready` block passes `timeout=ready.timeout_s` explicitly, so the data wins
+    whenever there is data; this default covers only a `ReadySpec` written in
+    code — `azerothcore_ready()` and the tests — and keeping it at 480 leaves
+    the legacy AzerothCore wait exactly as long as it has always been.
+    """
+
+    world: str
+    auth: str | None = None
+    fatal: str | None = None
+    timeout: float = _READY_TIMEOUT_SECONDS
+    interval: float = _POLL_INTERVAL_SECONDS
+    restart_loop: int = 4
+
+
+AZEROTHCORE_READY_WORLD = "ready..."
+"""What an AzerothCore worldserver prints once the world is loaded; the legacy marker.
+
+Verified against the three shipped installers (`wait_for_server` greps
+`ready\\.\\.\\.` in the worldserver log), `dml-start.sh`'s `_wait_ready`, and
+`catalog.json`'s `install.native.ready.world` — the same literal in all four.
+"""
+
+
+def azerothcore_ready(realm_host: str, realm_port: int, **kwargs: float) -> ReadySpec:
+    """The AzerothCore `ReadySpec`: auth serving `<host>:<port>`, world saying `ready...`.
+
+    The `**kwargs: float` shape is kept for `controller.wait_ready()` and
+    `docker_ctl.wait_server_ready()`, whose callers forward `timeout`/`interval`
+    exactly as they always did. Only those two are accepted: `restart_loop` is
+    an int and anything else is a typo, so both are refused rather than dropped.
+    The auth marker is escaped here, always: a host is a literal, not a regex.
+    """
+    unknown = set(kwargs) - {"timeout", "interval"}
+    if unknown:
+        raise TypeError(f"azerothcore_ready() accepts timeout/interval only, not {sorted(unknown)}")
+    return ReadySpec(
+        world=AZEROTHCORE_READY_WORLD,
+        auth=re.escape(f"{realm_host}:{realm_port}"),
+        timeout=kwargs.get("timeout", _READY_TIMEOUT_SECONDS),
+        interval=kwargs.get("interval", _POLL_INTERVAL_SECONDS),
+    )
 
 
 def wait_ready(
