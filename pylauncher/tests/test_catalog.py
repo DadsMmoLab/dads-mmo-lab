@@ -9,7 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from yulon import resources
-from yulon.catalog.catalog import CATALOG_FILE, load_catalog, parse_catalog
+from yulon.catalog.catalog import CATALOG_FILE, PasswordPlan, load_catalog, parse_catalog
 from yulon.controller_wow_wotlk import docker_ctl
 
 V1_GAMES = ("wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise")
@@ -30,7 +30,7 @@ def test_wotlk_entry_matches_the_controller_spec() -> None:
     wotlk = load_catalog().get("wow-wotlk")
     assert wotlk.container_spec() == docker_ctl.SPEC
     assert wotlk.has_manifests is True
-    assert wotlk.install.db_root_password == "password"
+    assert wotlk.install.password == PasswordPlan(mode="fixed", value="password")
     assert wotlk.emulator.sources[0].url == (
         "https://github.com/mod-playerbots/azerothcore-wotlk.git"
     )
@@ -61,6 +61,7 @@ def test_script_variant_keys_must_be_known_package_managers() -> None:
                 "install": {
                     "script": "s.sh",
                     "default_server_dir": "d",
+                    "password": {"mode": "fixed", "value": "x"},
                     "script_variants": {"ubuntu": "s-ubuntu.sh"},
                 },
                 "containers": {"db": "d", "auth": "a", "world": "w"},
@@ -93,7 +94,11 @@ def test_unknown_game_and_bad_entries_are_rejected() -> None:
                         "name": "X",
                         "status": "wip",
                         "emulator": {"name": "e", "sources": [{"repo": "ftp://evil/x"}]},
-                        "install": {"script": "s.sh", "default_server_dir": "d"},
+                        "install": {
+                            "script": "s.sh",
+                            "default_server_dir": "d",
+                            "password": {"mode": "fixed", "value": "x"},
+                        },
                         "containers": {"db": "a", "auth": "b", "world": "c"},
                         "ports": {"auth": 1, "world": 2},
                         "databases": {"auth": "a", "characters": "c", "world": "w"},
@@ -108,7 +113,7 @@ def test_unknown_game_and_bad_entries_are_rejected() -> None:
 def test_db_password_prefers_a_fixed_one_then_the_generated_file(tmp_path: Path) -> None:
     """Where the root password comes from, for a game that does not have a fixed one.
 
-    `db_root_password_file` was declared in the schema and read nowhere, so
+    The generated-password file was declared in the schema and read nowhere, so
     every caller fell back to the shared default - which for TBC and Vanilla is
     simply the wrong password, because their installers generate one. Start and
     Stop need no database, so it would have surfaced on Create account.
@@ -119,13 +124,13 @@ def test_db_password_prefers_a_fixed_one_then_the_generated_file(tmp_path: Path)
     assert wotlk.db_password(tmp_path) == "password", "a fixed password wins outright"
 
     tbc = catalog.get("wow-tbc").install
-    assert tbc.db_root_password_file, "wow-tbc is expected to generate its password"
+    assert tbc.password.file, "wow-tbc is expected to generate its password"
     assert tbc.db_password(tmp_path) is None, "no file yet, so nothing is knowable"
 
-    (tmp_path / tbc.db_root_password_file).write_text("tbcdeadbeef\n", encoding="utf-8")
+    (tmp_path / tbc.password.file).write_text("tbcdeadbeef\n", encoding="utf-8")
     assert tbc.db_password(tmp_path) == "tbcdeadbeef", "read, and stripped of its newline"
 
-    (tmp_path / tbc.db_root_password_file).write_text("   \n", encoding="utf-8")
+    (tmp_path / tbc.password.file).write_text("   \n", encoding="utf-8")
     assert tbc.db_password(tmp_path) is None, "a blank file is not a password"
 
 
@@ -136,26 +141,67 @@ def test_db_password_is_none_when_the_file_cannot_be_read(tmp_path: Path) -> Non
     password is unknown instead of authenticating with a guess.
     """
     tbc = load_catalog().get("wow-tbc").install
-    assert tbc.db_root_password_file
-    (tmp_path / tbc.db_root_password_file).mkdir()
+    assert tbc.password.file
+    (tmp_path / tbc.password.file).mkdir()
     assert tbc.db_password(tmp_path) is None
 
 
-def test_every_game_says_how_its_db_password_can_be_known() -> None:
-    """A game that declares neither is a controller that cannot use its database.
+def test_every_entry_says_how_its_password_comes_to_exist() -> None:
+    """One model, two modes (phase7-decisions "Password").
 
-    The app needs the root password for every SQL-backed control - accounts,
-    backup, restore, the repair probes. An entry that names no fixed password
-    AND no generated-password file silently resolves to the shared default,
-    which is right only by accident. This is the invariant that caught
-    wow-tortoise: its installer generates `tortoise$(date +%s | tail -c 6)` and
-    the catalog declared nothing at all.
+    WotLK's fixed `"password"` is a contract with backup, the console and every
+    archived guide. The three CMaNGOS entries generate one per install and
+    persist it at `.db_password`, prefixed so a value seen in `docker exec`
+    output says which server it belongs to. The two old optional strings let an
+    entry say both or neither; the model refuses that.
     """
-    for entry in load_catalog().games:
-        install = entry.install
-        assert install.db_root_password or install.db_root_password_file, (
-            f"{entry.id} declares neither db_root_password nor db_root_password_file, "
-            f"so the app would authenticate to its database with the shared default"
+    catalog = load_catalog()
+    assert catalog.get("wow-wotlk").install.password == PasswordPlan(mode="fixed", value="password")
+    generated = (("wow-tbc", "tbc-"), ("wow-vanilla", "vanilla-"), ("wow-tortoise", "tortoise-"))
+    for game_id, prefix in generated:
+        plan = catalog.get(game_id).install.password
+        assert plan == PasswordPlan(mode="generated", file=".db_password", prefix=prefix), game_id
+
+
+@pytest.mark.parametrize(
+    "plan",
+    [
+        {"mode": "fixed"},
+        {"mode": "fixed", "value": ""},
+        {"mode": "generated"},
+        {"mode": "generated", "prefix": "tbc-"},
+        {"mode": "rolled", "value": "x"},
+    ],
+)
+def test_a_password_plan_without_its_mode_s_field_is_refused(plan: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        PasswordPlan.model_validate(plan)
+
+
+def test_the_old_password_fields_are_gone_not_ignored() -> None:
+    """`extra="forbid"` turns a stale key into an error instead of a silent default."""
+    with pytest.raises(ValidationError, match="db_root_password"):
+        parse_catalog(
+            {
+                "games": [
+                    {
+                        "id": "x",
+                        "name": "X",
+                        "status": "wip",
+                        "emulator": {"name": "e", "sources": [{"repo": "a/b"}]},
+                        "install": {
+                            "script": "s.sh",
+                            "default_server_dir": "d",
+                            "password": {"mode": "fixed", "value": "x"},
+                            "db_root_password": "x",
+                        },
+                        "containers": {"db": "a", "auth": "b", "world": "c"},
+                        "ports": {"auth": 1, "world": 2},
+                        "databases": {"auth": "a", "characters": "c", "world": "w"},
+                        "client": {"version": "1", "build": 1},
+                    }
+                ]
+            }
         )
 
 

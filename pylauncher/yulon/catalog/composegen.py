@@ -318,7 +318,7 @@ def render(
             "catalog.json), so no compose files were generated."
         )
     templates = templates_root / native.templates
-    password = db_password if db_password is not None else (entry.install.db_root_password or "")
+    password = db_password if db_password is not None else (entry.install.password.value or "")
     if not password:
         raise ComposeGenError(
             f"{entry.name} has no database root password to write into its compose files."

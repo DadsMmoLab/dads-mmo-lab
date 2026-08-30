@@ -35,7 +35,10 @@
           "dnf": "wow-wotlk/install-wow-wotlk-fedora.sh"
         },
         "default_server_dir": "wow-server-playerbots",
-        "db_root_password": "password",
+        "password": {
+          "mode": "fixed",
+          "value": "password"
+        },
         "native": {
           "templates": "wow-wotlk/native",
           "world_env": {
@@ -101,7 +104,11 @@
         "script": "wow-tbc/install-wow-tbc.sh",
         "default_server_dir": "wow-tbc-server",
         "requires_client_dir": true,
-        "db_root_password_file": ".db_password"
+        "password": {
+          "mode": "generated",
+          "file": ".db_password",
+          "prefix": "tbc-"
+        }
       },
       "containers": {
         "db": "tbc-db",
@@ -168,7 +175,11 @@
         "script": "wow-vanilla/install-wow-vanilla.sh",
         "default_server_dir": "wow-vanilla-server",
         "requires_client_dir": true,
-        "db_root_password_file": ".db_password"
+        "password": {
+          "mode": "generated",
+          "file": ".db_password",
+          "prefix": "vanilla-"
+        }
       },
       "containers": {
         "db": "vanilla-db",
@@ -228,8 +239,12 @@
         ],
         "script": "wow-tortoise/install-tortoise-wow-wsl.sh",
         "default_server_dir": "tortoise-wow-server",
-        "db_root_password_file": ".db_password",
-        "requires_client_dir": true
+        "requires_client_dir": true,
+        "password": {
+          "mode": "generated",
+          "file": ".db_password",
+          "prefix": "tortoise-"
+        }
       },
       "containers": {
         "db": "tortoise-db",

@@ -101,9 +101,9 @@ class ControllerServices:
             # Stop need no database and no tab at all is worse; but the reason
             # every SQL-backed control is about to fail is written down once,
             # here, instead of arriving as "access denied" six clicks later.
-            if entry.install.db_root_password_file:
+            if entry.install.password.mode == "generated":
                 logger.warning(
-                    f"{entry.id}: cannot read {entry.install.db_root_password_file} in "
+                    f"{entry.id}: cannot read {entry.install.password.file} in "
                     f"{server_dir}, so the database password is unknown - accounts, backup "
                     f"and restore will fail until that file is restored"
                 )

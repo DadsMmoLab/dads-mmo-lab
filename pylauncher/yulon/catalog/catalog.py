@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from yulon.docker import ContainerSpec
 from yulon.manifest import Db, Source
@@ -37,6 +37,47 @@ class Emulator(_Strict):
 
     name: str = Field(min_length=1)
     sources: tuple[Source, ...] = Field(min_length=1)
+
+
+class PasswordPlan(_Strict):
+    """How this game's database root password comes to exist (phase7-decisions "Password").
+
+    `fixed` is WotLK's `"password"` — a contract with backup, the console and
+    every archived guide, spliced into the base compose file as the
+    `${DB_ROOT_PASSWORD:-…}` default. `generated` is the CMaNGOS entries':
+    resolved by the install spine before stage 1 as `prefix + token_hex(8)`,
+    persisted at `file` under the server dir, and reaching compose only
+    through `.env`, never the compose text. One model rather than two optional
+    strings because the old pair (`db_root_password`,
+    `db_root_password_file`) let an entry say both or neither, and nothing
+    refused either.
+    """
+
+    mode: Literal["fixed", "generated"]
+    value: str | None = Field(default=None, description="The password itself; required when fixed.")
+    file: str | None = Field(
+        default=None,
+        description=(
+            "File under the server dir holding the generated value, e.g. `.db_password`; "
+            "required when generated."
+        ),
+    )
+    prefix: str = Field(
+        default="",
+        description=(
+            "Prefix on a generated value (`tbc-`), so a password seen in a log or a `docker "
+            "exec` says which server it belongs to. `resolve_secrets()` mints "
+            '`f"{prefix}{secrets.token_hex(8)}"` — the dash is part of the prefix.'
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _the_mode_has_its_field(self) -> PasswordPlan:
+        if self.mode == "fixed" and not self.value:
+            raise ValueError("a fixed password plan needs a non-empty `value`")
+        if self.mode == "generated" and not self.file:
+            raise ValueError("a generated password plan needs `file`")
+        return self
 
 
 class NativeInstall(_Strict):
@@ -128,11 +169,8 @@ class Install(_Strict):
         description="Path to the install-*.sh, relative to catalog/installers/",
     )
     default_server_dir: str = Field(min_length=1, description="Default dir name under $HOME")
-    db_root_password: str | None = Field(
-        default=None, description="Fixed root password the installer uses, if any."
-    )
-    db_root_password_file: str | None = Field(
-        default=None, description="File under the server dir holding a generated password."
+    password: PasswordPlan = Field(
+        description="Where the database root password comes from: fixed, or generated per install."
     )
     requires_client_dir: bool = Field(
         default=False,
@@ -144,7 +182,7 @@ class Install(_Strict):
 
         Not every game has a fixed one: the TBC and Vanilla installers GENERATE
         a password (`tbc$(openssl rand -hex 8)`) and write it to a file under the
-        server dir, which is what `db_root_password_file` names. That field was
+        server dir, which is what a `generated` plan's `file` names. That fact was
         declared here and read NOWHERE, so every caller fell back to the shared
         default and authenticated as root with the literal string "password".
         Start and Stop need no database, which is why it would have surfaced
@@ -155,11 +193,14 @@ class Install(_Strict):
         password is not knowable from here, and a caller should decide what to
         do about that rather than be handed a guess.
         """
-        if self.db_root_password:
-            return self.db_root_password
-        if self.db_root_password_file:
+        if self.password.mode == "fixed":
+            return self.password.value
+        # `PasswordPlan` refuses a generated plan with no `file`, so the fallthrough
+        # below is unreachable through the catalog - but `file` is still typed
+        # optional, and guessing a filename here would be worse than saying "unknown".
+        if self.password.file:
             try:
-                text = (server_dir / self.db_root_password_file).read_text(encoding="utf-8")
+                text = (server_dir / self.password.file).read_text(encoding="utf-8")
             except (OSError, ValueError):
                 # ValueError covers UnicodeDecodeError, which is what a file
                 # written in another encoding raises - it is not an OSError, so

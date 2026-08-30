@@ -162,7 +162,7 @@ def build_window() -> object:
         # the only one and it carries a fixed password, so a game that GENERATES
         # its password can never reach this line. The Server tab's copy of this
         # wiring does have a server_dir, and does read the file.
-        password = entry.install.db_root_password or wotlk_modules.DEFAULT_DB_ROOT_PASSWORD
+        password = entry.install.password.value or wotlk_modules.DEFAULT_DB_ROOT_PASSWORD
         sql = DockerSql(spec.db, password, schemas=entry.schema_map())
         mysql = wotlk_maintenance.DockerMysql(spec.db, password)
         return installer_for(

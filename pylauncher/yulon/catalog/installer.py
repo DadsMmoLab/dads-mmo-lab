@@ -834,7 +834,7 @@ def _main(argv: list[str] | None = None) -> int:
         from yulon.controller_wow_wotlk import modules as wotlk_modules
         from yulon.controller_wow_wotlk import repair as wotlk_repair
 
-        password = entry.install.db_root_password or wotlk_modules.DEFAULT_DB_ROOT_PASSWORD
+        password = entry.install.password.value or wotlk_modules.DEFAULT_DB_ROOT_PASSWORD
         sql = DockerSql(spec.db, password, schemas=entry.schema_map())
         mysql = wotlk_maintenance.DockerMysql(spec.db, password)
         import_probe = lambda: wotlk_repair.import_state(sql, mysql)  # noqa: E731
