@@ -89,7 +89,7 @@ booting a plausible-looking wrong server.
 # without the second the bots never log in.
 #
 # The Linux installer's own override also pins AC_AI_PLAYERBOT_MIN/MAX_RANDOM_
-# BOTS to 1600/2000, and this comment used to argue at length that they should
+# BOTS to 500/500, and this comment used to argue at length that they should
 # stay out. They did not stay out — the compose diff against the proven install
 # (2026-08-24) found that a native install would otherwise take mod-playerbots'
 # defaults and hand the same user a different world from the same button, and
@@ -99,11 +99,15 @@ booting a plausible-looking wrong server.
 # The argument was not wrong, only outranked, and the part still worth keeping
 # is the cost: an env key SHADOWS the matching row in playerbots.conf, so a
 # settings surface that edits that file will appear to do nothing until this
-# key is removed. That is why the numbers are DATA in `catalog.json` and not a
-# constant here — a per-game value a person may want different, style-guide §3.
-# What is still unmeasured is whether 2000 bots fits the laptop this path's
-# preflight exists for; the first live gate owes an RSS reading at that
-# population, and until it has one the number is inherited, not earned.
+# key is removed. Nor is rewriting the env itself immediate — a container that
+# is already running keeps the population it started with until it is
+# RECREATED, so anything that changes this number is changing what the next
+# `up` builds, not what the world outside the window is doing. That is why the
+# numbers are DATA in `catalog.json` and not a constant here — a per-game value
+# a person may want different, style-guide §3. What is still unmeasured is
+# whether 500 bots fits the laptop this path's preflight exists for; the first
+# live gate owes an RSS reading at that population, and until it has one the
+# number is decided, not earned.
 DEFAULT_WORLD_ENV: Mapping[str, str] = {
     "AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES": "1",
     "AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN": "1",
@@ -112,7 +116,7 @@ DEFAULT_WORLD_ENV: Mapping[str, str] = {
 different. Anything a person might reasonably want a different value for belongs in
 `catalog.json`'s `install.native.world_env` instead — the playerbot population started here and
 was moved there after an adversarial review pointed out that a per-game number in a module
-constant is exactly what style-guide §3 forbids, and that one machine's 2000 bots is not a
+constant is exactly what style-guide §3 forbids, and that one machine's bot population is not a
 default for every machine.
 
 The environment differences the compose diff turned up and this deliberately does NOT carry —

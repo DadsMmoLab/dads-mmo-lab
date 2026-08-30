@@ -39,8 +39,8 @@
         "native": {
           "templates": "wow-wotlk/native",
           "world_env": {
-            "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS": "1600",
-            "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS": "2000"
+            "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS": "500",
+            "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS": "500"
           }
         }
       },

@@ -1960,13 +1960,17 @@ EOF
         print_success "realmd.conf patched"
     fi
 
-    # ── Playerbots: 600-800 random bots (Steam Deck RAM limit) ──────
+    # ── Playerbots: 500 random bots ─────────────────────────────────
+    # Same number as every other game here, and still under the Steam Deck RAM
+    # limit that put this script below the others in the first place. Min and
+    # Max match so the population is the one asked for; 100 accounts hold 500
+    # bot characters at ten each.
     if [ -f "$SERVER_DIR/etc/aiplayerbot.conf" ]; then
-        sed -i "s|^AiPlayerbot\.MinRandomBots .*|AiPlayerbot.MinRandomBots = 600|" \
+        sed -i "s|^AiPlayerbot\.MinRandomBots .*|AiPlayerbot.MinRandomBots = 500|" \
             "$SERVER_DIR/etc/aiplayerbot.conf"
-        sed -i "s|^AiPlayerbot\.MaxRandomBots .*|AiPlayerbot.MaxRandomBots = 800|" \
+        sed -i "s|^AiPlayerbot\.MaxRandomBots .*|AiPlayerbot.MaxRandomBots = 500|" \
             "$SERVER_DIR/etc/aiplayerbot.conf"
-        sed -i "s|^AiPlayerbot\.RandomBotAccountCount .*|AiPlayerbot.RandomBotAccountCount = 200|" \
+        sed -i "s|^AiPlayerbot\.RandomBotAccountCount .*|AiPlayerbot.RandomBotAccountCount = 100|" \
             "$SERVER_DIR/etc/aiplayerbot.conf"
         sed -i "s|^#\? *AiPlayerbot\.SyncLevelWithPlayers .*|AiPlayerbot.SyncLevelWithPlayers = 1|" \
             "$SERVER_DIR/etc/aiplayerbot.conf"
@@ -1974,7 +1978,7 @@ EOF
             "$SERVER_DIR/etc/aiplayerbot.conf"
         sed -i "s|^#\? *AiPlayerbot\.SyncLevelNoPlayer .*|AiPlayerbot.SyncLevelNoPlayer = 1|" \
             "$SERVER_DIR/etc/aiplayerbot.conf"
-        print_success "aiplayerbot.conf patched (600-800 bots, 200 accounts, level-synced to player+5)"
+        print_success "aiplayerbot.conf patched (500 bots, 100 accounts, level-synced to player+5)"
     fi
 
     # ── AHBot: high-volume auction house (~15k items target) ─────────
