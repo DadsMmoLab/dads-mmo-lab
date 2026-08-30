@@ -11,10 +11,10 @@ table (README §13), database names, what client the user must supply
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from yulon.docker import ContainerSpec
 from yulon.manifest import Db, Source
@@ -32,11 +32,37 @@ class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+class EmulatorSource(Source):
+    """One repository the installer clones, and where it lands under the server dir.
+
+    `dest` replaced an index rule ("sources[0] is the core, the rest go under
+    `modules/`") that only AzerothCore's layout satisfied: CMaNGOS's playerbots
+    checkout nests INSIDE the core at `src/mangos-tbc/src/modules/Bots`, which
+    no index can say. Relative to the server dir, POSIX-spelled; `"."` means the
+    server dir IS the checkout, as it is for AzerothCore.
+    """
+
+    dest: str = Field(
+        min_length=1,
+        description="Clone target relative to the server dir; '.' means the server dir itself.",
+    )
+
+    @field_validator("dest")
+    @classmethod
+    def _dest_stays_inside_the_server_dir(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if "\\" in value or path.is_absolute() or ".." in path.parts:
+            raise ValueError(
+                f"dest must be a relative POSIX path inside the server dir, got {value!r}"
+            )
+        return value
+
+
 class Emulator(_Strict):
     """The open-source emulator: a display name and the repos the installer clones."""
 
     name: str = Field(min_length=1)
-    sources: tuple[Source, ...] = Field(min_length=1)
+    sources: tuple[EmulatorSource, ...] = Field(min_length=1)
 
 
 class PasswordPlan(_Strict):

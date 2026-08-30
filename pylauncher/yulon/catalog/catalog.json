@@ -12,11 +12,13 @@
           {
             "repo": "mod-playerbots/azerothcore-wotlk",
             "branch": "Playerbot",
-            "depth": null
+            "depth": null,
+            "dest": "."
           },
           {
             "repo": "mod-playerbots/mod-playerbots",
-            "branch": "master"
+            "branch": "master",
+            "dest": "modules/mod-playerbots"
           }
         ]
       },
@@ -87,13 +89,16 @@
         "name": "CMaNGOS mangos-tbc + cmangos/playerbots + tbc-db",
         "sources": [
           {
-            "repo": "cmangos/mangos-tbc"
+            "repo": "cmangos/mangos-tbc",
+            "dest": "src/mangos-tbc"
           },
           {
-            "repo": "cmangos/playerbots"
+            "repo": "cmangos/playerbots",
+            "dest": "src/mangos-tbc/src/modules/Bots"
           },
           {
-            "repo": "cmangos/tbc-db"
+            "repo": "cmangos/tbc-db",
+            "dest": "src/tbc-db"
           }
         ]
       },
@@ -158,13 +163,16 @@
         "name": "CMaNGOS mangos-classic + cmangos/playerbots + classic-db",
         "sources": [
           {
-            "repo": "cmangos/mangos-classic"
+            "repo": "cmangos/mangos-classic",
+            "dest": "src/mangos-classic"
           },
           {
-            "repo": "cmangos/playerbots"
+            "repo": "cmangos/playerbots",
+            "dest": "src/mangos-classic/src/modules/Bots"
           },
           {
-            "repo": "cmangos/classic-db"
+            "repo": "cmangos/classic-db",
+            "dest": "src/classic-db"
           }
         ]
       },
@@ -229,7 +237,8 @@
         "name": "Penqle/tortoise-wow (MaNGOS Zero fork)",
         "sources": [
           {
-            "repo": "Penqle/tortoise-wow"
+            "repo": "Penqle/tortoise-wow",
+            "dest": "src/tortoise-wow"
           }
         ]
       },

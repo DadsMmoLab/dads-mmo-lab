@@ -9,7 +9,13 @@ import pytest
 from pydantic import ValidationError
 
 from yulon import resources
-from yulon.catalog.catalog import CATALOG_FILE, PasswordPlan, load_catalog, parse_catalog
+from yulon.catalog.catalog import (
+    CATALOG_FILE,
+    EmulatorSource,
+    PasswordPlan,
+    load_catalog,
+    parse_catalog,
+)
 from yulon.controller_wow_wotlk import docker_ctl
 
 V1_GAMES = ("wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise")
@@ -57,7 +63,7 @@ def test_script_variant_keys_must_be_known_package_managers() -> None:
                 "id": "x-y",
                 "name": "X",
                 "status": "wip",
-                "emulator": {"name": "e", "sources": [{"repo": "a/b"}]},
+                "emulator": {"name": "e", "sources": [{"repo": "a/b", "dest": "."}]},
                 "install": {
                     "script": "s.sh",
                     "default_server_dir": "d",
@@ -93,7 +99,10 @@ def test_unknown_game_and_bad_entries_are_rejected() -> None:
                         "id": "x",
                         "name": "X",
                         "status": "wip",
-                        "emulator": {"name": "e", "sources": [{"repo": "ftp://evil/x"}]},
+                        "emulator": {
+                            "name": "e",
+                            "sources": [{"repo": "ftp://evil/x", "dest": "."}],
+                        },
                         "install": {
                             "script": "s.sh",
                             "default_server_dir": "d",
@@ -188,7 +197,7 @@ def test_the_old_password_fields_are_gone_not_ignored() -> None:
                         "id": "x",
                         "name": "X",
                         "status": "wip",
-                        "emulator": {"name": "e", "sources": [{"repo": "a/b"}]},
+                        "emulator": {"name": "e", "sources": [{"repo": "a/b", "dest": "."}]},
                         "install": {
                             "script": "s.sh",
                             "default_server_dir": "d",
@@ -270,3 +279,35 @@ def test_no_catalog_compose_service_is_really_a_container_name() -> None:
                 f"{game.id}: `docker compose up {service}` names a CONTAINER, not a service; "
                 f"this compose file declares {sorted(declared)}"
             )
+
+
+def test_every_source_says_where_it_lands() -> None:
+    """`dest` replaces the index rule "sources[0] is the core, the rest go under modules/".
+
+    That rule fit exactly one layout. CMaNGOS's playerbots checkout nests INSIDE
+    the core (`src/mangos-tbc/src/modules/Bots`), which no index can express.
+    WotLK's values are the paths `native._clone_core`/`_clone_modules` write
+    today, so the move to data changes no directory on disk.
+    """
+    catalog = load_catalog()
+    expected = {
+        "wow-wotlk": (".", "modules/mod-playerbots"),
+        "wow-tbc": ("src/mangos-tbc", "src/mangos-tbc/src/modules/Bots", "src/tbc-db"),
+        "wow-vanilla": (
+            "src/mangos-classic",
+            "src/mangos-classic/src/modules/Bots",
+            "src/classic-db",
+        ),
+        "wow-tortoise": ("src/tortoise-wow",),
+    }
+    for game_id, dests in expected.items():
+        sources = catalog.get(game_id).emulator.sources
+        assert all(isinstance(source, EmulatorSource) for source in sources)
+        assert tuple(source.dest for source in sources) == dests, game_id
+
+
+@pytest.mark.parametrize("dest", ["", "/srv/wow", "../elsewhere", "src/../../x", "src\\core"])
+def test_a_dest_that_could_leave_the_server_dir_is_refused(dest: str) -> None:
+    """A clone target is joined onto the server dir; nothing may point it outside."""
+    with pytest.raises(ValidationError):
+        EmulatorSource.model_validate({"repo": "a/b", "dest": dest})
