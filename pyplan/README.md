@@ -19,6 +19,7 @@ There are **three `README.md`s**, each with a distinct audience, plus three `pyp
 | `pyplan/phase6-decisions.md` | **The Phase 6 decisions log ("why")**: reasoning, rejections, incident history. |
 | `pyplan/phase7-decisions.md` | **The Phase 7 decisions log**: one install engine for all four servers; what it overturns in the pages above, by name. |
 | `pyplan/phase7-plans/` | **The Phase 7 implementation plans**, one per gated step (7.1, 7.2, 7.3 so far): bite-sized TDD tasks with the code, against the interface contract each plan embeds. Executed task by task; ticked in the checklist. |
+| `pyplan/phase8-decisions.md` | **The Phase 8 decisions log**: so far one feature only — uninstalling an install, and what it deliberately does not touch. Written before Phase 8 is scoped; blocked on Phase 7. |
 | `pyplan/checklist.md` | **The checkable progress tracker**: completed `[x]` / pending `[ ]` items per phase. |
 
 **Precedence (restated once, here and in the other two):** `README.md` wins on *what/why*;
