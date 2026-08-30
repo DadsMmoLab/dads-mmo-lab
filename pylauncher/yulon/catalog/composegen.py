@@ -329,6 +329,17 @@ def render(
     # The entry's own settings layered over the structural defaults, and an
     # explicit `world_env` overriding both — that is the seam a settings
     # surface arrives through.
+    #
+    # The `else {}` is not harmless. An entry that says `family: "azerothcore"`
+    # and omits the `azerothcore` block validates today, renders here without
+    # complaint, and hands the user mod-playerbots' OWN bot population instead
+    # of the one that was decided — the same-button-different-world divergence
+    # the 2026-08-24 `docker compose config` diff was run to catch, arriving
+    # this time through a missing block rather than a missing key. Nothing
+    # covers it because every test asserts against the shipped catalogue, which
+    # has the block. What closes it is the exactly-one-family-block validator
+    # on `NativeInstall` (contract A14, added with the CMaNGOS models); until
+    # that exists this branch is a hole, not a default.
     entry_env = native.azerothcore.world_env if native.azerothcore is not None else {}
     env = dict(world_env) if world_env is not None else {**DEFAULT_WORLD_ENV, **entry_env}
     base = _fill(

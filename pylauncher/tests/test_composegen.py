@@ -498,6 +498,29 @@ def test_every_installer_writes_the_bot_population_that_was_decided() -> None:
     assert min_bots == BOT_POPULATION
 
 
+def test_the_catalogue_and_this_module_name_the_same_images() -> None:
+    """The prefix and the four suffixes now exist TWICE, and only one copy is authoritative.
+
+    B.3 moved them into `catalog.json` as `native.image_prefix`/`native.images`;
+    `DEFAULT_IMAGE_PREFIX` and `BUILT_SERVICES` stay until the task that
+    rewrites `render()`/`built_image_refs()` to read the entry. Between those
+    two commits nothing tied the copies together: a review mutated
+    `DEFAULT_IMAGE_PREFIX` to `"yulon.local/ac-wotlk-DRIFT-"` and the whole
+    suite stayed green, because the test below pins `BUILT_SERVICES` to the
+    template and `test_catalog.py` pins `native.images` to a literal, and no
+    assertion crossed from one to the other.
+
+    Drift here is the silent-forever bug the per-reference rewrite exists to
+    prevent: whichever copy the engine asks the daemon about names an image
+    that was never tagged, `images_built()` answers False for good, and every
+    resume re-runs the multi-hour build. Delete this test with the constants.
+    """
+    native = ENTRY.install.native
+    assert native is not None
+    assert native.image_prefix == composegen.DEFAULT_IMAGE_PREFIX
+    assert native.images == tuple(composegen.BUILT_SERVICES)
+
+
 def test_the_image_refs_match_the_services_the_build_overlay_actually_builds(
     tmp_path: Path,
 ) -> None:
