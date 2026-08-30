@@ -271,10 +271,46 @@ def test_server_dir_problem_names_the_folders_that_break_a_build(
         assert problem is not None and expected in problem
 
 
-def test_keep_awake_is_a_no_op_on_linux() -> None:
-    """The Linux path still runs the bash installer; `systemd-inhibit` waits for its gate."""
-    with platform.keep_awake(platform_id=lambda: "linux"):
-        pass
+INHIBIT_ARGV = [
+    "systemd-inhibit",
+    "--what=idle:sleep",
+    "--who=Yu'lon",
+    "--why=installing a server",
+    "sleep",
+    "infinity",
+]
+
+
+def test_keep_awake_on_linux_holds_a_systemd_inhibit_and_lets_it_go() -> None:
+    """The `caffeinate` shape on Linux: a detached inhibitor, terminated on the way out."""
+    spawned: list[list[str]] = []
+    stopped: list[str] = []
+
+    class FakeChild:
+        def terminate(self) -> None:
+            stopped.append("terminated")
+
+    with platform.keep_awake(
+        platform_id=lambda: "linux",
+        spawn=lambda argv: (spawned.append(argv), FakeChild())[1],  # type: ignore[arg-type,return-value]
+    ):
+        assert spawned == [INHIBIT_ARGV]
+        assert stopped == []
+    assert stopped == ["terminated"]
+
+
+def test_keep_awake_on_linux_survives_a_missing_systemd_inhibit(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No systemd (or no binary) is a warning, and the install still runs."""
+
+    def refuse(_argv: list[str]) -> object:
+        raise OSError("no such file")
+
+    with caplog.at_level("WARNING"):
+        with platform.keep_awake(platform_id=lambda: "linux", spawn=refuse):  # type: ignore[arg-type]
+            pass
+    assert "may be interrupted" in caplog.text
 
 
 def test_keep_awake_on_macos_spawns_a_caffeinate_that_dies_with_us() -> None:

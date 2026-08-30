@@ -3183,28 +3183,27 @@ def keep_awake(
     from the main (GUI) thread is refused rather than silently doing nothing
     useful the moment the install moves off it.
 
-    Linux: a no-op for Phase 6. The Linux path still runs the bash installer,
-    and `systemd-inhibit` waits for the 6.5 Linux gate rather than being
-    written blind here.
+    Linux: `systemd-inhibit --what=idle:sleep ... sleep infinity`, detached,
+    terminated on exit — the `caffeinate` shape. Unlike `caffeinate -w` it
+    does not die with us on its own, so the `finally` matters here. A box
+    without systemd gets the same warning as a Mac without `caffeinate`.
     """
     here = platform_id()
     if here == "macos":
-        argv = ["caffeinate", "-dims", "-w", str(os.getpid())]
-        start = spawn if spawn is not None else _spawn_detached
-        try:
-            child = start(argv)
-        except OSError as exc:
-            logger.warning(f"could not hold this Mac awake ({exc}); the build may be interrupted")
+        with _held_by(["caffeinate", "-dims", "-w", str(os.getpid())], "this Mac", spawn):
             yield
-            return
-        logger.info(f"holding this Mac awake for the build: {' '.join(argv)}")
-        try:
+        return
+    if here == "linux":
+        argv = [
+            "systemd-inhibit",
+            "--what=idle:sleep",
+            "--who=Yu'lon",
+            "--why=installing a server",
+            "sleep",
+            "infinity",
+        ]
+        with _held_by(argv, "this machine", spawn):
             yield
-        finally:
-            try:
-                child.terminate()
-            except OSError:
-                pass
         return
     if here == "windows":
         if threading.current_thread() is threading.main_thread():
@@ -3218,6 +3217,30 @@ def keep_awake(
         return
     logger.debug(f"keep_awake() is a no-op on {here}")
     yield
+
+
+@contextmanager
+def _held_by(
+    argv: list[str],
+    what: str,
+    spawn: Callable[[list[str]], subprocess.Popen[bytes]] | None,
+) -> Iterator[None]:
+    """Spawn a keep-awake helper for the block; a helper that will not start is a warning."""
+    start = spawn if spawn is not None else _spawn_detached
+    try:
+        child = start(argv)
+    except OSError as exc:
+        logger.warning(f"could not hold {what} awake ({exc}); the build may be interrupted")
+        yield
+        return
+    logger.info(f"holding {what} awake for the build: {' '.join(argv)}")
+    try:
+        yield
+    finally:
+        try:
+            child.terminate()
+        except OSError:
+            pass
 
 
 def _spawn_detached(argv: list[str]) -> subprocess.Popen[bytes]:
