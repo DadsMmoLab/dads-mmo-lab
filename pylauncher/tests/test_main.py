@@ -16,8 +16,12 @@ survived review in the first place.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import time
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -228,6 +232,160 @@ def test_headless_provisioning_never_hands_over_a_prompter(
     monkeypatch.setattr(main.platform, "ensure_docker", _provision)
     assert main.provision_headless() == main.PROVISION_READY
     assert seen and seen[0].get("ask") is None
+
+
+# ------------------------------------------- a config dir that cannot be written
+
+# Run in a child process on purpose. The failure is in `main()`'s FIRST
+# statement, so the only honest reproduction starts an interpreter that has not
+# configured logging yet, and a suite that has already built a `QApplication`
+# cannot build the second one `main()` makes. `build_window()` is the one thing
+# stubbed: the real one reads the user's `state.json` and asks GitHub for a
+# release, neither of which belongs in this test - and neither of which is ever
+# reached when the entry point dies at line one.
+_ENTRY_POINT = """\
+import os, pathlib, sys
+
+sys.argv = ["yulon"]
+from yulon import platform
+
+blocked = pathlib.Path(os.environ["YULON_TEST_BLOCKED"])
+resolved = platform.config_dir()
+if blocked not in resolved.parents:
+    raise SystemExit(f"config_dir() ignored the environment and answered {resolved}")
+
+from PySide6.QtWidgets import QMainWindow
+
+import main
+
+main.build_window = lambda: QMainWindow()
+raise SystemExit(main.main())
+"""
+
+
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="config_dir() has no environment override on macOS, so nothing here can block it",
+)
+def test_the_launcher_still_starts_when_its_config_dir_cannot_be_written(
+    tmp_path: Path,
+) -> None:
+    """The whole defect, at the entry point: an unwritable config dir killed startup.
+
+    `configure(config_dir=platform.config_dir())` runs before `QApplication`
+    exists, and `RotatingFileHandler` was constructed with no `try` anywhere
+    between `__main__` and it - so a managed profile, a read-only roaming share
+    or a redirected `%APPDATA%` got `PermissionError` and exit 1 with no window.
+    The shipped exe is `console=False` (`build/pylauncher.spec`), so it produced
+    no window, no dialog and not even a visible traceback.
+
+    The temp dir is pointed at a writable place as well, because "it started" is
+    only half the fix: support gets nothing out of an app that came up with no
+    log at all, and this asserts the log really landed where the fallback says.
+    """
+    blocked = tmp_path / "roaming"
+    blocked.write_text("a file, so nothing can be created under it", encoding="utf-8")
+    scratch_temp = tmp_path / "temp"
+    scratch_temp.mkdir()
+
+    env = dict(os.environ)
+    env.update(
+        {
+            "YULON_TEST_BLOCKED": str(blocked),
+            "APPDATA": str(blocked),  # Windows: the reported trigger
+            "XDG_DATA_HOME": str(blocked),  # Linux: the same question, its own variable
+            "YULON_SMOKE_TEST": "1",  # build the window, then leave; do not run an event loop
+            "QT_QPA_PLATFORM": "offscreen",
+            "TMPDIR": str(scratch_temp),
+            "TEMP": str(scratch_temp),
+            "TMP": str(scratch_temp),
+        }
+    )
+    env.pop("YULON_PROVISION", None)
+    pylauncher = Path(main.__file__).parent
+    env["PYTHONPATH"] = str(pylauncher)
+
+    done = subprocess.run(
+        [sys.executable, "-c", _ENTRY_POINT],
+        cwd=pylauncher,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+
+    assert done.returncode == 0, f"the launcher refused to start:\n{done.stderr}"
+    fallback_log = scratch_temp / "yulon" / "yulon.log"
+    assert fallback_log.exists(), f"it started but logged nowhere:\n{done.stderr}"
+    assert "Yu'lon launcher starting" in fallback_log.read_text(encoding="utf-8")
+
+
+def test_a_log_that_had_to_move_is_told_to_the_user_and_not_only_to_the_log(
+    qapp: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stderr warning about the log reaches nobody in the build that ships.
+
+    `build/pylauncher.spec` sets `console=False`, so the frozen exe has no
+    stream to warn on: a dialog is the only channel that survives the
+    packaging, and it names the file so the user can find it.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    told: list[str] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: told.append(a[2]))
+    monkeypatch.setattr(main, "file_log_problem", lambda: r"logging to C:\Temp\yulon\yulon.log")
+
+    main._warn_about_the_log_file(None)
+
+    assert told and r"C:\Temp\yulon\yulon.log" in told[0], f"the user was not told: {told}"
+
+
+def test_a_log_that_went_where_it_was_asked_to_says_nothing(
+    qapp: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every normal start goes through this line; a dialog on it would be a new bug."""
+    from PySide6.QtWidgets import QMessageBox
+
+    told: list[str] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: told.append(a[2]))
+    monkeypatch.setattr(main, "file_log_problem", lambda: None)
+
+    main._warn_about_the_log_file(None)
+
+    assert told == [], f"a working install was nagged: {told}"
+
+
+def test_a_state_file_that_cannot_be_written_does_not_look_like_a_saved_one(
+    qapp: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same unwritable directory, reached from a Qt slot instead of from startup.
+
+    Swallowing it would leave the new tab on screen and the install forgotten,
+    which is indistinguishable from a save that worked right up until the next
+    launch comes up without it.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    def _refuse(*_a: Any, **_k: Any) -> Any:
+        raise PermissionError(13, "Access is denied", "state.json")
+
+    monkeypatch.setattr(state, "save_state", _refuse)
+    told: list[str] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: told.append(a[2]))
+
+    assert main._warn_unless_remembered(state.AppState(), None) is False
+    assert told and "state.json" in told[0], f"the failed save was silent: {told}"
+
+
+def test_a_state_file_that_was_written_is_reported_as_written(
+    qapp: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half: the caller has to be able to tell the two apart."""
+    saved: list[Any] = []
+    monkeypatch.setattr(state, "save_state", lambda app_state, path=None: saved.append(app_state))
+
+    assert main._warn_unless_remembered(state.AppState(), None) is True
+    assert len(saved) == 1
 
 
 # --------------------------------------------------------------- window tabs

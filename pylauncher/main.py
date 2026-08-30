@@ -12,9 +12,13 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from yulon import platform
-from yulon.log import configure, get_logger
+from yulon.log import configure, file_log_problem, get_logger
+
+if TYPE_CHECKING:  # `yulon.state` pulls in pydantic; `--provision` must not pay for it.
+    from yulon.state import AppState
 
 logger = get_logger(__name__)
 
@@ -27,6 +31,52 @@ that every Install button is inside the viewport at exactly this width, and a
 test that carried its own copy of the number would keep passing if someone
 shrank the window.
 """
+
+
+def _warn_about_the_log_file(parent: Any) -> None:
+    """Say once, on screen, that the log did not go where it was meant to.
+
+    The frozen build is `console=False` (`build/pylauncher.spec`), so a warning
+    on stderr reaches nobody at all: a dialog is the only channel that survives
+    the packaging, and it carries the path because finding the log is the only
+    reason anyone reads this. Silent when there is nothing to say, which is
+    every normal start.
+    """
+    problem = file_log_problem()
+    if problem is None:
+        return
+    from PySide6.QtWidgets import QMessageBox
+
+    QMessageBox.warning(parent, "Yu'lon could not write its log", problem)
+
+
+def _warn_unless_remembered(app_state: AppState, parent: Any) -> bool:
+    """Write `state.json`, and say so out loud when it cannot be written.
+
+    Same unwritable config dir as the log file, arriving in a Qt slot rather
+    than at startup - so it degrades a running app instead of preventing one,
+    and the uncaught `OSError` came out of a slot, where Qt turns it into a
+    traceback nobody sees. Swallowing it is no better: the new tab stays on
+    screen and the install is simply forgotten, which is indistinguishable from
+    a save that worked until the next launch comes up without it. Returning the
+    outcome keeps a caller from reporting one as the other.
+    """
+    from yulon.state import save_state
+
+    try:
+        save_state(app_state)
+        return True
+    except OSError as exc:
+        logger.error(f"state.json could not be written: {exc}")
+        from PySide6.QtWidgets import QMessageBox
+
+        QMessageBox.warning(
+            parent,
+            "Yu'lon cannot remember this server",
+            "This server is set up and its tab works, but state.json could not be "
+            f"written ({exc}), so Yu'lon will not reopen it after a restart.",
+        )
+        return False
 
 
 def build_window() -> object:
@@ -45,7 +95,7 @@ def build_window() -> object:
     from yulon import __version__
     from yulon.catalog.catalog import CatalogEntry, load_catalog
     from yulon.catalog.installer import InstallEngine
-    from yulon.state import KnownInstall, load_state, save_state
+    from yulon.state import KnownInstall, load_state
     from yulon.ui.catalog_view import CatalogView
     from yulon.ui.controller_view import ControllerServices, ControllerView
     from yulon.ui.widgets.log_panel import LogPanel
@@ -255,7 +305,7 @@ def build_window() -> object:
                 wsl_distro=known.wsl_distro if known else None,
             )
         )
-        save_state(state)
+        _warn_unless_remembered(state, window)
         add_controller(game, sd, cd, known.wsl_distro if known else None)
 
     def on_adopted(game: str, server_dir: object, client_dir: object, wsl_distro: object) -> None:
@@ -270,7 +320,7 @@ def build_window() -> object:
         cd = Path(str(client_dir)) if client_dir is not None else None
         distro = str(wsl_distro) if wsl_distro else None
         state.remember(KnownInstall(game=game, server_dir=sd, client_dir=cd, wsl_distro=distro))
-        save_state(state)
+        _warn_unless_remembered(state, window)
         add_controller(game, sd, cd, distro)
 
     catalog_view.installed.connect(on_installed)
@@ -487,6 +537,9 @@ def main() -> int:
         guard = _RefuseCloseWhileBusy(window)
         window.installEventFilter(guard)
         window.show()
+        # After show(), so the app is visibly UP before it admits to anything:
+        # the log file failing is not a reason to hold the window back.
+        _warn_about_the_log_file(window)
         return int(app.exec())
     finally:
         _stop_background_threads(window)
