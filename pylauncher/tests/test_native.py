@@ -331,7 +331,7 @@ def test_a_fresh_install_runs_every_stage_in_order(tmp_path: Path) -> None:
         "start",
     ]
     assert "compiling" in lines  # the build's output is streamed, not buffered
-    state = native.read_state(server_dir)
+    state = native.read_state(server_dir, valid=native.STAGE_ORDER)
     assert state is not None
     assert state.completed == (
         "clone-core",
@@ -351,21 +351,21 @@ def test_a_fresh_install_runs_every_stage_in_order(tmp_path: Path) -> None:
 def test_preflight_and_guard_and_up_and_ready_are_never_recorded(tmp_path: Path) -> None:
     """A guard a resume skips is not a guard, and a resume must really start the server.
 
-    Asserted twice on purpose: a finished install has none of them written
-    down, AND the state object refuses to record them at all. Only the second
-    half survives someone rearranging `run()` — the first would keep passing if
-    a stage stopped being reached for an unrelated reason.
+    The assertion that matters is the engine-level one: a finished install has
+    none of them written down. `with_stage` is asserted below only for what it
+    still owns — ordering and the stage names it will accept at all.
     """
     rec = Recorder(images=False)
     server_dir = tmp_path / "wow"
     install(rec, server_dir)
-    state = native.read_state(server_dir)
+    state = native.read_state(server_dir, valid=native.STAGE_ORDER)
     assert state is not None
     assert not (set(state.completed) & native.NEVER_RECORDED)
     fresh = native.InstallState(game_id=ENTRY.id, install_id="abcd1234")
-    for stage in ("preflight", "guard", "start-db", "up", "ready"):
-        assert fresh.with_stage(stage).completed == (), f"{stage} was written down"
-    assert fresh.with_stage("build").completed == ("build",)
+    assert fresh.with_stage("build", native.STAGE_ORDER).completed == ("build",)
+    # `with_stage` no longer knows NEVER_RECORDED; `_run_stage` enforces it (the
+    # engine-level assertion above) and A.3 moves the rule to `Stage.recorded`.
+    assert fresh.with_stage("no-such-stage", native.STAGE_ORDER).completed == ()
 
 
 def resumed(server_dir: Path, **overrides: object) -> Recorder:
@@ -737,7 +737,7 @@ def test_starting_the_database_is_never_recorded_so_a_resume_does_it_again(
     """A resume probes too, so it needs the database up just as much as a first install."""
     server_dir = tmp_path / "wow"
     install(Recorder(images=False), server_dir)
-    state = native.read_state(server_dir)
+    state = native.read_state(server_dir, valid=native.STAGE_ORDER)
     assert state is not None
     assert "start-db" not in state.completed
     again = resumed(server_dir, images=True, probe_answers=[IMPORTED])
@@ -808,7 +808,7 @@ def test_a_failed_stage_records_nothing_so_it_runs_again(tmp_path: Path) -> None
     server_dir = tmp_path / "wow"
     with pytest.raises(InstallerError, match="no space left"):
         install(rec, server_dir)
-    state = native.read_state(server_dir)
+    state = native.read_state(server_dir, valid=native.STAGE_ORDER)
     assert state is not None
     assert "build" not in state.completed
     assert state.last_error  # …but the reason is kept for the next run's log
@@ -912,7 +912,7 @@ def test_an_unreadable_state_file_is_a_missing_hint_not_a_crash(tmp_path: Path) 
     server_dir = tmp_path / "wow"
     server_dir.mkdir()
     (server_dir / native.STATE_FILE).write_text("{not json", encoding="utf-8")
-    assert native.read_state(server_dir) is None
+    assert native.read_state(server_dir, valid=native.STAGE_ORDER) is None
 
 
 def test_the_state_file_only_records_stages_this_engine_knows(tmp_path: Path) -> None:
@@ -930,7 +930,7 @@ def test_the_state_file_only_records_stages_this_engine_knows(tmp_path: Path) ->
         ),
         encoding="utf-8",
     )
-    state = native.read_state(server_dir)
+    state = native.read_state(server_dir, valid=native.STAGE_ORDER)
     assert state is not None
     assert state.completed == ("build",)
 
