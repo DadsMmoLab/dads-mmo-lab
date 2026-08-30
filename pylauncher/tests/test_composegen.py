@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from yulon import resources
+from yulon import platform, resources
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry, DbFacts, NativeInstall, ReadyMarkers, load_catalog
 
@@ -644,6 +644,28 @@ def test_off_selinux_the_label_renders_to_nothing(tmp_path: Path) -> None:
     assert ":z" not in plain.base and ":z" not in plain.override
     assert "- ./modules:/azerothcore/modules\n" in plain.override
     assert "{{" not in plain.base and "{{" not in plain.override
+
+
+def test_render_accepts_every_label_platform_bind_label_can_produce(tmp_path: Path) -> None:
+    """The allow-list above and `platform.bind_label()` have to be the same two strings.
+
+    A.5 is what finally wires the two together; until then the only thing
+    holding the ends in agreement is this test and its twin in
+    `test_platform.py`. A third answer out of `bind_label()` would not fail
+    there — it would fail here, as a `ComposeGenError` raised in the middle of
+    a real install, after the sources are cloned.
+    """
+    for enforcing in (True, False, None):
+        for fs_type in (None, "ext2/ext3", "xfs", "9p", "NTFS3"):
+            label = platform.bind_label(enforcing=enforcing, fs_type=fs_type)
+            plan = composegen.render(
+                ENTRY,
+                tmp_path / "wow",
+                templates_root=TEMPLATES,
+                bind_label=label,
+                platform_id=lambda: "linux",
+            )
+            assert "{{" not in plan.base, (enforcing, fs_type)
 
 
 def test_a_bind_label_that_is_not_a_mount_option_is_refused(tmp_path: Path) -> None:

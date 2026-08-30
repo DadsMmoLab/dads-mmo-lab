@@ -1432,6 +1432,125 @@ def docker_engine_commands(pm: PackageManager, *, steamos: bool) -> list[list[st
     return [*install, ["systemctl", "enable", "--now", "docker"]]
 
 
+# -------------------------------------------------------------------- SELinux
+# Fedora and its family run SELinux enforcing, and a bind mount without a label
+# is unreadable to the container. The WotLK bash installer's answer — `:z` on
+# every host bind, and `chcon -Rt container_file_t` on the bind roots, skipped
+# on filesystems that cannot carry a label — passed the 2026-08-25 Fedora gate.
+# These are the same facts, as functions, so composegen's `BIND_LABEL` token and
+# preflight's SELinux line read one source.
+#
+# Each probe answers yes, no, or COULD NOT ASK, and the three are kept apart on
+# purpose. The shell version of this code had "the tool was not there" (exit
+# 127) and "the answer is no" (exit 1) arriving as the same value, which is how
+# a Fedora install once ran the relabel path and relabelled nothing while its
+# test asserted the empty result and passed. `None` here means only "unknown";
+# it never means "not enforcing" and never means "this filesystem cannot hold
+# labels".
+
+SELINUX_NOLABEL_FS: frozenset[str] = frozenset(
+    {"exfat", "ntfs", "ntfs3", "fuseblk", "msdos", "vfat", "cifs", "smb2", "nfs", "nfs4", "9p"}
+)
+"""Filesystems that cannot hold an SELinux label; `:z` on them makes the daemon refuse the mount."""
+
+_SELINUX_ENFORCE_PATH = Path("/sys/fs/selinux/enforce")
+
+_GETENFORCE_ANSWERS = {"enforcing": True, "permissive": False, "disabled": False}
+"""The three words `getenforce` prints. Anything else is unknown, not a "no"."""
+
+
+def selinux_enforcing(
+    *,
+    enforce_path: Path = _SELINUX_ENFORCE_PATH,
+    run: RunCmd | None = None,
+    which: Callable[[str], str | None] | None = None,
+) -> bool | None:
+    """Is SELinux enforcing here? `None` = could not tell (or not Linux at all).
+
+    The kernel's own file first, then `getenforce`: the file exists whenever
+    SELinux is loaded, while the tool lives in the optional `libselinux-utils`,
+    so gating on the tool alone fails open on a minimal Fedora — enforcing, no
+    `getenforce`, no `:z`, and a container that cannot read its config.
+
+    A box with neither is a definite "not enforcing" rather than an unknown:
+    Ubuntu and Arch must not get an "unchecked" preflight line for a subsystem
+    they do not have. But a `getenforce` that IS there and then fails, cannot be
+    started, or says something these three words do not cover is `None` — the
+    question went unanswered, and the caller has to be able to see that.
+    """
+    if detect() != "linux":
+        return None
+    try:
+        if enforce_path.exists():
+            return enforce_path.read_text(encoding="utf-8").strip() == "1"
+    except OSError as exc:
+        logger.info(f"could not read {enforce_path}: {exc}")
+    find = which if which is not None else _which
+    if find("getenforce") is None:
+        return False
+    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv, timeout=5.0))
+    try:
+        proc = do(["getenforce"])
+    except OSError as exc:
+        logger.info(f"getenforce could not be started: {exc}")
+        return None
+    if proc.returncode != 0:
+        logger.info(f"getenforce exited {proc.returncode}; SELinux state unknown")
+        return None
+    said = proc.stdout.strip().lower()
+    if said not in _GETENFORCE_ANSWERS:
+        logger.info(f"getenforce said something unrecognised: {proc.stdout.strip()!r}")
+        return None
+    return _GETENFORCE_ANSWERS[said]
+
+
+def filesystem_type(path: Path, *, run: RunCmd | None = None) -> str | None:
+    """`stat -f -c %T` of the first existing ancestor of `path`; Linux only, `None` if unknown.
+
+    The ancestor walk is `preflight._free_bytes()`'s, for the same reason: the
+    server folder is routinely one the user has not created yet.
+
+    Never `""`. An empty answer would pass `selinux_labels_supported()` as a
+    filesystem that merely is not on the deny-list, which turns a `stat` that
+    failed into a `:z` on a mount that cannot take one.
+    """
+    if detect() != "linux":
+        return None
+    probe = path
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv, timeout=5.0))
+    try:
+        proc = do(["stat", "-f", "-c", "%T", str(probe)])
+    except OSError as exc:
+        logger.info(f"stat could not be started: {exc}")
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        logger.info(f"stat -f -c %T {probe} exited {proc.returncode} with {proc.stdout.strip()!r}")
+        return None
+    return proc.stdout.strip().lower()
+
+
+def selinux_labels_supported(fs_type: str | None) -> bool:
+    """Deny-list: an unknown filesystem is assumed to hold labels, because most do."""
+    return fs_type is None or fs_type.lower() not in SELINUX_NOLABEL_FS
+
+
+def bind_label(*, enforcing: bool | None, fs_type: str | None) -> str:
+    """The compose bind-mount suffix: `:z` under enforcing SELinux on a labelable filesystem.
+
+    Only ever `":z"` or `""` — `composegen.render()` refuses any other value,
+    and it refuses it mid-install rather than here.
+
+    Empty off SELinux so every template renders byte-identical there, which
+    `test_composegen.py`'s byte assertions and the compose-config fixture prove.
+    An `enforcing` of `None` (nobody could tell) renders nothing too: a `:z` the
+    daemon rejects breaks an install that otherwise works, while a missing one
+    on an enforcing box shows up as the permission error preflight warns about.
+    """
+    return ":z" if enforcing is True and selinux_labels_supported(fs_type) else ""
+
+
 # ------------------------------------------------------------------ downloads
 # The Windows/macOS provisioning paths fetch a Docker Desktop installer — 629 MB
 # (659,189,680 bytes, measured 2026-08-23) — and then run it ELEVATED. So the
