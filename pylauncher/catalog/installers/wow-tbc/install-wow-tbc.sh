@@ -1824,15 +1824,15 @@ EOF
         print_success "realmd.conf patched"
     fi
 
-    # ── Playerbots: 1600-2000 random bots ────────────────────────────
+    # ── Playerbots: 500 random bots ─────────────────────────────────
     if [ -f "$SERVER_DIR/etc/aiplayerbot.conf" ]; then
-        sed -i "s|^AiPlayerbot\.MinRandomBots .*|AiPlayerbot.MinRandomBots = 1600|" \
+        sed -i "s|^AiPlayerbot\.MinRandomBots .*|AiPlayerbot.MinRandomBots = 500|" \
             "$SERVER_DIR/etc/aiplayerbot.conf"
-        sed -i "s|^AiPlayerbot\.MaxRandomBots .*|AiPlayerbot.MaxRandomBots = 2000|" \
+        sed -i "s|^AiPlayerbot\.MaxRandomBots .*|AiPlayerbot.MaxRandomBots = 500|" \
             "$SERVER_DIR/etc/aiplayerbot.conf"
-        sed -i "s|^AiPlayerbot\.RandomBotAccountCount .*|AiPlayerbot.RandomBotAccountCount = 400|" \
+        sed -i "s|^AiPlayerbot\.RandomBotAccountCount .*|AiPlayerbot.RandomBotAccountCount = 100|" \
             "$SERVER_DIR/etc/aiplayerbot.conf"
-        print_success "aiplayerbot.conf patched (1600-2000 bots, 400 accounts)"
+        print_success "aiplayerbot.conf patched (500 bots, 100 accounts)"
     fi
 
     # ── AHBot: high-volume auction house (~15k items target) ─────────

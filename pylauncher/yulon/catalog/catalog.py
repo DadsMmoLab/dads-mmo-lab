@@ -86,11 +86,13 @@ class NativeInstall(_Strict):
             "defaults. Data rather than Python because these are facts about ONE game that a "
             "person may reasonably want different: the playerbot population lives here, not in a "
             "module constant (style-guide §3, and an adversarial review that caught it there). "
-            "PROVENANCE of WotLK's 1600/2000: copied from the ONE proven yulon-ubuntu install, "
+            "PROVENANCE: WotLK carried 1600/2000, copied from the ONE proven yulon-ubuntu install, "
             "where the Linux installer script wrote them, after a `docker compose config` diff "
             "on 2026-08-24 found a native install would otherwise differ from a script install. "
-            "Not measured on any other machine and not measured at all for RAM — one desktop's "
-            "population, carried so the two paths agree, owed an RSS reading by the first gate."
+            "Never measured on another machine and never measured at all for RAM. Lowered to "
+            "500/500 on 2026-08-28 by owner decision, and the same number was written into the "
+            "three WotLK scripts, TBC and Vanilla so the script and native paths still agree — "
+            "the point of the 2026-08-24 diff. Still owed an RSS reading by the first gate."
         ),
     )
 
