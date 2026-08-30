@@ -498,54 +498,28 @@ def test_every_installer_writes_the_bot_population_that_was_decided() -> None:
     assert min_bots == BOT_POPULATION
 
 
-def test_the_catalogue_and_this_module_name_the_same_images() -> None:
-    """The prefix and the four suffixes now exist TWICE, and only one copy is authoritative.
-
-    B.3 moved them into `catalog.json` as `native.image_prefix`/`native.images`;
-    `DEFAULT_IMAGE_PREFIX` and `BUILT_SERVICES` stay until the task that
-    rewrites `render()`/`built_image_refs()` to read the entry. Between those
-    two commits nothing tied the copies together: a review mutated
-    `DEFAULT_IMAGE_PREFIX` to `"yulon.local/ac-wotlk-DRIFT-"` and the whole
-    suite stayed green, because the test below pins `BUILT_SERVICES` to the
-    template and `test_catalog.py` pins `native.images` to a literal, and no
-    assertion crossed from one to the other.
-
-    Drift here is the silent-forever bug the per-reference rewrite exists to
-    prevent: whichever copy the engine asks the daemon about names an image
-    that was never tagged, `images_built()` answers False for good, and every
-    resume re-runs the multi-hour build. Delete this test with the constants.
-    """
-    native = ENTRY.install.native
-    assert native is not None
-    assert native.image_prefix == composegen.DEFAULT_IMAGE_PREFIX
-    assert native.images == tuple(composegen.BUILT_SERVICES)
-
-
 def test_the_image_refs_match_the_services_the_build_overlay_actually_builds(
     tmp_path: Path,
 ) -> None:
-    """`BUILT_SERVICES` is a third copy of four strings, and nothing cross-checked it.
+    """`native.images` and the build overlay's `target:` lines must agree, and nothing else did.
 
     The same four names live in `build.yml.tmpl`'s `target:` lines, in
-    `base.yml.tmpl`'s `image:` refs, and in `BUILT_SERVICES`. They agree today.
-    Nothing enforced it: rename a `target:` without touching the tuple and
-    `images_built()` asks the daemon for a reference that will never exist, so
-    it answers False forever and every resume re-runs the multi-hour build —
-    permanently, silently, with a green suite. That is precisely the bug the
-    per-reference rewrite was written to fix, reintroduced through the one seam
-    nothing checked (review, 2026-08-24).
-
-    Derived from the rendered files rather than restated, so the assertion
-    cannot drift the way the tuple did.
+    `base.yml.tmpl`'s `image:` refs, and now in `catalog.json`'s `images`
+    (they were a module constant, `BUILT_SERVICES`). Rename a `target:` without
+    touching the data and `images_built()` asks the daemon for a reference that
+    will never exist, so it answers False forever and every resume re-runs the
+    multi-hour build — permanently, silently, with a green suite (review,
+    2026-08-24). Derived from the rendered files rather than restated, so the
+    assertion cannot drift the way the tuple did.
     """
     plan = render(tmp_path / "wow")
-    refs = composegen.built_image_refs(tmp_path / "wow", platform_id=lambda: "linux")
+    refs = composegen.built_image_refs(ENTRY, tmp_path / "wow", platform_id=lambda: "linux")
+    native = ENTRY.install.native
+    assert native is not None
 
     built_targets = set(re.findall(r"^\s*target:\s*(\S+)\s*$", plan.build, re.MULTILINE))
-    assert built_targets == set(composegen.BUILT_SERVICES), (
-        built_targets,
-        composegen.BUILT_SERVICES,
-    )
+    assert built_targets == set(native.images), (built_targets, native.images)
+    assert all(ref.startswith(native.image_prefix) for ref in refs)
 
     # And every reference the engine will ask the daemon about is exactly an
     # image the base file names, so a rename in either place fails here.
@@ -565,3 +539,37 @@ def test_the_image_refs_match_the_services_the_build_overlay_actually_builds(
     base_images = set(re.findall(r"^\s*image:\s*(\S+)\s*$", plan.base, re.MULTILINE))
     assert set(refs) <= base_images, (set(refs) - base_images, base_images)
     assert "${IMAGE_TAG" not in plan.base, "the interpolation wrapper came back"
+
+
+def test_the_image_prefix_is_the_entrys_not_a_constant(tmp_path: Path) -> None:
+    """Two games must not tag their builds into one namespace; the prefix is catalog data."""
+    native = ENTRY.install.native
+    assert native is not None
+    other = ENTRY.model_copy(
+        update={
+            "install": ENTRY.install.model_copy(
+                update={"native": native.model_copy(update={"image_prefix": "yulon.local/x-"})}
+            )
+        }
+    )
+    refs = composegen.built_image_refs(other, tmp_path / "wow", platform_id=lambda: "linux")
+    tag = composegen.image_tag(tmp_path / "wow", platform_id=lambda: "linux")
+    assert refs == tuple(f"yulon.local/x-{name}:{tag}" for name in native.images)
+    plan = composegen.render(
+        other, tmp_path / "wow", templates_root=TEMPLATES, platform_id=lambda: "linux"
+    )
+    assert "yulon.local/x-worldserver:" in plan.base
+    assert "yulon.local/ac-wotlk-" not in plan.base
+    assert not hasattr(composegen, "DEFAULT_IMAGE_PREFIX")
+    assert not hasattr(composegen, "BUILT_SERVICES")
+
+
+def test_built_image_refs_refuses_an_entry_with_no_native_block(tmp_path: Path) -> None:
+    """Built from WotLK with `native` stripped, not from a CMaNGOS entry: G.4 gives those
+    a native block in 7.3 and this test must not care."""
+    scriptless = ENTRY.model_copy(
+        update={"install": ENTRY.install.model_copy(update={"native": None})}
+    )
+    assert scriptless.install.native is None
+    with pytest.raises(composegen.ComposeGenError, match="install.native"):
+        composegen.built_image_refs(scriptless, tmp_path / "wow", platform_id=lambda: "linux")

@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from yulon import platform
-from yulon.catalog.catalog import CatalogEntry
+from yulon.catalog.catalog import CatalogEntry, NativeInstall
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -70,18 +70,6 @@ to prevent — so the length is a real trade. 32 bits over the handful of
 directories one person installs to is a birthday probability under 1e-8, and
 the state file's own `install_id` check catches the pathological case at
 install time rather than letting it run.
-"""
-
-DEFAULT_IMAGE_PREFIX = "yulon.local/ac-wotlk-"
-"""Where images this machine BUILDS are named.
-
-Deliberately not upstream's `acore/`: a build tags whatever the base file's
-`image:` says, so reusing an upstream ref would clobber a pulled image and let
-a later `docker compose pull` silently replace this playerbots build with
-upstream's vanilla worldserver. The first component contains a dot, so Docker
-reads it as a registry HOST and can never resolve it to somebody else's Docker
-Hub repo — a stale-image mistake then fails loudly at pull time instead of
-booting a plausible-looking wrong server.
 """
 
 # Runtime env the generated override starts with. Two keys, both load-bearing:
@@ -188,22 +176,8 @@ def project_name(
     return f"yulon-{_slug(game_id)}-{install_id(server_dir, platform_id=platform_id)}"
 
 
-BUILT_SERVICES: tuple[str, ...] = (
-    "worldserver",
-    "authserver",
-    "db-import",
-    "client-data",
-)
-"""The image suffixes the build overlay produces, in the base file's spelling.
-
-Kept beside the prefix and the tag because the three together are the only
-description of what a finished build leaves behind, and `docker.images_built()`
-now has to ask about them by name — see `built_image_refs()`.
-"""
-
-
 def built_image_refs(
-    server_dir: Path, *, platform_id: Callable[[], str] = platform.detect
+    entry: CatalogEntry, server_dir: Path, *, platform_id: Callable[[], str] = platform.detect
 ) -> tuple[str, ...]:
     """The image references this install's build produces, fully qualified.
 
@@ -219,9 +193,23 @@ def built_image_refs(
     in, so the old question answered "not built" for every finished build and a
     resume re-ran the compile. Cheap in BuildKit cache terms and still wrong:
     the engine would have reported hours of work it did not need to do.
+
+    The prefix and the service keys are the entry's (`install.native.images`,
+    `.image_prefix`) since 7.1, so two games cannot tag into one namespace.
     """
+    native = _native_of(entry)
     tag = image_tag(server_dir, platform_id=platform_id)
-    return tuple(f"{DEFAULT_IMAGE_PREFIX}{name}:{tag}" for name in BUILT_SERVICES)
+    return tuple(f"{native.image_prefix}{name}:{tag}" for name in native.images)
+
+
+def _native_of(entry: CatalogEntry) -> NativeInstall:
+    """The entry's native block, or the one refusal every native-only function shares."""
+    if entry.install.native is None:
+        raise ComposeGenError(
+            f"{entry.name} does not say how to install natively (no `install.native` in "
+            "catalog.json), so no compose files were generated."
+        )
+    return entry.install.native
 
 
 def image_tag(server_dir: Path, *, platform_id: Callable[[], str] = platform.detect) -> str:
@@ -311,12 +299,7 @@ def render(
             missing, a placeholder was left unfilled, or a value cannot be
             safely spliced into YAML.
     """
-    native = entry.install.native
-    if native is None:
-        raise ComposeGenError(
-            f"{entry.name} does not say how to install natively (no `install.native` in "
-            "catalog.json), so no compose files were generated."
-        )
+    native = _native_of(entry)
     templates = templates_root / native.templates
     password = db_password if db_password is not None else (entry.install.password.value or "")
     if not password:
@@ -351,7 +334,7 @@ def render(
             "WORLD_PORT": str(entry.ports.world),
             "SOAP_PORT": str(native.soap_port),
             "DB_PASSWORD": password,
-            "IMAGE_PREFIX": DEFAULT_IMAGE_PREFIX,
+            "IMAGE_PREFIX": native.image_prefix,
             "IMAGE_TAG": tag,
             "CONTAINER_USER": container_user(platform_id),
         },

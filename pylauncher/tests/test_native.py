@@ -1096,7 +1096,7 @@ def test_macos_native_installer_full_run_and_compose_generation(tmp_path: Path) 
     assert "# user: left to the image (acore)" in base_content
 
     # Images in base compose file match expected tags
-    refs = composegen.built_image_refs(server_dir, platform_id=lambda: "macos")
+    refs = composegen.built_image_refs(ENTRY, server_dir, platform_id=lambda: "macos")
     assert any(ref in base_content for ref in refs)
 
     # Build overlay specifies build contexts and Dockerfiles

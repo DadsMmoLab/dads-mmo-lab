@@ -767,7 +767,7 @@ class NativeInstaller:
         `docker.images_built()`).
         """
         built = self._seams.images_built(
-            composegen.built_image_refs(server_dir, platform_id=self._seams.platform_id)
+            composegen.built_image_refs(self.entry, server_dir, platform_id=self._seams.platform_id)
         )
         if state.has("build") and built:
             yield "The server is already built; skipping the compile."
