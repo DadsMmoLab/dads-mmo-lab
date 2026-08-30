@@ -9,8 +9,9 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from PySide6.QtWidgets import QPushButton, QWidget
+from PySide6.QtWidgets import QPushButton, QScrollArea, QSplitter, QWidget
 
+from main import DEFAULT_WINDOW_SIZE
 from tests.conftest import process_events
 from yulon import runner, wsl
 from yulon.catalog.catalog import CatalogEntry, load_catalog
@@ -889,3 +890,68 @@ def test_adopting_allows_a_compose_file_it_cannot_read(
     view.adopted.connect(lambda *a: got.append(a))
     assert view.adopt_from_wsl(CATALOG.get("wow-wotlk")) is True
     assert len(got) == 1
+
+
+def _catalog_in_the_default_window(
+    view: CatalogView, panel: LogPanel
+) -> tuple[QSplitter, QScrollArea]:
+    """Lay the catalog out exactly as `build_window()` does, at the size it opens at.
+
+    The tiles' width budget is not the window's — the Catalog tab is a splitter
+    with the log panel beside it, so the view gets roughly half of it. Rebuilding
+    that arrangement rather than resizing the view to some chosen number is the
+    point: the budget has to be the app's own, or the test is measuring a window
+    that does not exist.
+
+    The splitter comes back with the scroll area because `addWidget()` reparents
+    both children onto it: dropping it here would delete the C++ side of the very
+    widgets the caller is about to measure.
+    """
+    splitter = QSplitter()
+    splitter.addWidget(view)
+    splitter.addWidget(panel)
+    splitter.resize(*DEFAULT_WINDOW_SIZE)
+    splitter.show()
+    process_events()
+    scroll = view.findChild(QScrollArea)
+    assert isinstance(scroll, QScrollArea)
+    return splitter, scroll
+
+
+def test_every_install_button_is_inside_the_default_window(qapp: object) -> None:
+    """Four tiles, four reachable Install buttons — at the size the app opens at.
+
+    The tile description was a plain `QLabel`, so a tile was as wide as its
+    longest unwrapped line, and WotLK's description is 118 characters. Two of
+    those per grid row asked for some 3200px where the Catalog tab has under
+    700, and WoW TBC and WoW Tortoise sat past the right edge of the viewport
+    with their Install buttons drawn where nobody could see them. Clicking blind
+    still opened the folder picker, which is why this survived: the control was
+    never broken, only offscreen (measured on the shipped v0.6.51, 2026-08-30).
+
+    Asserted as geometry rather than as `wordWrap() is True` deliberately. The
+    property is one way to keep the promise; the promise is that the buttons are
+    on screen, and it has to break again the day someone writes a description
+    longer than wrapping can absorb.
+    """
+    panel = LogPanel()
+    view = CatalogView(CATALOG, lambda e: _FakeInstaller(e, []), panel, pick_dir=lambda *_: None)
+    window, scroll = _catalog_in_the_default_window(view, panel)
+    assert window.isHidden() is False  # geometry is only meaningful once laid out
+    viewport = scroll.viewport()
+
+    offscreen = []
+    for game in CATALOG.games:
+        button = view.button_for(game.id)
+        left = button.mapTo(viewport, button.rect().topLeft()).x()
+        right = left + button.width()
+        if left < 0 or right > viewport.width():
+            offscreen.append(f"{game.id}: x {left}..{right} of {viewport.width()}")
+    assert offscreen == []
+
+    # And nothing is merely *scrollable* into reach: a horizontal scrollbar with
+    # anything to scroll means the grid still does not fit, and the user meets
+    # the same hidden tiles on the first frame.
+    assert scroll.horizontalScrollBar().maximum() == 0
+    grid = scroll.widget()
+    assert grid is not None and grid.minimumSizeHint().width() <= viewport.width()
