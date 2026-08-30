@@ -93,7 +93,7 @@ booting a plausible-looking wrong server.
 # stay out. They did not stay out — the compose diff against the proven install
 # (2026-08-24) found that a native install would otherwise take mod-playerbots'
 # defaults and hand the same user a different world from the same button, and
-# they now ship in `catalog.json`'s `install.native.world_env`. Corrected after
+# they now ship in `catalog.json`'s `install.native.azerothcore.world_env`. Corrected after
 # a sweep found this text still arguing the opposite of what the code does.
 #
 # The argument was not wrong, only outranked, and the part still worth keeping
@@ -114,10 +114,10 @@ DEFAULT_WORLD_ENV: Mapping[str, str] = {
 }
 """Settings that are structural rather than tunable: without them the stack is wrong, not merely
 different. Anything a person might reasonably want a different value for belongs in
-`catalog.json`'s `install.native.world_env` instead — the playerbot population started here and
-was moved there after an adversarial review pointed out that a per-game number in a module
-constant is exactly what style-guide §3 forbids, and that one machine's bot population is not a
-default for every machine.
+`catalog.json`'s `install.native.azerothcore.world_env` instead — the playerbot population
+started here and was moved there after an adversarial review pointed out that a per-game number
+in a module constant is exactly what style-guide §3 forbids, and that one machine's bot
+population is not a default for every machine.
 
 The environment differences the compose diff turned up and this deliberately does NOT carry —
 `AC_CCACHE`, `CTYPE`, `CSCRIPTS`, `DATAPATH`, `USER_CONF_PATH` and the three empty
@@ -329,7 +329,8 @@ def render(
     # The entry's own settings layered over the structural defaults, and an
     # explicit `world_env` overriding both — that is the seam a settings
     # surface arrives through.
-    env = dict(world_env) if world_env is not None else {**DEFAULT_WORLD_ENV, **native.world_env}
+    entry_env = native.azerothcore.world_env if native.azerothcore is not None else {}
+    env = dict(world_env) if world_env is not None else {**DEFAULT_WORLD_ENV, **entry_env}
     base = _fill(
         _read_template(templates / "base.yml.tmpl"),
         {

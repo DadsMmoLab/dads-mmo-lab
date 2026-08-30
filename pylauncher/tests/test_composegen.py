@@ -450,8 +450,10 @@ def test_the_generated_stack_configures_the_bot_population(tmp_path: Path) -> No
     # Data, not code — and the structural flags stay behind in the constant.
     assert "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS" not in composegen.DEFAULT_WORLD_ENV
     assert ENTRY.install.native is not None
-    assert ENTRY.install.native.world_env["AC_AI_PLAYERBOT_MIN_RANDOM_BOTS"] == BOT_POPULATION
-    assert ENTRY.install.native.world_env["AC_AI_PLAYERBOT_MAX_RANDOM_BOTS"] == BOT_POPULATION
+    assert ENTRY.install.native.azerothcore is not None
+    world_env = ENTRY.install.native.azerothcore.world_env
+    assert world_env["AC_AI_PLAYERBOT_MIN_RANDOM_BOTS"] == BOT_POPULATION
+    assert world_env["AC_AI_PLAYERBOT_MAX_RANDOM_BOTS"] == BOT_POPULATION
     assert 'AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES: "1"' in plan.override
 
 
@@ -491,7 +493,9 @@ def test_every_installer_writes_the_bot_population_that_was_decided() -> None:
     # The sixth place is the native path's data, which the scan above cannot
     # see: it lives in `catalog.json`, not under `catalog/installers/`.
     assert ENTRY.install.native is not None
-    assert ENTRY.install.native.world_env["AC_AI_PLAYERBOT_MIN_RANDOM_BOTS"] == BOT_POPULATION
+    assert ENTRY.install.native.azerothcore is not None
+    min_bots = ENTRY.install.native.azerothcore.world_env["AC_AI_PLAYERBOT_MIN_RANDOM_BOTS"]
+    assert min_bots == BOT_POPULATION
 
 
 def test_the_image_refs_match_the_services_the_build_overlay_actually_builds(

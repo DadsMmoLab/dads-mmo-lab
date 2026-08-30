@@ -11,8 +11,10 @@ from pydantic import ValidationError
 from yulon import resources
 from yulon.catalog.catalog import (
     CATALOG_FILE,
+    DbFacts,
     EmulatorSource,
     PasswordPlan,
+    ReadyMarkers,
     load_catalog,
     parse_catalog,
 )
@@ -311,3 +313,68 @@ def test_a_dest_that_could_leave_the_server_dir_is_refused(dest: str) -> None:
     """A clone target is joined onto the server dir; nothing may point it outside."""
     with pytest.raises(ValidationError):
         EmulatorSource.model_validate({"repo": "a/b", "dest": dest})
+
+
+def test_wotlk_native_block_names_its_family_images_database_and_ready_markers() -> None:
+    """The facts `native.py` and `docker.py` hard-coded, now data (phase7-decisions "wow-wotlk").
+
+    The image prefix and the four service keys are `composegen`'s old
+    `DEFAULT_IMAGE_PREFIX`/`BUILT_SERVICES` with the same values; the ready
+    markers are `docker.py`'s `"ready..."` literal and `native._READY_REALM_HOST`
+    spelled as tokens. Same strings, new home, so a resume still finds its images.
+    The markers are literal (`regex` False): the spine `re.escape`s them, so the
+    dots in `127.0.0.1` never become wildcards.
+
+    The bot population is the owner's 500/500 (2026-08-28), the same number the
+    five installer scripts ship; `test_composegen.py` sweeps them all against it.
+    """
+    native = load_catalog().get("wow-wotlk").install.native
+    assert native is not None
+    assert native.family == "azerothcore"
+    assert native.images == ("worldserver", "authserver", "db-import", "client-data")
+    assert native.image_prefix == "yulon.local/ac-wotlk-"
+    assert native.dockerfile_dir is None
+    assert native.db == DbFacts(image="mysql:8.4", client="mysql", user="root")
+    assert native.db.charset == "utf8mb4"
+    assert native.ready == ReadyMarkers(world="ready...", auth="{{REALM_HOST}}:{{WORLD_PORT}}")
+    assert native.ready.fatal is None
+    assert native.ready.regex is False
+    assert native.ready.timeout_s == 600 and native.ready.restart_loop == 4
+    assert native.azerothcore is not None
+    assert native.azerothcore.world_env == {
+        "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS": "500",
+        "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS": "500",
+    }
+    # `world_env` moved INTO the azerothcore block; a stale top-level key is an error.
+    with pytest.raises(ValidationError, match="world_env"):
+        type(native).model_validate({**native.model_dump(), "world_env": {}})
+
+
+def test_the_three_cmangos_entries_have_no_native_block_yet() -> None:
+    """7.1 dispatches only WotLK natively; the CMaNGOS blocks arrive with 7.3's models.
+
+    F.4 changes the `platforms` assertion to `()` in 7.2; G.4 deletes this test
+    when the three entries get their `native` blocks in 7.3.
+    """
+    catalog = load_catalog()
+    for game_id in ("wow-tbc", "wow-vanilla", "wow-tortoise"):
+        assert catalog.get(game_id).install.native is None, game_id
+        assert catalog.get(game_id).install.platforms == ("linux",), game_id
+
+
+@pytest.mark.parametrize("missing", ["family", "images", "image_prefix", "db", "ready"])
+def test_a_native_block_without_its_facts_is_refused(missing: str) -> None:
+    native = load_catalog().get("wow-wotlk").install.native
+    assert native is not None
+    data = native.model_dump()
+    del data[missing]
+    with pytest.raises(ValidationError, match=missing):
+        type(native).model_validate(data)
+
+
+def test_ready_markers_are_literal_unless_the_entry_says_regex() -> None:
+    """A5: `regex` defaults to False; only Tortoise's alternations set it (7.3)."""
+    assert ReadyMarkers(world="ready...").regex is False
+    assert ReadyMarkers(world="World initialized|Avg Diff", regex=True).regex is True
+    with pytest.raises(ValidationError):
+        ReadyMarkers(world="")

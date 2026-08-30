@@ -106,8 +106,77 @@ class PasswordPlan(_Strict):
         return self
 
 
+class DbFacts(_Strict):
+    """The database the emulator runs on: image, client binary, app user, charset.
+
+    Data because it differs per core (WotLK's `mysql:8.4` and `root`, the CMaNGOS
+    entries' MariaDB and a `mangos` user) and because `apply.py`/`maintenance.py`
+    spell the client binary today as a literal `mysql` — 7.9 reads it from here.
+    """
+
+    image: str = Field(min_length=1)
+    client: Literal["mysql", "mariadb"]
+    user: str = Field(min_length=1)
+    charset: str = "utf8mb4"
+
+
+class ReadyMarkers(_Strict):
+    """What "the server is up" looks like in this game's logs, matched over this run's log.
+
+    `world` is required: it is the line the `ready` stage waits for. `auth` is
+    optional (None: do not wait on the auth log at all), `fatal` short-circuits
+    the wait to failure. All three take the `{{TOKEN}}` grammar plus
+    `REALM_HOST`, filled by the spine through `composegen.fill()`. They are
+    LITERAL strings unless `regex` is true: the spine `re.escape`s the filled
+    text before building `docker.ReadySpec`, so `127.0.0.1` matches only
+    itself. Tortoise's alternations set `regex: true` (7.3). These are the
+    literals `docker.py` ("ready...") and `native._READY_REALM_HOST` used to
+    carry.
+    """
+
+    world: str = Field(min_length=1)
+    auth: str | None = None
+    fatal: str | None = None
+    timeout_s: int = Field(default=600, gt=0)
+    restart_loop: int = Field(
+        default=4,
+        ge=1,
+        description="RestartCount growth that means a crash loop rather than a slow start.",
+    )
+    regex: bool = Field(
+        default=False,
+        description=(
+            "True: `world`/`auth`/`fatal` are regular expressions as written. False: they are "
+            "literal text the spine escapes before matching."
+        ),
+    )
+
+
+class AzerothCoreData(_Strict):
+    """The AzerothCore family's own install data — only the worldserver env block (A2)."""
+
+    world_env: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Per-game runtime settings for the worldserver, merged over composegen's structural "
+            "defaults. Data rather than Python because these are facts about ONE game that a "
+            "person may reasonably want different: the playerbot population lives here, not in a "
+            "module constant (style-guide §3, and an adversarial review that caught it there). "
+            "PROVENANCE: WotLK carried 1600/2000, copied from the ONE proven yulon-ubuntu "
+            "install where the Linux installer script wrote them, after a `docker compose "
+            "config` diff on 2026-08-24 found a native install would otherwise differ from a "
+            "script install. Never measured on another machine and never measured at all for "
+            "RAM. Lowered to 500/500 by owner decision on 2026-08-28, and the same number went "
+            "into the three WotLK scripts, TBC and Vanilla so the script and native paths still "
+            "agree — the point of the 2026-08-24 diff, and the thing that went wrong when the "
+            "decision sat on one branch while every installer shipped 1600/2000. Still owed an "
+            "RSS reading by the first gate."
+        ),
+    )
+
+
 class NativeInstall(_Strict):
-    """What the native install engine needs that is a fact about THIS game (roadmap 6.2).
+    """What the native install engine needs that is a fact about THIS game (roadmap 6.2, 7.1).
 
     Floors are here rather than in `preflight.py` because a different game
     compiles at a different cost: AzerothCore's numbers are not a rule about
@@ -122,6 +191,42 @@ class NativeInstall(_Strict):
         description=(
             "Directory of this game's compose templates, relative to catalog/installers/."
         ),
+    )
+    family: Literal["azerothcore", "cmangos"] = Field(
+        description="Which family engine installs this game; must equal the engine's `family`."
+    )
+    images: tuple[str, ...] = Field(
+        min_length=1,
+        description=(
+            "The image suffixes the build overlay produces, in the base file's spelling. The "
+            "prefix, the tag and these together are the only description of what a finished "
+            "build leaves behind, and `docker.images_built()` asks about them by name — see "
+            "`composegen.built_image_refs()`."
+        ),
+    )
+    image_prefix: str = Field(
+        min_length=1,
+        description=(
+            "Where images this machine BUILDS are named. Deliberately not upstream's `acore/`: "
+            "a build tags whatever the base file's `image:` says, so reusing an upstream ref "
+            "would clobber a pulled image and let a later `docker compose pull` silently "
+            "replace this playerbots build with upstream's vanilla worldserver. The first "
+            "component contains a dot, so Docker reads it as a registry HOST and can never "
+            "resolve it to somebody else's Docker Hub repo — a stale-image mistake then fails "
+            "loudly at pull time instead of booting a plausible-looking wrong server."
+        ),
+    )
+    dockerfile_dir: str | None = Field(
+        default=None,
+        description=(
+            "Directory of a Dockerfile.tmpl/dockerignore.tmpl pair, relative to "
+            "catalog/installers/ (CMaNGOS, 7.3). None: the checkout ships its own Dockerfile."
+        ),
+    )
+    db: DbFacts
+    ready: ReadyMarkers
+    azerothcore: AzerothCoreData | None = Field(
+        default=None, description="Present exactly when `family` is azerothcore (7.3 validates)."
     )
     soap_port: int = Field(default=7878, gt=0, lt=65536)
     min_ram_gb: float = Field(
@@ -146,24 +251,6 @@ class NativeInstall(_Strict):
         description="The checkout is 2.4 GB but the clone PEAKS near 3.7 GB.",
     )
     warn_server_dir_gb: float = Field(default=15.0, gt=0)
-    world_env: dict[str, str] = Field(
-        default_factory=dict,
-        description=(
-            "Per-game runtime settings for the worldserver, merged over composegen's structural "
-            "defaults. Data rather than Python because these are facts about ONE game that a "
-            "person may reasonably want different: the playerbot population lives here, not in a "
-            "module constant (style-guide §3, and an adversarial review that caught it there). "
-            "PROVENANCE: WotLK carried 1600/2000, copied from the ONE proven yulon-ubuntu "
-            "install where the Linux installer script wrote them, after a `docker compose "
-            "config` diff on 2026-08-24 found a native install would otherwise differ from a "
-            "script install. Never measured on another machine and never measured at all for "
-            "RAM. Lowered to 500/500 by owner decision on 2026-08-28, and the same number went "
-            "into the three WotLK scripts, TBC and Vanilla so the script and native paths still "
-            "agree — the point of the 2026-08-24 diff, and the thing that went wrong when the "
-            "decision sat on one branch while every installer shipped 1600/2000. Still owed an "
-            "RSS reading by the first gate."
-        ),
-    )
 
     def floors_gb(self, *, same_volume: bool) -> tuple[float, float]:
         """(refuse, warn) free-space floors when both needs land on one volume.

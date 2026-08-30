@@ -42,10 +42,29 @@
           "value": "password"
         },
         "native": {
+          "family": "azerothcore",
           "templates": "wow-wotlk/native",
-          "world_env": {
-            "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS": "500",
-            "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS": "500"
+          "images": [
+            "worldserver",
+            "authserver",
+            "db-import",
+            "client-data"
+          ],
+          "image_prefix": "yulon.local/ac-wotlk-",
+          "db": {
+            "image": "mysql:8.4",
+            "client": "mysql",
+            "user": "root"
+          },
+          "ready": {
+            "world": "ready...",
+            "auth": "{{REALM_HOST}}:{{WORLD_PORT}}"
+          },
+          "azerothcore": {
+            "world_env": {
+              "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS": "500",
+              "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS": "500"
+            }
           }
         }
       },
