@@ -189,6 +189,31 @@ def test_a_password_plan_without_its_mode_s_field_is_refused(plan: dict[str, obj
         PasswordPlan.model_validate(plan)
 
 
+@pytest.mark.parametrize(
+    ("plan", "message"),
+    [
+        ({"mode": "generated", "file": ".db_password", "value": "x"}, "must not carry a `value`"),
+        ({"mode": "generated", "value": "x"}, "must not carry a `value`"),
+        ({"mode": "fixed", "value": "x", "file": ".db_password"}, "must not name a `file`"),
+    ],
+)
+def test_a_password_plan_may_not_name_the_other_mode_s_field(
+    plan: dict[str, object], message: str
+) -> None:
+    """Each mode refuses the other's field, because `composegen` reads `.value` unconditionally.
+
+    `{"mode": "generated", "value": "x"}` validated until this test existed
+    (review, B.6): the entry says the password is minted per install and
+    persisted at `file`, while `render()` would find a `.value` to splice into
+    the compose TEXT — the exact leak B.6's refusal of `{{DB_PASSWORD}}` exists
+    to prevent, arriving through the model instead of the template. A `file` on
+    a fixed plan is the mirror: two sources of truth for one password, and
+    nothing saying which wins.
+    """
+    with pytest.raises(ValidationError, match=message):
+        PasswordPlan.model_validate(plan)
+
+
 def test_the_old_password_fields_are_gone_not_ignored() -> None:
     """`extra="forbid"` turns a stale key into an error instead of a silent default."""
     with pytest.raises(ValidationError, match="db_root_password"):

@@ -20,3 +20,11 @@
 *.zsh   text eol=lf
 *.ksh   text eol=lf
 *.fish  text eol=lf
+
+# The committed byte snapshot of what `composegen.render()` writes (contract
+# A16). `write_plan()` writes those files with `newline="\n"` on every OS, so
+# the snapshot is only a BYTE snapshot while the checkout holds LF — a Windows
+# checkout under core.autocrlf=true would otherwise grow CRLF and the phrase
+# "byte for byte" in `test_composegen.py` would be resting on Python's
+# universal-newline translation rather than on the bytes.
+pylauncher/tests/data/wotlk-rendered/*.yml  text eol=lf

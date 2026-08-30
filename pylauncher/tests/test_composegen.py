@@ -9,14 +9,16 @@ this project would notice until two containers fought over 3724.
 
 from __future__ import annotations
 
+import hashlib
 import re
+import sys
 from pathlib import Path
 
 import pytest
 
 from yulon import resources
 from yulon.catalog import composegen
-from yulon.catalog.catalog import load_catalog
+from yulon.catalog.catalog import CatalogEntry, DbFacts, NativeInstall, ReadyMarkers, load_catalog
 
 ENTRY = load_catalog().get("wow-wotlk")
 TEMPLATES = resources.installers_dir()
@@ -663,3 +665,130 @@ def test_fill_is_the_one_public_substitution_and_refuses_a_leftover_token() -> N
     with pytest.raises(composegen.ComposeGenError, match="unfilled compose placeholder"):
         composegen.fill("a {{X}} {{Z}}", {"X": "1"})
     assert composegen._fill is composegen.fill
+
+
+# -- generated-password mode: the secret lives in .env and nowhere else --------
+
+
+def generated_entry(tmp_path: Path, base: str) -> CatalogEntry:
+    """wow-tbc (a generated-password entry) with a throwaway native block and templates.
+
+    G.2's exactly-one-family-block validator makes this block need a minimal
+    `cmangos=CmangosData(...)`; G.2 adds it here (A14).
+    """
+    templates = tmp_path / "gen"
+    templates.mkdir(exist_ok=True)
+    (templates / "base.yml.tmpl").write_text(base, encoding="utf-8")
+    (templates / "override.yml.tmpl").write_text("services:\n{{ENVIRONMENT}}\n", encoding="utf-8")
+    (templates / "build.yml.tmpl").write_text("services:\n", encoding="utf-8")
+    tbc = load_catalog().get("wow-tbc")
+    native = NativeInstall(
+        family="cmangos",
+        templates="gen",
+        images=("server",),
+        image_prefix="yulon.local/cmangos-tbc-",
+        db=DbFacts(image="mariadb:11", client="mariadb", user="mangos"),
+        ready=ReadyMarkers(world="Avg Diff"),
+    )
+    return tbc.model_copy(update={"install": tbc.install.model_copy(update={"native": native})})
+
+
+SAFE_BASE = "name: {{PROJECT_NAME}}\nroot: ${DB_ROOT_PASSWORD:?Yu'lon .env is missing}\n"
+
+
+def test_a_generated_password_reaches_env_and_never_the_compose_text(tmp_path: Path) -> None:
+    """The secret travels in `.env` (phase7-decisions "Password"), which has exactly one writer."""
+    entry = generated_entry(tmp_path, SAFE_BASE)
+    plan = composegen.render(
+        entry,
+        tmp_path / "wow",
+        templates_root=tmp_path,
+        db_password="tbc-0a1b2c3d",
+        platform_id=lambda: "linux",
+    )
+    assert plan.dotenv == {"DB_ROOT_PASSWORD": "tbc-0a1b2c3d"}
+    for text in (plan.base, plan.override, plan.build):
+        assert "tbc-0a1b2c3d" not in text
+    assert "${DB_ROOT_PASSWORD:?" in plan.base
+
+
+def test_generated_mode_without_a_password_is_an_error_not_a_blank(tmp_path: Path) -> None:
+    entry = generated_entry(tmp_path, SAFE_BASE)
+    with pytest.raises(composegen.ComposeGenError, match="generates its database password"):
+        composegen.render(
+            entry, tmp_path / "wow", templates_root=tmp_path, platform_id=lambda: "linux"
+        )
+
+
+def test_a_generated_password_template_may_not_mention_the_password_token(tmp_path: Path) -> None:
+    """`{{DB_PASSWORD}}` would bake the secret into a file git can see; refused by name."""
+    entry = generated_entry(tmp_path, "name: {{PROJECT_NAME}}\nroot: {{DB_PASSWORD}}\n")
+    with pytest.raises(composegen.ComposeGenError, match=r"DB_PASSWORD.*base\.yml\.tmpl"):
+        composegen.render(
+            entry,
+            tmp_path / "wow",
+            templates_root=tmp_path,
+            db_password="tbc-0a1b2c3d",
+            platform_id=lambda: "linux",
+        )
+
+
+def test_a_fixed_password_still_lands_in_the_base_file_and_not_in_env(tmp_path: Path) -> None:
+    """WotLK is unchanged: the fixed value is the interpolation default, `.env` stays untouched."""
+    plan = render(tmp_path / "wow")
+    assert plan.dotenv == {}
+    assert "${DB_ROOT_PASSWORD:-password}" in plan.base
+
+
+# -- A16: the committed byte snapshot ------------------------------------------
+
+LINUX_SERVER_DIR = Path("/home/pk/wow-server-playerbots")
+LINUX_INSTALL_ID = hashlib.sha256(b"/home/pk/wow-server-playerbots").hexdigest()[
+    : composegen.INSTALL_ID_LENGTH
+]
+SNAPSHOT_DIR = Path(__file__).resolve().parent / "data" / "wotlk-rendered"
+
+
+def rendered_as_on_linux() -> dict[str, str]:
+    """WotLK rendered for the yulon-ubuntu path, platform linux, no SELinux label.
+
+    `install_id()` hashes `os.path.abspath()`, and on Windows `/home/pk/…` grows
+    a drive letter, so the id is the ONE thing normalised to its Linux value —
+    on Linux itself the replace is a no-op and the comparison is literal.
+    """
+    plan = composegen.render(
+        ENTRY,
+        LINUX_SERVER_DIR,
+        templates_root=TEMPLATES,
+        bind_label="",
+        platform_id=lambda: "linux",
+    )
+    actual_id = composegen.install_id(LINUX_SERVER_DIR, platform_id=lambda: "linux")
+    return {
+        composegen.BASE_FILE: plan.base.replace(actual_id, LINUX_INSTALL_ID),
+        composegen.OVERRIDE_FILE: plan.override.replace(actual_id, LINUX_INSTALL_ID),
+        composegen.BUILD_FILE: plan.build.replace(actual_id, LINUX_INSTALL_ID),
+    }
+
+
+def test_the_wotlk_render_reproduces_the_committed_snapshot_byte_for_byte() -> None:
+    """A16: the three files under `tests/data/wotlk-rendered/` ARE what `render()` writes.
+
+    Committed in 7.1 and kept green through 7.3 (G.5/G.7), which is how "the
+    WotLK templates render byte-identical" stops being a sentence in the
+    checklist and becomes something the suite refuses to let drift. Regenerate
+    them only by the command in B.6 Step 3, and only when a WotLK template
+    change is the point of the commit.
+    """
+    texts = rendered_as_on_linux()
+    assert set(texts) == {p.name for p in SNAPSHOT_DIR.iterdir() if p.is_file()}
+    for name, text in texts.items():
+        expected = (SNAPSHOT_DIR / name).read_text(encoding="utf-8")
+        assert text == expected, name
+    if sys.platform.startswith("linux"):
+        assert (
+            composegen.install_id(LINUX_SERVER_DIR, platform_id=lambda: "linux") == LINUX_INSTALL_ID
+        )
+    assert f"name: yulon-wow-wotlk-{LINUX_INSTALL_ID}\n" in texts[composegen.BASE_FILE]
+    assert "${DB_ROOT_PASSWORD:-password}" in texts[composegen.BASE_FILE]
+    assert ":z" not in texts[composegen.BASE_FILE]

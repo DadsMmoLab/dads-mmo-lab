@@ -232,19 +232,13 @@ def _slug(text: str) -> str:
 class ComposePlan:
     """The three files' text plus the `.env` keys this install needs on top of them.
 
-    `dotenv` is **always empty as this module is called today**, and saying so
-    is the point: `render()` has no caller that passes a per-install password,
-    so every value it writes is the catalog's fixed one, which the base file's
-    interpolation default has to carry anyway. A docstring here once promised
-    that a non-default password "lands in `.env` rather than being baked into
-    the file"; nothing implemented that, and a caller trusting it would have
-    written a generated secret into `docker-compose.yml` in seven places
-    (review, 2026-08-23).
-
-    The field stays because the `.env` merge is real machinery
-    (`write_dotenv()`) that `write_plan()` applies when this is non-empty — it
-    is the seam a per-install password would arrive through, not a claim that
-    one already does.
+    `dotenv` is empty for a fixed-password game (WotLK): the catalog's value is
+    the base file's interpolation default and needs no `.env`. For a
+    generated-password game it carries exactly `DB_ROOT_PASSWORD`, which
+    `write_plan()` merges into `.env` through `write_dotenv()` — the one writer
+    of that file — so the secret is never in a compose file git can see. A
+    docstring here once promised the second behaviour while nothing implemented
+    it (review, 2026-08-23); it has had a caller since 7.1.
     """
 
     base: str
@@ -289,11 +283,12 @@ def render(
 ) -> ComposePlan:
     """Render this entry's three compose files for an install in `server_dir`.
 
-    `db_password` overrides the catalog's fixed password (for a game that
-    generates one per install). **Whatever it is, it is rendered into
-    `docker-compose.yml`** — as the `${DB_ROOT_PASSWORD:-…}` interpolation
-    default, in seven places. The returned plan's `dotenv` is empty; see
-    `ComposePlan.dotenv` for why that is stated rather than fixed.
+    `db_password` is the per-install value for a game whose plan is `generated`
+    (the spine resolves it before stage 1); it may also override a fixed one. A
+    fixed value is rendered into `docker-compose.yml` as the
+    `${DB_ROOT_PASSWORD:-…}` default; a generated one goes only into the plan's
+    `dotenv`, and a template that names `{{DB_PASSWORD}}` in that mode is
+    refused.
 
     `bind_label` is appended to every `./…:` host bind in the templates:
     `":z"` when SELinux enforces and the filesystem can carry labels
@@ -304,17 +299,34 @@ def render(
 
     Raises:
         ComposeGenError: the entry has no `install.native` block, a template is
-            missing, a placeholder was left unfilled, or a value cannot be
-            safely spliced into YAML.
+            missing, a placeholder was left unfilled, a value cannot be safely
+            spliced into YAML, the entry generates its password and none was
+            given, or a template names `{{DB_PASSWORD}}` in generated mode.
     """
     native = _native_of(entry)
     templates = templates_root / native.templates
-    password = db_password if db_password is not None else (entry.install.password.value or "")
-    if not password:
+    plan = entry.install.password
+    if db_password is not None:
+        password = db_password
+    elif plan.mode == "fixed" and plan.value:
+        password = plan.value
+    else:
         raise ComposeGenError(
-            f"{entry.name} has no database root password to write into its compose files."
+            f"{entry.name} generates its database password per install, and none was given "
+            "to render its compose files with."
         )
     _refuse_unsafe(password, "the database root password")
+    generated = plan.mode == "generated"
+    template_names = ("base.yml.tmpl", "override.yml.tmpl", "build.yml.tmpl")
+    texts = {name: _read_template(templates / name) for name in template_names}
+    if generated:
+        for name, text in texts.items():
+            if "{{DB_PASSWORD}}" in text:
+                raise ComposeGenError(
+                    f"{{{{DB_PASSWORD}}}} appears in {templates / name}, but {entry.name} "
+                    "generates its password per install; spell it "
+                    "${DB_ROOT_PASSWORD:?Yu'lon .env is missing} so the secret stays in .env."
+                )
     # An allow-list of two, because this value is spliced into a YAML list item
     # with no quoting at all: a newline in it writes whatever follows as another
     # mount, and the templates are the one place a stray mount would not be
@@ -343,14 +355,18 @@ def render(
     entry_env = native.azerothcore.world_env if native.azerothcore is not None else {}
     env = dict(world_env) if world_env is not None else {**DEFAULT_WORLD_ENV, **entry_env}
     base = fill(
-        _read_template(templates / "base.yml.tmpl"),
+        texts["base.yml.tmpl"],
         {
             "PROJECT_NAME": project,
             "DB_PORT": str(entry.ports.db or 3306),
             "AUTH_PORT": str(entry.ports.auth),
             "WORLD_PORT": str(entry.ports.world),
             "SOAP_PORT": str(native.soap_port),
-            "DB_PASSWORD": password,
+            # Absent entirely in generated mode, so a template that names the
+            # token fails `fill()`'s unfilled-placeholder check rather than
+            # quietly rendering an empty password — belt to the refusal's
+            # braces, which already caught it by name above.
+            **({} if generated else {"DB_PASSWORD": password}),
             "IMAGE_PREFIX": native.image_prefix,
             "IMAGE_TAG": tag,
             "CONTAINER_USER": container_user(platform_id),
@@ -358,17 +374,17 @@ def render(
         },
     )
     override = fill(
-        _read_template(templates / "override.yml.tmpl"),
+        texts["override.yml.tmpl"],
         {"ENVIRONMENT": _env_block(env), "BIND_LABEL": bind_label},
     )
     build = fill(
-        _read_template(templates / "build.yml.tmpl"),
+        texts["build.yml.tmpl"],
         # `.` and not the absolute path: the server dir IS the checkout, and
         # compose resolves a relative context against the file's own directory,
         # so a moved folder keeps building.
         {"BUILD_CONTEXT": "."},
     )
-    return ComposePlan(base, override, build, {})
+    return ComposePlan(base, override, build, {"DB_ROOT_PASSWORD": password} if generated else {})
 
 
 def _read_template(path: Path) -> str:
@@ -507,11 +523,8 @@ def write_plan(
 def merge_dotenv(existing: str, additions: Mapping[str, str]) -> str:
     """`.env` text with `additions` applied: existing assignments replaced, new ones appended.
 
-    No non-test caller reaches this today — `render()` returns an empty
-    `dotenv`, so `write_plan()`'s branch never fires. It is written and tested
-    ahead of the first caller that needs it (a per-install database password,
-    or the settings surface writing a port binding), not because something
-    already merges an `.env`.
+    Reached through `write_plan()` for a generated-password game since 7.1; a
+    fixed-password plan never fills `dotenv`, so WotLK never comes here.
 
     A merge and not a rewrite, because this file is shared. Compose interpolates
     the compose files from it, a later SOAP setup writes its own port binding

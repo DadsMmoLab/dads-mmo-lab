@@ -98,7 +98,29 @@ class PasswordPlan(_Strict):
     )
 
     @model_validator(mode="after")
-    def _the_mode_has_its_field(self) -> PasswordPlan:
+    def _the_mode_has_its_field_and_only_its_field(self) -> PasswordPlan:
+        """Each mode needs its own field and refuses the other's.
+
+        The "and only its own" half is the load-bearing one, and it was missing
+        until B.6: `{"mode": "generated", "value": "x"}` validated, while
+        `composegen.render()` reads `.value` to decide what to splice into the
+        compose TEXT. An entry could therefore promise a per-install secret that
+        never leaves `.env` and hand a real password to a file git can see —
+        the leak B.6's `{{DB_PASSWORD}}` refusal exists to stop, arriving
+        through the model instead of the template. The mirror clause is cheaper
+        but the same shape: a `file` on a fixed plan is two sources of truth for
+        one password with nothing saying which wins.
+        """
+        if self.mode == "generated" and self.value is not None:
+            raise ValueError(
+                "a generated password plan must not carry a `value`: the secret is minted per "
+                "install and lives in `file` and `.env`, never in the catalog or a compose file"
+            )
+        if self.mode == "fixed" and self.file is not None:
+            raise ValueError(
+                "a fixed password plan must not name a `file`: `value` is the password, and a "
+                "second source of truth for it is a bug waiting for a mismatch"
+            )
         if self.mode == "fixed" and not self.value:
             raise ValueError("a fixed password plan needs a non-empty `value`")
         if self.mode == "generated" and not self.file:
