@@ -284,6 +284,7 @@ def render(
     templates_root: Path,
     world_env: Mapping[str, str] | None = None,
     db_password: str | None = None,
+    bind_label: str = "",
     platform_id: Callable[[], str] = platform.detect,
 ) -> ComposePlan:
     """Render this entry's three compose files for an install in `server_dir`.
@@ -293,6 +294,13 @@ def render(
     `docker-compose.yml`** — as the `${DB_ROOT_PASSWORD:-…}` interpolation
     default, in seven places. The returned plan's `dotenv` is empty; see
     `ComposePlan.dotenv` for why that is stated rather than fixed.
+
+    `bind_label` is appended to every `./…:` host bind in the templates:
+    `":z"` when SELinux enforces and the filesystem can carry labels
+    (`platform.bind_label()` decides; the spine passes it), otherwise empty, so
+    off SELinux the rendered files are byte-identical to before 7.1. Never on a
+    named volume — the templates put the token only on bind lines, and
+    `test_composegen.py` counts them.
 
     Raises:
         ComposeGenError: the entry has no `install.native` block, a template is
@@ -307,6 +315,15 @@ def render(
             f"{entry.name} has no database root password to write into its compose files."
         )
     _refuse_unsafe(password, "the database root password")
+    # An allow-list of two, because this value is spliced into a YAML list item
+    # with no quoting at all: a newline in it writes whatever follows as another
+    # mount, and the templates are the one place a stray mount would not be
+    # noticed until a container had it.
+    if bind_label not in ("", ":z"):
+        raise ComposeGenError(
+            f"the bind label {bind_label!r} is not a mount option this engine writes; "
+            "only ':z' or nothing is spliced after a host bind."
+        )
     tag = image_tag(server_dir, platform_id=platform_id)
     project = project_name(entry.id, server_dir, platform_id=platform_id)
     # The entry's own settings layered over the structural defaults, and an
@@ -325,7 +342,7 @@ def render(
     # that exists this branch is a hole, not a default.
     entry_env = native.azerothcore.world_env if native.azerothcore is not None else {}
     env = dict(world_env) if world_env is not None else {**DEFAULT_WORLD_ENV, **entry_env}
-    base = _fill(
+    base = fill(
         _read_template(templates / "base.yml.tmpl"),
         {
             "PROJECT_NAME": project,
@@ -337,12 +354,14 @@ def render(
             "IMAGE_PREFIX": native.image_prefix,
             "IMAGE_TAG": tag,
             "CONTAINER_USER": container_user(platform_id),
+            "BIND_LABEL": bind_label,
         },
     )
-    override = _fill(
-        _read_template(templates / "override.yml.tmpl"), {"ENVIRONMENT": _env_block(env)}
+    override = fill(
+        _read_template(templates / "override.yml.tmpl"),
+        {"ENVIRONMENT": _env_block(env), "BIND_LABEL": bind_label},
     )
-    build = _fill(
+    build = fill(
         _read_template(templates / "build.yml.tmpl"),
         # `.` and not the absolute path: the server dir IS the checkout, and
         # compose resolves a relative context against the file's own directory,
@@ -359,20 +378,29 @@ def _read_template(path: Path) -> str:
         raise ComposeGenError(f"the compose template {path} could not be read: {exc}") from exc
 
 
-def _fill(template: str, values: Mapping[str, str]) -> str:
+def fill(text: str, tokens: Mapping[str, str]) -> str:
     """`{{TOKEN}}` substitution where an unresolved token is an ERROR.
 
-    A template edit that adds a placeholder nobody fills would otherwise ship a
-    compose file containing a literal `{{...}}`, which compose accepts happily
-    as a string and which fails somewhere else entirely.
+    The ONE substitution for everything this engine renders — compose
+    templates, a CMaNGOS Dockerfile, `.conf` values, SQL statements and the
+    ready markers all come through here (contract A6), so a token spelled once
+    in `catalog.json` means the same thing in every file. A template edit that
+    adds a placeholder nobody fills would otherwise ship a compose file
+    containing a literal `{{...}}`, which compose accepts happily as a string
+    and which fails somewhere else entirely. Unused tokens are fine; unfilled
+    ones are not.
     """
-    out = template
-    for key, value in values.items():
+    out = text
+    for key, value in tokens.items():
         out = out.replace("{{" + key + "}}", value)
     start = out.find("{{")
     if start >= 0:
         raise ComposeGenError(f"unfilled compose placeholder near: {out[start:start + 40]!r}")
     return out
+
+
+_fill = fill
+"""The pre-7.1 private name, kept so nothing that imported it moves twice."""
 
 
 def _env_block(env: Mapping[str, str]) -> str:

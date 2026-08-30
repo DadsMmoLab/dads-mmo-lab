@@ -573,3 +573,93 @@ def test_built_image_refs_refuses_an_entry_with_no_native_block(tmp_path: Path) 
     assert scriptless.install.native is None
     with pytest.raises(composegen.ComposeGenError, match="install.native"):
         composegen.built_image_refs(scriptless, tmp_path / "wow", platform_id=lambda: "linux")
+
+
+HOST_BIND = re.compile(r"^\s*-\s*\./")
+"""A HOST bind line in a compose template: a list item whose source is a `./` path.
+
+Named volumes (`db-data:`, `client-data:`) deliberately do not match. A relabel
+suffix on a named volume is a bug rather than a no-op, so the two are told apart
+by what the mount SOURCE is and not by which service they sit under.
+"""
+
+
+def test_every_host_bind_line_carries_the_label_and_no_named_volume_does(tmp_path: Path) -> None:
+    """SELinux: `:z` on every `./...:` bind, never on `client-data:`/`db-data:` (phase7-decisions).
+
+    Eight lines today - seven in the base file, one in the override - and the
+    count is asserted so a new bind line added without the token fails here
+    rather than as "Permission denied" from a container on Fedora. A uniform
+    `:z`, not the Fedora script's `:Z` on `./modules`: that mount is shared by
+    `ac-db-import` and `ac-worldserver`, and `:Z` on a shared mount locks the
+    other service out. The token may appear on nothing else - not even a
+    comment, which `fill()` would otherwise happily rewrite.
+    """
+    base_tmpl = (TEMPLATES / "wow-wotlk/native/base.yml.tmpl").read_text(encoding="utf-8")
+    override_tmpl = (TEMPLATES / "wow-wotlk/native/override.yml.tmpl").read_text(encoding="utf-8")
+    assert base_tmpl.count("{{BIND_LABEL}}") == 7
+    assert override_tmpl.count("{{BIND_LABEL}}") == 1
+    for text in (base_tmpl, override_tmpl):
+        for line in text.splitlines():
+            if HOST_BIND.match(line):
+                assert line.endswith("{{BIND_LABEL}}"), line
+            elif "{{BIND_LABEL}}" in line:
+                raise AssertionError(f"the label is on something that is not a host bind: {line}")
+
+    labelled = composegen.render(
+        ENTRY,
+        tmp_path / "wow",
+        templates_root=TEMPLATES,
+        bind_label=":z",
+        platform_id=lambda: "linux",
+    )
+    binds = [
+        line
+        for text in (labelled.base, labelled.override)
+        for line in text.splitlines()
+        if HOST_BIND.match(line)
+    ]
+    assert len(binds) == 8
+    assert all(line.endswith(":z") for line in binds), binds
+    assert "client-data:/azerothcore/env/dist/data/:ro" in labelled.base
+    assert "db-data:/var/lib/mysql\n" in labelled.base
+    assert labelled.build.count(":z") == 0
+
+
+def test_off_selinux_the_label_renders_to_nothing(tmp_path: Path) -> None:
+    """The default is the empty string, so every existing install renders byte-identically."""
+    plain = composegen.render(
+        ENTRY, tmp_path / "wow", templates_root=TEMPLATES, platform_id=lambda: "linux"
+    )
+    explicit = composegen.render(
+        ENTRY,
+        tmp_path / "wow",
+        templates_root=TEMPLATES,
+        bind_label="",
+        platform_id=lambda: "linux",
+    )
+    assert plain == explicit
+    assert ":z" not in plain.base and ":z" not in plain.override
+    assert "- ./modules:/azerothcore/modules\n" in plain.override
+    assert "{{" not in plain.base and "{{" not in plain.override
+
+
+def test_a_bind_label_that_is_not_a_mount_option_is_refused(tmp_path: Path) -> None:
+    """Anything but `:z` is refused, because the token lands unquoted inside a YAML list item."""
+    with pytest.raises(composegen.ComposeGenError, match="bind label"):
+        composegen.render(
+            ENTRY,
+            tmp_path / "wow",
+            templates_root=TEMPLATES,
+            bind_label=":z\n  - /etc:/etc",
+            platform_id=lambda: "linux",
+        )
+
+
+def test_fill_is_the_one_public_substitution_and_refuses_a_leftover_token() -> None:
+    """A6: conf values, SQL statements and ready markers all go through this one function."""
+    assert composegen.fill("a {{X}} b {{Y}}", {"X": "1", "Y": "2"}) == "a 1 b 2"
+    assert composegen.fill("no tokens", {"X": "unused"}) == "no tokens"
+    with pytest.raises(composegen.ComposeGenError, match="unfilled compose placeholder"):
+        composegen.fill("a {{X}} {{Z}}", {"X": "1"})
+    assert composegen._fill is composegen.fill

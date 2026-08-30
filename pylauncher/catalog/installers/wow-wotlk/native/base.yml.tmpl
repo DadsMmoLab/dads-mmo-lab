@@ -45,6 +45,7 @@
 # button, the backup `docker exec ac-database mysqldump` and every archived
 # guide address them by name. The per-install separation lives in `name:`
 # instead, which is also what keys the named volumes.
+# BIND_LABEL: the SELinux relabel suffix, on every ./ host bind below and on no named volume.
 name: {{PROJECT_NAME}}
 
 services:
@@ -132,11 +133,11 @@ services:
       AC_PLAYERBOTS_DATABASE_INFO: "ac-database;3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_playerbots"
     {{CONTAINER_USER}}
     volumes:
-      - ./env/dist/etc:/azerothcore/env/dist/etc
-      - ./env/dist/logs:/azerothcore/env/dist/logs
+      - ./env/dist/etc:/azerothcore/env/dist/etc{{BIND_LABEL}}
+      - ./env/dist/logs:/azerothcore/env/dist/logs{{BIND_LABEL}}
       # The modules tree, because the import applies every module's own
       # data/sql/db-auth and db-characters updates as well as AzerothCore's.
-      - ./modules:/azerothcore/modules
+      - ./modules:/azerothcore/modules{{BIND_LABEL}}
     depends_on:
       ac-database:
         condition: service_healthy
@@ -215,8 +216,8 @@ services:
       AC_LOGIN_DATABASE_INFO: "ac-database;3306;root;${DB_ROOT_PASSWORD:-{{DB_PASSWORD}}};acore_auth"
     {{CONTAINER_USER}}
     volumes:
-      - ./env/dist/etc:/azerothcore/env/dist/etc
-      - ./env/dist/logs:/azerothcore/env/dist/logs
+      - ./env/dist/etc:/azerothcore/env/dist/etc{{BIND_LABEL}}
+      - ./env/dist/logs:/azerothcore/env/dist/logs{{BIND_LABEL}}
     ports:
       # The game client connects to this from the LAN, so it is deliberately
       # NOT loopback-pinned (unlike the DB and SOAP admin ports).
@@ -265,8 +266,8 @@ services:
     volumes:
       # env/dist/etc must be bound out to the host: it is where the module
       # system reads and writes worldserver.conf and every module conf.
-      - ./env/dist/etc:/azerothcore/env/dist/etc
-      - ./env/dist/logs:/azerothcore/env/dist/logs
+      - ./env/dist/etc:/azerothcore/env/dist/etc{{BIND_LABEL}}
+      - ./env/dist/logs:/azerothcore/env/dist/logs{{BIND_LABEL}}
       - client-data:/azerothcore/env/dist/data/:ro
       # The ./modules source mount lives in docker-compose.override.yml.
     depends_on:
