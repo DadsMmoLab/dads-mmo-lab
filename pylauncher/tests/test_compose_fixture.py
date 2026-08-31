@@ -192,14 +192,15 @@ def test_what_the_script_capture_shows_and_this_vocabulary_still_cannot_see() ->
 
     * `build.args` — upstream passes `USER_ID`/`GROUP_ID`/`DOCKER_USER` into the image build and
       the native stack passes none. `_build()` compares the dockerfile and the target only.
-    * `build.context` — absolute on the script side (C1's predicted surprise, in the flesh, but
-      on `context` and not on `dockerfile`, which is relative on both). Not compared, by design:
-      it is the install dir either way.
-    * the SELinux label — the script install carries `bind: {selinux: Z}` on exactly ONE mount,
-      the worldserver's modules tree, and nothing on its other five binds, while this engine
-      labels every `./` bind with `z` when SELinux is on. `volume_from_config()` does not read
-      `bind.selinux` and `_mount_mode()` drops `z`/`Z` on the other side, so the two schemes are
-      invisible to each other. Recorded in `pyplan/checklist.md`.
+    * `build.context` — absolute in the RAW capture (C1's predicted surprise, in the flesh, but on
+      `context` and not on `dockerfile`, which is relative on both); relativised here with the
+      rest of the install path before this file was committed, which is why the assertion four
+      lines below reads `"."`. Not compared either way, by design: it is the install dir either way.
+    * the SELinux label — the script install's capture carries `bind: {selinux: Z}` on exactly
+      ONE mount, the worldserver's modules tree, and nothing on its other SIX binds, while this
+      engine labels every `./` bind with `z` when SELinux is on. `volume_from_config()` does not
+      read `bind.selinux` and `_mount_mode()` drops `z`/`Z` on the other side, so the two schemes
+      are invisible to each other. Recorded in `pyplan/bug-checklist.md` §17.
     * the healthcheck — theirs addresses MySQL over the local socket, ours over TCP by service
       name from the compose network. Owned by `test_composegen.py`.
     """
@@ -237,7 +238,10 @@ def test_dropping_the_build_overlay_drops_build_and_nothing_else(tmp_path: Path)
 
 def test_the_fixture_carries_no_machine_identity() -> None:
     """A fixture that names /home/pk or the folder's install id would drift the first time
-    somebody captured it from another box; the capture step strips both.
+    somebody captured it from another box; the capture step strips both. Checked against BOTH
+    committed fixtures — the native install's image tags carry a per-install id that had to be
+    stripped from everywhere else; the script install's tags are upstream's fixed
+    `acore/*:master`, so it never carried an id to leak, but nothing had asserted that either.
 
     The install id appears in THREE places in a raw `compose config`: the top-level `name:`, the
     `name:` compose fills into every top-level volume and network declaration (`<project>_db-data`),
@@ -247,23 +251,27 @@ def test_the_fixture_carries_no_machine_identity() -> None:
     the tag by a documented rule, so it cannot drift a result, and leaving it keeps the fixture
     recognisably a capture rather than an edited document.
     """
-    text = FIXTURE.read_text(encoding="utf-8")
-    data = json.loads(text)
+    for fixture in (FIXTURE, SCRIPT_FIXTURE):
+        text = fixture.read_text(encoding="utf-8")
+        data = json.loads(text)
+        assert "/home/" not in text
+        assert "name" not in data
+        assert all("name" not in body for body in data["volumes"].values())
+        assert all("name" not in body for body in data["networks"].values())
+        assert set(data["services"]) == {
+            "ac-database",
+            "ac-db-import",
+            "ac-client-data-init",
+            "ac-authserver",
+            "ac-worldserver",
+        }
+    # The per-install id is a NATIVE-only concept (the script install's images are upstream's
+    # fixed tags), so this half stays scoped to that one fixture.
+    native = json.loads(FIXTURE.read_text(encoding="utf-8"))
     install_id = "243c46e3"
-    assert "/home/" not in text
-    assert "name" not in data
-    assert all("name" not in body for body in data["volumes"].values())
-    assert all("name" not in body for body in data["networks"].values())
-    assert install_id not in json.dumps({k: v for k, v in data.items() if k != "services"})
-    for name, svc in data["services"].items():
+    assert install_id not in json.dumps({k: v for k, v in native.items() if k != "services"})
+    for name, svc in native["services"].items():
         assert install_id not in json.dumps({k: v for k, v in svc.items() if k != "image"}), name
-    assert set(data["services"]) == {
-        "ac-database",
-        "ac-db-import",
-        "ac-client-data-init",
-        "ac-authserver",
-        "ac-worldserver",
-    }
 
 
 def test_a_captured_compose_config_matches_the_fixture() -> None:
@@ -932,8 +940,9 @@ def _proven(options: dict[str, object] | None = None) -> sc.Stack:
     """The proven install's top level, spelled the way the captured fixture spells it.
 
     Its two volumes carry OUR names, `db-data` and `client-data`, because the reference is a
-    native install and the engine rendered them — see `DESIGN_VOLUME_NAMES`, which the capture
-    emptied. `options` attaches a body to one of them.
+    native install and the engine rendered them — this pairing carries no rename registry
+    (`_config()`'s default, `sc.NO_VOLUME_ALIASES`, is empty), so both names are compared exactly
+    as written. `options` attaches a body to one of them.
     """
     volumes: dict[str, object] = {"db-data": {}, "client-data": {}}
     volumes.update(options or {})

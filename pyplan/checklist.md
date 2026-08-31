@@ -594,16 +594,22 @@ recorded as missing and the generated file **does** supply — that gap is close
 path and remains open on the script path.
 
 **The defect it found.** `AC_AI_PLAYERBOT_MIN_RANDOM_BOTS` and `AC_AI_PLAYERBOT_MAX_RANDOM_BOTS`
-are absent from `DEFAULT_WORLD_ENV`. The proven install carries 1600 and 2000, written by the
-Linux installer script; a native install would have taken mod-playerbots' own defaults instead.
-Not a crash — a user on macOS and a user on Linux quietly getting different worlds from the same
-button, which is the class of difference this project rejected named volumes to avoid. Fixed with
-the proven install's own values — but **not in `DEFAULT_WORLD_ENV`, which is where the sentences
+are absent from `DEFAULT_WORLD_ENV`. The proven install carries 1600 and 2000 — the Linux
+installer script's numbers as they stood on 2026-08-24, this section's own date, before
+[#134](https://github.com/DadsMmoLab/dads-mmo-lab/pull/134) ("Five hundred bots, in the six places
+that decide the number") dropped every installer script AND `catalog.json`'s own
+`install.native.world_env` to 500/500. **This is a different capture from, and an older number
+than, the 2026-08-31 bash-install capture below** (`wotlk-compose-config-script.json`), which
+reads 500/500 — the population the scripts and `catalog.json` actually ship today. A native
+install would have taken mod-playerbots' own defaults instead. Not a crash — a user on macOS and a
+user on Linux quietly getting different worlds from the same button, which is the class of
+difference this project rejected named volumes to avoid. Fixed with the proven install's own
+values, 1600/2000 at the time — but **not in `DEFAULT_WORLD_ENV`, which is where the sentences
 above locate the defect**. An adversarial review pointed out that a per-game number in a module
-constant is what style-guide §3 forbids, and that one machine's 2000 bots is no default for every
-machine, so 1600/2000 live in `catalog.json`'s `install.native.world_env` and a test now forbids
-them in `DEFAULT_WORLD_ENV`. The values live in `catalog.json`'s
-`install.native.world_env`, and a test now forbids them in `DEFAULT_WORLD_ENV`.
+constant is what style-guide §3 forbids, and that one machine's bot count is no default for every
+machine, so the values moved into `catalog.json`'s `install.native.world_env` and a test now
+forbids hardcoding either key in `DEFAULT_WORLD_ENV`. What lives in `catalog.json` today is
+500/500, after #134 — not the 1600/2000 this paragraph is about.
 
 **Where the numbers come from, stated once.** They are ONE desktop's, copied so that a native
 install and a script install agree — never measured for RAM on anything. The first live gate
@@ -1310,11 +1316,16 @@ ours; it is inherited. Not a Yu'lon defect, and the same second bridge network a
 
 **Four things the capture shows that the comparison still cannot see**, each now with a real
 example rather than a hypothetical one: `build.args` (upstream passes `USER_ID`/`GROUP_ID`/
-`DOCKER_USER` into the image build; we pass none), `build.context` (absolute on their side — the
-absolute-path surprise that was predicted for `dockerfile`, which is relative on both), the
+`DOCKER_USER` into the image build; we pass none), `build.context` (absolute in the RAW capture —
+the absolute-path surprise that was predicted for `dockerfile`, which is relative on both — but
+relativised with the rest of the install path before the fixture was committed, so the committed
+file and the test that reads it both say `"."`), the
 healthcheck (theirs over the local socket, ours over TCP by service name), and **the SELinux
-label**: the script install carries `bind: {selinux: Z}` on exactly ONE mount, the worldserver's
-modules tree, and nothing on its other five binds, while this engine labels every `./` bind with
-`z`. `Z` is private-to-one-container relabelling and `z` is shared; nothing compares them, and
-nobody has established which is right for a tree two services mount. Recorded in
-`bug-checklist.md`.
+label**: the script install's capture carries `bind: {selinux: Z}` on exactly ONE mount, the
+worldserver's modules tree, and nothing on its other SIX binds — not the six `:z` the shipped
+Fedora script actually writes on disk, which the capture's shape does not match. `Z` is
+private-to-one-container relabelling and `z` is shared, and the script's own comment already
+answers which is right for a tree two services mount (`z`) — which settles it for our engine's
+`./modules`, mounted by both `ac-worldserver` and `ac-db-import`. Nothing compares the two
+spellings, so this is read from the captures, not asserted by a test. Recorded in
+`bug-checklist.md` §17, with what is and is not actually open.
