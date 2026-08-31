@@ -2591,8 +2591,16 @@ def _probe_selinux_argv(selinux_enforcing: Callable[[], bool | None]) -> list[st
     gets, and a genuine denial still reaches the user as a refusal it can
     explain. Folding "could not ask" into either answer is the mistake
     `platform.selinux_enforcing()`'s own docstring was written against.
+
+    The rule itself lives in `platform.label_disable_args()`, beside
+    `bind_label()`, because `git.ContainerGit` needs the same flag for the same
+    reason — its read-only `remote get-url origin` was denied on this exact box
+    — and two spellings of one security decision are one edit away from being
+    two different security decisions. What stays here is the seam adapter: this
+    function takes the CALLABLE, because `bind_mount_ok()` takes the SELinux
+    question as a parameter so a test can state the machine's answer.
     """
-    return ["--security-opt", "label:disable"] if selinux_enforcing() is True else []
+    return platform.label_disable_args(enforcing=selinux_enforcing())
 
 
 def bind_mount_ok(

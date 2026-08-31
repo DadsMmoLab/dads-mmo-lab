@@ -642,6 +642,70 @@ def test_a_checkout_git_will_not_identify_is_refused_rather_than_cloned_over(
     assert (server_dir / "somebody-elses-source").exists()
 
 
+def test_an_enforcing_box_still_recognises_a_users_own_checkout_of_this_repository(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The refusal that names the repository must survive SELinux, and it did not.
+
+    This is the level the harm happens at, so the argv is not stated here — the
+    real `ContainerGit.remote_url()` runs, against a `runner.run` that behaves
+    the way Fedora 44 Enforcing was measured to behave (2026-08-30): a bind
+    mount of an unlabelled folder is invisible to a confined container, and the
+    SAME command with `--security-opt label:disable` answers. Only the machine
+    is stated, through the two seams `ContainerGit` has for exactly that; the
+    seam wired in is `native.Seams.remote_url`'s own default body,
+    `ContainerGit().remote_url`.
+
+    What the denial looks like is why three review seats read past it. The
+    container cannot see `.git` at all, so git says "fatal: not a git repository"
+    rather than anything about permissions; `remote_url()` catches the `GitError`
+    and returns `None`; and `None` is what a folder with no checkout in it
+    answers. So on every enforcing box a user's own checkout stopped being a
+    checkout of a NAMED repository and became an unreadable one — the refusal
+    that fired said git would not say what this is and told the user to pick an
+    empty folder, about a machine that could have answered perfectly well, to a
+    user whose remedy is now to delete their work.
+
+    Take `--security-opt label:disable` out of `git._capture()` and this goes
+    red on the message: the "would not say what it is a checkout of" refusal
+    fires instead of the one that names the repository and the missing record.
+    """
+    core_url = ENTRY.emulator.sources[0].url
+    server_dir = tmp_path / "wow"
+    (server_dir / ".git").mkdir(parents=True)
+    (server_dir / "my-own-patches.cpp").write_text("mine", encoding="utf-8")
+
+    def enforcing_selinux(
+        argv: list[str], cwd: Path | None = None, env: object = None, **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        unconfined = "--security-opt" in argv and argv[argv.index("--security-opt") + 1] == (
+            "label:disable"
+        )
+        if unconfined:
+            return subprocess.CompletedProcess(argv, 0, f"{core_url}\n", "")
+        # Not "permission denied": with the mount invisible, git reports that
+        # the directory is not a repository at all.
+        return subprocess.CompletedProcess(
+            argv, 128, "", "fatal: not a git repository (or any parent up to mount point /)"
+        )
+
+    monkeypatch.setattr(runner, "run", enforcing_selinux)
+    monkeypatch.setattr(git.platform, "docker_program", lambda: "docker")
+    fedora = git.ContainerGit(
+        selinux_enforcing=lambda: True, filesystem_type=lambda _path: "ext2/ext3"
+    )
+
+    rec = Recorder()
+    with pytest.raises(InstallerError) as refusal:
+        install(rec, server_dir, remote_url=fedora.remote_url)
+    said = str(refusal.value)
+    assert "there is no record here of an install this app made" in said, said
+    assert core_url in said, said
+    assert "would not say what it is a checkout of" not in said, said
+    assert not rec.clones
+    assert (server_dir / "my-own-patches.cpp").read_text(encoding="utf-8") == "mine"
+
+
 def test_the_same_repository_spelled_differently_is_not_a_conflict(tmp_path: Path) -> None:
     """`...y.git`, `...y` and `git@github.com:x/y` are one repository.
 

@@ -311,6 +311,84 @@ def test_a_read_only_git_question_does_not_relabel_the_folder_it_asks_about(
     assert seen[-1][seen[-1].index("-v") + 1] == f"{writing}:/git:z"
 
 
+def _read_argv(seen: list[list[str]], dest: Path, *, enforcing: bool | None) -> list[str]:
+    """The argv of one read-only containerized git question, with the machine stated."""
+    (dest / ".git").mkdir(parents=True, exist_ok=True)
+    git.ContainerGit(
+        selinux_enforcing=lambda: enforcing, filesystem_type=lambda _path: "ext2/ext3"
+    ).remote_url(dest)
+    assert seen, "the question never reached a container"
+    return seen[-1]
+
+
+def test_a_read_only_git_question_runs_unconfined_so_it_can_see_an_unlabelled_folder(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """Dropping `:z` from the reads was half an answer; without the other half they go blind.
+
+    Measured on Fedora 44, Enforcing (2026-08-30), against a checkout the user
+    made themselves, so `unconfined_u:object_r:user_home_t:s0`:
+
+        $ docker run --rm -v /home/pk/ownco:/git ... remote get-url origin
+        fatal: not a git repository (or any parent up to mount point /)
+        $ docker run --rm --security-opt label:disable -v ... remote get-url origin
+        https://github.com/mod-playerbots/azerothcore-wotlk.git
+
+    and `ls -Zd` says the label is untouched afterwards, which is the whole
+    reason this is the right flag and `:z` is not.
+
+    What the denial looks like is why an argv test alone was not enough to catch
+    it: the container cannot see `.git`, so git reports "not a git repository"
+    rather than a permission error, `remote_url()` catches the `GitError` and
+    answers `None`, and `None` is exactly what a directory holding no checkout
+    answers. See the refusal-level test in `test_families_azerothcore.py`.
+    """
+    argv = _read_argv(seen, tmp_path / "someone-elses-checkout", enforcing=True)
+    assert "--security-opt" in argv
+    assert argv[argv.index("--security-opt") + 1] == "label:disable"
+    # And NOT the other half: `label:disable` lets the container read the folder,
+    # `:z` would rewrite it. A read that carried both would still be a read that
+    # relabels its subject.
+    assert not [item for item in argv if item.endswith((":z", ":Z"))]
+
+    # The anchor, on the SAME machine: a WRITE is the mirror image. `:z` is
+    # right there — the folder is this app's own and relabelling it is the point
+    # — and confinement is not turned off for it.
+    writing = tmp_path / "ours"
+    git.ContainerGit(
+        selinux_enforcing=lambda: True, filesystem_type=lambda _path: "ext2/ext3"
+    ).clone(git.CloneSpec(url="https://example/core.git", dest=writing, depth=None))
+    assert seen[-1][seen[-1].index("-v") + 1] == f"{writing}:/git:z"
+    assert "label:disable" not in seen[-1]
+
+
+def test_a_read_only_git_question_stays_confined_where_selinux_is_not_enforcing(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """No SELinux, nothing to disable. Ubuntu, Arch, macOS and Windows read confined."""
+    argv = _read_argv(seen, tmp_path / "checkout", enforcing=False)
+    assert "label:disable" not in argv
+    assert not [item for item in argv if item.endswith((":z", ":Z"))]
+
+
+def test_a_selinux_answer_nobody_could_read_neither_labels_nor_unconfines_a_read(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """THREE answers, and `None` gets neither half.
+
+    `None` is "could not ask" — no `getenforce`, an unreadable
+    `/sys/fs/selinux/enforce`, a tool that said something new. Turning a
+    container's confinement off is a security decision, and taking one on no
+    evidence is the mistake `platform.selinux_enforcing()`'s docstring exists to
+    prevent; a `:z` on the same evidence would relabel a stranger's folder. So
+    the question runs exactly as it does on a box with no SELinux at all, and a
+    genuine denial reaches the caller as the `None` it already fails closed on.
+    """
+    argv = _read_argv(seen, tmp_path / "checkout", enforcing=None)
+    assert "label:disable" not in argv
+    assert not [item for item in argv if item.endswith((":z", ":Z"))]
+
+
 def test_the_filesystem_is_not_stated_unless_selinux_says_enforcing(
     seen: list[list[str]], tmp_path: Path
 ) -> None:

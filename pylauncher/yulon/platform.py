@@ -1572,6 +1572,51 @@ def bind_label(*, enforcing: bool | None, fs_type: str | None) -> str:
     return ":z" if enforcing is True and selinux_labels_supported(fs_type) else ""
 
 
+def label_disable_args(*, enforcing: bool | None) -> list[str]:
+    """`--security-opt label:disable` for a container that must READ an unlabelled folder.
+
+    `bind_label()`'s counterpart, and deliberately its neighbour: they are the
+    two halves of one decision — how a container reaches a host directory on an
+    enforcing box — and a project that spelled them in two modules would be one
+    edit away from disagreeing with itself about SELinux.
+
+    **The difference between them is whether the container writes.** `:z` asks
+    the daemon to RECURSIVELY relabel the mount source to `container_file_t`,
+    which is exactly right for a folder this app created and is about to fill,
+    and exactly wrong for a folder it is only asking a question about — a read
+    that relabels its own subject has changed the thing the answer said not to
+    touch. `label:disable` runs that one container unconfined instead, and
+    leaves the host label as it found it. Measured on Fedora 44, Enforcing
+    (2026-08-30), on an unlabelled checkout:
+
+        $ ls -Zd /home/pk/ownco2
+        unconfined_u:object_r:user_home_t:s0 /home/pk/ownco2
+        $ docker run --rm -v /home/pk/ownco2:/git ... remote get-url origin
+        fatal: not a git repository (or any parent up to mount point /)
+        $ docker run --rm --security-opt label:disable -v ... remote get-url origin
+        https://github.com/mod-playerbots/azerothcore-wotlk.git
+        $ ls -Zd /home/pk/ownco2
+        unconfined_u:object_r:user_home_t:s0 /home/pk/ownco2
+
+    Note what the denial LOOKS like, because it is why this was missed: the
+    container cannot see `.git` at all, so git does not say "permission denied",
+    it says the directory is not a repository. Every caller then gets the answer
+    it uses for "there is nothing here".
+
+    Three answers, not two, the same as everywhere else in this section.
+    `enforcing is None` is "could not ask", and it adds nothing: turning a
+    container's confinement off is a security decision, and taking one on no
+    evidence is what `selinux_enforcing()`'s docstring exists to prevent.
+
+    What it gives up, stated plainly: one short-lived container, running a
+    pinned image digest, runs unconfined by SELinux for the length of a read.
+    The callers are `docker.bind_mount_ok()`'s `ls` and `git.ContainerGit`'s
+    `remote get-url` / `status --porcelain`; none of them writes, and the
+    alternative to each is an answer that is wrong in the dangerous direction.
+    """
+    return ["--security-opt", "label:disable"] if enforcing is True else []
+
+
 def relabel_for_containers(
     path: Path,
     *,

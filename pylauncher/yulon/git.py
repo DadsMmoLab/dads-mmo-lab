@@ -514,8 +514,10 @@ class ContainerGit:
 
         `writes` says whether this invocation puts anything into `dest`, and it
         is keyword-only and mandatory so a new caller has to answer it rather
-        than inherit an answer. Only a writer is labelled — see the `:z` comment
-        below for why a reader must not be.
+        than inherit an answer, and on an enforcing SELinux box it picks between
+        two different ways of reaching the folder: a writer gets `:z` and a
+        reader gets `--security-opt label:disable`. Never both, never neither —
+        see the SELinux comment below.
 
         argv[0] comes from `platform.docker_program()` for the reason spelled
         out there: this class exists *because* Windows and macOS already have
@@ -576,8 +578,8 @@ class ContainerGit:
         #     $ docker run --rm -v /home/pk/labtest:/git:z ... -c "touch /git/y"
         #     (succeeded, and the folder is now container_file_t)
         #
-        # **`:z` here, `--security-opt label:disable` in `docker.bind_mount_ok()`,
-        # and the difference is the mount source.** The preflight probe
+        # **`:z` for a write, `--security-opt label:disable` for a read, and the
+        # difference is the mount source.** The preflight probe
         # deliberately mounts an ANCESTOR of the chosen folder — routinely the
         # user's whole home directory — so a `:z` there would recursively
         # relabel `$HOME` to `container_file_t` and break the desktop session.
@@ -596,9 +598,36 @@ class ContainerGit:
         # by `native.refuse_unowned_checkout()`, and the evidence it refuses on
         # is `_remote_of()` -> `_git_remote_url()` -> `remote_url()` -> here.
         # The refusal's own words are "nothing was touched", and a relabel of
-        # the user's git checkout would have made them false. Reads mount bare;
-        # if a read is denied on an enforcing box the answer is `None`, which
-        # every caller of these two already fails closed on.
+        # the user's git checkout would have made them false.
+        #
+        # **A read must still be able to SEE the folder, and unlabelled it
+        # cannot.** Dropping the `:z` from the two questions was only half the
+        # answer, and the half that was left out was measured the same day on
+        # Fedora 44, Enforcing, against a user's own unlabelled checkout
+        # (`unconfined_u:object_r:user_home_t:s0`):
+        #
+        #     $ docker run --rm -v /home/pk/ownco:/git ... remote get-url origin
+        #     fatal: not a git repository (or any parent up to mount point /)
+        #     $ docker run --rm --security-opt label:disable -v ... get-url origin
+        #     https://github.com/mod-playerbots/azerothcore-wotlk.git
+        #
+        # and the folder's label is byte-identical afterwards, which is the
+        # whole point. Note the SHAPE of the denial: the container cannot see
+        # `.git` at all, so git does not report a permission error, it reports
+        # that the directory is not a repository — so the failure arrives here
+        # as an ordinary `GitError` and leaves as `None`, indistinguishable from
+        # "there is no checkout here". Every enforcing box therefore answered
+        # `None` for every foreign checkout it was asked about. That direction
+        # is not free even where a guard catches it: `_clone_core()` refuses on
+        # `has_git and existing is None` with "git would not say what it is a
+        # checkout of ... Pick an empty folder", which is a true sentence about
+        # a machine that could have answered perfectly well, told to a user
+        # whose remedy is to delete a checkout.
+        #
+        # `platform.label_disable_args()` is the same function
+        # `docker.bind_mount_ok()`'s probe asks — one decision about running a
+        # container unconfined, in one place — and it keeps the three answers
+        # three: `None` adds neither the label nor the flag.
         #
         # `filesystem_type()` is asked only when the answer can matter.
         # `bind_label()` is still the one place that decides — `enforcing is
@@ -607,16 +636,20 @@ class ContainerGit:
         # whatever the filesystem says, so the subprocess was pure waste on
         # every Ubuntu and Arch box, on every containerized git call.
         label = ""
+        unconfined: list[str] = []
         if writes:
             enforcing = self.selinux_enforcing()
             label = platform.bind_label(
                 enforcing=enforcing,
                 fs_type=self.filesystem_type(dest) if enforcing is True else None,
             )
+        else:
+            unconfined = platform.label_disable_args(enforcing=self.selinux_enforcing())
         argv = [
             program,
             "run",
             "--rm",
+            *unconfined,
             "-v",
             f"{dest}:/git{label}",
             # State the working directory rather than inheriting the image's.
