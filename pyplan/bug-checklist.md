@@ -798,7 +798,7 @@ was found by reading code; each is a line in a resolved compose document from a 
   TCP-reachable: `apply.py`, `maintenance.py` and `accounts.py` all go over `docker exec`. Same
   capture as the two items above: `pylauncher/tests/data/wotlk-compose-config-script.json` shows
   `ac-database` and `ac-worldserver` publishing both ports with no `host_ip`, and
-  `SCRIPT_INSTALL_DIVERGENCES` in `tests/support_compose.py` pins the difference so it cannot
+  `SCRIPT_INSTALL_DIVERGENCES` in `tests/test_compose_fixture.py` pins the difference so it cannot
   silently disappear from a future re-capture.
   *Recorded, not fixed:* whether the right fix is an override patch or simply deletion is the
   owner's call, not this list's — 7.2 (`pyplan/phase7-plans/7.2-retire-bash.md`) deletes all three
