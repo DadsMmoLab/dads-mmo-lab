@@ -2547,12 +2547,61 @@ def images_built(refs: Sequence[str], *, wsl_distro: str | None = None) -> bool 
     return True
 
 
+def _probe_selinux_argv(selinux_enforcing: Callable[[], bool | None]) -> list[str]:
+    """`--security-opt label:disable` for the bind probe, and only when enforcing.
+
+    Measured on a clean Fedora 44 box with SELinux Enforcing (2026-08-30). The
+    probe mounts `$HOME` (see `bind_mount_ok()`: it walks up to the nearest
+    POPULATED ancestor) and the container is denied it, because `$HOME` is
+    `user_home_dir_t` and a confined container may only read `container_file_t`:
+
+        $ docker run --rm --entrypoint ls -v /home/pk:/probe:ro <digest> -A /probe
+        ls: can't open '/probe': Permission denied
+        $ docker run --rm --security-opt label:disable ... -A /probe
+        .bash_logout
+        .bash_profile
+        ...
+
+    An empty listing plus a non-zero exit is exactly the shape `bind_mount_ok()`
+    reads as "Docker cannot see that folder", so preflight REFUSED every install
+    on every enforcing box — on a host with no Docker Desktop to configure, one
+    line after it had printed `[pass] SELinux`. The engine's own SELinux support
+    (`{{BIND_LABEL}}` → `:z` on every generated bind, and
+    `platform.relabel_for_containers()`) is real and correct, and no install
+    could ever reach it: both run at `generate-compose`, which is after this.
+
+    **`:z` is not the fix and must not be used here.** The mount is an ANCESTOR
+    of the chosen folder, routinely the user's home directory, and `:z` tells
+    the daemon to RECURSIVELY relabel the mount source to `container_file_t` —
+    so a read-only listing probe would rewrite the SELinux label of every file
+    under `$HOME`. That breaks the desktop session it just relabelled, and
+    nothing undoes it. The install's own binds are a different case: they name
+    the server folder the app created, so `composegen` labels those and this
+    does not.
+
+    What `label:disable` gives up, stated plainly: this one container runs
+    unconfined by SELinux for the length of an `ls`. It runs a pinned image
+    DIGEST, the mount is `:ro`, the entrypoint is `ls`, and everything but the
+    listing is discarded — there is no write path to give up and no code of ours
+    or the user's inside. The alternative was refusing the install outright.
+
+    Three answers, not two. `selinux_enforcing()` returns `None` for "could not
+    ask", and `None` is neither True nor False here: on `None` the flag is NOT
+    added, so a box that cannot answer gets the same probe an unlabelled box
+    gets, and a genuine denial still reaches the user as a refusal it can
+    explain. Folding "could not ask" into either answer is the mistake
+    `platform.selinux_enforcing()`'s own docstring was written against.
+    """
+    return ["--security-opt", "label:disable"] if selinux_enforcing() is True else []
+
+
 def bind_mount_ok(
     server_dir: Path,
     image: str,
     *,
     timeout: float = BIND_PROBE_TIMEOUT_SECONDS,
     wsl_distro: str | None = None,
+    selinux_enforcing: Callable[[], bool | None] = platform.selinux_enforcing,
 ) -> bool | None:
     """Can a container actually see the chosen folder? None = could not ask.
 
@@ -2588,6 +2637,12 @@ def bind_mount_ok(
     exactly what nobody here can run. What a Mac HAS now produced (2026-08-26)
     is the other half — this function refusing a folder that was shared —
     which is what the second question below exists for.
+
+    On an enforcing SELinux host the probe container is DENIED the mount unless
+    it is told not to be confined — see `_probe_selinux_argv()`, which is the
+    whole of that story. Measured on a clean Fedora 44 box (2026-08-30): every
+    install was refused here, one line after `[pass] SELinux`, and told to
+    check a Docker Desktop setting that does not exist on Docker Engine.
     """
     mount = _first_populated_ancestor(server_dir)
     if mount is None:
@@ -2609,7 +2664,8 @@ def bind_mount_ok(
     # refused** (found by the Windows file-sharing gate 2026-08-24, then
     # reproduced on Linux — it was never Windows-specific).
     proc = _docker(
-        ["run", "--rm", "--entrypoint", "ls", "-v", f"{mount}:/probe:ro", image, "-A", "/probe"],
+        ["run", "--rm", *_probe_selinux_argv(selinux_enforcing), "--entrypoint", "ls"]
+        + ["-v", f"{mount}:/probe:ro", image, "-A", "/probe"],
         timeout=timeout,
         wsl_distro=wsl_distro,
     )

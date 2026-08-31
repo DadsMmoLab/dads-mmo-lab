@@ -494,13 +494,19 @@ def _bind_check(facts: Facts, server_dir: Path) -> Check:
     does — see `docker.bind_mount_ok()`, which compares the container's listing
     against the host's rather than trusting an exit code, since `ls` on an empty
     directory exits 0 and the chosen folder is empty at preflight time.
+
+    The remedy is written for the engine the user actually has — see
+    `_bind_remedy()`. Sending a Fedora user to "Settings → Resources → File
+    sharing" is the D4 defect the Ubuntu gate recorded ("set Docker Desktop to
+    8 CPUs" on a box running Docker Engine): unactionable advice reads as the
+    app being confused about the machine it is standing on.
     """
     if facts.bind_mount is None:
         return Check(
             "sharing the folder with Docker",
             "unchecked",
             "the folder could not be tested inside a container — that is not a pass",
-            "If the install fails immediately, check Docker Desktop's file sharing settings.",
+            f"If the install fails immediately, {_bind_remedy(facts, server_dir)}",
         )
     if facts.bind_mount:
         return Check("sharing the folder with Docker", "pass", f"a container can read {server_dir}")
@@ -508,8 +514,53 @@ def _bind_check(facts: Facts, server_dir: Path) -> Check:
         "sharing the folder with Docker",
         "refuse",
         f"a container could not see {server_dir}, so the server files would be invisible to it",
-        "Add this folder (or its parent) to Docker Desktop's Settings → Resources → File "
-        "sharing, or pick a folder under your home directory, then try again.",
+        _sentence(_bind_remedy(facts, server_dir)),
+    )
+
+
+def _sentence(remedy: str) -> str:
+    """The remedy as its own sentence. NOT `str.capitalize()`, which lowercases the rest.
+
+    `"...Docker Desktop's Settings → Resources → File sharing...".capitalize()`
+    is `"...docker desktop's settings..."`, and the same call would turn
+    `SELinux` and `chcon` into `selinux` and `chcon` in a command the user is
+    meant to paste.
+    """
+    return remedy[:1].upper() + remedy[1:]
+
+
+def _bind_remedy(facts: Facts, server_dir: Path) -> str:
+    """What to actually do about a folder a container cannot see, per platform.
+
+    Docker Desktop is the whole story on Windows and macOS: it shares only the
+    directories its file-sharing list names, and a folder outside them is the
+    one thing this check exists to catch.
+
+    Docker Engine on Linux has no such list and no such settings pane, so that
+    sentence is unactionable there — and after the probe stopped being defeated
+    by SELinux confinement (`docker._probe_selinux_argv()`), a Linux failure
+    here is no longer SELinux either. What is left is the folder: a directory on
+    the way down that the daemon's user cannot traverse, or a mount (autofs, a
+    fuse home, a network share) the daemon cannot follow. Labelling is still
+    worth naming while SELinux is enforcing, because it is the next thing to try
+    and the command is not one to guess at — but it is offered as a next step,
+    not as the diagnosis.
+    """
+    if facts.platform_id != "linux":
+        return (
+            "add this folder (or its parent) to Docker Desktop's Settings → Resources → File "
+            "sharing, or pick a folder under your home directory, then try again."
+        )
+    label = (
+        " SELinux is enforcing here; the check itself already runs unconfined, so if it still "
+        f"fails, run `chcon -Rt container_file_t {server_dir}` and try again."
+        if facts.selinux_enforcing
+        else ""
+    )
+    return (
+        f"check that {server_dir} and every folder above it can be read by the user the Docker "
+        "daemon runs as, and that it is not on a mount the daemon cannot follow (a network "
+        f"share, or an automounted home).{label}"
     )
 
 

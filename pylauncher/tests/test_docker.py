@@ -3137,7 +3137,9 @@ def test_the_bind_mount_probe_mounts_the_folder_and_tells_no_from_no_answer(
     (tmp_path / "already-here.txt").write_text("x", encoding="utf-8")
     server_dir = tmp_path / "wow"  # the folder the user picked; not created yet
     monkeypatch.setattr(docker.runner, "run", answer(0, "already-here.txt\n"))
-    assert docker.bind_mount_ok(server_dir, "alpine/git") is True
+    # The SELinux seam is answered explicitly, not left to the host: this asserts
+    # the argv exactly, and the suite runs on boxes whose real answer differs.
+    assert docker.bind_mount_ok(server_dir, "alpine/git", selinux_enforcing=lambda: False) is True
     # The mount source is the nearest ancestor that HAS something in it, not the
     # chosen folder: `-v <missing>:/probe` makes Docker create the directory,
     # and an empty directory's listing proves nothing either way.
@@ -3182,6 +3184,71 @@ def test_the_bind_mount_probe_mounts_the_folder_and_tells_no_from_no_answer(
     # 124 is what `runner.run()` reports for a command that never answered.
     monkeypatch.setattr(docker.runner, "run", answer(124, stderr="timed out after 30.0s"))
     assert docker.bind_mount_ok(server_dir, "alpine/git") is None
+
+
+def _probe_argv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, enforcing: bool | None
+) -> list[str]:
+    """The argv the bind probe actually runs, with SELinux answering `enforcing`."""
+    (tmp_path / "already-here.txt").write_text("x", encoding="utf-8")
+    seen: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return _completed(stdout="already-here.txt\n")
+
+    monkeypatch.setattr(docker.runner, "run", run)
+    assert (
+        docker.bind_mount_ok(tmp_path / "wow", "alpine/git", selinux_enforcing=lambda: enforcing)
+        is True
+    )
+    return seen[-1]
+
+
+def test_the_bind_probe_runs_unconfined_when_selinux_is_enforcing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Every install on an enforcing box was refused here, and this is why.
+
+    Measured on a clean Fedora 44 box (2026-08-30). The probe mounts the nearest
+    POPULATED ancestor of the chosen folder, which is routinely `$HOME`; `$HOME`
+    is `user_home_dir_t`; a confined container may read `container_file_t` and
+    nothing else, so `ls` answered `can't open '/probe': Permission denied` with
+    an empty listing and a non-zero exit — exactly the shape `bind_mount_ok()`
+    reads as "Docker cannot see that folder". Preflight then refused the install
+    one line after printing `[pass] SELinux`, and sent a Fedora user to a Docker
+    Desktop settings pane that does not exist on Docker Engine.
+    """
+    argv = _probe_argv(monkeypatch, tmp_path, enforcing=True)
+    assert argv[:4] == ["docker", "run", "--rm", "--security-opt"]
+    assert argv[4] == "label:disable"
+    # `:z` is NOT the alternative and must never appear here: the mount source is
+    # an ancestor of the chosen folder, routinely the user's home directory, and
+    # `:z` would recursively relabel that whole tree to `container_file_t` for
+    # the sake of one read-only `ls`.
+    assert f"{tmp_path}:/probe:ro" in argv
+    assert not [a for a in argv if a.endswith(":z") or a.endswith(":Z")]
+
+
+def test_the_bind_probe_stays_confined_when_selinux_is_not_enforcing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An Ubuntu or Windows box gets no `label:disable`: there is nothing to disable."""
+    assert "label:disable" not in _probe_argv(monkeypatch, tmp_path, enforcing=False)
+
+
+def test_a_selinux_answer_that_could_not_be_read_does_not_disable_labels(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`selinux_enforcing()` has THREE answers, and `None` is not a quiet "yes".
+
+    None means the question went unanswered — no `getenforce`, an unreadable
+    `/sys/fs/selinux/enforce`, a tool that said something new. Turning the
+    container's confinement off on a machine that never claimed to be enforcing
+    is a security decision taken on no evidence, and folding "could not ask"
+    into an answer is the mistake this project keeps having to unmake.
+    """
+    assert "label:disable" not in _probe_argv(monkeypatch, tmp_path, enforcing=None)
 
 
 def test_a_probe_that_never_reached_the_mount_is_unchecked_not_a_refusal(

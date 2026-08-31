@@ -164,13 +164,56 @@ def test_a_folder_docker_cannot_see_is_refused_before_anything_is_written() -> N
     """The empty-mount trap: the clone "succeeds" and the build context is empty."""
     report = preflight.evaluate(ENTRY, SERVER_DIR, facts(bind_mount=False))
     assert verdict(report, "sharing the folder") == "refuse"
-    assert "File sharing" in report.message()
+    assert str(SERVER_DIR) in report.message()
+
+
+def test_the_file_sharing_remedy_is_only_offered_where_that_setting_exists() -> None:
+    """D4 again: "Docker Desktop's Settings → Resources" printed on Docker Engine.
+
+    The Ubuntu gate recorded that class of defect as "set Docker Desktop to 8
+    CPUs" on a box that has no Docker Desktop, and a Fedora 44 box (2026-08-30)
+    hit this one: the install stopped with "add this folder to Docker Desktop's
+    Settings → Resources → File sharing" on a machine where no such pane, and no
+    such file-sharing list, exists. Docker Engine shares the whole filesystem.
+    """
+    desktop = preflight.evaluate(
+        ENTRY, SERVER_DIR, facts(platform_id="windows", bind_mount=False)
+    ).message()
+    assert "Settings → Resources → File sharing" in desktop
+
+    engine = preflight.evaluate(ENTRY, SERVER_DIR, facts(bind_mount=False)).message()
+    assert "Docker Desktop" not in engine and "File sharing" not in engine
+    # What a Linux user can actually act on is the folder itself.
+    assert "read by the user the Docker daemon runs as" in engine
+
+
+def test_the_linux_remedy_names_the_label_command_only_while_selinux_is_enforcing() -> None:
+    """`chcon` is the next thing to try there — and noise on a box without SELinux.
+
+    It is offered as a next step, not as the diagnosis: since the probe itself
+    runs with `label:disable` (`docker._probe_selinux_argv()`), a refusal on an
+    enforcing box is no longer SELinux confinement denying the mount.
+    """
+    enforcing = preflight.evaluate(
+        ENTRY, SERVER_DIR, facts(bind_mount=False, selinux_enforcing=True)
+    ).message()
+    assert f"chcon -Rt container_file_t {SERVER_DIR}" in enforcing
+
+    for answer in (False, None):
+        quiet = preflight.evaluate(
+            ENTRY, SERVER_DIR, facts(bind_mount=False, selinux_enforcing=answer)
+        ).message()
+        assert "chcon" not in quiet
 
 
 def test_a_bind_probe_that_could_not_run_is_unchecked() -> None:
     report = preflight.evaluate(ENTRY, SERVER_DIR, facts(bind_mount=None))
     assert verdict(report, "sharing the folder") == "unchecked"
     assert report.ok()
+    # The unchecked line carries the same platform-fitted advice: it named a
+    # Docker Desktop settings pane on a Linux host too.
+    said = [check for check in report.unchecked() if "sharing the folder" in check.name][0]
+    assert "Docker Desktop" not in said.remedy
 
 
 def test_a_synced_or_network_folder_is_refused_with_the_reason() -> None:
