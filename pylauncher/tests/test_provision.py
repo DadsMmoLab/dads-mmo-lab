@@ -2060,3 +2060,119 @@ def test_provisioning_leaks_the_password_into_no_channel_at_all(
         assert canary not in text, text
     # ...and the one place it IS allowed: stdin, on every fed step.
     assert feed.calls and all(text == canary + "\n" for _argv, text in feed.calls)
+
+
+# ------------------------------------------- fix round 1: the two dialogs nobody may open
+
+
+def test_a_cancelled_run_never_asks_for_a_sudo_password_either(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pressing Cancel must not be answered with a demand for the root password.
+
+    `_settle_docker_group()` has always refused to open the group dialog on a
+    cancelled run. The sudo-password guard was written as `not dry_run` alone
+    and so kept only half of that promise: a cancelled run asked no group
+    question and then asked for a password anyway, and answered it would have
+    run every package step elevated (review, 2026-08-31). Before 7.1 a
+    cancelled run asked nothing at all, and that is the behaviour being
+    restored — asking too late is the one kind of consent this file exists to
+    prevent.
+    """
+    _linux(monkeypatch)
+    cancel = threading.Event()
+    cancel.set()
+    asked: list[str] = []
+
+    def ask(question: str) -> str:
+        asked.append(question)
+        return "y"
+
+    def spy(*args: object, **kwargs: object) -> platform.SudoSession:
+        raise AssertionError("a cancelled run built a sudo session")
+
+    monkeypatch.setattr(platform, "SudoSession", spy)
+    report = platform.ensure_docker(
+        run=_Refuses("sudo -n"),  # every step answers "a password is required"
+        which=_which("apt-get"),
+        user="pk",
+        wait_seconds=0.0,
+        cancel=cancel,
+        ask=ask,
+        run_input=_never_feeds,
+    )
+
+    assert asked == []  # neither question: not the group one, not the password one
+    assert report.docker_group == "not-asked"
+
+
+@pytest.mark.parametrize(
+    ("stderr", "is_a_password_problem"),
+    [
+        ("sudo: a password is required", True),
+        ("sudo: A password is required", True),  # capitalised: `.lower()` earns its keep
+        ("sudo: pk is not in the sudoers file.  This incident will be reported.", False),
+        ("sudo: systemctl: command not found", False),
+        ("E: Could not get lock /var/lib/dpkg/lock-frontend", False),
+        ("", False),
+    ],
+)
+def test_only_sudos_own_password_wording_counts_as_needing_a_password(
+    stderr: str, is_a_password_problem: bool
+) -> None:
+    """The distinction the escalation branch turns on, pinned by field.
+
+    A privileged step exits non-zero for a hundred reasons and exactly one of
+    them is worth a dialog. Everything else — not in sudoers, no such command,
+    a held dpkg lock — is a question no password can answer.
+    """
+    assert platform._needs_password(stderr) is is_a_password_problem
+
+
+def test_a_sudo_n_failure_that_is_not_about_a_password_never_opens_the_dialog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Not in sudoers: the steps fail, and the user is not asked for a password that cannot work.
+
+    Driven through `ensure_docker()` with a session present, because the branch
+    is what has to hold — `_needs_password()` being right on its own proves
+    nothing if the caller does not consult it. Dropping the call from the
+    condition left the whole file green until this test existed.
+    """
+    _linux(monkeypatch)
+    built: list[platform.SudoSession] = []
+    real_session = platform.SudoSession
+
+    def spy(*args: object, **kwargs: object) -> platform.SudoSession:
+        session = real_session(*args, **kwargs)  # type: ignore[arg-type]
+        built.append(session)
+        return session
+
+    monkeypatch.setattr(platform, "SudoSession", spy)
+    sudo_questions: list[str] = []
+
+    def ask(question: str) -> str:
+        if question == platform.SUDO_PASSWORD_QUESTION:
+            sudo_questions.append(question)
+            return "hunter2"
+        return "y"
+
+    run = _Refuses(
+        "sudo -n", stderr="sudo: pk is not in the sudoers file.  This incident will be reported."
+    )
+    report = platform.ensure_docker(
+        run=run,
+        which=_which("apt-get"),
+        user="pk",
+        wait_seconds=0.0,
+        ask=ask,
+        run_input=_never_feeds,  # raises if a single password-carrying step is attempted
+    )
+
+    assert sudo_questions == []
+    assert len(built) == 1  # the session was built, and never used
+    assert built[0].asked == 0 and built[0].outcome == "unasked"
+    # The step is reported by sudo's own words, not translated into a password.
+    assert any("not in the sudoers file" in s for s in report.skipped), report.skipped
+    assert not [m for m in report.manual_steps if "needed a password" in m], report.manual_steps
+    assert any("Some steps did not run" in m for m in report.manual_steps), report.manual_steps

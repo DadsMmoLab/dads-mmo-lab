@@ -2281,6 +2281,25 @@ class SudoSession:
         return False
 
 
+def _may_open_a_dialog(dry_run: bool, cancel: threading.Event | None) -> bool:
+    """Whether this run is allowed to put a question to the user at all.
+
+    Two runs are not. A `dry_run` exists to show a plan, and a plan that
+    interrogates the user is not one. A cancelled run is over — and asking
+    someone for their ROOT PASSWORD after they pressed Cancel is the worst
+    version of asking too late, which is the failure this whole consent path
+    was written to prevent.
+
+    One predicate rather than the same two clauses written out twice: the
+    docker-group question has refused a cancelled run since 2026-08-24, and
+    when the sudo-password question was added beside it (7.1, D.2) its guard
+    was spelled `not dry_run` alone. A cancelled run then asked no group
+    question and demanded a password anyway (review, 2026-08-31). Both
+    dialogs now consult this, so the next one added cannot drift the same way.
+    """
+    return not dry_run and not (cancel is not None and cancel.is_set())
+
+
 def _needs_password(stderr: str) -> bool:
     """`sudo -n`'s own verdict, read in the C locale `_c_locale_env()` pins.
 
@@ -2521,12 +2540,14 @@ def _ensure_docker_linux(
 
     consent = _settle_docker_group(do, user, dry_run, cancel, ask)
 
-    # One session for the whole run, built after the consent question and never
-    # in a dry run. It is what keeps the promise of a single dialog: both
-    # `_run_steps()` calls below share it, so the `usermod` reuses the password
-    # the package steps already established rather than opening a second one.
+    # One session for the whole run, built after the consent question and only
+    # by a run that may open a dialog at all — the same gate `_settle_docker_group()`
+    # puts on the group question, not a second spelling of half of it. It is
+    # what keeps the promise of a single dialog: both `_run_steps()` calls
+    # below share it, so the `usermod` reuses the password the package steps
+    # already established rather than opening a second one.
     session: SudoSession | None = None
-    if ask is not None and not dry_run:
+    if ask is not None and _may_open_a_dialog(dry_run, cancel):
         session = SudoSession(ask, run_input if run_input is not None else _run_with_input)
 
     commands = docker_engine_commands(pm, steamos=is_steamos())
@@ -2611,9 +2632,10 @@ def _settle_docker_group(
     A cancelled run never opens a dialog. A `dry_run` never opens one either —
     it exists to show a plan, and a plan that interrogates the user is not one.
     """
-    if dry_run or (cancel is not None and cancel.is_set()):
+    if not _may_open_a_dialog(dry_run, cancel):
         # `dry_run` shows a plan, so it runs nothing at all — not even the
-        # harmless `id`. A cancelled run does not open a dialog either.
+        # harmless `id`. A cancelled run does not open a dialog either. The
+        # same predicate gates the sudo-password dialog in the caller.
         return "not-asked"
     if _docker_group_member(do, user):
         return "already-member"
