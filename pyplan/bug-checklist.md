@@ -737,6 +737,76 @@ directions on the same day; both are kept.
 
 ---
 
+### 17. Found by diffing two real `docker compose config` captures — 2026-08-31
+
+Both captures are committed under `pylauncher/tests/data/`: the engine's own install on Ubuntu
+after it reached `ready`, and a bash-installer server still standing on Fedora. Neither of these
+was found by reading code; each is a line in a resolved compose document from a box that ran.
+
+- [ ] **`ac-client-data-init` runs on compose's implicit `default` network, not `ac-network`.**
+  `catalog/installers/wow-wotlk/docker-compose.yml.tmpl` — the service declares no `networks:`, so
+  compose materialises a SECOND per-project bridge for it and every install ends up with two
+  networks where the file names one. Harmless today: it fetches an archive into a named volume and
+  talks to no other service. **Inherited, not introduced** — the bash script install does exactly
+  the same thing, which is why nobody had noticed.
+  *Recorded, not fixed, and the fix carries an obligation:* adding `networks: [ac-network]` changes
+  what `docker compose config` resolves, so the committed native fixture
+  (`tests/data/wotlk-compose-config.json`) and the byte snapshot under `tests/data/wotlk-rendered/`
+  must BOTH be re-captured in the same commit, and the re-capture has to come off a real install —
+  a hand-edited fixture is not a capture. `test_the_synthesised_default_declaration_is_modelled_and_not_erased`
+  is what will go red first.
+
+- [ ] **The captured shape of the SELinux label is not what the shipped Fedora script writes, and
+  the z-vs-Z question it looked like it was raising is already answered in that same script.**
+  `install-wow-wotlk-fedora.sh`'s override literally writes `:z` on SIX binds (worldserver,
+  authserver and db-import's `env/dist/etc` and `env/dist/logs`, L1758-1759/1770-1771/1777-1778)
+  and `:Z` on ONE (the worldserver's `./modules`, L1740) — but the captured fixture
+  (`wotlk-compose-config-script.json`) shows `bind: {selinux: Z}` on that one modules mount and
+  **no `selinux` field at all** on the other six, not `:z`. That exact shape — six labels
+  stripped, one untouched — is precisely what `selinux_drop_z_from_override()` (L416-425) leaves
+  behind: its `sed` matches only `/azerothcore/env/dist/*:z` and never touches `./modules:...:Z`.
+  It runs when SELinux is enforcing on a filesystem that cannot hold labels; the Fedora VM
+  (`yulon-fedora`) this capture came from is confirmed enforcing (§3 and §9 above), but the same
+  VM's `stat -f -c %T ~` is recorded elsewhere as `xfs`/`btrfs`
+  (`pyplan/phase7-plans/7.1-spine-azerothcore-linux.md`, the E.4 Fedora gate setup step), which
+  `selinux_labels_supported()` treats as label-capable — so the drop path is not obviously why
+  this particular box produced this shape, and this list cannot pin the mechanism down further
+  from a capture and a script reading alone.
+  **What IS settled, in the script's own words:** the override's comment
+  (`install-wow-wotlk-fedora.sh` L1752-1757) already answers the "which label is correct for a
+  shared tree" question — "`z`, not `Z`: three services share these mounts, and `Z` would give
+  each container a private MCS category pair, so whichever relabelled last would lock the others
+  out. The `./modules:...:Z` above is the opposite case — a single mounting service." In our own
+  stack `./modules` is mounted by TWO services (`ac-worldserver` and `ac-db-import` — pinned
+  divergence 2 above), so by that same reasoning `z` is the correct label for it, and
+  `platform.bind_label()` labelling it `z` on every bind is already right. There is no open design
+  question here.
+  *What is still open:* confirm on the Fedora 7.1 E.4 live gate that a two-service `z`-labelled
+  modules mount actually behaves (both containers get and keep access) — a one-line observation on
+  a gate that runs anyway, not a reproduction owed to this list. The comparison vocabulary still
+  reads neither spelling (`volume_from_config()` ignores `bind.selinux`, `_mount_mode()` drops
+  `z`/`Z`), so nothing here is asserted by a test.
+
+- [ ] **The script install publishes MySQL and the SOAP admin console on every interface, not
+  loopback.** `catalog/installers/wow-wotlk/install-wow-wotlk{,-ubuntu,-fedora}.sh` write an
+  override that never touches `ports:`, so all three inherit upstream's bare `3306:3306` and
+  `7878:7878` — an unauthenticated `root`/`password` MySQL (the pair is upstream's own compose
+  file, not ours) and an unauthenticated SOAP console (a remote shell in front of a GM account),
+  both reachable from the LAN rather than only the host that runs them. The native engine's own
+  install binds both to `127.0.0.1` — `native/base.yml.tmpl:62` for MySQL, `:264` for SOAP, each
+  with a comment — because nothing in the launcher's maintenance path needs either port
+  TCP-reachable: `apply.py`, `maintenance.py` and `accounts.py` all go over `docker exec`. Same
+  capture as the two items above: `pylauncher/tests/data/wotlk-compose-config-script.json` shows
+  `ac-database` and `ac-worldserver` publishing both ports with no `host_ip`, and
+  `SCRIPT_INSTALL_DIVERGENCES` in `tests/test_compose_fixture.py` pins the difference so it cannot
+  silently disappear from a future re-capture.
+  *Recorded, not fixed:* whether the right fix is an override patch or simply deletion is the
+  owner's call, not this list's — 7.2 (`pyplan/phase7-plans/7.2-retire-bash.md`) deletes all three
+  scripts outright, so the fix may turn out to be "the file is gone" rather than a patch to it.
+  Until then, these three scripts are what a user running `install-wow-wotlk*.sh` today actually
+  gets.
+
+
 ### One thing worth keeping
 
 Three of these have an obvious fix that is **wrong**, and two of them arm a worse bug:

@@ -1,0 +1,278 @@
+{
+  "networks": {
+    "ac-network": {},
+    "default": {}
+  },
+  "services": {
+    "ac-authserver": {
+      "build": {
+        "args": {
+          "DOCKER_USER": "acore",
+          "GROUP_ID": "1000",
+          "USER_ID": "1000"
+        },
+        "context": ".",
+        "dockerfile": "apps/docker/Dockerfile",
+        "target": "authserver"
+      },
+      "container_name": "ac-authserver",
+      "depends_on": {
+        "ac-database": {
+          "condition": "service_healthy",
+          "required": true
+        },
+        "ac-db-import": {
+          "condition": "service_completed_successfully",
+          "required": true
+        }
+      },
+      "environment": {
+        "AC_CCACHE": "true",
+        "AC_LOGIN_DATABASE_INFO": "ac-database;3306;root;password;acore_auth",
+        "AC_LOGS_DIR": "/azerothcore/env/dist/logs",
+        "AC_RESTARTER_BINFILE": "",
+        "AC_RESTARTER_BINPATH": "",
+        "AC_RESTARTER_WITHGDB": "",
+        "AC_TEMP_DIR": "/azerothcore/env/dist/temp",
+        "CSCRIPTS": "static",
+        "CTYPE": "RelWithDebInfo",
+        "DATAPATH": "/azerothcore/env/dist/data",
+        "USER_CONF_PATH": "/azerothcore/apps/docker/config-docker.sh"
+      },
+      "image": "acore/ac-wotlk-authserver:master",
+      "networks": {
+        "ac-network": null
+      },
+      "ports": [
+        {
+          "mode": "ingress",
+          "protocol": "tcp",
+          "published": "3724",
+          "target": 3724
+        }
+      ],
+      "restart": "unless-stopped",
+      "tty": true,
+      "volumes": [
+        {
+          "bind": {},
+          "source": "./env/dist/etc",
+          "target": "/azerothcore/env/dist/etc",
+          "type": "bind"
+        },
+        {
+          "bind": {},
+          "source": "./env/dist/logs",
+          "target": "/azerothcore/env/dist/logs",
+          "type": "bind"
+        }
+      ]
+    },
+    "ac-client-data-init": {
+      "build": {
+        "args": {
+          "DOCKER_USER": "acore",
+          "GROUP_ID": "1000",
+          "USER_ID": "1000"
+        },
+        "context": ".",
+        "dockerfile": "apps/docker/Dockerfile",
+        "target": "client-data"
+      },
+      "container_name": "ac-client-data-init",
+      "image": "acore/ac-wotlk-client-data:master",
+      "networks": {
+        "default": null
+      },
+      "volumes": [
+        {
+          "source": "ac-client-data",
+          "target": "/azerothcore/env/dist/data",
+          "type": "volume",
+          "volume": {}
+        }
+      ]
+    },
+    "ac-database": {
+      "container_name": "ac-database",
+      "environment": {
+        "MYSQL_ROOT_PASSWORD": "password"
+      },
+      "healthcheck": {
+        "interval": "5s",
+        "retries": 40,
+        "test": [
+          "CMD-SHELL",
+          "/usr/bin/mysql --user=root --password=$$MYSQL_ROOT_PASSWORD --execute \"SHOW DATABASES;\""
+        ],
+        "timeout": "10s"
+      },
+      "image": "mysql:8.4",
+      "networks": {
+        "ac-network": null
+      },
+      "ports": [
+        {
+          "mode": "ingress",
+          "protocol": "tcp",
+          "published": "3306",
+          "target": 3306
+        }
+      ],
+      "restart": "unless-stopped",
+      "volumes": [
+        {
+          "source": "ac-database",
+          "target": "/var/lib/mysql",
+          "type": "volume",
+          "volume": {}
+        }
+      ]
+    },
+    "ac-db-import": {
+      "build": {
+        "args": {
+          "DOCKER_USER": "acore",
+          "GROUP_ID": "1000",
+          "USER_ID": "1000"
+        },
+        "context": ".",
+        "dockerfile": "apps/docker/Dockerfile",
+        "target": "db-import"
+      },
+      "container_name": "ac-db-import",
+      "depends_on": {
+        "ac-database": {
+          "condition": "service_healthy",
+          "required": true
+        }
+      },
+      "environment": {
+        "AC_CHARACTER_DATABASE_INFO": "ac-database;3306;root;password;acore_characters",
+        "AC_DATA_DIR": "/azerothcore/env/dist/data",
+        "AC_LOGIN_DATABASE_INFO": "ac-database;3306;root;password;acore_auth",
+        "AC_LOGS_DIR": "/azerothcore/env/dist/logs",
+        "AC_WORLD_DATABASE_INFO": "ac-database;3306;root;password;acore_world"
+      },
+      "image": "acore/ac-wotlk-db-import:master",
+      "networks": {
+        "ac-network": null
+      },
+      "volumes": [
+        {
+          "bind": {},
+          "source": "./env/dist/etc",
+          "target": "/azerothcore/env/dist/etc",
+          "type": "bind"
+        },
+        {
+          "bind": {},
+          "source": "./env/dist/logs",
+          "target": "/azerothcore/env/dist/logs",
+          "type": "bind"
+        }
+      ]
+    },
+    "ac-worldserver": {
+      "build": {
+        "args": {
+          "DOCKER_USER": "acore",
+          "GROUP_ID": "1000",
+          "USER_ID": "1000"
+        },
+        "context": ".",
+        "dockerfile": "apps/docker/Dockerfile",
+        "target": "worldserver"
+      },
+      "container_name": "ac-worldserver",
+      "depends_on": {
+        "ac-client-data-init": {
+          "condition": "service_completed_successfully",
+          "required": true
+        },
+        "ac-database": {
+          "condition": "service_healthy",
+          "required": true
+        },
+        "ac-db-import": {
+          "condition": "service_completed_successfully",
+          "required": true
+        }
+      },
+      "environment": {
+        "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS": "500",
+        "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS": "500",
+        "AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN": "1",
+        "AC_CCACHE": "true",
+        "AC_CHARACTER_DATABASE_INFO": "ac-database;3306;root;password;acore_characters",
+        "AC_DATA_DIR": "/azerothcore/env/dist/data",
+        "AC_LOGIN_DATABASE_INFO": "ac-database;3306;root;password;acore_auth",
+        "AC_LOGS_DIR": "/azerothcore/env/dist/logs",
+        "AC_PLAYERBOTS_DATABASE_INFO": "ac-database;3306;root;password;acore_playerbots",
+        "AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES": "1",
+        "AC_RESTARTER_BINFILE": "",
+        "AC_RESTARTER_BINPATH": "",
+        "AC_RESTARTER_WITHGDB": "",
+        "AC_WORLD_DATABASE_INFO": "ac-database;3306;root;password;acore_world",
+        "CSCRIPTS": "static",
+        "CTYPE": "RelWithDebInfo",
+        "DATAPATH": "/azerothcore/env/dist/data",
+        "USER_CONF_PATH": "/azerothcore/apps/docker/config-docker.sh"
+      },
+      "image": "acore/ac-wotlk-worldserver:master",
+      "networks": {
+        "ac-network": null
+      },
+      "ports": [
+        {
+          "mode": "ingress",
+          "protocol": "tcp",
+          "published": "8085",
+          "target": 8085
+        },
+        {
+          "mode": "ingress",
+          "protocol": "tcp",
+          "published": "7878",
+          "target": 7878
+        }
+      ],
+      "restart": "unless-stopped",
+      "stdin_open": true,
+      "tty": true,
+      "volumes": [
+        {
+          "bind": {},
+          "source": "./env/dist/etc",
+          "target": "/azerothcore/env/dist/etc",
+          "type": "bind"
+        },
+        {
+          "bind": {},
+          "source": "./env/dist/logs",
+          "target": "/azerothcore/env/dist/logs",
+          "type": "bind"
+        },
+        {
+          "read_only": true,
+          "source": "ac-client-data",
+          "target": "/azerothcore/env/dist/data",
+          "type": "volume",
+          "volume": {}
+        },
+        {
+          "bind": {
+            "selinux": "Z"
+          },
+          "source": "./modules",
+          "target": "/azerothcore/modules",
+          "type": "bind"
+        }
+      ]
+    }
+  },
+  "volumes": {
+    "ac-client-data": {},
+    "ac-database": {}
+  }
+}
