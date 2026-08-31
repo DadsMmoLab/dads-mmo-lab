@@ -125,14 +125,20 @@ def test_linux_engine_plan_per_package_manager() -> None:
     """Every list that will run `compose build` carries BuildKit — under each distro's own name.
 
     The apt list has since the Ubuntu gate (`docker.io` ships no plugin); the
-    Fedora and Arch scripts that passed installed it by hand
-    (`docker-buildx-plugin`, `docker-buildx`), so the dnf and pacman lists
-    must too, or gate 7.1 there is the first build without it. The pacman and
-    dnf packages are asserted as two SEPARATE full-argv equalities, and the
-    two argvs genuinely differ in their last element (`docker-buildx` vs.
-    `docker-buildx-plugin`) — that is the real, distro-specific package name in
-    each case, not a typo one of them should be "fixed" to match the other
-    (see the comment on the dnf branch in `docker_engine_commands()`).
+    dnf and pacman lists must too, or gate 7.1 there is the first build
+    without it.
+
+    All three name the plugin `docker-buildx`, and this test pins that
+    agreement rather than an exception to it. The dnf list said
+    `docker-buildx-plugin` until 2026-08-31, when the Fedora box was asked:
+    `dnf repoquery docker-buildx-plugin` returns nothing on Fedora 44 and
+    `docker-buildx` returns 0.31.1 and 0.36.1, so the shipped command could
+    not have installed anything — `dnf install` fails on an unknown package
+    and takes the whole provisioning step with it.
+    `docker-buildx-plugin` is real in Docker's own repo, beside `docker-ce`,
+    which is what the Bazzite branch of install-wow-wotlk-fedora.sh layers
+    through rpm-ostree. It is the wrong name beside `moby-engine`, and that
+    is what the dnf branch installs.
     """
     assert platform.docker_engine_commands("pacman", steamos=True) == [
         ["steamos-readonly", "disable"],
@@ -149,7 +155,7 @@ def test_linux_engine_plan_per_package_manager() -> None:
         "install",
         "moby-engine",
         "docker-compose",
-        "docker-buildx-plugin",
+        "docker-buildx",
     ]
     # The group join is not in any plan, on purpose: the argv exists only
     # inside the consent branch, so there is no ungated construction site.
@@ -161,6 +167,31 @@ def test_linux_engine_plan_per_package_manager() -> None:
         lambda n: "/usr/bin/apt-get" if n == "apt-get" else None
     ) == ("apt")
     assert platform.linux_package_manager(lambda n: None) is None
+
+
+def test_the_dnf_list_never_mixes_two_package_worlds() -> None:
+    """A `*-plugin` docker package beside `moby-engine` is a package that does not exist.
+
+    Fedora's repos carry `moby-engine`, `docker-compose` and `docker-buildx`.
+    Docker's own repo carries `docker-ce`, `docker-compose-plugin` and
+    `docker-buildx-plugin`. Either set installs; a name taken from one and
+    pasted beside the other resolves to nothing, and `dnf install` fails
+    outright rather than skipping it — which is how the shipped command
+    aborted every Fedora provision until 2026-08-31.
+
+    The equality above pins today's exact list. This asks the weaker question
+    that keeps holding when a fourth package joins it, and names the rule in
+    its own failure message.
+    """
+    dnf = platform.docker_engine_commands("dnf", steamos=False)[0]
+    packages = dnf[dnf.index("install") + 1 :]
+    assert "moby-engine" in packages, dnf
+    mixed = [p for p in packages if p.endswith("-plugin")]
+    assert not mixed, (
+        f"{mixed} are Docker-repo names (they ship beside docker-ce); this "
+        f"command installs moby-engine, so every package in it must be "
+        f"Fedora's own: {packages}"
+    )
 
 
 def test_linux_runs_under_sudo_n_and_reports_password_needs(
