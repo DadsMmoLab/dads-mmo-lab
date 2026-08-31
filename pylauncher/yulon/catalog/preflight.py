@@ -133,7 +133,6 @@ def gather(
     bind_mount_ok: Callable[[Path], bool | None] | None = None,
     port_conflicts: Callable[[], list[str]] | None = None,
     probe_port: Callable[[str, int], platform.PortProbe] = platform.probe_tcp,
-    client_dir: Path | None = None,
     selinux: Callable[[], bool | None] = platform.selinux_enforcing,
     fs_type: Callable[[Path], str | None] = platform.filesystem_type,
 ) -> Facts:
@@ -157,7 +156,6 @@ def gather(
     the checking is already wired when the checks arrive; accepting it now is
     what keeps that from being a second change to every caller.
     """
-    del client_dir  # 7.3 reads it; named here so the keyword is part of the contract
     here = platform_id()
     ready = docker_ready()
     free = disk_free if disk_free is not None else _free_bytes
