@@ -1610,9 +1610,36 @@ def label_disable_args(*, enforcing: bool | None) -> list[str]:
 
     What it gives up, stated plainly: one short-lived container, running a
     pinned image digest, runs unconfined by SELinux for the length of a read.
-    The callers are `docker.bind_mount_ok()`'s `ls` and `git.ContainerGit`'s
-    `remote get-url` / `status --porcelain`; none of them writes, and the
-    alternative to each is an answer that is wrong in the dangerous direction.
+    Concretely its process type becomes `spc_t` rather than `container_t` — no
+    MCS separation, no `container_file_t`-only file access, the container
+    booleans stop applying — and since `container_user_args()` passes
+    `--user $(id -u):$(id -g)` on Linux, what is left is exactly the invoking
+    user's own authority. DAC, seccomp and AppArmor are untouched.
+
+    **The blast radius is the mount list, so every caller owes its own `:ro`.**
+    That sentence is here because this docstring once carried a safety argument
+    instead: pinned digest, `:ro` mount, `--entrypoint ls`, nothing that writes.
+    That argument is `docker.bind_mount_ok()`'s, where all three clauses are
+    true. `git.ContainerGit`'s read satisfied only the first — its mount string
+    had no `:ro` on it at all — so the second caller inherited a justification
+    it did not meet (adversarial review, 2026-08-31). This function knows only
+    `enforcing`: it cannot see the mount or the entrypoint, so it cannot make
+    that argument on a caller's behalf, and a new caller must make it for
+    itself. `git._READ_ONLY_CONTAINER_ARGS` is what that looks like.
+
+    The alternatives, correctly priced, because an overstated version of this
+    paragraph is what bought the trade. For `bind_mount_ok()` the alternative is
+    refusing every install on every enforcing box, and `:z` is not available
+    there — the mount is an ANCESTOR of the chosen folder, routinely `$HOME`.
+    For the git read the alternative is NOT an answer that is wrong in the
+    dangerous direction: `remote_url()` answering `None` reaches
+    `native.refuse_unowned_checkout()`, which refuses on a `.git` the HOST can
+    see. It is a loud but WRONG refusal — an enforcing user told to move aside a
+    checkout the machine could have read perfectly well. Worth this flag; not
+    data loss, and not to be described as any.
+
+    A note for whoever bumps `git.CONTAINER_GIT_IMAGE`: that digest is the code
+    that runs unconfined here.
     """
     return ["--security-opt", "label:disable"] if enforcing is True else []
 

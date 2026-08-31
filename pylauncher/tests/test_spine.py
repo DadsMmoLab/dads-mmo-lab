@@ -134,6 +134,47 @@ def test_the_same_file_reads_differently_for_two_entries_stage_tuples(tmp_path: 
     assert wide.completed == ("build", "clone-core")
 
 
+def test_ownership_is_three_answers_and_a_file_nobody_can_read_is_never_the_middle_one(
+    tmp_path: Path,
+) -> None:
+    """`read_claim()` is the ONE place a folder becomes an ownership answer.
+
+    It exists because two places answered and they disagreed on exactly one
+    input. `read_state()` said `None` for a file it could not parse — correct
+    for "which stages may I skip?", since a hint that cannot be read is no hint
+    — and `claimed_this_folder()` said `is_file()`, which is `True` for the same
+    input. A bool has nowhere to put "the file is there and I cannot read it",
+    so the two questions shared one answer and the corrupt case fell out of the
+    gap with `git reset --hard` behind it.
+
+    Absent is `UNCLAIMED`, parsed is `OWNED`, present-and-unreadable is
+    `UNKNOWN`, and `UNKNOWN` must never be worth more than `UNCLAIMED`.
+    """
+    good = tmp_path / "ours"
+    good.mkdir()
+    native.write_state(good, native.InstallState("wow-tbc", "abc", "cmangos"))
+    empty = tmp_path / "empty"
+    empty.mkdir()
+
+    assert native.read_claim(empty, valid=ORDER).ownership is native.Ownership.UNCLAIMED
+    assert native.read_claim(empty, valid=ORDER).state is None
+    owned = native.read_claim(good, valid=ORDER)
+    assert owned.ownership is native.Ownership.OWNED
+    assert owned.state is not None and owned.state.install_id == "abc"
+
+    damages = ("", "{not json", "[]", '{"version": 1}', "\x00\x00")
+    for number, damage in enumerate(damages):
+        broken = tmp_path / f"broken{number}"
+        broken.mkdir()
+        (broken / native.STATE_FILE).write_text(damage, encoding="utf-8")
+        claim = native.read_claim(broken, valid=ORDER)
+        assert claim.ownership is native.Ownership.UNKNOWN, damage
+        assert claim.state is None, damage
+        # And the hint reader keeps its own contract on the same input, which is
+        # what made the two answers look interchangeable in the first place.
+        assert native.read_state(broken, valid=ORDER) is None, damage
+
+
 def test_with_stage_orders_by_the_entry_tuple_and_never_records_twice() -> None:
     fresh = native.InstallState(game_id="wow-tbc", install_id="abc", family="cmangos")
     once = fresh.with_stage("import", ORDER).with_stage("clone-sources", ORDER)
@@ -408,6 +449,34 @@ def test_a_state_file_without_a_family_is_adopted_and_gains_the_current_one(
     state = native.read_state(server_dir, valid=AzerothCoreInstaller.STAGE_NAMES)
     assert state is not None
     assert state.family == "azerothcore"
+
+
+def test_a_state_file_the_guard_cannot_read_stops_the_install_instead_of_starting_fresh(
+    tmp_path: Path,
+) -> None:
+    """`Ownership.UNKNOWN` fails closed, and this is where it does it first.
+
+    Ignoring it made this the FRESH-install path — every `install_id`,
+    `game_id`, `family` and not-empty refusal in `_guard()` is written `if
+    existing is not None and …` — while `claimed_this_folder()` was
+    simultaneously calling the same folder ours. Two answers, one input, and
+    `git reset --hard` on the far side of them.
+
+    The failure modes are not exotic enough to gamble on: a crash mid-write, a
+    file damaged by hand or by a backup tool, a version this build cannot read,
+    and an unrelated file that happens to sit at the reserved name all arrive
+    here identically. An atomic writer covers exactly one of the four.
+    """
+    server_dir = tmp_path / "wow"
+    server_dir.mkdir()
+    (server_dir / native.STATE_FILE).write_text("{not json", encoding="utf-8")
+    rec = Recorder(images=False)
+    with pytest.raises(InstallerError, match="cannot read"):
+        install(rec, server_dir)
+    assert rec.calls == ["gather"], rec.calls
+    # Never deleted or rewritten: a file this engine cannot read may not be its
+    # own, and the message asks the user to decide.
+    assert (server_dir / native.STATE_FILE).read_text(encoding="utf-8") == "{not json"
 
 
 # -- preflight ----------------------------------------------------------------
@@ -748,6 +817,95 @@ def test_stage_clone_sources_clones_every_source_at_its_dest_and_refuses_what_it
     with pytest.raises(InstallerError, match="has files in it but is not a checkout"):
         list(_build(again, family).run(InstallOptions(server_dir=tmp_path / "wow2")))
     assert (hand_made / "my-own-patches.cpp").read_text(encoding="utf-8") == "mine"
+
+
+def _owned_context(server_dir: Path) -> tuple[native.StagedInstaller, native.StageContext]:
+    """An install that has claimed `server_dir`, and the context its stages are handed.
+
+    The state file and `ctx.state` are the SAME record, which is the arrangement
+    `_guard()` produces: it validated the file's `install_id`, `game_id` and
+    `family` and handed the parsed object on.
+    """
+    state = native.InstallState(game_id=ENTRY.id, install_id="an-install-id", family="azerothcore")
+    server_dir.mkdir(parents=True, exist_ok=True)
+    native.write_state(server_dir, state)
+    installer = _build(Recorder(), _family(lambda _me: ()))
+    ctx = native.StageContext(
+        server_dir=server_dir,
+        client_dir=None,
+        state=state,
+        cancel=threading.Event(),
+        secrets=native.Secrets("pw"),
+    )
+    return installer, ctx
+
+
+def test_the_one_path_that_could_destroy_a_users_work_no_longer_needs_three_copied_guards(
+    tmp_path: Path,
+) -> None:
+    """`refuse_unowned_checkout()` has to be safe alone, and it was not.
+
+    Its `if remote is None: return` was safe only because
+    `if has_git and existing is None: raise` was copy-pasted into
+    `families/azerothcore.py` twice and `stage_clone_sources()` once — so the
+    method whose own docstring calls itself "the one path in this engine that
+    could still destroy a user's work" was relying on three call sites to have
+    stopped first (review, 2026-08-31). `None` from `remote_url()` is not "there
+    is no checkout": it is also no docker CLI, a daemon that would not answer, a
+    failed pull, and — until `5c6c655c` — an SELinux denial on every enforcing
+    box. A `.git` the HOST can see is the evidence that the answer is wrong.
+
+    Called here with nothing else in the picture, which is the point: no family
+    body, no stage, no guard above it.
+    """
+    installer, ctx = _owned_context(tmp_path / "wow")
+    checkout = tmp_path / "wow"
+    (checkout / ".git").mkdir(parents=True, exist_ok=True)
+    with pytest.raises(InstallerError, match="would not say what it is a checkout of"):
+        installer.refuse_unowned_checkout(ctx, checkout, "https://example/core.git", None)
+
+    # And it still stands down where `None` really does mean "no checkout here",
+    # which is every fresh clone: a directory that does not exist yet.
+    fresh = tmp_path / "not-there-yet"
+    assert installer.refuse_unowned_checkout(ctx, fresh, "https://example/core.git", None) is None
+
+
+def test_a_state_file_damaged_during_the_install_is_not_ownership_either(tmp_path: Path) -> None:
+    """`_guard()` refuses `UNKNOWN` before stage 1, so reaching it later means mid-run damage.
+
+    That is precisely why `claimed_this_folder()` re-reads the folder instead of
+    trusting a decision taken minutes and several stages ago — and why it
+    answers three ways. The old bool could only say "the file is there", which
+    for a file nobody can read is the most confident thing it could possibly
+    have said.
+    """
+    server_dir = tmp_path / "wow"
+    installer, ctx = _owned_context(server_dir)
+    checkout = server_dir
+    (checkout / ".git").mkdir(parents=True, exist_ok=True)
+    url = "https://example/core.git"
+    assert installer.claimed_this_folder(ctx) is native.Ownership.OWNED
+    assert installer.refuse_unowned_checkout(ctx, checkout, url, url) is None
+
+    (server_dir / native.STATE_FILE).write_text("", encoding="utf-8")
+    assert installer.claimed_this_folder(ctx) is native.Ownership.UNKNOWN
+    with pytest.raises(InstallerError, match="cannot be read"):
+        installer.refuse_unowned_checkout(ctx, checkout, url, url)
+
+    # A file that parses but names a DIFFERENT install is not ownership either:
+    # something replaced it while this run was going, and the identity
+    # `_guard()` validated is the only thing worth comparing it to.
+    native.write_state(
+        server_dir, native.InstallState(game_id=ENTRY.id, install_id="someone-else", family="")
+    )
+    assert installer.claimed_this_folder(ctx) is native.Ownership.UNKNOWN
+
+    # And with no file at all it is UNCLAIMED, which refuses with the sentence
+    # about a checkout this app never made — not the one about a damaged file.
+    (server_dir / native.STATE_FILE).unlink()
+    assert installer.claimed_this_folder(ctx) is native.Ownership.UNCLAIMED
+    with pytest.raises(InstallerError, match="no record here of an install this app made"):
+        installer.refuse_unowned_checkout(ctx, checkout, url, url)
 
 
 def test_stage_start_db_starts_the_database_even_for_an_entry_with_no_import_service(

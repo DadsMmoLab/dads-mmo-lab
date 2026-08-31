@@ -377,6 +377,58 @@ def test_a_first_install_into_the_users_own_checkout_is_refused_and_left_alone(
     assert not any("part-way through" in line for line in lines), lines
 
 
+def test_a_state_file_nobody_can_read_never_authorises_a_reset_of_a_users_checkout(
+    tmp_path: Path,
+) -> None:
+    """The FOURTH round's defect, at the level where the harm happens.
+
+    Two functions disagreed about what owning a folder means, and a corrupt file
+    landed between them. `read_state()` answered `None` for a state file that
+    would not parse, so `_guard()` treated the folder as FRESH and skipped every
+    refusal it has; `claimed_this_folder()` answered
+    `(server_dir / STATE_FILE).is_file()` — presence — so
+    `refuse_unowned_checkout()` called the folder OURS and stood down; and
+    `git fetch` + `git reset --hard FETCH_HEAD` ran over a user's own checkout.
+
+    The repro is the adversarial reviewer's, and it needs no SELinux and no
+    resume: clone the repo to `~/mywork`, edit a file, truncate
+    `.yulon-install.json` to zero bytes, install into `~/mywork`. Commit
+    `60d53374` hid this on enforcing boxes — the container could not read `.git`
+    at all, so an earlier guard raised first — and `5c6c655c`, which made those
+    reads work again, uncovered it.
+
+    Asserted at the harm rather than at a flag: the reset seam is never reached
+    and the edit is still there. `test_a_first_install_into_the_users_own_
+    checkout_is_refused_and_left_alone` above is the missing-file half of the
+    same claim, and a corrupt file must never be worth more than a missing one.
+    """
+    server_dir = tmp_path / "mywork"
+    (server_dir / ".git").mkdir(parents=True)
+    edited = server_dir / "src" / "server" / "worldserver.cpp"
+    edited.parent.mkdir(parents=True)
+    edited.write_text("// my patch\n", encoding="utf-8")
+    (server_dir / native.STATE_FILE).write_text("", encoding="utf-8")
+    rec = Recorder(images=False)
+    rec.remotes[server_dir] = ENTRY.emulator.sources[0].url
+    reset: list[Path] = []
+
+    def hard_reset(spec: git.CloneSpec) -> None:
+        reset.append(spec.dest)
+        for path in spec.dest.rglob("*.cpp"):
+            path.write_text("// upstream\n", encoding="utf-8")
+
+    with pytest.raises(InstallerError, match="cannot read"):
+        list(engine(rec, clone=hard_reset).run(InstallOptions(server_dir=server_dir)))
+    assert reset == [], reset
+    assert rec.clones == [], rec.clones
+    # Nothing ran at all beyond the machine check that precedes the guard — no
+    # clone, no build, no container. A flag set to the right value would not be
+    # evidence of that; an empty call log is.
+    assert rec.calls == ["gather"], rec.calls
+    assert edited.read_text(encoding="utf-8") == "// my patch\n"
+    assert not (server_dir / "docker-compose.yml").exists()
+
+
 def test_the_part_way_through_sentence_is_only_said_where_it_is_true(tmp_path: Path) -> None:
     """It is said over a fetch+reset, so it must never be said about somebody else's work.
 
