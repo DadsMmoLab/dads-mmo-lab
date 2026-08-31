@@ -403,3 +403,68 @@ def test_ready_markers_are_literal_unless_the_entry_says_regex() -> None:
     assert ReadyMarkers(world="World initialized|Avg Diff", regex=True).regex is True
     with pytest.raises(ValidationError):
         ReadyMarkers(world="")
+
+
+def test_a_game_with_a_one_shot_import_service_must_carry_a_fixed_password() -> None:
+    """The invariant that keeps the import gate and the Server tab on one password.
+
+
+
+    `install_wiring.import_gate_for()` builds the probe pair from
+
+    `fixed_db_password(entry)` - the CATALOGUE's value - because it has no
+
+    `server_dir` to read a generated file from. `ControllerServices.for_wotlk()`
+
+    builds everything else from `entry.install.db_password(server_dir)`, which
+
+    does read that file. Today the two agree, and only because the one entry
+
+    that names a `db_import` container is wow-wotlk, whose plan is `fixed`.
+
+
+
+    An entry that named an import service AND generated its password would send
+
+    the probe to the database as root with the literal "password" while every
+
+    other control used the real one. The symptom is not a silent Repair offer:
+
+    `repair.import_state()` cannot read the schemas, answers `unreadable`, and
+
+    the spine turns that into a hard `InstallerError` - so the install fails at
+
+    the import stage with a message about the database being unreadable, which
+
+    is a confusing way to say "wrong password".
+
+
+
+    If you are reading this because the test went red, you added such an entry.
+
+    Either give it `"mode": "fixed"`, or teach `import_gate_for()` to be handed
+
+    a password by a caller that holds a `server_dir` (a contract change - see
+
+    the 7.1 interface contract's `install_wiring` block). Do NOT make
+
+    `for_wotlk()` use the fixed password: that is the closed bug this pair of
+
+    seams exists to keep closed.
+
+    """
+
+    generated = [
+        entry.id
+        for entry in load_catalog().games
+        if entry.containers.db_import and entry.install.password.mode != "fixed"
+    ]
+
+    assert not generated, (
+        "these name a one-shot import service but generate their password, so the "
+        f"import gate would authenticate with the catalogue's fixed value: {generated}"
+    )
+
+    assert any(
+        entry.containers.db_import for entry in load_catalog().games
+    ), "no entry names an import service at all, so this test would pass on an empty catalog"

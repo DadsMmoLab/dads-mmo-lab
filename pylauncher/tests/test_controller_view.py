@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from yulon import docker, networking, runner
-from yulon.apply import Applier, ApplyReport
+from yulon.apply import Applier, ApplyReport, DockerSql
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.controller import Controller
 from yulon.controller_wow_wotlk import console, modules
@@ -18,6 +18,7 @@ from yulon.controller_wow_wotlk.accounts import AccountResult
 from yulon.controller_wow_wotlk.console import ConsoleReply
 from yulon.controller_wow_wotlk.maintenance import (
     BackupReport,
+    DockerMysql,
     InterruptedRestore,
     MaintenanceError,
     RestorePlan,
@@ -1225,6 +1226,16 @@ def test_every_seam_for_wotlk_builds_says_which_daemon_it_means() -> None:
     the test written to prevent it (review, 2026-08-26). The cost is that such
     a call must NAME the parameter rather than pass it positionally, which is
     cheap and reads better at the call site anyway.
+
+    DATACLASS FIELDS COUNT TOO, and they did not until 2026-08-31. The dunder
+    skip below is right about `__init__` as a NAME, but a dataclass declares
+    `wsl_distro` as an annotated class attribute and never writes an `__init__`
+    at all - so `DockerSql(...)` and `DockerMysql(...)`, the two seams this
+    function builds by hand, were invisible to a scan whose docstring promises
+    the next seam cannot be forgotten. Measured: dropping `wsl_distro=` from
+    either constructor left the whole suite at 1196 passed. A class whose body
+    annotates the field is collected by its CLASS name, which is how the call
+    site spells it.
     """
     import ast
 
@@ -1240,9 +1251,21 @@ def test_every_seam_for_wotlk_builds_says_which_daemon_it_means() -> None:
                     # ever catches somebody else's `super().__init__(parent)`.
                     if not node.name.startswith("__"):
                         accepts.add(node.name)
+            elif isinstance(node, ast.ClassDef):
+                if any(
+                    isinstance(stmt, ast.AnnAssign)
+                    and isinstance(stmt.target, ast.Name)
+                    and stmt.target.id == "wsl_distro"
+                    for stmt in node.body
+                ):
+                    accepts.add(node.name)
     assert {
         "send_command",
         "published_bindings",
+        # The two dataclass seams, so the collection above cannot rot back to
+        # functions-only and still pass.
+        "DockerSql",
+        "DockerMysql",
     } <= accepts, "the scan found no wsl_distro-aware functions, so it would pass on an empty repo"
 
     source = Path(controller_view_module.__file__).read_text(encoding="utf-8")
@@ -1492,3 +1515,56 @@ def test_a_password_file_that_cannot_be_read_still_opens_the_tab_and_says_why(
         tortoise.id in message and str(tortoise.install.password.file) in message
         for message in said
     ), said
+
+
+def test_both_db_seams_for_wotlk_builds_are_bound_to_the_distro_they_live_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The AST scan above is static; this is the same question asked of the objects.
+
+    `wsl_distro=` on these two constructors was pinned by NOTHING until now.
+    Measured on 2026-08-31: dropping it from `DockerSql(...)`, and separately
+    from `DockerMysql(...)`, left the whole suite at 1196 passed either way.
+    The seam scan could not see them because a dataclass declares the field
+    rather than taking it as a parameter, and every other test that looks like
+    it covers this really covers something else - the backup census reads the
+    distro from `backup(wsl_distro=...)`, not from the `DockerMysql` it is
+    handed, so it passes with the object mis-wired and only the real `docker
+    exec` further in would go to the Windows host that has no `ac-database`.
+
+    Asked of the constructed objects, so a call site that passes the parameter
+    but hands it `None` is caught as well as one that omits it.
+    """
+    sql_seams: list[DockerSql] = []
+    mysql_seams: list[DockerMysql] = []
+    real_sql = controller_view_module.DockerSql
+    real_mysql = controller_view_module.wotlk_maintenance.DockerMysql
+
+    def recording_sql(*args: object, **kwargs: object) -> DockerSql:
+        made: DockerSql = real_sql(*args, **kwargs)  # type: ignore[arg-type]
+        sql_seams.append(made)
+        return made
+
+    def recording_mysql(*args: object, **kwargs: object) -> DockerMysql:
+        made: DockerMysql = real_mysql(*args, **kwargs)  # type: ignore[arg-type]
+        mysql_seams.append(made)
+        return made
+
+    monkeypatch.setattr(controller_view_module, "DockerSql", recording_sql)
+    monkeypatch.setattr(controller_view_module.wotlk_maintenance, "DockerMysql", recording_mysql)
+
+    ControllerServices.for_wotlk(WOTLK, tmp_path, None, "dml-arch")
+
+    # More than one of each may be built: `import_gate_for()` makes its own
+    # pair, and the gate's seams have to address the same daemon as the tab's.
+    # Every seam that was built is asked, not just the first.
+    assert sql_seams and mysql_seams, "a seam was not built at all"
+    assert all(seam.wsl_distro == "dml-arch" for seam in sql_seams), sql_seams
+    assert all(seam.wsl_distro == "dml-arch" for seam in mysql_seams), mysql_seams
+
+    sql_seams.clear()
+    mysql_seams.clear()
+    ControllerServices.for_wotlk(WOTLK, tmp_path)
+    assert sql_seams and mysql_seams, "a seam was not built at all"
+    assert all(seam.wsl_distro is None for seam in sql_seams), "a distro was invented"
+    assert all(seam.wsl_distro is None for seam in mysql_seams), "a distro was invented"
