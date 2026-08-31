@@ -1965,6 +1965,18 @@ def test_the_three_ways_of_not_getting_a_password_are_three_different_skips(
     assert not [m for m in unavailable.manual_steps if "needed a password" in m]
     assert any("Some steps did not run" in m for m in unavailable.manual_steps)
 
+    # Three sentences in `manual_steps` as well, not just in `skipped`. That is
+    # the half a user actually reads — `_preflight_lines()` puts the manual
+    # steps in the failure dialog and falls back to the skip lines only when
+    # there are none — and it kept the command names while dropping the reason,
+    # so a dismissed dialog and three wrong passwords read identically here
+    # while `skipped` above happily proved they were different (2026-08-31).
+    def advice(report: platform.ProvisionReport) -> str:
+        return next(m for m in report.manual_steps if m.startswith("Some steps"))
+
+    assert len({advice(declined), advice(refused), advice(unavailable)}) == 3
+    assert advice(refused) != advice(declined)
+
 
 def test_a_box_whose_sudo_needs_no_password_never_opens_the_dialog(
     monkeypatch: pytest.MonkeyPatch,

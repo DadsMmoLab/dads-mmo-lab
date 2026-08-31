@@ -906,6 +906,12 @@ def test_provisioning_is_the_only_seam_the_prompter_is_handed_to(tmp_path: Path)
     Written as an argv-shaped check rather than a grep: the same forwarding
     spelled `ask=ask`, `**kwargs` or a partial is one object arriving at one
     seam, and only the seam can see all three.
+
+    The wrapper below assumes every non-`None` `Seams` field is CALLABLE, and
+    that assumption is now asserted rather than relied on. `Seams` grows a field
+    per merge; a data one — a Path, a timeout, a flag — would be silently
+    replaced by a closure here and break its consumer somewhere else entirely,
+    with this test still green. It has to fail at the field, by name.
     """
     handed: list[str] = []
 
@@ -928,6 +934,11 @@ def test_provisioning_is_the_only_seam_the_prompter_is_handed_to(tmp_path: Path)
     for seam_field in fields(native.Seams):
         original = getattr(installer._seams, seam_field.name)
         if original is not None:
+            assert callable(original), (
+                f"Seams.{seam_field.name} is not callable, so wrapping it here would hand the "
+                "engine a closure where it expects data — and this test would stay green while "
+                "something far away broke. Teach the wrapper about it instead."
+            )
             setattr(installer._seams, seam_field.name, watched(seam_field.name, original))
 
     list(installer.run(InstallOptions(server_dir=tmp_path / "srv"), ask=prompter))

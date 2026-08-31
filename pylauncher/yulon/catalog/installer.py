@@ -551,13 +551,16 @@ class Installer:
         passed through to Docker provisioning so its ready-poll can be
         interrupted (a stop mid-provision must not leave a worker sleeping).
 
-        `ask` reaches Docker provisioning for one question: whether to join the
-        docker group, which is root-equivalent. It has to arrive here rather
+        `ask` reaches Docker provisioning for two questions, in this order:
+        whether to join the docker group, which is root-equivalent, and — on
+        Linux, once a privileged step reports that it needs one — the sudo
+        password (`platform.SudoSession`, 7.1). It has to arrive here rather
         than only in `run()`, because provisioning happens HERE — before the
         script starts. That ordering is why the scripts' own consent gate could
         never fire on the machine it was written for: `ensure_docker()` had
         already joined the group, so the script found the user a member and
-        never asked (found 2026-08-24).
+        never asked (found 2026-08-24). This said "one question" until the sudo
+        password landed beside it on another branch (merge review, 2026-08-31).
         """
         here = self._platform_id()
         if not self.entry.install.supports(here):
@@ -611,12 +614,14 @@ class Installer:
     ) -> Iterator[str]:
         """Run the install, yielding output lines live; answers prompts itself.
 
-        `ask` is consulted for exactly one thing: `sudo` asking for a password
-        during the distro package steps. No rule in `PROMPT_RULES` can ever know
-        it, so without `ask` the script stops dead there — which is what
-        installing on Linux did (`sudo -v` at the top of the Ubuntu script,
-        guarded by `exit 1`, so it failed seconds in with "Could not cache sudo
-        credentials. Aborting.").
+        Once the script itself is running, `ask` is consulted for exactly one
+        thing: `sudo` asking for a password during the distro package steps. No
+        rule in `PROMPT_RULES` can ever know it, so without `ask` the script
+        stops dead there — which is what installing on Linux did (`sudo -v` at
+        the top of the Ubuntu script, guarded by `exit 1`, so it failed seconds
+        in with "Could not cache sudo credentials. Aborting."). Before that,
+        `preflight()` is handed the same `ask` and Docker provisioning may put
+        its own two questions to it; see that method.
 
         Two things make that work, and both are needed:
 

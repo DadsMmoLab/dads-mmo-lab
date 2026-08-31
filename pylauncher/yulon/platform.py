@@ -2603,9 +2603,19 @@ def _ensure_docker_linux(
             manual.insert(0, "Some steps did not run: " + "; ".join(other))
         if password:
             failed = "; ".join(s.split(":")[0] for s in password)
-            manual.insert(
-                0, f"Some steps needed a password; run them in a terminal with sudo: {failed}"
-            )
+            # The reason, not just the command list. `_run_steps()` writes three
+            # different sentences into `skipped` (`_sudo_skip_reason()`) and this
+            # line used to keep only the part BEFORE the colon — so a dismissed
+            # dialog and three wrong passwords, which the type keeps apart all
+            # the way to `SudoOutcome`, arrived at the user as the same
+            # sentence, and the one whose remedy is "type it correctly" read as
+            # the one whose remedy is "go and type it in a terminal". The
+            # distinction was carried the whole way and then dropped in the last
+            # line that renders it (merge review, 2026-08-31).
+            lead = "Some steps needed a password"
+            if session is not None and session.outcome == "refused":
+                lead = "Some steps needed a password and sudo refused the one given"
+            manual.insert(0, f"{lead}; run them in a terminal with sudo: {failed}")
     return ProvisionReport(
         "linux", tuple(done), tuple(skipped), tuple(manual), False, ready, outcome
     )

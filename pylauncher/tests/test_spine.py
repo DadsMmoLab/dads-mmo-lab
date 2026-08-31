@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import subprocess
 import threading
 import traceback
 from collections.abc import Callable, Iterator
@@ -20,15 +21,14 @@ from pathlib import Path
 import pytest
 
 from tests.support_native import ENTRY, IMPORTED, PARTIAL, TBC, Recorder, install
-from yulon import docker, resources
+from yulon import docker, platform, resources
 from yulon.catalog import composegen, native, preflight
 from yulon.catalog.catalog import CatalogEntry, ReadyMarkers
 from yulon.catalog.families import FAMILIES, family_for
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
-from yulon.catalog.installer import InstallerError, InstallOptions
+from yulon.catalog.installer import DockerUnavailableError, InstallerError, InstallOptions
 
 ORDER = ("clone-sources", "build", "import", "up")
-HALF_WRITTEN = docker.ImportState("partial", "acore_world has 3 tables but no import record")
 CANARY = "hunter2-a2-canary"
 
 
@@ -248,14 +248,14 @@ def test_a_callable_gate_answers_the_probe_and_refuses_to_reset_without_a_seam()
 
     def probe() -> docker.ImportState:
         calls.append("probe")
-        return HALF_WRITTEN
+        return PARTIAL
 
     def reset() -> tuple[str, ...]:
         calls.append("reset")
         return ("acore_world",)
 
     gate: native.ImportGate = native.CallableGate(probe, reset)
-    assert gate.probe() is HALF_WRITTEN
+    assert gate.probe() is PARTIAL
     assert gate.reset() == ("acore_world",)
     assert calls == ["probe", "reset"]
     with pytest.raises(InstallerError, match="no way to clear"):
@@ -445,6 +445,213 @@ def test_the_real_gather_takes_the_client_dir_and_ignores_it_until_7_3(tmp_path:
     )
     assert facts.platform_id == "macos"
     assert facts.docker_ready is False
+
+
+# -- the forwarded prompter, all the way down to the sudo dialog ---------------
+#
+# The wire (`preflight(ask=...)` → `ensure_docker(ask=...)`, A4) and the thing
+# it feeds (`platform.SudoSession`, C7) were built on branches that never saw
+# each other, so a green suite on either side was no evidence about the join.
+# Everything below drives the REAL `platform.ensure_docker()` and
+# `_ensure_docker_linux()`; only the machine underneath them is a double.
+
+SUDO_CANARY = "hunter2-sudo-canary"
+
+
+class _LinuxBox:
+    """A `RunCmd` for a Linux box with no Docker and a package manager to install one with.
+
+    Answers what `ensure_docker()` really asks a machine: `docker info` fails,
+    `id -nG` says the user is not in the docker group, and every `sudo -n`
+    refuses with sudo's own words — the state a clean Fedora/Arch box is in,
+    and the only stderr `_needs_password()` accepts.
+
+    `needs_password=False` is the root/NOPASSWD box, where no step ever reaches
+    the session and the outcome stays `unasked`.
+    """
+
+    def __init__(self, needs_password: bool = True) -> None:
+        self.calls: list[list[str]] = []
+        self.needs_password = needs_password
+
+    def __call__(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
+        self.calls.append(argv)
+        if argv[:2] == ["docker", "info"]:
+            return subprocess.CompletedProcess(argv, 1, "", "")
+        if argv[0] == "id":
+            return subprocess.CompletedProcess(argv, 0, "pk wheel", "")
+        if argv[:2] == ["sudo", "-n"] and self.needs_password:
+            return subprocess.CompletedProcess(argv, 1, "", "sudo: a password is required")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+
+def _provisions_a_linux_box(
+    run: _LinuxBox, run_input: platform.RunWithInput
+) -> Callable[..., platform.ProvisionReport]:
+    """The `ensure_docker` seam, wired to the real function with a fake machine under it.
+
+    The spine hands this seam `cancel` and `ask` and nothing else, which is the
+    point: the fakes are bound here, so `ask` has to travel the real parameter
+    rather than one the test handed in.
+    """
+
+    def provision(**kwargs: object) -> platform.ProvisionReport:
+        return platform.ensure_docker(
+            run=run,
+            which=lambda name: "/usr/bin/apt-get" if name == "apt-get" else None,
+            user="pk",
+            wait_seconds=0.0,
+            run_input=run_input,
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+    return provision
+
+
+def test_the_prompter_the_spine_forwards_is_the_one_the_sudo_dialog_asks_with(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The join, by identity: `ask` leaves `preflight()` and arrives inside `SudoSession`.
+
+    Not "a prompter was called" — THE prompter. `SudoSession` is spied on at
+    construction, so what is asserted is the object the engine forwarded, and
+    both of the questions the module docstring promises ("both via the
+    forwarded `ask`") are put to it. The password it answers with then has to
+    be seen reaching `sudo` on STDIN, or the wire reaches the dialog and drops
+    what the dialog says.
+    """
+    monkeypatch.setattr(platform.sys, "platform", "linux")
+    monkeypatch.setattr(platform, "is_steamos", lambda: False)
+    built: list[object] = []
+    real_session = platform.SudoSession
+
+    def spy(ask: object, run_input: object, **kwargs: object) -> platform.SudoSession:
+        built.append(ask)
+        return real_session(ask, run_input, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(platform, "SudoSession", spy)
+
+    asked: list[str] = []
+
+    def prompter(question: str) -> str:
+        asked.append(question)
+        return SUDO_CANARY if question == platform.SUDO_PASSWORD_QUESTION else "n"
+
+    fed: list[tuple[list[str], str]] = []
+
+    def feed(argv: list[str], text: str) -> subprocess.CompletedProcess[str]:
+        fed.append((argv, text))
+        return subprocess.CompletedProcess(argv, 0 if text == SUDO_CANARY + "\n" else 1, "", "")
+
+    rec = Recorder(images=False)
+    installer = _build(
+        rec,
+        AzerothCoreInstaller,
+        docker_ready=lambda: False,
+        ensure_docker=_provisions_a_linux_box(_LinuxBox(), feed),
+    )
+    with pytest.raises(DockerUnavailableError):
+        installer.preflight(InstallOptions(server_dir=tmp_path / "wow"), ask=prompter)
+
+    assert built == [prompter], "the session was built with something other than the forwarded ask"
+    assert asked[0] == platform.DOCKER_GROUP_QUESTION.format(user="pk")
+    assert platform.SUDO_PASSWORD_QUESTION in asked
+    assert asked.count(platform.SUDO_PASSWORD_QUESTION) == 1  # one dialog per run, still
+    # The answer went to sudo, on stdin, and never as an argv element.
+    assert fed[0][0] == ["sudo", "-S", "-p", "", "-v"] and fed[0][1] == SUDO_CANARY + "\n"
+    assert [argv for argv, _ in fed if any(SUDO_CANARY in part for part in argv)] == []
+    # ...and every later privileged step was fed it rather than re-asking.
+    assert ["sudo", "-S", "-p", "", "apt-get", "update"] in [argv for argv, _ in fed]
+
+
+class _NoSudoBinary:
+    """A `RunWithInput` for a box with no `sudo` at all: the exec itself fails."""
+
+    def __call__(self, argv: list[str], text: str) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError(2, "No such file or directory", "sudo")
+
+
+def _refuses_every_password(argv: list[str], text: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(argv, 1, "", "Sorry, try again.")
+
+
+def _accepts(password: str) -> platform.RunWithInput:
+    def feed(argv: list[str], text: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 0 if text == password + "\n" else 1, "", "")
+
+    return feed
+
+
+def _never_feeds(argv: list[str], text: str) -> subprocess.CompletedProcess[str]:
+    raise AssertionError(f"a password was fed to {argv} when no step needed one")
+
+
+def test_every_sudo_outcome_survives_the_trip_up_to_the_sentence_the_user_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`SudoOutcome`'s five values, driven from the Install button to the failure dialog.
+
+    `SudoOutcome` exists because a `bool` loses the difference between "they
+    said no", "the machine said no" and "nobody could be asked" — and carrying
+    it is only worth anything if it is still legible after `ensure_docker()`,
+    `_preflight_lines()` and `DockerUnavailableError` have each rewritten it. A
+    distinction that exists in the type and dies in the message is the exact
+    failure this asserts against.
+
+    Five values, THREE sentences, and that is the right count: `unasked` and
+    `verified` are the two where the privileged steps actually ran, so the user
+    is told nothing about sudo at all — the same silence, for the same reason.
+
+    `unavailable` is the one with a wrong answer waiting for it: "run them in a
+    terminal with sudo" is useless advice on a box whose `sudo` is what could
+    not be run, so it must not appear there (measured in a container on
+    yulon-ubuntu, 2026-08-24).
+    """
+    monkeypatch.setattr(platform.sys, "platform", "linux")
+    monkeypatch.setattr(platform, "is_steamos", lambda: False)
+
+    def message(run: _LinuxBox, run_input: platform.RunWithInput, password: str | None) -> str:
+        def prompter(question: str) -> str | None:
+            return password if question == platform.SUDO_PASSWORD_QUESTION else "n"
+
+        rec = Recorder(images=False)
+        installer = _build(
+            rec,
+            AzerothCoreInstaller,
+            docker_ready=lambda: False,
+            ensure_docker=_provisions_a_linux_box(run, run_input),
+        )
+        with pytest.raises(DockerUnavailableError) as caught:
+            installer.preflight(InstallOptions(server_dir=tmp_path / "wow"), ask=prompter)
+        return str(caught.value)
+
+    unasked = message(_LinuxBox(needs_password=False), _never_feeds, None)
+    verified = message(_LinuxBox(), _accepts(SUDO_CANARY), SUDO_CANARY)
+    declined = message(_LinuxBox(), _accepts(SUDO_CANARY), "")
+    refused = message(_LinuxBox(), _refuses_every_password, "wrong")
+    unavailable = message(_LinuxBox(), _NoSudoBinary(), SUDO_CANARY)
+
+    # The two whose steps ran carry no sudo complaint at all. (Both still carry
+    # the docker-group advice, which names `sudo usermod` for a reason of its
+    # own — so this asserts the absence of the SKIP sentences, not of the word.)
+    for quiet in (unasked, verified):
+        assert "password" not in quiet.lower(), quiet
+        assert "Some steps" not in quiet, quiet
+        assert "sudo could not be run" not in quiet, quiet
+
+    # The three that did not are three different sentences, not one house one.
+    # `declined` and `refused` were the same sentence until this merge review:
+    # the reason is written into `skipped` and was then thrown away by the line
+    # that renders `manual_steps`, which kept only the command names.
+    assert "Some steps needed a password; run them in a terminal with sudo" in declined
+    assert "Some steps needed a password and sudo refused the one given" in refused
+    assert "sudo could not be run, so nothing was elevated" in unavailable
+    assert len({declined, refused, unavailable}) == 3
+
+    # ...and the box with no `sudo` is never sent to a terminal to run one.
+    assert "terminal with sudo" not in unavailable
+    assert "needed a password" not in unavailable
+    assert "Some steps did not run" in unavailable
 
 
 # -- secrets ------------------------------------------------------------------
