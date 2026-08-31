@@ -44,6 +44,7 @@ from tests.support_native import (
 )
 from yulon import docker, git, platform, resources, runner
 from yulon.catalog import composegen, native, preflight
+from yulon.catalog import installer as installer_module
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.installer import (
     DockerNeedsReLoginError,
@@ -1045,6 +1046,58 @@ def test_a_provision_that_worked_and_only_needs_a_re_login_is_not_a_failure(
     message = str(caught.value)
     assert "could not be set up" not in message, message
     assert "log out and back in" in message.lower(), message
+
+
+def test_the_press_after_the_group_join_is_not_told_docker_could_not_be_set_up(
+    tmp_path: Path,
+) -> None:
+    """Press 2 on the gate box, and the state a real Linux user is in most often.
+
+    `_docker_group_member()` asks `id -nG <user>`, which reads the group
+    DATABASE - so the moment the join lands the user is a member by that
+    question, while the running session still is not by the kernel's. Press 2
+    therefore reports `already-member` with the daemon still unreachable, which
+    `platform.DockerGroupOutcome`'s own docstring already put on the same side
+    as `granted`: "only `granted` and `already-member` ... may print the
+    log-out-and-back-in line". `docker_unavailable()` read only `granted`, so
+    press 2 got D1's sentence back, with no manual steps to soften it.
+    """
+    installer = engine(
+        Recorder(images=False),
+        docker_ready=lambda: False,
+        ensure_docker=lambda **_kwargs: platform.ProvisionReport(
+            "linux",
+            done=("apt-get install -y docker.io",),
+            docker_group="already-member",
+        ),
+    )
+    with pytest.raises(DockerNeedsReLoginError) as caught:
+        installer.preflight(InstallOptions(server_dir=tmp_path / "srv"))
+    message = str(caught.value)
+    assert "could not be set up" not in message, message
+    assert "Install Docker, start it, and try again." not in message, message
+    assert "log out and back in" in message.lower(), message
+
+
+def test_the_two_re_login_outcomes_do_not_read_as_one_sentence(tmp_path: Path) -> None:
+    """Joined just now and already a member need different next actions.
+
+    `granted` knows why this session cannot see the group. `already-member`
+    does not: either the user has not logged out since, or the Docker service
+    is down - and the message has to name both, because nothing on the report
+    tells them apart.
+    """
+    seen = {
+        outcome: str(
+            installer_module.docker_unavailable(
+                platform.ProvisionReport("linux", docker_group=outcome)
+            )
+        )
+        for outcome in ("granted", "already-member")
+    }
+    assert len(set(seen.values())) == 2, seen
+    assert "service is not running" in seen["already-member"]
+    assert "service is not running" not in seen["granted"]
 
 
 def test_a_provision_that_really_failed_still_says_so(tmp_path: Path) -> None:

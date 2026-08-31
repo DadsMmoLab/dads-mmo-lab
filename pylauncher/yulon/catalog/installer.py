@@ -125,8 +125,8 @@ class UnsupportedPlatformError(InstallerError):
 def docker_unavailable(report: platform.ProvisionReport) -> DockerUnavailableError:
     """The refusal for a provision that ran and left no daemon THIS process can reach.
 
-    Two outcomes wore one sentence until 7.1, and it was the wrong one for the
-    outcome a first-time Linux user actually meets. `docker_group == "granted"`
+    THREE outcomes wore one sentence until 7.1, and it was the wrong one for
+    the two a first-time Linux user actually meets. `docker_group == "granted"`
     means the group join RAN and succeeded — the engine is installed and the
     account is a member — and the only thing between the user and a working
     install is that a process cannot acquire a supplementary group it was
@@ -136,6 +136,19 @@ def docker_unavailable(report: platform.ProvisionReport) -> DockerUnavailableErr
     `docker.io` 29.1.3 active, `pk` added to group 124, and the install
     reported as failed).
 
+    `already-member` is the same event one press later and is the state a real
+    user is in most often. `_docker_group_member()` asks `id -nG <user>`, which
+    reads the group database rather than the running process, so the press
+    AFTER the join reports `already-member` with the daemon still unreachable -
+    and that branch produced "could not be set up automatically. Install
+    Docker, start it, and try again." with no manual steps at all.
+    `platform.DockerGroupOutcome`'s docstring had already put the two on the
+    same side: "only `granted` and `already-member` ... may print the
+    log-out-and-back-in line". They get different sentences, because they need
+    different next actions: `granted` knows why this session cannot see the
+    group, and `already-member` cannot tell "you have not logged out yet" from
+    "the service is down", so it names both.
+
     Built here rather than at either call site so the script path and the
     native spine cannot drift: both had the same sentence, so both had the
     same defect.
@@ -144,8 +157,21 @@ def docker_unavailable(report: platform.ProvisionReport) -> DockerUnavailableErr
     if report.docker_group == "granted":
         return DockerNeedsReLoginError(
             "Docker is installed and set up. It cannot be used from this session yet: your "
-            "account was added to the docker group, and that only takes effect at your next "
-            "login. " + (details or "Log out and back in, then start the install again.")
+            "account was added to the docker group, and a session that was already open does "
+            "not pick up a new group. "
+            + (details or "Log out and back in, then start the install again.")
+        )
+    if report.docker_group == "already-member":
+        # Two causes, and the report cannot tell them apart, so both are named.
+        # `ensure_docker()` returns early when a daemon answers, so reaching
+        # here at all means it did not - which for a member of the group is
+        # either a session opened before the join, or a service that is down.
+        return DockerNeedsReLoginError(
+            "Docker is installed and your account is already in the docker group, but this "
+            "session still cannot reach the daemon. A session that was open before the group "
+            "was granted does not pick it up: log out and back in, then start the install "
+            "again. If you have already done that, the Docker service is not running - start "
+            "it and try again." + (f" {details}" if details else "")
         )
     return DockerUnavailableError(
         "Docker isn't available and could not be set up automatically. "

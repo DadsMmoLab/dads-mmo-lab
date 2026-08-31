@@ -2581,7 +2581,14 @@ def _ensure_docker_linux(
     )
 
     manual: list[str] = []
-    if outcome == "granted":
+    if outcome in ("granted", "already-member"):
+        # `already-member` is here because this function only runs when no
+        # daemon answered (`ensure_docker()` returns before it otherwise), and
+        # for a member of the group the commonest cause is a session opened
+        # before the membership existed. `DockerGroupOutcome`'s docstring has
+        # always said both outcomes may print this line; only `granted` did, so
+        # the press after the join reported nothing left to do (review,
+        # 2026-08-31).
         manual.append(DOCKER_GROUP_RELOGIN_STEP.format(user=user))
     elif outcome == "join-failed":
         manual.append(DOCKER_GROUP_JOIN_FAILED_STEP.format(user=user))
