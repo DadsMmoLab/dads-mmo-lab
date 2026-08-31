@@ -29,9 +29,9 @@ still caught:
   our `db-data` and `client-data`. The captured fixture is a NATIVE install and declares
   `db-data` and `client-data` — our own names — so at the mount level the erasure no longer buys
   a real difference and is a blind spot instead of a justification: it cannot see a mount that
-  was pointed at the other existing volume. What it never hid is a RENAME, and less than before:
-  `compare_stack()` compares the top-level declarations by name, exactly, now that
-  `DESIGN_VOLUME_NAMES` is empty. Both halves are pinned by
+  was pointed at the other existing volume. What it never hid is a RENAME:
+  `compare_stack()` compares the top-level declarations by name, translating only what a
+  pairing's registry records. Both halves are pinned by
   `test_a_renamed_named_volume_is_caught_at_the_top_level_not_at_the_mount`. The KIND survives,
   so a bind where a managed volume belongs is still reported, and so does READ-ONLY: only the
   SELinux label characters are dropped from the mode column (below), never `ro`.
@@ -55,14 +55,20 @@ still caught:
   kept, because a declaration carries options and options must stay attached to an identity — a
   `driver_opts.device` that moved from one 1.1 GB store to the other is otherwise invisible, and
   a problem line that does not name the volume cannot be acted on. Names are compared as
-  written: `DESIGN_VOLUME_NAMES` is the registry for a recorded rename and the capture emptied
-  it.
+  written unless the PAIRING'S OWN registry records a rename: `NO_VOLUME_ALIASES` for the native
+  fixture, whose two volumes the engine named itself, and `SCRIPT_INSTALL_VOLUME_NAMES` for the
+  bash script install, which really does call them `ac-database` and `ac-client-data`. A `Stack`
+  remembers which registry reduced it, so the two can never be compared across.
 * a service that names no `networks:` → compose's implicit `default`, on both sides, and a
   top-level `default:` declaration synthesised for the rendered files when some service names
   none. `compose config` materialises both; the file can spell neither. This is the same
   pre-resolution/post-resolution split as `${VAR:-default}`, and it is MODELLED rather than
   erased: the synthesised declaration carries no options, so a `default:` that grew any on the
   captured side is still reported.
+* the published host IP is NOT erased, and used to be. Both sources can spell it — ours inside
+  the `${...:-127.0.0.1:7878}` default, `compose config` as a `host_ip` field — and the bash
+  script install publishes MySQL and the SOAP console on every interface where this stack pins
+  both to loopback. Dropping it called those identical.
 * upstream's build-time env (`BUILD_TIME_ENV`, `BUILD_TIME_ENV_PREFIXES`) → forgiven when only
   the PROVEN install has it. Upstream's compose sets these on the runtime services and the
   image's entrypoint reads none of them (checked in the image, 2026-08-24), so the native stack
@@ -71,7 +77,9 @@ still caught:
 
 WHAT THIS VOCABULARY CANNOT SEE, so that "the diff is clean" is never read as "the two files
 match". `Service` has no field for the image tag, an environment VALUE, `stop_grace_period`, the
-healthcheck, `user`, `tty`/`stdin_open`, `entrypoint`/`command` or the build context.
+healthcheck, `user`, `tty`/`stdin_open`, `entrypoint`/`command`, the build context or the build
+`args` — and `volume_from_config()` does not read a bind's `selinux` field, so the script
+install's single `Z` on the modules tree meets this engine's `z` on every bind in silence.
 The first two are the cost of the rules above; the rest are fields this reduction does not carry.
 Each is named by a test in `test_compose_fixture.py`, and where another test file already owns
 the value it is named there too — `stop_grace_period`, the healthcheck and `user:` are asserted
@@ -114,30 +122,43 @@ NO_ALIASES: Mapping[str, str] = {}
 """No name is a recorded design difference here. Networks use this: `ac-network` is `ac-network`
 on both sides, so a renamed network is a difference and not an allowance."""
 
-DESIGN_VOLUME_NAMES: Mapping[str, str] = {}
-"""The registry of recorded volume-name differences, mapped native -> reference. EMPTY, and the
-capture is why.
+NO_VOLUME_ALIASES: Mapping[str, str] = {}
+"""No volume is renamed between these two documents, so every name is compared as written.
 
-IT USED TO HOLD `db-data` -> `ac-database` and `client-data` -> `ac-client-data`, on two written
-sources: `pyplan/checklist.md`'s "Recorded, not fixed:" line under "The compose diff against the
-proven install" (2026-08-24), and the 2026-08-23 teardown gate in the same file (grep for
-`wow-server-playerbots_ac-database`). Both describe UPSTREAM's script install in
-`~/wow-server-playerbots`, which is what the reference was going to be captured from.
+This is the registry for a NATIVE-to-NATIVE pairing — the committed native fixture, the E.3/E.4
+gates, 7.2's re-run diff. It used to hold `db-data` -> `ac-database` and
+`client-data` -> `ac-client-data`, taken from `pyplan/checklist.md`'s "Recorded, not fixed:" line
+(2026-08-24) and a 2026-08-23 teardown gate — but both of those describe the BASH SCRIPT install,
+and the native fixture is the engine's own output, which declares our own two names.
+`_stale_translations()` reported that on the first run against the real capture, naming both
+spellings, which is the guard working rather than a failure."""
 
-THE REFERENCE THAT SHIPPED IS NOT THAT INSTALL. `tests/data/wotlk-compose-config.json` is
-`docker compose config` from the live gate's own NATIVE install (2026-08-31, reached `ready` on
-a clean Ubuntu box), and it declares `client-data` and `db-data` — our names, because the engine
-rendered them. Every comparison this vocabulary performs is native render against native
-capture: the fixture test, the E.3/E.4 gates and 7.2's re-run diff. There is no rename between
-those two, so a live entry here would do nothing but print a problem line naming a volume that
-exists on NEITHER side (`docker volume inspect <project>_ac-client-data` finds nothing), and
-`_stale_translations()` said so on the first run against the real capture — which is that
-guard's whole purpose, working.
+SCRIPT_INSTALL_VOLUME_NAMES: Mapping[str, str] = {
+    "db-data": "ac-database",
+    "client-data": "ac-client-data",
+}
+"""The one recorded volume-name difference, mapped native -> bash script install. CONFIRMED, and
+by a capture rather than by a note.
 
-The mechanism stays for the day a rename is recorded again: an entry translates the top-level
-declarations on both sides, and `_stale_translations()` reports it the moment it stops
-describing either side rather than quietly doing nothing. Empty, names are compared exactly as
-written, which is the strongest the comparison has ever been."""
+`tests/data/wotlk-compose-config-script.json` is `docker compose config` from a server the bash
+installer built (Fedora, 2026-08-31, project `wow-server-playerbots`). It declares exactly
+`ac-database` and `ac-client-data`, which is what the 2026-08-24 checklist line and the
+2026-08-23 teardown gate had claimed from a `docker volume ls` reading. Both names are now
+evidence.
+
+A MOUNT carries nothing but a name, a kind and a target, so there the name is erased outright. A
+top-level DECLARATION also carries options, and options compared without an identity to hang on
+cannot tell "client-data moved to another disk" from "db-data did". So the two recorded names
+are translated here instead, and every other name is compared exactly as written — a third
+volume, or a rename nobody recorded, is a difference.
+
+This is a record of a decided divergence, not a wildcard, and `_stale_translations()` keeps it
+one: an entry that stops describing either side is reported rather than quietly doing nothing."""
+
+DESIGN_VOLUME_NAMES: Mapping[str, str] = NO_VOLUME_ALIASES
+"""The default registry: none. A pairing that needs one passes it in, which is what makes two
+fixtures with genuinely different volume names comparable in the same vocabulary — and what
+stops one pairing's allowance from silently applying to the other."""
 
 NATIVE_ONLY_ENV: frozenset[tuple[str, str]] = frozenset(
     {("ac-db-import", "AC_PLAYERBOTS_DATABASE_INFO")}
@@ -165,7 +186,7 @@ class Service:
 
     container_name: str | None
     image: str | None
-    ports: frozenset[tuple[str, int, str]]
+    ports: frozenset[tuple[str, str, int, str]]
     volumes: frozenset[tuple[str, str, str, str]]
     networks: frozenset[str]
     env_keys: frozenset[str]
@@ -189,10 +210,20 @@ class Stack:
     volumes: tuple[tuple[str, tuple[str, ...]], ...]
     networks: tuple[tuple[str, tuple[str, ...]], ...]
     declared_volumes: tuple[str, ...]
-    """The top-level volume names AS WRITTEN, before `DESIGN_VOLUME_NAMES` translates any of
-    them. `volumes` above is the comparison view and cannot answer "did this document declare
+    """The top-level volume names AS WRITTEN, before the rename registry translates any of them.
+    `volumes` above is the comparison view and cannot answer "did this document declare
     `db-data`" once the translation has run — and provenance, not the translated result, is what
     says whether a translation entry is still live."""
+
+    volume_aliases: tuple[tuple[str, str], ...]
+    """The rename registry this record was reduced with, carried so it cannot be forgotten.
+
+    Two fixtures now need different registries — the native capture none, the bash script install
+    two entries — and a `Stack` that did not remember which one it used could be compared against
+    one that used the other, producing a clean-looking diff built on two different sets of names.
+    `compare_stack()` refuses that pairing outright, and `_stale_translations()` reads the
+    registry from here rather than from a module global, so the policing and the translation can
+    never be asked about different tables."""
 
 
 def resolve_defaults(text: str) -> str:
@@ -213,23 +244,41 @@ def image_name(ref: str) -> str:
     return ref.rsplit(":", 1)[0].split("/")[-1]
 
 
-def port_from_string(spec: str) -> tuple[str, int, str]:
-    """A short-form port (`[host_ip:]published:target[/proto]`) as (published, target, protocol).
+def port_from_string(spec: str) -> tuple[str, str, int, str]:
+    """A short-form port (`[host_ip:]published:target[/proto]`) as (host_ip, published, target,
+    protocol); an absent host IP is `""`, which is compose's "every interface".
 
-    The host IP is dropped because the two sources spell it differently — the SOAP mapping
-    carries its loopback prefix inside the `${...:-127.0.0.1:7878}` default here and arrives as
-    a separate `host_ip` field from `compose config` — so it cannot be compared without
-    reporting a difference that is not one. The protocol is read rather than dropped: it varies
-    with no machine, and `3724:3724/udp` is a realm nobody can log in to.
+    THE HOST IP IS COMPARED, and this docstring used to say it could not be. The old reason was
+    that the two sources spell it differently — ours inside the `${...:-127.0.0.1:7878}` default,
+    a separate `host_ip` field from `compose config` — which is true of where it is WRITTEN and
+    not of whether it can be read: after `resolve_defaults()` the short form is
+    `127.0.0.1:7878:7878` and the prefix is the third column from the right. What dropping it
+    cost was measured on 2026-08-31, when the bash script install was captured: that stack
+    publishes 3306 and 7878 on EVERY interface where this one pins both to loopback, and the
+    comparison called the two identical. An unauthenticated MySQL reachable from the LAN is the
+    largest single divergence either capture contains.
+
+    The protocol is read for the same kind of reason: it varies with no machine, and
+    `3724:3724/udp` is a realm nobody can log in to.
     """
     resolved, _, proto = resolve_defaults(spec).partition("/")
     parts = resolved.split(":")
-    return parts[-2], int(parts[-1]), proto or "tcp"
+    host = parts[-3] if len(parts) >= 3 else ""
+    return host, parts[-2], int(parts[-1]), proto or "tcp"
 
 
-def port_from_config(entry: dict[str, Any]) -> tuple[str, int, str]:
-    """A `compose config` port object as (published, target, protocol)."""
-    return str(entry["published"]), int(entry["target"]), str(entry.get("protocol") or "tcp")
+def port_from_config(entry: dict[str, Any]) -> tuple[str, str, int, str]:
+    """A `compose config` port object as (host_ip, published, target, protocol).
+
+    An absent `host_ip` is `""` — compose's own spelling of "bind every interface", and the same
+    thing a short form with no prefix means, so the two meet.
+    """
+    return (
+        str(entry.get("host_ip") or ""),
+        str(entry["published"]),
+        int(entry["target"]),
+        str(entry.get("protocol") or "tcp"),
+    )
 
 
 def _mount_mode(columns: list[str]) -> str:
@@ -409,7 +458,9 @@ def shape_from_config(data: dict[str, Any], *, root: str | None = None) -> dict[
     }
 
 
-def stack_from_plan(plan: ComposePlan) -> Stack:
+def stack_from_plan(
+    plan: ComposePlan, *, volume_aliases: Mapping[str, str] = DESIGN_VOLUME_NAMES
+) -> Stack:
     """The three rendered files' top level, merged.
 
     The text is read WITHOUT `resolve_defaults()`: nothing up here is interpolated, and that
@@ -436,21 +487,29 @@ def stack_from_plan(plan: ComposePlan) -> Stack:
         networks.setdefault("default", None)
     return Stack(
         project=project,
-        volumes=_declarations(volumes, aliases=DESIGN_VOLUME_NAMES),
+        volumes=_declarations(volumes, aliases=volume_aliases),
         networks=_declarations(networks, aliases=NO_ALIASES),
         declared_volumes=_declared_names(volumes),
+        volume_aliases=tuple(sorted(volume_aliases.items())),
     )
 
 
-def stack_from_config(data: dict[str, Any], *, root: str | None = None) -> Stack:
+def stack_from_config(
+    data: dict[str, Any],
+    *,
+    root: str | None = None,
+    volume_aliases: Mapping[str, str] = DESIGN_VOLUME_NAMES,
+) -> Stack:
     """`docker compose config --format json`'s top level. `root` is accepted for symmetry with
-    `shape_from_config()` and unused: nothing up here is a host path."""
+    `shape_from_config()` and unused: nothing up here is a host path. `volume_aliases` must be the
+    same registry the other side of the comparison was reduced with; `compare_stack()` checks."""
     del root
     return Stack(
         project=str(data["name"]) if data.get("name") else None,
-        volumes=_declarations(data.get("volumes"), aliases=DESIGN_VOLUME_NAMES),
+        volumes=_declarations(data.get("volumes"), aliases=volume_aliases),
         networks=_declarations(data.get("networks"), aliases=NO_ALIASES),
         declared_volumes=_declared_names(data.get("volumes")),
+        volume_aliases=tuple(sorted(volume_aliases.items())),
     )
 
 
@@ -531,7 +590,7 @@ def _stale_translations(native: Stack, proven: Stack) -> list[str]:
     licence for two renames has to say when it has stopped describing the two.
     """
     problems: list[str] = []
-    for source, target in sorted(DESIGN_VOLUME_NAMES.items()):
+    for source, target in native.volume_aliases:
         for label, half, declared in (
             ("native stack", source, native.declared_volumes),
             ("proven install", target, proven.declared_volumes),
@@ -547,6 +606,14 @@ def _stale_translations(native: Stack, proven: Stack) -> list[str]:
 def compare_stack(native: Stack, proven: Stack) -> list[str]:
     """The top-level blocks `compare()` has no room for; empty means "matches"."""
     problems: list[str] = []
+    if native.volume_aliases != proven.volume_aliases:
+        # Reducing the two sides with different rename registries produces a diff whose names
+        # come from two different vocabularies; nothing below it can be trusted, so stop here.
+        return [
+            "volume aliases: the two sides were reduced with different rename registries, "
+            f"{[list(pair) for pair in native.volume_aliases]} vs "
+            f"{[list(pair) for pair in proven.volume_aliases]}"
+        ]
     if not native.project:
         problems.append(
             "project: the native stack has no `name:`, so its named volumes are keyed by the "

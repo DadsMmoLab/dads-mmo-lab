@@ -1261,6 +1261,60 @@ the same way: `docker compose config --format json` in the install directory, no
 
 **What still matched, and it is the whole point.** All five services and their container names,
 every published port and protocol, every bind and named-volume mount including client data's
-`:ro`, every `depends_on` edge with its condition, `restart`, every environment KEY on every
-service — including the 500/500 bot population, which is the difference the 2026-08-24 diff was
-run to find.
+`:ro`, every `depends_on` edge with its condition, `restart`, and every environment KEY on every
+service.
+
+**Said precisely, because the first draft of this line overstated it.** The comparison reads
+environment KEYS, never values — `test_env_values_are_not_compared_which_is_its_cost` shows a bot
+population of 0 comparing equal to 500 — so what it established is that
+`AC_AI_PLAYERBOT_MIN_RANDOM_BOTS` and `_MAX_` are present on the worldserver, not that they are
+500. The 500/500 is readable in the committed fixture and is asserted, as a value, by
+`test_composegen.py` against `catalog.json`. Two different claims, and only the weaker one belongs
+to this diff.
+
+### The bash script install, captured at last — and what it proved (2026-08-31)
+
+The 2026-08-24 diff above was run against `~/wow-server-playerbots` by hand and never committed;
+the E.2 fixture that was, turned out to be a NATIVE install, which cannot exercise a single one of
+the design differences the comparison vocabulary forgives. The script install was then found still
+standing on the **Fedora** box, left over from the hunt, and captured read-only:
+`pylauncher/tests/data/wotlk-compose-config-script.json` (project `wow-server-playerbots`,
+upstream's compose file, upstream's published `acore/*:master` images).
+
+**Three differences stand, and all three are pinned in `SCRIPT_INSTALL_DIVERGENCES` rather than
+forgiven.**
+
+1. **The script install publishes MySQL on every interface.** `3306` with no host binding, where
+   the native stack pins it to `127.0.0.1`. An unauthenticated `root`/`password` MySQL reachable
+   from the LAN — the credentials are upstream's fixed pair and are in the compose file. Ours has
+   never needed the binding: the launcher's maintenance path uses `docker exec`.
+2. **The same for the SOAP admin port, `7878`** — a remote console in front of a GM account.
+3. **The native stack mounts the modules tree into `ac-db-import` and the script install does
+   not.** Deliberate: the import applies each module's own `db-auth`/`db-characters` SQL, which is
+   how the native path has the playerbots schema the script path's repair gate found missing.
+
+**Everything else matched, which is the finding that matters.** All five services and container
+names, all `depends_on` edges with their conditions, `restart`, every other mount, both
+`build.dockerfile` values and all four `target`s, and every environment key modulo the two
+recorded allowances. Upstream's `AC_CCACHE`/`CTYPE`/`CSCRIPTS`/`DATAPATH`/`USER_CONF_PATH` and the
+three empty `AC_RESTARTER_*` are present exactly as `BUILD_TIME_ENV` describes them.
+
+**The volume rename is CONFIRMED.** "Recorded, not fixed" (2026-08-24) said `db-data`/`client-data`
+against `ac-database`/`ac-client-data` on the strength of a `docker volume ls` reading. The capture
+declares those two names, so the record is now evidence. It lives in
+`support_compose.SCRIPT_INSTALL_VOLUME_NAMES` and applies to that pairing only — the native fixture
+carries no registry, and a `Stack` remembers which one reduced it so the two cannot be crossed.
+
+**`ac-client-data-init` is on `default` upstream too.** The 2026-08-31 note above recorded it as
+ours; it is inherited. Not a Yu'lon defect, and the same second bridge network appears in both.
+
+**Four things the capture shows that the comparison still cannot see**, each now with a real
+example rather than a hypothetical one: `build.args` (upstream passes `USER_ID`/`GROUP_ID`/
+`DOCKER_USER` into the image build; we pass none), `build.context` (absolute on their side — the
+absolute-path surprise that was predicted for `dockerfile`, which is relative on both), the
+healthcheck (theirs over the local socket, ours over TCP by service name), and **the SELinux
+label**: the script install carries `bind: {selinux: Z}` on exactly ONE mount, the worldserver's
+modules tree, and nothing on its other five binds, while this engine labels every `./` bind with
+`z`. `Z` is private-to-one-container relabelling and `z` is shared; nothing compares them, and
+nobody has established which is right for a tree two services mount. Recorded in
+`bug-checklist.md`.

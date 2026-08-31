@@ -8,11 +8,20 @@ Two sources, one vocabulary. `support_compose.shape_from_plan()` reads the files
 and tag, a named volume's name at the mount, `stop_grace_period`, the playerbots DB on the
 importer, upstream's build-time env). Nothing here runs a daemon.
 
-THE REAL INSTALL IS `tests/data/wotlk-compose-config.json`, captured off the live gate's own
-install on a clean Ubuntu box after it reached `ready` (2026-08-31), with the project `name:` and
-the absolute install path stripped so it names no machine. It is a NATIVE install — the engine's
-own output, not upstream's script install — which is what makes the rename registry empty and the
-volume names comparable as written. `pyplan/checklist.md` carries what its first run reported.
+TWO REAL INSTALLS, and they answer different questions.
+
+* `tests/data/wotlk-compose-config.json` — the live gate's own NATIVE install on a clean Ubuntu
+  box, captured after it reached `ready` (2026-08-31). Asks "does today's render still resolve to
+  the stack that worked". Its pairing carries no rename registry: the engine named both volumes.
+* `tests/data/wotlk-compose-config-script.json` — a server the BASH INSTALLER built, captured on
+  Fedora the same day (project `wow-server-playerbots`). Asks "where do the two engines really
+  differ", which is the question the whole vocabulary was built for and the one a
+  native-against-native diff cannot ask: every documented design allowance fires against this
+  fixture and none of them fires against the other. Three differences stand, all pinned in
+  `SCRIPT_INSTALL_DIVERGENCES` with reasons.
+
+Both have the project `name:` and the absolute install path stripped so neither names a machine.
+`pyplan/checklist.md` carries what each first run reported.
 
 The second half of this file is the bill for the first. Every rule the vocabulary applies is a
 difference it will never report again, so each one is followed by a test that a MEANINGFUL
@@ -46,6 +55,7 @@ ENTRY = load_catalog().get("wow-wotlk")
 TEMPLATES = resources.installers_dir()
 
 FIXTURE = Path(__file__).parent / "data" / "wotlk-compose-config.json"
+SCRIPT_FIXTURE = Path(__file__).parent / "data" / "wotlk-compose-config-script.json"
 
 
 def render(server_dir: Path) -> composegen.ComposePlan:
@@ -83,6 +93,131 @@ def test_the_rendered_stack_matches_the_proven_install(tmp_path: Path) -> None:
     proven = json.loads(FIXTURE.read_text(encoding="utf-8"))
     assert sc.compare(sc.shape_from_plan(plan), sc.shape_from_config(proven)) == []
     assert sc.compare_stack(sc.stack_from_plan(plan), sc.stack_from_config(proven)) == []
+
+
+SCRIPT_INSTALL_DIVERGENCES = [
+    # The bash install publishes MySQL on EVERY interface. Ours pins it to loopback, and the
+    # launcher's own maintenance path talks to the database through `docker exec` rather than
+    # over the network, so nothing needs the binding. This is the largest divergence either
+    # capture contains and it was invisible until the host IP started being compared.
+    "ac-database: ports {('127.0.0.1', '3306', 3306, 'tcp')} vs {('', '3306', 3306, 'tcp')}",
+    # We mount the modules tree into the IMPORTER; the script install mounts it only into the
+    # worldserver. The import applies each module's own db-auth/db-characters SQL as well as
+    # AzerothCore's, which it cannot do without the tree — the base template says so where the
+    # mount is written. Deliberate, and the reason the native stack has the playerbots schema
+    # where the script install's repair gate found it missing.
+    "ac-db-import: volumes "
+    "{('bind', './env/dist/etc', '/azerothcore/env/dist/etc', 'rw'), "
+    "('bind', './env/dist/logs', '/azerothcore/env/dist/logs', 'rw'), "
+    "('bind', './modules', '/azerothcore/modules', 'rw')} vs "
+    "{('bind', './env/dist/etc', '/azerothcore/env/dist/etc', 'rw'), "
+    "('bind', './env/dist/logs', '/azerothcore/env/dist/logs', 'rw')}",
+    # Same as the first line, for the SOAP admin port: theirs is on every interface, ours on
+    # loopback. SOAP is an unauthenticated-by-design remote console in front of a GM account.
+    "ac-worldserver: ports {('', '8085', 8085, 'tcp'), ('127.0.0.1', '7878', 7878, 'tcp')} vs "
+    "{('', '7878', 7878, 'tcp'), ('', '8085', 8085, 'tcp')}",
+]
+"""Every difference between the rendered stack and the bash script install, PINNED rather than
+forgiven. Each is a finding with a reason, and each reason is about the two installs genuinely
+doing different things — never about making this test pass. A new line appearing here is a new
+divergence to explain; a line disappearing is a change to one of the two."""
+
+
+def test_the_rendered_stack_against_the_bash_script_install(tmp_path: Path) -> None:
+    """The comparison this project set out to make, and the one the native fixture cannot make.
+
+    `tests/data/wotlk-compose-config-script.json` is `docker compose config` from a server the
+    BASH INSTALLER built (Fedora, 2026-08-31, project `wow-server-playerbots`) — upstream's own
+    compose file, upstream's published `acore/*:master` images, a different distro and a different
+    install path from the native capture. It is committed for one reason the native fixture cannot
+    serve: every documented design difference in `support_compose.py` — the image registry and
+    tag, the two volume names, upstream's build-time env, the playerbots DB the importer only has
+    here — is exercised by NOTHING in a native-against-native comparison. Against this fixture
+    each one fires, so an allow-list that stopped describing reality would be caught instead of
+    reading like coverage.
+
+    What it is NOT is a regression net for upstream. Upstream's file is a third party's and will
+    change; when it does, the difference is a finding to read, not a red to silence. Three
+    differences stand today and all three are pinned above with their reasons.
+    """
+    plan = render(tmp_path)
+    script = json.loads(SCRIPT_FIXTURE.read_text(encoding="utf-8"))
+    aliases = sc.SCRIPT_INSTALL_VOLUME_NAMES
+    assert sc.compare(sc.shape_from_plan(plan), sc.shape_from_config(script)) == (
+        SCRIPT_INSTALL_DIVERGENCES
+    )
+    assert (
+        sc.compare_stack(
+            sc.stack_from_plan(plan, volume_aliases=aliases),
+            sc.stack_from_config(script, volume_aliases=aliases),
+        )
+        == []
+    )
+
+
+def test_the_script_install_exercises_every_allowance_the_native_fixture_cannot(
+    tmp_path: Path,
+) -> None:
+    """The receipt for committing a second fixture: each design difference the vocabulary forgives
+    is REAL in this pairing and absent from the other, so none of them is an allowance for a thing
+    that never happens.
+
+    Take any one away and the comparison above stops being clean — which is what a rule earning
+    its place looks like.
+    """
+    script = json.loads(SCRIPT_FIXTURE.read_text(encoding="utf-8"))
+    native = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    services = script["services"]
+    # The image registry and tag rule: upstream's published images against our locally built ones.
+    assert services["ac-worldserver"]["image"] == "acore/ac-wotlk-worldserver:master"
+    assert native["services"]["ac-worldserver"]["image"].startswith("yulon.local/")
+    assert sc.image_name(services["ac-worldserver"]["image"]) == "ac-wotlk-worldserver"
+    # The volume rename: confirmed by capture, not by a note in a checklist.
+    assert sorted(script["volumes"]) == ["ac-client-data", "ac-database"]
+    assert sorted(native["volumes"]) == ["client-data", "db-data"]
+    # Upstream's build-time env, on the runtime services, exactly as BUILD_TIME_ENV describes it.
+    theirs = set(services["ac-worldserver"]["environment"])
+    ours = set(sc.shape_from_plan(render(tmp_path))["ac-worldserver"].env_keys)
+    assert theirs - ours == sc.BUILD_TIME_ENV | {
+        key for key in theirs if key.startswith(sc.BUILD_TIME_ENV_PREFIXES)
+    }
+    # And the playerbots schema on the importer, which only the native stack supplies.
+    assert "AC_PLAYERBOTS_DATABASE_INFO" not in services["ac-db-import"]["environment"]
+    assert ("ac-db-import", "AC_PLAYERBOTS_DATABASE_INFO") in sc.NATIVE_ONLY_ENV
+
+
+def test_what_the_script_capture_shows_and_this_vocabulary_still_cannot_see() -> None:
+    """DECLARED SILENCES, each with a real example now rather than a hypothetical one. Stated so
+    that "three differences" is never read as "three differences exist".
+
+    * `build.args` — upstream passes `USER_ID`/`GROUP_ID`/`DOCKER_USER` into the image build and
+      the native stack passes none. `_build()` compares the dockerfile and the target only.
+    * `build.context` — absolute on the script side (C1's predicted surprise, in the flesh, but
+      on `context` and not on `dockerfile`, which is relative on both). Not compared, by design:
+      it is the install dir either way.
+    * the SELinux label — the script install carries `bind: {selinux: Z}` on exactly ONE mount,
+      the worldserver's modules tree, and nothing on its other five binds, while this engine
+      labels every `./` bind with `z` when SELinux is on. `volume_from_config()` does not read
+      `bind.selinux` and `_mount_mode()` drops `z`/`Z` on the other side, so the two schemes are
+      invisible to each other. Recorded in `pyplan/checklist.md`.
+    * the healthcheck — theirs addresses MySQL over the local socket, ours over TCP by service
+      name from the compose network. Owned by `test_composegen.py`.
+    """
+    script = json.loads(SCRIPT_FIXTURE.read_text(encoding="utf-8"))
+    world = script["services"]["ac-worldserver"]
+    assert set(world["build"]["args"]) == {"DOCKER_USER", "GROUP_ID", "USER_ID"}
+    assert world["build"]["context"] == "." and world["build"]["dockerfile"] == (
+        "apps/docker/Dockerfile"
+    )
+    assert sc.Service.__dataclass_fields__.keys().isdisjoint({"build_args", "healthcheck"})
+    labelled = [v for v in world["volumes"] if (v.get("bind") or {}).get("selinux")]
+    assert [v["target"] for v in labelled] == ["/azerothcore/modules"]
+    assert sc.volume_from_config(labelled[0], root=None) == (
+        "bind",
+        "./modules",
+        "/azerothcore/modules",
+        "rw",
+    )
 
 
 def test_dropping_the_build_overlay_drops_build_and_nothing_else(tmp_path: Path) -> None:
@@ -155,22 +290,47 @@ def test_a_captured_compose_config_matches_the_fixture() -> None:
 
 def test_port_strings_resolve_compose_defaults() -> None:
     assert sc.port_from_string("127.0.0.1:${DOCKER_DB_EXTERNAL_PORT:-3306}:3306") == (
+        "127.0.0.1",
         "3306",
         3306,
         "tcp",
     )
-    assert sc.port_from_string("${DOCKER_AUTH_EXTERNAL_PORT:-3724}:3724") == ("3724", 3724, "tcp")
-    # The SOAP default carries its own host prefix; the regex must swallow the inner colon.
+    assert sc.port_from_string("${DOCKER_AUTH_EXTERNAL_PORT:-3724}:3724") == (
+        "",
+        "3724",
+        3724,
+        "tcp",
+    )
+    # The SOAP default carries its own host prefix; the regex must swallow the inner colon, and
+    # the prefix survives as the host IP rather than being thrown away with it.
     assert sc.port_from_string("${DOCKER_SOAP_EXTERNAL_PORT:-127.0.0.1:7878}:7878") == (
+        "127.0.0.1",
         "7878",
         7878,
         "tcp",
     )
     assert sc.port_from_config({"target": 3306, "published": "3306", "host_ip": "127.0.0.1"}) == (
+        "127.0.0.1",
         "3306",
         3306,
         "tcp",
     )
+
+
+def test_a_port_published_on_every_interface_is_not_the_same_as_a_loopback_one() -> None:
+    """The rule that pays for reading the host IP, and the divergence it found. A published port
+    with no host prefix is bound on EVERY interface — which is how the bash script install
+    publishes MySQL and the SOAP console, and how this stack publishes neither. Both sources
+    spell the absence the same way (`""`), so the two meet without an allowance.
+    """
+    assert sc.port_from_string("${DOCKER_DB_EXTERNAL_PORT:-3306}:3306") == ("", "3306", 3306, "tcp")
+    assert sc.port_from_config({"target": 3306, "published": "3306"}) == ("", "3306", 3306, "tcp")
+    assert sc.port_from_string("127.0.0.1:3306:3306") != sc.port_from_string("3306:3306")
+    exposed = frozenset({("", "8085", 8085, "tcp"), ("", "7878", 7878, "tcp")})
+    assert theirs(ports=exposed) == [
+        "ac-worldserver: ports {('', '8085', 8085, 'tcp'), ('127.0.0.1', '7878', 7878, 'tcp')} "
+        "vs {('', '7878', 7878, 'tcp'), ('', '8085', 8085, 'tcp')}"
+    ]
 
 
 def test_image_name_drops_registry_and_tag() -> None:
@@ -230,10 +390,18 @@ def test_shape_from_plan_merges_the_three_files(tmp_path: Path) -> None:
     # And from the base: client data is mounted READ-ONLY into the worldserver.
     assert ("volume", "<named>", "/azerothcore/env/dist/data", "ro") in world.volumes
     assert "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS" in world.env_keys
-    # From the build overlay.
-    assert world.build == ("apps/docker/Dockerfile", "worldserver")
-    assert shape["ac-database"].build is None
-    assert world.ports == frozenset({("8085", 8085, "tcp"), ("7878", 7878, "tcp")})
+    # From the build overlay: the dockerfile AND every one of the four service-to-target pairs.
+    # Nothing else pins the pairing — `test_composegen.py` counts four targets without binding
+    # any of them to a service, and the byte snapshot's remedy for a mismatch is regeneration —
+    # so a worldserver built from the authserver stage would otherwise pass everything but this.
+    assert {name: svc.build for name, svc in shape.items()} == {
+        "ac-worldserver": ("apps/docker/Dockerfile", "worldserver"),
+        "ac-authserver": ("apps/docker/Dockerfile", "authserver"),
+        "ac-db-import": ("apps/docker/Dockerfile", "db-import"),
+        "ac-client-data-init": ("apps/docker/Dockerfile", "client-data"),
+        "ac-database": None,
+    }
+    assert world.ports == frozenset({("", "8085", 8085, "tcp"), ("127.0.0.1", "7878", 7878, "tcp")})
     assert world.depends_on == (
         ("ac-client-data-init", "service_completed_successfully"),
         ("ac-database", "service_healthy"),
@@ -245,7 +413,7 @@ def test_compare_names_the_service_and_the_field() -> None:
     a = sc.Service(
         container_name="ac-authserver",
         image="ac-wotlk-authserver",
-        ports=frozenset({("3724", 3724, "tcp")}),
+        ports=frozenset({("", "3724", 3724, "tcp")}),
         volumes=frozenset(),
         networks=frozenset({"ac-network"}),
         env_keys=frozenset({"AC_LOGS_DIR"}),
@@ -267,7 +435,7 @@ def test_compare_names_the_service_and_the_field() -> None:
     problems = sc.compare({"ac-authserver": a}, {"ac-authserver": b})
     # AC_CCACHE is upstream build-time env the native stack deliberately drops; the port is real.
     # frozensets are shown as plain sets, so the line reads `{...} vs set()`, not `frozenset(...)`.
-    assert problems == ["ac-authserver: ports {('3724', 3724, 'tcp')} vs set()"]
+    assert problems == ["ac-authserver: ports {('', '3724', 3724, 'tcp')} vs set()"]
     assert sc.compare({"ac-authserver": a}, {}) == ["services: {'ac-authserver'} vs set()"]
 
 
@@ -278,7 +446,7 @@ def test_compare_names_the_service_and_the_field() -> None:
 REFERENCE = sc.Service(
     container_name="ac-worldserver",
     image="ac-wotlk-worldserver",
-    ports=frozenset({("8085", 8085, "tcp"), ("7878", 7878, "tcp")}),
+    ports=frozenset({("", "8085", 8085, "tcp"), ("127.0.0.1", "7878", 7878, "tcp")}),
     volumes=frozenset(
         {
             ("bind", "./modules", "/azerothcore/modules", "rw"),
@@ -310,7 +478,12 @@ def test_an_unchanged_service_reports_nothing() -> None:
 
 def test_resolving_the_default_reads_it_rather_than_erasing_the_binding() -> None:
     """A different default is a different published port, not noise inside `${...}`."""
-    assert sc.port_from_string("${DOCKER_DB_EXTERNAL_PORT:-13306}:3306") == ("13306", 3306, "tcp")
+    assert sc.port_from_string("${DOCKER_DB_EXTERNAL_PORT:-13306}:3306") == (
+        "",
+        "13306",
+        3306,
+        "tcp",
+    )
     assert sc.resolve_defaults("a ${X:-1} b ${Y:-two} c") == "a 1 b two c"
     # A variable with no default is left alone rather than silently blanked: an unresolvable
     # reference must not compare equal to whatever the other side actually published.
@@ -319,15 +492,15 @@ def test_resolving_the_default_reads_it_rather_than_erasing_the_binding() -> Non
 
 
 def test_a_republished_port_is_reported() -> None:
-    moved = frozenset({("13306", 8085, "tcp"), ("7878", 7878, "tcp")})
+    moved = frozenset({("", "13306", 8085, "tcp"), ("127.0.0.1", "7878", 7878, "tcp")})
     assert theirs(ports=moved) == [
-        "ac-worldserver: ports {('7878', 7878, 'tcp'), ('8085', 8085, 'tcp')} vs "
-        "{('13306', 8085, 'tcp'), ('7878', 7878, 'tcp')}"
+        "ac-worldserver: ports {('', '8085', 8085, 'tcp'), ('127.0.0.1', '7878', 7878, 'tcp')} "
+        "vs {('', '13306', 8085, 'tcp'), ('127.0.0.1', '7878', 7878, 'tcp')}"
     ]
 
 
 def test_a_dropped_port_is_reported() -> None:
-    assert theirs(ports=frozenset({("8085", 8085, "tcp")})) != []
+    assert theirs(ports=frozenset({("", "8085", 8085, "tcp")})) != []
 
 
 def test_a_port_that_changed_protocol_is_reported() -> None:
@@ -336,16 +509,18 @@ def test_a_port_that_changed_protocol_is_reported() -> None:
     on UDP answers no client, and both sources spell it: `/udp` in the short form, a `protocol`
     field from `compose config`."""
     assert sc.port_from_string("${DOCKER_AUTH_EXTERNAL_PORT:-3724}:3724/udp") == (
+        "",
         "3724",
         3724,
         "udp",
     )
     assert sc.port_from_config({"target": 3724, "published": "3724", "protocol": "udp"}) == (
+        "",
         "3724",
         3724,
         "udp",
     )
-    udp = frozenset({("8085", 8085, "udp"), ("7878", 7878, "tcp")})
+    udp = frozenset({("", "8085", 8085, "udp"), ("127.0.0.1", "7878", 7878, "tcp")})
     assert theirs(ports=udp) != []
 
 
@@ -722,7 +897,9 @@ def test_the_rendered_top_level_volumes_and_networks_are_plain(tmp_path: Path) -
 
 
 def _config(
-    volumes: dict[str, object], networks: Mapping[str, Mapping[str, object]] | None = None
+    volumes: dict[str, object],
+    networks: Mapping[str, Mapping[str, object]] | None = None,
+    aliases: Mapping[str, str] = sc.NO_VOLUME_ALIASES,
 ) -> sc.Stack:
     """A `compose config` top level with the project-prefixed `name:` compose writes on each.
 
@@ -746,7 +923,8 @@ def _config(
             "networks": {
                 name: {"name": f"{project}_{name}", **body} for name, body in declared.items()
             },
-        }
+        },
+        volume_aliases=aliases,
     )
 
 
@@ -795,20 +973,42 @@ def test_the_same_options_on_the_other_store_is_a_different_stack() -> None:
     ]
 
 
-def test_the_rename_registry_is_empty_because_the_capture_emptied_it() -> None:
-    """C9/C10, settled by the first real evidence. `DESIGN_VOLUME_NAMES` held
-    `db-data` -> `ac-database` and `client-data` -> `ac-client-data`, taken from a
-    `checklist.md` line and a gate log that both describe UPSTREAM's script install in
-    `~/wow-server-playerbots`. The committed reference is not that install: it is `docker compose
-    config` from the engine's own native install, and it declares `client-data` and `db-data`.
-    Every comparison this vocabulary performs is native render against native capture, so there
-    is no rename to record — and a live entry would print problem lines naming a volume that
-    exists on neither side. Empty, the names are compared exactly as written.
+def test_each_registry_describes_the_pairing_it_belongs_to_and_only_that_one() -> None:
+    """C9/C10, settled by two captures rather than by a note.
+
+    The recorded rename `db-data` -> `ac-database` / `client-data` -> `ac-client-data` came from
+    a `checklist.md` line and a gate log, both describing UPSTREAM's script install. Against the
+    script capture it is CONFIRMED, name for name. Against the native capture it describes
+    nothing — the engine rendered both volumes itself — so that pairing carries no registry and
+    compares the names as written.
+
+    The registry therefore belongs to a pairing, not to the module: one table applied to both
+    fixtures would have been wrong for one of them whichever way it was set.
     """
-    assert dict(sc.DESIGN_VOLUME_NAMES) == {}
-    captured = json.loads(FIXTURE.read_text(encoding="utf-8"))
-    assert sc.stack_from_config(captured).declared_volumes == ("client-data", "db-data")
-    assert sc.stack_from_config(captured).volumes == (("client-data", ()), ("db-data", ()))
+    assert dict(sc.SCRIPT_INSTALL_VOLUME_NAMES) == {
+        "db-data": "ac-database",
+        "client-data": "ac-client-data",
+    }
+    assert dict(sc.NO_VOLUME_ALIASES) == {} and sc.DESIGN_VOLUME_NAMES is sc.NO_VOLUME_ALIASES
+    script = json.loads(SCRIPT_FIXTURE.read_text(encoding="utf-8"))
+    native = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    assert sc.stack_from_config(script).declared_volumes == ("ac-client-data", "ac-database")
+    assert sc.stack_from_config(native).declared_volumes == ("client-data", "db-data")
+    assert sc.stack_from_config(native).volumes == (("client-data", ()), ("db-data", ()))
+
+
+def test_two_sides_reduced_with_different_registries_are_refused() -> None:
+    """The reason a `Stack` carries the registry it was built with. Comparing a side translated by
+    the script-install table against one that was not produces names from two vocabularies, and
+    every line below it would be built on that. Reporting the mismatch is the only honest answer;
+    a clean-looking diff would be the dangerous one.
+    """
+    ours = _config({"db-data": {}, "client-data": {}}, aliases=sc.SCRIPT_INSTALL_VOLUME_NAMES)
+    theirs = _config({"ac-database": {}, "ac-client-data": {}})
+    assert sc.compare_stack(ours, theirs) == [
+        "volume aliases: the two sides were reduced with different rename registries, "
+        "[['client-data', 'ac-client-data'], ['db-data', 'ac-database']] vs []"
+    ]
 
 
 def test_a_renamed_named_volume_is_caught_at_the_top_level_not_at_the_mount() -> None:
@@ -828,36 +1028,35 @@ def test_a_renamed_named_volume_is_caught_at_the_top_level_not_at_the_mount() ->
     ]
 
 
-def test_a_registered_rename_still_translates_and_still_has_to_stay_true(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The registry is empty, not gone: the mechanism is kept for the day a rename is recorded
-    again, and the condition on keeping it is that an entry which quietly stops matching is worse
-    than no entry at all. With one entry registered, the rename is translated and reported as
-    nothing; the moment either side stops declaring its own half AS WRITTEN, the guard names both
-    spellings and what that side really declares, rather than letting the diff read as one volume
-    ADDED and another REMOVED.
+def test_the_registered_rename_still_has_to_stay_true(tmp_path: Path) -> None:
+    """The condition on holding a registry at all: an entry that quietly stops matching is worse
+    than no entry. While it describes both sides the rename is translated and reported as nothing
+    — the script fixture's whole `compare_stack()` is clean on that basis. The moment either side
+    stops declaring its own half AS WRITTEN, the guard names both spellings and what that side
+    really declares, instead of letting the diff read as one volume ADDED and another REMOVED.
 
     Provenance is what the guard asks, never the translated result: our side renaming `db-data`
     to `mysql-data` while some unrelated volume happens to be called `ac-database` is a dead
     entry, and asking "is the target present?" answered yes for the wrong reason.
     """
-    monkeypatch.setattr(sc, "DESIGN_VOLUME_NAMES", {"db-data": "ac-database"})
-    upstream = _config({"ac-database": {}, "client-data": {}})
-    assert sc.compare_stack(_config({"db-data": {}, "client-data": {}}), upstream) == []
+    table = sc.SCRIPT_INSTALL_VOLUME_NAMES
+    script = json.loads(SCRIPT_FIXTURE.read_text(encoding="utf-8"))
+    live = sc.stack_from_config(script, volume_aliases=table)
+    assert sc.compare_stack(sc.stack_from_plan(render(tmp_path), volume_aliases=table), live) == []
     # Our side stopped declaring the source name; a coincidental `ac-database` does not save it.
-    coincidence = _config({"mysql-data": {}, "client-data": {}, "ac-database": {}})
-    assert sc.compare_stack(coincidence, upstream) == [
+    coincidence = _config({"mysql-data": {}, "client-data": {}, "ac-database": {}}, aliases=table)
+    assert sc.compare_stack(coincidence, live) == [
         "volumes: the recorded rename `db-data` -> `ac-database` no longer describes the native "
         "stack, which declares ['ac-database', 'client-data', 'mysql-data']",
         "volumes: only in the native stack ['mysql-data']",
     ]
     # And the other half: the reference renamed the target, so the entry stops describing it and
     # the untranslated name arrives as one volume ADDED and another REMOVED.
-    renamed_upstream = _config({"acore-database": {}, "client-data": {}})
-    assert sc.compare_stack(_config({"db-data": {}, "client-data": {}}), renamed_upstream) == [
+    ours = _config({"db-data": {}, "client-data": {}}, aliases=table)
+    renamed = _config({"acore-database": {}, "ac-client-data": {}}, aliases=table)
+    assert sc.compare_stack(ours, renamed) == [
         "volumes: the recorded rename `db-data` -> `ac-database` no longer describes the proven "
-        "install, which declares ['acore-database', 'client-data']",
+        "install, which declares ['ac-client-data', 'acore-database']",
         "volumes: only in the native stack ['ac-database']",
         "volumes: only in the proven install ['acore-database']",
     ]
@@ -888,7 +1087,10 @@ def test_a_problem_line_reads_the_same_way_twice() -> None:
     processes, so the members are sorted — the braces stay because a set is what they are."""
     ours = replace(REFERENCE, ports=frozenset())
     line = sc.compare({"ac-worldserver": REFERENCE}, {"ac-worldserver": ours})[0]
-    assert line == ("ac-worldserver: ports {('7878', 7878, 'tcp'), ('8085', 8085, 'tcp')} vs set()")
+    assert line == (
+        "ac-worldserver: ports "
+        "{('', '8085', 8085, 'tcp'), ('127.0.0.1', '7878', 7878, 'tcp')} vs set()"
+    )
     assert sc.compare({"b": REFERENCE, "a": REFERENCE}, {}) == ["services: {'a', 'b'} vs set()"]
 
 

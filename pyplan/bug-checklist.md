@@ -737,6 +737,38 @@ directions on the same day; both are kept.
 
 ---
 
+### 17. Found by diffing two real `docker compose config` captures — 2026-08-31
+
+Both captures are committed under `pylauncher/tests/data/`: the engine's own install on Ubuntu
+after it reached `ready`, and a bash-installer server still standing on Fedora. Neither of these
+was found by reading code; each is a line in a resolved compose document from a box that ran.
+
+- [ ] **`ac-client-data-init` runs on compose's implicit `default` network, not `ac-network`.**
+  `catalog/installers/wow-wotlk/docker-compose.yml.tmpl` — the service declares no `networks:`, so
+  compose materialises a SECOND per-project bridge for it and every install ends up with two
+  networks where the file names one. Harmless today: it fetches an archive into a named volume and
+  talks to no other service. **Inherited, not introduced** — the bash script install does exactly
+  the same thing, which is why nobody had noticed.
+  *Recorded, not fixed, and the fix carries an obligation:* adding `networks: [ac-network]` changes
+  what `docker compose config` resolves, so the committed native fixture
+  (`tests/data/wotlk-compose-config.json`) and the byte snapshot under `tests/data/wotlk-rendered/`
+  must BOTH be re-captured in the same commit, and the re-capture has to come off a real install —
+  a hand-edited fixture is not a capture. `test_the_synthesised_default_declaration_is_modelled_and_not_erased`
+  is what will go red first.
+
+- [ ] **The engine labels every bind `:z` where the script install labels one `Z`.**
+  `platform.bind_label()` — on an SELinux box this stack renders `:z` (shared relabel) on all eight
+  `./` binds; the Fedora script install carries `bind: {selinux: Z}` (private relabel) on exactly
+  one, the worldserver's modules tree, and nothing at all on its other five. Both servers work, so
+  neither scheme is broken, but nobody has established which is correct for a tree that TWO
+  services mount — `Z` on a shared tree is the classic way to make the second container's access
+  fail, and `z` on a tree nothing else touches is looser than it needs to be.
+  *Unverified from here:* the comparison vocabulary reads neither spelling
+  (`volume_from_config()` ignores `bind.selinux`, `_mount_mode()` drops `z`/`Z`), so this is a
+  reading of two captures, not a reproduction. The Fedora gate in 7.1 E.4 is where it can be
+  settled on a box.
+
+
 ### One thing worth keeping
 
 Three of these have an obvious fix that is **wrong**, and two of them arm a worse bug:
