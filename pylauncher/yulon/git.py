@@ -389,7 +389,7 @@ class ContainerGit:
         if not (dest / ".git").is_dir():
             return None
         try:
-            proc = self._capture(dest, ["remote", "get-url", "origin"])
+            proc = self._capture(dest, ["remote", "get-url", "origin"], writes=False)
         except GitError as exc:
             logger.debug(f"could not read origin in {dest}: {exc}")
             return None
@@ -415,7 +415,7 @@ class ContainerGit:
         if not (dest / ".git").is_dir():
             return None
         try:
-            proc = self._capture(dest, ["status", "--porcelain", "--", relative_path])
+            proc = self._capture(dest, ["status", "--porcelain", "--", relative_path], writes=False)
         except GitError as exc:
             logger.debug(f"could not ask git about {relative_path} in {dest}: {exc}")
             return None
@@ -476,7 +476,7 @@ class ContainerGit:
 
     def _run(self, spec: CloneSpec, git_args: list[str]) -> None:
         """One containerized `git` invocation against this spec's destination."""
-        self._capture(spec.dest, git_args)
+        self._capture(spec.dest, git_args, writes=True)
 
     def _clone_with_mount_race_retry(self, spec: CloneSpec, git_args: list[str]) -> None:
         """The initial clone, retried once against the exact bind-mount race in the class docstring.
@@ -497,7 +497,7 @@ class ContainerGit:
         the first attempt exactly as before.
         """
         try:
-            self._capture(spec.dest, git_args)
+            self._capture(spec.dest, git_args, writes=True)
         except GitError as exc:
             if not _is_fresh_mount_race(str(exc)):
                 raise
@@ -505,10 +505,17 @@ class ContainerGit:
                 f"containerized git clone hit the fresh-mount race in {spec.dest} ({exc}); "
                 "retrying once before falling back to host git"
             )
-            self._capture(spec.dest, git_args)
+            self._capture(spec.dest, git_args, writes=True)
 
-    def _capture(self, dest: Path, git_args: list[str]) -> subprocess.CompletedProcess[str]:
+    def _capture(
+        self, dest: Path, git_args: list[str], *, writes: bool
+    ) -> subprocess.CompletedProcess[str]:
         """One containerized `git` invocation, or `GitError` if it fails.
+
+        `writes` says whether this invocation puts anything into `dest`, and it
+        is keyword-only and mandatory so a new caller has to answer it rather
+        than inherit an answer. Only a writer is labelled — see the `:z` comment
+        below for why a reader must not be.
 
         argv[0] comes from `platform.docker_program()` for the reason spelled
         out there: this class exists *because* Windows and macOS already have
@@ -579,9 +586,33 @@ class ContainerGit:
         # it is what `platform.relabel_for_containers()` does to it a few stages
         # later anyway, and every compose bind the engine generates for it
         # already carries the same `:z`.
-        label = platform.bind_label(
-            enforcing=self.selinux_enforcing(), fs_type=self.filesystem_type(dest)
-        )
+        #
+        # **Only for the calls that WRITE into `dest`.** `_capture()` is shared
+        # with `remote_url()` and `is_unmodified()`, which ask a question and
+        # change nothing — and a `:z` relabels the mount source recursively, so
+        # asking would have rewritten the labels of the very folder the answer
+        # is used to decide NOT to touch. That is not hypothetical: the first
+        # press against a user's OWN checkout of the same repository is refused
+        # by `native.refuse_unowned_checkout()`, and the evidence it refuses on
+        # is `_remote_of()` -> `_git_remote_url()` -> `remote_url()` -> here.
+        # The refusal's own words are "nothing was touched", and a relabel of
+        # the user's git checkout would have made them false. Reads mount bare;
+        # if a read is denied on an enforcing box the answer is `None`, which
+        # every caller of these two already fails closed on.
+        #
+        # `filesystem_type()` is asked only when the answer can matter.
+        # `bind_label()` is still the one place that decides — `enforcing is
+        # True` is not re-implemented here, it is the precondition for the
+        # `stat` being worth spawning at all. Off SELinux the label is `""`
+        # whatever the filesystem says, so the subprocess was pure waste on
+        # every Ubuntu and Arch box, on every containerized git call.
+        label = ""
+        if writes:
+            enforcing = self.selinux_enforcing()
+            label = platform.bind_label(
+                enforcing=enforcing,
+                fs_type=self.filesystem_type(dest) if enforcing is True else None,
+            )
         argv = [
             program,
             "run",

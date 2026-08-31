@@ -187,23 +187,33 @@ def test_the_file_sharing_remedy_is_only_offered_where_that_setting_exists() -> 
     assert "read by the user the Docker daemon runs as" in engine
 
 
-def test_the_linux_remedy_names_the_label_command_only_while_selinux_is_enforcing() -> None:
-    """`chcon` is the next thing to try there — and noise on a box without SELinux.
+def test_the_linux_remedy_rules_selinux_out_rather_than_offering_a_chcon() -> None:
+    """The enforcing appendix must not hand over a command that cannot work.
 
-    It is offered as a next step, not as the diagnosis: since the probe itself
-    runs with `label:disable` (`docker._probe_selinux_argv()`), a refusal on an
-    enforcing box is no longer SELinux confinement denying the mount.
+    Two things were wrong with `chcon -Rt container_file_t {server_dir}`. The
+    folder is routinely absent at preflight time — that is why the probe mounts
+    the nearest POPULATED ancestor at all — so the pasted command answers "No
+    such file or directory". And the probe runs `--security-opt label:disable`
+    (`docker._probe_selinux_argv()`), so no host label can change what it saw:
+    the sentence said "the check itself already runs unconfined" and then
+    offered a relabel anyway.
+
+    So the appendix now says what is true — SELinux is not the cause, look at
+    the folder. Still only while enforcing: it is noise on a box without
+    SELinux, and `None` means nobody could ask.
     """
     enforcing = preflight.evaluate(
         ENTRY, SERVER_DIR, facts(bind_mount=False, selinux_enforcing=True)
     ).message()
-    assert f"chcon -Rt container_file_t {SERVER_DIR}" in enforcing
+    assert "chcon" not in enforcing, "a command that cannot change the outcome is not a remedy"
+    assert "SELinux is enforcing here, but it is not what refused this" in enforcing
+    assert str(SERVER_DIR) in enforcing
 
     for answer in (False, None):
         quiet = preflight.evaluate(
             ENTRY, SERVER_DIR, facts(bind_mount=False, selinux_enforcing=answer)
         ).message()
-        assert "chcon" not in quiet
+        assert "SELinux" not in quiet
 
 
 def test_a_bind_probe_that_could_not_run_is_unchecked() -> None:

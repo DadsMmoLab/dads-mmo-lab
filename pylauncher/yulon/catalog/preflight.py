@@ -541,10 +541,24 @@ def _bind_remedy(facts: Facts, server_dir: Path) -> str:
     by SELinux confinement (`docker._probe_selinux_argv()`), a Linux failure
     here is no longer SELinux either. What is left is the folder: a directory on
     the way down that the daemon's user cannot traverse, or a mount (autofs, a
-    fuse home, a network share) the daemon cannot follow. Labelling is still
-    worth naming while SELinux is enforcing, because it is the next thing to try
-    and the command is not one to guess at — but it is offered as a next step,
-    not as the diagnosis.
+    fuse home, a network share) the daemon cannot follow.
+
+    So while SELinux is enforcing the appendix RULES IT OUT rather than handing
+    over a command. It used to say "run `chcon -Rt container_file_t
+    {server_dir}`", and that was wrong twice over. The path usually does not
+    exist yet — the probe walks up to the nearest *populated* ancestor precisely
+    because the chosen folder is routinely absent or empty at preflight time, so
+    the pasted command answers `chcon: cannot access ...: No such file or
+    directory`. And it could not have changed the outcome anyway: the probe
+    container runs `--security-opt label:disable`, so relabelling the host
+    directory cannot alter what it saw. The sentence diagnosed correctly and
+    then offered a remedy for a different diagnosis. A user on an enforcing box
+    needs to be told to stop looking there, and where to look instead.
+
+    `is True`, not truthiness, for the reason the whole diff spells the three
+    answers out: `None` is "nobody could ask". It happens to read the same here
+    — `None` is falsy — and it stops reading the same the moment this becomes
+    "say something when we could not tell".
     """
     if facts.platform_id != "linux":
         return (
@@ -552,9 +566,9 @@ def _bind_remedy(facts: Facts, server_dir: Path) -> str:
             "sharing, or pick a folder under your home directory, then try again."
         )
     label = (
-        " SELinux is enforcing here; the check itself already runs unconfined, so if it still "
-        f"fails, run `chcon -Rt container_file_t {server_dir}` and try again."
-        if facts.selinux_enforcing
+        " SELinux is enforcing here, but it is not what refused this: the check runs unconfined "
+        "and the install labels its own folder, so it is the folder itself to look at."
+        if facts.selinux_enforcing is True
         else ""
     )
     return (

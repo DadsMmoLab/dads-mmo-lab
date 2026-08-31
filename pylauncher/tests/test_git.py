@@ -275,6 +275,76 @@ def test_the_clone_mount_is_not_labelled_on_a_filesystem_that_cannot_hold_labels
     assert _clone_mount(seen, dest, enforcing=True, fs_type="ntfs") == f"{dest}:/git"
 
 
+def test_a_read_only_git_question_does_not_relabel_the_folder_it_asks_about(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """`:z` is a recursive RELABEL of the mount source, so a question must not carry one.
+
+    `_capture()` is shared with `remote_url()` and `is_unmodified()`, which write
+    nothing. The cost of labelling them anyway is not untidiness: the first press
+    against a user's OWN checkout of the same repository is refused by
+    `native.refuse_unowned_checkout()`, and the evidence that refusal rests on is
+    `git remote get-url origin` — `_remote_of()` -> `_git_remote_url()` ->
+    `ContainerGit.remote_url()` -> here. So on an enforcing box the engine would
+    have rewritten the labels of a stranger's git checkout as a side effect of
+    deciding not to touch it, under a message that says "nothing was touched".
+
+    Same machine, same two answers, for both halves — so this cannot pass by the
+    seams quietly answering "not enforcing".
+    """
+    fedora = git.ContainerGit(
+        selinux_enforcing=lambda: True, filesystem_type=lambda _path: "ext2/ext3"
+    )
+    dest = tmp_path / "someone-elses-checkout"
+    (dest / ".git").mkdir(parents=True)
+
+    fedora.remote_url(dest)
+    fedora.is_unmodified(dest, "docker-compose.yml")
+    assert len(seen) == 2, "both questions ran; neither was short-circuited away"
+    for argv in seen:
+        assert argv[argv.index("-v") + 1] == f"{dest}:/git", "a read must not relabel its subject"
+
+    # The anchor: the SAME machine puts `:z` on the mount that WRITES, so the
+    # negative above is the distinction being made and not SELinux being absent.
+    writing = tmp_path / "ours"
+    fedora.clone(git.CloneSpec(url="https://example/core.git", dest=writing, depth=None))
+    assert seen[-1][seen[-1].index("-v") + 1] == f"{writing}:/git:z"
+
+
+def test_the_filesystem_is_not_stated_unless_selinux_says_enforcing(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """`platform.filesystem_type()` shells out `stat`, and off SELinux it cannot matter.
+
+    `bind_label()` is `"" ` for `False` and for `None` whatever the filesystem
+    answers, so asking was a subprocess per containerized git call on every
+    Ubuntu and Arch box — and, because the real one runs through `runner.run`,
+    it also put a `stat` argv in front of the docker argv every test that reads
+    `seen[0]` was written against.
+    """
+    asked: list[Path] = []
+
+    def record(path: Path) -> str | None:
+        asked.append(path)
+        return "ext2/ext3"
+
+    for answer in (False, None):
+        quiet = git.ContainerGit(
+            selinux_enforcing=lambda said=answer: said,  # type: ignore[misc]
+            filesystem_type=record,
+        )
+        quiet.clone(git.CloneSpec(url="https://example/core.git", dest=tmp_path / f"core-{answer}"))
+    assert asked == [], "nothing that cannot change the label is worth a subprocess"
+
+    # And it IS asked when the answer decides something — otherwise a seam that
+    # was never called would pass this test by doing nothing at all.
+    enforcing_dest = tmp_path / "core-enforcing"
+    git.ContainerGit(selinux_enforcing=lambda: True, filesystem_type=record).clone(
+        git.CloneSpec(url="https://example/core.git", dest=enforcing_dest)
+    )
+    assert asked == [enforcing_dest]
+
+
 def test_docker_desktop_never_gets_a_user_flag(
     monkeypatch: pytest.MonkeyPatch, seen: list[list[str]], tmp_path: Path
 ) -> None:
@@ -507,7 +577,12 @@ def test_container_git_runs_the_docker_this_host_can_start(
     seen: list[list[str]], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(git.platform, "_resolved_docker_cli", OFF_PATH_EXE)
-    git.ContainerGit().clone(git.CloneSpec(url="https://example/core.git", dest=tmp_path / "core"))
+    # `seen[0]` has to BE the docker call, so the filesystem seam is stated:
+    # the real one shells out `stat` through this very fixture on Linux, and on
+    # an enforcing runner it would be recorded first. See `_capture()`.
+    git.ContainerGit(filesystem_type=lambda _path: None).clone(
+        git.CloneSpec(url="https://example/core.git", dest=tmp_path / "core")
+    )
     assert seen, "nothing ran"
     assert seen[0][0] == OFF_PATH_EXE
     assert seen[0][1:3] == ["run", "--rm"], "only argv[0] moved"
@@ -614,11 +689,15 @@ def test_container_git_takes_its_user_args_from_platform(
         return ["--user", "4242:4242"]
 
     monkeypatch.setattr(git.platform, "container_user_args", four_two)
-    git.ContainerGit().clone(git.CloneSpec(url="https://example/core.git", dest=tmp_path / "core"))
+    # The filesystem seam is stated for the reason given in
+    # `test_container_git_runs_the_docker_this_host_can_start`: on an enforcing
+    # Linux runner the real one would put a `stat` argv into `seen[0]`.
+    unlabelled = git.ContainerGit(filesystem_type=lambda _path: None)
+    unlabelled.clone(git.CloneSpec(url="https://example/core.git", dest=tmp_path / "core"))
     argv = seen[0]
     assert argv[argv.index("--user") + 1] == "4242:4242"
     assert argv.index("--user") < argv.index(git.CONTAINER_GIT_IMAGE)
 
     monkeypatch.setattr(git.platform, "container_user_args", lambda **kwargs: [])
-    git.ContainerGit().clone(git.CloneSpec(url="https://example/core.git", dest=tmp_path / "core2"))
+    unlabelled.clone(git.CloneSpec(url="https://example/core.git", dest=tmp_path / "core2"))
     assert "--user" not in seen[1]
