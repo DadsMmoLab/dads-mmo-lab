@@ -22,12 +22,15 @@ careful than its length suggests:
   every resume: an install must end by actually starting and verifying the
   server, and the database must be back up before the import can ask it
   anything.
-* **The state file is a hint.** Every stage re-checks disk evidence before
-  skipping: the clone stages ask git for the remote, the build asks the daemon
-  for images, compose generation reads its own marker. An `is_done`
-  short-circuit once let a state file dropped into a directory make the
-  generator rewrite a real server's compose file and orphan its character
-  volumes.
+* **The state file is a hint, and disk evidence answers in both directions.**
+  Every stage re-checks disk evidence before skipping: the clone stages ask git
+  for the remote, the build asks the daemon for images, compose generation
+  reads its own marker. An `is_done` short-circuit once let a state file
+  dropped into a directory make the generator rewrite a real server's compose
+  file and orphan its character volumes. The converse is just as load-bearing
+  and was missing until 7.1: a stage that is recorded AND corroborated must be
+  a genuine no-op, because "re-run it to be sure" is destructive for a clone —
+  see `StagedInstaller.already_cloned()`.
 * `install_id` is a hash of the ABSOLUTE server directory, so a COPIED install
   directory is refused rather than adopted; `family` is recorded too, so a
   catalog edit that moves a game between families is a refusal, never a
@@ -80,9 +83,11 @@ STATE_FILE = ".yulon-install.json"
 STATE_VERSION = 1
 
 OPENING_NOTE = (
-    "You can stop this at any time. Nothing is written outside the folder below, and starting the "
-    "install again continues from the last step that finished — only the step that was interrupted "
-    "runs again."
+    "You can stop this at any time. Nothing is written outside the folder below, and starting "
+    "the install again continues from where it stopped: a step that already finished is checked "
+    "rather than repeated, so the hours it took are kept and the server source is left exactly "
+    "as it is on disk. Only the last steps — starting the server and waiting for it — run on "
+    "every attempt."
 )
 """What a Stop costs, said before it is pressed, and true of every stage.
 
@@ -90,6 +95,24 @@ The sentence this replaced was about the build (see `BUILD_CANCEL_NOTE`) and
 was said as the second line of every install and appended to every
 cancellation, so a user who stopped during the clone or the download was told
 Docker was finishing a build step (review, 2026-08-23).
+
+**"Checked rather than repeated" is the whole engine's rule, and it is the
+honest verb.** The wording before this one promised that "only the step that
+was interrupted runs again", and the live Ubuntu gate (2026-08-30) printed
+`Already finished: clone-core, clone-modules, generate-compose` and then ran
+all three — each clone stage doing `git fetch` + `git reset --hard FETCH_HEAD`
+over the user's own source. Two sentences, one of which had to move. Both did:
+the clone stages became genuine no-ops when disk evidence agrees with the
+record (`already_cloned()`), and this line stopped claiming a precision the
+engine does not have — `start-db`, `up` and `ready` are `recorded=False` and
+run every time, and `client-data` re-runs a one-shot that exits in seconds
+when the version on disk already matches.
+
+It says "the server source", not "the folder": `generate-compose` still
+rewrites a compose file that carries this engine's own marker, so an edit to
+`docker-compose.override.yml` does not survive a resume. That is a separate
+question from this one — it is the app's file, written from the catalog — and
+this sentence must not promise it away.
 """
 
 BUILD_CANCEL_NOTE = (
@@ -799,20 +822,57 @@ class StagedInstaller:
 
     # -- stage bodies a family binds into `Stage.run` --------------------
 
-    def stage_clone_sources(
-        self, ctx: StageContext, sources: Sequence[EmulatorSource]
-    ) -> Iterator[str]:
-        """Clone (or update) every source at its `dest`, refusing what is not ours.
+    def already_cloned(self, ctx: StageContext, stage: str, remote: str | None) -> bool:
+        """Is this clone BOTH written down and corroborated by a checkout on disk?
 
-        Disk evidence beats the state file: a `.git` whose `origin` is this
-        source is an existing clone and gets fetch+reset through the seam's
-        own update path; a `.git` pointing somewhere else is refused BY NAME
-        and never deleted, because a directory holding somebody's fork is not
-        this installer's to remove. A directory with files and no `.git` is
-        refused too: the clone seam `shutil.rmtree`s a destination it does
-        not recognise, and a tree a user unpacked by hand must not fall
-        through (review, 2026-08-23). `dest == "."` is the server dir itself,
-        where the state file is the one leftover that does not count.
+        The two halves are the whole rule, and neither is sufficient alone.
+
+        `InstallState.has()` is documented as "never a reason to skip on its
+        own" because a state file can lie — a fresh empty folder once
+        skip-compiled against another install's images — so the record is only
+        ever a hint, and `remote` (what `git remote get-url origin` says at the
+        destination, already checked against the source's URL by the caller) is
+        the disk evidence that can contradict it.
+
+        The other direction is what this method was missing until 7.1, and it
+        cost the live Ubuntu gate (2026-08-30) its source tree: a clone that is
+        recorded AND present was being handed to the seam anyway, where an
+        existing `.git` means `git fetch` + `git reset --hard FETCH_HEAD`. That
+        is destructive twice over. It discards any edit a user made to the
+        server source, unrecoverably and with no warning; and it moves the
+        checkout to whatever upstream has published since — so a user who stops
+        a compile and starts it again does not resume the build they
+        interrupted, they start a different one. A resume must not be able to
+        change what is being built.
+
+        `remote is None` with a record is the repair case and still clones: the
+        checkout was deleted, or was never a checkout. A checkout with NO record
+        is the other repair case — a run interrupted part-way through a clone —
+        and fetch+reset is exactly right there, because a half-materialised
+        working tree is not something to build against.
+        """
+        return ctx.state.has(stage) and remote is not None
+
+    def stage_clone_sources(
+        self, ctx: StageContext, sources: Sequence[EmulatorSource], *, recorded_as: str
+    ) -> Iterator[str]:
+        """Clone every source at its `dest`, refusing what is not ours and touching what is done.
+
+        `recorded_as` is the name the FAMILY binds this body to in its `Stage`
+        tuple; the body cannot know it, and without it the record could not be
+        consulted at all — which is how the AzerothCore stages came to fetch and
+        reset on every resume. See `already_cloned()`.
+
+        Disk evidence beats the state file in both directions: a `.git` whose
+        `origin` is this source and a record of this stage is a finished clone
+        and is left exactly as it is; the same `.git` with no record gets
+        fetch+reset through the seam's own update path; a `.git` pointing
+        somewhere else is refused BY NAME and never deleted, because a directory
+        holding somebody's fork is not this installer's to remove. A directory
+        with files and no `.git` is refused too: the clone seam `shutil.rmtree`s
+        a destination it does not recognise, and a tree a user unpacked by hand
+        must not fall through (review, 2026-08-23). `dest == "."` is the server
+        dir itself, where the state file is the one leftover that does not count.
         """
         if not sources:
             yield "This server has nothing to clone."
@@ -838,9 +898,12 @@ class StagedInstaller:
                         f"{dest} has files in it but is not a checkout of {source.url}, so it "
                         "was left alone. Move that folder aside and try again."
                     )
+            if self.already_cloned(ctx, recorded_as, existing):
+                yield f"{source.repo} is already in {source.dest}; leaving it exactly as it is."
+                continue
             yield f"Cloning {source.repo} into {source.dest}"
             if existing is not None:
-                yield "It is already cloned; updating it instead."
+                yield "A previous run left it part-way through; finishing it off."
             self._clone(
                 git.CloneSpec(
                     url=source.url,

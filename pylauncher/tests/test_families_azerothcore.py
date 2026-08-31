@@ -20,10 +20,12 @@ green (checklist, "CI was green while the suite was red").
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import fields
+from dataclasses import fields, replace
 from pathlib import Path
 
 import pytest
@@ -40,7 +42,7 @@ from tests.support_native import (
     engine,
     install,
 )
-from yulon import docker, git, platform, resources
+from yulon import docker, git, platform, resources, runner
 from yulon.catalog import composegen, native, preflight
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.installer import (
@@ -241,7 +243,9 @@ def test_a_resume_starts_and_verifies_the_server_again_but_does_not_rebuild(
     install(again, server_dir)
     assert "build" not in again.calls
     assert "start" in again.calls  # `up` is never recorded, so it always runs
-    assert f"clone:{ENTRY.emulator.sources[0].url}" in again.calls  # updates, not skipped
+    # Recorded AND on disk, so the clone is a genuine no-op: no fetch, no reset,
+    # nothing moved. It used to update here, which is the whole of D5.
+    assert not any(call.startswith("clone:") for call in again.calls), again.calls
 
 
 def test_a_state_file_claiming_a_build_that_docker_cannot_confirm_rebuilds(
@@ -257,6 +261,111 @@ def test_a_state_file_claiming_a_build_that_docker_cannot_confirm_rebuilds(
     lines = install(unknown, server_dir)
     assert "build" in unknown.calls
     assert any("would not say whether" in line for line in lines)
+
+
+# -- what a resume does to the source it already cloned (D5) ----------------
+
+
+def test_a_resume_runs_no_git_command_at_all_against_a_clone_it_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Asserted on the ARGV git is handed, because the seam only proves intent.
+
+    `reset --hard` is spelled `["reset", "--hard", "FETCH_HEAD"]` here, so a
+    test that greps a log for the shell spelling of the command would watch the
+    wrong thing entirely (`audit by argv, not by string`). The REAL
+    `ContainerGit` is wired into the clone seam and every argv it would hand
+    `runner.run` is collected instead.
+    """
+    server_dir = tmp_path / "wow"
+    install(Recorder(images=False), server_dir)
+
+    argvs: list[list[str]] = []
+
+    def record(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        argvs.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(runner, "run", record)
+    monkeypatch.setattr(platform, "docker_program", lambda: "docker")
+    again = resumed(server_dir, images=True, probe_answers=[IMPORTED])
+    install(again, server_dir, clone=git.ContainerGit().clone)
+    tokens = [token for argv in argvs for token in argv]
+    assert "fetch" not in tokens, argvs
+    assert "reset" not in tokens, argvs
+    assert argvs == [], argvs
+
+
+def test_an_edit_to_the_cloned_source_survives_a_resume(tmp_path: Path) -> None:
+    """`reset --hard` is not recoverable, so a resume must not be able to reach one.
+
+    The double models what the update path really does — the working tree
+    becomes the remote's — so a resume that runs it destroys the edit exactly
+    as the live gate's would have.
+    """
+    server_dir = tmp_path / "wow"
+    install(Recorder(images=False), server_dir)
+    edited = server_dir / "src" / "server" / "worldserver.cpp"
+    edited.parent.mkdir(parents=True)
+    edited.write_text("// my patch\n", encoding="utf-8")
+
+    def hard_reset(spec: git.CloneSpec) -> None:
+        """What `git fetch && git reset --hard FETCH_HEAD` does to a tracked file."""
+        for path in spec.dest.rglob("*.cpp"):
+            path.write_text("// upstream\n", encoding="utf-8")
+
+    again = resumed(server_dir, images=True, probe_answers=[IMPORTED])
+    install(again, server_dir, clone=hard_reset)
+    assert edited.read_text(encoding="utf-8") == "// my patch\n"
+
+
+def test_a_recorded_clone_that_is_gone_from_disk_is_cloned_again(tmp_path: Path) -> None:
+    """Recorded is half the predicate; the disk has to agree, or the state file rules alone.
+
+    `InstallState.has()` is "never a reason to skip on its own" for a reason
+    this project paid for once already, so the repair path has to still be
+    reachable: the module directory is deleted between the two runs and the
+    resume must clone it, while the core — recorded and still on disk — is left
+    alone.
+    """
+    server_dir = tmp_path / "wow"
+    install(Recorder(images=False), server_dir)
+    module = server_dir / ENTRY.emulator.sources[1].dest
+    shutil.rmtree(module)
+    again = resumed(server_dir, images=True, probe_answers=[IMPORTED])
+    del again.remotes[module]  # a directory that is not there answers nothing
+    install(again, server_dir)
+    assert [spec.dest for spec in again.clones] == [module]
+
+
+def test_a_clone_on_disk_that_was_never_recorded_is_still_updated(tmp_path: Path) -> None:
+    """The other half: a run interrupted DURING a clone recorded nothing, so it repairs.
+
+    That is where `fetch` + `reset --hard` belongs and it must stay reachable —
+    a half-checked-out tree is not something to build against.
+    """
+    server_dir = tmp_path / "wow"
+    install(Recorder(images=False), server_dir)
+    state = native.read_state(server_dir, valid=STAGE_NAMES)
+    assert state is not None
+    native.write_state(server_dir, replace(state, completed=("generate-compose", "build")))
+    again = resumed(server_dir, images=True, probe_answers=[IMPORTED])
+    install(again, server_dir)
+    assert [spec.dest for spec in again.clones] == [
+        server_dir / source.dest for source in ENTRY.emulator.sources
+    ]
+
+
+def test_a_resume_says_it_left_the_clone_alone_rather_than_claiming_to_update_it(
+    tmp_path: Path,
+) -> None:
+    """The log is the only place a user can see which of the two happened."""
+    server_dir = tmp_path / "wow"
+    install(Recorder(images=False), server_dir)
+    again = resumed(server_dir, images=True, probe_answers=[IMPORTED])
+    lines = install(again, server_dir)
+    assert any("leaving it exactly as it is" in line for line in lines), lines
+    assert not any("updating it instead" in line for line in lines), lines
 
 
 # -- the guard --------------------------------------------------------------

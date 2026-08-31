@@ -706,7 +706,9 @@ def test_stage_clone_sources_clones_every_source_at_its_dest_and_refuses_what_it
         lambda me: (
             native.Stage(
                 "clone-sources",
-                lambda ctx: me.stage_clone_sources(ctx, me.entry.emulator.sources),
+                lambda ctx: me.stage_clone_sources(
+                    ctx, me.entry.emulator.sources, recorded_as="clone-sources"
+                ),
             ),
         )
     )
@@ -716,6 +718,14 @@ def test_stage_clone_sources_clones_every_source_at_its_dest_and_refuses_what_it
         server_dir / source.dest for source in ENTRY.emulator.sources
     ]
     assert rec.clones[0].dest == server_dir  # dest "." IS the server dir
+
+    # The spine's own stage obeys the same rule the family's two do: a second
+    # run over a recorded, present clone touches nothing (D5).
+    settled = Recorder()
+    for source in ENTRY.emulator.sources:
+        settled.remotes[server_dir / source.dest] = source.url
+    list(_build(settled, family).run(InstallOptions(server_dir=server_dir)))
+    assert settled.clones == []
 
     hand_made = tmp_path / "wow2" / ENTRY.emulator.sources[1].dest
     hand_made.mkdir(parents=True)

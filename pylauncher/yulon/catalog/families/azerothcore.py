@@ -65,13 +65,15 @@ class AzerothCoreInstaller(StagedInstaller):
         )
 
     def _clone_core(self, ctx: StageContext) -> Iterator[str]:
-        """Clone (or update) the emulator itself INTO the server dir — it is the checkout.
+        """Clone the emulator itself INTO the server dir — it is the checkout.
 
-        Disk evidence beats the state file: a `.git` whose `origin` is this
-        entry's source is an existing clone and gets fetch+reset through the
-        seam's own update path; a `.git` pointing somewhere else is refused BY
-        NAME and never deleted, because a directory holding somebody's fork is
-        not this installer's to remove.
+        Disk evidence beats the state file in BOTH directions, which is
+        `StagedInstaller.already_cloned()`'s rule: recorded and on disk is a
+        finished clone and is left exactly as it is — no fetch, no reset,
+        nothing moved; recorded but gone, or on disk with nothing recorded, is
+        the repair case and clones. A `.git` pointing somewhere else is refused
+        BY NAME and never deleted, because a directory holding somebody's fork
+        is not this installer's to remove.
         """
         cores = [source for source in self.entry.emulator.sources if source.dest == "."]
         if len(cores) != 1:
@@ -108,9 +110,12 @@ class AzerothCoreInstaller(StagedInstaller):
                     f"{server_dir} has files in it but is not a checkout of {source.url}, so it "
                     "was left alone. Pick an empty folder."
                 )
+        if self.already_cloned(ctx, "clone-core", existing):
+            yield f"{source.repo} is already cloned in {server_dir}; leaving it exactly as it is."
+            return
         yield f"Cloning {source.repo} into {server_dir} (this is a large repository)"
-        if ctx.state.has("clone-core") and existing is not None:
-            yield "It is already cloned; updating it instead."
+        if existing is not None:
+            yield "A previous run left it part-way through; finishing it off."
         self._clone(
             git.CloneSpec(
                 url=source.url,
@@ -160,7 +165,12 @@ class AzerothCoreInstaller(StagedInstaller):
                     f"{dest} has files in it but is not a checkout of {source.url}, so it was "
                     "left alone. Move that folder aside and try again."
                 )
+            if self.already_cloned(ctx, "clone-modules", existing):
+                yield f"{source.repo} is already in {source.dest}; leaving it exactly as it is."
+                continue
             yield f"Cloning {source.repo} into {source.dest}"
+            if existing is not None:
+                yield "A previous run left it part-way through; finishing it off."
             self._clone(
                 git.CloneSpec(
                     url=source.url,
