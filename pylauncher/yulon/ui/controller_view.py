@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from yulon import docker, networking
+from yulon import docker, install_wiring, networking
 from yulon.apply import Applier, ApplyReport, DockerSql
 from yulon.catalog.catalog import CatalogEntry
 from yulon.controller import Controller, InstallStatus, PortConflictError
@@ -45,7 +45,6 @@ from yulon.controller_wow_wotlk import accounts as wotlk_accounts
 from yulon.controller_wow_wotlk import console as wotlk_console
 from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
 from yulon.controller_wow_wotlk import modules as wotlk_modules
-from yulon.controller_wow_wotlk import repair as wotlk_repair
 from yulon.log import get_logger
 from yulon.manifest import Manifest
 from yulon.manifest_store import FAMILY_FILES, ManifestStore
@@ -118,27 +117,25 @@ class ControllerServices:
         # `docker_ctl.SPEC.db`, so a catalog entry that names a different one
         # cannot end up backing up somebody else's database.
         mysql = wotlk_maintenance.DockerMysql(spec.db, password, wsl_distro=wsl_distro)
-        # Both seams, because neither answers the whole question on its own:
-        # `DockerMysql` can ask what schemas exist without naming one to connect
-        # to, `DockerSql` can then read inside them. See `repair.import_state()`.
+        # The probe pair is `(None, None)` for a game that names no one-shot
+        # import service — `install_wiring.import_gate_for()` carries the
+        # reasoning that used to live here, once, for this tab, the Catalog tab
+        # and the CLI. `wsl_distro=` because that function builds its own two
+        # seams and they address a daemon too.
+        #
+        # Its password is `fixed_db_password(entry)` and NOT the file read
+        # above, which is right and is not an oversight: a gate is built only
+        # for an entry that names an import service, wow-wotlk is the only one,
+        # and its plan is `fixed`. The reverse substitution — this function's
+        # `sql`/`mysql`/applier taking the fixed value — is the closed bug the
+        # comment above describes.
+        probe, reset = install_wiring.import_gate_for(entry, wsl_distro=wsl_distro)
         controller = Controller(
             spec,
             server_dir,
             wsl_distro=wsl_distro,
-            # Only for a game that named a one-shot import service. `for_wotlk()`
-            # is called for EVERY install in state.json, not just wow-wotlk, and
-            # `repair.import_state()` looks for the `acore_*` schemas by name — so
-            # attaching it unconditionally told a healthy CMaNGOS install its
-            # databases were never imported, and offered it the destructive
-            # Repair button. `import_service` is the same fact `repair_import()`
-            # already refuses on, so the two agree by construction rather than by
-            # a second list of which games are AzerothCore (review, 2026-08-23).
-            import_probe=(
-                (lambda: wotlk_repair.import_state(sql, mysql)) if spec.import_service else None
-            ),
-            reset_unfinished=(
-                (lambda: wotlk_repair.reset_unfinished(sql, mysql)) if spec.import_service else None
-            ),
+            import_probe=probe,
+            reset_unfinished=reset,
         )
         return cls(
             controller=controller,

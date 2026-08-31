@@ -93,8 +93,8 @@ def build_window() -> object:
     )
 
     from yulon import __version__
-    from yulon.catalog.catalog import CatalogEntry, load_catalog
-    from yulon.catalog.installer import InstallEngine
+    from yulon.catalog.catalog import load_catalog
+    from yulon.install_wiring import installer_for_app
     from yulon.state import KnownInstall, load_state
     from yulon.ui.catalog_view import CatalogView
     from yulon.ui.controller_view import ControllerServices, ControllerView
@@ -138,44 +138,12 @@ def build_window() -> object:
     log_panel = LogPanel()
     panels: list[LogPanel] = [log_panel]
 
-    def make_installer(entry: CatalogEntry) -> InstallEngine:
-        """The engine for one entry: the bash script, or the native one (roadmap 6.2).
-
-        The per-game import seams are assembled HERE and passed down, the same
-        way `ControllerServices.for_wotlk()` assembles them for the Server tab:
-        `catalog/` must not import a controller package, and `repair.py` knows
-        the `acore_*` schema names that answer the question. Both are attached
-        only for an entry that names a one-shot import service, so a game whose
-        import is not a separate service never gets a probe that looks for
-        somebody else's schemas.
-        """
-        from yulon.apply import DockerSql
-        from yulon.catalog.installer import installer_for
-        from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
-        from yulon.controller_wow_wotlk import modules as wotlk_modules
-        from yulon.controller_wow_wotlk import repair as wotlk_repair
-
-        spec = entry.container_spec()
-        # Not `db_password()` here, deliberately: this factory has no server_dir,
-        # and the password only reaches the two import seams below, which are
-        # wired solely for an entry that names an `import_service`. wow-wotlk is
-        # the only one and it carries a fixed password, so a game that GENERATES
-        # its password can never reach this line. The Server tab's copy of this
-        # wiring does have a server_dir, and does read the file.
-        password = entry.install.password.value or wotlk_modules.DEFAULT_DB_ROOT_PASSWORD
-        sql = DockerSql(spec.db, password, schemas=entry.schema_map())
-        mysql = wotlk_maintenance.DockerMysql(spec.db, password)
-        return installer_for(
-            entry,
-            import_probe=(
-                (lambda: wotlk_repair.import_state(sql, mysql)) if spec.import_service else None
-            ),
-            reset_unfinished=(
-                (lambda: wotlk_repair.reset_unfinished(sql, mysql)) if spec.import_service else None
-            ),
-        )
-
-    catalog_view = CatalogView(catalog, make_installer, log_panel)
+    # The engine and its per-game import gate come from one place (7.1):
+    # `install_wiring` is what the Server tab and the CLI harness use too. The
+    # copy that stood here hand-wrote the same probe pair and the same
+    # fixed-password fallback, and `catalog/` may not import a controller
+    # package to do it itself (style-guide §3).
+    catalog_view = CatalogView(catalog, installer_for_app, log_panel)
     splitter = QSplitter()
     splitter.addWidget(catalog_view)
     splitter.addWidget(log_panel)

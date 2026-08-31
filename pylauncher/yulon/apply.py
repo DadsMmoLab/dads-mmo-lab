@@ -196,7 +196,16 @@ class DockerSql:
     """`SqlRunner` over `docker exec <db_container> mysql`, like wow-manage.sh does."""
 
     db_container: str
-    root_password: str
+    root_password: str = field(repr=False)
+    """Kept out of the repr, like `maintenance.DockerMysql.root_password`.
+
+    A frozen dataclass reprs every field by default, and this object is handed
+    to worker threads and closed over by the seams the tabs call: a pytest
+    assertion diff, a logged object or a traceback frame dump in a UI error
+    handler would each print the database password. Its `DockerMysql` sibling
+    closed this channel on 2026-08-23 and this one was missed, because the two
+    are built side by side at every call site (2026-08-30).
+    """
     wsl_distro: str | None = None
     """The WSL2 distro this server's docker lives in, if it is not local."""
     schemas: Mapping[Db, str] = field(default_factory=lambda: DB_NAMES)

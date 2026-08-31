@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from collections.abc import Iterator, Sequence
 from pathlib import Path
@@ -9,14 +10,15 @@ from pathlib import Path
 import pytest
 
 from yulon import docker, networking, runner
-from yulon.apply import Applier, ApplyReport
-from yulon.catalog.catalog import load_catalog
+from yulon.apply import Applier, ApplyReport, DockerSql
+from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.controller import Controller
 from yulon.controller_wow_wotlk import console, modules
 from yulon.controller_wow_wotlk.accounts import AccountResult
 from yulon.controller_wow_wotlk.console import ConsoleReply
 from yulon.controller_wow_wotlk.maintenance import (
     BackupReport,
+    DockerMysql,
     InterruptedRestore,
     MaintenanceError,
     RestorePlan,
@@ -1224,6 +1226,16 @@ def test_every_seam_for_wotlk_builds_says_which_daemon_it_means() -> None:
     the test written to prevent it (review, 2026-08-26). The cost is that such
     a call must NAME the parameter rather than pass it positionally, which is
     cheap and reads better at the call site anyway.
+
+    DATACLASS FIELDS COUNT TOO, and they did not until 2026-08-31. The dunder
+    skip below is right about `__init__` as a NAME, but a dataclass declares
+    `wsl_distro` as an annotated class attribute and never writes an `__init__`
+    at all - so `DockerSql(...)` and `DockerMysql(...)`, the two seams this
+    function builds by hand, were invisible to a scan whose docstring promises
+    the next seam cannot be forgotten. Measured: dropping `wsl_distro=` from
+    either constructor left the whole suite at 1196 passed. A class whose body
+    annotates the field is collected by its CLASS name, which is how the call
+    site spells it.
     """
     import ast
 
@@ -1239,9 +1251,21 @@ def test_every_seam_for_wotlk_builds_says_which_daemon_it_means() -> None:
                     # ever catches somebody else's `super().__init__(parent)`.
                     if not node.name.startswith("__"):
                         accepts.add(node.name)
+            elif isinstance(node, ast.ClassDef):
+                if any(
+                    isinstance(stmt, ast.AnnAssign)
+                    and isinstance(stmt.target, ast.Name)
+                    and stmt.target.id == "wsl_distro"
+                    for stmt in node.body
+                ):
+                    accepts.add(node.name)
     assert {
         "send_command",
         "published_bindings",
+        # The two dataclass seams, so the collection above cannot rot back to
+        # functions-only and still pass.
+        "DockerSql",
+        "DockerMysql",
     } <= accepts, "the scan found no wsl_distro-aware functions, so it would pass on an empty repo"
 
     source = Path(controller_view_module.__file__).read_text(encoding="utf-8")
@@ -1385,3 +1409,162 @@ def test_a_tortoise_account_is_created_with_that_core_s_own_scheme(
     monkeypatch.setattr(controller_view_module.wotlk_accounts, "create_account", fake_create)
     ControllerServices.for_wotlk(tortoise, tmp_path, None).create_account("bob", "pw", 0)
     assert seen.get("scheme") == "mangos_sha", seen
+
+
+def test_for_wotlk_takes_its_import_gate_from_install_wiring(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """One wiring for the Catalog tab, the Server tab and the CLI — not three copies.
+
+    Only the GATE moves: the probe pair is the thing all three built by hand,
+    and `install_wiring` is where it lives now. The distro travels with it,
+    because a WSL-resident server answers only to its own daemon.
+    """
+    gate_calls: list[tuple[str, object]] = []
+
+    def probe_sentinel() -> docker.ImportState:
+        return docker.ImportState("imported", "sentinel", complete=True)
+
+    def reset_sentinel() -> tuple[str, ...]:
+        return ()
+
+    def fake_gate(entry: CatalogEntry, *, wsl_distro: str | None = None) -> tuple[object, object]:
+        gate_calls.append((entry.id, wsl_distro))
+        return probe_sentinel, reset_sentinel
+
+    monkeypatch.setattr(controller_view_module.install_wiring, "import_gate_for", fake_gate)
+
+    services = ControllerServices.for_wotlk(WOTLK, tmp_path, None, "dml-arch")
+    assert gate_calls == [(WOTLK.id, "dml-arch")], gate_calls
+    assert services.controller.import_probe is probe_sentinel
+    assert services.controller.reset_unfinished is reset_sentinel
+
+
+def test_a_generated_password_game_is_never_handed_the_fixed_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bug this seam closed, asked of the wiring rather than of `db_password()`.
+
+    wow-tbc, wow-vanilla and wow-tortoise all declare `"mode": "generated"`:
+    their password is minted at install time and written under the server dir.
+    `install_wiring.fixed_db_password()` answers the CATALOGUE's fixed value,
+    which for those three is the shared default — so wiring the tab from it
+    authenticates as root with the literal "password" and every SQL-backed
+    control dies with access denied (closed 2026-08-23, and easy to re-open
+    because `for_wotlk` is the one place that reads the file).
+
+    Asked end to end, down to the `MYSQL_PWD` the client is really handed, and
+    of BOTH seams: `DockerSql` (accounts, modules, the realmlist update) and
+    `DockerMysql` (backup and restore). A test that drove wow-wotlk would pass
+    with the substitution in place, because its plan is `fixed`.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    assert tortoise.install.password.mode == "generated", "this entry proves nothing otherwise"
+    generated = "tortoise-1a2b3c4d5e6f7a8b"
+    assert controller_view_module.install_wiring.fixed_db_password(tortoise) != generated
+    (tmp_path / str(tortoise.install.password.file)).write_text(generated + "\n", encoding="utf-8")
+
+    handed_to_mysql: list[str] = []
+    real_mysql = controller_view_module.wotlk_maintenance.DockerMysql
+
+    def recording_mysql(container: str, password: str, **kwargs: object) -> object:
+        handed_to_mysql.append(password)
+        return real_mysql(container, password, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(controller_view_module.wotlk_maintenance, "DockerMysql", recording_mysql)
+
+    handed_to_sql: list[str | None] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        env = kwargs.get("env")
+        if isinstance(env, dict) and "MYSQL_PWD" in env:
+            handed_to_sql.append(env["MYSQL_PWD"])
+        # "" first, so the username reads as free; a row afterwards, so the
+        # read-back that follows the INSERT finds the account it just made.
+        return subprocess.CompletedProcess(argv, 0, "" if len(handed_to_sql) < 2 else "1", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    services = ControllerServices.for_wotlk(tortoise, tmp_path, None)
+    services.create_account("bob", "hunter2", 0)
+
+    assert handed_to_sql, "nothing was sent to mysql at all"
+    assert set(handed_to_sql) == {generated}, handed_to_sql
+    assert handed_to_mysql == [generated], handed_to_mysql
+
+
+def test_a_password_file_that_cannot_be_read_still_opens_the_tab_and_says_why(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The other half of the same seam: "unknown" is not "use the default", silently.
+
+    `db_password()` answers None when the entry NAMES a file and that file
+    cannot be read. The tab is still built — Start and Stop need no database,
+    and no tab at all is worse — but the reason every SQL-backed control is
+    about to fail is written down once, here, instead of arriving as "access
+    denied" six clicks later.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    assert not (tmp_path / str(tortoise.install.password.file)).exists()
+
+    with caplog.at_level(logging.WARNING):
+        services = ControllerServices.for_wotlk(tortoise, tmp_path, None)
+
+    assert services.controller.spec == tortoise.container_spec(), "no tab at all is worse"
+    said = [record.getMessage() for record in caplog.records]
+    assert any(
+        tortoise.id in message and str(tortoise.install.password.file) in message
+        for message in said
+    ), said
+
+
+def test_both_db_seams_for_wotlk_builds_are_bound_to_the_distro_they_live_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The AST scan above is static; this is the same question asked of the objects.
+
+    `wsl_distro=` on these two constructors was pinned by NOTHING until now.
+    Measured on 2026-08-31: dropping it from `DockerSql(...)`, and separately
+    from `DockerMysql(...)`, left the whole suite at 1196 passed either way.
+    The seam scan could not see them because a dataclass declares the field
+    rather than taking it as a parameter, and every other test that looks like
+    it covers this really covers something else - the backup census reads the
+    distro from `backup(wsl_distro=...)`, not from the `DockerMysql` it is
+    handed, so it passes with the object mis-wired and only the real `docker
+    exec` further in would go to the Windows host that has no `ac-database`.
+
+    Asked of the constructed objects, so a call site that passes the parameter
+    but hands it `None` is caught as well as one that omits it.
+    """
+    sql_seams: list[DockerSql] = []
+    mysql_seams: list[DockerMysql] = []
+    real_sql = controller_view_module.DockerSql
+    real_mysql = controller_view_module.wotlk_maintenance.DockerMysql
+
+    def recording_sql(*args: object, **kwargs: object) -> DockerSql:
+        made: DockerSql = real_sql(*args, **kwargs)  # type: ignore[arg-type]
+        sql_seams.append(made)
+        return made
+
+    def recording_mysql(*args: object, **kwargs: object) -> DockerMysql:
+        made: DockerMysql = real_mysql(*args, **kwargs)  # type: ignore[arg-type]
+        mysql_seams.append(made)
+        return made
+
+    monkeypatch.setattr(controller_view_module, "DockerSql", recording_sql)
+    monkeypatch.setattr(controller_view_module.wotlk_maintenance, "DockerMysql", recording_mysql)
+
+    ControllerServices.for_wotlk(WOTLK, tmp_path, None, "dml-arch")
+
+    # More than one of each may be built: `import_gate_for()` makes its own
+    # pair, and the gate's seams have to address the same daemon as the tab's.
+    # Every seam that was built is asked, not just the first.
+    assert sql_seams and mysql_seams, "a seam was not built at all"
+    assert all(seam.wsl_distro == "dml-arch" for seam in sql_seams), sql_seams
+    assert all(seam.wsl_distro == "dml-arch" for seam in mysql_seams), mysql_seams
+
+    sql_seams.clear()
+    mysql_seams.clear()
+    ControllerServices.for_wotlk(WOTLK, tmp_path)
+    assert sql_seams and mysql_seams, "a seam was not built at all"
+    assert all(seam.wsl_distro is None for seam in sql_seams), "a distro was invented"
+    assert all(seam.wsl_distro is None for seam in mysql_seams), "a distro was invented"
