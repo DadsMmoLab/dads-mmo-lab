@@ -160,34 +160,50 @@ class InstallState:
     `install_id` is what makes it a claim: it is derived from the absolute path
     of the directory holding it, so a state file copied into another directory
     describes an install that is not there.
+
+    `family` (7.1) is the second claim: a folder installed as one emulator
+    family is never reinterpreted as another by a catalog edit — the guard
+    refuses instead. Empty in files written before 7.1, which the guard reads
+    as the entry's current family; `version` stays 1 because the key is
+    additive.
     """
 
     game_id: str
     install_id: str
+    family: str = ""
     completed: tuple[str, ...] = ()
     last_error: str = ""
     updated_unix: int = 0
     version: int = STATE_VERSION
 
-    def with_stage(self, stage: str) -> InstallState:
-        """This state plus `stage`, in stage order, with nothing recorded twice."""
-        if stage in NEVER_RECORDED or stage in self.completed:
+    def with_stage(self, stage: str, order: Sequence[str]) -> InstallState:
+        """This state plus `stage`, in `order`, with nothing recorded twice.
+
+        `order` is the ENTRY's stage tuple rather than a module constant
+        because 7.1 has two families with two tuples. A name outside it is
+        dropped — the same rule `read_state()` applies on the way in — so the
+        file can never carry a name nobody can interpret.
+        """
+        if stage in self.completed:
             return self
         done = set(self.completed) | {stage}
-        return replace(self, completed=tuple(s for s in STAGE_ORDER if s in done), last_error="")
+        return replace(self, completed=tuple(s for s in order if s in done), last_error="")
 
     def has(self, stage: str) -> bool:
         """Did a previous run finish `stage`? Never a reason to skip on its own."""
         return stage in self.completed
 
 
-def read_state(server_dir: Path) -> InstallState | None:
+def read_state(server_dir: Path, *, valid: Sequence[str]) -> InstallState | None:
     """The state file in `server_dir`, or None if there is none this engine wrote.
 
     An unreadable or malformed file answers None: it is a hint, and a hint that
     cannot be parsed is simply no hint. It is never deleted here — a file this
     engine cannot read may be somebody else's, and `guard` is what decides
     whether the directory can be used at all.
+
+    `valid` is the entry's stage tuple: a name outside it is dropped rather
+    than kept, so a stage that no longer exists can never become a skip.
     """
     path = server_dir / STATE_FILE
     try:
@@ -205,16 +221,23 @@ def read_state(server_dir: Path) -> InstallState | None:
         return None
     completed = parsed.get("completed")
     stages = (
-        tuple(stage for stage in completed if isinstance(stage, str) and stage in STAGE_ORDER)
+        tuple(stage for stage in completed if isinstance(stage, str) and stage in valid)
         if isinstance(completed, list)
         else ()
     )
+    # A missing or non-string `family` reads as "" — the one value that means
+    # "this file does not say". It is never a family name, so it can never
+    # match the wrong one; the guard treats it as the entry's own family, which
+    # is safe because every state file written before 7.1 was written by the
+    # only family that existed then.
+    family = parsed.get("family")
     error = parsed.get("last_error")
     updated = parsed.get("updated_unix")
     version = parsed.get("version")
     return InstallState(
         game_id=game_id,
         install_id=install_id,
+        family=family if isinstance(family, str) else "",
         completed=stages,
         last_error=error if isinstance(error, str) else "",
         updated_unix=updated if isinstance(updated, int) else 0,
@@ -232,6 +255,7 @@ def write_state(server_dir: Path, state: InstallState) -> None:
     payload = {
         "version": state.version,
         "game_id": state.game_id,
+        "family": state.family,
         "install_id": state.install_id,
         "completed": list(state.completed),
         "last_error": state.last_error,
@@ -480,7 +504,7 @@ class NativeInstaller:
         a different compose project.
         """
         install_id = composegen.install_id(server_dir, platform_id=self._seams.platform_id)
-        existing = read_state(server_dir) if server_dir.is_dir() else None
+        existing = read_state(server_dir, valid=STAGE_ORDER) if server_dir.is_dir() else None
         if existing is not None and existing.install_id != install_id:
             raise InstallerError(
                 f"{server_dir} holds an install record made for a different folder, so this "
@@ -590,7 +614,7 @@ class NativeInstaller:
             raise InstallerError(f"unknown install stage {stage!r}")
         if stage in NEVER_RECORDED:
             return state
-        recorded = state.with_stage(stage)
+        recorded = state.with_stage(stage, STAGE_ORDER)
         write_state(server_dir, recorded)
         return recorded
 
