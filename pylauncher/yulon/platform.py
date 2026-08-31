@@ -1437,13 +1437,16 @@ def docker_engine_commands(pm: PackageManager, *, steamos: bool) -> list[list[st
         #     dnf repoquery docker-buildx        -> 0.31.1, 0.36.1
         #     dnf repoquery docker-buildx-plugin -> nothing
         #     dnf provides */docker-buildx-plugin -> No matches found
-        # `docker-buildx-plugin` IS the right name in the other package world:
-        # Docker's own repo, where the engine is `docker-ce`. That is what
-        # install-wow-wotlk-fedora.sh:870 layers, and it does so on Bazzite,
-        # an immutable Fedora that ships `docker-ce` — an rpm-ostree branch,
-        # not a dnf one. Do not copy that name back here while this command
-        # installs `moby-engine`: the two must come from the same repo, and
-        # `dnf install docker-buildx-plugin` fails outright on plain Fedora.
+        # `docker-buildx-plugin` IS the right name in the other package
+        # world: Docker's own repo, where the engine is `docker-ce`. BOTH of
+        # install-wow-wotlk-fedora.sh's branches install it — Bazzite by
+        # layering it with rpm-ostree (:870) and plain Fedora with dnf (:879)
+        # — and both work because the script ADDS Docker's CE repo first.
+        # So it is not dnf-versus-rpm-ostree that decides the name; it is
+        # which repo the engine came from. This command takes `moby-engine`
+        # from Fedora's own repos and must stay in that world: against them,
+        # `dnf install docker-buildx-plugin` fails outright and takes the
+        # whole provision with it.
         install = [["dnf", "-y", "install", "moby-engine", "docker-compose", "docker-buildx"]]
     else:
         install = [["zypper", "--non-interactive", "install", "docker", "docker-compose"]]

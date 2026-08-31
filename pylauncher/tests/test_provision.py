@@ -170,27 +170,39 @@ def test_linux_engine_plan_per_package_manager() -> None:
 
 
 def test_the_dnf_list_never_mixes_two_package_worlds() -> None:
-    """A `*-plugin` docker package beside `moby-engine` is a package that does not exist.
+    """A Docker-repo package beside `moby-engine` is a package that does not exist.
 
     Fedora's repos carry `moby-engine`, `docker-compose` and `docker-buildx`.
     Docker's own repo carries `docker-ce`, `docker-compose-plugin` and
-    `docker-buildx-plugin`. Either set installs; a name taken from one and
+    `docker-buildx-plugin`. Either set installs — the bash script uses the
+    second and adds Docker's repo first — but a name taken from one and
     pasted beside the other resolves to nothing, and `dnf install` fails
-    outright rather than skipping it — which is how the shipped command
-    aborted every Fedora provision until 2026-08-31.
+    outright rather than skipping it, which is how the shipped command
+    aborted every Fedora provision until 2026-08-31. This command adds no
+    repo, so Fedora's is the only world available to it.
 
-    The equality above pins today's exact list. This asks the weaker question
-    that keeps holding when a fourth package joins it, and names the rule in
-    its own failure message.
+    The equality above pins today's exact list. This names the rule instead,
+    so it keeps holding when a fourth package joins, and says which world a
+    wrong name came from rather than only that it is wrong. It is deliberately
+    a membership test and not a suffix test: `docker-ce` carries no `-plugin`
+    and is the clearest way to get this wrong.
     """
     dnf = platform.docker_engine_commands("dnf", steamos=False)[0]
-    packages = dnf[dnf.index("install") + 1 :]
+    packages = set(dnf[dnf.index("install") + 1 :])
     assert "moby-engine" in packages, dnf
-    mixed = [p for p in packages if p.endswith("-plugin")]
+    docker_repo = {
+        "docker-ce",
+        "docker-ce-cli",
+        "docker-ce-rootless-extras",
+        "docker-buildx-plugin",
+        "docker-compose-plugin",
+        "containerd.io",
+    }
+    mixed = sorted(packages & docker_repo)
     assert not mixed, (
-        f"{mixed} are Docker-repo names (they ship beside docker-ce); this "
-        f"command installs moby-engine, so every package in it must be "
-        f"Fedora's own: {packages}"
+        f"{mixed} come from Docker's own repo, which this command never adds; "
+        f"it installs moby-engine from Fedora's, so every package beside it "
+        f"must be Fedora's too: {sorted(packages)}"
     )
 
 
