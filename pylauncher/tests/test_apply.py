@@ -698,3 +698,21 @@ def test_the_probe_is_asked_once_per_container(monkeypatch: pytest.MonkeyPatch) 
     for _ in range(3):
         apply_module.mysql_client("tbc-db")
     assert asked == ["tbc-db"], asked
+
+
+def test_the_sql_seam_never_renders_the_password_it_carries() -> None:
+    """A frozen dataclass reprs every field, and this one carries the DB root password.
+
+    `maintenance.DockerMysql` closed exactly this channel on 2026-08-23; its
+    `apply.DockerSql` sibling was missed, so a pytest assertion diff, a logged
+    object or a traceback frame dump in a UI error handler would each print the
+    password. Both objects are built side by side by the same three call sites
+    (`main.py`, `ControllerServices.for_wotlk`, `install_wiring.import_gate_for`),
+    which is how one of them being safe read as both of them being safe.
+    """
+    sql = DockerSql("ac-database", "hunter2")
+    assert "hunter2" not in repr(sql)
+    assert "hunter2" not in str(sql)
+    assert "hunter2" not in f"{sql}"
+    assert sql.root_password == "hunter2", "still readable where it is actually needed"
+    assert "ac-database" in repr(sql), "the repr is still useful for the fields that are not secret"

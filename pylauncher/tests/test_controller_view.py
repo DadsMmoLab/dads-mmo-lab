@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from collections.abc import Iterator, Sequence
 from pathlib import Path
@@ -10,7 +11,7 @@ import pytest
 
 from yulon import docker, networking, runner
 from yulon.apply import Applier, ApplyReport
-from yulon.catalog.catalog import load_catalog
+from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.controller import Controller
 from yulon.controller_wow_wotlk import console, modules
 from yulon.controller_wow_wotlk.accounts import AccountResult
@@ -1385,3 +1386,109 @@ def test_a_tortoise_account_is_created_with_that_core_s_own_scheme(
     monkeypatch.setattr(controller_view_module.wotlk_accounts, "create_account", fake_create)
     ControllerServices.for_wotlk(tortoise, tmp_path, None).create_account("bob", "pw", 0)
     assert seen.get("scheme") == "mangos_sha", seen
+
+
+def test_for_wotlk_takes_its_import_gate_from_install_wiring(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """One wiring for the Catalog tab, the Server tab and the CLI — not three copies.
+
+    Only the GATE moves: the probe pair is the thing all three built by hand,
+    and `install_wiring` is where it lives now. The distro travels with it,
+    because a WSL-resident server answers only to its own daemon.
+    """
+    gate_calls: list[tuple[str, object]] = []
+
+    def probe_sentinel() -> docker.ImportState:
+        return docker.ImportState("imported", "sentinel", complete=True)
+
+    def reset_sentinel() -> tuple[str, ...]:
+        return ()
+
+    def fake_gate(entry: CatalogEntry, *, wsl_distro: str | None = None) -> tuple[object, object]:
+        gate_calls.append((entry.id, wsl_distro))
+        return probe_sentinel, reset_sentinel
+
+    monkeypatch.setattr(controller_view_module.install_wiring, "import_gate_for", fake_gate)
+
+    services = ControllerServices.for_wotlk(WOTLK, tmp_path, None, "dml-arch")
+    assert gate_calls == [(WOTLK.id, "dml-arch")], gate_calls
+    assert services.controller.import_probe is probe_sentinel
+    assert services.controller.reset_unfinished is reset_sentinel
+
+
+def test_a_generated_password_game_is_never_handed_the_fixed_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bug this seam closed, asked of the wiring rather than of `db_password()`.
+
+    wow-tbc, wow-vanilla and wow-tortoise all declare `"mode": "generated"`:
+    their password is minted at install time and written under the server dir.
+    `install_wiring.fixed_db_password()` answers the CATALOGUE's fixed value,
+    which for those three is the shared default — so wiring the tab from it
+    authenticates as root with the literal "password" and every SQL-backed
+    control dies with access denied (closed 2026-08-23, and easy to re-open
+    because `for_wotlk` is the one place that reads the file).
+
+    Asked end to end, down to the `MYSQL_PWD` the client is really handed, and
+    of BOTH seams: `DockerSql` (accounts, modules, the realmlist update) and
+    `DockerMysql` (backup and restore). A test that drove wow-wotlk would pass
+    with the substitution in place, because its plan is `fixed`.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    assert tortoise.install.password.mode == "generated", "this entry proves nothing otherwise"
+    generated = "tortoise-1a2b3c4d5e6f7a8b"
+    assert controller_view_module.install_wiring.fixed_db_password(tortoise) != generated
+    (tmp_path / str(tortoise.install.password.file)).write_text(generated + "\n", encoding="utf-8")
+
+    handed_to_mysql: list[str] = []
+    real_mysql = controller_view_module.wotlk_maintenance.DockerMysql
+
+    def recording_mysql(container: str, password: str, **kwargs: object) -> object:
+        handed_to_mysql.append(password)
+        return real_mysql(container, password, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(controller_view_module.wotlk_maintenance, "DockerMysql", recording_mysql)
+
+    handed_to_sql: list[str | None] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        env = kwargs.get("env")
+        if isinstance(env, dict) and "MYSQL_PWD" in env:
+            handed_to_sql.append(env["MYSQL_PWD"])
+        # "" first, so the username reads as free; a row afterwards, so the
+        # read-back that follows the INSERT finds the account it just made.
+        return subprocess.CompletedProcess(argv, 0, "" if len(handed_to_sql) < 2 else "1", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    services = ControllerServices.for_wotlk(tortoise, tmp_path, None)
+    services.create_account("bob", "hunter2", 0)
+
+    assert handed_to_sql, "nothing was sent to mysql at all"
+    assert set(handed_to_sql) == {generated}, handed_to_sql
+    assert handed_to_mysql == [generated], handed_to_mysql
+
+
+def test_a_password_file_that_cannot_be_read_still_opens_the_tab_and_says_why(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The other half of the same seam: "unknown" is not "use the default", silently.
+
+    `db_password()` answers None when the entry NAMES a file and that file
+    cannot be read. The tab is still built — Start and Stop need no database,
+    and no tab at all is worse — but the reason every SQL-backed control is
+    about to fail is written down once, here, instead of arriving as "access
+    denied" six clicks later.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    assert not (tmp_path / str(tortoise.install.password.file)).exists()
+
+    with caplog.at_level(logging.WARNING):
+        services = ControllerServices.for_wotlk(tortoise, tmp_path, None)
+
+    assert services.controller.spec == tortoise.container_spec(), "no tab at all is worse"
+    said = [record.getMessage() for record in caplog.records]
+    assert any(
+        tortoise.id in message and str(tortoise.install.password.file) in message
+        for message in said
+    ), said

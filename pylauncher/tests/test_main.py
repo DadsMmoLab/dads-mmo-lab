@@ -674,3 +674,33 @@ def test_a_tab_opened_after_startup_is_still_joined_when_the_window_closes(
     main._stop_background_threads(window)
 
     assert view.console_log.running is False, "the new tab's console thread outlived the window"
+
+
+def test_the_entry_point_wires_installs_through_install_wiring_and_no_controller_package() -> None:
+    """`main.py` must not carry its own copy of the probe wiring.
+
+    Read by `ast` rather than by running `build_window()` (which needs Qt and a
+    display): every import anywhere in the file — the nested ones inside
+    `build_window()` included — is collected, and none may name a
+    `controller_wow_wotlk` module. The one that wires an engine is
+    `yulon.install_wiring`.
+
+    The password check is case-insensitive on purpose: the copy this deletes
+    spelled it `wotlk_modules.DEFAULT_DB_ROOT_PASSWORD`, which a case-sensitive
+    `"db_root_password" not in source` walks straight past.
+    """
+    import ast
+
+    source = Path(main.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            modules.add(node.module)
+            modules.update(f"{node.module}.{alias.name}" for alias in node.names)
+    assert not [m for m in modules if "controller_wow_wotlk" in m], sorted(modules)
+    assert "yulon.install_wiring.installer_for_app" in modules
+    assert "db_root_password" not in source.lower()
+    assert "make_installer" not in source
