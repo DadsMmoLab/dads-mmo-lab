@@ -339,6 +339,61 @@ def test_a_recorded_clone_that_is_gone_from_disk_is_cloned_again(tmp_path: Path)
     assert [spec.dest for spec in again.clones] == [module]
 
 
+def test_a_first_install_into_the_users_own_checkout_is_refused_and_left_alone(
+    tmp_path: Path,
+) -> None:
+    """The path D5's fix did not close, and it needs no resume to reach it.
+
+    `_guard()` exempts a directory that is a git checkout from the not-empty
+    refusal so the clone stage can name whose it is — and the clone stage only
+    ever named a checkout of a DIFFERENT repository. A user who points a first
+    install at their own checkout of the same repo has no record on disk, so
+    `already_cloned()` is False and the seam's update path runs: `git fetch` +
+    `git reset --hard FETCH_HEAD` over their work.
+    """
+    server_dir = tmp_path / "wow"
+    (server_dir / ".git").mkdir(parents=True)
+    edited = server_dir / "src" / "server" / "worldserver.cpp"
+    edited.parent.mkdir(parents=True)
+    edited.write_text("// my patch\n", encoding="utf-8")
+    rec = Recorder(images=False)
+    rec.remotes[server_dir] = ENTRY.emulator.sources[0].url
+    reset: list[Path] = []
+
+    def hard_reset(spec: git.CloneSpec) -> None:
+        """What the seam does to a destination that already has a `.git`."""
+        reset.append(spec.dest)
+        for path in spec.dest.rglob("*.cpp"):
+            path.write_text("// upstream\n", encoding="utf-8")
+
+    lines: list[str] = []
+    with pytest.raises(InstallerError, match="no record here of an install this app made"):
+        for line in engine(rec, clone=hard_reset).run(InstallOptions(server_dir=server_dir)):
+            lines.append(line)
+    assert reset == [], reset
+    assert edited.read_text(encoding="utf-8") == "// my patch\n"
+    # The sentence that used to sit two lines above the `reset --hard`.
+    assert not any("part-way through" in line for line in lines), lines
+
+
+def test_the_part_way_through_sentence_is_only_said_where_it_is_true(tmp_path: Path) -> None:
+    """It is said over a fetch+reset, so it must never be said about somebody else's work.
+
+    True exactly when this install already owns the folder: a record is on disk,
+    `_guard()` matched it on `install_id`, `game_id` and `family`, and the
+    checkout inside it was therefore made by a run of this install that did not
+    get as far as writing the stage down.
+    """
+    server_dir = tmp_path / "wow"
+    install(Recorder(images=False), server_dir)
+    state = native.read_state(server_dir, valid=STAGE_NAMES)
+    assert state is not None
+    native.write_state(server_dir, replace(state, completed=("generate-compose", "build")))
+    again = resumed(server_dir, images=True, probe_answers=[IMPORTED])
+    lines = install(again, server_dir)
+    assert any("A previous run of this install left it part-way through" in x for x in lines), lines
+
+
 def test_a_clone_on_disk_that_was_never_recorded_is_still_updated(tmp_path: Path) -> None:
     """The other half: a run interrupted DURING a clone recorded nothing, so it repairs.
 
@@ -498,37 +553,56 @@ def test_a_checkout_git_will_not_identify_is_refused_rather_than_cloned_over(
 
 
 def test_the_same_repository_spelled_differently_is_not_a_conflict(tmp_path: Path) -> None:
-    """`...y.git`, `...y` and `git@github.com:x/y` are one repository."""
+    """`...y.git`, `...y` and `git@github.com:x/y` are one repository.
+
+    Asserted on a resume rather than a first press, because a checkout in a
+    folder with no record of an install this app made is now refused whatever
+    its origin says (`refuse_unowned_checkout()`). `_same_repo()` is compared
+    BEFORE the record is consulted, so this still exercises the spelling rule:
+    a refusal about punctuation would fire here first.
+    """
     server_dir = tmp_path / "wow"
-    (server_dir / ".git").mkdir(parents=True)
-    rec = Recorder(images=False)
-    rec.remotes[server_dir] = ENTRY.emulator.sources[0].url.removesuffix(".git")
-    install(rec, server_dir)
-    assert rec.clones  # it updated through the seam rather than refusing
+    install(Recorder(images=False), server_dir)
+    again = resumed(server_dir, images=True, probe_answers=[IMPORTED])
+    again.remotes[server_dir] = ENTRY.emulator.sources[0].url.removesuffix(".git")
+    lines = install(again, server_dir)
+    assert any("leaving it exactly as it is" in line for line in lines), lines
 
 
 def _already_cloned(rec: Recorder, server_dir: Path) -> None:
-    """Put the core checkout on disk the way `clone-core` leaves it.
+    """Put the core checkout on disk the way `clone-core` really leaves it.
 
-    `.git`, an origin git will answer for, and the `docker-compose.yml` the
-    repository ships — a module test that skipped the last one got refused three
-    stages earlier for a reason that had nothing to do with modules.
+    `.git`, an origin git will answer for, the `docker-compose.yml` the
+    repository ships — a module test that skipped that one got refused three
+    stages earlier for a reason that had nothing to do with modules — AND the
+    state file recording the stage. The record is not decoration: a checkout in
+    a folder holding no record of an install this app made is refused by name
+    now (`refuse_unowned_checkout()`), so a helper that left it out would be
+    modelling a user's own checkout rather than this engine's own work.
     """
     (server_dir / ".git").mkdir(parents=True, exist_ok=True)
     rec.remotes[server_dir] = ENTRY.emulator.sources[0].url
     path = server_dir / composegen.BASE_FILE
     path.write_text(UPSTREAM_COMPOSE, encoding="utf-8")
     rec.tracked[path] = UPSTREAM_COMPOSE
+    native.write_state(
+        server_dir,
+        native.InstallState(
+            game_id=ENTRY.id,
+            install_id=composegen.install_id(server_dir, platform_id=lambda: "macos"),
+            family="azerothcore",
+            completed=("clone-core",),
+        ),
+    )
 
 
 def test_a_module_directory_holding_another_repository_is_refused_too(tmp_path: Path) -> None:
     """The same rule one level down: `modules/mod-playerbots` may be somebody's fork."""
     server_dir = tmp_path / "wow"
     module = server_dir / "modules" / "mod-playerbots"
-    (server_dir / ".git").mkdir(parents=True)
     (module / ".git").mkdir(parents=True)
     rec = Recorder(images=False)
-    rec.remotes[server_dir] = ENTRY.emulator.sources[0].url
+    _already_cloned(rec, server_dir)
     rec.remotes[module] = "https://github.com/someone/mod-playerbots.git"
     with pytest.raises(InstallerError, match="not of"):
         install(rec, server_dir)

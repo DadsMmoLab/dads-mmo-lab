@@ -733,6 +733,18 @@ def test_stage_clone_sources_clones_every_source_at_its_dest_and_refuses_what_it
     again = Recorder()
     (tmp_path / "wow2" / ".git").mkdir()
     again.remotes[tmp_path / "wow2"] = ENTRY.emulator.sources[0].url
+    # This install owns wow2 and got part-way through its clone: without the
+    # record, the core checkout is somebody's own repository and
+    # `refuse_unowned_checkout()` stops the run one source before the module
+    # this test is about.
+    native.write_state(
+        tmp_path / "wow2",
+        native.InstallState(
+            game_id=ENTRY.id,
+            install_id=composegen.install_id(tmp_path / "wow2", platform_id=lambda: "macos"),
+            family="azerothcore",
+        ),
+    )
     with pytest.raises(InstallerError, match="has files in it but is not a checkout"):
         list(_build(again, family).run(InstallOptions(server_dir=tmp_path / "wow2")))
     assert (hand_made / "my-own-patches.cpp").read_text(encoding="utf-8") == "mine"

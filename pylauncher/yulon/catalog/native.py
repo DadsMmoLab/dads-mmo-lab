@@ -827,6 +827,64 @@ class StagedInstaller:
 
     # -- stage bodies a family binds into `Stage.run` --------------------
 
+    def claimed_this_folder(self, ctx: StageContext) -> bool:
+        """Has a previous run of THIS install already written its record here?
+
+        The state file's presence, and nothing softer, because `_guard()` has
+        already proved that any state file still here belongs to this install:
+        it matched on `install_id` (the hash of this absolute path), on
+        `game_id` and on `family`, and refused the folder otherwise. So the file
+        being there means "this app has run in this folder before, for this
+        game" — which is exactly the question a clone stage has to answer before
+        it decides that an unrecorded checkout is its own unfinished work rather
+        than somebody's repository.
+
+        `ctx.state` cannot answer it: `_guard()` hands every run a state object
+        whether or not a file was read, so a fresh install and a resumed one are
+        indistinguishable from the object alone. `_record_error()` asks the same
+        question the same way.
+        """
+        return (ctx.server_dir / STATE_FILE).is_file()
+
+    def refuse_unowned_checkout(
+        self, ctx: StageContext, dest: Path, url: str, remote: str | None
+    ) -> None:
+        """Refuse a checkout of the RIGHT repository that this install never made.
+
+        The one path in this engine that could still destroy a user's work, and
+        it was reached by a first press rather than a resume. `_guard()`
+        deliberately exempts a directory that is a git checkout from the
+        not-empty refusal, so that a clone stage can say whose repository it is
+        instead of "this folder is not empty" — but the clone stages only ever
+        refused a checkout of a DIFFERENT repository. Point a first install at
+        your own checkout of the same repo and every guard passed: no record, so
+        `already_cloned()` is False, so the seam's update path ran, which is
+        `git fetch` + `git reset --hard FETCH_HEAD`. Driven end to end (review,
+        2026-08-31): `// my patch` became `// upstream`.
+
+        Ownership is `claimed_this_folder()`. INSIDE a folder this install owns,
+        an unrecorded checkout is this install's own unfinished work and
+        fetch+reset is the right repair — that is how a `modules/` clone that
+        died half way is healed. Outside one, it is somebody's repository and
+        this app did not put it there, so it is named and left alone.
+
+        The cost is stated in the message rather than worked around: a FIRST
+        clone that died before its stage was recorded also lands here, and the
+        remedy is to delete the half-finished folder. Losing a download is not
+        the same order of harm as losing work, and no evidence available at this
+        point tells the two apart — a partly-cloned tree and a checkout a user
+        made both answer `git remote get-url origin` with this exact URL.
+        """
+        if remote is None or self.claimed_this_folder(ctx):
+            return
+        raise InstallerError(
+            f"{dest} is already a git checkout of {url}, and there is no record here of an "
+            "install this app made. Continuing would run `git fetch` and `git reset --hard` "
+            "over it, which throws away anything you have changed, so nothing was touched. "
+            "Install into an empty folder instead — and if this folder is a half-finished "
+            "download from an earlier attempt, delete it first."
+        )
+
     def already_cloned(self, ctx: StageContext, stage: str, remote: str | None) -> bool:
         """Is this clone BOTH written down and corroborated by a checkout on disk?
 
@@ -906,9 +964,10 @@ class StagedInstaller:
             if self.already_cloned(ctx, recorded_as, existing):
                 yield f"{source.repo} is already in {source.dest}; leaving it exactly as it is."
                 continue
+            self.refuse_unowned_checkout(ctx, dest, source.url, existing)
             yield f"Cloning {source.repo} into {source.dest}"
             if existing is not None:
-                yield "A previous run left it part-way through; finishing it off."
+                yield "A previous run of this install left it part-way through; finishing it off."
             self._clone(
                 git.CloneSpec(
                     url=source.url,

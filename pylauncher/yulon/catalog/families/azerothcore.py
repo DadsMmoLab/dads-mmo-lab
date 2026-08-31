@@ -113,9 +113,10 @@ class AzerothCoreInstaller(StagedInstaller):
         if self.already_cloned(ctx, "clone-core", existing):
             yield f"{source.repo} is already cloned in {server_dir}; leaving it exactly as it is."
             return
+        self.refuse_unowned_checkout(ctx, server_dir, source.url, existing)
         yield f"Cloning {source.repo} into {server_dir} (this is a large repository)"
         if existing is not None:
-            yield "A previous run left it part-way through; finishing it off."
+            yield "A previous run of this install left it part-way through; finishing it off."
         self._clone(
             git.CloneSpec(
                 url=source.url,
@@ -168,9 +169,10 @@ class AzerothCoreInstaller(StagedInstaller):
             if self.already_cloned(ctx, "clone-modules", existing):
                 yield f"{source.repo} is already in {source.dest}; leaving it exactly as it is."
                 continue
+            self.refuse_unowned_checkout(ctx, dest, source.url, existing)
             yield f"Cloning {source.repo} into {source.dest}"
             if existing is not None:
-                yield "A previous run left it part-way through; finishing it off."
+                yield "A previous run of this install left it part-way through; finishing it off."
             self._clone(
                 git.CloneSpec(
                     url=source.url,
