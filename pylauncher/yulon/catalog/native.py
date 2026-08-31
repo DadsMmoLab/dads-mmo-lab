@@ -57,6 +57,7 @@ from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Protocol
 
 from yulon import docker, git, platform, resources, runner
 from yulon.catalog import composegen, preflight
@@ -268,6 +269,92 @@ def write_state(server_dir: Path, state: InstallState) -> None:
     except OSError as exc:
         tmp.unlink(missing_ok=True)
         logger.warning(f"could not record install progress in {path}: {exc}")
+
+
+@dataclass(frozen=True)
+class Secrets:
+    """What a stage may need that must never be printed: the database password.
+
+    A holder rather than a bare `str` so a `StageContext` can be logged or
+    land in a traceback without the value going with it — `repr()` masks it
+    on purpose, and there is no `__str__` that gives it back.
+    """
+
+    db_password: str
+
+    def __repr__(self) -> str:
+        return "Secrets(db_password=***)"
+
+
+@dataclass(frozen=True)
+class StageContext:
+    """Everything a stage body is handed. Frozen: a stage reads, the spine decides.
+
+    `secrets` is resolved by the spine BEFORE the first stage (see
+    `StagedInstaller.resolve_secrets()`), so a frozen context can carry it and
+    no stage has to know where the password came from.
+    """
+
+    server_dir: Path
+    client_dir: Path | None
+    state: InstallState
+    cancel: threading.Event | None
+    secrets: Secrets
+
+
+@dataclass(frozen=True)
+class Stage:
+    """One named, resumable step: data plus a bound callable, not a name in an if-chain.
+
+    `name` is what `.yulon-install.json` records, so renaming one reinterprets
+    every state file in the wild — the AzerothCore names are pinned by a test
+    for that reason. `recorded=False` is the old `NEVER_RECORDED`: a resume
+    must always run it again. `cancel_note` is what a Stop costs HERE and only
+    here; the SPINE says it right after `--- <name>`, and no stage body yields
+    its own, so no family can say the build's sentence over the download.
+    """
+
+    name: str
+    run: Callable[[StageContext], Iterator[str]]
+    recorded: bool = True
+    cancel_note: str = ""
+
+
+class ImportGate(Protocol):
+    """What the import stage asks of a database: its state, and a way to clear a half-written one.
+
+    Family-neutral: AzerothCore answers through the injected `acore_*` probe
+    pair (`CallableGate`), CMaNGOS through its own marker table (7.3). The
+    stage's five-branch table is the same for both.
+    """
+
+    def probe(self) -> docker.ImportState: ...
+
+    def reset(self) -> tuple[str, ...]: ...
+
+
+@dataclass(frozen=True)
+class CallableGate:
+    """An `ImportGate` from the two callables the app already injects for AzerothCore.
+
+    `reset_fn` may be None — an engine built without a reset seam — and then
+    `reset()` is the refusal the old `_import()` made inline: a half-written
+    database with no way to clear it is a stop, not a guess.
+    """
+
+    probe_fn: docker.ImportProbe
+    reset_fn: docker.ResetUnfinished | None
+
+    def probe(self) -> docker.ImportState:
+        return self.probe_fn()
+
+    def reset(self) -> tuple[str, ...]:
+        if self.reset_fn is None:
+            raise InstallerError(
+                "This install's databases were left half-written and this installer has no way "
+                "to clear them, so nothing was run."
+            )
+        return self.reset_fn()
 
 
 def _git_file_unmodified(dest: Path, relative_path: str) -> bool | None:
