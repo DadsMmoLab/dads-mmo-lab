@@ -1,29 +1,20 @@
-"""Tests for the native install engine (`yulon.catalog.native`, roadmap 6.2).
+"""Tests for the AzerothCore family (`yulon.catalog.families.azerothcore`, roadmap 7.1).
+
+The tests of `test_native.py` (roadmap 6.2), re-homed unchanged in intent when
+the engine split into a game-free spine and a family: every one of them is
+about WHAT the WotLK install does — its stages, its refusals, what a resume
+repeats — and that is the family's contract. Spine-only behaviour is in
+`test_spine.py`; the machine double is `tests/support_native.py`.
 
 Every external effect is a seam, so a whole install runs here in milliseconds
-with no daemon, no network and no four-hour build. That is the only kind of
-test anyone on this project can run for this file: there is no Mac, so nothing
-below is evidence that the engine installs a server — it is evidence about the
-engine's control flow, its refusals, and what a resume does and does not
-repeat.
+with no daemon, no network and no four-hour build. Nothing below is evidence
+that the engine installs a server — it is evidence about the engine's control
+flow, its refusals, and what a resume does and does not repeat.
 
 The platform is always injected through the `platform_id` seam. Faking
 `sys.platform` instead mutates the real module for the whole process, which is
 how this suite once went red on every Python 3.12+ Linux box while CI stayed
 green (checklist, "CI was green while the suite was red").
-
-**Every double below must be able to give the answers the real function gives,
-including the ones that make the engine refuse.** Four blockers survived 677
-green tests and a 41-mutation run on the first version of this file, and all
-four survived for the same reason: the doubles could not produce the real
-answer. `container_project` returned `None` for a container that does not
-exist, where the real one returns `UNREADABLE`; the import probe returned
-`absent` with no database running, which the real probe cannot do; the clone
-double made a bare `.git` directory, where a real clone of that repository also
-lays down its own `docker-compose.yml`; and there was no case at all for the
-port scan listing our own containers. So `Recorder` models a machine — what
-containers exist on it, what git has, what the database can answer and when —
-rather than answering each question the way the code under test would like.
 """
 
 from __future__ import annotations
@@ -31,15 +22,26 @@ from __future__ import annotations
 import json
 import threading
 from collections.abc import Iterator
-from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass, field
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
+from tests.support_native import (
+    ENTRY,
+    IMPORTED,
+    PARTIAL,
+    POPULATED_HALF,
+    TBC,
+    UNREADABLE,
+    UPSTREAM_COMPOSE,
+    Recorder,
+    engine,
+    install,
+)
 from yulon import docker, git, platform, resources
 from yulon.catalog import composegen, native, preflight
-from yulon.catalog.catalog import load_catalog
+from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.installer import (
     DockerUnavailableError,
     Installer,
@@ -49,220 +51,31 @@ from yulon.catalog.installer import (
     installer_for,
 )
 
-ENTRY = load_catalog().get("wow-wotlk")
-TBC = load_catalog().get("wow-tbc")
-
-IMPORTED = docker.ImportState("imported", "every schema is full", complete=True)
-ABSENT = docker.ImportState("absent", "no schemas at all")
-PARTIAL = docker.ImportState("partial", "acore_world has 3 tables but no import record")
-UNREADABLE = docker.ImportState("unreadable", "the database would not answer")
-POPULATED_HALF = docker.ImportState("populated", "400 rows, but acore_world is empty")
+STAGE_NAMES = AzerothCoreInstaller.STAGE_NAMES
 
 
-UPSTREAM_COMPOSE = "services:\n  ac-database:\n    image: mysql:8.4\n"
-"""Stand-in for the `docker-compose.yml` the emulator repository ships at its root.
+def test_the_family_decides_which_engine_installs_and_linux_no_longer_keeps_the_script() -> None:
+    """One place decides, from `catalog.json` data — now on `install.native` (7.1, A1).
 
-Its exact content does not matter; that it is THERE after a clone does. The
-server directory is the checkout, this repo's own `tests/fixture.md` calls that
-file "the `docker-compose.yml` shipped in that repo", and the Linux installer's
-whole mechanism (write only an override, then `compose up -d --build`) only
-works because it is. A clone double that made only `.git` hid a blocker that
-refused every install.
-"""
-
-
-@dataclass
-class Recorder:
-    """A whole machine's worth of doubles, and a record of what the engine did to it."""
-
-    calls: list[str] = field(default_factory=list)
-    clones: list[git.CloneSpec] = field(default_factory=list)
-    remotes: dict[Path, str] = field(default_factory=dict)
-    tracked: dict[Path, str] = field(default_factory=dict)
-    """Files git has, and their committed content — what `git status` compares against."""
-
-    git_answers: bool = True
-    """False when git cannot be asked at all, which is `is_unmodified()`'s `None`."""
-
-    images: bool | None = True
-    build_result: docker.AttachedRun = docker.AttachedRun(0, ("built",))
-    one_shot_result: docker.AttachedRun = docker.AttachedRun(0, ("ran",))
-    probe_answers: list[docker.ImportState] = field(default_factory=lambda: [ABSENT, IMPORTED])
-    reset_answer: tuple[str, ...] = ("acore_world",)
-    containers: dict[str, str | None] = field(default_factory=dict)
-    """Containers that EXIST on this machine, and the compose project owning each.
-
-    `None` is a container carrying no compose label. A name that is not a key
-    here does not exist — and `container_project()` answers `UNREADABLE` for
-    those, because `docker inspect <missing>` exits 1. That is the answer the
-    old `projects.get(name)` double could never give, and it refused every
-    fresh install.
+    WotLK is native on every platform, Linux included: the flip is one JSON key.
+    The three CMaNGOS entries have no `native` block yet, so they keep the
+    script path on Linux and, off Linux, the 6.1 refusal — which still comes
+    from `Installer`, the one place that words it, until 7.2 deletes it.
     """
-
-    daemon_lists_containers: bool = True
-    """False when `docker ps -a` fails, which the real `container_exists()` RAISES on."""
-
-    db_started: bool = False
-    db_start_error: str = ""
-    db_healthy: bool = True
-    ready: bool = True
-
-    def probe(self) -> docker.ImportState:
-        """What the databases read as — and `unreadable` until one is running.
-
-        The real probe is `controller_wow_wotlk.repair.import_state()`, which
-        asks `DockerMysql.databases()`, i.e. `docker exec ac-database mysql …`.
-        With no database container that raises and the state is `unreadable`.
-        `absent` is not an answer it can give, so this double cannot give it
-        either until `start_db` has run.
-        """
-        self.calls.append("probe")
-        if not self.db_started:
-            return UNREADABLE
-        return self.probe_answers.pop(0) if len(self.probe_answers) > 1 else self.probe_answers[0]
-
-    def reset(self) -> tuple[str, ...]:
-        self.calls.append("reset")
-        return self.reset_answer
-
-    def container_exists(self, name: str) -> bool:
-        if not self.daemon_lists_containers:
-            raise docker.DockerCommandError("docker ps -a exited 1: is the daemon running?")
-        return name in self.containers
-
-    def container_project(self, name: str) -> str | None:
-        return self.containers[name] if name in self.containers else docker.UNREADABLE
-
-    def file_unmodified(self, dest: Path, relative_path: str) -> bool | None:
-        """`git status --porcelain -- <path>`: empty only for tracked and unchanged.
-
-        Three answers, because the real command distinguishes three states and
-        the engine treats them differently: untracked (`?? path`) and modified
-        (` M path`) are both False, and a git that cannot be asked is None.
-        """
-        if not self.git_answers or not (dest / ".git").is_dir():
-            return None
-        path = dest / relative_path
-        if path not in self.tracked:
-            return False
-        return path.is_file() and path.read_text(encoding="utf-8") == self.tracked[path]
-
-    def start_db(self, spec: docker.ContainerSpec, server_dir: Path) -> None:
-        self.calls.append("start-db")
-        if self.db_start_error:
-            raise docker.DockerCommandError(self.db_start_error)
-        self.db_started = True
-
-    def seams(self, **overrides: object) -> native.Seams:
-        def clone(spec: git.CloneSpec) -> None:
-            self.calls.append(f"clone:{spec.url}")
-            self.clones.append(spec)
-            (spec.dest / ".git").mkdir(parents=True, exist_ok=True)
-            self.remotes[spec.dest] = spec.url
-            if spec.url == ENTRY.emulator.sources[0].url:
-                # What the real repository leaves behind, not just `.git`.
-                path = spec.dest / composegen.BASE_FILE
-                path.write_text(UPSTREAM_COMPOSE, encoding="utf-8")
-                self.tracked[path] = UPSTREAM_COMPOSE
-
-        def build(
-            server_dir: Path, files: object, *, sink: object = None, cancel: object = None
-        ) -> docker.AttachedRun:
-            self.calls.append("build")
-            if callable(sink):
-                sink("compiling")
-            return self.build_result
-
-        def one_shot(
-            service: str, server_dir: Path, *, sink: object = None, cancel: object = None
-        ) -> docker.AttachedRun:
-            self.calls.append(f"one-shot:{service}")
-            if callable(sink):
-                sink(f"{service} said something")
-            return self.one_shot_result
-
-        def verify(
-            probe: object, service: str, server_dir: Path, run: object
-        ) -> docker.ImportState:
-            self.calls.append("verify")
-            return IMPORTED
-
-        seams = native.Seams(
-            platform_id=lambda: "macos",
-            docker_ready=lambda: True,
-            ensure_docker=_never_provisions,
-            gather=self.gather,
-            clone=clone,
-            remote_url=lambda dest: self.remotes.get(dest),
-            file_unmodified=self.file_unmodified,
-            images_built=lambda refs: self.images,
-            build=build,
-            one_shot=one_shot,
-            verify_import=verify,
-            container_exists=self.container_exists,
-            container_project=self.container_project,
-            start_db=self.start_db,
-            start=self.start,
-            wait_db_healthy=lambda spec: self.db_healthy,
-            wait_ready=lambda spec, ready: self.ready,
-            keep_awake=lambda: nullcontext(),
-        )
-        for key, value in overrides.items():
-            setattr(seams, key, value)
-        return seams
-
-    def gather(self, entry: object, server_dir: Path, **_kwargs: object) -> preflight.Facts:
-        self.calls.append("gather")
-        return preflight.Facts(
-            platform_id="macos",
-            docker_ready=True,
-            vm=platform.VmResources(16 * preflight.GIB, 4),
-            data_root=Path("/var/lib/docker"),
-            data_root_free=200 * preflight.GIB,
-            server_dir_free=200 * preflight.GIB,
-            same_volume=False,
-            bind_mount=True,
-        )
-
-    def start(self, spec: docker.ContainerSpec, server_dir: Path) -> bool:
-        self.calls.append("start")
-        return True
-
-
-def _never_provisions(**_kwargs: object) -> platform.ProvisionReport:
-    raise AssertionError("the engine asked to provision Docker when Docker was already ready")
-
-
-def engine(rec: Recorder, **overrides: object) -> native.NativeInstaller:
-    return native.NativeInstaller(
-        ENTRY,
-        installers_root=resources.installers_dir(),
-        import_probe=rec.probe,
-        reset_unfinished=rec.reset,
-        seams=rec.seams(**overrides),
-    )
-
-
-def install(rec: Recorder, server_dir: Path, **overrides: object) -> list[str]:
-    return list(engine(rec, **overrides).run(InstallOptions(server_dir=server_dir)))
-
-
-# -- dispatch ---------------------------------------------------------------
-
-
-def test_the_platform_decides_which_engine_installs_and_linux_keeps_the_script() -> None:
-    """One place decides, from `catalog.json` data (roadmap 6.2/6.3)."""
-    assert isinstance(installer_for(ENTRY, platform_id=lambda: "linux"), Installer)
-    assert isinstance(installer_for(ENTRY, platform_id=lambda: "macos"), native.NativeInstaller)
-    assert isinstance(installer_for(ENTRY, platform_id=lambda: "windows"), native.NativeInstaller)
-    # An entry with no macOS/Windows path at all still gets the 6.1 refusal, from
-    # the script installer, which is the one place that words it.
+    assert isinstance(installer_for(ENTRY, platform_id=lambda: "linux"), AzerothCoreInstaller)
+    assert isinstance(installer_for(ENTRY, platform_id=lambda: "macos"), AzerothCoreInstaller)
+    assert isinstance(installer_for(ENTRY, platform_id=lambda: "windows"), AzerothCoreInstaller)
+    assert isinstance(installer_for(TBC, platform_id=lambda: "linux"), Installer)
     assert isinstance(installer_for(TBC, platform_id=lambda: "macos"), Installer)
     assert isinstance(installer_for(TBC, platform_id=lambda: "windows"), Installer)
 
 
-def test_script_platforms_defaults_to_platforms_so_old_entries_mean_what_they_said() -> None:
-    assert TBC.install.script_platforms is None
+def test_the_entry_names_its_family_and_a_scriptless_entry_still_reads_as_scripted() -> None:
+    """`family` is catalog data; an entry without a `native` block has not been asked yet."""
+    assert ENTRY.install.native is not None
+    assert ENTRY.install.native.family == "azerothcore"
+    assert AzerothCoreInstaller.family == ENTRY.install.native.family
+    assert TBC.install.native is None
     assert TBC.install.scripted_platforms() == TBC.install.platforms
     assert TBC.install.uses_script("linux") is True
     assert TBC.install.is_native("linux") is False
@@ -270,15 +83,11 @@ def test_script_platforms_defaults_to_platforms_so_old_entries_mean_what_they_sa
     # honest 6.1 refusal, not an engine that starts and then fails.
     assert TBC.install.is_native("macos") is False
     assert TBC.install.is_native("windows") is False
-    assert ENTRY.install.is_native("macos") is True
-    assert ENTRY.install.is_native("windows") is True
-    assert ENTRY.install.uses_script("linux") is True
-    assert ENTRY.install.uses_script("windows") is False
 
 
 def test_the_unsupported_platform_refusal_still_comes_first(tmp_path: Path) -> None:
     rec = Recorder()
-    installer = native.NativeInstaller(TBC, seams=rec.seams(platform_id=lambda: "macos"))
+    installer = AzerothCoreInstaller(TBC, seams=rec.seams(platform_id=lambda: "macos"))
     with pytest.raises(UnsupportedPlatformError, match="cannot be installed on macOS"):
         list(installer.run(InstallOptions(server_dir=tmp_path)))
     assert rec.calls == []
@@ -299,6 +108,7 @@ def test_every_seam_defaults_to_the_real_function_it_stands_in_for() -> None:
     assert real.images_built is docker.images_built
     assert real.one_shot is docker.run_one_shot
     assert real.gather is preflight.gather
+    assert real.wait_ready is docker.wait_ready_for
     # `ensure_docker` is the one seam whose REAL default escalates on Linux, so
     # the engine not calling it (or calling a fake) is what the macOS path's
     # "no sudo" claim ultimately rests on. Pin that the default really is the
@@ -331,7 +141,7 @@ def test_a_fresh_install_runs_every_stage_in_order(tmp_path: Path) -> None:
         "start",
     ]
     assert "compiling" in lines  # the build's output is streamed, not buffered
-    state = native.read_state(server_dir, valid=native.STAGE_ORDER)
+    state = native.read_state(server_dir, valid=STAGE_NAMES)
     assert state is not None
     assert state.completed == (
         "clone-core",
@@ -351,21 +161,24 @@ def test_a_fresh_install_runs_every_stage_in_order(tmp_path: Path) -> None:
 def test_preflight_and_guard_and_up_and_ready_are_never_recorded(tmp_path: Path) -> None:
     """A guard a resume skips is not a guard, and a resume must really start the server.
 
-    The assertion that matters is the engine-level one: a finished install has
-    none of them written down. `with_stage` is asserted below only for what it
-    still owns — ordering and the stage names it will accept at all.
+    Asserted twice on purpose: a finished install has none of them written
+    down, AND the stage tuple refuses to record them at all. Only the second
+    half survives someone rearranging `run()` — the first would keep passing if
+    a stage stopped being reached for an unrelated reason. `preflight` and
+    `guard` are not stages any more: the spine owns them, so a family can
+    neither forget them nor record them.
     """
     rec = Recorder(images=False)
     server_dir = tmp_path / "wow"
     install(rec, server_dir)
-    state = native.read_state(server_dir, valid=native.STAGE_ORDER)
+    state = native.read_state(server_dir, valid=STAGE_NAMES)
     assert state is not None
-    assert not (set(state.completed) & native.NEVER_RECORDED)
-    fresh = native.InstallState(game_id=ENTRY.id, install_id="abcd1234")
-    assert fresh.with_stage("build", native.STAGE_ORDER).completed == ("build",)
-    # `with_stage` no longer knows NEVER_RECORDED; `_run_stage` enforces it (the
-    # engine-level assertion above) and A.3 moves the rule to `Stage.recorded`.
-    assert fresh.with_stage("no-such-stage", native.STAGE_ORDER).completed == ()
+    assert not (set(state.completed) & {"start-db", "up", "ready"})
+    assert "preflight" not in STAGE_NAMES and "guard" not in STAGE_NAMES
+    by_name = {stage.name: stage for stage in engine(Recorder()).stages()}
+    for name in ("start-db", "up", "ready"):
+        assert by_name[name].recorded is False, f"{name} would be written down"
+    assert by_name["build"].recorded is True
 
 
 def resumed(server_dir: Path, **overrides: object) -> Recorder:
@@ -737,7 +550,7 @@ def test_starting_the_database_is_never_recorded_so_a_resume_does_it_again(
     """A resume probes too, so it needs the database up just as much as a first install."""
     server_dir = tmp_path / "wow"
     install(Recorder(images=False), server_dir)
-    state = native.read_state(server_dir, valid=native.STAGE_ORDER)
+    state = native.read_state(server_dir, valid=STAGE_NAMES)
     assert state is not None
     assert "start-db" not in state.completed
     again = resumed(server_dir, images=True, probe_answers=[IMPORTED])
@@ -780,7 +593,7 @@ def test_a_populated_but_unfinished_database_is_refused(tmp_path: Path) -> None:
 
 def test_an_engine_without_the_reset_seam_refuses_a_partial_database(tmp_path: Path) -> None:
     rec = Recorder(images=False, probe_answers=[PARTIAL])
-    installer = native.NativeInstaller(
+    installer = AzerothCoreInstaller(
         ENTRY,
         installers_root=resources.installers_dir(),
         import_probe=rec.probe,
@@ -794,7 +607,7 @@ def test_an_engine_without_the_reset_seam_refuses_a_partial_database(tmp_path: P
 def test_an_engine_with_no_probe_at_all_refuses_before_anything_runs(tmp_path: Path) -> None:
     """An installer that cannot ask what the databases hold must not write to them."""
     rec = Recorder()
-    installer = native.NativeInstaller(ENTRY, import_probe=None, seams=rec.seams())
+    installer = AzerothCoreInstaller(ENTRY, import_probe=None, seams=rec.seams())
     with pytest.raises(InstallerError, match="built without a way to check"):
         list(installer.run(InstallOptions(server_dir=tmp_path / "wow")))
     assert rec.calls == []
@@ -808,7 +621,7 @@ def test_a_failed_stage_records_nothing_so_it_runs_again(tmp_path: Path) -> None
     server_dir = tmp_path / "wow"
     with pytest.raises(InstallerError, match="no space left"):
         install(rec, server_dir)
-    state = native.read_state(server_dir, valid=native.STAGE_ORDER)
+    state = native.read_state(server_dir, valid=STAGE_NAMES)
     assert state is not None
     assert "build" not in state.completed
     assert state.last_error  # …but the reason is kept for the next run's log
@@ -912,7 +725,7 @@ def test_an_unreadable_state_file_is_a_missing_hint_not_a_crash(tmp_path: Path) 
     server_dir = tmp_path / "wow"
     server_dir.mkdir()
     (server_dir / native.STATE_FILE).write_text("{not json", encoding="utf-8")
-    assert native.read_state(server_dir, valid=native.STAGE_ORDER) is None
+    assert native.read_state(server_dir, valid=STAGE_NAMES) is None
 
 
 def test_the_state_file_only_records_stages_this_engine_knows(tmp_path: Path) -> None:
@@ -930,7 +743,7 @@ def test_the_state_file_only_records_stages_this_engine_knows(tmp_path: Path) ->
         ),
         encoding="utf-8",
     )
-    state = native.read_state(server_dir, valid=native.STAGE_ORDER)
+    state = native.read_state(server_dir, valid=STAGE_NAMES)
     assert state is not None
     assert state.completed == ("build",)
 
@@ -1124,3 +937,29 @@ def test_macos_native_installer_handles_db_healthy_timeout(tmp_path: Path) -> No
     rec = Recorder(images=False, db_healthy=False)
     with pytest.raises(InstallerError, match="The database never reported healthy"):
         install(rec, tmp_path / "wow-macos-db-unhealthy")
+
+
+# -- the stage names, pinned -------------------------------------------------
+
+
+def test_wotlk_stage_names_are_the_historical_tuple() -> None:
+    """A state file written by the 6.3 Windows partial install (2026-08-25) exists and must read.
+
+    Renaming a stage reinterprets every `.yulon-install.json` in the wild —
+    a resume would redo, or worse skip, work under a name it no longer knows.
+    The CMaNGOS family (7.3), which has no state files anywhere, is free to
+    pick its own names; this tuple is not.
+    """
+    assert AzerothCoreInstaller.STAGE_NAMES == (
+        "clone-core",
+        "clone-modules",
+        "generate-compose",
+        "build",
+        "client-data",
+        "start-db",
+        "import",
+        "up",
+        "ready",
+    )
+    assert engine(Recorder()).stage_names() == AzerothCoreInstaller.STAGE_NAMES
+    assert len(set(AzerothCoreInstaller.STAGE_NAMES)) == len(AzerothCoreInstaller.STAGE_NAMES)
