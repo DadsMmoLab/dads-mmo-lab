@@ -189,7 +189,12 @@ def test_container_git_mounts_the_destination_and_clones_into_it(
 ) -> None:
     """macOS/Windows already require Docker, so git need not be a second prerequisite."""
     dest = tmp_path / "core"
-    git.ContainerGit().clone(git.CloneSpec(url="https://example/core.git", dest=dest, depth=None))
+    # The SELinux answer is stated rather than inherited from the box the suite
+    # runs on: on a Fedora runner the real seam answers "enforcing" and the
+    # mount is `…:/git:z`, which the labelling tests below assert on purpose.
+    git.ContainerGit(selinux_enforcing=lambda: False).clone(
+        git.CloneSpec(url="https://example/core.git", dest=dest, depth=None)
+    )
     argv = seen[0]
     assert argv[:4] == ["docker", "run", "--rm", "-v"]
     assert argv[4] == f"{dest}:/git"
@@ -198,6 +203,76 @@ def test_container_git_mounts_the_destination_and_clones_into_it(
     assert argv[-2:] == ["https://example/core.git", "."]
     assert "--depth" not in argv
     assert "@sha256:" in " ".join(argv), "the image must be pinned by digest, not by a moving tag"
+
+
+def _clone_mount(
+    seen: list[list[str]], dest: Path, *, enforcing: bool | None, fs_type: str | None = "ext2/ext3"
+) -> str:
+    """The `-v` argument of the one containerized clone this states the machine for."""
+    git.ContainerGit(
+        selinux_enforcing=lambda: enforcing, filesystem_type=lambda _path: fs_type
+    ).clone(git.CloneSpec(url="https://example/core.git", dest=dest, depth=None))
+    argv = seen[-1]
+    return argv[argv.index("-v") + 1]
+
+
+def test_the_clone_mount_is_labelled_when_selinux_is_enforcing(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """Measured on a clean Fedora 44 box with SELinux Enforcing (2026-08-30).
+
+    The destination is a folder the app has just created under the user's home,
+    so it is `user_home_t`, and a confined container may only write
+    `container_file_t`:
+
+        $ docker run --rm -v /home/pk/labtest:/git ... -c "touch /git/x"
+        touch: /git/x: Permission denied
+        $ docker run --rm -v /home/pk/labtest:/git:z ... -c "touch /git/y"
+        (succeeded)
+
+    So with the preflight probe fixed, every Fedora install stopped one stage
+    later, at `clone-core`.
+    """
+    dest = tmp_path / "core"
+    assert _clone_mount(seen, dest, enforcing=True) == f"{dest}:/git:z"
+
+
+def test_the_clone_mount_is_not_labelled_where_selinux_is_not_enforcing(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """Relabelling is not free and not universal: no SELinux, no `:z`.
+
+    Same rule the generated compose binds follow, because it is literally the
+    same function deciding — `platform.bind_label()`.
+    """
+    dest = tmp_path / "core"
+    assert _clone_mount(seen, dest, enforcing=False) == f"{dest}:/git"
+
+
+def test_a_selinux_answer_nobody_could_read_does_not_label_the_clone_mount(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """THREE answers, not two. `None` is "could not ask", and it is not a quiet yes.
+
+    A `:z` on a machine that never claimed to be enforcing asks the daemon to
+    rewrite the labels of a folder for no evidence, and on an engine that does
+    not support the option it fails an install that otherwise works.
+    """
+    dest = tmp_path / "core"
+    assert _clone_mount(seen, dest, enforcing=None) == f"{dest}:/git"
+
+
+def test_the_clone_mount_is_not_labelled_on_a_filesystem_that_cannot_hold_labels(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """Enforcing is not enough: exFAT/NTFS/CIFS carry no labels and `:z` on them is refused.
+
+    Not re-implemented here — `platform.bind_label()` already consults
+    `selinux_labels_supported()`, and reusing that seam is what brings the rule
+    along. This asserts that the reuse is real.
+    """
+    dest = tmp_path / "core"
+    assert _clone_mount(seen, dest, enforcing=True, fs_type="ntfs") == f"{dest}:/git"
 
 
 def test_docker_desktop_never_gets_a_user_flag(

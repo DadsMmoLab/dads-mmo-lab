@@ -372,6 +372,13 @@ class ContainerGit:
 
     image: str = _CONTAINER_GIT_IMAGE
 
+    # The SELinux seams, in the shape `docker.bind_mount_ok()` already uses:
+    # the real functions by default, overridable so a test can state the
+    # machine's answer instead of inheriting the host the suite runs on. Both,
+    # because `platform.bind_label()` needs both — see `_capture()`.
+    selinux_enforcing: Callable[[], bool | None] = platform.selinux_enforcing
+    filesystem_type: Callable[[Path], str | None] = platform.filesystem_type
+
     def remote_url(self, dest: Path) -> str | None:
         """`git remote get-url origin` in the checkout at `dest`; see `RunnerGit.remote_url()`.
 
@@ -541,12 +548,46 @@ class ContainerGit:
         program = platform.docker_program()
         if program is None:
             raise GitError(platform.DOCKER_CLI_MISSING_HELP)
+        # `:z` on an enforcing SELinux box, and the SAME decision the generated
+        # compose binds make: `platform.bind_label()` is the one place that
+        # answers it, so the clone mount and the `{{BIND_LABEL}}` mounts can
+        # never disagree about whether this machine labels. Reusing it also
+        # brings the filesystem rule along for free — `bind_label()` consults
+        # `selinux_labels_supported()`, so a server folder on exFAT, NTFS or a
+        # network share gets no label rather than a mount the daemon refuses —
+        # and it keeps the three answers three: `selinux_enforcing()` returns
+        # `None` for "could not ask", and only `True` labels.
+        #
+        # Measured on a clean Fedora 44 box with SELinux Enforcing (2026-08-30),
+        # with the preflight probe already fixed so the install could get this
+        # far:
+        #
+        #     $ ls -Zd ~/labtest
+        #     unconfined_u:object_r:user_home_t:s0 /home/pk/labtest
+        #     $ docker run --rm -v /home/pk/labtest:/git ... -c "touch /git/x"
+        #     touch: /git/x: Permission denied
+        #     $ docker run --rm -v /home/pk/labtest:/git:z ... -c "touch /git/y"
+        #     (succeeded, and the folder is now container_file_t)
+        #
+        # **`:z` here, `--security-opt label:disable` in `docker.bind_mount_ok()`,
+        # and the difference is the mount source.** The preflight probe
+        # deliberately mounts an ANCESTOR of the chosen folder — routinely the
+        # user's whole home directory — so a `:z` there would recursively
+        # relabel `$HOME` to `container_file_t` and break the desktop session.
+        # This mount is the server directory itself, the folder the app just
+        # created and owns; relabelling THAT is exactly what the install wants,
+        # it is what `platform.relabel_for_containers()` does to it a few stages
+        # later anyway, and every compose bind the engine generates for it
+        # already carries the same `:z`.
+        label = platform.bind_label(
+            enforcing=self.selinux_enforcing(), fs_type=self.filesystem_type(dest)
+        )
         argv = [
             program,
             "run",
             "--rm",
             "-v",
-            f"{dest}:/git",
+            f"{dest}:/git{label}",
             # State the working directory rather than inheriting the image's.
             # `image` is a public field, so an override would otherwise clone
             # into the wrong place — silently, since `.` would resolve
