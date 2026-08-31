@@ -144,13 +144,25 @@ _EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 #     + --attr-source=<empty tree>  -> neither ran
 #
 # `--attr-source` is the one that reaches the filters: a clean/smudge driver is
-# selected by a `filter` ATTRIBUTE, and reading attributes from the empty tree
-# means no path has one, so no driver is ever consulted. Git offers no "run no
-# filters" switch, and the driver NAMES come from the repository's own config,
-# so there is nothing to enumerate and override — cutting off the selection is
-# the only mechanism there is. It is safe to require here because this argv only
-# ever runs inside the pinned digest below (git 2.49.1) and `--attr-source`
-# needs 2.40; the host-git `RunnerGit` is deliberately not given it.
+# selected by a `filter` ATTRIBUTE, so cutting off the selection is the only
+# mechanism there is — git offers no "run no filters" switch, and the driver
+# NAMES come from the repository's own config, so there is nothing to enumerate
+# and override. It is safe to require here because this argv only ever runs
+# inside the pinned digest below (git 2.49.1) and `--attr-source` needs 2.40;
+# the host-git `RunnerGit` is deliberately not given it.
+#
+# `--attr-source` covers the WORKING TREE's `.gitattributes` and NOTHING ELSE.
+# Review measured the other two attribute sources on git 2.51.2, with a
+# `filter.evil.clean` that logs when it runs:
+#
+#     .git/info/attributes      + --attr-source  -> the filter RAN
+#     core.attributesFile (repo config) + same   -> the filter RAN
+#     ... and + -c core.attributesFile=/dev/null -> it did not
+#
+# so `core.attributesFile` is in the list below, and `$GIT_DIR/info/attributes`
+# is NOT closable by any flag. Both files are repository content in exactly the
+# sense `core.fsmonitor` is, so this list does not make a hostile repository
+# safe — it removes the easy routes and leaves one open.
 #
 # `--no-optional-locks` stops `status` refreshing `.git/index`, which is both a
 # write the `:ro` mount would refuse and the trigger for the `post-index-change`
@@ -162,12 +174,17 @@ _EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 #
 # What this does NOT cover, said plainly rather than left to be discovered: git
 # has no switch that disables filter DRIVERS themselves, only the attributes
-# that select them, so a future caller that needs real attributes gets no
-# protection from this list. Whatever it does run is contained by
-# `_READ_ONLY_CONTAINER_ARGS` above and by nothing else.
+# that select them — and it cannot override `$GIT_DIR/info/attributes` at all,
+# so a repository that puts its `filter` attribute THERE still selects a driver
+# despite every flag in this list. A future caller that needs real attributes
+# gets no protection either. Whatever does run is contained by
+# `_READ_ONLY_CONTAINER_ARGS` above and by nothing else, which is why that list
+# is not optional.
 _UNTRUSTED_REPO_ARGS = [
     "--no-optional-locks",
     f"--attr-source={_EMPTY_TREE}",
+    "-c",
+    "core.attributesFile=/dev/null",
     "-c",
     "core.fsmonitor=false",
     "-c",
