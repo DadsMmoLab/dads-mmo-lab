@@ -618,9 +618,31 @@ def test_the_recorded_rename_is_two_names_and_not_a_licence_to_rename() -> None:
     upstream = _config({"ac-database": {}, "ac-client-data": {}})
     assert sc.compare_stack(upstream, upstream) == []
     assert sc.compare_stack(ours, upstream) == [
+        "volumes: the recorded rename `db-data` -> `ac-database` no longer describes the native "
+        "stack, which declares ['ac-client-data', 'mysql-data']",
         "volumes: only in the native stack ['mysql-data']",
         "volumes: only in the proven install ['ac-database']",
     ]
+
+
+def test_a_translation_that_stopped_describing_the_proven_install_says_so() -> None:
+    """The condition on keeping the table: an entry that quietly stops matching is worse than no
+    entry at all. If upstream renames `ac-database`, the untranslated name arrives as a
+    declaration nobody has seen before and the diff reads as one volume ADDED and another
+    REMOVED, rather than as the rename it is — which is how a two-line record of a decided
+    divergence becomes a wildcard nobody rechecks. The guard names both spellings and what that
+    side really declares, so the fix — correct the table, or record a second rename — is one
+    read away."""
+    native = _config({"db-data": {}, "client-data": {}})
+    upstream_renamed = _config({"acore-database": {}, "ac-client-data": {}})
+    assert sc.compare_stack(native, upstream_renamed) == [
+        "volumes: the recorded rename `db-data` -> `ac-database` no longer describes the proven "
+        "install, which declares ['ac-client-data', 'acore-database']",
+        "volumes: only in the native stack ['ac-database']",
+        "volumes: only in the proven install ['acore-database']",
+    ]
+    # And it stays quiet while the record still holds on both sides.
+    assert sc.compare_stack(native, native) == []
 
 
 def test_an_external_or_redriven_declaration_is_reported(tmp_path: Path) -> None:

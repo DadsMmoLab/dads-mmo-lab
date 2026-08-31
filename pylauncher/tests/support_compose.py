@@ -106,16 +106,23 @@ DESIGN_VOLUME_NAMES: Mapping[str, str] = {
 }
 """The one recorded volume-name difference, mapped native -> upstream.
 
-`pyplan/checklist.md`, "Recorded, not fixed" (2026-08-24): "the volume names differ (`db-data`
-and `client-data` vs `ac-database` and `ac-client-data`). Both are project-scoped so nothing
-collides". The 2026-08-23 teardown gate saw the proven install's two as
-`wow-server-playerbots_ac-database` and `_ac-client-data`, which is the same two short names.
+TWO SOURCES SAY THESE ARE THE SAME TWO STORES UNDER TWO NAMES, and both are greppable:
+
+* `pyplan/checklist.md`, the "Recorded, not fixed:" line under "The compose diff against the
+  proven install" (2026-08-24) — "the volume names differ (`db-data` and `client-data` vs
+  `ac-database` and `ac-client-data`). Both are project-scoped so nothing collides".
+* the 2026-08-23 teardown gate in the same file (grep for `wow-server-playerbots_ac-database`),
+  which read the proven install's two volumes off the box as
+  `wow-server-playerbots_ac-database` and `_ac-client-data` — the same two short names.
 
 A MOUNT carries nothing but a name, a kind and a target, so there the name is erased outright. A
 top-level DECLARATION also carries options, and options compared without an identity to hang on
 cannot tell "client-data moved to another disk" from "db-data did". So the two recorded names
 are translated here instead, and every other name is compared exactly as written — a third
-volume, or a rename nobody recorded, is a difference."""
+volume, or a rename nobody recorded, is a difference.
+
+This is a record of a decided divergence, not a wildcard, and `_stale_translations()` keeps it
+one: an entry that stops describing either side is reported rather than quietly doing nothing."""
 
 NATIVE_ONLY_ENV: frozenset[tuple[str, str]] = frozenset(
     {("ac-db-import", "AC_PLAYERBOTS_DATABASE_INFO")}
@@ -452,6 +459,32 @@ def _declaration_problems(
     return problems
 
 
+def _stale_translations(native: Stack, proven: Stack) -> list[str]:
+    """A `DESIGN_VOLUME_NAMES` entry that has stopped describing either side.
+
+    The table equates two names, so it is only true while BOTH names name something: the source
+    on ours, the target on theirs. After translation the target is what a matching declaration
+    is called on both sides, so its absence from either is the entry going stale — our template
+    renamed `db-data`, or upstream renamed `ac-database`.
+
+    Silence there would be worse than a false report. An entry that stops matching does not fail
+    safe: the untranslated name arrives as a declaration nobody has seen before, and the diff
+    reads as one volume ADDED and another REMOVED rather than as the rename it is. A standing
+    licence for two renames has to say when it is no longer describing the two.
+    """
+    ours = {name for name, _ in native.volumes}
+    theirs = {name for name, _ in proven.volumes}
+    problems: list[str] = []
+    for source, target in sorted(DESIGN_VOLUME_NAMES.items()):
+        for label, declared in (("native stack", ours), ("proven install", theirs)):
+            if target not in declared:
+                problems.append(
+                    f"volumes: the recorded rename `{source}` -> `{target}` no longer describes "
+                    f"the {label}, which declares {sorted(declared)}"
+                )
+    return problems
+
+
 def compare_stack(native: Stack, proven: Stack) -> list[str]:
     """The top-level blocks `compare()` has no room for; empty means "matches"."""
     problems: list[str] = []
@@ -460,6 +493,7 @@ def compare_stack(native: Stack, proven: Stack) -> list[str]:
             "project: the native stack has no `name:`, so its named volumes are keyed by the "
             "install directory and two installs can share one database"
         )
+    problems.extend(_stale_translations(native, proven))
     problems.extend(_declaration_problems("volumes", native.volumes, proven.volumes))
     problems.extend(_declaration_problems("networks", native.networks, proven.networks))
     return problems
