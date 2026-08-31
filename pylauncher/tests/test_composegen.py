@@ -416,18 +416,18 @@ def test_the_generated_stack_configures_the_bot_population(tmp_path: Path) -> No
     The numbers live in `catalog.json`, not in a constant in this package. They
     started in `DEFAULT_WORLD_ENV` and an adversarial review moved them: a
     per-game value in a module constant is what style-guide §3 forbids, and one
-    machine's 2000 bots is not a default for every machine — a preflight-passing
+    machine's population is not a default for every machine — a preflight-passing
     laptop can install successfully and then be unusable. Making them data is
     what lets a capacity-aware default, or a user setting, exist later.
     """
     plan = render(tmp_path / "wow")
-    assert 'AC_AI_PLAYERBOT_MIN_RANDOM_BOTS: "1600"' in plan.override
-    assert 'AC_AI_PLAYERBOT_MAX_RANDOM_BOTS: "2000"' in plan.override
+    assert 'AC_AI_PLAYERBOT_MIN_RANDOM_BOTS: "500"' in plan.override
+    assert 'AC_AI_PLAYERBOT_MAX_RANDOM_BOTS: "500"' in plan.override
 
     # Data, not code — and the structural flags stay behind in the constant.
     assert "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS" not in composegen.DEFAULT_WORLD_ENV
     assert ENTRY.install.native is not None
-    assert ENTRY.install.native.world_env["AC_AI_PLAYERBOT_MIN_RANDOM_BOTS"] == "1600"
+    assert ENTRY.install.native.world_env["AC_AI_PLAYERBOT_MIN_RANDOM_BOTS"] == "500"
     assert 'AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES: "1"' in plan.override
 
 
