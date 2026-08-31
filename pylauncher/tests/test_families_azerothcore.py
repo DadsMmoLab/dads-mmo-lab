@@ -21,8 +21,9 @@ from __future__ import annotations
 
 import json
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
@@ -857,19 +858,18 @@ def test_a_stage_failure_is_not_swallowed_by_the_keep_awake_wrapper(tmp_path: Pa
         install(rec, tmp_path / "wow")
 
 
-def test_the_native_engine_never_hands_a_prompter_to_provisioning(tmp_path: Path) -> None:
-    """The one thing keeping a native Linux entry from escalating silently.
+def test_the_prompter_reaches_provisioning_and_nothing_else(tmp_path: Path) -> None:
+    """The 7.1 flip of the 6.2 pin: `ask` is forwarded to exactly one consent seam.
 
-    `native.py`'s module docstring argues that "nothing on this path may
-    prompt" is structural rather than a fact about today's catalog: the engine
-    calls `ensure_docker()` itself, and on Linux that call CAN join the docker
-    group, so the safety comes from passing no prompter down — with nobody to
-    ask, `ensure_docker()` declines.
+    Two questions pass THROUGH the engine, both inside `ensure_docker()` and
+    before stage 1 — the docker-group consent and, on Linux, the sudo password.
+    The engine itself still asks nothing: the prompter below raises if any
+    stage calls it, and a whole install runs with it attached.
 
-    That invariant was enforced by nothing but a human reading the source. The
-    script path got a pinning test for its half the same day; this side, which
-    the docstring itself says is one `catalog.json` key away from mattering,
-    did not (review, 2026-08-24).
+    Until this flip the 6.2 pin asserted `ask is None` at this seam, which made
+    the whole consent path unreachable from the Install button: `ensure_docker`
+    declines the docker-group join whenever there is nobody to ask, so a native
+    Linux install could never join the group however the user answered.
     """
     seen: list[dict[str, object]] = []
 
@@ -878,14 +878,90 @@ def test_the_native_engine_never_hands_a_prompter_to_provisioning(tmp_path: Path
         return platform.ProvisionReport("linux", docker_ready=True)
 
     def prompter(_question: str) -> str:
-        raise AssertionError("the native path asked the user something")
+        raise AssertionError("the engine asked the user something on its own behalf")
 
-    rec = Recorder()
+    rec = Recorder(images=False)
     installer = engine(rec, docker_ready=lambda: False, ensure_docker=provision)
     installer.preflight(InstallOptions(server_dir=tmp_path / "srv"), ask=prompter)
-
     assert seen, "ensure_docker was never reached"
-    assert seen[0].get("ask") is None
+    assert seen[0].get("ask") is prompter
+
+    seen.clear()
+    lines = list(installer.run(InstallOptions(server_dir=tmp_path / "srv"), ask=prompter))
+    assert seen[0].get("ask") is prompter
+    assert "start" in rec.calls  # the whole install ran; the prompter was never called
+    assert lines[-1].endswith(str(tmp_path / "srv"))
+
+
+def test_provisioning_is_the_only_seam_the_prompter_is_handed_to(tmp_path: Path) -> None:
+    """The negative half of the rule, asserted over every seam rather than one.
+
+    The test above proves the wire exists and that no stage CALLS the prompter.
+    Neither catches the failure this rule is really about: a second seam being
+    handed `ask` and asking later, off this call stack — `gather()` growing a
+    "may I probe your ports with sudo?" question, say. So every callable on
+    `Seams` is wrapped, a whole install runs, and the prompter is required to
+    appear in exactly one seam's arguments.
+
+    Written as an argv-shaped check rather than a grep: the same forwarding
+    spelled `ask=ask`, `**kwargs` or a partial is one object arriving at one
+    seam, and only the seam can see all three.
+    """
+    handed: list[str] = []
+
+    def watched(name: str, seam: Callable[..., object]) -> Callable[..., object]:
+        def spy(*args: object, **kwargs: object) -> object:
+            if any(arg is prompter for arg in (*args, *kwargs.values())):
+                handed.append(name)
+            return seam(*args, **kwargs)
+
+        return spy
+
+    def provision(**_kwargs: object) -> platform.ProvisionReport:
+        return platform.ProvisionReport("linux", docker_ready=True)
+
+    def prompter(_question: str) -> str:
+        raise AssertionError("the engine asked the user something on its own behalf")
+
+    rec = Recorder(images=False)
+    installer = engine(rec, docker_ready=lambda: False, ensure_docker=provision)
+    for seam_field in fields(native.Seams):
+        original = getattr(installer._seams, seam_field.name)
+        if original is not None:
+            setattr(installer._seams, seam_field.name, watched(seam_field.name, original))
+
+    list(installer.run(InstallOptions(server_dir=tmp_path / "srv"), ask=prompter))
+    assert handed == ["ensure_docker"], f"the prompter reached {handed}"
+
+
+def test_the_reason_provisioning_gave_survives_the_trip_back_up(tmp_path: Path) -> None:
+    """Six ways of not joining the docker group, six sentences — still six up here.
+
+    `ensure_docker()` keeps its outcomes apart on purpose (`DockerGroupOutcome`
+    is six values, and each one that leaves the user with something to do says
+    so in its own `manual_steps` line). Forwarding `ask` is only worth anything
+    if that distinction survives `_preflight_lines`: a spine that answered every
+    unready daemon with one house sentence would throw the reasons away exactly
+    when the user needs to read them.
+    """
+    messages: list[str] = []
+    for step in (
+        "You said no to the docker group, so run docker with sudo.",
+        "Nobody was there to ask about the docker group.",
+        "You said yes but the group join did not run.",
+    ):
+
+        def provision(step: str = step, **_kwargs: object) -> platform.ProvisionReport:
+            return platform.ProvisionReport("linux", manual_steps=(step,))
+
+        rec = Recorder(images=False)
+        installer = engine(rec, docker_ready=lambda: False, ensure_docker=provision)
+        with pytest.raises(DockerUnavailableError) as caught:
+            installer.preflight(InstallOptions(server_dir=tmp_path / "srv"))
+        assert step in str(caught.value)
+        messages.append(str(caught.value))
+
+    assert len(set(messages)) == 3, "three provisioning outcomes read as one message"
 
 
 def test_macos_native_installer_full_run_and_compose_generation(tmp_path: Path) -> None:

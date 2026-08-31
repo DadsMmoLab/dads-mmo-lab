@@ -473,8 +473,12 @@ class StagedInstaller:
         interchangeable. Docker provisioning is attempted exactly once before
         the machine facts are gathered, because every number below it is
         fabricated without a daemon.
+
+        `ask` is forwarded to Docker provisioning — the docker-group consent
+        and the Linux sudo password — and to nothing else; see the module
+        docstring.
         """
-        for _ in self._preflight_lines(options, cancel):
+        for _ in self._preflight_lines(options, cancel, ask):
             pass
 
     def run(
@@ -486,6 +490,8 @@ class StagedInstaller:
     ) -> Iterator[str]:
         """Run the install, yielding output live. Resumes whatever a previous run finished.
 
+        `ask` reaches provisioning only; no stage may prompt.
+
         Raises:
             InstallerError: any refusal, any stage that failed, or a cancel.
                 The message is the sentence a user reads in the failure dialog.
@@ -494,7 +500,7 @@ class StagedInstaller:
         server_dir = self.server_dir(opts)
         yield f"Installing {self.entry.name} into {server_dir}"
         yield OPENING_NOTE
-        yield from self._preflight_lines(opts, cancel)
+        yield from self._preflight_lines(opts, cancel, ask)
         self._check_cancel(cancel)
 
         state = self._guard(server_dir)
@@ -594,7 +600,10 @@ class StagedInstaller:
     # -- preflight -------------------------------------------------------
 
     def _preflight_lines(
-        self, options: InstallOptions, cancel: threading.Event | None
+        self,
+        options: InstallOptions,
+        cancel: threading.Event | None,
+        ask: runner.Prompter | None = None,
     ) -> Iterator[str]:
         here = self._seams.platform_id()
         if not self.entry.install.supports(here):
@@ -633,7 +642,10 @@ class StagedInstaller:
                 "Docker Desktop and waiting for its engine, up to a few minutes with no "
                 "output. You can stop at any time."
             )
-            report = self._seams.ensure_docker(cancel=cancel)
+            # `ask` reaches provisioning and nothing else: the docker-group
+            # consent and the Linux sudo password are asked there, before any
+            # privileged step, and declined when there is nobody to ask.
+            report = self._seams.ensure_docker(cancel=cancel, ask=ask)
             if report.reboot_required:
                 raise DockerUnavailableError(
                     "Docker's prerequisites were installed but a reboot is needed first. "
