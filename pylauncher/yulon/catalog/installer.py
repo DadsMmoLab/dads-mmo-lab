@@ -162,10 +162,17 @@ def docker_unavailable(report: platform.ProvisionReport) -> DockerUnavailableErr
             + (details or "Log out and back in, then start the install again.")
         )
     if report.docker_group == "already-member":
-        # Two causes, and the report cannot tell them apart, so both are named.
-        # `ensure_docker()` returns early when a daemon answers, so reaching
-        # here at all means it did not - which for a member of the group is
-        # either a session opened before the join, or a service that is down.
+        # Two causes, and the report cannot tell them apart, so both are named,
+        # commoner first. `ensure_docker()` returns early when a daemon answers,
+        # so reaching here at all means it did not - which for a member of the
+        # group is either a session opened before the join, or a service that is
+        # down.
+        #
+        # The log-out instruction is INSIDE this sentence and `platform.py`
+        # deliberately keeps it out of `manual_steps` for this outcome, or
+        # `details` appends a second copy of it after the "if you have already
+        # done that" clause - which sends the one user that clause exists for
+        # straight back to the advice it just ruled out (review, 2026-08-31).
         return DockerNeedsReLoginError(
             "Docker is installed and your account is already in the docker group, but this "
             "session still cannot reach the daemon. A session that was open before the group "

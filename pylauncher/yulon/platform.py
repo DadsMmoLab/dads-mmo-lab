@@ -2581,14 +2581,17 @@ def _ensure_docker_linux(
     )
 
     manual: list[str] = []
-    if outcome in ("granted", "already-member"):
-        # `already-member` is here because this function only runs when no
-        # daemon answered (`ensure_docker()` returns before it otherwise), and
-        # for a member of the group the commonest cause is a session opened
-        # before the membership existed. `DockerGroupOutcome`'s docstring has
-        # always said both outcomes may print this line; only `granted` did, so
-        # the press after the join reported nothing left to do (review,
-        # 2026-08-31).
+    if outcome == "granted":
+        # `already-member` deliberately does NOT append this, though
+        # `DockerGroupOutcome` says it may. It was added here for one phase and
+        # the result was that a member read the instruction twice: once inside
+        # `installer.docker_unavailable()`'s sentence for that outcome, and once
+        # as this step appended after it — with the clause written for the user
+        # who has ALREADY logged out sitting between the two, so the message
+        # answered its own escape hatch by repeating the advice it had just
+        # ruled out (review, 2026-08-31). Nothing is lost by leaving it out: an
+        # `already-member` report is only produced when no daemon answered, and
+        # that report always reaches the sentence, which says it once.
         manual.append(DOCKER_GROUP_RELOGIN_STEP.format(user=user))
     elif outcome == "join-failed":
         manual.append(DOCKER_GROUP_JOIN_FAILED_STEP.format(user=user))

@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from yulon import platform
+from yulon.catalog import installer
 
 # The directory the current Docker Desktop installs itself into, and the
 # `docker.exe` inside it. Real strings from a real machine (Windows 11 Pro
@@ -1191,6 +1192,30 @@ def test_linux_does_not_ask_a_user_who_is_already_a_member(
         run=near, which=_which("apt-get"), user="pk", wait_seconds=0.0, ask=decline
     )
     assert len(asked) == 1
+
+
+def test_the_message_a_member_reads_says_the_one_thing_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Composed from a REAL report, which is the only way this defect is visible.
+
+    This file imports `catalog.installer` for one reason: the sentence a user
+    reads is built from `manual_steps`, and both tests written when
+    `already-member` was added constructed `ProvisionReport` BY HAND with that
+    tuple empty. A hand-built report cannot show a duplication that only exists
+    once provisioning fills the tuple in — so "log out and back in" shipped
+    twice, once inside the sentence and once appended after it, with the clause
+    written for the user who has ALREADY logged out sitting between the two
+    (review, 2026-08-31).
+    """
+    _linux(monkeypatch)
+    run = _WithGroups("pk sudo docker")
+    report = platform.ensure_docker(run=run, which=_which("apt-get"), user="pk", wait_seconds=0.0)
+    assert report.docker_group == "already-member" and not report.docker_ready
+    message = str(installer.docker_unavailable(report))
+    assert message.lower().count("log out and back in") == 1, message
+    # The last thing said is the branch for the user the first half does not fit.
+    assert message.rstrip().endswith("start it and try again."), message
 
 
 def test_linux_never_opens_a_dialog_for_a_plan_or_a_cancelled_run(
