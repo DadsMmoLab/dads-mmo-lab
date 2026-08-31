@@ -1,12 +1,18 @@
 """The generated WotLK stack against the proven yulon-ubuntu install (phase7-decisions, "The
 compose-config reference").
 
-Two sources, one vocabulary. `support_compose.shape_from_plan()` reads the three files
+Two sources, one vocabulary. `support_compose.shape_from_plan()` reads the files
 `composegen.render()` produces; `shape_from_config()` reads what `docker compose config
 --format json` says about a real install. Both become the same `Service` records, and
 `compare()` reports every difference that is not a documented design difference (image prefix
-and tag, volume names, `stop_grace_period`, the playerbots DB on the importer, upstream's
-build-time env). Nothing here runs a daemon.
+and tag, a named volume's name at the mount, `stop_grace_period`, the playerbots DB on the
+importer, upstream's build-time env). Nothing here runs a daemon.
+
+THE REAL INSTALL IS `tests/data/wotlk-compose-config.json`, captured off the live gate's own
+install on a clean Ubuntu box after it reached `ready` (2026-08-31), with the project `name:` and
+the absolute install path stripped so it names no machine. It is a NATIVE install — the engine's
+own output, not upstream's script install — which is what makes the rename registry empty and the
+volume names comparable as written. `pyplan/checklist.md` carries what its first run reported.
 
 The second half of this file is the bill for the first. Every rule the vocabulary applies is a
 difference it will never report again, so each one is followed by a test that a MEANINGFUL
@@ -22,6 +28,9 @@ reports that the file moved but never that the script has to be able to resume.
 
 from __future__ import annotations
 
+import json
+import os
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
@@ -36,11 +45,111 @@ from yulon.catalog.catalog import load_catalog
 ENTRY = load_catalog().get("wow-wotlk")
 TEMPLATES = resources.installers_dir()
 
+FIXTURE = Path(__file__).parent / "data" / "wotlk-compose-config.json"
+
 
 def render(server_dir: Path) -> composegen.ComposePlan:
     """Linux, no SELinux: `bind_label=""` is the byte-identical-to-before rendering."""
     return composegen.render(
         ENTRY, server_dir, templates_root=TEMPLATES, bind_label="", platform_id=lambda: "linux"
+    )
+
+
+def auto_loaded(plan: composegen.ComposePlan) -> composegen.ComposePlan:
+    """The plan MINUS the build overlay — the two files compose loads on its own.
+
+    The fixture is `docker compose config` run in the install directory, so it resolved
+    `docker-compose.yml` plus `docker-compose.override.yml` and nothing else: the build overlay
+    is deliberately never auto-loaded (its own header says so), which is what stops a
+    post-install `up` from starting a multi-hour rebuild. Comparing a three-file render against
+    that capture reported `build ... vs None` on all four built services — a difference in which
+    documents were captured, not in the stack — so the same two documents are compared on both
+    sides instead of forgiving a missing `build`, which would have hidden the engine losing the
+    overlay. `test_dropping_the_build_overlay_drops_build_and_nothing_else` is the receipt.
+    """
+    return replace(plan, build="services: {}\n")
+
+
+def test_the_rendered_stack_matches_the_proven_install(tmp_path: Path) -> None:
+    """Off SELinux the rendered files are byte-identical to 6.2's, and this is the proof that
+    they still RESOLVE to the proven install's stack — service by service, not by eye.
+
+    Both halves of the vocabulary run: `compare()` sees the services, `compare_stack()` sees the
+    top-level `volumes:`/`networks:` blocks that no per-service record can reach. Wiring only one
+    would leave the other reading like coverage while comparing nothing — and the top-level block
+    is where a `driver_opts.device` can move 1.1 GB of client data to another disk in silence.
+    """
+    plan = auto_loaded(render(tmp_path))
+    proven = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    assert sc.compare(sc.shape_from_plan(plan), sc.shape_from_config(proven)) == []
+    assert sc.compare_stack(sc.stack_from_plan(plan), sc.stack_from_config(proven)) == []
+
+
+def test_dropping_the_build_overlay_drops_build_and_nothing_else(tmp_path: Path) -> None:
+    """PAID-FOR BLIND SPOT, and the fence around it. The fixture pins the RUNTIME stack, so it
+    can never report a change to `docker-compose.build.yml`; that file is owned by
+    `test_shape_from_plan_merges_the_three_files` (its dockerfile and all four targets), by
+    `test_composegen.py` and by the byte snapshot. What is asserted here is that `auto_loaded()`
+    removes exactly `build` and no other field, so it cannot quietly hide a second difference.
+    """
+    full = sc.shape_from_plan(render(tmp_path))
+    runtime = sc.shape_from_plan(auto_loaded(render(tmp_path)))
+    assert set(full) == set(runtime)
+    assert full["ac-worldserver"].build == ("apps/docker/Dockerfile", "worldserver")
+    assert all(svc.build is None for svc in runtime.values())
+    assert {name: replace(svc, build=None) for name, svc in full.items()} == runtime
+
+
+def test_the_fixture_carries_no_machine_identity() -> None:
+    """A fixture that names /home/pk or the folder's install id would drift the first time
+    somebody captured it from another box; the capture step strips both.
+
+    The install id appears in THREE places in a raw `compose config`: the top-level `name:`, the
+    `name:` compose fills into every top-level volume and network declaration (`<project>_db-data`),
+    and the image tag the engine builds (`:native-<id>`). The first two are stripped, because the
+    comparison reads them — `_options()` drops a declaration's `name`, so nothing is lost. The
+    third is left as captured, and is asserted here to be the only survivor: `image_name()` drops
+    the tag by a documented rule, so it cannot drift a result, and leaving it keeps the fixture
+    recognisably a capture rather than an edited document.
+    """
+    text = FIXTURE.read_text(encoding="utf-8")
+    data = json.loads(text)
+    install_id = "243c46e3"
+    assert "/home/" not in text
+    assert "name" not in data
+    assert all("name" not in body for body in data["volumes"].values())
+    assert all("name" not in body for body in data["networks"].values())
+    assert install_id not in json.dumps({k: v for k, v in data.items() if k != "services"})
+    for name, svc in data["services"].items():
+        assert install_id not in json.dumps({k: v for k, v in svc.items() if k != "image"}), name
+    assert set(data["services"]) == {
+        "ac-database",
+        "ac-db-import",
+        "ac-client-data-init",
+        "ac-authserver",
+        "ac-worldserver",
+    }
+
+
+def test_a_captured_compose_config_matches_the_fixture() -> None:
+    """The live gate's diff: point YULON_COMPOSE_CONFIG at `docker compose config --format json`
+    captured from a NATIVE install and YULON_COMPOSE_ROOT at that install's absolute server dir.
+    Skips, loudly, when not asked for.
+
+    Capture it the way the fixture was captured: in the install directory, with NO `-f` flags, so
+    compose resolves the two files it auto-loads and not the build overlay. Hand it the RAW
+    output — the `name:` is not stripped from a live capture, because `compare_stack()` refuses a
+    stack that has none and that refusal is half of what makes erasing volume names safe.
+    """
+    captured = os.environ.get("YULON_COMPOSE_CONFIG")
+    if not captured:
+        pytest.skip("set YULON_COMPOSE_CONFIG=<compose config json> to diff a live install")
+    root = os.environ.get("YULON_COMPOSE_ROOT")
+    raw = json.loads(Path(captured).read_text(encoding="utf-8"))
+    proven = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    assert sc.compare(sc.shape_from_config(raw, root=root), sc.shape_from_config(proven)) == []
+    assert (
+        sc.compare_stack(sc.stack_from_config(raw, root=root), sc.stack_from_config(proven)) == []
     )
 
 
@@ -138,6 +247,7 @@ def test_compare_names_the_service_and_the_field() -> None:
         image="ac-wotlk-authserver",
         ports=frozenset({("3724", 3724, "tcp")}),
         volumes=frozenset(),
+        networks=frozenset({"ac-network"}),
         env_keys=frozenset({"AC_LOGS_DIR"}),
         depends_on=(),
         build=None,
@@ -148,6 +258,7 @@ def test_compare_names_the_service_and_the_field() -> None:
         image="ac-wotlk-authserver",
         ports=frozenset(),
         volumes=frozenset(),
+        networks=frozenset({"ac-network"}),
         env_keys=frozenset({"AC_LOGS_DIR", "AC_CCACHE"}),
         depends_on=(),
         build=None,
@@ -174,6 +285,7 @@ REFERENCE = sc.Service(
             ("volume", "<named>", "/azerothcore/env/dist/data", "ro"),
         }
     ),
+    networks=frozenset({"ac-network"}),
     env_keys=frozenset({"AC_LOGS_DIR", "AC_DATA_DIR"}),
     depends_on=(("ac-database", "service_healthy"),),
     build=("apps/docker/Dockerfile", "worldserver"),
@@ -440,6 +552,57 @@ def test_the_short_list_form_means_service_started_not_no_condition() -> None:
     )
 
 
+# Rule: a service naming no `networks:` is read as compose's implicit `default`, and the
+# rendered top level grows a `default:` declaration when some service names none. `compose
+# config` materialises both; the file can spell neither.
+
+
+def test_a_service_that_left_the_stack_network_is_reported() -> None:
+    """The reason the absence is read out rather than left empty. A worldserver that lost
+    `networks: [ac-network]` lands on the implicit default bridge with every other container on
+    the machine — and would have compared equal to one that was never attached, had both spelled
+    "no networks" as the empty set."""
+    assert theirs(networks=frozenset({"default"})) == [
+        "ac-worldserver: networks {'ac-network'} vs {'default'}"
+    ]
+    assert theirs(networks=frozenset({"ac-network", "extra"})) != []
+
+
+def test_the_two_spellings_of_a_service_network_meet(tmp_path: Path) -> None:
+    """The rendered file writes `networks: [ac-network]`; `compose config` writes a mapping of
+    name to per-network aliases. Only the names are read, and a service that names none is read
+    as `default` on both sides — which is exactly what the capture shows for
+    `ac-client-data-init`, the one service in the stack that is not on `ac-network`."""
+    shape = sc.shape_from_plan(render(tmp_path))
+    assert shape["ac-worldserver"].networks == frozenset({"ac-network"})
+    assert shape["ac-client-data-init"].networks == frozenset({"default"})
+    captured = json.loads(FIXTURE.read_text(encoding="utf-8"))["services"]
+    assert sc.shape_from_config({"services": captured})["ac-client-data-init"].networks == (
+        frozenset({"default"})
+    )
+    assert sc.shape_from_plan(_plan("networks: [ac-network]\n"))["s"].networks == frozenset(
+        {"ac-network"}
+    )
+
+
+def test_the_synthesised_default_declaration_is_modelled_and_not_erased(tmp_path: Path) -> None:
+    """The `default:` block is added to the rendered top level with NO options, so it models
+    what compose does without forgiving what a declaration says. A captured `default:` that grew
+    a driver or a `driver_opts.device` is still a reported difference — and a plan where every
+    service names a network grows no `default:` at all, so the synthesis cannot become an
+    unconditional blank cheque."""
+    stack = sc.stack_from_plan(render(tmp_path))
+    redriven = _config({"db-data": {}, "client-data": {}}, networks={"default": {"driver": "host"}})
+    assert sc.compare_stack(stack, redriven) == ["networks: default [] vs ['driver=host']"]
+    attached = composegen.ComposePlan(
+        base="networks:\n  ac-network:\nservices:\n  s:\n    networks: [ac-network]\n",
+        override="services: {}\n",
+        build="services: {}\n",
+        dotenv={},
+    )
+    assert sc.stack_from_plan(attached).networks == (("ac-network", ()),)
+
+
 # Rule: `build` is (dockerfile, target); the context is not compared because it is the server
 # dir on one side and the proven box's own path on the other.
 
@@ -547,20 +710,31 @@ def test_a_stack_without_a_project_name_is_refused(tmp_path: Path) -> None:
 
 
 def test_the_rendered_top_level_volumes_and_networks_are_plain(tmp_path: Path) -> None:
-    """The two named volumes and the one network are declared with NO options, which is what
+    """The two named volumes and the two networks are declared with NO options, which is what
     makes them ordinary managed volumes on the docker root. That is the fact the next tests
-    protect. The two volumes appear under upstream's names because that rename is the one
-    recorded design difference; the network is not renamed and is not translated."""
+    protect. The volumes appear under the names the file writes, because the rename registry is
+    empty; `default` is the implicit network compose materialises for `ac-client-data-init`."""
     stack = sc.stack_from_plan(render(tmp_path))
-    assert stack.volumes == (("ac-client-data", ()), ("ac-database", ()))
-    assert stack.networks == (("ac-network", ()),)
-    # What the file itself says, which is what the translation table is checked against.
+    assert stack.volumes == (("client-data", ()), ("db-data", ()))
+    assert stack.networks == (("ac-network", ()), ("default", ()))
+    # What the file itself says, which is what the translation registry is checked against.
     assert stack.declared_volumes == ("client-data", "db-data")
 
 
-def _config(volumes: dict[str, object], networks: dict[str, object] | None = None) -> sc.Stack:
-    """A `compose config` top level with the project-prefixed `name:` compose writes on each."""
+def _config(
+    volumes: dict[str, object], networks: Mapping[str, Mapping[str, object]] | None = None
+) -> sc.Stack:
+    """A `compose config` top level with the project-prefixed `name:` compose writes on each.
+
+    `default` is declared alongside `ac-network` because that is what the real capture shows:
+    `ac-client-data-init` names no network, so compose materialises the implicit one.
+    """
     project = "yulon-wow-wotlk-056ed20d"
+    declared: Mapping[str, Mapping[str, object]] = {
+        "ac-network": {},
+        "default": {},
+        **(networks or {}),
+    }
     return sc.stack_from_config(
         {
             "services": {},
@@ -569,16 +743,21 @@ def _config(volumes: dict[str, object], networks: dict[str, object] | None = Non
                 name: {"name": f"{project}_{name}", **body}  # type: ignore[dict-item]
                 for name, body in volumes.items()
             },
-            "networks": networks or {"ac-network": {"name": f"{project}_ac-network"}},
+            "networks": {
+                name: {"name": f"{project}_{name}", **body} for name, body in declared.items()
+            },
         }
     )
 
 
 def _proven(options: dict[str, object] | None = None) -> sc.Stack:
-    """The proven install's top level. Its two volumes carry UPSTREAM's names — that difference
-    is the reason `DESIGN_VOLUME_NAMES` exists, so a stand-in spelled our way would not be one.
-    `options` attaches a body to one of them, by the name upstream calls it."""
-    volumes: dict[str, object] = {"ac-database": {}, "ac-client-data": {}}
+    """The proven install's top level, spelled the way the captured fixture spells it.
+
+    Its two volumes carry OUR names, `db-data` and `client-data`, because the reference is a
+    native install and the engine rendered them — see `DESIGN_VOLUME_NAMES`, which the capture
+    emptied. `options` attaches a body to one of them.
+    """
+    volumes: dict[str, object] = {"db-data": {}, "client-data": {}}
     volumes.update(options or {})
     return _config(volumes)
 
@@ -597,7 +776,7 @@ def test_a_relocated_named_volume_is_reported_by_the_stack_comparison(tmp_path: 
     # The per-service view cannot tell these apart at all.
     assert sc.shape_from_config({"services": {}}) == {}
     assert sc.compare_stack(relocated, proven) == [
-        "volumes: ac-client-data ['driver_opts.device=/somewhere/else', 'driver_opts.o=bind', "
+        "volumes: client-data ['driver_opts.device=/somewhere/else', 'driver_opts.o=bind', "
         "'driver_opts.type=none'] vs []"
     ]
 
@@ -607,76 +786,88 @@ def test_the_same_options_on_the_other_store_is_a_different_stack() -> None:
     stores was moved off the docker root — one is the client data, the other is the database —
     and a comparison that erased the names would call them identical."""
     client_data_moved = _config({"db-data": {}, "client-data": {"driver_opts": RELOCATION}})
-    database_moved = _proven({"ac-database": {"driver_opts": RELOCATION}})
+    database_moved = _proven({"db-data": {"driver_opts": RELOCATION}})
     assert sc.compare_stack(client_data_moved, database_moved) == [
-        "volumes: ac-client-data ['driver_opts.device=/somewhere/else', 'driver_opts.o=bind', "
+        "volumes: client-data ['driver_opts.device=/somewhere/else', 'driver_opts.o=bind', "
         "'driver_opts.type=none'] vs []",
-        "volumes: ac-database [] vs ['driver_opts.device=/somewhere/else', "
+        "volumes: db-data [] vs ['driver_opts.device=/somewhere/else', "
         "'driver_opts.o=bind', 'driver_opts.type=none']",
     ]
 
 
-def test_the_recorded_rename_is_two_names_and_not_a_licence_to_rename() -> None:
-    """`db-data`/`client-data` are translated to upstream's `ac-database`/`ac-client-data`
-    because that rename is recorded in `checklist.md` ("Recorded, not fixed", 2026-08-24) and
-    would otherwise be reported on every run forever. It is exactly those two: a third volume,
-    or a rename nobody wrote down, is a difference and is named on both sides."""
-    assert dict(sc.DESIGN_VOLUME_NAMES) == {
-        "db-data": "ac-database",
-        "client-data": "ac-client-data",
-    }
-    ours = _config({"mysql-data": {}, "client-data": {}})
-    assert sc.compare_stack(_config({"db-data": {}, "client-data": {}}), _proven()) == []
-    assert sc.compare_stack(ours, _proven()) == [
-        "volumes: the recorded rename `db-data` -> `ac-database` no longer describes the native "
-        "stack, which declares ['client-data', 'mysql-data']",
-        "volumes: only in the native stack ['mysql-data']",
-        "volumes: only in the proven install ['ac-database']",
-    ]
-
-
-def test_a_translation_that_stopped_describing_the_proven_install_says_so() -> None:
-    """The condition on keeping the table: an entry that quietly stops matching is worse than no
-    entry at all. If upstream renames `ac-database`, the untranslated name arrives as a
-    declaration nobody has seen before and the diff reads as one volume ADDED and another
-    REMOVED, rather than as the rename it is — which is how a two-line record of a decided
-    divergence becomes a wildcard nobody rechecks. The guard names both spellings and what that
-    side really declares, so the fix — correct the table, or record a second rename — is one
-    read away."""
-    native = _config({"db-data": {}, "client-data": {}})
-    upstream_renamed = _config({"acore-database": {}, "ac-client-data": {}})
-    assert sc.compare_stack(native, upstream_renamed) == [
-        "volumes: the recorded rename `db-data` -> `ac-database` no longer describes the proven "
-        "install, which declares ['ac-client-data', 'acore-database']",
-        "volumes: only in the native stack ['ac-database']",
-        "volumes: only in the proven install ['acore-database']",
-    ]
-    # And it stays quiet while the record still holds on both sides.
-    assert sc.compare_stack(native, _proven()) == []
-
-
-def test_a_coincidental_name_does_not_keep_a_dead_translation_alive() -> None:
-    """The corner the guard was getting wrong. Our side renames `db-data` to `mysql-data` — a
-    genuinely stale entry — while some other volume in the same stack happens to be called
-    `ac-database`. Asking "is the TARGET present?" answered yes for an unrelated reason and the
-    warning never fired; the add/remove pair still showed, so nothing was hidden outright, but
-    the one line that says the recorded rename has stopped describing reality was missing, and
-    that line is the whole point of keeping the table.
-
-    So the question is asked of provenance instead: does OUR side still declare `db-data`, as
-    written, before any translation. Nothing else either side happens to declare can answer it.
+def test_the_rename_registry_is_empty_because_the_capture_emptied_it() -> None:
+    """C9/C10, settled by the first real evidence. `DESIGN_VOLUME_NAMES` held
+    `db-data` -> `ac-database` and `client-data` -> `ac-client-data`, taken from a
+    `checklist.md` line and a gate log that both describe UPSTREAM's script install in
+    `~/wow-server-playerbots`. The committed reference is not that install: it is `docker compose
+    config` from the engine's own native install, and it declares `client-data` and `db-data`.
+    Every comparison this vocabulary performs is native render against native capture, so there
+    is no rename to record — and a live entry would print problem lines naming a volume that
+    exists on neither side. Empty, the names are compared exactly as written.
     """
-    # Provenance is not optional: a Stack cannot be built without saying what it declared, so
-    # the rule can never be asked of a record that has no answer.
-    with pytest.raises(TypeError):
-        sc.Stack(project="p", volumes=(), networks=())  # type: ignore[call-arg]
-    ours = _config({"mysql-data": {}, "client-data": {}, "ac-database": {}})
-    assert "ac-database" in {name for name, _ in ours.volumes}  # the coincidence, in place
-    assert sc.compare_stack(ours, _proven()) == [
+    assert dict(sc.DESIGN_VOLUME_NAMES) == {}
+    captured = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    assert sc.stack_from_config(captured).declared_volumes == ("client-data", "db-data")
+    assert sc.stack_from_config(captured).volumes == (("client-data", ()), ("db-data", ()))
+
+
+def test_a_renamed_named_volume_is_caught_at_the_top_level_not_at_the_mount() -> None:
+    """The mount rule's cost, and what pays for it. A named volume's NAME is erased at the mount
+    (`<named>`), so the per-service view cannot tell `db-data` mounted at the data path from
+    `client-data` mounted there. The DECLARATION is compared by name, exactly, and that is where
+    a renamed or swapped store is reported — which is only true because the rename registry is
+    empty, so no name is translated on its way through.
+    """
+    assert sc.volume_from_string("db-data:/azerothcore/env/dist/data") == sc.volume_from_string(
+        "client-data:/azerothcore/env/dist/data"
+    )
+    renamed = _config({"mysql-data": {}, "client-data": {}})
+    assert sc.compare_stack(renamed, _proven()) == [
+        "volumes: only in the native stack ['mysql-data']",
+        "volumes: only in the proven install ['db-data']",
+    ]
+
+
+def test_a_registered_rename_still_translates_and_still_has_to_stay_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The registry is empty, not gone: the mechanism is kept for the day a rename is recorded
+    again, and the condition on keeping it is that an entry which quietly stops matching is worse
+    than no entry at all. With one entry registered, the rename is translated and reported as
+    nothing; the moment either side stops declaring its own half AS WRITTEN, the guard names both
+    spellings and what that side really declares, rather than letting the diff read as one volume
+    ADDED and another REMOVED.
+
+    Provenance is what the guard asks, never the translated result: our side renaming `db-data`
+    to `mysql-data` while some unrelated volume happens to be called `ac-database` is a dead
+    entry, and asking "is the target present?" answered yes for the wrong reason.
+    """
+    monkeypatch.setattr(sc, "DESIGN_VOLUME_NAMES", {"db-data": "ac-database"})
+    upstream = _config({"ac-database": {}, "client-data": {}})
+    assert sc.compare_stack(_config({"db-data": {}, "client-data": {}}), upstream) == []
+    # Our side stopped declaring the source name; a coincidental `ac-database` does not save it.
+    coincidence = _config({"mysql-data": {}, "client-data": {}, "ac-database": {}})
+    assert sc.compare_stack(coincidence, upstream) == [
         "volumes: the recorded rename `db-data` -> `ac-database` no longer describes the native "
         "stack, which declares ['ac-database', 'client-data', 'mysql-data']",
         "volumes: only in the native stack ['mysql-data']",
     ]
+    # And the other half: the reference renamed the target, so the entry stops describing it and
+    # the untranslated name arrives as one volume ADDED and another REMOVED.
+    renamed_upstream = _config({"acore-database": {}, "client-data": {}})
+    assert sc.compare_stack(_config({"db-data": {}, "client-data": {}}), renamed_upstream) == [
+        "volumes: the recorded rename `db-data` -> `ac-database` no longer describes the proven "
+        "install, which declares ['acore-database', 'client-data']",
+        "volumes: only in the native stack ['ac-database']",
+        "volumes: only in the proven install ['acore-database']",
+    ]
+
+
+def test_a_stack_record_cannot_be_built_without_its_provenance() -> None:
+    """`declared_volumes` is not optional, so the staleness rule can never be asked of a record
+    that has no answer."""
+    with pytest.raises(TypeError):
+        sc.Stack(project="p", volumes=(), networks=())  # type: ignore[call-arg]
 
 
 def test_an_external_or_redriven_declaration_is_reported(tmp_path: Path) -> None:
@@ -685,7 +876,7 @@ def test_an_external_or_redriven_declaration_is_reported(tmp_path: Path) -> None
     a service."""
     proven = _proven()
     external = _config({"db-data": {}, "client-data": {"external": True}})
-    assert sc.compare_stack(external, proven) == ["volumes: ac-client-data ['external=True'] vs []"]
+    assert sc.compare_stack(external, proven) == ["volumes: client-data ['external=True'] vs []"]
     redriven = _config(
         {"db-data": {}, "client-data": {}}, networks={"ac-network": {"driver": "macvlan"}}
     )

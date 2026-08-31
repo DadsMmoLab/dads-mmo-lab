@@ -1221,3 +1221,46 @@ that build.
   differing service and container names since 2026-08-22, so the *code* was proven and the *catalog* was
   never checked against the installers it ships. The regression test now reads the compose services straight
   out of each installer script and refuses any catalog service that is really a container name there.
+
+### The compose diff against the proven install, re-run against a real capture (2026-08-31)
+
+7.1's task E.2 committed `pylauncher/tests/data/wotlk-compose-config.json` — `docker compose
+config` taken off the live gate's own install after it reached `ready` on a clean Ubuntu box,
+with the project `name:` and the absolute install path stripped so the fixture names no machine.
+The first run of `support_compose.compare()` and `compare_stack()` against it was not clean, and
+what the seven lines said is worth keeping.
+
+**The reference is a NATIVE install, not the script install.** Everything the 2026-08-24 section
+above records was measured against `~/wow-server-playerbots`, which upstream's compose built. The
+committed fixture is the engine's own output. That single fact settles two open questions.
+
+**The volume names no longer differ.** "Recorded, not fixed" above says `db-data`/`client-data`
+against `ac-database`/`ac-client-data`; the capture declares `client-data` and `db-data`, because
+the engine rendered them. Every comparison the vocabulary now performs — the fixture test, the
+E.3/E.4 gates, 7.2's re-run — is native render against native capture, so there is no rename to
+translate: `support_compose.DESIGN_VOLUME_NAMES` is empty, and the staleness guard that reported
+this is what said so. The record above still describes the script install and is left standing.
+The upside is that volume names are now compared exactly as written, which is stronger than
+before: a renamed or relocated store is reported by name.
+
+**`ac-client-data-init` is not on `ac-network`.** It declares no `networks:`, so compose puts it
+on the implicit `default` and materialises a second per-project bridge — visible only in the
+resolved config, never in the file. Recorded, not fixed: the service only fetches an archive into
+a named volume and talks to nothing, and changing the template would have invalidated the byte
+snapshot this task exists to compare against. `Service` now carries `networks`, so a service that
+falls off `ac-network` is reported instead of being a blind spot.
+
+**The fixture pins the runtime stack, not the build overlay.** A bare `docker compose config`
+resolves `docker-compose.yml` plus `docker-compose.override.yml` and never
+`docker-compose.build.yml`, which is deliberately not auto-loaded — so the capture has no `build:`
+at all and reported `build ... vs None` on all four built services. The comparison drops the
+overlay on the rendered side too rather than forgiving a missing `build`, so the two sides are the
+same two documents; the overlay stays owned by `test_composegen.py`, by the byte snapshot and by
+`test_shape_from_plan_merges_the_three_files`. Anyone capturing for the E.3/E.4 gate must capture
+the same way: `docker compose config --format json` in the install directory, no `-f`.
+
+**What still matched, and it is the whole point.** All five services and their container names,
+every published port and protocol, every bind and named-volume mount including client data's
+`:ro`, every `depends_on` edge with its condition, `restart`, every environment KEY on every
+service — including the 500/500 bot population, which is the difference the 2026-08-24 diff was
+run to find.

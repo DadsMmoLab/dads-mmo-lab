@@ -24,10 +24,17 @@ still caught:
   difference (`yulon.local/ac-wotlk-worldserver:native-<install id>` against upstream's
   `acore/ac-wotlk-worldserver:master`); the NAME is not, and `mysql` against `mariadb` is
   reported.
-* named volume → `<named>` at its target. The volume names differ by design (`db-data` here,
-  `ac-database` upstream — the collision fix, recorded-not-fixed). The KIND survives, so a bind
-  where a managed volume belongs is still reported, and so does READ-ONLY: only the SELinux
-  label characters are dropped from the mode column (below), never `ro`.
+* named volume → `<named>` at its target. This rule was written when the reference was going to
+  be UPSTREAM's script install, whose two volumes are `ac-database` and `ac-client-data` against
+  our `db-data` and `client-data`. The captured fixture is a NATIVE install and declares
+  `db-data` and `client-data` — our own names — so at the mount level the erasure no longer buys
+  a real difference and is a blind spot instead of a justification: it cannot see a mount that
+  was pointed at the other existing volume. What it never hid is a RENAME, and less than before:
+  `compare_stack()` compares the top-level declarations by name, exactly, now that
+  `DESIGN_VOLUME_NAMES` is empty. Both halves are pinned by
+  `test_a_renamed_named_volume_is_caught_at_the_top_level_not_at_the_mount`. The KIND survives,
+  so a bind where a managed volume belongs is still reported, and so does READ-ONLY: only the
+  SELinux label characters are dropped from the mode column (below), never `ro`.
 * bind source → relative to the install dir. It is an absolute host path that is `/home/pk/...`
   on the proven box and a pytest tmp dir here. Only paths actually under the install dir are
   stripped, so a sibling `/home/pk/srv-backup` stays absolute rather than becoming `./-backup`.
@@ -47,8 +54,15 @@ still caught:
   `compose config` writes `<project>_client-data` where the file says `client-data`). The key is
   kept, because a declaration carries options and options must stay attached to an identity — a
   `driver_opts.device` that moved from one 1.1 GB store to the other is otherwise invisible, and
-  a problem line that does not name the volume cannot be acted on. The two names that genuinely
-  differ between the sources are translated by `DESIGN_VOLUME_NAMES`, not erased.
+  a problem line that does not name the volume cannot be acted on. Names are compared as
+  written: `DESIGN_VOLUME_NAMES` is the registry for a recorded rename and the capture emptied
+  it.
+* a service that names no `networks:` → compose's implicit `default`, on both sides, and a
+  top-level `default:` declaration synthesised for the rendered files when some service names
+  none. `compose config` materialises both; the file can spell neither. This is the same
+  pre-resolution/post-resolution split as `${VAR:-default}`, and it is MODELLED rather than
+  erased: the synthesised declaration carries no options, so a `default:` that grew any on the
+  captured side is still reported.
 * upstream's build-time env (`BUILD_TIME_ENV`, `BUILD_TIME_ENV_PREFIXES`) → forgiven when only
   the PROVEN install has it. Upstream's compose sets these on the runtime services and the
   image's entrypoint reads none of them (checked in the image, 2026-08-24), so the native stack
@@ -57,7 +71,7 @@ still caught:
 
 WHAT THIS VOCABULARY CANNOT SEE, so that "the diff is clean" is never read as "the two files
 match". `Service` has no field for the image tag, an environment VALUE, `stop_grace_period`, the
-healthcheck, `networks`, `user`, `tty`/`stdin_open`, `entrypoint`/`command` or the build context.
+healthcheck, `user`, `tty`/`stdin_open`, `entrypoint`/`command` or the build context.
 The first two are the cost of the rules above; the rest are fields this reduction does not carry.
 Each is named by a test in `test_compose_fixture.py`, and where another test file already owns
 the value it is named there too — `stop_grace_period`, the healthcheck and `user:` are asserted
@@ -100,29 +114,30 @@ NO_ALIASES: Mapping[str, str] = {}
 """No name is a recorded design difference here. Networks use this: `ac-network` is `ac-network`
 on both sides, so a renamed network is a difference and not an allowance."""
 
-DESIGN_VOLUME_NAMES: Mapping[str, str] = {
-    "db-data": "ac-database",
-    "client-data": "ac-client-data",
-}
-"""The one recorded volume-name difference, mapped native -> upstream.
+DESIGN_VOLUME_NAMES: Mapping[str, str] = {}
+"""The registry of recorded volume-name differences, mapped native -> reference. EMPTY, and the
+capture is why.
 
-TWO SOURCES SAY THESE ARE THE SAME TWO STORES UNDER TWO NAMES, and both are greppable:
+IT USED TO HOLD `db-data` -> `ac-database` and `client-data` -> `ac-client-data`, on two written
+sources: `pyplan/checklist.md`'s "Recorded, not fixed:" line under "The compose diff against the
+proven install" (2026-08-24), and the 2026-08-23 teardown gate in the same file (grep for
+`wow-server-playerbots_ac-database`). Both describe UPSTREAM's script install in
+`~/wow-server-playerbots`, which is what the reference was going to be captured from.
 
-* `pyplan/checklist.md`, the "Recorded, not fixed:" line under "The compose diff against the
-  proven install" (2026-08-24) — "the volume names differ (`db-data` and `client-data` vs
-  `ac-database` and `ac-client-data`). Both are project-scoped so nothing collides".
-* the 2026-08-23 teardown gate in the same file (grep for `wow-server-playerbots_ac-database`),
-  which read the proven install's two volumes off the box as
-  `wow-server-playerbots_ac-database` and `_ac-client-data` — the same two short names.
+THE REFERENCE THAT SHIPPED IS NOT THAT INSTALL. `tests/data/wotlk-compose-config.json` is
+`docker compose config` from the live gate's own NATIVE install (2026-08-31, reached `ready` on
+a clean Ubuntu box), and it declares `client-data` and `db-data` — our names, because the engine
+rendered them. Every comparison this vocabulary performs is native render against native
+capture: the fixture test, the E.3/E.4 gates and 7.2's re-run diff. There is no rename between
+those two, so a live entry here would do nothing but print a problem line naming a volume that
+exists on NEITHER side (`docker volume inspect <project>_ac-client-data` finds nothing), and
+`_stale_translations()` said so on the first run against the real capture — which is that
+guard's whole purpose, working.
 
-A MOUNT carries nothing but a name, a kind and a target, so there the name is erased outright. A
-top-level DECLARATION also carries options, and options compared without an identity to hang on
-cannot tell "client-data moved to another disk" from "db-data did". So the two recorded names
-are translated here instead, and every other name is compared exactly as written — a third
-volume, or a rename nobody recorded, is a difference.
-
-This is a record of a decided divergence, not a wildcard, and `_stale_translations()` keeps it
-one: an entry that stops describing either side is reported rather than quietly doing nothing."""
+The mechanism stays for the day a rename is recorded again: an entry translates the top-level
+declarations on both sides, and `_stale_translations()` reports it the moment it stops
+describing either side rather than quietly doing nothing. Empty, names are compared exactly as
+written, which is the strongest the comparison has ever been."""
 
 NATIVE_ONLY_ENV: frozenset[tuple[str, str]] = frozenset(
     {("ac-db-import", "AC_PLAYERBOTS_DATABASE_INFO")}
@@ -136,6 +151,7 @@ _COMPARED_FIELDS: tuple[str, ...] = (
     "image",
     "ports",
     "volumes",
+    "networks",
     "depends_on",
     "build",
     "restart",
@@ -151,6 +167,7 @@ class Service:
     image: str | None
     ports: frozenset[tuple[str, int, str]]
     volumes: frozenset[tuple[str, str, str, str]]
+    networks: frozenset[str]
     env_keys: frozenset[str]
     depends_on: tuple[tuple[str, str], ...]
     build: tuple[str, str] | None
@@ -278,6 +295,21 @@ def _env_keys(raw: Any) -> frozenset[str]:
     return frozenset(str(key) for key in raw)
 
 
+def _networks(raw: Any) -> frozenset[str]:
+    """The networks a service joins; NAMING NONE is read out as compose's implicit `default`.
+
+    Written as a list of names here and as a mapping (name -> per-network aliases) by `compose
+    config`; only the names are compared. The absence is read out rather than left empty because
+    that is what compose does with it, and because the two spellings would otherwise never meet:
+    the captured `ac-client-data-init` says `{"default": null}` where the rendered file says
+    nothing at all. Reading it out is also what makes a service that fell off `ac-network`
+    visible as `{'default'} vs {'ac-network'}` instead of as silence.
+    """
+    if not raw:
+        return frozenset({"default"})
+    return frozenset(str(name) for name in raw)
+
+
 def _build(raw: Any) -> tuple[str, str] | None:
     """(dockerfile, target). The context is not compared: it is `.` here and the proven box's
     own absolute path there, and it is the same directory in both cases."""
@@ -299,6 +331,7 @@ def _service(svc: dict[str, Any], *, root: str | None, from_config: bool) -> Ser
             volume_from_config(v, root=root) if from_config else volume_from_string(str(v))
             for v in volumes
         ),
+        networks=_networks(svc.get("networks")),
         env_keys=_env_keys(svc.get("environment")),
         depends_on=_depends(svc.get("depends_on")),
         build=_build(svc.get("build")),
@@ -381,15 +414,26 @@ def stack_from_plan(plan: ComposePlan) -> Stack:
 
     The text is read WITHOUT `resolve_defaults()`: nothing up here is interpolated, and that
     pass would mangle the `$${var:-}` shell spellings inside a service's inline script.
+
+    A `default:` declaration is synthesised when some service names no `networks:`, because that
+    is what compose materialises and what the capture therefore shows. It is synthesised with NO
+    options, so a captured `default:` that carries any is still a reported difference.
     """
     project: str | None = None
     volumes: dict[str, Any] = {}
     networks: dict[str, Any] = {}
+    attached: dict[str, bool] = {}
     for text in (plan.base, plan.override, plan.build):
         doc = yaml.safe_load(text) or {}
         project = str(doc["name"]) if doc.get("name") else project
         volumes.update(doc.get("volumes") or {})
         networks.update(doc.get("networks") or {})
+        for name, svc in (doc.get("services") or {}).items():
+            # Across files, ANY file naming a network attaches the service — the override adds
+            # env and a mount to `ac-worldserver` and names no network, which does not detach it.
+            attached[name] = attached.get(name, False) or bool((svc or {}).get("networks"))
+    if not all(attached.values()):
+        networks.setdefault("default", None)
     return Stack(
         project=project,
         volumes=_declarations(volumes, aliases=DESIGN_VOLUME_NAMES),
