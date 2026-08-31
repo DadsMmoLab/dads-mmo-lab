@@ -1428,18 +1428,26 @@ def docker_engine_commands(pm: PackageManager, *, steamos: bool) -> list[list[st
             ["apt-get", "install", "-y", "docker.io", "docker-compose-v2", "docker-buildx"],
         ]
     elif pm == "dnf":
-        # docker-buildx-plugin, NOT docker-buildx: that is pacman's package name,
-        # not dnf's, and the two are not interchangeable — `docker-buildx` does
-        # not exist in Fedora's repos, and `dnf install` fails outright on it.
-        # The passing Fedora gate script installs `docker-buildx-plugin` by hand
-        # (install-wow-wotlk-fedora.sh:879) and every diagnostic in it queries
-        # that same rpm name (install-wow-wotlk-fedora.sh:825,827,901); the
-        # passing Arch script installs the bare `docker-buildx`
-        # (install-wow-wotlk.sh:765). Two different real package names for the
-        # same plugin on two distros — resist "fixing" this back to one spelling.
-        install = [
-            ["dnf", "-y", "install", "moby-engine", "docker-compose", "docker-buildx-plugin"]
-        ]
+        # docker-buildx, and the reason is which REPO the other two packages
+        # come from, not which distro this is. `moby-engine` and
+        # `docker-compose` above are Fedora's own builds, so the BuildKit
+        # plugin beside them is Fedora's too, and Fedora names it
+        # `docker-buildx`. Measured on Fedora 44 (repos: fedora, updates),
+        # 2026-08-31:
+        #     dnf repoquery docker-buildx        -> 0.31.1, 0.36.1
+        #     dnf repoquery docker-buildx-plugin -> nothing
+        #     dnf provides */docker-buildx-plugin -> No matches found
+        # `docker-buildx-plugin` IS the right name in the other package
+        # world: Docker's own repo, where the engine is `docker-ce`. BOTH of
+        # install-wow-wotlk-fedora.sh's branches install it — Bazzite by
+        # layering it with rpm-ostree (:870) and plain Fedora with dnf (:879)
+        # — and both work because the script ADDS Docker's CE repo first.
+        # So it is not dnf-versus-rpm-ostree that decides the name; it is
+        # which repo the engine came from. This command takes `moby-engine`
+        # from Fedora's own repos and must stay in that world: against them,
+        # `dnf install docker-buildx-plugin` fails outright and takes the
+        # whole provision with it.
+        install = [["dnf", "-y", "install", "moby-engine", "docker-compose", "docker-buildx"]]
     else:
         install = [["zypper", "--non-interactive", "install", "docker", "docker-compose"]]
     return [*install, ["systemctl", "enable", "--now", "docker"]]
