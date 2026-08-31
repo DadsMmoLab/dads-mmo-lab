@@ -85,12 +85,17 @@ STATE_FILE = ".yulon-install.json"
 STATE_VERSION = 1
 
 OPENING_NOTE = (
-    "You can stop this at any time. Nothing is written outside the folder below, and starting "
-    "the install again continues from where it stopped: source this app has finished cloning "
-    "is never fetched, reset or moved, and the build is not run a second time once Docker "
-    "confirms its images are there. Everything cheap runs again on every attempt — the compose "
-    "files this app writes are put back the way the catalog says, the server-data download "
-    "resumes and re-checks itself, and the database and server are started and waited for."
+    "You can stop this at any time. What an install writes outside the folder below is named "
+    "here rather than denied: the images this build produces and the volumes holding the "
+    "database and the server data, which live in Docker's own storage — that is why the checks "
+    "below look at the space on Docker's disk too; Docker itself, when no daemon answers yet "
+    "(on Linux: system packages, a service, and the group you are asked about first); and this "
+    "app's own settings and log, in its config folder. Starting the install again continues "
+    "from where it stopped: source this app has finished cloning is never fetched, reset or "
+    "moved, and the build is not run a second time once Docker confirms its images are there. "
+    "Everything cheap runs again on every attempt — the compose files this app writes are put "
+    "back the way the catalog says, the server-data download resumes and re-checks itself, and "
+    "the database and server are started and waited for."
 )
 """What a Stop costs, said before it is pressed, and true of every stage.
 
@@ -99,22 +104,31 @@ was said as the second line of every install and appended to every
 cancellation, so a user who stopped during the clone or the download was told
 Docker was finishing a build step (review, 2026-08-23).
 
-**This sentence has been rewritten three times, each time because it claimed
-more than the engine does, and it is now written from what the stages actually
-do rather than from what a resume ought to feel like.** It said "only the step
-that was interrupted runs again" while the live Ubuntu gate (2026-08-30)
-printed `Already finished: clone-core, clone-modules, generate-compose` and ran
-all three, each doing `git fetch` + `git reset --hard FETCH_HEAD` over the
-user's source. It then said the source was "left exactly as it is on disk",
-which is false of `docker-compose.yml` — a TRACKED file of the emulator
-checkout, carrying this engine's marker after the first install, so
-`composegen.write_plan()` puts it back whenever it differs; a comment appended
-to it does not survive a resume (driven, 2026-08-31). And it said only the last
-steps run every time, while `start-db` sits mid-list with `recorded=False` and
-`client-data` consults no state at all.
+**This sentence has been rewritten until every clause names something a stage
+is responsible for keeping, because each version claimed more than the engine
+does.** It said "only the step that was interrupted runs again" while the live
+Ubuntu gate (2026-08-30) printed `Already finished: clone-core, clone-modules,
+generate-compose` and ran all three, each doing `git fetch` + `git reset --hard
+FETCH_HEAD` over the user's source. It said the source was "left exactly as it
+is on disk", which is false of `docker-compose.yml` — a TRACKED file of the
+emulator checkout, carrying this engine's marker after the first install, so
+`composegen.write_plan()` puts it back whenever it differs. It said only the
+last steps run every time, while `start-db` sits mid-list with `recorded=False`
+and `client-data` consults no state at all. And it opened with "nothing is
+written outside the folder below", three lines above `Docker setup did:
+apt-get update; apt-get install -y docker.io; systemctl enable --now docker;
+usermod -aG docker pk` — a reassurance printed directly above the actions
+contradicting it, which is the exact shape of the sentence removed from the
+clone stage (review, 2026-08-31).
 
-So each clause is now a claim some stage is responsible for keeping:
+So each clause is now a claim something is responsible for keeping:
 
+* *what goes outside this folder* — the base template's two NAMED volumes
+  (`db-data`, `client-data`) plus the built images, which is why
+  `preflight.evaluate()` has a check about Docker's data root and not only
+  about this drive; `platform.ensure_docker()` for the second item, whose own
+  `done` steps are printed a few lines below this one; and `config_dir()` for
+  the third;
 * *finished cloning is never fetched, reset or moved* — `already_cloned()`, and
   `refuse_unowned_checkout()` for the checkout that was never this app's;
 * *the build is not run a second time once Docker confirms its images* —

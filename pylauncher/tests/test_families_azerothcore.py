@@ -448,6 +448,54 @@ def test_a_resume_puts_the_compose_file_back_and_the_note_does_not_deny_it(
     assert "the compose files this app writes" in native.OPENING_NOTE
 
 
+def test_the_note_does_not_say_nothing_is_written_outside_the_folder(tmp_path: Path) -> None:
+    """The last clause of that sentence that named no stage responsible for keeping it.
+
+    An install writes gigabytes into Docker's own storage — the images it
+    builds and the two named volumes the database and the server data live in —
+    which is the whole reason preflight has a check about Docker's disk rather
+    than this one. And on Linux the lines immediately UNDER the note are
+    `apt-get`, `systemctl` and `usermod`. A reassurance printed three lines
+    above the actions contradicting it is the same shape as the sentence
+    removed from the clone stage.
+    """
+    report = platform.ProvisionReport(
+        "linux",
+        done=(
+            "apt-get update",
+            "apt-get install -y docker.io",
+            "systemctl enable --now docker",
+            "usermod -aG docker pk",
+        ),
+        docker_ready=True,
+        docker_group="granted",
+    )
+    answers = iter([False, True])
+    server_dir = tmp_path / "wow"
+    lines = list(
+        engine(
+            Recorder(images=False),
+            docker_ready=lambda: next(answers, True),
+            ensure_docker=lambda **_kwargs: report,
+        ).run(InstallOptions(server_dir=server_dir))
+    )
+    note_at = lines.index(native.OPENING_NOTE)
+    outside = [
+        line
+        for line in lines
+        if any(word in line for word in ("apt-get", "systemctl enable", "usermod"))
+    ]
+    assert outside and lines.index(outside[0]) > note_at, lines
+    assert any("free space on Docker's disk" in line for line in lines), lines
+    # And the data really does live outside the folder: two NAMED volumes.
+    rendered = (server_dir / composegen.BASE_FILE).read_text(encoding="utf-8")
+    assert "\nvolumes:\n" in rendered and "db-data:" in rendered and "client-data:" in rendered
+
+    assert "Nothing is written outside the folder" not in native.OPENING_NOTE
+    for named in ("Docker's own storage", "Docker itself", "config folder"):
+        assert named in native.OPENING_NOTE, native.OPENING_NOTE
+
+
 def test_the_note_does_not_call_the_repeated_steps_the_last_ones(tmp_path: Path) -> None:
     """`start-db` sits mid-list and `client-data` consults no state at all.
 
