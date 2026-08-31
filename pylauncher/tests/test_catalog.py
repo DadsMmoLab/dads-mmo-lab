@@ -468,3 +468,12 @@ def test_a_game_with_a_one_shot_import_service_must_carry_a_fixed_password() -> 
     assert any(
         entry.containers.db_import for entry in load_catalog().games
     ), "no entry names an import service at all, so this test would pass on an empty catalog"
+
+
+def test_wotlk_names_no_script_platform_but_still_ships_its_scripts_until_7_2() -> None:
+    """One JSON key changes; the bash files and `script` field stay until 7.2 deletes this test."""
+    wotlk = load_catalog().get("wow-wotlk")
+    assert wotlk.install.script_platforms is None
+    assert wotlk.install.platforms == ("linux", "macos", "windows")
+    assert wotlk.install.native is not None
+    assert wotlk.install.script == "wow-wotlk/install-wow-wotlk.sh"

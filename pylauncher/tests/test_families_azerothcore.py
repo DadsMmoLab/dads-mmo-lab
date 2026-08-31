@@ -86,6 +86,36 @@ def test_the_entry_names_its_family_and_a_scriptless_entry_still_reads_as_script
     assert TBC.install.is_native("windows") is False
 
 
+def test_wotlk_drops_script_platforms_so_its_fallback_matches_every_old_entry() -> None:
+    """The 7.1 flip's data half (B.7): one JSON key gone, `scripted_platforms()` falls back.
+
+    `installer_for()` in this tree already dispatches on `install.native` alone
+    (see `test_the_family_decides_which_engine_installs_and_linux_no_longer_keeps_the_script`
+    above) — the A.3 dispatch rewrite has already landed here, ahead of the
+    plan's stated B.7-then-A.1..A.3 order. So there is no transitional window in
+    this tree where `installer_for()` still reads `is_native()`/`uses_script()`
+    for WotLK: those method bodies are provably dead for WotLK already, kept
+    only until 7.2 deletes them (A1). This test pins what they still SAY, now
+    that the field they used to narrow (`script_platforms`) is gone: with no
+    narrower answer on file, WotLK reads exactly like TBC above — "scripted
+    everywhere it is installable" — even though nothing acts on that anymore.
+    """
+    assert ENTRY.install.script_platforms is None
+    assert ENTRY.install.native is not None
+    assert ENTRY.install.scripted_platforms() == ENTRY.install.platforms
+    assert ENTRY.install.uses_script("linux") is True
+    assert ENTRY.install.uses_script("macos") is True
+    assert ENTRY.install.uses_script("windows") is True
+    assert ENTRY.install.is_native("linux") is False
+    assert ENTRY.install.is_native("macos") is False
+    assert ENTRY.install.is_native("windows") is False
+    # And the real dispatcher does not care: WotLK installs natively everywhere,
+    # `is_native()`'s "False" above notwithstanding.
+    assert isinstance(installer_for(ENTRY, platform_id=lambda: "linux"), AzerothCoreInstaller)
+    assert isinstance(installer_for(ENTRY, platform_id=lambda: "macos"), AzerothCoreInstaller)
+    assert isinstance(installer_for(ENTRY, platform_id=lambda: "windows"), AzerothCoreInstaller)
+
+
 def test_the_unsupported_platform_refusal_still_comes_first(tmp_path: Path) -> None:
     rec = Recorder()
     installer = AzerothCoreInstaller(TBC, seams=rec.seams(platform_id=lambda: "macos"))
