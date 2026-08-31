@@ -42,11 +42,13 @@ still caught:
   order, and the short list form leaves the condition implicit at `service_started` — which is
   read out rather than blanked, because a weakened edge is exactly the kind of difference this
   fixture exists to find.
-* a top-level `volumes:`/`networks:` declaration → its options, with its own name and compose's
-  per-project `name:` dropped. Both are per-install by construction (the project name keys them);
-  `driver`, `driver_opts` and `external` are not, and a `client-data` volume that grew a
-  `driver_opts.device` pointing somewhere else would relocate 1.1 GB of client data while every
-  per-service record stayed identical.
+* a top-level `volumes:`/`networks:` declaration → its options UNDER ITS OWN KEY, with only
+  compose's per-project `name:` value dropped (that one is per-install by construction:
+  `compose config` writes `<project>_client-data` where the file says `client-data`). The key is
+  kept, because a declaration carries options and options must stay attached to an identity — a
+  `driver_opts.device` that moved from one 1.1 GB store to the other is otherwise invisible, and
+  a problem line that does not name the volume cannot be acted on. The two names that genuinely
+  differ between the sources are translated by `DESIGN_VOLUME_NAMES`, not erased.
 * upstream's build-time env (`BUILD_TIME_ENV`, `BUILD_TIME_ENV_PREFIXES`) → forgiven when only
   the PROVEN install has it. Upstream's compose sets these on the runtime services and the
   image's entrypoint reads none of them (checked in the image, 2026-08-24), so the native stack
@@ -59,16 +61,19 @@ healthcheck, `networks`, `user`, `tty`/`stdin_open`, `entrypoint`/`command` or t
 The first two are the cost of the rules above; the rest are fields this reduction does not carry.
 Each is named by a test in `test_compose_fixture.py`, and where another test file already owns
 the value it is named there too — `stop_grace_period`, the healthcheck and `user:` are asserted
-on the rendered side by `test_composegen.py`. Two are owned by NOBODY else and so are asserted
-in `test_compose_fixture.py` itself: `ac-client-data-init`'s `command`, which is the ~45-line
-resumable downloader that REPLACES upstream's un-resumable `curl … > data.zip` and is the
-largest deliberate divergence in the stack, and the per-install project `name:` that keys every
-named volume and is what makes erasing volume names safe in the first place.
+on the rendered side by `test_composegen.py`. One pair is owned by no ASSERTION anywhere else
+and so is asserted in `test_compose_fixture.py` itself: `ac-client-data-init`'s `entrypoint` and
+`command`, the ~45-line resumable downloader that REPLACES upstream's un-resumable
+`curl … > data.zip` and is the largest deliberate divergence in the stack. Its text IS in the
+byte snapshot under `tests/data/wotlk-rendered/`, but a snapshot is a change-detector whose
+documented remedy is regeneration — it says the file changed, never that the script must be able
+to resume.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -90,6 +95,27 @@ them (checked in the image, 2026-08-24). The native stack drops them on purpose.
 
 BUILD_TIME_ENV_PREFIXES: tuple[str, ...] = ("AC_RESTARTER_",)
 """The three empty `AC_RESTARTER_*` keys, same reasoning, matched by prefix."""
+
+NO_ALIASES: Mapping[str, str] = {}
+"""No name is a recorded design difference here. Networks use this: `ac-network` is `ac-network`
+on both sides, so a renamed network is a difference and not an allowance."""
+
+DESIGN_VOLUME_NAMES: Mapping[str, str] = {
+    "db-data": "ac-database",
+    "client-data": "ac-client-data",
+}
+"""The one recorded volume-name difference, mapped native -> upstream.
+
+`pyplan/checklist.md`, "Recorded, not fixed" (2026-08-24): "the volume names differ (`db-data`
+and `client-data` vs `ac-database` and `ac-client-data`). Both are project-scoped so nothing
+collides". The 2026-08-23 teardown gate saw the proven install's two as
+`wow-server-playerbots_ac-database` and `_ac-client-data`, which is the same two short names.
+
+A MOUNT carries nothing but a name, a kind and a target, so there the name is erased outright. A
+top-level DECLARATION also carries options, and options compared without an identity to hang on
+cannot tell "client-data moved to another disk" from "db-data did". So the two recorded names
+are translated here instead, and every other name is compared exactly as written — a third
+volume, or a rename nobody recorded, is a difference."""
 
 NATIVE_ONLY_ENV: frozenset[tuple[str, str]] = frozenset(
     {("ac-db-import", "AC_PLAYERBOTS_DATABASE_INFO")}
@@ -136,8 +162,8 @@ class Stack:
     """
 
     project: str | None
-    volumes: tuple[tuple[str, ...], ...]
-    networks: tuple[tuple[str, ...], ...]
+    volumes: tuple[tuple[str, tuple[str, ...]], ...]
+    networks: tuple[tuple[str, tuple[str, ...]], ...]
 
 
 def resolve_defaults(text: str) -> str:
@@ -288,11 +314,20 @@ def _options(body: Any) -> tuple[str, ...]:
     return tuple(sorted(flat))
 
 
-def _declarations(raw: Any) -> tuple[tuple[str, ...], ...]:
-    """A whole top-level `volumes:`/`networks:` block, name-erased the way the mounts are."""
+def _declarations(
+    raw: Any, *, aliases: Mapping[str, str]
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """A whole top-level `volumes:`/`networks:` block as sorted (name, options) pairs.
+
+    The name is kept — `compose config` keys this map by the SHORT name on both sides, and only
+    the `name:` INSIDE carries the project prefix — so that a difference can be attributed to
+    one declaration and reported by name. `aliases` translates the recorded design renames.
+    """
     if not raw:
         return ()
-    return tuple(sorted(_options(body) for body in raw.values()))
+    return tuple(
+        sorted((aliases.get(str(name), str(name)), _options(body)) for name, body in raw.items())
+    )
 
 
 def shape_from_plan(plan: ComposePlan) -> dict[str, Service]:
@@ -338,7 +373,11 @@ def stack_from_plan(plan: ComposePlan) -> Stack:
         project = str(doc["name"]) if doc.get("name") else project
         volumes.update(doc.get("volumes") or {})
         networks.update(doc.get("networks") or {})
-    return Stack(project, _declarations(volumes), _declarations(networks))
+    return Stack(
+        project,
+        _declarations(volumes, aliases=DESIGN_VOLUME_NAMES),
+        _declarations(networks, aliases=NO_ALIASES),
+    )
 
 
 def stack_from_config(data: dict[str, Any], *, root: str | None = None) -> Stack:
@@ -347,8 +386,8 @@ def stack_from_config(data: dict[str, Any], *, root: str | None = None) -> Stack
     del root
     return Stack(
         str(data["name"]) if data.get("name") else None,
-        _declarations(data.get("volumes")),
-        _declarations(data.get("networks")),
+        _declarations(data.get("volumes"), aliases=DESIGN_VOLUME_NAMES),
+        _declarations(data.get("networks"), aliases=NO_ALIASES),
     )
 
 
@@ -391,6 +430,28 @@ def compare(native: dict[str, Service], proven: dict[str, Service]) -> list[str]
     return problems
 
 
+def _declaration_problems(
+    label: str,
+    native: tuple[tuple[str, tuple[str, ...]], ...],
+    proven: tuple[tuple[str, tuple[str, ...]], ...],
+) -> list[str]:
+    """One line per declaration that differs, each naming the declaration.
+
+    A gate operator reading `volumes: [(), ('driver_opts.device=…',)] vs [(), ()]` cannot tell
+    which of two 1.1 GB stores moved. Naming it is the whole reason the key is kept.
+    """
+    ours, theirs = dict(native), dict(proven)
+    problems: list[str] = []
+    if only_ours := sorted(set(ours) - set(theirs)):
+        problems.append(f"{label}: only in the native stack {only_ours}")
+    if only_theirs := sorted(set(theirs) - set(ours)):
+        problems.append(f"{label}: only in the proven install {only_theirs}")
+    for name in sorted(set(ours) & set(theirs)):
+        if ours[name] != theirs[name]:
+            problems.append(f"{label}: {name} {list(ours[name])} vs {list(theirs[name])}")
+    return problems
+
+
 def compare_stack(native: Stack, proven: Stack) -> list[str]:
     """The top-level blocks `compare()` has no room for; empty means "matches"."""
     problems: list[str] = []
@@ -399,8 +460,6 @@ def compare_stack(native: Stack, proven: Stack) -> list[str]:
             "project: the native stack has no `name:`, so its named volumes are keyed by the "
             "install directory and two installs can share one database"
         )
-    if native.volumes != proven.volumes:
-        problems.append(f"volumes: {list(native.volumes)} vs {list(proven.volumes)}")
-    if native.networks != proven.networks:
-        problems.append(f"networks: {list(native.networks)} vs {list(proven.networks)}")
+    problems.extend(_declaration_problems("volumes", native.volumes, proven.volumes))
+    problems.extend(_declaration_problems("networks", native.networks, proven.networks))
     return problems

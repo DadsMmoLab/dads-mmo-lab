@@ -13,11 +13,11 @@ difference it will never report again, so each one is followed by a test that a 
 change in the same area is still caught, and — where a rule costs real sight — by a test that
 pins exactly what it hides, so a reader can tell a paid-for blind spot from a missing feature.
 
-Two facts about the rendered stack are asserted HERE rather than deferred to another file,
-because nothing else in `tests/` asserts them and both are invisible to `Service`:
-`ac-client-data-init`'s inline downloader (the largest deliberate divergence from upstream in
-the whole stack) and the per-install project `name:` (what keys the named volumes, and so the
-only reason erasing volume names is safe).
+One fact about the rendered stack is asserted HERE rather than deferred: `ac-client-data-init`'s
+inline downloader, the largest deliberate divergence from upstream in the whole stack. It is
+invisible to `Service`, and the only other thing carrying that text is the byte snapshot under
+`tests/data/wotlk-rendered/` — a change-detector whose documented remedy is regeneration, which
+reports that the file moved but never that the script has to be able to resume.
 """
 
 from __future__ import annotations
@@ -497,20 +497,26 @@ def test_the_fields_a_service_record_does_not_carry_are_owned_elsewhere() -> Non
 def test_the_replaced_client_data_downloader_is_asserted_here_because_nobody_else_does(
     tmp_path: Path,
 ) -> None:
-    """`ac-client-data-init`'s `command` is a ~45-line shell script that REPLACES upstream's
-    `curl -L <url> > data.zip`, which cannot resume and so never finishes on a flaky link (it
-    died at 66 MB of 1140 MB on the Ubuntu box, 2026-08-19). It is the largest deliberate
-    divergence in the stack and it is invisible to `Service`, so a silent revert to upstream's
-    downloader would pass every other test in this file. Nothing in `tests/` asserted it before
-    this test: `grep -rl "inst_download_client_data" tests/` found nothing.
+    """`ac-client-data-init`'s `entrypoint` + `command` are a ~45-line bash script that REPLACES
+    upstream's `curl -L <url> > data.zip`, which cannot resume and so never finishes on a flaky
+    link (it died at 66 MB of 1140 MB on the Ubuntu box, 2026-08-19). It is the largest
+    deliberate divergence in the stack and it is invisible to `Service`, so a silent revert to
+    upstream's downloader would pass every other test in this file.
 
-    The four properties below are the reason the replacement exists — resume, retry, a
-    version-keyed partial that can never be spliced across two releases, and a refusal to
-    extract a truncated archive — plus the fallback to upstream's own function when the version
-    cannot be read, which is what keeps this never worse than what it replaced.
+    Its text IS in the byte snapshot at `tests/data/wotlk-rendered/docker-compose.yml`, so this
+    is not the only thing that would go red. But that snapshot is a CHANGE-DETECTOR whose own
+    docstring says to regenerate it "when a WotLK template change is the point of the commit" —
+    it reports that the file moved, and the documented remedy makes the new text the expected
+    text. It cannot say the script has to be able to resume. That is what the assertions below
+    say, one per property the replacement exists for: bash (without the `entrypoint` this stops
+    being a script at all and becomes argv for the image's own entrypoint), resume, retry, a
+    version-keyed partial that can never be spliced across two releases, a refusal to extract a
+    truncated archive — and the fallback to upstream's own function when the version cannot be
+    read, which is what keeps this never worse than what it replaced.
     """
-    doc = yaml.safe_load(render(tmp_path).base)
-    command = "\n".join(doc["services"]["ac-client-data-init"]["command"])
+    service = yaml.safe_load(render(tmp_path).base)["services"]["ac-client-data-init"]
+    assert service["entrypoint"] == ["/bin/bash", "-c"]
+    command = "\n".join(service["command"])
     assert "--continue-at -" in command
     assert "--retry 30" in command
     assert 'zip="$$data/data-$$ver.zip"' in command
@@ -518,12 +524,18 @@ def test_the_replaced_client_data_downloader_is_asserted_here_because_nobody_els
     assert "inst_download_client_data" in command
 
 
-def test_the_rendered_stack_names_a_per_install_project(tmp_path: Path) -> None:
-    """Erasing volume NAMES is only safe because the project `name:` keys them: `db-data` in
+def test_a_stack_without_a_project_name_is_refused(tmp_path: Path) -> None:
+    """Erasing volume NAMES is only sound because the project `name:` keys them: `db-data` in
     project `yulon-wow-wotlk-<id>` is a different volume from `db-data` in another install's
     project. Without a `name:` compose falls back to the directory basename, two installs in
-    similarly named folders share one database, and this whole vocabulary's central erasure
-    becomes unsound. Nothing else in `tests/` checks it, so `compare_stack()` does."""
+    similarly named folders share one database, and this vocabulary's central erasure stops
+    being safe.
+
+    `test_composegen.py` owns the rendered name — that it is per-directory and travels in the
+    file (`test_the_project_name_is_per_directory_and_travels_in_the_file`) and its exact value
+    in the byte snapshot. What is asserted here is the other half: that the COMPARISON refuses a
+    stack that lost it, rather than quietly reporting a clean diff built on an unsound erasure.
+    """
     stack = sc.stack_from_plan(render(tmp_path))
     assert stack.project is not None and stack.project.startswith("yulon-wow-wotlk-")
     assert sc.compare_stack(stack, stack) == []
@@ -536,40 +548,78 @@ def test_the_rendered_stack_names_a_per_install_project(tmp_path: Path) -> None:
 
 def test_the_rendered_top_level_volumes_and_networks_are_plain(tmp_path: Path) -> None:
     """The two named volumes and the one network are declared with NO options, which is what
-    makes them ordinary managed volumes on the docker root. That is the fact the next test
-    protects."""
+    makes them ordinary managed volumes on the docker root. That is the fact the next tests
+    protect. The two volumes appear under upstream's names because that rename is the one
+    recorded design difference; the network is not renamed and is not translated."""
     stack = sc.stack_from_plan(render(tmp_path))
-    assert stack.volumes == ((), ())
-    assert stack.networks == ((),)
+    assert stack.volumes == (("ac-client-data", ()), ("ac-database", ()))
+    assert stack.networks == (("ac-network", ()),)
+
+
+def _config(volumes: dict[str, object], networks: dict[str, object] | None = None) -> sc.Stack:
+    """A `compose config` top level with the project-prefixed `name:` compose writes on each."""
+    project = "yulon-wow-wotlk-056ed20d"
+    return sc.stack_from_config(
+        {
+            "services": {},
+            "name": project,
+            "volumes": {
+                name: {"name": f"{project}_{name}", **body}  # type: ignore[dict-item]
+                for name, body in volumes.items()
+            },
+            "networks": networks or {"ac-network": {"name": f"{project}_ac-network"}},
+        }
+    )
+
+
+RELOCATION = {"type": "none", "device": "/somewhere/else", "o": "bind"}
 
 
 def test_a_relocated_named_volume_is_reported_by_the_stack_comparison(tmp_path: Path) -> None:
     """No per-service record can see this: a top-level `client-data:` that grows
     `driver_opts: {type: none, device: /somewhere/else, o: bind}` puts all 1.1 GB of client data
     on another disk, and both sides still reduce to
-    `('volume', '<named>', '/azerothcore/env/dist/data', 'ro')`. The declaration's own name and
-    compose's per-project `name:` are erased the same way the mounts' are; everything else about
-    it is compared."""
+    `('volume', '<named>', '/azerothcore/env/dist/data', 'ro')`. Only compose's per-project
+    `name:` is dropped from a declaration; the rest of it is compared, under its own key."""
     proven = sc.stack_from_plan(render(tmp_path))
-    relocated = sc.stack_from_config(
-        {
-            "services": {},
-            "name": "yulon-wow-wotlk-056ed20d",
-            "volumes": {
-                "db-data": {"name": "yulon-wow-wotlk-056ed20d_db-data"},
-                "client-data": {
-                    "name": "yulon-wow-wotlk-056ed20d_client-data",
-                    "driver_opts": {"type": "none", "device": "/somewhere/else", "o": "bind"},
-                },
-            },
-            "networks": {"ac-network": {"name": "yulon-wow-wotlk-056ed20d_ac-network"}},
-        }
-    )
+    relocated = _config({"db-data": {}, "client-data": {"driver_opts": RELOCATION}})
     # The per-service view cannot tell these apart at all.
     assert sc.shape_from_config({"services": {}}) == {}
     assert sc.compare_stack(relocated, proven) == [
-        "volumes: [(), ('driver_opts.device=/somewhere/else', 'driver_opts.o=bind', "
-        "'driver_opts.type=none')] vs [(), ()]"
+        "volumes: ac-client-data ['driver_opts.device=/somewhere/else', 'driver_opts.o=bind', "
+        "'driver_opts.type=none'] vs []"
+    ]
+
+
+def test_the_same_options_on_the_other_store_is_a_different_stack() -> None:
+    """The reason the declaration's KEY is kept. These two differ only in WHICH of the two 1.1 GB
+    stores was moved off the docker root — one is the client data, the other is the database —
+    and a comparison that erased the names would call them identical."""
+    client_data_moved = _config({"db-data": {}, "client-data": {"driver_opts": RELOCATION}})
+    database_moved = _config({"db-data": {"driver_opts": RELOCATION}, "client-data": {}})
+    assert sc.compare_stack(client_data_moved, database_moved) == [
+        "volumes: ac-client-data ['driver_opts.device=/somewhere/else', 'driver_opts.o=bind', "
+        "'driver_opts.type=none'] vs []",
+        "volumes: ac-database [] vs ['driver_opts.device=/somewhere/else', "
+        "'driver_opts.o=bind', 'driver_opts.type=none']",
+    ]
+
+
+def test_the_recorded_rename_is_two_names_and_not_a_licence_to_rename() -> None:
+    """`db-data`/`client-data` are translated to upstream's `ac-database`/`ac-client-data`
+    because that rename is recorded in `checklist.md` ("Recorded, not fixed", 2026-08-24) and
+    would otherwise be reported on every run forever. It is exactly those two: a third volume,
+    or a rename nobody wrote down, is a difference and is named on both sides."""
+    assert dict(sc.DESIGN_VOLUME_NAMES) == {
+        "db-data": "ac-database",
+        "client-data": "ac-client-data",
+    }
+    ours = _config({"mysql-data": {}, "client-data": {}})
+    upstream = _config({"ac-database": {}, "ac-client-data": {}})
+    assert sc.compare_stack(upstream, upstream) == []
+    assert sc.compare_stack(ours, upstream) == [
+        "volumes: only in the native stack ['mysql-data']",
+        "volumes: only in the proven install ['ac-database']",
     ]
 
 
@@ -578,10 +628,12 @@ def test_an_external_or_redriven_declaration_is_reported(tmp_path: Path) -> None
     in it — and a changed network driver changes what the containers can reach. Neither touches
     a service."""
     proven = sc.stack_from_plan(render(tmp_path))
-    external = replace(proven, volumes=((), ("external=True",)))
-    assert sc.compare_stack(external, proven) == ["volumes: [(), ('external=True',)] vs [(), ()]"]
-    redriven = replace(proven, networks=(("driver=macvlan",),))
-    assert sc.compare_stack(redriven, proven) == ["networks: [('driver=macvlan',)] vs [()]"]
+    external = _config({"db-data": {}, "client-data": {"external": True}})
+    assert sc.compare_stack(external, proven) == ["volumes: ac-client-data ['external=True'] vs []"]
+    redriven = _config(
+        {"db-data": {}, "client-data": {}}, networks={"ac-network": {"driver": "macvlan"}}
+    )
+    assert sc.compare_stack(redriven, proven) == ["networks: ac-network ['driver=macvlan'] vs []"]
 
 
 def test_a_problem_line_reads_the_same_way_twice() -> None:
