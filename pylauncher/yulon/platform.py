@@ -2281,24 +2281,95 @@ class SudoSession:
         return False
 
 
+def _needs_password(stderr: str) -> bool:
+    """`sudo -n`'s own verdict, read in the C locale `_c_locale_env()` pins.
+
+    Sudo says "sudo: a password is required" when it would have had to prompt.
+    Read from sudo rather than guessed from the exit code, because a package
+    step can exit non-zero for a hundred reasons and only this one is worth
+    opening a dialog for.
+    """
+    return "password is required" in stderr.lower()
+
+
+def _sudo_skip_reason(outcome: SudoOutcome) -> str:
+    """Why a privileged step did not run, in the words of the outcome that stopped it.
+
+    Three answers, not two, all the way out to the report: the person gave no
+    password, `sudo` rejected the one they gave, or `sudo` could never be asked
+    at all. `_ensure_docker_linux()` files a skip under "needed a password"
+    when its text says password — so the third one deliberately does NOT,
+    because "run them in a terminal with sudo" is useless advice on a box whose
+    `sudo` is what failed to run.
+    """
+    if outcome == "declined":
+        return "needed a password and none was given"
+    if outcome == "refused":
+        return "the sudo password was refused"
+    if outcome == "unavailable":
+        return "sudo could not be run, so nothing was elevated"
+    # `verify()` has just answered False, and every False path sets one of the
+    # three above — so this is unreachable today. Spelled out rather than
+    # asserted so a sixth `SudoOutcome` degrades to the old wording instead of
+    # crashing a provisioning run.
+    return "needed a password"
+
+
 def _run_steps(
-    do: RunCmd, commands: list[list[str]], *, sudo: bool, dry_run: bool
+    do: RunCmd,
+    commands: list[list[str]],
+    *,
+    sudo: bool,
+    dry_run: bool,
+    session: SudoSession | None = None,
 ) -> tuple[list[str], list[str]]:
+    """Run `commands` in order; `done` and `skipped` carry the shown text (and why, for a skip).
+
+    With `sudo`, each step is `sudo -n <cmd>` until one answers "a password is
+    required" and a `session` is present: then the session asks once (its own
+    promise), and that step and every later one run as `sudo -S -p '' <cmd>`
+    with the password on stdin. No session keeps the old shape exactly — a skip
+    whose text is sudo's own stderr. A session that could not get a password
+    keeps the shape and replaces the text with which of the three it was.
+
+    `elevated` is per call rather than read off the session, so a caller with
+    `sudo=False` (the Windows and macOS installers) can be handed a verified
+    session and still never take the privileged branch. The gate is the
+    parameter, not the stderr: an unprivileged installer whose own error text
+    happens to mention a password must not open a sudo dialog.
+    """
     done: list[str] = []
     skipped: list[str] = []
+    elevated = False
     for cmd in commands:
         shown = " ".join(cmd)
         if dry_run:
             skipped.append(f"(dry run) {shown}")
             continue
-        argv = ["sudo", "-n", *cmd] if sudo else cmd
+        unelevated = ""
         try:
-            proc = do(argv)
+            if sudo and elevated and session is not None:
+                proc = session.run(cmd)
+            else:
+                proc = do(["sudo", "-n", *cmd] if sudo else cmd)
+                if (
+                    sudo
+                    and proc.returncode != 0
+                    and session is not None
+                    and _needs_password(proc.stderr)
+                ):
+                    if session.verify():
+                        elevated = True
+                        proc = session.run(cmd)
+                    else:
+                        unelevated = _sudo_skip_reason(session.outcome)
         except OSError as exc:
             skipped.append(f"{shown}: {exc}")
             continue
         if proc.returncode == 0:
             done.append(shown)
+        elif unelevated:
+            skipped.append(f"{shown}: {unelevated}")
         else:
             skipped.append(f"{shown}: exit {proc.returncode} {proc.stderr.strip()}")
     return done, skipped
@@ -2314,11 +2385,15 @@ def ensure_docker(
     wait_seconds: float = _DOCKER_READY_TIMEOUT_SECONDS,
     cancel: threading.Event | None = None,
     ask: runner.Prompter | None = None,
+    run_input: RunWithInput | None = None,
 ) -> ProvisionReport:
     """Make sure a Docker daemon is reachable, installing what the OS needs (README §3b).
 
-    Linux: Docker Engine through the distro package manager (under `sudo -n`; a
-    password-needing sudo is a reported skip with the commands to paste). The
+    Linux: Docker Engine through the distro package manager (under `sudo -n`;
+    when that needs a password and `ask` is given, the password is asked for
+    ONCE and fed on stdin to every remaining step — `SudoSession`; without
+    `ask` the skip is reported with the commands to paste). `run_input` is the
+    stdin-feeding seam, defaulting to `_run_with_input()`. The
     docker-group join is asked for through `ask` BEFORE anything privileged
     runs, and declined whenever there is nobody to ask; the answer is on the
     report as `docker_group`. Windows and macOS ignore `ask` — Docker Desktop
@@ -2341,7 +2416,7 @@ def ensure_docker(
         return ProvisionReport(current, done=("docker already running",), docker_ready=True)
     if current == "linux":
         return _ensure_docker_linux(
-            do, which, dry_run, _linux_user(user), wait_seconds, cancel, ask
+            do, which, dry_run, _linux_user(user), wait_seconds, cancel, ask, run_input
         )
     if current == "windows":
         return _ensure_docker_windows(do, which, download, dry_run, wait_seconds, cancel)
@@ -2415,6 +2490,7 @@ def _ensure_docker_linux(
     wait_seconds: float,
     cancel: threading.Event | None = None,
     ask: runner.Prompter | None = None,
+    run_input: RunWithInput | None = None,
 ) -> ProvisionReport:
     """Install Docker Engine, and join the docker group only if asked and told yes.
 
@@ -2427,6 +2503,11 @@ def _ensure_docker_linux(
     Declining the group is not declining Docker. The engine is installed either
     way — that is the disclosed part of "the app installs everything" — and
     what the user keeps is the choice about their own machine's security.
+
+    The sudo password is the second and last question on this path, and it is
+    asked only after the group question — the consent dialog must not be
+    preceded by a password prompt for steps the user has not yet heard about.
+    A dry run builds no session: it runs nothing, so it may ask nothing.
     """
     pm = linux_package_manager(which)
     if pm is None:
@@ -2440,14 +2521,26 @@ def _ensure_docker_linux(
 
     consent = _settle_docker_group(do, user, dry_run, cancel, ask)
 
+    # One session for the whole run, built after the consent question and never
+    # in a dry run. It is what keeps the promise of a single dialog: both
+    # `_run_steps()` calls below share it, so the `usermod` reuses the password
+    # the package steps already established rather than opening a second one.
+    session: SudoSession | None = None
+    if ask is not None and not dry_run:
+        session = SudoSession(ask, run_input if run_input is not None else _run_with_input)
+
     commands = docker_engine_commands(pm, steamos=is_steamos())
-    done, skipped = _run_steps(do, commands, sudo=True, dry_run=dry_run)
+    done, skipped = _run_steps(do, commands, sudo=True, dry_run=dry_run, session=session)
     joined_ok = False
     if consent == "granted":
         # The one place this argv is built. `docker_engine_commands()` no
         # longer contains it, so there is no ungated path to it at all.
         joined, refused = _run_steps(
-            do, [["usermod", "-aG", "docker", user]], sudo=True, dry_run=dry_run
+            do,
+            [["usermod", "-aG", "docker", user]],
+            sudo=True,
+            dry_run=dry_run,
+            session=session,
         )
         joined_ok = bool(joined) and not refused
         done, skipped = [*done, *joined], [*skipped, *refused]
