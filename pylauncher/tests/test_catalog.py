@@ -403,3 +403,12 @@ def test_ready_markers_are_literal_unless_the_entry_says_regex() -> None:
     assert ReadyMarkers(world="World initialized|Avg Diff", regex=True).regex is True
     with pytest.raises(ValidationError):
         ReadyMarkers(world="")
+
+
+def test_wotlk_names_no_script_platform_but_still_ships_its_scripts_until_7_2() -> None:
+    """One JSON key changes; the bash files and `script` field stay until 7.2 deletes this test."""
+    wotlk = load_catalog().get("wow-wotlk")
+    assert wotlk.install.script_platforms is None
+    assert wotlk.install.platforms == ("linux", "macos", "windows")
+    assert wotlk.install.native is not None
+    assert wotlk.install.script == "wow-wotlk/install-wow-wotlk.sh"

@@ -28,9 +28,6 @@
           "macos",
           "windows"
         ],
-        "script_platforms": [
-          "linux"
-        ],
         "script": "wow-wotlk/install-wow-wotlk.sh",
         "script_variants": {
           "apt": "wow-wotlk/install-wow-wotlk-ubuntu.sh",
