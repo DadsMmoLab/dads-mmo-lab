@@ -105,8 +105,72 @@ class DockerUnavailableError(InstallerError):
     """No Docker daemon is reachable and automatic provisioning is not available yet."""
 
 
+class DockerNeedsReLoginError(DockerUnavailableError):
+    """Docker WAS set up; this login session cannot see the group it was given.
+
+    A subclass rather than a sibling, because to everything that only needs to
+    stop the install these two are one event — but they are not one event to
+    the user, and they were being told the wrong one. `usermod -aG docker`
+    cannot change the supplementary groups of a process that is already
+    running, so the very run that provisions Docker correctly is the run that
+    cannot use it: the remedy is a new login, not a second attempt at
+    installing anything (live Ubuntu gate, press 1, 2026-08-30).
+    """
+
+
 class UnsupportedPlatformError(InstallerError):
     """This entry's installer does not run on this platform (roadmap 6.1)."""
+
+
+def docker_unavailable(report: platform.ProvisionReport) -> DockerUnavailableError:
+    """The refusal for a provision that ran and left no daemon THIS process can reach.
+
+    Two outcomes wore one sentence until 7.1, and it was the wrong one for the
+    outcome a first-time Linux user actually meets. `docker_group == "granted"`
+    means the group join RAN and succeeded — the engine is installed and the
+    account is a member — and the only thing between the user and a working
+    install is that a process cannot acquire a supplementary group it was
+    granted after it started. Telling them Docker "could not be set up
+    automatically" is the opposite of what happened, and it is the first thing
+    this engine ever says to them (live Ubuntu gate, press 1, 2026-08-30:
+    `docker.io` 29.1.3 active, `pk` added to group 124, and the install
+    reported as failed).
+
+    Built here rather than at either call site so the script path and the
+    native spine cannot drift: both had the same sentence, so both had the
+    same defect.
+    """
+    details = " ".join(report.manual_steps) or "; ".join(report.skipped)
+    if report.docker_group == "granted":
+        return DockerNeedsReLoginError(
+            "Docker is installed and set up. It cannot be used from this session yet: your "
+            "account was added to the docker group, and that only takes effect at your next "
+            "login. " + (details or "Log out and back in, then start the install again.")
+        )
+    return DockerUnavailableError(
+        "Docker isn't available and could not be set up automatically. "
+        + (details or "Install Docker, start it, and try again.")
+    )
+
+
+def provision_lines(report: platform.ProvisionReport) -> Iterator[str]:
+    """What provisioning DID, said on every path and not only the failing one.
+
+    The report was read exclusively inside the refusal, so a provision that
+    worked threw `done`, `skipped` and `manual_steps` away — and the one manual
+    step that matters most is produced by the SUCCESS case: a user who has just
+    consented to the docker-group join needs to be told to log out and back in.
+    They saw that sentence only if something else went wrong (review finding,
+    confirmed against the 2026-08-30 gate).
+
+    `skipped` is deliberately not echoed: on Linux `ensure_docker()` already
+    folds it into a `manual_steps` line that says WHY each one was skipped, and
+    printing both says everything twice.
+    """
+    if report.done:
+        yield "Docker setup did: " + "; ".join(report.done)
+    for step in report.manual_steps:
+        yield f"Still to do: {step}"
 
 
 @dataclass(frozen=True)
@@ -599,11 +663,7 @@ class Installer:
                     + " ".join(report.manual_steps)
                 )
             if not report.docker_ready and not self._docker_check():
-                details = " ".join(report.manual_steps) or "; ".join(report.skipped)
-                raise DockerUnavailableError(
-                    "Docker isn't available and could not be set up automatically. "
-                    + (details or "Install Docker, start it, and try again.")
-                )
+                raise docker_unavailable(report)
 
     def run(
         self,

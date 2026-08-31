@@ -73,6 +73,8 @@ from yulon.catalog.installer import (
     InstallerError,
     InstallOptions,
     UnsupportedPlatformError,
+    docker_unavailable,
+    provision_lines,
     unsupported_platform_message,
 )
 from yulon.log import get_logger
@@ -677,17 +679,20 @@ class StagedInstaller:
             # consent and the Linux sudo password are asked there, before any
             # privileged step, and declined when there is nobody to ask.
             report = self._seams.ensure_docker(cancel=cancel, ask=ask)
+            # Said whatever happens next, including when nothing goes wrong.
+            # Provisioning's own report was read only inside the refusals below,
+            # so a run that installed Docker and joined the docker group told
+            # the user neither — and the log-out-and-back-in step it produces is
+            # the one thing standing between them and a server. See
+            # `installer.provision_lines()`.
+            yield from provision_lines(report)
             if report.reboot_required:
                 raise DockerUnavailableError(
                     "Docker's prerequisites were installed but a reboot is needed first. "
                     + " ".join(report.manual_steps)
                 )
             if not report.docker_ready and not self._seams.docker_ready():
-                details = " ".join(report.manual_steps) or "; ".join(report.skipped)
-                raise DockerUnavailableError(
-                    "Docker isn't available and could not be set up automatically. "
-                    + (details or "Install Docker, start it, and try again.")
-                )
+                raise docker_unavailable(report)
         try:
             # The engine's own seams are handed down rather than letting
             # preflight fall back to its real defaults: without this an engine

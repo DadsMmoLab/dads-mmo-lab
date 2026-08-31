@@ -46,6 +46,7 @@ from yulon import docker, git, platform, resources, runner
 from yulon.catalog import composegen, native, preflight
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.installer import (
+    DockerNeedsReLoginError,
     DockerUnavailableError,
     Installer,
     InstallerError,
@@ -932,6 +933,80 @@ def test_docker_that_cannot_be_provisioned_is_a_clean_refusal(tmp_path: Path) ->
     )
     with pytest.raises(DockerUnavailableError):
         list(installer.run(InstallOptions(server_dir=tmp_path / "wow")))
+
+
+def _provisioned(**overrides: object) -> platform.ProvisionReport:
+    """The live gate's press 1: the engine installed, the group joined, no daemon yet.
+
+    `docker.io` 29.1.3 active and `pk` added to group 124 (Ubuntu gate,
+    2026-08-30) — and `docker_ready` still False, because `usermod` cannot
+    change the supplementary groups of a process that is already running.
+    """
+    fields_: dict[str, object] = {
+        "done": ("apt-get install -y docker.io", "usermod -aG docker pk"),
+        "manual_steps": (platform.DOCKER_GROUP_RELOGIN_STEP.format(user="pk"),),
+        "docker_ready": False,
+        "docker_group": "granted",
+    }
+    fields_.update(overrides)
+    return platform.ProvisionReport("linux", **fields_)  # type: ignore[arg-type]
+
+
+def test_a_provision_that_worked_and_only_needs_a_re_login_is_not_a_failure(
+    tmp_path: Path,
+) -> None:
+    """D1: the gate's first press did everything right and was reported as "could not".
+
+    Two different states with two different next actions — "Docker could not be
+    set up" and "Docker is set up and your account needs a new login" — and the
+    user reads the first sentence, not the remedy under it.
+    """
+    installer = engine(
+        Recorder(images=False),
+        docker_ready=lambda: False,
+        ensure_docker=lambda **_kwargs: _provisioned(),
+    )
+    with pytest.raises(DockerNeedsReLoginError) as caught:
+        installer.preflight(InstallOptions(server_dir=tmp_path / "srv"))
+    message = str(caught.value)
+    assert "could not be set up" not in message, message
+    assert "log out and back in" in message.lower(), message
+
+
+def test_a_provision_that_really_failed_still_says_so(tmp_path: Path) -> None:
+    """The other half of the distinction: a join that did not run is not a success."""
+    installer = engine(
+        Recorder(images=False),
+        docker_ready=lambda: False,
+        ensure_docker=lambda **_kwargs: _provisioned(
+            done=(),
+            manual_steps=(platform.DOCKER_GROUP_JOIN_FAILED_STEP.format(user="pk"),),
+            docker_group="join-failed",
+        ),
+    )
+    with pytest.raises(DockerUnavailableError) as caught:
+        installer.preflight(InstallOptions(server_dir=tmp_path / "srv"))
+    assert not isinstance(caught.value, DockerNeedsReLoginError)
+    assert "could not be set up automatically" in str(caught.value)
+
+
+def test_a_successful_provision_still_says_what_it_did_and_what_is_left(tmp_path: Path) -> None:
+    """The same root cause seen from the success side: the report was read only on failure.
+
+    A user who has just granted the docker-group join, on a box where the
+    daemon answers anyway, was never shown the log-out step at all — the one
+    thing standing between them and a working install.
+    """
+    answers = iter([False, True])
+    lines = list(
+        engine(
+            Recorder(images=False),
+            docker_ready=lambda: next(answers, True),
+            ensure_docker=lambda **_kwargs: _provisioned(docker_ready=True),
+        ).run(InstallOptions(server_dir=tmp_path / "wow"))
+    )
+    assert any("usermod -aG docker pk" in line for line in lines), lines
+    assert any("log out and back in" in line.lower() for line in lines), lines
 
 
 def test_the_engines_own_platform_reaches_preflight_instead_of_the_real_host(
