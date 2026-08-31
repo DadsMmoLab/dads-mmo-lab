@@ -95,6 +95,13 @@ class NativeInstall(_Strict):
             "agree — the point of the 2026-08-24 diff, and the thing that went wrong when the "
             "decision sat on one branch while every installer shipped 1600/2000. Still owed an "
             "RSS reading by the first gate."
+            "PROVENANCE: WotLK carried 1600/2000, copied from the ONE proven yulon-ubuntu install, "
+            "where the Linux installer script wrote them, after a `docker compose config` diff "
+            "on 2026-08-24 found a native install would otherwise differ from a script install. "
+            "Never measured on another machine and never measured at all for RAM. Lowered to "
+            "500/500 on 2026-08-28 by owner decision, and the same number was written into the "
+            "three WotLK scripts, TBC and Vanilla so the script and native paths still agree — "
+            "the point of the 2026-08-24 diff. Still owed an RSS reading by the first gate."
         ),
     )
 
