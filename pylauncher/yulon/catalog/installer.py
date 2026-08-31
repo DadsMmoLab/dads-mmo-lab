@@ -692,9 +692,9 @@ class Installer:
 class InstallEngine(Protocol):
     """What a catalog view can drive, whichever engine it got.
 
-    Both `Installer` (the bash script) and `native.NativeInstaller` satisfy it,
-    which is the whole reason `catalog_view.py`, `log_panel.py` and the job
-    runner needed no changes for roadmap 6.2.
+    Both `Installer` (the bash script) and every `native.StagedInstaller`
+    family satisfy it, which is the whole reason `catalog_view.py`,
+    `log_panel.py` and the job runner needed no changes for roadmap 6.2.
     """
 
     def preflight(
@@ -724,20 +724,19 @@ def installer_for(
 ) -> InstallEngine:
     """The engine that installs `entry` on THIS platform. The only place that decides.
 
-    Three rules, in order, all of them reading `catalog.json` rather than
-    asking what OS this is (style-guide §3):
-
-    1. the platform is not in `install.platforms` — refused by whoever calls
-       `preflight()`, unchanged from roadmap 6.1. A `Installer` is returned so
-       that refusal comes from the one place that words it;
-    2. the platform is in `install.script_platforms` — today's script path,
-       byte for byte what Linux already runs;
-    3. otherwise — the native engine.
+    Script versus family, read from `catalog.json` rather than from what OS
+    this is (style-guide §3, amendment A1): an entry with an `install.native`
+    block is installed by its family engine on every platform it supports; an
+    entry without one still runs its bash script, until 7.2 deletes that path
+    (`Install.uses_script()`/`is_native()` are untouched here and go in 7.2).
+    The platform refusal is unchanged from roadmap 6.1 and lives in each
+    engine's `preflight()`, so an unsupported click is refused by whoever
+    calls it.
 
     `import_probe`/`reset_unfinished` are per-game seams the CALLER supplies
-    (the app wires `controller_wow_wotlk.repair`), because `catalog/` must not
-    import a controller package. They are ignored on the script path, which
-    runs its import through the script.
+    (`install_wiring.py`), because `catalog/` must not import a controller
+    package. They are ignored on the script path, which runs its import
+    through the script.
 
     Imported inside the function on purpose: `native.py` imports this module
     for `InstallOptions` and the error types, so naming it at module scope
@@ -745,17 +744,17 @@ def installer_for(
     exceptions and a dataclass — buys nothing but an import.
     """
     from yulon.catalog import native
+    from yulon.catalog.families import family_for
 
-    here = platform_id()
-    if entry.install.is_native(here):
-        return native.NativeInstaller(
-            entry,
-            installers_root=installers_root,
-            import_probe=import_probe,
-            reset_unfinished=reset_unfinished,
-            seams=native.Seams(platform_id=platform_id),
-        )
-    return Installer(entry, installers_root=installers_root, platform_id=platform_id)
+    if entry.install.native is None:
+        return Installer(entry, installers_root=installers_root, platform_id=platform_id)
+    return family_for(entry)(
+        entry,
+        installers_root=installers_root,
+        import_probe=import_probe,
+        reset_unfinished=reset_unfinished,
+        seams=native.Seams(platform_id=platform_id),
+    )
 
 
 def _terminal_prompter(prompt: str) -> str:
@@ -814,7 +813,7 @@ def _main(argv: list[str] | None = None) -> int:
         sys.stderr.write(f"unknown game {args.game!r}\n")
         return 2
     # `installer_for()`, not `Installer(...)`: the CLI used to construct the
-    # script engine directly, so it could never exercise `NativeInstaller` on
+    # script engine directly, so it could never exercise a native family on
     # any platform, and "I ran the install through the CLI" proved less than it
     # sounded like it did. It now dispatches exactly as the Install button does.
     #

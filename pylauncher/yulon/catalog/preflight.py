@@ -123,6 +123,7 @@ def gather(
     entry: CatalogEntry,
     server_dir: Path,
     *,
+    client_dir: Path | None = None,
     platform_id: Callable[[], str] = platform.detect,
     docker_ready: Callable[[], bool] = platform.docker_ready,
     vm_resources: Callable[[], platform.VmResources | None] = platform.vm_resources,
@@ -149,8 +150,14 @@ def gather(
     CI stayed green.
 
     SELinux and the server folder's filesystem are asked only on Linux, where
-    they exist. `client_dir` is accepted from 7.1 and consulted from 7.3.
+    they exist.
+
+    `client_dir` is carried from 7.1 and unused until 7.3 adds the client
+    checks (A9). The spine passes it on every call, so the seam that will do
+    the checking is already wired when the checks arrive; accepting it now is
+    what keeps that from being a second change to every caller.
     """
+    del client_dir  # 7.3 reads it; named here so the keyword is part of the contract
     here = platform_id()
     ready = docker_ready()
     free = disk_free if disk_free is not None else _free_bytes
