@@ -61,6 +61,7 @@ import time
 from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
+from enum import Enum
 from pathlib import Path
 from secrets import token_hex
 from typing import ClassVar, Protocol
@@ -230,17 +231,90 @@ class InstallState:
         return stage in self.completed
 
 
-def read_state(server_dir: Path, *, valid: Sequence[str]) -> InstallState | None:
-    """The state file in `server_dir`, or None if there is none this engine wrote.
+class Ownership(Enum):
+    """Whose folder is this? Three answers, because a bool has nowhere to put the third.
 
-    An unreadable or malformed file answers None: it is a hint, and a hint that
-    cannot be parsed is simply no hint. It is never deleted here — a file this
-    engine cannot read may be somebody else's, and `guard` is what decides
-    whether the directory can be used at all.
+    `UNCLAIMED` — no state file. Nobody has claimed the folder; whatever else
+    is in it is judged by the guards that look at the disk.
+
+    `OWNED` — a state file that PARSED and that names this install: the same
+    `install_id` (the hash of this absolute path), the same `game_id`, and a
+    `family` that does not contradict this one.
+
+    `UNKNOWN` — a state file is there and could not be turned into any of that:
+    truncated by a crash mid-write, damaged by hand, written by a version this
+    one cannot read, or an unrelated file that happens to sit at the reserved
+    name. This is the case where the engine knows LEAST, and it must never be
+    the case where it acts most freely. It fails closed everywhere it is
+    reached; see `StagedInstaller.claimed_this_folder()` for what that bought.
+    """
+
+    UNCLAIMED = "unclaimed"
+    OWNED = "owned"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class Claim:
+    """`read_claim()`'s answer: the ownership, plus the state when there is one.
+
+    `state` is non-None exactly when `ownership is Ownership.OWNED`. It is the
+    parsed record; `UNKNOWN` carries none, which is the point of it.
+    """
+
+    ownership: Ownership
+    state: InstallState | None = None
+
+
+def read_claim(server_dir: Path, *, valid: Sequence[str]) -> Claim:
+    """The ONE place a folder is turned into an ownership answer.
+
+    This function exists because two of them disagreed, on exactly one input,
+    in the direction that loses work. `read_state()` answered `None` for a
+    state file that would not parse and `claimed_this_folder()` answered
+    `(server_dir / STATE_FILE).is_file()` — presence — so a corrupt file made
+    the guard treat the folder as FRESH while the clone stage treated it as
+    OURS, and `git fetch` + `git reset --hard` ran over the user's own
+    checkout. Repro (adversarial review, 2026-08-31): clone a repo to
+    `~/mywork`, edit a file, truncate `.yulon-install.json` to zero bytes,
+    install into `~/mywork`; the edit is gone. Commit `60d53374` hid this on
+    enforcing SELinux boxes — the container could not read `.git`, so an
+    earlier guard raised first — and `5c6c655c`, which made those reads work
+    again, uncovered it.
+
+    So: presence is never ownership, and a corrupt file is never allowed to
+    make this engine MORE confident than a missing one. Everything that asks
+    "is this folder mine?" asks here.
+
+    The file is never deleted or rewritten here — one that cannot be read may
+    be somebody else's, and the caller is what decides whether the directory
+    can be used at all.
 
     `valid` is the entry's stage tuple: a name outside it is dropped rather
     than kept, so a stage that no longer exists can never become a skip.
     """
+    if not (server_dir / STATE_FILE).is_file():
+        return Claim(Ownership.UNCLAIMED)
+    parsed = _parse_state(server_dir, valid=valid)
+    if parsed is None:
+        return Claim(Ownership.UNKNOWN)
+    return Claim(Ownership.OWNED, parsed)
+
+
+def read_state(server_dir: Path, *, valid: Sequence[str]) -> InstallState | None:
+    """The state file in `server_dir`, or None if there is none this engine can read.
+
+    The HINT, and only the hint: an unreadable or malformed file answers None
+    because a hint that cannot be parsed is simply no hint. That is the right
+    answer for "which stages may I skip?" and the wrong one for "is this folder
+    mine?", which is `read_claim()`'s question and never this one's. The two
+    used to share this single answer, and see `read_claim()` for what that cost.
+    """
+    return read_claim(server_dir, valid=valid).state
+
+
+def _parse_state(server_dir: Path, *, valid: Sequence[str]) -> InstallState | None:
+    """The state file's contents, or None if it will not open, parse, or say whose it is."""
     path = server_dir / STATE_FILE
     try:
         with path.open(encoding="utf-8") as fh:
@@ -757,9 +831,31 @@ class StagedInstaller:
         a different compose project. It must also be ours by `family`: a
         catalog edit that moves a game between families is a refusal here,
         never a reinterpretation.
+
+        A state file that will not parse is refused rather than ignored, and
+        that refusal is the whole of `Ownership.UNKNOWN`. Treating it as absent
+        made this the FRESH-install path while `claimed_this_folder()` was
+        simultaneously calling the folder ours — the two ownership answers
+        disagreeing on exactly the input where the engine knows least, with
+        `git reset --hard` at the end of it (`read_claim()`). Refusing costs a
+        user with a damaged file one sentence and one deletion; the other
+        direction cost them their work.
         """
         install_id = composegen.install_id(server_dir, platform_id=self._seams.platform_id)
-        existing = read_state(server_dir, valid=self.stage_names()) if server_dir.is_dir() else None
+        claim = (
+            read_claim(server_dir, valid=self.stage_names())
+            if server_dir.is_dir()
+            else Claim(Ownership.UNCLAIMED)
+        )
+        if claim.ownership is Ownership.UNKNOWN:
+            raise InstallerError(
+                f"{server_dir} holds a {STATE_FILE} this app cannot read, so it cannot tell "
+                "whether this folder is one of its own installs or somebody else's work. "
+                "Nothing was written. If that file is left over from an install that was "
+                "interrupted, delete it and try again; if you did not expect it to be there, "
+                "install into another folder instead."
+            )
+        existing = claim.state
         if existing is not None and existing.install_id != install_id:
             raise InstallerError(
                 f"{server_dir} holds an install record made for a different folder, so this "
@@ -851,24 +947,46 @@ class StagedInstaller:
 
     # -- stage bodies a family binds into `Stage.run` --------------------
 
-    def claimed_this_folder(self, ctx: StageContext) -> bool:
+    def claimed_this_folder(self, ctx: StageContext) -> Ownership:
         """Has a previous run of THIS install already written its record here?
 
-        The state file's presence, and nothing softer, because `_guard()` has
-        already proved that any state file still here belongs to this install:
-        it matched on `install_id` (the hash of this absolute path), on
-        `game_id` and on `family`, and refused the folder otherwise. So the file
-        being there means "this app has run in this folder before, for this
-        game" — which is exactly the question a clone stage has to answer before
-        it decides that an unrecorded checkout is its own unfinished work rather
-        than somebody's repository.
+        Answered by `read_claim()`, which is the same function `_guard()` asks,
+        because the previous two answers to this question disagreed. This one
+        used to be `(ctx.server_dir / STATE_FILE).is_file()` — PRESENCE — on the
+        premise that `_guard()` had already proved that any state file still
+        here belongs to this install. The premise held only for a file
+        `_guard()` could parse: every check there is written `if existing is not
+        None and …`, and `read_state()` answered `None` for a file it could not
+        read. So a corrupt state file passed `_guard()` as "fresh folder" and
+        passed this as "ours", and `refuse_unowned_checkout()` stood down over a
+        user's own checkout. `read_claim()`'s docstring has the repro.
 
-        `ctx.state` cannot answer it: `_guard()` hands every run a state object
-        whether or not a file was read, so a fresh install and a resumed one are
-        indistinguishable from the object alone. `_record_error()` asks the same
-        question the same way.
+        Three answers, and only `OWNED` is ownership. `UNKNOWN` is a state file
+        that is there and unreadable, and it must never be worth more than
+        `UNCLAIMED`, which is no file at all: it is the input the engine knows
+        least about. `_guard()` refuses `UNKNOWN` before a stage runs, so
+        reaching it here means the file was damaged or replaced DURING the
+        install — which is exactly why this re-reads the folder rather than
+        trusting a decision taken minutes ago.
+
+        `ctx.state` cannot answer it either: `_guard()` hands every run a state
+        object whether or not a file was read, so a fresh install and a resumed
+        one are indistinguishable from the object alone. What `ctx.state` is
+        good for is the identity `_guard()` already validated, which is what the
+        re-read is checked against here.
+
+        (`_record_error()` still asks `is_file()`, and correctly: its question is
+        "is there a file to update?", never "is this folder mine?".)
         """
-        return (ctx.server_dir / STATE_FILE).is_file()
+        claim = read_claim(ctx.server_dir, valid=self.stage_names())
+        found = claim.state
+        if found is None:
+            return claim.ownership
+        if found.install_id != ctx.state.install_id or found.game_id != ctx.state.game_id:
+            return Ownership.UNKNOWN
+        if found.family and found.family != ctx.state.family:
+            return Ownership.UNKNOWN
+        return Ownership.OWNED
 
     def refuse_unowned_checkout(
         self, ctx: StageContext, dest: Path, url: str, remote: str | None
@@ -886,11 +1004,26 @@ class StagedInstaller:
         `git fetch` + `git reset --hard FETCH_HEAD`. Driven end to end (review,
         2026-08-31): `// my patch` became `// upstream`.
 
-        Ownership is `claimed_this_folder()`. INSIDE a folder this install owns,
-        an unrecorded checkout is this install's own unfinished work and
-        fetch+reset is the right repair — that is how a `modules/` clone that
-        died half way is healed. Outside one, it is somebody's repository and
-        this app did not put it there, so it is named and left alone.
+        Ownership is `claimed_this_folder()`, and only `Ownership.OWNED` is it.
+        INSIDE a folder this install owns, an unrecorded checkout is this
+        install's own unfinished work and fetch+reset is the right repair — that
+        is how a `modules/` clone that died half way is healed. Outside one, it
+        is somebody's repository and this app did not put it there, so it is
+        named and left alone. `UNKNOWN` — a state file that is there and will
+        not parse — is not ownership and gets its own sentence, because "there
+        is no record here" would be a lie about a folder that has one.
+
+        **`remote is None` is handled HERE, not at three call sites.** It used
+        to `return` — safe only because
+        `if has_git and existing is None: raise` was copy-pasted into
+        `families/azerothcore.py` twice and `stage_clone_sources()` once, so
+        the one method whose job is this could not do it alone (review,
+        2026-08-31). Every one of those copies had the same `dest` this method
+        is handed. `None` there does NOT mean "no checkout": it also means no
+        docker CLI, a daemon that would not answer, a failed image pull, and —
+        until `5c6c655c` — an SELinux denial on every enforcing box. A `.git`
+        on disk is the host's own evidence that the container's `None` is a
+        misdiagnosis, and stopping is the only safe reading of it.
 
         The cost is stated in the message rather than worked around: a FIRST
         clone that died before its stage was recorded also lands here, and the
@@ -899,8 +1032,24 @@ class StagedInstaller:
         point tells the two apart — a partly-cloned tree and a checkout a user
         made both answer `git remote get-url origin` with this exact URL.
         """
-        if remote is None or self.claimed_this_folder(ctx):
+        if remote is None:
+            if (dest / ".git").is_dir():
+                raise InstallerError(
+                    f"{dest} contains a git checkout, but git would not say what it is a "
+                    "checkout of, so nothing was changed. Move that folder aside and try again."
+                )
             return
+        claim = self.claimed_this_folder(ctx)
+        if claim is Ownership.OWNED:
+            return
+        if claim is Ownership.UNKNOWN:
+            raise InstallerError(
+                f"{dest} is a git checkout of {url}, and the {STATE_FILE} beside it cannot be "
+                "read, so this app cannot tell whether the checkout is its own unfinished work "
+                "or yours. Continuing would run `git fetch` and `git reset --hard` over it, so "
+                "nothing was touched. Delete that file if it is left over from an interrupted "
+                "install, or install into an empty folder instead."
+            )
         raise InstallerError(
             f"{dest} is already a git checkout of {url}, and there is no record here of an "
             "install this app made. Continuing would run `git fetch` and `git reset --hard` "
@@ -968,11 +1117,6 @@ class StagedInstaller:
             dest = ctx.server_dir / source.dest
             has_git = (dest / ".git").is_dir()
             existing = self._remote_of(dest)
-            if has_git and existing is None:
-                raise InstallerError(
-                    f"{dest} contains a git checkout, but git would not say what it is a "
-                    "checkout of, so nothing was changed. Move that folder aside and try again."
-                )
             if existing is not None and not _same_repo(existing, source.url):
                 raise InstallerError(
                     f"{dest} is a checkout of {existing}, not of {source.url}. Nothing was "

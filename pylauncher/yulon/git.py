@@ -89,6 +89,109 @@ _HTTP_VERSION_ARGS = ["-c", "http.version=HTTP/1.1"]
 _HTTP_VERSION_CONFIG = ["--config", "http.version=HTTP/1.1"]
 
 
+# Docker flags for the two questions `_capture(writes=False)` asks. They exist
+# because those questions are asked about a folder this app has NOT decided is
+# its own — `remote_url()`'s whole purpose is to find out whose a checkout is —
+# and because on an enforcing SELinux box that same container also runs
+# `--security-opt label:disable`, which drops it from `container_t` to the
+# invoking user's full authority. `label:disable`'s safety argument was written
+# for `docker.bind_mount_ok()`'s probe: pinned digest, `:ro` mount, entrypoint
+# `ls`. The git read satisfied only the first clause, because the mount string
+# was `f"{dest}:/git"` with an EMPTY label — read-write, on a stranger's
+# repository (adversarial review, 2026-08-31). These flags are the other two
+# clauses, and then some.
+#
+# Measured against the pinned digest below, on this repo shape (2026-08-31);
+# `remote get-url origin` and `status --porcelain -- docker-compose.yml` both
+# answer correctly under every line of it, and a modified file still reports
+# ` M`:
+#
+#     -v <repo>:/git      sh -c 'touch /git/PROOF'  -> WROTE (the file appeared)
+#     -v <repo>:/git:ro   sh -c 'touch /git/PROOF'  -> touch: Read-only file system
+#
+# `--read-only` is the container's OWN root filesystem, not the mount, and it is
+# here because it was measured rather than assumed: both questions answer with
+# it. `--network none` costs nothing — neither question touches a network — and
+# it is what makes "the repository chose the program" (see below) unable to
+# reach anything. `--cap-drop ALL` and `no-new-privileges` are the two that
+# `container_t` was providing for free until `label:disable` turned it off.
+_READ_ONLY_CONTAINER_ARGS = [
+    "--network",
+    "none",
+    "--cap-drop",
+    "ALL",
+    "--security-opt",
+    "no-new-privileges",
+    "--read-only",
+]
+
+# The empty tree. Git resolves this object id in any repository, including one
+# with no commits at all (measured: `git init` with nothing committed answers
+# both questions with `--attr-source` pointed at it).
+_EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+# Git honours REPOSITORY configuration, and two of its keys name a program git
+# then EXECUTES. The repository being asked is by construction one this app did
+# not make, and after `label:disable` the container asking is unconfined — so
+# "is this file unchanged?" could run repository-selected code with the user's
+# authority. Measured inside the pinned image (2026-08-31), on a repo carrying
+# `core.fsmonitor=/git/fsm.sh`, `.gitattributes` of `* filter=evil` and
+# `filter.evil.clean=/git/clean.sh`, with a plain
+# `git status --porcelain -- docker-compose.yml`:
+#
+#     no flags                      -> fsmonitor RAN, clean filter RAN
+#     -c core.fsmonitor=false       -> fsmonitor did not run, clean filter RAN
+#     + --attr-source=<empty tree>  -> neither ran
+#
+# `--attr-source` is the one that reaches the filters: a clean/smudge driver is
+# selected by a `filter` ATTRIBUTE, so cutting off the selection is the only
+# mechanism there is — git offers no "run no filters" switch, and the driver
+# NAMES come from the repository's own config, so there is nothing to enumerate
+# and override. It is safe to require here because this argv only ever runs
+# inside the pinned digest below (git 2.49.1) and `--attr-source` needs 2.40;
+# the host-git `RunnerGit` is deliberately not given it.
+#
+# `--attr-source` covers the WORKING TREE's `.gitattributes` and NOTHING ELSE.
+# Review measured the other two attribute sources on git 2.51.2, with a
+# `filter.evil.clean` that logs when it runs:
+#
+#     .git/info/attributes      + --attr-source  -> the filter RAN
+#     core.attributesFile (repo config) + same   -> the filter RAN
+#     ... and + -c core.attributesFile=/dev/null -> it did not
+#
+# so `core.attributesFile` is in the list below, and `$GIT_DIR/info/attributes`
+# is NOT closable by any flag. Both files are repository content in exactly the
+# sense `core.fsmonitor` is, so this list does not make a hostile repository
+# safe — it removes the easy routes and leaves one open.
+#
+# `--no-optional-locks` stops `status` refreshing `.git/index`, which is both a
+# write the `:ro` mount would refuse and the trigger for the `post-index-change`
+# hook; `core.hooksPath=/dev/null` is the belt to that braces, since a directory
+# of hooks is also repository content. `--ignore-submodules=all` does the same
+# for a nested repository — a SECOND set of repository-chosen programs — but it
+# is a `status` option rather than a top-level one, so it lives at
+# `is_unmodified()`'s call site instead of in this list.
+#
+# What this does NOT cover, said plainly rather than left to be discovered: git
+# has no switch that disables filter DRIVERS themselves, only the attributes
+# that select them — and it cannot override `$GIT_DIR/info/attributes` at all,
+# so a repository that puts its `filter` attribute THERE still selects a driver
+# despite every flag in this list. A future caller that needs real attributes
+# gets no protection either. Whatever does run is contained by
+# `_READ_ONLY_CONTAINER_ARGS` above and by nothing else, which is why that list
+# is not optional.
+_UNTRUSTED_REPO_ARGS = [
+    "--no-optional-locks",
+    f"--attr-source={_EMPTY_TREE}",
+    "-c",
+    "core.attributesFile=/dev/null",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+]
+
+
 # Pinned by digest, not by tag. This image is handed a writable bind mount of
 # the destination directory, so "whatever :latest resolves to today" is a
 # third party with write access to a user's install. The tag is kept alongside
@@ -372,6 +475,13 @@ class ContainerGit:
 
     image: str = _CONTAINER_GIT_IMAGE
 
+    # The SELinux seams, in the shape `docker.bind_mount_ok()` already uses:
+    # the real functions by default, overridable so a test can state the
+    # machine's answer instead of inheriting the host the suite runs on. Both,
+    # because `platform.bind_label()` needs both — see `_capture()`.
+    selinux_enforcing: Callable[[], bool | None] = platform.selinux_enforcing
+    filesystem_type: Callable[[Path], str | None] = platform.filesystem_type
+
     def remote_url(self, dest: Path) -> str | None:
         """`git remote get-url origin` in the checkout at `dest`; see `RunnerGit.remote_url()`.
 
@@ -382,7 +492,7 @@ class ContainerGit:
         if not (dest / ".git").is_dir():
             return None
         try:
-            proc = self._capture(dest, ["remote", "get-url", "origin"])
+            proc = self._capture(dest, ["remote", "get-url", "origin"], writes=False)
         except GitError as exc:
             logger.debug(f"could not read origin in {dest}: {exc}")
             return None
@@ -402,13 +512,23 @@ class ContainerGit:
         `None` when git could not be asked at all, which callers must fail
         closed on: "we could not check" is not "it is safe to overwrite".
 
+        `--ignore-submodules=all` is a `status` option rather than one of
+        `_UNTRUSTED_REPO_ARGS`, so it lives here: without it `status` descends
+        into a nested repository, and a nested repository is a SECOND set of
+        repository-chosen programs. It cannot change this method's answer for a
+        `relative_path` that is an ordinary file.
+
         Deliberately NOT on the `Git` Protocol, for the same reason
         `remote_url()` is not — see the comment there.
         """
         if not (dest / ".git").is_dir():
             return None
         try:
-            proc = self._capture(dest, ["status", "--porcelain", "--", relative_path])
+            proc = self._capture(
+                dest,
+                ["status", "--ignore-submodules=all", "--porcelain", "--", relative_path],
+                writes=False,
+            )
         except GitError as exc:
             logger.debug(f"could not ask git about {relative_path} in {dest}: {exc}")
             return None
@@ -469,7 +589,7 @@ class ContainerGit:
 
     def _run(self, spec: CloneSpec, git_args: list[str]) -> None:
         """One containerized `git` invocation against this spec's destination."""
-        self._capture(spec.dest, git_args)
+        self._capture(spec.dest, git_args, writes=True)
 
     def _clone_with_mount_race_retry(self, spec: CloneSpec, git_args: list[str]) -> None:
         """The initial clone, retried once against the exact bind-mount race in the class docstring.
@@ -490,7 +610,7 @@ class ContainerGit:
         the first attempt exactly as before.
         """
         try:
-            self._capture(spec.dest, git_args)
+            self._capture(spec.dest, git_args, writes=True)
         except GitError as exc:
             if not _is_fresh_mount_race(str(exc)):
                 raise
@@ -498,10 +618,21 @@ class ContainerGit:
                 f"containerized git clone hit the fresh-mount race in {spec.dest} ({exc}); "
                 "retrying once before falling back to host git"
             )
-            self._capture(spec.dest, git_args)
+            self._capture(spec.dest, git_args, writes=True)
 
-    def _capture(self, dest: Path, git_args: list[str]) -> subprocess.CompletedProcess[str]:
+    def _capture(
+        self, dest: Path, git_args: list[str], *, writes: bool
+    ) -> subprocess.CompletedProcess[str]:
         """One containerized `git` invocation, or `GitError` if it fails.
+
+        `writes` says whether this invocation puts anything into `dest`, and it
+        is keyword-only and mandatory so a new caller has to answer it rather
+        than inherit an answer. It picks between two different containers. A
+        writer gets a read-write mount, `:z` where SELinux is enforcing, and
+        stays confined. A reader gets a `:ro` mount, `_READ_ONLY_CONTAINER_ARGS`,
+        `_UNTRUSTED_REPO_ARGS`, and — where SELinux is enforcing, and only there
+        — `--security-opt label:disable`. Never both labels, never neither; see
+        the SELinux comment below.
 
         argv[0] comes from `platform.docker_program()` for the reason spelled
         out there: this class exists *because* Windows and macOS already have
@@ -541,12 +672,117 @@ class ContainerGit:
         program = platform.docker_program()
         if program is None:
             raise GitError(platform.DOCKER_CLI_MISSING_HELP)
+        # `:z` on an enforcing SELinux box, and the SAME decision the generated
+        # compose binds make: `platform.bind_label()` is the one place that
+        # answers it, so the clone mount and the `{{BIND_LABEL}}` mounts can
+        # never disagree about whether this machine labels. Reusing it also
+        # brings the filesystem rule along for free — `bind_label()` consults
+        # `selinux_labels_supported()`, so a server folder on exFAT, NTFS or a
+        # network share gets no label rather than a mount the daemon refuses —
+        # and it keeps the three answers three: `selinux_enforcing()` returns
+        # `None` for "could not ask", and only `True` labels.
+        #
+        # Measured on a clean Fedora 44 box with SELinux Enforcing (2026-08-30),
+        # with the preflight probe already fixed so the install could get this
+        # far:
+        #
+        #     $ ls -Zd ~/labtest
+        #     unconfined_u:object_r:user_home_t:s0 /home/pk/labtest
+        #     $ docker run --rm -v /home/pk/labtest:/git ... -c "touch /git/x"
+        #     touch: /git/x: Permission denied
+        #     $ docker run --rm -v /home/pk/labtest:/git:z ... -c "touch /git/y"
+        #     (succeeded, and the folder is now container_file_t)
+        #
+        # **`:z` for a write, `--security-opt label:disable` for a read, and the
+        # difference is the mount source.** The preflight probe
+        # deliberately mounts an ANCESTOR of the chosen folder — routinely the
+        # user's whole home directory — so a `:z` there would recursively
+        # relabel `$HOME` to `container_file_t` and break the desktop session.
+        # This mount is the server directory itself, the folder the app just
+        # created and owns; relabelling THAT is exactly what the install wants,
+        # it is what `platform.relabel_for_containers()` does to it a few stages
+        # later anyway, and every compose bind the engine generates for it
+        # already carries the same `:z`.
+        #
+        # **Only for the calls that WRITE into `dest`.** `_capture()` is shared
+        # with `remote_url()` and `is_unmodified()`, which ask a question and
+        # change nothing — and a `:z` relabels the mount source recursively, so
+        # asking would have rewritten the labels of the very folder the answer
+        # is used to decide NOT to touch. That is not hypothetical: the first
+        # press against a user's OWN checkout of the same repository is refused
+        # by `native.refuse_unowned_checkout()`, and the evidence it refuses on
+        # is `_remote_of()` -> `_git_remote_url()` -> `remote_url()` -> here.
+        # The refusal's own words are "nothing was touched", and a relabel of
+        # the user's git checkout would have made them false.
+        #
+        # **A read must still be able to SEE the folder, and unlabelled it
+        # cannot.** Dropping the `:z` from the two questions was only half the
+        # answer, and the half that was left out was measured the same day on
+        # Fedora 44, Enforcing, against a user's own unlabelled checkout
+        # (`unconfined_u:object_r:user_home_t:s0`):
+        #
+        #     $ docker run --rm -v /home/pk/ownco:/git ... remote get-url origin
+        #     fatal: not a git repository (or any parent up to mount point /)
+        #     $ docker run --rm --security-opt label:disable -v ... get-url origin
+        #     https://github.com/mod-playerbots/azerothcore-wotlk.git
+        #
+        # and the folder's label is byte-identical afterwards, which is the
+        # whole point. Note the SHAPE of the denial: the container cannot see
+        # `.git` at all, so git does not report a permission error, it reports
+        # that the directory is not a repository — so the failure arrives here
+        # as an ordinary `GitError` and leaves as `None`, indistinguishable from
+        # "there is no checkout here". Every enforcing box therefore answered
+        # `None` for every foreign checkout it was asked about. That direction
+        # is not free even where a guard catches it: `_clone_core()` refuses on
+        # `has_git and existing is None` with "git would not say what it is a
+        # checkout of ... Pick an empty folder", which is a true sentence about
+        # a machine that could have answered perfectly well, told to a user
+        # whose remedy is to delete a checkout.
+        #
+        # `platform.label_disable_args()` is the same function
+        # `docker.bind_mount_ok()`'s probe asks — one decision about running a
+        # container unconfined, in one place — and it keeps the three answers
+        # three: `None` adds neither the label nor the flag.
+        #
+        # `filesystem_type()` is asked only when the answer can matter.
+        # `bind_label()` is still the one place that decides — `enforcing is
+        # True` is not re-implemented here, it is the precondition for the
+        # `stat` being worth spawning at all. Off SELinux the label is `""`
+        # whatever the filesystem says, so the subprocess was pure waste on
+        # every Ubuntu and Arch box, on every containerized git call.
+        #
+        # **A read mounts `:ro` and runs with everything else it does not need
+        # taken away** — `_READ_ONLY_CONTAINER_ARGS` — and asks git in a way that
+        # denies the repository the choice of what runs —
+        # `_UNTRUSTED_REPO_ARGS`. Both are above, with the measurements. The
+        # short version: the mount string here used to be `f"{dest}:/git"` with
+        # an empty label on the read path, so `label:disable` was granting an
+        # unconfined container a READ-WRITE mount of a folder this app had just
+        # decided was not its own, on a justification (`:ro`, entrypoint `ls`,
+        # pinned digest) that belonged to `docker.bind_mount_ok()`'s probe.
+        label = ""
+        hardening: list[str] = []
+        untrusted: list[str] = []
+        if writes:
+            enforcing = self.selinux_enforcing()
+            label = platform.bind_label(
+                enforcing=enforcing,
+                fs_type=self.filesystem_type(dest) if enforcing is True else None,
+            )
+        else:
+            label = ":ro"
+            hardening = [
+                *platform.label_disable_args(enforcing=self.selinux_enforcing()),
+                *_READ_ONLY_CONTAINER_ARGS,
+            ]
+            untrusted = _UNTRUSTED_REPO_ARGS
         argv = [
             program,
             "run",
             "--rm",
+            *hardening,
             "-v",
-            f"{dest}:/git",
+            f"{dest}:/git{label}",
             # State the working directory rather than inheriting the image's.
             # `image` is a public field, so an override would otherwise clone
             # into the wrong place — silently, since `.` would resolve
@@ -555,6 +791,7 @@ class ContainerGit:
             "/git",
             *self._user_args(),
             self.image,
+            *untrusted,
             *_LINE_ENDING_ARGS,
             *_HTTP_VERSION_ARGS,
             *git_args,

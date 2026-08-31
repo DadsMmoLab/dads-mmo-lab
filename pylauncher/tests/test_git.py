@@ -189,7 +189,12 @@ def test_container_git_mounts_the_destination_and_clones_into_it(
 ) -> None:
     """macOS/Windows already require Docker, so git need not be a second prerequisite."""
     dest = tmp_path / "core"
-    git.ContainerGit().clone(git.CloneSpec(url="https://example/core.git", dest=dest, depth=None))
+    # The SELinux answer is stated rather than inherited from the box the suite
+    # runs on: on a Fedora runner the real seam answers "enforcing" and the
+    # mount is `…:/git:z`, which the labelling tests below assert on purpose.
+    git.ContainerGit(selinux_enforcing=lambda: False).clone(
+        git.CloneSpec(url="https://example/core.git", dest=dest, depth=None)
+    )
     argv = seen[0]
     assert argv[:4] == ["docker", "run", "--rm", "-v"]
     assert argv[4] == f"{dest}:/git"
@@ -198,6 +203,342 @@ def test_container_git_mounts_the_destination_and_clones_into_it(
     assert argv[-2:] == ["https://example/core.git", "."]
     assert "--depth" not in argv
     assert "@sha256:" in " ".join(argv), "the image must be pinned by digest, not by a moving tag"
+
+
+def _clone_mount(
+    seen: list[list[str]], dest: Path, *, enforcing: bool | None, fs_type: str | None = "ext2/ext3"
+) -> str:
+    """The `-v` argument of the one containerized clone this states the machine for."""
+    git.ContainerGit(
+        selinux_enforcing=lambda: enforcing, filesystem_type=lambda _path: fs_type
+    ).clone(git.CloneSpec(url="https://example/core.git", dest=dest, depth=None))
+    argv = seen[-1]
+    return argv[argv.index("-v") + 1]
+
+
+def test_the_clone_mount_is_labelled_when_selinux_is_enforcing(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """Measured on a clean Fedora 44 box with SELinux Enforcing (2026-08-30).
+
+    The destination is a folder the app has just created under the user's home,
+    so it is `user_home_t`, and a confined container may only write
+    `container_file_t`:
+
+        $ docker run --rm -v /home/pk/labtest:/git ... -c "touch /git/x"
+        touch: /git/x: Permission denied
+        $ docker run --rm -v /home/pk/labtest:/git:z ... -c "touch /git/y"
+        (succeeded)
+
+    So with the preflight probe fixed, every Fedora install stopped one stage
+    later, at `clone-core`.
+    """
+    dest = tmp_path / "core"
+    assert _clone_mount(seen, dest, enforcing=True) == f"{dest}:/git:z"
+
+
+def test_the_clone_mount_is_not_labelled_where_selinux_is_not_enforcing(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """Relabelling is not free and not universal: no SELinux, no `:z`.
+
+    Same rule the generated compose binds follow, because it is literally the
+    same function deciding — `platform.bind_label()`.
+    """
+    dest = tmp_path / "core"
+    assert _clone_mount(seen, dest, enforcing=False) == f"{dest}:/git"
+
+
+def test_a_selinux_answer_nobody_could_read_does_not_label_the_clone_mount(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """THREE answers, not two. `None` is "could not ask", and it is not a quiet yes.
+
+    A `:z` on a machine that never claimed to be enforcing asks the daemon to
+    rewrite the labels of a folder for no evidence, and on an engine that does
+    not support the option it fails an install that otherwise works.
+    """
+    dest = tmp_path / "core"
+    assert _clone_mount(seen, dest, enforcing=None) == f"{dest}:/git"
+
+
+def test_the_clone_mount_is_not_labelled_on_a_filesystem_that_cannot_hold_labels(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """Enforcing is not enough: exFAT/NTFS/CIFS carry no labels and `:z` on them is refused.
+
+    Not re-implemented here — `platform.bind_label()` already consults
+    `selinux_labels_supported()`, and reusing that seam is what brings the rule
+    along. This asserts that the reuse is real.
+    """
+    dest = tmp_path / "core"
+    assert _clone_mount(seen, dest, enforcing=True, fs_type="ntfs") == f"{dest}:/git"
+
+
+def test_a_read_only_git_question_does_not_relabel_the_folder_it_asks_about(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """`:z` is a recursive RELABEL of the mount source, so a question must not carry one.
+
+    `_capture()` is shared with `remote_url()` and `is_unmodified()`, which write
+    nothing. The cost of labelling them anyway is not untidiness: the first press
+    against a user's OWN checkout of the same repository is refused by
+    `native.refuse_unowned_checkout()`, and the evidence that refusal rests on is
+    `git remote get-url origin` — `_remote_of()` -> `_git_remote_url()` ->
+    `ContainerGit.remote_url()` -> here. So on an enforcing box the engine would
+    have rewritten the labels of a stranger's git checkout as a side effect of
+    deciding not to touch it, under a message that says "nothing was touched".
+
+    Same machine, same two answers, for both halves — so this cannot pass by the
+    seams quietly answering "not enforcing".
+    """
+    fedora = git.ContainerGit(
+        selinux_enforcing=lambda: True, filesystem_type=lambda _path: "ext2/ext3"
+    )
+    dest = tmp_path / "someone-elses-checkout"
+    (dest / ".git").mkdir(parents=True)
+
+    fedora.remote_url(dest)
+    fedora.is_unmodified(dest, "docker-compose.yml")
+    assert len(seen) == 2, "both questions ran; neither was short-circuited away"
+    for argv in seen:
+        mount = argv[argv.index("-v") + 1]
+        assert mount == f"{dest}:/git:ro", "a read must not relabel its subject"
+        assert not mount.endswith((":z", ":Z"))
+
+    # The anchor: the SAME machine puts `:z` on the mount that WRITES, so the
+    # negative above is the distinction being made and not SELinux being absent.
+    writing = tmp_path / "ours"
+    fedora.clone(git.CloneSpec(url="https://example/core.git", dest=writing, depth=None))
+    assert seen[-1][seen[-1].index("-v") + 1] == f"{writing}:/git:z"
+
+
+def _labelling_fs(_path: Path) -> str:
+    """A filesystem that holds SELinux labels, so `bind_label()` is not the thing under test."""
+    return "ext2/ext3"
+
+
+def _read_argv(seen: list[list[str]], dest: Path, *, enforcing: bool | None) -> list[str]:
+    """The argv of one read-only containerized git question, with the machine stated."""
+    (dest / ".git").mkdir(parents=True, exist_ok=True)
+    git.ContainerGit(
+        selinux_enforcing=lambda: enforcing, filesystem_type=lambda _path: "ext2/ext3"
+    ).remote_url(dest)
+    assert seen, "the question never reached a container"
+    return seen[-1]
+
+
+def test_a_read_only_git_question_mounts_read_only_and_keeps_nothing_it_does_not_need(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """The mount is the grant, and the read path was granting a WRITABLE one.
+
+    `label:disable`'s price was paid on the probe's argument — pinned digest,
+    `:ro` mount, `--entrypoint ls` — and the git read met only the first of the
+    three: `_capture()` built `f"{dest}:/git"` with an empty label whenever
+    `writes=False`. So an unconfined container, holding the invoking user's full
+    authority, had a read-write mount of the folder this app had just decided it
+    does not own (adversarial review, 2026-08-31).
+
+    Measured against the pinned digest (2026-08-31), same image, same shape as
+    production:
+
+        -v <repo>:/git     sh -c 'touch /git/PROOF' -> wrote; PROOF appeared
+        -v <repo>:/git:ro  sh -c 'touch /git/PROOF' -> Read-only file system
+
+    and `remote get-url origin` plus `status --porcelain` answer correctly under
+    `:ro` and under every other flag asserted here, with a modified file still
+    reported as ` M`.
+
+    **What an argv test cannot cover.** That the daemon honours `:ro`,
+    `--read-only`, `--cap-drop` and `no-new-privileges` at all; that they behave
+    the same under an enforcing policy as they do here; and that a future git
+    subcommand added to the read path still answers with the container's own
+    root filesystem read-only. The measurements above are the evidence for the
+    first two, on a real daemon, and they are not re-run by this suite.
+    """
+    for dest, ask in (
+        (tmp_path / "read-remote", lambda impl, path: impl.remote_url(path)),
+        (tmp_path / "read-status", lambda impl, path: impl.is_unmodified(path, "x")),
+    ):
+        (dest / ".git").mkdir(parents=True)
+        ask(git.ContainerGit(selinux_enforcing=lambda: True, filesystem_type=_labelling_fs), dest)
+        argv = seen[-1]
+        assert argv[argv.index("-v") + 1] == f"{dest}:/git:ro"
+        assert argv[argv.index("--network") + 1] == "none"
+        assert argv[argv.index("--cap-drop") + 1] == "ALL"
+        assert "--read-only" in argv
+        assert "no-new-privileges" in argv
+
+    # The anchor: a WRITE gets none of it. A clone that could not write into its
+    # own destination, or reach the network it clones from, is not a clone.
+    writing = tmp_path / "ours"
+    git.ContainerGit(selinux_enforcing=lambda: True, filesystem_type=_labelling_fs).clone(
+        git.CloneSpec(url="https://example/core.git", dest=writing, depth=None)
+    )
+    argv = seen[-1]
+    assert argv[argv.index("-v") + 1] == f"{writing}:/git:z"
+    assert "--read-only" not in argv
+    assert "--network" not in argv
+    assert "--cap-drop" not in argv
+    assert "no-new-privileges" not in argv
+
+
+def test_a_read_only_git_question_denies_the_repository_the_choice_of_what_runs(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """`git status` runs programs the REPOSITORY names, and the repository is not ours.
+
+    `core.fsmonitor` names a program git executes; a clean/smudge filter is
+    consulted while deciding whether a file is modified. Both come from the
+    repository's own config, and `remote_url()`/`is_unmodified()` are asked about
+    checkouts this app did not make — inside the container whose SELinux
+    confinement this branch turned off.
+
+    Measured inside the pinned image (2026-08-31) on a repository carrying
+    `core.fsmonitor=/git/fsm.sh`, `.gitattributes` of `* filter=evil` and
+    `filter.evil.clean=/git/clean.sh`, running `status --porcelain -- <path>`:
+
+        no flags                     -> fsmonitor RAN, clean filter RAN
+        -c core.fsmonitor=false      -> fsmonitor did not run, clean filter RAN
+        + --attr-source=<empty tree> -> neither ran
+
+    `--attr-source` is the only lever that reaches the filters: git has no
+    switch that disables filter DRIVERS, and their names come from the
+    repository, so cutting off the ATTRIBUTE that selects one is the whole
+    mechanism. Stated plainly because it is a limit, not a win.
+
+    **What an argv test cannot cover.** Whether git 2.49.1 really consults no
+    driver under `--attr-source`, and whether a later git changes that; both are
+    the measurement above, against the digest this argv pins. Nor can it cover
+    the mechanisms nobody disabled — see `git._UNTRUSTED_REPO_ARGS`.
+    """
+    dest = tmp_path / "someone-elses-checkout"
+    (dest / ".git").mkdir(parents=True)
+    impl = git.ContainerGit(selinux_enforcing=lambda: True, filesystem_type=_labelling_fs)
+    impl.remote_url(dest)
+    impl.is_unmodified(dest, "docker-compose.yml")
+    assert len(seen) == 2
+    for argv in seen:
+        assert "--no-optional-locks" in argv
+        assert f"--attr-source={git._EMPTY_TREE}" in argv
+        assert "core.fsmonitor=false" in argv
+        assert "core.hooksPath=/dev/null" in argv
+        # Before the subcommand, or git rejects them outright.
+        subcommand = min(argv.index(word) for word in ("remote", "status") if word in argv)
+        for flag in ("--no-optional-locks", "core.fsmonitor=false"):
+            assert argv.index(flag) < subcommand
+    assert "--ignore-submodules=all" in seen[-1], "a nested repo is a second config"
+
+    # The anchor: a WRITE keeps none of them. `--attr-source` on a clone would
+    # blind the checkout to the repository's own `.gitattributes`, which is the
+    # repository this app CHOSE and whose line endings it depends on.
+    impl.clone(git.CloneSpec(url="https://example/core.git", dest=tmp_path / "ours", depth=None))
+    for flag in ("--no-optional-locks", "core.fsmonitor=false", "core.hooksPath=/dev/null"):
+        assert flag not in seen[-1]
+    assert not [item for item in seen[-1] if item.startswith("--attr-source")]
+
+
+def test_a_read_only_git_question_runs_unconfined_so_it_can_see_an_unlabelled_folder(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """Dropping `:z` from the reads was half an answer; without the other half they go blind.
+
+    Measured on Fedora 44, Enforcing (2026-08-30), against a checkout the user
+    made themselves, so `unconfined_u:object_r:user_home_t:s0`:
+
+        $ docker run --rm -v /home/pk/ownco:/git ... remote get-url origin
+        fatal: not a git repository (or any parent up to mount point /)
+        $ docker run --rm --security-opt label:disable -v ... remote get-url origin
+        https://github.com/mod-playerbots/azerothcore-wotlk.git
+
+    and `ls -Zd` says the label is untouched afterwards, which is the whole
+    reason this is the right flag and `:z` is not.
+
+    What the denial looks like is why an argv test alone was not enough to catch
+    it: the container cannot see `.git`, so git reports "not a git repository"
+    rather than a permission error, `remote_url()` catches the `GitError` and
+    answers `None`, and `None` is exactly what a directory holding no checkout
+    answers. See the refusal-level test in `test_families_azerothcore.py`.
+    """
+    argv = _read_argv(seen, tmp_path / "someone-elses-checkout", enforcing=True)
+    assert "--security-opt" in argv
+    assert argv[argv.index("--security-opt") + 1] == "label:disable"
+    # And NOT the other half: `label:disable` lets the container read the folder,
+    # `:z` would rewrite it. A read that carried both would still be a read that
+    # relabels its subject.
+    assert not [item for item in argv if item.endswith((":z", ":Z"))]
+
+    # The anchor, on the SAME machine: a WRITE is the mirror image. `:z` is
+    # right there — the folder is this app's own and relabelling it is the point
+    # — and confinement is not turned off for it.
+    writing = tmp_path / "ours"
+    git.ContainerGit(
+        selinux_enforcing=lambda: True, filesystem_type=lambda _path: "ext2/ext3"
+    ).clone(git.CloneSpec(url="https://example/core.git", dest=writing, depth=None))
+    assert seen[-1][seen[-1].index("-v") + 1] == f"{writing}:/git:z"
+    assert "label:disable" not in seen[-1]
+
+
+def test_a_read_only_git_question_stays_confined_where_selinux_is_not_enforcing(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """No SELinux, nothing to disable. Ubuntu, Arch, macOS and Windows read confined."""
+    argv = _read_argv(seen, tmp_path / "checkout", enforcing=False)
+    assert "label:disable" not in argv
+    assert not [item for item in argv if item.endswith((":z", ":Z"))]
+
+
+def test_a_selinux_answer_nobody_could_read_neither_labels_nor_unconfines_a_read(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """THREE answers, and `None` gets neither half.
+
+    `None` is "could not ask" — no `getenforce`, an unreadable
+    `/sys/fs/selinux/enforce`, a tool that said something new. Turning a
+    container's confinement off is a security decision, and taking one on no
+    evidence is the mistake `platform.selinux_enforcing()`'s docstring exists to
+    prevent; a `:z` on the same evidence would relabel a stranger's folder. So
+    the question runs exactly as it does on a box with no SELinux at all, and a
+    genuine denial reaches the caller as the `None` it already fails closed on.
+    """
+    argv = _read_argv(seen, tmp_path / "checkout", enforcing=None)
+    assert "label:disable" not in argv
+    assert not [item for item in argv if item.endswith((":z", ":Z"))]
+
+
+def test_the_filesystem_is_not_stated_unless_selinux_says_enforcing(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """`platform.filesystem_type()` shells out `stat`, and off SELinux it cannot matter.
+
+    `bind_label()` is `"" ` for `False` and for `None` whatever the filesystem
+    answers, so asking was a subprocess per containerized git call on every
+    Ubuntu and Arch box — and, because the real one runs through `runner.run`,
+    it also put a `stat` argv in front of the docker argv every test that reads
+    `seen[0]` was written against.
+    """
+    asked: list[Path] = []
+
+    def record(path: Path) -> str | None:
+        asked.append(path)
+        return "ext2/ext3"
+
+    for answer in (False, None):
+        quiet = git.ContainerGit(
+            selinux_enforcing=lambda said=answer: said,  # type: ignore[misc]
+            filesystem_type=record,
+        )
+        quiet.clone(git.CloneSpec(url="https://example/core.git", dest=tmp_path / f"core-{answer}"))
+    assert asked == [], "nothing that cannot change the label is worth a subprocess"
+
+    # And it IS asked when the answer decides something — otherwise a seam that
+    # was never called would pass this test by doing nothing at all.
+    enforcing_dest = tmp_path / "core-enforcing"
+    git.ContainerGit(selinux_enforcing=lambda: True, filesystem_type=record).clone(
+        git.CloneSpec(url="https://example/core.git", dest=enforcing_dest)
+    )
+    assert asked == [enforcing_dest]
 
 
 def test_docker_desktop_never_gets_a_user_flag(
@@ -349,7 +690,13 @@ def test_is_unmodified_tells_upstreams_own_file_from_one_somebody_edited(
     monkeypatch.setattr(runner, "run", fake_run)
     answers.append(_completed(stdout=""))
     assert git.ContainerGit().is_unmodified(dest, "docker-compose.yml") is True
-    assert seen_argv[-1][-4:] == ["status", "--porcelain", "--", "docker-compose.yml"]
+    assert seen_argv[-1][-5:] == [
+        "status",
+        "--ignore-submodules=all",
+        "--porcelain",
+        "--",
+        "docker-compose.yml",
+    ]
     answers.append(_completed(stdout=" M docker-compose.yml\n"))
     assert git.ContainerGit().is_unmodified(dest, "docker-compose.yml") is False
     answers.append(_completed(stdout="?? docker-compose.yml\n"))
@@ -432,7 +779,12 @@ def test_container_git_runs_the_docker_this_host_can_start(
     seen: list[list[str]], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(git.platform, "_resolved_docker_cli", OFF_PATH_EXE)
-    git.ContainerGit().clone(git.CloneSpec(url="https://example/core.git", dest=tmp_path / "core"))
+    # `seen[0]` has to BE the docker call, so the filesystem seam is stated:
+    # the real one shells out `stat` through this very fixture on Linux, and on
+    # an enforcing runner it would be recorded first. See `_capture()`.
+    git.ContainerGit(filesystem_type=lambda _path: None).clone(
+        git.CloneSpec(url="https://example/core.git", dest=tmp_path / "core")
+    )
     assert seen, "nothing ran"
     assert seen[0][0] == OFF_PATH_EXE
     assert seen[0][1:3] == ["run", "--rm"], "only argv[0] moved"
@@ -539,11 +891,15 @@ def test_container_git_takes_its_user_args_from_platform(
         return ["--user", "4242:4242"]
 
     monkeypatch.setattr(git.platform, "container_user_args", four_two)
-    git.ContainerGit().clone(git.CloneSpec(url="https://example/core.git", dest=tmp_path / "core"))
+    # The filesystem seam is stated for the reason given in
+    # `test_container_git_runs_the_docker_this_host_can_start`: on an enforcing
+    # Linux runner the real one would put a `stat` argv into `seen[0]`.
+    unlabelled = git.ContainerGit(filesystem_type=lambda _path: None)
+    unlabelled.clone(git.CloneSpec(url="https://example/core.git", dest=tmp_path / "core"))
     argv = seen[0]
     assert argv[argv.index("--user") + 1] == "4242:4242"
     assert argv.index("--user") < argv.index(git.CONTAINER_GIT_IMAGE)
 
     monkeypatch.setattr(git.platform, "container_user_args", lambda **kwargs: [])
-    git.ContainerGit().clone(git.CloneSpec(url="https://example/core.git", dest=tmp_path / "core2"))
+    unlabelled.clone(git.CloneSpec(url="https://example/core.git", dest=tmp_path / "core2"))
     assert "--user" not in seen[1]

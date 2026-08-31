@@ -1572,6 +1572,78 @@ def bind_label(*, enforcing: bool | None, fs_type: str | None) -> str:
     return ":z" if enforcing is True and selinux_labels_supported(fs_type) else ""
 
 
+def label_disable_args(*, enforcing: bool | None) -> list[str]:
+    """`--security-opt label:disable` for a container that must READ an unlabelled folder.
+
+    `bind_label()`'s counterpart, and deliberately its neighbour: they are the
+    two halves of one decision — how a container reaches a host directory on an
+    enforcing box — and a project that spelled them in two modules would be one
+    edit away from disagreeing with itself about SELinux.
+
+    **The difference between them is whether the container writes.** `:z` asks
+    the daemon to RECURSIVELY relabel the mount source to `container_file_t`,
+    which is exactly right for a folder this app created and is about to fill,
+    and exactly wrong for a folder it is only asking a question about — a read
+    that relabels its own subject has changed the thing the answer said not to
+    touch. `label:disable` runs that one container unconfined instead, and
+    leaves the host label as it found it. Measured on Fedora 44, Enforcing
+    (2026-08-30), on an unlabelled checkout:
+
+        $ ls -Zd /home/pk/ownco2
+        unconfined_u:object_r:user_home_t:s0 /home/pk/ownco2
+        $ docker run --rm -v /home/pk/ownco2:/git ... remote get-url origin
+        fatal: not a git repository (or any parent up to mount point /)
+        $ docker run --rm --security-opt label:disable -v ... remote get-url origin
+        https://github.com/mod-playerbots/azerothcore-wotlk.git
+        $ ls -Zd /home/pk/ownco2
+        unconfined_u:object_r:user_home_t:s0 /home/pk/ownco2
+
+    Note what the denial LOOKS like, because it is why this was missed: the
+    container cannot see `.git` at all, so git does not say "permission denied",
+    it says the directory is not a repository. Every caller then gets the answer
+    it uses for "there is nothing here".
+
+    Three answers, not two, the same as everywhere else in this section.
+    `enforcing is None` is "could not ask", and it adds nothing: turning a
+    container's confinement off is a security decision, and taking one on no
+    evidence is what `selinux_enforcing()`'s docstring exists to prevent.
+
+    What it gives up, stated plainly: one short-lived container, running a
+    pinned image digest, runs unconfined by SELinux for the length of a read.
+    Concretely its process type becomes `spc_t` rather than `container_t` — no
+    MCS separation, no `container_file_t`-only file access, the container
+    booleans stop applying — and since `container_user_args()` passes
+    `--user $(id -u):$(id -g)` on Linux, what is left is exactly the invoking
+    user's own authority. DAC, seccomp and AppArmor are untouched.
+
+    **The blast radius is the mount list, so every caller owes its own `:ro`.**
+    That sentence is here because this docstring once carried a safety argument
+    instead: pinned digest, `:ro` mount, `--entrypoint ls`, nothing that writes.
+    That argument is `docker.bind_mount_ok()`'s, where all three clauses are
+    true. `git.ContainerGit`'s read satisfied only the first — its mount string
+    had no `:ro` on it at all — so the second caller inherited a justification
+    it did not meet (adversarial review, 2026-08-31). This function knows only
+    `enforcing`: it cannot see the mount or the entrypoint, so it cannot make
+    that argument on a caller's behalf, and a new caller must make it for
+    itself. `git._READ_ONLY_CONTAINER_ARGS` is what that looks like.
+
+    The alternatives, correctly priced, because an overstated version of this
+    paragraph is what bought the trade. For `bind_mount_ok()` the alternative is
+    refusing every install on every enforcing box, and `:z` is not available
+    there — the mount is an ANCESTOR of the chosen folder, routinely `$HOME`.
+    For the git read the alternative is NOT an answer that is wrong in the
+    dangerous direction: `remote_url()` answering `None` reaches
+    `native.refuse_unowned_checkout()`, which refuses on a `.git` the HOST can
+    see. It is a loud but WRONG refusal — an enforcing user told to move aside a
+    checkout the machine could have read perfectly well. Worth this flag; not
+    data loss, and not to be described as any.
+
+    A note for whoever bumps `git.CONTAINER_GIT_IMAGE`: that digest is the code
+    that runs unconfined here.
+    """
+    return ["--security-opt", "label:disable"] if enforcing is True else []
+
+
 def relabel_for_containers(
     path: Path,
     *,

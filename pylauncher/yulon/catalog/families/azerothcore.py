@@ -85,14 +85,13 @@ class AzerothCoreInstaller(StagedInstaller):
         server_dir = ctx.server_dir
         has_git = (server_dir / ".git").is_dir()
         existing = self._remote_of(server_dir)
-        if has_git and existing is None:
-            # A checkout whose origin cannot be read is not an empty directory
-            # and not ours either. Refused rather than cloned over, because the
-            # clone seam DELETES a destination it does not recognise.
-            raise InstallerError(
-                f"{server_dir} contains a git checkout, but git would not say what it is a "
-                "checkout of, so nothing was changed. Pick an empty folder."
-            )
+        # A checkout whose origin cannot be read is not an empty directory and
+        # not ours either, and it is refused rather than cloned over because the
+        # clone seam DELETES a destination it does not recognise. That refusal
+        # is `refuse_unowned_checkout()`'s own, below: it used to be copied into
+        # this body and two others, which left the method whose docstring calls
+        # itself "the one path in this engine that could still destroy a user's
+        # work" unable to protect itself (review, 2026-08-31).
         if existing is not None and not _same_repo(existing, source.url):
             raise InstallerError(
                 f"{server_dir} is already a git checkout of {existing}, not of {source.url}. "
@@ -151,11 +150,6 @@ class AzerothCoreInstaller(StagedInstaller):
             dest = ctx.server_dir / source.dest
             has_git = (dest / ".git").is_dir()
             existing = self._remote_of(dest)
-            if has_git and existing is None:
-                raise InstallerError(
-                    f"{dest} contains a git checkout, but git would not say what it is a "
-                    "checkout of, so nothing was changed. Move that folder aside and try again."
-                )
             if existing is not None and not _same_repo(existing, source.url):
                 raise InstallerError(
                     f"{dest} is a checkout of {existing}, not of {source.url}. Nothing was "

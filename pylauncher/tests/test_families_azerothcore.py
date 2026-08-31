@@ -377,6 +377,58 @@ def test_a_first_install_into_the_users_own_checkout_is_refused_and_left_alone(
     assert not any("part-way through" in line for line in lines), lines
 
 
+def test_a_state_file_nobody_can_read_never_authorises_a_reset_of_a_users_checkout(
+    tmp_path: Path,
+) -> None:
+    """The FOURTH round's defect, at the level where the harm happens.
+
+    Two functions disagreed about what owning a folder means, and a corrupt file
+    landed between them. `read_state()` answered `None` for a state file that
+    would not parse, so `_guard()` treated the folder as FRESH and skipped every
+    refusal it has; `claimed_this_folder()` answered
+    `(server_dir / STATE_FILE).is_file()` — presence — so
+    `refuse_unowned_checkout()` called the folder OURS and stood down; and
+    `git fetch` + `git reset --hard FETCH_HEAD` ran over a user's own checkout.
+
+    The repro is the adversarial reviewer's, and it needs no SELinux and no
+    resume: clone the repo to `~/mywork`, edit a file, truncate
+    `.yulon-install.json` to zero bytes, install into `~/mywork`. Commit
+    `60d53374` hid this on enforcing boxes — the container could not read `.git`
+    at all, so an earlier guard raised first — and `5c6c655c`, which made those
+    reads work again, uncovered it.
+
+    Asserted at the harm rather than at a flag: the reset seam is never reached
+    and the edit is still there. `test_a_first_install_into_the_users_own_
+    checkout_is_refused_and_left_alone` above is the missing-file half of the
+    same claim, and a corrupt file must never be worth more than a missing one.
+    """
+    server_dir = tmp_path / "mywork"
+    (server_dir / ".git").mkdir(parents=True)
+    edited = server_dir / "src" / "server" / "worldserver.cpp"
+    edited.parent.mkdir(parents=True)
+    edited.write_text("// my patch\n", encoding="utf-8")
+    (server_dir / native.STATE_FILE).write_text("", encoding="utf-8")
+    rec = Recorder(images=False)
+    rec.remotes[server_dir] = ENTRY.emulator.sources[0].url
+    reset: list[Path] = []
+
+    def hard_reset(spec: git.CloneSpec) -> None:
+        reset.append(spec.dest)
+        for path in spec.dest.rglob("*.cpp"):
+            path.write_text("// upstream\n", encoding="utf-8")
+
+    with pytest.raises(InstallerError, match="cannot read"):
+        list(engine(rec, clone=hard_reset).run(InstallOptions(server_dir=server_dir)))
+    assert reset == [], reset
+    assert rec.clones == [], rec.clones
+    # Nothing ran at all beyond the machine check that precedes the guard — no
+    # clone, no build, no container. A flag set to the right value would not be
+    # evidence of that; an empty call log is.
+    assert rec.calls == ["gather"], rec.calls
+    assert edited.read_text(encoding="utf-8") == "// my patch\n"
+    assert not (server_dir / "docker-compose.yml").exists()
+
+
 def test_the_part_way_through_sentence_is_only_said_where_it_is_true(tmp_path: Path) -> None:
     """It is said over a fetch+reset, so it must never be said about somebody else's work.
 
@@ -640,6 +692,70 @@ def test_a_checkout_git_will_not_identify_is_refused_rather_than_cloned_over(
         install(rec, server_dir)
     assert not rec.clones
     assert (server_dir / "somebody-elses-source").exists()
+
+
+def test_an_enforcing_box_still_recognises_a_users_own_checkout_of_this_repository(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The refusal that names the repository must survive SELinux, and it did not.
+
+    This is the level the harm happens at, so the argv is not stated here — the
+    real `ContainerGit.remote_url()` runs, against a `runner.run` that behaves
+    the way Fedora 44 Enforcing was measured to behave (2026-08-30): a bind
+    mount of an unlabelled folder is invisible to a confined container, and the
+    SAME command with `--security-opt label:disable` answers. Only the machine
+    is stated, through the two seams `ContainerGit` has for exactly that; the
+    seam wired in is `native.Seams.remote_url`'s own default body,
+    `ContainerGit().remote_url`.
+
+    What the denial looks like is why three review seats read past it. The
+    container cannot see `.git` at all, so git says "fatal: not a git repository"
+    rather than anything about permissions; `remote_url()` catches the `GitError`
+    and returns `None`; and `None` is what a folder with no checkout in it
+    answers. So on every enforcing box a user's own checkout stopped being a
+    checkout of a NAMED repository and became an unreadable one — the refusal
+    that fired said git would not say what this is and told the user to pick an
+    empty folder, about a machine that could have answered perfectly well, to a
+    user whose remedy is now to delete their work.
+
+    Take `--security-opt label:disable` out of `git._capture()` and this goes
+    red on the message: the "would not say what it is a checkout of" refusal
+    fires instead of the one that names the repository and the missing record.
+    """
+    core_url = ENTRY.emulator.sources[0].url
+    server_dir = tmp_path / "wow"
+    (server_dir / ".git").mkdir(parents=True)
+    (server_dir / "my-own-patches.cpp").write_text("mine", encoding="utf-8")
+
+    def enforcing_selinux(
+        argv: list[str], cwd: Path | None = None, env: object = None, **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        unconfined = "--security-opt" in argv and argv[argv.index("--security-opt") + 1] == (
+            "label:disable"
+        )
+        if unconfined:
+            return subprocess.CompletedProcess(argv, 0, f"{core_url}\n", "")
+        # Not "permission denied": with the mount invisible, git reports that
+        # the directory is not a repository at all.
+        return subprocess.CompletedProcess(
+            argv, 128, "", "fatal: not a git repository (or any parent up to mount point /)"
+        )
+
+    monkeypatch.setattr(runner, "run", enforcing_selinux)
+    monkeypatch.setattr(git.platform, "docker_program", lambda: "docker")
+    fedora = git.ContainerGit(
+        selinux_enforcing=lambda: True, filesystem_type=lambda _path: "ext2/ext3"
+    )
+
+    rec = Recorder()
+    with pytest.raises(InstallerError) as refusal:
+        install(rec, server_dir, remote_url=fedora.remote_url)
+    said = str(refusal.value)
+    assert "there is no record here of an install this app made" in said, said
+    assert core_url in said, said
+    assert "would not say what it is a checkout of" not in said, said
+    assert not rec.clones
+    assert (server_dir / "my-own-patches.cpp").read_text(encoding="utf-8") == "mine"
 
 
 def test_the_same_repository_spelled_differently_is_not_a_conflict(tmp_path: Path) -> None:
