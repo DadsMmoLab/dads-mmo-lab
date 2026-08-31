@@ -387,6 +387,14 @@ class Seams:
     start: Callable[[docker.ContainerSpec, Path], bool] = docker.start_staged
     wait_db_healthy: Callable[[docker.ContainerSpec], bool] = docker.wait_db_healthy_for
     wait_ready: Callable[[docker.ContainerSpec, docker.ReadySpec], bool] = docker.wait_ready_for
+    # `selinux_enforcing` answers True, False or None, and `None` is "could not
+    # ask" — never "no". The type says so here so that a caller collapsing the
+    # two is a type error, and not a Fedora install that renders no `:z`,
+    # relabels nothing, and looks exactly like a working one until the
+    # worldserver cannot read the config it was just handed.
+    relabel: Callable[[Path], bool] = platform.relabel_for_containers
+    selinux_enforcing: Callable[[], bool | None] = platform.selinux_enforcing
+    fs_type: Callable[[Path], str | None] = platform.filesystem_type
     keep_awake: Callable[[], AbstractContextManager[None]] = platform.keep_awake
 
 
@@ -864,12 +872,33 @@ class StagedInstaller:
         asked answers `None` — all three keep the refusal. The override and
         build files get no exception at all: upstream ships neither, so an
         unmarked one there is somebody's own settings.
+
+        Under enforcing SELinux the bind lines get `:z` through
+        `{{BIND_LABEL}}` and the folder is relabelled once (`relabel` seam);
+        the 2026-08-25 Fedora gate proved the bash, gate 7.1 on Fedora proves
+        this port.
         """
+        # `:z` on every host bind line when SELinux enforces and the drive can
+        # carry labels; empty otherwise, so the rendered files are byte-identical
+        # off SELinux (the committed compose-config fixture is the proof). A
+        # uniform `:z`, not `:Z`: `./modules` is shared by the import and the
+        # worldserver, and `:Z` locks the other service out.
+        #
+        # THREE ANSWERS GO IN, not two. `selinux_enforcing()` returns None for
+        # "could not ask" and it is passed through as None — `bind_label()` is
+        # the one place allowed to decide what an unknown means (it renders
+        # nothing, and preflight says "unchecked" so the user sees that the
+        # question went unanswered). Collapsing it here to a bool would make
+        # the two indistinguishable everywhere downstream.
+        label = platform.bind_label(
+            enforcing=self._seams.selinux_enforcing(), fs_type=self._seams.fs_type(ctx.server_dir)
+        )
         plan = composegen.render(
             self.entry,
             ctx.server_dir,
             templates_root=self.installers_root,
             db_password=ctx.secrets.db_password,
+            bind_label=label,
             platform_id=self._seams.platform_id,
         )
         replaceable = self._replaceable_compose(ctx.server_dir)
@@ -888,6 +917,22 @@ class StagedInstaller:
             yield "The compose files are already exactly what this install needs."
         for path in written:
             yield f"Wrote {path.name}"
+        if label and not self._seams.relabel(ctx.server_dir):
+            # A Python port of the Fedora script's `selinux_label_for_containers`
+            # (`chcon -Rt container_file_t`, no sudo). Failure is said, not
+            # fatal: the `:z` mount option relabels at `up` on most setups.
+            #
+            # Run here, and only here, on purpose. Both clone stages are done by
+            # now, so everything the host has written exists; everything created
+            # after this — the build's output, the client data — is written by a
+            # container into a volume or into a bind that `:z` relabels when it
+            # is mounted. A later Fedora permission error is therefore evidence
+            # for a SECOND relabel somewhere, not for a longer timeout on this
+            # one.
+            yield (
+                f"{ctx.server_dir} could not be relabelled for containers (chcon); if the "
+                "server refuses to start under SELinux, run `chcon -Rt container_file_t` on it."
+            )
 
     def stage_build(self, ctx: StageContext) -> Iterator[str]:
         """Compile the server. Hours, and the one stage whose output is worth watching.

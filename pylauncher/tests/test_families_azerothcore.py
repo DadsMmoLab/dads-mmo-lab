@@ -110,6 +110,13 @@ def test_every_seam_defaults_to_the_real_function_it_stands_in_for() -> None:
     assert real.one_shot is docker.run_one_shot
     assert real.gather is preflight.gather
     assert real.wait_ready is docker.wait_ready_for
+    # The three SELinux seams. Every SELinux test in `test_spine.py` fakes all
+    # three, so they are only evidence about Fedora if these are what a real
+    # install reaches for — and `selinux_enforcing` in particular must be the
+    # tri-state probe, not something that answers `False` for "could not ask".
+    assert real.relabel is platform.relabel_for_containers
+    assert real.selinux_enforcing is platform.selinux_enforcing
+    assert real.fs_type is platform.filesystem_type
     # `ensure_docker` is the one seam whose REAL default escalates on Linux, so
     # the engine not calling it (or calling a fake) is what the macOS path's
     # "no sudo" claim ultimately rests on. Pin that the default really is the
