@@ -651,6 +651,27 @@ class Installer:
         already joined the group, so the script found the user a member and
         never asked (found 2026-08-24). This said "one question" until the sudo
         password landed beside it on another branch (merge review, 2026-08-31).
+
+        The body is `_preflight_lines()` so that `run()` can SHOW what
+        provisioning did while this method keeps returning None. Same shape as
+        `native.StagedInstaller`, and for the same reason: the lines are the
+        report a user needs and they were reaching one of the two engines.
+        """
+        for _ in self._preflight_lines(options, cancel, ask):
+            pass
+
+    def _preflight_lines(
+        self,
+        options: InstallOptions,
+        cancel: threading.Event | None,
+        ask: runner.Prompter | None = None,
+    ) -> Iterator[str]:
+        """`preflight()`'s body, yielding what provisioning did as it happens.
+
+        Yielded rather than collected and returned: a refusal below stops the
+        generator, and the lines said BEFORE it are exactly the ones that
+        explain it. Collecting them into a list for `run()` to yield afterwards
+        would lose every one of them on the failing path.
         """
         here = self._platform_id()
         if not self.entry.install.supports(here):
@@ -683,6 +704,11 @@ class Installer:
                 raise InstallerError(folder_problem)
         if not self._docker_check():
             report = self._ensure_docker(cancel=cancel, ask=ask)
+            # Three of the four catalog entries have no `install.native` block,
+            # so `installer_for()` hands them to THIS engine — and the half of
+            # D1 that says what provisioning did was wired into the other one
+            # only (review, 2026-08-31).
+            yield from provision_lines(report)
             if report.reboot_required:
                 raise DockerUnavailableError(
                     "Docker's prerequisites were installed but a reboot is needed first. "
@@ -724,7 +750,7 @@ class Installer:
         Setting `cancel` interrupts the script (see `runner.interact()`).
         """
         opts = options or InstallOptions()
-        self.preflight(opts, cancel=cancel, ask=ask)
+        yield from self._preflight_lines(opts, cancel, ask)
         logger.info(f"installing {self.entry.id} via {self.script}")
         tail: deque[str] = deque(maxlen=_ERROR_TAIL_LINES)
 
