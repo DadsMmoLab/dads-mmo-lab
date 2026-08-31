@@ -538,9 +538,9 @@ def test_a_stack_without_a_project_name_is_refused(tmp_path: Path) -> None:
     """
     stack = sc.stack_from_plan(render(tmp_path))
     assert stack.project is not None and stack.project.startswith("yulon-wow-wotlk-")
-    assert sc.compare_stack(stack, stack) == []
+    assert sc.compare_stack(stack, _proven()) == []
     nameless = replace(stack, project=None)
-    assert sc.compare_stack(nameless, stack) == [
+    assert sc.compare_stack(nameless, _proven()) == [
         "project: the native stack has no `name:`, so its named volumes are keyed by the "
         "install directory and two installs can share one database"
     ]
@@ -554,6 +554,8 @@ def test_the_rendered_top_level_volumes_and_networks_are_plain(tmp_path: Path) -
     stack = sc.stack_from_plan(render(tmp_path))
     assert stack.volumes == (("ac-client-data", ()), ("ac-database", ()))
     assert stack.networks == (("ac-network", ()),)
+    # What the file itself says, which is what the translation table is checked against.
+    assert stack.declared_volumes == ("client-data", "db-data")
 
 
 def _config(volumes: dict[str, object], networks: dict[str, object] | None = None) -> sc.Stack:
@@ -572,6 +574,15 @@ def _config(volumes: dict[str, object], networks: dict[str, object] | None = Non
     )
 
 
+def _proven(options: dict[str, object] | None = None) -> sc.Stack:
+    """The proven install's top level. Its two volumes carry UPSTREAM's names — that difference
+    is the reason `DESIGN_VOLUME_NAMES` exists, so a stand-in spelled our way would not be one.
+    `options` attaches a body to one of them, by the name upstream calls it."""
+    volumes: dict[str, object] = {"ac-database": {}, "ac-client-data": {}}
+    volumes.update(options or {})
+    return _config(volumes)
+
+
 RELOCATION = {"type": "none", "device": "/somewhere/else", "o": "bind"}
 
 
@@ -581,7 +592,7 @@ def test_a_relocated_named_volume_is_reported_by_the_stack_comparison(tmp_path: 
     on another disk, and both sides still reduce to
     `('volume', '<named>', '/azerothcore/env/dist/data', 'ro')`. Only compose's per-project
     `name:` is dropped from a declaration; the rest of it is compared, under its own key."""
-    proven = sc.stack_from_plan(render(tmp_path))
+    proven = _proven()
     relocated = _config({"db-data": {}, "client-data": {"driver_opts": RELOCATION}})
     # The per-service view cannot tell these apart at all.
     assert sc.shape_from_config({"services": {}}) == {}
@@ -596,7 +607,7 @@ def test_the_same_options_on_the_other_store_is_a_different_stack() -> None:
     stores was moved off the docker root — one is the client data, the other is the database —
     and a comparison that erased the names would call them identical."""
     client_data_moved = _config({"db-data": {}, "client-data": {"driver_opts": RELOCATION}})
-    database_moved = _config({"db-data": {"driver_opts": RELOCATION}, "client-data": {}})
+    database_moved = _proven({"ac-database": {"driver_opts": RELOCATION}})
     assert sc.compare_stack(client_data_moved, database_moved) == [
         "volumes: ac-client-data ['driver_opts.device=/somewhere/else', 'driver_opts.o=bind', "
         "'driver_opts.type=none'] vs []",
@@ -615,11 +626,10 @@ def test_the_recorded_rename_is_two_names_and_not_a_licence_to_rename() -> None:
         "client-data": "ac-client-data",
     }
     ours = _config({"mysql-data": {}, "client-data": {}})
-    upstream = _config({"ac-database": {}, "ac-client-data": {}})
-    assert sc.compare_stack(upstream, upstream) == []
-    assert sc.compare_stack(ours, upstream) == [
+    assert sc.compare_stack(_config({"db-data": {}, "client-data": {}}), _proven()) == []
+    assert sc.compare_stack(ours, _proven()) == [
         "volumes: the recorded rename `db-data` -> `ac-database` no longer describes the native "
-        "stack, which declares ['ac-client-data', 'mysql-data']",
+        "stack, which declares ['client-data', 'mysql-data']",
         "volumes: only in the native stack ['mysql-data']",
         "volumes: only in the proven install ['ac-database']",
     ]
@@ -642,14 +652,38 @@ def test_a_translation_that_stopped_describing_the_proven_install_says_so() -> N
         "volumes: only in the proven install ['acore-database']",
     ]
     # And it stays quiet while the record still holds on both sides.
-    assert sc.compare_stack(native, native) == []
+    assert sc.compare_stack(native, _proven()) == []
+
+
+def test_a_coincidental_name_does_not_keep_a_dead_translation_alive() -> None:
+    """The corner the guard was getting wrong. Our side renames `db-data` to `mysql-data` — a
+    genuinely stale entry — while some other volume in the same stack happens to be called
+    `ac-database`. Asking "is the TARGET present?" answered yes for an unrelated reason and the
+    warning never fired; the add/remove pair still showed, so nothing was hidden outright, but
+    the one line that says the recorded rename has stopped describing reality was missing, and
+    that line is the whole point of keeping the table.
+
+    So the question is asked of provenance instead: does OUR side still declare `db-data`, as
+    written, before any translation. Nothing else either side happens to declare can answer it.
+    """
+    # Provenance is not optional: a Stack cannot be built without saying what it declared, so
+    # the rule can never be asked of a record that has no answer.
+    with pytest.raises(TypeError):
+        sc.Stack(project="p", volumes=(), networks=())  # type: ignore[call-arg]
+    ours = _config({"mysql-data": {}, "client-data": {}, "ac-database": {}})
+    assert "ac-database" in {name for name, _ in ours.volumes}  # the coincidence, in place
+    assert sc.compare_stack(ours, _proven()) == [
+        "volumes: the recorded rename `db-data` -> `ac-database` no longer describes the native "
+        "stack, which declares ['ac-database', 'client-data', 'mysql-data']",
+        "volumes: only in the native stack ['mysql-data']",
+    ]
 
 
 def test_an_external_or_redriven_declaration_is_reported(tmp_path: Path) -> None:
     """`external: true` hands the stack a volume somebody else made — with somebody else's data
     in it — and a changed network driver changes what the containers can reach. Neither touches
     a service."""
-    proven = sc.stack_from_plan(render(tmp_path))
+    proven = _proven()
     external = _config({"db-data": {}, "client-data": {"external": True}})
     assert sc.compare_stack(external, proven) == ["volumes: ac-client-data ['external=True'] vs []"]
     redriven = _config(

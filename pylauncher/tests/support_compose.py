@@ -171,6 +171,11 @@ class Stack:
     project: str | None
     volumes: tuple[tuple[str, tuple[str, ...]], ...]
     networks: tuple[tuple[str, tuple[str, ...]], ...]
+    declared_volumes: tuple[str, ...]
+    """The top-level volume names AS WRITTEN, before `DESIGN_VOLUME_NAMES` translates any of
+    them. `volumes` above is the comparison view and cannot answer "did this document declare
+    `db-data`" once the translation has run — and provenance, not the translated result, is what
+    says whether a translation entry is still live."""
 
 
 def resolve_defaults(text: str) -> str:
@@ -337,6 +342,11 @@ def _declarations(
     )
 
 
+def _declared_names(raw: Any) -> tuple[str, ...]:
+    """The block's keys as the document writes them — no translation, no options."""
+    return tuple(sorted(str(name) for name in raw)) if raw else ()
+
+
 def shape_from_plan(plan: ComposePlan) -> dict[str, Service]:
     """The three rendered files merged the way compose merges them, then reduced.
 
@@ -381,9 +391,10 @@ def stack_from_plan(plan: ComposePlan) -> Stack:
         volumes.update(doc.get("volumes") or {})
         networks.update(doc.get("networks") or {})
     return Stack(
-        project,
-        _declarations(volumes, aliases=DESIGN_VOLUME_NAMES),
-        _declarations(networks, aliases=NO_ALIASES),
+        project=project,
+        volumes=_declarations(volumes, aliases=DESIGN_VOLUME_NAMES),
+        networks=_declarations(networks, aliases=NO_ALIASES),
+        declared_volumes=_declared_names(volumes),
     )
 
 
@@ -392,9 +403,10 @@ def stack_from_config(data: dict[str, Any], *, root: str | None = None) -> Stack
     `shape_from_config()` and unused: nothing up here is a host path."""
     del root
     return Stack(
-        str(data["name"]) if data.get("name") else None,
-        _declarations(data.get("volumes"), aliases=DESIGN_VOLUME_NAMES),
-        _declarations(data.get("networks"), aliases=NO_ALIASES),
+        project=str(data["name"]) if data.get("name") else None,
+        volumes=_declarations(data.get("volumes"), aliases=DESIGN_VOLUME_NAMES),
+        networks=_declarations(data.get("networks"), aliases=NO_ALIASES),
+        declared_volumes=_declared_names(data.get("volumes")),
     )
 
 
@@ -460,27 +472,30 @@ def _declaration_problems(
 
 
 def _stale_translations(native: Stack, proven: Stack) -> list[str]:
-    """A `DESIGN_VOLUME_NAMES` entry that has stopped describing either side.
+    """THE RULE: an entry is live only while each side declares its own half of the equation as
+    written — our side the source name, the proven install the target name.
 
-    The table equates two names, so it is only true while BOTH names name something: the source
-    on ours, the target on theirs. After translation the target is what a matching declaration
-    is called on both sides, so its absence from either is the entry going stale — our template
-    renamed `db-data`, or upstream renamed `ac-database`.
+    Both halves are looked up in `declared_volumes`, which is what each document literally says
+    BEFORE translation. That is provenance rather than coincidence, and the difference is not
+    theoretical: checking the translated result instead meant that renaming `db-data` to
+    `mysql-data` while some other volume happened to be called `ac-database` left the entry
+    looking live, because the target name was present for an unrelated reason.
 
-    Silence there would be worse than a false report. An entry that stops matching does not fail
+    Silence here would be worse than a false report. An entry that stops matching does not fail
     safe: the untranslated name arrives as a declaration nobody has seen before, and the diff
     reads as one volume ADDED and another REMOVED rather than as the rename it is. A standing
-    licence for two renames has to say when it is no longer describing the two.
+    licence for two renames has to say when it has stopped describing the two.
     """
-    ours = {name for name, _ in native.volumes}
-    theirs = {name for name, _ in proven.volumes}
     problems: list[str] = []
     for source, target in sorted(DESIGN_VOLUME_NAMES.items()):
-        for label, declared in (("native stack", ours), ("proven install", theirs)):
-            if target not in declared:
+        for label, half, declared in (
+            ("native stack", source, native.declared_volumes),
+            ("proven install", target, proven.declared_volumes),
+        ):
+            if half not in declared:
                 problems.append(
                     f"volumes: the recorded rename `{source}` -> `{target}` no longer describes "
-                    f"the {label}, which declares {sorted(declared)}"
+                    f"the {label}, which declares {list(declared)}"
                 )
     return problems
 
