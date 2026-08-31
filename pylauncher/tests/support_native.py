@@ -58,6 +58,15 @@ class Recorder:
 
     calls: list[str] = field(default_factory=list)
     clones: list[git.CloneSpec] = field(default_factory=list)
+    relabelled: list[Path] = field(default_factory=list)
+    """Paths handed to `chcon -Rt container_file_t`, in order.
+
+    A list and not a flag, because the negative is the interesting half: off
+    SELinux, and on a filesystem that cannot hold a label, this must stay
+    EMPTY. A relabel firing on Ubuntu is the same bug the shell lineage had,
+    only pointing the other way.
+    """
+
     remotes: dict[Path, str] = field(default_factory=dict)
     tracked: dict[Path, str] = field(default_factory=dict)
     """Files git has, and their committed content — what `git status` compares against."""
@@ -128,6 +137,11 @@ class Recorder:
             return False
         return path.is_file() and path.read_text(encoding="utf-8") == self.tracked[path]
 
+    def relabel(self, path: Path) -> bool:
+        """`platform.relabel_for_containers()` on a box where it worked."""
+        self.relabelled.append(path)
+        return True
+
     def start_db(self, spec: docker.ContainerSpec, server_dir: Path) -> None:
         self.calls.append("start-db")
         if self.db_start_error:
@@ -186,6 +200,14 @@ class Recorder:
             start=self.start,
             wait_db_healthy=lambda spec: self.db_healthy,
             wait_ready=lambda spec, ready: self.ready,
+            # An INERT SELinux by default: not enforcing, on a filesystem that
+            # could hold a label if it were. That is Ubuntu/Arch/macOS, which
+            # is what every other test in both files is about, and it keeps
+            # `:z` out of their rendered compose files. A test that wants the
+            # Fedora shape overrides these two by name.
+            relabel=self.relabel,
+            selinux_enforcing=lambda: False,
+            fs_type=lambda path: "ext4",
             keep_awake=lambda: nullcontext(),
         )
         for key, value in overrides.items():

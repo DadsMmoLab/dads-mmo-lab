@@ -873,3 +873,176 @@ def test_pumped_output_arrives_in_order_and_before_the_stage_ends(tmp_path: Path
     lines = install(rec, tmp_path / "wow")
     assert lines.index("compiling") < lines.index("The build finished.")
     assert lines.index("--- build") < lines.index("compiling")
+
+
+# -- SELinux ----------------------------------------------------------------
+#
+# Three facts meet in `generate-compose`: is SELinux enforcing, can this
+# filesystem hold a label, and did the one-off relabel work. The engine asks
+# the first two through seams and lets `platform.bind_label()` combine them, so
+# the policy lives in one function and this file asserts the WIRING.
+
+_MOUNT_MODES = frozenset(
+    {
+        "ro",
+        "rw",
+        "z",
+        "Z",
+        "shared",
+        "rshared",
+        "slave",
+        "rslave",
+        "private",
+        "rprivate",
+        "nocopy",
+        "consistent",
+        "cached",
+        "delegated",
+    }
+)
+"""Every mount option a compose short-syntax bind may already carry before the label."""
+
+
+def _compose_text(server_dir: Path) -> str:
+    """Both auto-loaded files, because `{{BIND_LABEL}}` is in the override too."""
+    base = (server_dir / composegen.BASE_FILE).read_text(encoding="utf-8")
+    override = (server_dir / composegen.OVERRIDE_FILE).read_text(encoding="utf-8")
+    return f"{base}\n{override}"
+
+
+def test_bind_mounts_are_labelled_only_when_selinux_enforces_on_a_labelable_fs(
+    tmp_path: Path,
+) -> None:
+    """`:z` on every host bind line under enforcing SELinux; byte-identical files elsewhere.
+
+    The two negatives carry as much weight as the positive. A `:z` written on
+    Ubuntu would be harmless noise, but a `:z` written on the exFAT drive a
+    user keeps their servers on makes the daemon refuse to create the
+    container at all — which is why `fs_type` is asked separately from
+    `selinux_enforcing` rather than assumed.
+    """
+    off = tmp_path / "off"
+    rec_off = Recorder(images=False)
+    install(rec_off, off)
+    assert ":z" not in _compose_text(off)
+    assert rec_off.relabelled == []
+
+    on = tmp_path / "on"
+    rec = Recorder(images=False)
+    install(rec, on, selinux_enforcing=lambda: True, fs_type=lambda path: "ext4")
+    assert ":z" in (on / composegen.BASE_FILE).read_text(encoding="utf-8")
+    assert ":z" in (on / composegen.OVERRIDE_FILE).read_text(encoding="utf-8")
+    assert rec.relabelled == [on]
+
+    ntfs = tmp_path / "ntfs"
+    rec_ntfs = Recorder(images=False)
+    install(rec_ntfs, ntfs, selinux_enforcing=lambda: True, fs_type=lambda p: "ntfs")
+    assert ":z" not in _compose_text(ntfs)
+    # No label written, so nothing to relabel: `chcon` on a filesystem with no
+    # xattrs fails anyway, and the warning line would be noise on a machine
+    # whose install is fine.
+    assert rec_ntfs.relabelled == []
+
+
+def test_selinux_that_could_not_be_asked_arrives_as_none_and_not_as_no(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`selinux_enforcing()` has THREE answers and the middle one must survive the trip.
+
+    `True`, `False`, `None` — and `None` means the question went unanswered,
+    never "no". Both `None` and `False` end in an empty label today, so no
+    rendered file can tell them apart; what this pins is that the engine hands
+    `bind_label()` what the seam actually said, so a `bool(...)` or an
+    `is True` at the call site is a failing test rather than a silent collapse
+    that a later change to the policy would turn into a wrong install. The
+    shell lineage collapsed exactly this pair and relabelled nothing on an
+    enforcing Fedora while its own test passed.
+    """
+    asked: list[tuple[bool | None, str | None]] = []
+    real = platform.bind_label
+
+    def spy(*, enforcing: bool | None, fs_type: str | None) -> str:
+        asked.append((enforcing, fs_type))
+        return real(enforcing=enforcing, fs_type=fs_type)
+
+    monkeypatch.setattr(native.platform, "bind_label", spy)
+    rec = Recorder(images=False)
+    install(rec, tmp_path / "wow", selinux_enforcing=lambda: None, fs_type=lambda p: "ext4")
+    assert asked == [(None, "ext4")]
+    assert ":z" not in _compose_text(tmp_path / "wow")
+    assert rec.relabelled == []
+
+
+def test_the_filesystem_is_probed_for_the_folder_the_binds_actually_live_in(
+    tmp_path: Path,
+) -> None:
+    """`fs_type` is asked about the SERVER dir — the thing every `./` bind is relative to.
+
+    A compose bind is resolved against the file's own directory, so the only
+    filesystem whose label support matters is the one holding the server
+    folder. Asking about anything else (the config dir, the home dir, cwd)
+    answers a different machine's question on any box with more than one drive
+    — which is the box this check exists for.
+    """
+    server_dir = tmp_path / "wow"
+    probed: list[Path] = []
+
+    def fs_type(path: Path) -> str | None:
+        probed.append(path)
+        return "btrfs"
+
+    install(Recorder(images=False), server_dir, selinux_enforcing=lambda: True, fs_type=fs_type)
+    assert probed == [server_dir]
+
+
+def test_a_label_is_never_appended_to_a_bind_that_already_carries_a_mode(tmp_path: Path) -> None:
+    """`:ro:z` is not a mount spec; the legal spelling is `:ro,z`, and Docker refuses the first.
+
+    The label is spliced onto the end of a bind line as a bare suffix, so a
+    host bind that already carries a mode renders `./x:/y:ro:z` and the daemon
+    rejects the whole file at `up` — after the build, on the one platform that
+    needs the label. No WotLK host bind carries a mode, which is exactly why
+    nothing else catches it: the templates and the token convention agree by
+    luck rather than by rule. The CMaNGOS games (7.3) DO mount the client
+    read-only, so the first template that puts `{{BIND_LABEL}}` after a mode
+    steps straight onto it. This is the tripwire that makes that a red test
+    here rather than a Fedora bug report; closing it properly means teaching
+    `composegen.render()` the comma form, which is group B's contract and not
+    this task's file.
+    """
+    server_dir = tmp_path / "wow"
+    install(
+        Recorder(images=False), server_dir, selinux_enforcing=lambda: True, fs_type=lambda p: "ext4"
+    )
+    labelled = [
+        line.strip()
+        for line in _compose_text(server_dir).splitlines()
+        if line.rstrip().endswith(":z")
+    ]
+    assert labelled, "the enforcing render wrote no labelled bind at all"
+    for line in labelled:
+        already = line.rstrip()[: -len(":z")].rsplit(":", 1)[-1]
+        assert already not in _MOUNT_MODES, f"{line!r} renders an illegal `:mode:z`; use `:mode,z`"
+
+
+def test_a_relabel_that_fails_is_a_warning_line_not_a_refusal(tmp_path: Path) -> None:
+    """`chcon` is belt to the `:z` braces: it can fail and the install still has to finish.
+
+    `:z` relabels the mount source when the container starts, which is the
+    mechanism that actually carries a Fedora install; the one-off `chcon`
+    covers the files that exist before compose ever runs. Failing the install
+    on it would refuse a server that works, so the line is said and the stages
+    keep going — `start` is in the calls, and the sentence names the command
+    to run by hand.
+    """
+    rec = Recorder(images=False)
+    lines = install(
+        rec,
+        tmp_path / "wow",
+        selinux_enforcing=lambda: True,
+        fs_type=lambda path: "ext4",
+        relabel=lambda path: False,
+    )
+    assert any("could not be relabelled" in line for line in lines)
+    assert any("chcon -Rt container_file_t" in line for line in lines)
+    assert "start" in rec.calls
