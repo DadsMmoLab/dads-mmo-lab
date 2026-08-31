@@ -10,6 +10,15 @@ handler in the per-OS config dir (README §11) is added only once a real
 Calling `configure(config_dir=...)` later (after an earlier stderr-only call)
 still adds the file handler; it does not silently no-op.
 
+Opening that file is allowed to fail. `configure()` is the first statement of
+`main()`, before `QApplication` exists, so an `OSError` here — a managed
+profile with a read-only `%APPDATA%`, a redirected or offline roaming share —
+used to end the process at exit 1 with no window, and in the frozen build
+(`console=False`, see `build/pylauncher.spec`) with no message at all. Not
+having a log file is a degraded app; not starting is no app. So the file
+handler falls back to the temp dir and then to nothing, and records why in
+`file_log_problem()` for a caller that has a way to tell the user.
+
 This module is imported once from `main.py` entry points; nothing else
 configures logging.
 """
@@ -17,6 +26,7 @@ configures logging.
 from __future__ import annotations
 
 import logging
+import tempfile
 import threading
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -28,6 +38,16 @@ _DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 _lock = threading.Lock()
 _stderr_configured = False
 _file_configured = False
+_file_problem: str | None = None
+
+
+def file_log_problem() -> str | None:
+    """One line about the log file, or `None` when it went where it was asked to.
+
+    Read by `main.py` once the GUI is up: this is the only channel that reaches
+    a user of the frozen build, whose stderr goes nowhere.
+    """
+    return _file_problem
 
 
 def get_logger(name: str) -> logging.Logger:
@@ -60,6 +80,11 @@ def configure(
     `configure()` (stderr-only, e.g. via `get_logger()`) followed later by
     `configure(config_dir=...)` still enables file logging; it is not a no-op.
 
+    A `config_dir` that cannot be written never raises out of here; see the
+    module docstring. `file_log_problem()` afterwards says whether that
+    happened, and a failed attempt is not remembered as a done one, so a later
+    call naming a writable directory still gets file logging.
+
     Args:
         config_dir: Directory to write the rotating `yulon.log` to. If omitted,
             only the stderr handler is (re-)ensured.
@@ -68,7 +93,7 @@ def configure(
         max_bytes: RotatingFileHandler max file size before rotation.
         backup_count: Number of rotated log files retained.
     """
-    global _stderr_configured, _file_configured
+    global _stderr_configured, _file_configured, _file_problem
 
     with _lock:
         root = logging.getLogger()
@@ -82,17 +107,54 @@ def configure(
             _stderr_configured = True
 
         if config_dir is not None and not _file_configured:
-            config_dir = Path(config_dir)
-            config_dir.mkdir(parents=True, exist_ok=True)
-            file_handler = RotatingFileHandler(
-                config_dir / f"{APP_NAME}.log",
-                maxBytes=max_bytes,
-                backupCount=backup_count,
-                encoding="utf-8",
-            )
-            file_handler.setFormatter(formatter)
-            root.addHandler(file_handler)
-            _file_configured = True
+            wanted = Path(config_dir)
+            try:
+                file_handler = _open_log(wanted, max_bytes, backup_count)
+                _file_problem = None
+            except OSError as exc:
+                # The temp dir, and only the temp dir, is worth a second try:
+                # the profiles that lose `%APPDATA%` lose it to redirection or
+                # a read-only roaming share, neither of which touches the local
+                # temp dir. A log the user can send us is most of what support
+                # has, so it is worth one fallback — but not a search.
+                fallback = Path(tempfile.gettempdir()) / APP_NAME
+                _file_problem = f"Yu'lon could not write its log to {wanted}: {exc}."
+                try:
+                    file_handler = _open_log(fallback, max_bytes, backup_count)
+                    _file_problem += f"\n\nIt is logging to {fallback / f'{APP_NAME}.log'} instead."
+                except OSError as fallback_exc:
+                    file_handler = None
+                    _file_problem += (
+                        f"\n\n{fallback} did not work either ({fallback_exc}), so this session "
+                        "keeps no log file. Everything else works normally."
+                    )
+            if file_handler is not None:
+                file_handler.setFormatter(formatter)
+                root.addHandler(file_handler)
+                # Only a handler that exists counts as done, so a later call
+                # naming a writable directory is still able to open one.
+                _file_configured = True
+            if _file_problem is not None:
+                # Logged as well as returned: this is one of the few lines worth
+                # having in the fallback file itself, which is where support
+                # will be reading from.
+                logging.getLogger(__name__).warning(_file_problem.replace("\n", " "))
+
+
+def _open_log(directory: Path, max_bytes: int, backup_count: int) -> RotatingFileHandler:
+    """Create `directory` and open `yulon.log` in it, or raise `OSError` trying.
+
+    Both halves have to be in here: `mkdir()` is what fails on a read-only
+    roaming share, and opening the file is what fails when the directory exists
+    but is not writable, and the caller has to treat the two the same way.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    return RotatingFileHandler(
+        directory / f"{APP_NAME}.log",
+        maxBytes=max_bytes,
+        backupCount=backup_count,
+        encoding="utf-8",
+    )
 
 
 def _reset_for_tests() -> None:
@@ -101,7 +163,7 @@ def _reset_for_tests() -> None:
     Test-only helper (avoids leaking global root-logger state across the test
     suite — see `tests/test_log.py`). Not part of the public API.
     """
-    global _stderr_configured, _file_configured
+    global _stderr_configured, _file_configured, _file_problem
     with _lock:
         root = logging.getLogger()
         for handler in list(root.handlers):
@@ -110,3 +172,4 @@ def _reset_for_tests() -> None:
                 handler.close()
         _stderr_configured = False
         _file_configured = False
+        _file_problem = None

@@ -170,15 +170,18 @@ recorded here so nobody "fixes" them again.
 
 ### 4. Arch — prerequisites
 
-- [ ] **The launcher will not start from source on a stock Arch desktop.** Qt names one missing
+- [x] **The launcher will not start from source on a stock Arch desktop.** Qt names one missing
   library; `ldd` shows **six**: `xcb-util-cursor xcb-util-wm xcb-util-keysyms xcb-util-image
   xcb-util-renderutil libxkbcommon-x11`. The README lists no Linux prerequisite. `libxkbcommon-x11`
   is one of the five sonames `check-bundle-closure.sh` already caught missing from the shipped
   tarball — same library, hit again on a path that gate does not cover.
-- [ ] **Document the Debian-family equivalent** (`libxcb-cursor0` and friends), found on m910q.
-- [ ] **Document that LAN setup is only partly automatic on Arch** — `detect_firewall()` returns
+  Fixed in [#136](https://github.com/DadsMmoLab/dads-mmo-lab/pull/136): all six sonames listed in `pylauncher/README.md`, with the package names for both families.
+- [x] **Document the Debian-family equivalent** (`libxcb-cursor0` and friends), found on m910q.
+  Done in [#136](https://github.com/DadsMmoLab/dads-mmo-lab/pull/136), alongside the Arch list.
+- [x] **Document that LAN setup is only partly automatic on Arch** — `detect_firewall()` returns
   `"none"` (no `ufw`, no `firewall-cmd`) and the app degrades gracefully to manual instructions.
   Correct behaviour, but "networking works" means something weaker there.
+  Done in [#136](https://github.com/DadsMmoLab/dads-mmo-lab/pull/136) — the README now says what "networking works" means on a box with no `ufw` and no `firewall-cmd`.
 
 ### 5. Windows
 
@@ -192,9 +195,10 @@ recorded here so nobody "fixes" them again.
   list, and its comment claims `wsl_distros()` "answers () for all of them" — false on **every**
   Windows box with Docker Desktop. **`tests/test_platform.py:526` pins the buggy value**, so fixing
   it breaks a green test and will look like a regression.
-- [ ] **Tab titles collide.** `main.py:220` titles a tab `server_dir.name`, and the installer always
+- [x] **Tab titles collide.** `main.py:220` titles a tab `server_dir.name`, and the installer always
   suggests the same leaf name — two installs in different parents are indistinguishable in the tab
   strip. Not data loss: Stop is ownership-protected by compose labels and refuses across installs.
+  Fixed in [#136](https://github.com/DadsMmoLab/dads-mmo-lab/pull/136): `yulon/ui/tab_titles.py` distinguishes two installs whose leaf names match, without turning the tab strip into a path dump.
 
 ---
 
@@ -213,12 +217,13 @@ recorded here so nobody "fixes" them again.
   `realmlist.wtf`**, so moving it silently would produce a server nobody could log in to.
   See [#128](https://github.com/DadsMmoLab/dads-mmo-lab/pull/128).
 
-- [ ] **Self-update has never worked for anyone.** `update.py:26` calls `/releases/latest`, which by
+- [x] **Self-update has never worked for anyone.** `update.py:26` calls `/releases/latest`, which by
   definition excludes prereleases — and **every** upstream release is flagged `Pre-release`
   (`v0.6.57Public`, `v0.6.55Public`, `v0.6.53`). Two independent fixes, not exclusive:
   **code** (call `/releases?per_page=5` and take the first non-draft — works with the release
   practice as it is), and **process** (`gh release edit … --prerelease=false`, needs upstream write
   access). *Which depends on whether 0.6.x is meant to be pre-release.*
+  Code half fixed in [#136](https://github.com/DadsMmoLab/dads-mmo-lab/pull/136): `/releases?per_page=5`, first non-draft. The process half (`gh release edit ... --prerelease=false`) still needs upstream write access and the owner's answer on whether 0.6.x is meant to be pre-release.
 - [ ] **Two installs of one game cannot coexist.** The template already parameterises the compose
   *project* (`name: {{PROJECT_NAME}}`) and then pins global `container_name:`s that override it. The
   service names already provide Compose DNS, so those five lines are redundant for addressing — but
@@ -269,7 +274,7 @@ again. Two of these were downgraded by their own verifier, which is the process 
 
 **Arch**
 
-- [ ] **HIGH — Two of the four games' Install buttons are off the screen at the default window
+- [x] **HIGH — Two of the four games' Install buttons are off the screen at the default window
   size.** `catalog_view.py:232` builds the tile description as a plain `QLabel` with no
   `setWordWrap(True)`, so each tile's width is set by its longest unwrapped line — WotLK's is 118
   characters. The 2-column grid (`catalog_view.py:213`) then demands roughly 1550—1630 px, and at
@@ -280,6 +285,7 @@ again. Two of these were downgraded by their own verifier, which is the process 
   control works — it is simply invisible. The sibling `note` label twelve lines further down
   (`catalog_view.py:244-249`) does call `setWordWrap(True)`, so this is an omission rather than a
   design. Reproduced identically in the shipped v0.6.51 tarball.
+  Fixed in [#136](https://github.com/DadsMmoLab/dads-mmo-lab/pull/136). Wrapping only the description was NOT enough — it left the grid at 1533px against a 661px viewport, because the unwrapped `Emulator:` line then set the width. Every line of a tile now wraps, and the test asserts button geometry at `main.DEFAULT_WINDOW_SIZE` rather than that a property is set.
 - [ ] **MEDIUM — On a screen narrower than 1100 px the window's own restore button strands its
   close button.** `main.py:306` calls `window.resize(1100, 750)` with no check against
   `QScreen.availableGeometry()`, and it is the only `resize()` in the package — there is no
@@ -295,7 +301,7 @@ again. Two of these were downgraded by their own verifier, which is the process 
 
 **Windows 11**
 
-- [ ] **MEDIUM — An unwritable config directory kills startup with no message at all.**
+- [x] **MEDIUM — An unwritable config directory kills startup with no message at all.**
   `main.py:410` calls `configure(config_dir=platform.config_dir())` as the FIRST statement of
   `main()`, before `QApplication` exists; `log.py:87` then constructs a `RotatingFileHandler` on
   `%APPDATA%\yulon\yulon.log` with no `try`/`except` anywhere between `__main__` and the
@@ -307,7 +313,8 @@ again. Two of these were downgraded by their own verifier, which is the process 
   AppData) is a machine nobody compiles AzerothCore on, and an unset `APPDATA` falls back to
   `~/AppData/Roaming` and works. `save_state()` fails the same way at `main.py:248` and `:263`,
   but those are Qt slots, so they degrade a running app rather than preventing launch.
-- [ ] **MEDIUM — Every `docker info` probe is unbounded, so a hung Docker CLI defeats the stated
+  Fixed in [#136](https://github.com/DadsMmoLab/dads-mmo-lab/pull/136): the app starts, logs where it can, and says so once — which is what `console=False` in the shipped exe made impossible before.
+- [x] **MEDIUM — Every `docker info` probe is unbounded, so a hung Docker CLI defeats the stated
   timeout.** `platform.docker_ready()` (`platform.py:1194`) defaults its runner to
   `lambda argv: runner.run(argv)`, and `runner.run()` (`runner.py:237`) defaults `timeout=None`, so
   the subprocess call never returns while the CLI hangs. `_wait_docker_ready()`
@@ -319,15 +326,17 @@ again. Two of these were downgraded by their own verifier, which is the process 
   The module's own convention is the strongest argument against it: `platform.py:304` bounds
   `detect_alf_state` at `timeout=5.0` with the comment "Bounded, like every other probe in this
   module".
+  Fixed in [#136](https://github.com/DadsMmoLab/dads-mmo-lab/pull/136): the bound lives at the probe, where every caller that matters reaches it in its bare form, and `_wait_docker_ready()` can no longer overshoot its budget by the length of one hung call.
 
 **Fedora** (found while preparing the box, before its hunt started)
 
-- [ ] **HIGH — Two games on one machine collide on the world port, and nothing checks first.**
+- [x] **HIGH — Two games on one machine collide on the world port, and nothing checks first.**
   `vanilla-install.log` on yulon-fedora ends with
   `Bind for 0.0.0.0:8085 failed: port is already allocated` followed by
   `Failed to start mangosd/realmd`, against the WotLK stack that was already running there. The
   install had already cloned, compiled and imported by that point. This also corrects the coverage
   note above: **Vanilla HAS been run**, on Fedora, and this is how it ended.
+  Fixed in [#128](https://github.com/DadsMmoLab/dads-mmo-lab/pull/128), before the compile rather than after it, with the offer to stop the other server. This box was left unticked when that merged.
 
 **Refuted this round — do not report again**
 
@@ -373,7 +382,7 @@ a broken script — **but nothing here proves the 8 GB floor is survivable**, on
   not "did this folder build it". It has now happened, unprompted, on a real box. The
   fix that landed this week (requiring every image sharing the worldserver image's prefix) does
   NOT cover this case: all four images were present, just built by something else.
-- [ ] **HIGH — The 500-bot decision never left the test branch.** The owner set
+- [x] **HIGH — The 500-bot decision never left the test branch.** The owner set
   min = max = 500 in the six places that decide the number, and that commit
   (`c5c7d20 Five hundred bots, in the six places that decide the number`) is contained in exactly
   one branch: `origin/test/full-vm-run-2026-08-28`. Every other branch, `upstream/Yulon` included,
@@ -381,6 +390,7 @@ a broken script — **but nothing here proves the 8 GB floor is survivable**, on
   in `catalog.json`, and `tests/test_composegen.py:424-430` PINS 1600/2000, so restoring 500 also
   fails a green test. The fresh Fedora install proves what actually ships: `1633/1633 Bot Reyna
   logged in`.
+  Fixed in [#136](https://github.com/DadsMmoLab/dads-mmo-lab/pull/136): the owner's own `c5c7d20` landed on a branch that ships, verified place by place against that commit.
 - [ ] **LOW — The Modules tab opens with nothing selected and both action buttons enabled.**
   `controller_view.py:1307` `_module_action()` returns early when `selected_manifest()` is None,
   writing no message and no log line, so "Install selected" and "Remove selected" do nothing at

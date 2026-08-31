@@ -1961,6 +1961,10 @@ EOF
     fi
 
     # ── Playerbots: 500 random bots ─────────────────────────────────
+    # Same number as every other game here, and still under the Steam Deck RAM
+    # limit that put this script below the others in the first place. Min and
+    # Max match so the population is the one asked for; 100 accounts hold 500
+    # bot characters at ten each.
     if [ -f "$SERVER_DIR/etc/aiplayerbot.conf" ]; then
         sed -i "s|^AiPlayerbot\.MinRandomBots .*|AiPlayerbot.MinRandomBots = 500|" \
             "$SERVER_DIR/etc/aiplayerbot.conf"

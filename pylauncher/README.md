@@ -57,8 +57,17 @@ Accounts, Maintenance, Modules and Networking tabs. On Windows, start, stop, fol
 the database work behind a module apply have each been run against a real install; the rest of
 those tabs are built and unit-tested there but have not been driven by hand.
 
-Two honest gaps:
+Three honest gaps:
 
+- **LAN setup is only partly automatic, and on Arch it is not automatic at all.** The Networking
+  tab opens the ports a friend on your LAN needs by driving the host's own firewall tool: `netsh`
+  on Windows, and `ufw` or `firewalld` on Linux. A stock Arch desktop has neither —
+  `detect_firewall()` answers `"none"` — so the plan carries the step as something for you to run
+  by hand instead of running it. That is the intended behaviour and nothing about it is silent,
+  but it is worth saying plainly, because a table that says Linux "run live" does not: on that
+  distro "networking works" means the app told you what to type, not that it did it. (macOS is a
+  third case again — its firewall is per-application and cannot express a port at all, so that one
+  is always manual.)
 - The **GM console** attaches over a pseudo-terminal, and the test for one is `os.openpty`,
   which CPython only provides on POSIX. (Windows 10 does have a pty of its own in ConPTY; nothing
   here uses it, so this is a limit of the code and not of the operating system.) On Windows the
@@ -124,3 +133,31 @@ later phase and are listed, not vouched for.
 Design docs, roadmap and checklist: [`../pyplan/`](../pyplan/README.md). Setup and conventions:
 [`../pyplan/contribution.md`](../pyplan/contribution.md) and
 [`../pyplan/style-guide.md`](../pyplan/style-guide.md).
+
+### Linux prerequisites for running from source
+
+`pip install -r requirements-dev.txt` gets you PySide6, and PySide6 does not bring the X libraries
+its `xcb` platform plugin loads at runtime — the distro supplies those. On a stock Arch desktop six
+of them are missing and the app aborts before it draws anything:
+
+```bash
+sudo pacman -S --needed xcb-util-cursor xcb-util-wm xcb-util-keysyms xcb-util-image \
+  xcb-util-renderutil libxkbcommon-x11
+```
+
+The Debian family (Ubuntu, Mint, Raspberry Pi OS) spells the same six:
+
+```bash
+sudo apt-get install libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-image0 \
+  libxcb-render-util0 libxkbcommon-x11-0
+```
+
+**Qt names only one of the six, and it is usually the wrong one.** Whatever is actually missing,
+the message reads `From 6.5.0, xcb-cursor0 or libxcb-cursor0 is needed to load the Qt xcb platform
+plugin`. Installing that one package and getting the identical error again is the normal
+experience. `QT_DEBUG_PLUGINS=1` prints the real unresolved soname, and `ldd` on the plugin
+(`.venv/lib/python3*/site-packages/PySide6/Qt/plugins/platforms/libqxcb.so`) lists them all.
+
+`libxkbcommon-x11` is the same library [`build/check-bundle-closure.sh`](build/check-bundle-closure.sh)
+already catches missing from the shipped tarball. That gate reads the bundle, and a source checkout
+bundles nothing — so it is one defect on two paths, and only one of them has a gate.

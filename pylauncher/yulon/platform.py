@@ -605,6 +605,11 @@ DOCKER_DESKTOP_MAC_URLS: dict[str, str] = {
 }
 _DOCKER_READY_TIMEOUT_SECONDS = 180.0
 _DOCKER_READY_POLL_SECONDS = 3.0
+# How long one `docker info` may take before it is treated as no answer. Ten
+# seconds is generous for a question the daemon answers in milliseconds and
+# short compared with the 180-second poll it sits inside, so a Docker CLI that
+# has wedged costs a couple of poll rounds rather than the whole budget.
+_DOCKER_PROBE_SECONDS = 10.0
 _MANUAL_DOCKER_DESKTOP = (
     "Download and install Docker Desktop by hand: "
     "https://www.docker.com/products/docker-desktop/"
@@ -680,6 +685,40 @@ class ProvisionReport:
 
 RunCmd = Callable[[list[str]], subprocess.CompletedProcess[str]]
 Downloader = Callable[[str, Path], Path]
+
+
+class _DefaultRunner:
+    """This module's own `RunCmd`, which can also hand out a bounded copy of itself.
+
+    Provisioning needs both kinds of patience from one runner. An
+    `apt-get install docker-ce` takes as long as it takes, so the step runner
+    must stay unbounded; a `docker info` is a probe, and every probe in this
+    module is bounded (`detect_alf_state()` says so in a comment). Handing the
+    step runner's patience to the probe is how the stated timeout was lost —
+    measured against a `docker` stub running `ping -n 999`, a five-second budget
+    was still inside the first call thirty-two seconds later.
+
+    So the default runner is a small object rather than a lambda: `_bounded()`
+    can recognise it and ask for the same command with a deadline attached. An
+    *injected* runner is left alone — that one is the caller's own subprocess
+    policy, which `ensure_docker()` already promises not to touch.
+    """
+
+    def __init__(self, env: dict[str, str] | None = None) -> None:
+        self._env = env
+
+    def __call__(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
+        return runner.run(argv, env=self._env)
+
+    def bounded(self, seconds: float) -> RunCmd:
+        """The same runner, with `seconds` as the child's deadline."""
+        env = self._env
+        return lambda argv: runner.run(argv, env=env, timeout=seconds)
+
+
+def _bounded(do: RunCmd, seconds: float) -> RunCmd:
+    """`do` with a per-call bound, where `do` is one of ours to bound."""
+    return do.bounded(seconds) if isinstance(do, _DefaultRunner) else do
 
 
 # ------------------------------------------------------ finding the docker CLI
@@ -1191,7 +1230,7 @@ def wsl_distros() -> tuple[str, ...]:
     return tuple(name for name in (line.strip() for line in text.splitlines()) if name)
 
 
-def docker_ready(run: RunCmd | None = None) -> bool:
+def docker_ready(run: RunCmd | None = None, *, timeout: float = _DOCKER_PROBE_SECONDS) -> bool:
     """True if `docker info` succeeds (daemon reachable); False if binary/daemon is missing.
 
     Tries each of `docker_programs()` in turn, which is one plain `docker` off
@@ -1202,11 +1241,24 @@ def docker_ready(run: RunCmd | None = None) -> bool:
     `subprocess`, not an answer, so it is logged and the next one is tried;
     swallowing it silently is how the plain-`docker` failure went unexplained
     for a full 180-second poll.
+
+    Bounded, and bounded here rather than at the call sites: `timeout` is the
+    whole probe's budget, shared across the candidates, so two of them cost one
+    wait and not two. The bound belongs in this function because the callers
+    that matter — `catalog/installer.py`, `catalog/native.py` and
+    `catalog/preflight.py`, which is the real GUI install path — all reach it
+    through its bare no-argument form, and a caller who forgets to ask for a
+    deadline is exactly the caller who needs one.
     """
-    do = run if run is not None else (lambda argv: runner.run(argv))
+    do = run if run is not None else _DefaultRunner()
+    deadline = time.monotonic() + timeout
     for program in docker_programs():
+        left = deadline - time.monotonic()
+        if left <= 0.0:
+            logger.debug(f"{timeout}s of docker probe spent before {program} was tried")
+            return False
         try:
-            if do([program, "info"]).returncode == 0:
+            if _bounded(do, left)([program, "info"]).returncode == 0:
                 return True
         except OSError as exc:
             logger.debug(f"could not start {program}: {exc}")
@@ -1786,8 +1838,13 @@ def _download_manual_steps(exc: OSError) -> tuple[str, ...]:
     return (_MANUAL_DOCKER_DESKTOP,)
 
 
+def _probe_seconds(remaining: float) -> float:
+    """How long one `docker info` may take, given what is left of a poll's budget."""
+    return _DOCKER_PROBE_SECONDS if remaining <= 0.0 else min(_DOCKER_PROBE_SECONDS, remaining)
+
+
 def _wait_docker_ready(
-    run: RunCmd, timeout: float, poll: float, cancel: threading.Event | None = None
+    run: RunCmd | None, timeout: float, poll: float, cancel: threading.Event | None = None
 ) -> bool:
     """Poll `docker_ready(run)` until it answers, the timeout passes, or `cancel` is set.
 
@@ -1796,15 +1853,31 @@ def _wait_docker_ready(
     does not leave a worker thread sleeping for minutes while the window tears
     down (review finding, 2026-08-20: a QThread destroyed while its worker is
     still in this poll aborts the process).
+
+    `timeout` bounds the calls, not merely the gaps between them. The old shape
+    tested the deadline before each probe and `cancel` after one returned, so
+    neither bounded the call in progress and the budget was only ever honoured
+    by a `docker info` that came back: a hung one carried the poll past its
+    deadline by however long it felt like hanging. Each probe now gets whatever
+    is left of the budget, and the poll stops rather than asking again after it
+    is spent. The very first probe always runs whatever the budget says —
+    `_ensure_docker_windows()` passes 0.0 to mean "ask once".
     """
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if docker_ready(run):
-            return True
+    if docker_ready(run, timeout=_probe_seconds(timeout)):
+        return True
+    while True:
         if cancel is not None and cancel.is_set():
             return False
-        time.sleep(poll)
-    return docker_ready(run)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            return False
+        time.sleep(min(poll, remaining))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            return False
+        if docker_ready(run, timeout=_probe_seconds(remaining)):
+            return True
 
 
 def _c_locale_env() -> dict[str, str]:
@@ -1881,9 +1954,11 @@ def ensure_docker(
     lists every step as skipped so the UI can show the plan. `cancel`, when set,
     interrupts the ready-poll early (the poll still returns the latest check).
     """
-    # The default runner pins the messages locale — see `_c_locale_env()`. An
-    # injected `run` is the caller's business and is left alone.
-    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv, env=_c_locale_env()))
+    # The default runner pins the messages locale — see `_c_locale_env()` — and
+    # is a `_DefaultRunner` so the `docker info` probes along the way can be
+    # bounded without bounding the package install they share it with. An
+    # injected `run` is the caller's business and is left alone, bound included.
+    do: RunCmd = run if run is not None else _DefaultRunner(_c_locale_env())
     current = detect()
     if docker_ready(do):
         logger.info("ensure_docker(): daemon already reachable")
@@ -2278,7 +2353,9 @@ def ensure_wsl2(*, run: RunCmd | None = None, dry_run: bool = False) -> Provisio
     Installing WSL needs elevation and a reboot; that is reported as
     `reboot_required`, and `docker_ready` stays False until the next run.
     """
-    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv))
+    # A `_DefaultRunner` rather than a lambda, so the `docker_ready()` probes
+    # below are bounded on the path that injects nothing — see there.
+    do: RunCmd = run if run is not None else _DefaultRunner()
     current = detect()
     if current != "windows":
         return ProvisionReport(
@@ -2497,12 +2574,16 @@ def vm_resources(run: RunCmd | None = None) -> VmResources | None:
     it would refuse every install on the machine with "0 GB of RAM" — the exact
     fabricated refusal the tri-state discipline exists to prevent.
     """
-    do = run if run is not None else (lambda argv: runner.run(argv))
+    do = run if run is not None else _DefaultRunner()
     program = docker_program()
     if program is None:
         return None
     try:
-        proc = do([program, "info", "--format", "{{json .}}"])
+        # The other `docker info` in this module, and bounded for the same
+        # reason: a CLI that never returns must arrive here as "unknown", which
+        # this function already knows how to say, rather than as a preflight
+        # that never finishes.
+        proc = _bounded(do, _DOCKER_PROBE_SECONDS)([program, "info", "--format", "{{json .}}"])
     except OSError as exc:
         logger.debug(f"could not start {program}: {exc}")
         return None

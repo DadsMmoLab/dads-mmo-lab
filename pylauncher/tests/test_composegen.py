@@ -21,6 +21,26 @@ from yulon.catalog.catalog import load_catalog
 ENTRY = load_catalog().get("wow-wotlk")
 TEMPLATES = resources.installers_dir()
 
+BOT_POPULATION = "500"
+"""How many random playerbots an install is supposed to come up with.
+
+Owner decision, 2026-08-28, for the test runs and the default alike. It is a
+constant here because the number is written down in six places — `catalog.json`
+for the native path, and one copy per installer script in two spellings — and
+the failure this project actually had was those six disagreeing with the
+decision rather than with each other's syntax.
+"""
+
+# Anything that WRITES a random-bot population, in either spelling: AzerothCore
+# takes it as compose environment, CMaNGOS as a `sed` replacement into
+# aiplayerbot.conf. The `= <digits>` is what makes this a write — `wow-manage.sh`
+# mentions `MaxRandomBots + 400` when it talks about PlayerLimit, and advice
+# about the number is not a decision about it.
+_BOT_POPULATION_WRITE = re.compile(
+    r'AC_AI_PLAYERBOT_(?:MIN|MAX)_RANDOM_BOTS:\s*"(?P<ac>\d+)"'
+    r"|AiPlayerbot\.(?:Min|Max)RandomBots\s*=\s*(?P<cmangos>\d+)"
+)
+
 # A YAML key at any depth, ignoring comments. There is no YAML parser in this
 # project's dependencies and adding one for a test would ship a dependency the
 # app does not use, so the scan is textual — over files this module wrote
@@ -416,6 +436,16 @@ def test_the_generated_stack_configures_the_bot_population(tmp_path: Path) -> No
     The numbers live in `catalog.json`, not in a constant in this package. They
     started in `DEFAULT_WORLD_ENV` and an adversarial review moved them: a
     per-game value in a module constant is what style-guide §3 forbids, and one
+    machine's bot population is not a default for every machine — a preflight-
+    passing laptop can install successfully and then be unusable. Making them
+    data is what lets a capacity-aware default, or a user setting, exist later.
+
+    Min and Max are the SAME number, not a band, so the world comes up with the
+    population that was asked for rather than somewhere under it.
+    """
+    plan = render(tmp_path / "wow")
+    assert f'AC_AI_PLAYERBOT_MIN_RANDOM_BOTS: "{BOT_POPULATION}"' in plan.override
+    assert f'AC_AI_PLAYERBOT_MAX_RANDOM_BOTS: "{BOT_POPULATION}"' in plan.override
     machine's population is not a default for every machine — a preflight-passing
     laptop can install successfully and then be unusable. Making them data is
     what lets a capacity-aware default, or a user setting, exist later.
@@ -427,8 +457,49 @@ def test_the_generated_stack_configures_the_bot_population(tmp_path: Path) -> No
     # Data, not code — and the structural flags stay behind in the constant.
     assert "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS" not in composegen.DEFAULT_WORLD_ENV
     assert ENTRY.install.native is not None
+    assert ENTRY.install.native.world_env["AC_AI_PLAYERBOT_MIN_RANDOM_BOTS"] == BOT_POPULATION
+    assert ENTRY.install.native.world_env["AC_AI_PLAYERBOT_MAX_RANDOM_BOTS"] == BOT_POPULATION
     assert ENTRY.install.native.world_env["AC_AI_PLAYERBOT_MIN_RANDOM_BOTS"] == "500"
     assert 'AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES: "1"' in plan.override
+
+
+def test_every_installer_writes_the_bot_population_that_was_decided() -> None:
+    """The decision and what ships have to be the same number, in all six places.
+
+    The way this went wrong was not a typo. 500/500 was decided and written
+    down, the change landed on one test branch, and every other branch went on
+    shipping 1600-2000 — a fresh Fedora install came up `1633/1633 Bot Reyna
+    logged in` while the number of record said 500. The pin above would not
+    have caught that: it watches the native path, and the five installer
+    scripts each carry their own copy of the number in their own spelling.
+
+    So this scans every installer file for anything that WRITES a random-bot
+    population and holds all of them to `BOT_POPULATION`. It is deliberately a
+    sweep rather than a list of five paths: a sixth installer, or a seventh
+    spelling in an existing one, is caught the day it is added rather than the
+    day someone counts the bots that logged in.
+    """
+    written: dict[str, list[str]] = {}
+    for path in sorted(TEMPLATES.rglob("*")):
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        found = [m.group("ac") or m.group("cmangos") for m in _BOT_POPULATION_WRITE.finditer(text)]
+        if found:
+            written[path.relative_to(TEMPLATES).as_posix()] = found
+
+    assert written == {
+        "wow-tbc/install-wow-tbc.sh": [BOT_POPULATION, BOT_POPULATION],
+        "wow-vanilla/install-wow-vanilla.sh": [BOT_POPULATION, BOT_POPULATION],
+        "wow-wotlk/install-wow-wotlk-fedora.sh": [BOT_POPULATION, BOT_POPULATION],
+        "wow-wotlk/install-wow-wotlk-ubuntu.sh": [BOT_POPULATION, BOT_POPULATION],
+        "wow-wotlk/install-wow-wotlk.sh": [BOT_POPULATION, BOT_POPULATION],
+    }, "an installer ships a bot population that is not the one that was decided"
+
+    # The sixth place is the native path's data, which the scan above cannot
+    # see: it lives in `catalog.json`, not under `catalog/installers/`.
+    assert ENTRY.install.native is not None
+    assert ENTRY.install.native.world_env["AC_AI_PLAYERBOT_MIN_RANDOM_BOTS"] == BOT_POPULATION
 
 
 def test_the_image_refs_match_the_services_the_build_overlay_actually_builds(

@@ -223,15 +223,38 @@ class CatalogView(QWidget):
 
     # -- tiles ----------------------------------------------------------
 
+    @staticmethod
+    def _tile_text(text: str, frame: QFrame) -> QLabel:
+        """A line of tile text that gives way instead of widening the tile.
+
+        A QLabel without `setWordWrap` demands its longest line, so every tile
+        was as wide as its worst sentence — WotLK's description is 118
+        characters, Vanilla's emulator line 66 — and two of those per grid row
+        asked for some 3200px where the Catalog tab has under 700. The second
+        column, Install buttons and all, was drawn past the right edge of the
+        viewport at the size the window opens at: reachable only by a horizontal
+        scrollbar most people never looked for, and clickable blind (v0.6.51,
+        2026-08-30). Wrapping is what the platform-gate note twenty lines below
+        already did; the rest of the tile simply never got it.
+
+        Every line goes through here rather than only the long ones, because
+        which line is longest is a property of `catalog.json` — the next entry
+        someone adds must not be able to push the buttons off screen again.
+        """
+        label = QLabel(text, frame)
+        label.setWordWrap(True)
+        return label
+
     def _tile(self, entry: CatalogEntry) -> QFrame:
         frame = QFrame(self)
         frame.setFrameShape(QFrame.Shape.StyledPanel)
         box = QVBoxLayout(frame)
-        title = QLabel(f"<b>{entry.name}</b> <i>({entry.status})</i>", frame)
-        box.addWidget(title)
-        box.addWidget(QLabel(entry.description, frame))
-        box.addWidget(QLabel(f"Client: {entry.client.version} (build {entry.client.build})", frame))
-        box.addWidget(QLabel(f"Emulator: {entry.emulator.name}", frame))
+        box.addWidget(self._tile_text(f"<b>{entry.name}</b> <i>({entry.status})</i>", frame))
+        box.addWidget(self._tile_text(entry.description, frame))
+        box.addWidget(
+            self._tile_text(f"Client: {entry.client.version} (build {entry.client.build})", frame)
+        )
+        box.addWidget(self._tile_text(f"Emulator: {entry.emulator.name}", frame))
         button = QPushButton("Install", frame)
         button.setObjectName(f"install-{entry.id}")
         button.clicked.connect(lambda _checked=False, e=entry: self.start_install(e))
@@ -241,13 +264,13 @@ class CatalogView(QWidget):
             # Roadmap 6.1: say it on the tile, before the click — and leave
             # "Use existing…" enabled, since managing a server installed
             # elsewhere works on every platform.
-            note = QLabel(
-                f"<i>Installer needs {platform_names(entry.install.platforms)} — "
-                "not available on this platform yet.</i>",
-                frame,
+            box.addWidget(
+                self._tile_text(
+                    f"<i>Installer needs {platform_names(entry.install.platforms)} — "
+                    "not available on this platform yet.</i>",
+                    frame,
+                )
             )
-            note.setWordWrap(True)
-            box.addWidget(note)
             button.setEnabled(False)
             button.setToolTip(unsupported_platform_message(entry, self._platform_id()))
             self._gated.add(entry.id)

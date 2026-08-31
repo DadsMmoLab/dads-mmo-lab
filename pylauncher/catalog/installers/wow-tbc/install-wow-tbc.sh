@@ -1824,7 +1824,12 @@ EOF
         print_success "realmd.conf patched"
     fi
 
-    # ── Playerbots: 500 random bots ─────────────────────────────────
+    # ── Playerbots: 500 random bots ──────────────────────────────────
+    # Min and Max are the same number so the world holds the population that
+    # was asked for instead of drifting anywhere under it. The account count
+    # caps how many bot characters can exist, at ten per account, so 100 is
+    # what 500 bots needs — 400 would create three hundred accounts nothing
+    # ever logs in as.
     if [ -f "$SERVER_DIR/etc/aiplayerbot.conf" ]; then
         sed -i "s|^AiPlayerbot\.MinRandomBots .*|AiPlayerbot.MinRandomBots = 500|" \
             "$SERVER_DIR/etc/aiplayerbot.conf"
