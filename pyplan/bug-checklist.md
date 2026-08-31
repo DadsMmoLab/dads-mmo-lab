@@ -818,6 +818,28 @@ was found by reading code; each is a line in a resolved compose document from a 
   Fedora 44. Naming it here so the next person to touch `docker_engine_commands()` knows the gap is
   known rather than overlooked.
 
+- **`networking.plan()` cannot see past NAT, and the realm it advertises is unreachable** —
+  2026-08-31, found while proving a real client login for the first time on any platform.
+  `plan()` takes `lan_ip` from `platform.detect_lan_ip()`, which reports the address of the
+  machine the engine runs on. Install into a VM on Hyper-V's Default Switch, VirtualBox NAT,
+  or WSL, and that address is `172.x` — routable from the host and from nowhere else. The
+  LAN step then writes it into `realmlist.address` and reports success, so the install is
+  "finished" and every client outside the box sees an empty or unreachable realm list, with
+  nothing anywhere naming the cause.
+  Measured: the Fedora gate VM detected `172.30.61.209`; a client on the LAN could only
+  connect once the address was overridden by hand to a reachable one and the host forwarded
+  3724/8085 inward. A user has no such lever — `lan_ip` is a keyword argument, not a field
+  in the Networking tab.
+  *Recorded, not fixed:* the shape is a design decision. Detecting "the address a client
+  would reach me on" is not something the box can answer alone; the honest options are to
+  ask the user, to probe from outside, or to refuse to claim success when the detected
+  address is in a NAT range (`10/8`, `172.16/12`, `192.168/16` behind another NAT, or a
+  known hypervisor range) and say so. The last is cheap and would have turned tonight's
+  silent wrong answer into a question.
+  Related observation, not a defect: behind a port forward `account.last_ip` records the
+  forwarder for every client, so per-IP account caps, ban-by-IP and geolocation all see one
+  address for the whole world.
+
 
 ### One thing worth keeping
 
