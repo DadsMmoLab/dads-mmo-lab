@@ -840,6 +840,38 @@ was found by reading code; each is a line in a resolved compose document from a 
   forwarder for every client, so per-IP account caps, ban-by-IP and geolocation all see one
   address for the whole world.
 
+- **The CLI harness dies on Windows the moment its output is redirected** — 2026-09-01, found by
+  the 6.3 clean-box gate on `yulon-win11-gate`, after every preflight check had passed:
+
+      File "yulon\install_wiring.py", line 209, in main
+        sys.stdout.write(line + "
+")
+      File "Lib\encodings\cp1252.py", line 19, in encode
+      UnicodeEncodeError: 'charmap' codec can't encode character '→'
+
+  The engine writes `→` in its own progress lines (it is in the provisioning JSON too). A Windows
+  console is UTF-8, but a REDIRECTED stdout takes the locale encoding — cp1252 here — which has no
+  `→`, so the process dies with exit 1 having done nothing wrong. It reached `--- clone-core` only
+  after `PYTHONUTF8=1` was forced in the harness wrapper.
+  This is not merely a gate artifact: `phase7-decisions.md:982` names this harness as the way to
+  drive an install, and any user piping it to a log file hits the same crash. The GUI does not,
+  because Qt does its own encoding.
+  *Recorded, not fixed:* the fix is one of — reconfigure `sys.stdout` to UTF-8 with
+  `errors="replace"` at entry, set `PYTHONUTF8` for the child, or stop emitting characters the
+  stream cannot be guaranteed to encode. The first is smallest and keeps the arrows.
+
+- **Docker cannot pull from a non-interactive Windows session** — same gate, same night. Docker's
+  Windows credential helper needs an interactive logon, so under ssh or a scheduled task every pull
+  fails with `error getting credentials - A specified logon session does not exist`. It cost the
+  bind-mount probe its image and then killed `clone-core` outright.
+  Environmental rather than a product defect, but it belongs here because it will meet anyone
+  automating Windows: the fix is stub `docker-credential-wincred.bat`/`-desktop.bat` on PATH that
+  answer `get` with `credentials not found in native keychain` **on stdout** (stderr leaves docker's
+  `out:` empty and it errors anyway) plus `DOCKER_CONFIG` pointing at a config with `credsStore` empty.
+  Worth noting what the engine got RIGHT: it did not blame the folder. It reported "that failure was
+  the probe's own pull rather than an answer about the folder" and carried on — the three-outcome
+  discipline behaving correctly against a real-world failure it had never seen.
+
 
 ### One thing worth keeping
 
