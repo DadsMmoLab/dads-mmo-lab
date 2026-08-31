@@ -813,7 +813,7 @@ def _main(argv: list[str] | None = None) -> int:
         sys.stderr.write(f"unknown game {args.game!r}\n")
         return 2
     # `installer_for()`, not `Installer(...)`: the CLI used to construct the
-    # script engine directly, so it could never exercise `NativeInstaller` on
+    # script engine directly, so it could never exercise a native family on
     # any platform, and "I ran the install through the CLI" proved less than it
     # sounded like it did. It now dispatches exactly as the Install button does.
     #

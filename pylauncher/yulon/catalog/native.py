@@ -1052,6 +1052,15 @@ class StagedInstaller:
         docker CLI — and it tells the caller only `False`. The world log is
         where three of them show; a crash loop shows as a container that keeps
         coming back, which `docker compose ps` says and a log tail does not.
+
+        Two known gaps in that wait, recorded rather than fixed in 7.1 because
+        `docker.wait_ready()` is not this task's to re-home: the crash-loop
+        latch counts the WORLD container's restarts only, so an auth container
+        in a crash loop sits out the whole timeout, and `spec.fatal` is
+        searched in the world log only, so a fatal line an auth server prints
+        is not seen. Both are conservative — they make the wait slower to give
+        up, never quicker to call a dead server ready — which is why they are
+        an entry in the checklist and not a blocker here.
         """
         spec = self.entry.container_spec()
         yield "Waiting for the database."
