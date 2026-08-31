@@ -85,6 +85,8 @@ class Facts:
     bind_mount: bool | None = None
     port_conflicts: tuple[str, ...] = ()
     ports_in_use: tuple[int, ...] = ()
+    selinux_enforcing: bool | None = None
+    server_fs_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -130,6 +132,9 @@ def gather(
     bind_mount_ok: Callable[[Path], bool | None] | None = None,
     port_conflicts: Callable[[], list[str]] | None = None,
     probe_port: Callable[[str, int], platform.PortProbe] = platform.probe_tcp,
+    client_dir: Path | None = None,
+    selinux: Callable[[], bool | None] = platform.selinux_enforcing,
+    fs_type: Callable[[Path], str | None] = platform.filesystem_type,
 ) -> Facts:
     """Ask the machine everything `evaluate()` needs, refusing to invent an answer.
 
@@ -142,6 +147,9 @@ def gather(
     including the volume comparison. Reading the real platform inside one of
     them is how this suite once went red on every Python 3.12+ Linux box while
     CI stayed green.
+
+    SELinux and the server folder's filesystem are asked only on Linux, where
+    they exist. `client_dir` is accepted from 7.1 and consulted from 7.3.
     """
     here = platform_id()
     ready = docker_ready()
@@ -164,6 +172,13 @@ def gather(
         # would have started that `rust-prior-art.md` §4 warns about.
         if probe_port("127.0.0.1", port).status == "open":
             listening.append(port)
+    # SELinux is a Linux fact. Off Linux the questions are not asked, so the
+    # check below can tell "not applicable" from "could not read it".
+    enforcing = selinux() if here == "linux" else None
+    server_fs = fs_type(server_dir) if here == "linux" else None
+    # `client_dir` is threaded through from `InstallOptions` now so the spine's
+    # call shape is final; the client-folder checks that read it arrive in 7.3.
+    del client_dir
     return Facts(
         platform_id=here,
         docker_ready=ready,
@@ -176,6 +191,8 @@ def gather(
         bind_mount=probe(server_dir) if ready else None,
         port_conflicts=tuple(conflicts()) if ready else (),
         ports_in_use=tuple(listening),
+        selinux_enforcing=enforcing,
+        server_fs_type=server_fs,
     )
 
 
@@ -286,6 +303,7 @@ def evaluate(entry: CatalogEntry, server_dir: Path, facts: Facts) -> Report:
     )
     checks.append(_folder_check(facts, server_dir))
     checks.append(_bind_check(facts, server_dir))
+    checks.append(_selinux_check(facts))
     checks.append(_port_check(facts))
     return Report(tuple(checks))
 
@@ -487,6 +505,47 @@ def _bind_check(facts: Facts, server_dir: Path) -> Check:
         f"a container could not see {server_dir}, so the server files would be invisible to it",
         "Add this folder (or its parent) to Docker Desktop's Settings → Resources → File "
         "sharing, or pick a folder under your home directory, then try again.",
+    )
+
+
+def _selinux_check(facts: Facts) -> Check:
+    """Will the containers be allowed to read the server folder under SELinux?
+
+    `composegen` puts `:z` on every host bind when SELinux is enforcing and the
+    filesystem can carry a label. On a drive that cannot (`SELINUX_NOLABEL_FS`
+    — NTFS, exFAT, network shares) the label is omitted, and the daemon may
+    then refuse to create the containers at all. That is a warning, not a
+    refusal: the WotLK bash installer shipped with exactly this behaviour and
+    its Fedora gate passed, and a hard refusal here would refuse a machine
+    whose daemon might well have coped.
+
+    Three answers, not two. `selinux_enforcing is None` means the question went
+    unanswered — a broken or absent `getenforce` on a box that IS enforcing —
+    and it is reported as `unchecked`, never folded into "not enforcing". The
+    shell lineage collapsed those two and relabelled nothing on an enforcing
+    Fedora while its test asserted the empty result and passed.
+    """
+    if facts.platform_id != "linux":
+        return Check("SELinux", "pass", "not a Linux host, so it does not apply")
+    if facts.selinux_enforcing is None:
+        return Check(
+            "SELinux",
+            "unchecked",
+            "whether SELinux is enforcing could not be read — that is not a pass",
+            "If the containers cannot read the server folder, run "
+            "`chcon -Rt container_file_t <server folder>` and try again.",
+        )
+    if not facts.selinux_enforcing:
+        return Check("SELinux", "pass", "not enforcing")
+    if platform.selinux_labels_supported(facts.server_fs_type):
+        return Check("SELinux", "pass", "enforcing; the server folder can carry container labels")
+    return Check(
+        "SELinux",
+        "warn",
+        f"enforcing, and the server folder is on {facts.server_fs_type}, which cannot hold "
+        "SELinux labels, so the `:z` bind option is omitted; the daemon may refuse to create "
+        "containers on this drive",
+        "If the server fails to start, pick a folder on the system drive (ext4, xfs or btrfs).",
     )
 
 

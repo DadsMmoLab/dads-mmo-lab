@@ -46,6 +46,8 @@ def facts(**overrides: object) -> preflight.Facts:
         bind_mount=True,
         port_conflicts=(),
         ports_in_use=(),
+        selinux_enforcing=False,
+        server_fs_type="ext2/ext3",
     )
     base.update(overrides)
     return preflight.Facts(**base)  # type: ignore[arg-type]
@@ -413,3 +415,70 @@ def test_cpu_vs_memory_heuristics(
         assert cpu_check.verdict == expected_verdict
     if expected_remedy_cpu is not None:
         assert expected_remedy_cpu in cpu_check.remedy
+
+
+def test_selinux_off_or_labelable_passes() -> None:
+    for enforcing, fs in ((False, "ntfs"), (True, "ext2/ext3"), (True, "xfs"), (True, None)):
+        report = preflight.evaluate(
+            ENTRY, SERVER_DIR, facts(selinux_enforcing=enforcing, server_fs_type=fs)
+        )
+        assert verdict(report, "SELinux") == "pass", (enforcing, fs)
+        assert report.ok()
+
+
+def test_selinux_enforcing_on_an_unlabelable_drive_warns_and_names_it() -> None:
+    """`:z` is omitted there, and the daemon may refuse the mount — say so before the build."""
+    report = preflight.evaluate(
+        ENTRY, SERVER_DIR, facts(selinux_enforcing=True, server_fs_type="ntfs")
+    )
+    assert verdict(report, "SELinux") == "warn"
+    assert report.ok()
+    said = [check for check in report.checks if check.name == "SELinux"][0]
+    assert "ntfs" in said.detail and ":z" in said.detail
+
+
+def test_selinux_that_could_not_be_read_on_linux_is_unchecked_and_a_pass_elsewhere() -> None:
+    linux = preflight.evaluate(ENTRY, SERVER_DIR, facts(selinux_enforcing=None))
+    assert verdict(linux, "SELinux") == "unchecked"
+    assert "not a pass" in [c for c in linux.checks if c.name == "SELinux"][0].detail
+    mac = preflight.evaluate(
+        ENTRY, SERVER_DIR, facts(platform_id="macos", selinux_enforcing=None, server_fs_type=None)
+    )
+    assert verdict(mac, "SELinux") == "pass"
+
+
+def test_gather_asks_selinux_only_on_linux_and_accepts_a_client_dir(tmp_path: Path) -> None:
+    """SELinux is asked on Linux only; `client_dir` is accepted now and read in 7.3 (A9)."""
+    asked: list[str] = []
+
+    def selinux() -> bool | None:
+        asked.append("selinux")
+        return True
+
+    def fs_type(path: Path) -> str | None:
+        asked.append(f"fs:{path}")
+        return "btrfs"
+
+    common: dict[str, object] = dict(
+        docker_ready=lambda: True,
+        vm_resources=lambda: None,
+        data_root=lambda: None,
+        disk_free=lambda _p: 100 * GIB,
+        dir_problem=lambda _p: None,
+        bind_mount_ok=lambda _p: True,
+        port_conflicts=lambda: [],
+        probe_port=lambda host, port: platform_module.PortProbe(host, port, "unknown", ""),
+        selinux=selinux,
+        fs_type=fs_type,
+    )
+    got = preflight.gather(
+        ENTRY, tmp_path, platform_id=lambda: "linux", client_dir=tmp_path / "client", **common
+    )  # type: ignore[arg-type]
+    assert got.selinux_enforcing is True and got.server_fs_type == "btrfs"
+    assert asked == ["selinux", f"fs:{tmp_path}"]
+    asked.clear()
+    got = preflight.gather(
+        ENTRY, tmp_path, platform_id=lambda: "windows", **common
+    )  # type: ignore[arg-type]
+    assert got.selinux_enforcing is None and got.server_fs_type is None
+    assert asked == []
