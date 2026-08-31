@@ -425,6 +425,47 @@ def test_a_resume_says_it_left_the_clone_alone_rather_than_claiming_to_update_it
     assert not any("updating it instead" in line for line in lines), lines
 
 
+def test_a_resume_puts_the_compose_file_back_and_the_note_does_not_deny_it(
+    tmp_path: Path,
+) -> None:
+    """`docker-compose.yml` is a TRACKED file of the emulator checkout — it is source.
+
+    The repository ships it at its root, which is why `generate-compose` has a
+    carve-out for it at all; after the first install it carries this engine's
+    marker, so `composegen.write_plan()` rewrites it whenever its content
+    differs. A comment appended to it does not survive a resume (driven,
+    2026-08-31), so a banner promising the source is left as it is on disk was
+    false about a file this engine rewrites every time.
+    """
+    server_dir = tmp_path / "wow"
+    install(Recorder(images=False), server_dir)
+    base = server_dir / composegen.BASE_FILE
+    base.write_text(base.read_text(encoding="utf-8") + "# my comment\n", encoding="utf-8")
+    again = resumed(server_dir, images=True, probe_answers=[IMPORTED])
+    install(again, server_dir)
+    assert "# my comment" not in base.read_text(encoding="utf-8")
+    assert "left exactly as it is on disk" not in native.OPENING_NOTE
+    assert "the compose files this app writes" in native.OPENING_NOTE
+
+
+def test_the_note_does_not_call_the_repeated_steps_the_last_ones(tmp_path: Path) -> None:
+    """`start-db` sits mid-list and `client-data` consults no state at all.
+
+    Both really run on a resume of a finished install, so "only the last steps
+    — starting the server and waiting for it — run on every attempt" named two
+    of the four. The note has now moved three times; this is what pins it.
+    """
+    server_dir = tmp_path / "wow"
+    install(Recorder(images=False), server_dir)
+    again = resumed(server_dir, images=True, probe_answers=[IMPORTED])
+    install(again, server_dir)
+    assert "start-db" in again.calls, again.calls
+    assert f"one-shot:{ENTRY.containers.client_data}" in again.calls, again.calls
+    assert "Only the last steps" not in native.OPENING_NOTE
+    for said in ("the server-data download", "the database and server are started"):
+        assert said in native.OPENING_NOTE, native.OPENING_NOTE
+
+
 # -- the guard --------------------------------------------------------------
 
 

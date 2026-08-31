@@ -86,10 +86,11 @@ STATE_VERSION = 1
 
 OPENING_NOTE = (
     "You can stop this at any time. Nothing is written outside the folder below, and starting "
-    "the install again continues from where it stopped: a step that already finished is checked "
-    "rather than repeated, so the hours it took are kept and the server source is left exactly "
-    "as it is on disk. Only the last steps — starting the server and waiting for it — run on "
-    "every attempt."
+    "the install again continues from where it stopped: source this app has finished cloning "
+    "is never fetched, reset or moved, and the build is not run a second time once Docker "
+    "confirms its images are there. Everything cheap runs again on every attempt — the compose "
+    "files this app writes are put back the way the catalog says, the server-data download "
+    "resumes and re-checks itself, and the database and server are started and waited for."
 )
 """What a Stop costs, said before it is pressed, and true of every stage.
 
@@ -98,23 +99,32 @@ was said as the second line of every install and appended to every
 cancellation, so a user who stopped during the clone or the download was told
 Docker was finishing a build step (review, 2026-08-23).
 
-**"Checked rather than repeated" is the whole engine's rule, and it is the
-honest verb.** The wording before this one promised that "only the step that
-was interrupted runs again", and the live Ubuntu gate (2026-08-30) printed
-`Already finished: clone-core, clone-modules, generate-compose` and then ran
-all three — each clone stage doing `git fetch` + `git reset --hard FETCH_HEAD`
-over the user's own source. Two sentences, one of which had to move. Both did:
-the clone stages became genuine no-ops when disk evidence agrees with the
-record (`already_cloned()`), and this line stopped claiming a precision the
-engine does not have — `start-db`, `up` and `ready` are `recorded=False` and
-run every time, and `client-data` re-runs a one-shot that exits in seconds
-when the version on disk already matches.
+**This sentence has been rewritten three times, each time because it claimed
+more than the engine does, and it is now written from what the stages actually
+do rather than from what a resume ought to feel like.** It said "only the step
+that was interrupted runs again" while the live Ubuntu gate (2026-08-30)
+printed `Already finished: clone-core, clone-modules, generate-compose` and ran
+all three, each doing `git fetch` + `git reset --hard FETCH_HEAD` over the
+user's source. It then said the source was "left exactly as it is on disk",
+which is false of `docker-compose.yml` — a TRACKED file of the emulator
+checkout, carrying this engine's marker after the first install, so
+`composegen.write_plan()` puts it back whenever it differs; a comment appended
+to it does not survive a resume (driven, 2026-08-31). And it said only the last
+steps run every time, while `start-db` sits mid-list with `recorded=False` and
+`client-data` consults no state at all.
 
-It says "the server source", not "the folder": `generate-compose` still
-rewrites a compose file that carries this engine's own marker, so an edit to
-`docker-compose.override.yml` does not survive a resume. That is a separate
-question from this one — it is the app's file, written from the catalog — and
-this sentence must not promise it away.
+So each clause is now a claim some stage is responsible for keeping:
+
+* *finished cloning is never fetched, reset or moved* — `already_cloned()`, and
+  `refuse_unowned_checkout()` for the checkout that was never this app's;
+* *the build is not run a second time once Docker confirms its images* —
+  `stage_build()`, where an unknown answer rebuilds rather than skips;
+* *the compose files this app writes are put back* — said, not hidden, because
+  `write_plan()` really does overwrite an edit to a file it wrote;
+* *the download resumes and re-checks itself* — the generated entrypoint's
+  `curl --continue-at -` plus its data-version comparison;
+* *the database and server are started and waited for* — the three
+  `recorded=False` stages, which is why a resume always ends with a live server.
 """
 
 BUILD_CANCEL_NOTE = (
