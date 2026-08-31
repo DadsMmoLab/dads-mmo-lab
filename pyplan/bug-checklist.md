@@ -806,6 +806,18 @@ was found by reading code; each is a line in a resolved compose document from a 
   Until then, these three scripts are what a user running `install-wow-wotlk*.sh` today actually
   gets.
 
+- **`linux_package_manager()` cannot tell an immutable Fedora from an ordinary one** — 2026-08-31,
+  found while fixing the buildx package name, not fixed here. It picks a package manager by which
+  binary is on `PATH`, and `dnf` is on `PATH` on Bazzite and Silverblue too. There, `/usr` is an
+  atomic ostree deployment: `dnf -y install moby-engine ...` is the wrong command whatever packages
+  it names, because those systems layer with `rpm-ostree install` and take a reboot to activate it.
+  `install-wow-wotlk-fedora.sh` has both branches and chooses between them; the Python engine has
+  only the dnf one.
+  *Recorded, not fixed:* the shape of the fix (a third `pm` value, or a flag on the dnf branch) is a
+  design decision, and no immutable box exists to gate it on — the 7.1 Fedora gate box is ordinary
+  Fedora 44. Naming it here so the next person to touch `docker_engine_commands()` knows the gap is
+  known rather than overlooked.
+
 
 ### One thing worth keeping
 
