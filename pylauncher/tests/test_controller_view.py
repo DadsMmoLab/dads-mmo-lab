@@ -1241,7 +1241,10 @@ def test_every_seam_for_wotlk_builds_says_which_daemon_it_means() -> None:
 
     package = Path(controller_view_module.__file__).parent.parent
     accepts: set[str] = set()
+    modules: set[str] = set()
+    by_module: dict[str, set[str]] = {}
     for path in package.rglob("*.py"):
+        modules.add(path.stem)
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
                 args = node.args
@@ -1251,6 +1254,7 @@ def test_every_seam_for_wotlk_builds_says_which_daemon_it_means() -> None:
                     # ever catches somebody else's `super().__init__(parent)`.
                     if not node.name.startswith("__"):
                         accepts.add(node.name)
+                        by_module.setdefault(path.stem, set()).add(node.name)
             elif isinstance(node, ast.ClassDef):
                 if any(
                     isinstance(stmt, ast.AnnAssign)
@@ -1259,6 +1263,7 @@ def test_every_seam_for_wotlk_builds_says_which_daemon_it_means() -> None:
                     for stmt in node.body
                 ):
                     accepts.add(node.name)
+                    by_module.setdefault(path.stem, set()).add(node.name)
     assert {
         "send_command",
         "published_bindings",
@@ -1277,9 +1282,23 @@ def test_every_seam_for_wotlk_builds_says_which_daemon_it_means() -> None:
         func = node.func
         if isinstance(func, ast.Attribute):
             name = func.attr
+            receiver = ast.unparse(func.value)
             # `self.<x>` and `self.services.<x>` are the view calling objects
             # that were built WITH the distro; they are not the seam.
-            on_self = ast.unparse(func.value).startswith("self")
+            on_self = receiver.startswith("self")
+            # A MODULE-qualified call names exactly one function, and a
+            # package-wide set of bare NAMES cannot tell two of them apart.
+            # `apply` is both `networking.apply(plan, sql=sql)`, which reaches
+            # no daemon and takes no distro, and `sqlplan.apply(...)`, which
+            # reaches one and does - so from 7.3 the scan reported the former
+            # as a seam addressing the wrong docker. Resolving the receiver
+            # against the module that defines it makes this STRICTER where it
+            # can be, never looser: `apply.DockerSql(...)` and
+            # `maintenance.DockerMysql(...)`, the two seams the assertion above
+            # pins, are checked exactly as before, and a bare name or an
+            # object-qualified call still falls back to the package-wide set.
+            if receiver in modules and name not in by_module.get(receiver, set()):
+                continue
         elif isinstance(func, ast.Name):
             name, on_self = func.id, False
         else:

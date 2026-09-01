@@ -23,13 +23,19 @@ and keeps the answers apart; the tests below name each one.
 
 from __future__ import annotations
 
+import gzip
 import inspect
 import logging
+import subprocess
+import threading
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import BinaryIO
 
 import pytest
 
 from yulon import docker
+from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry, SqlPhase, SqlPlan, load_catalog
 from yulon.catalog.families import sqlplan
 from yulon.catalog.installer import InstallerError
@@ -791,3 +797,675 @@ def test_the_protocols_describe_the_real_docker_seams(protocol: type, real: obje
         assert actual[parameter.name].kind == parameter.kind, parameter.name
     for name, parameter in list(actual.items())[len(expected) :]:
         assert parameter.default is not inspect.Parameter.empty, f"{name} has no default"
+
+
+@pytest.mark.parametrize(
+    ("protocol", "real"),
+    [(sqlplan.ExecStdin, docker.exec_stdin), (sqlplan.SqlQuery, docker.sql_query)],
+)
+def test_both_protocols_can_name_the_daemon_they_are_talking_to(
+    protocol: type, real: object
+) -> None:
+    """Neither seam may lose `wsl_distro` on its way through a Protocol.
+
+    Both real functions take it, and both fought for it rather than being
+    listed in `test_docker.py`'s `_DAEMON_AGNOSTIC`: a container name means
+    nothing to a daemon that does not hold it, so a server living inside a WSL
+    distro is `No such container` to Docker Desktop. The two existing
+    `docker exec -i -e MYSQL_PWD` call sites in this app
+    (`apply.DockerSql._argv()`, `maintenance.DockerMysql._exec()`) both thread
+    a distro for exactly that reason.
+
+    A Protocol that omits the parameter is where that gets undone, and quietly:
+    `apply()` cannot pass an argument its own seam type does not declare, so
+    every import would go to the local daemon with nothing to show it had been
+    decided. Defaulted, so a caller with no distro says nothing and a test fake
+    need not care - but declared, so a caller WITH one can be obeyed.
+    """
+    declared = inspect.signature(protocol.__call__).parameters["wsl_distro"]
+    actual = inspect.signature(real).parameters["wsl_distro"]  # type: ignore[arg-type]
+    assert declared.kind is inspect.Parameter.KEYWORD_ONLY
+    assert declared.kind is actual.kind
+    assert declared.default is None and actual.default is None
+
+
+# -- J.4: apply(), the streaming import ---------------------------------------
+#
+# Three failures stay three failures here, and only one of them is about SQL: a
+# statement the client rejected, a database that could not be reached at all,
+# and a dump this side could not read. `expand()` already keeps "nothing
+# matched" apart from "could not look" one layer up (see the module docstring);
+# collapsing them again at the moment the bytes move would undo it.
+#
+# The third has history. `docker.exec_stdin()` was first written with a single
+# `except OSError` around the read, `gzip.BadGzipFile` IS an `OSError`, and a
+# corrupt `.sql.gz` therefore fed the client HALF A DUMP - still valid SQL, so
+# it exited 0 and every check downstream agreed the import had worked. The
+# tests below drive the real `docker._pump()` over real corrupt files rather
+# than raising an exception of their own choosing, because "the fake raised
+# exactly what its author expected" is how that defect survives a test suite.
+
+
+class _Exec:
+    """`docker.exec_stdin` recorded by field: argv, the bytes actually read, the env.
+
+    `failing` maps a file name (or statement) to the stderr the client would
+    print; those calls exit 1. Everything else exits 0.
+
+    `wsl_distro` is recorded, in `distros`, rather than accepted and dropped.
+    That distinction is the whole point: `test_docker.py`'s completeness guard
+    is an AST walk over the SIGNATURE, so a function that takes the distro and
+    forgets it keeps that guard green while a WSL-resident install execs
+    against Docker Desktop and is told `No such container`. A fake that
+    swallowed the value would reproduce the same blind spot one layer up.
+    """
+
+    def __init__(self, failing: dict[str, str] | None = None) -> None:
+        self.failing = failing or {}
+        self.calls: list[tuple[str, tuple[str, ...], bytes, dict[str, str]]] = []
+        self.distros: list[str | None] = []
+
+    def __call__(
+        self,
+        container: str,
+        argv: Sequence[str],
+        source: BinaryIO,
+        *,
+        env: Mapping[str, str],
+        wsl_distro: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        data = source.read()
+        self.calls.append((container, tuple(argv), data, dict(env)))
+        self.distros.append(wsl_distro)
+        text = data.decode(errors="replace")
+        for key, stderr in self.failing.items():
+            if key in text:
+                return subprocess.CompletedProcess(list(argv), 1, "", stderr)
+        return subprocess.CompletedProcess(list(argv), 0, "", "")
+
+
+class _Collect:
+    """A write-only sink `docker._pump()` may close without losing what it wrote."""
+
+    def __init__(self) -> None:
+        self.data = bytearray()
+        self.closed = False
+
+    def write(self, chunk: bytes) -> int:
+        self.data += chunk
+        return len(chunk)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _PumpingExec:
+    """`exec_stdin` down to the one part that decides a corrupt dump: `docker._pump()`.
+
+    The read failure `apply()` has to recognise is not something a test can
+    honestly invent. A truncated `.sql.gz` raises `EOFError`, mangled deflate
+    bytes raise `zlib.error`, and something that was never gzip raises
+    `gzip.BadGzipFile`; `apply()` names none of the three and should not,
+    because `exec_stdin()` normalises every one of them to
+    `SourceUnreadableError` on the way past - which is precisely what makes
+    catching `(RuntimeError, OSError)` sufficient. So this fake runs the REAL
+    pump over a REAL corrupt file and lets it produce the real exception,
+    instead of raising the one its author had in mind.
+
+    It then exits 0, because that is what actually happened: half a dump is
+    valid SQL and the client is delighted by it.
+    """
+
+    def __init__(self) -> None:
+        self.sink = _Collect()
+        self.calls = 0
+
+    def __call__(
+        self,
+        container: str,
+        argv: Sequence[str],
+        source: BinaryIO,
+        *,
+        env: Mapping[str, str],
+        wsl_distro: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        self.calls += 1
+        docker._pump(source, self.sink, container)
+        return subprocess.CompletedProcess(list(argv), 0, "", "")
+
+
+class _Refusing:
+    """An `exec_stdin` that reaches no daemon at all, the way a missing CLI does."""
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        self.calls = 0
+
+    def __call__(
+        self,
+        container: str,
+        argv: Sequence[str],
+        source: BinaryIO,
+        *,
+        env: Mapping[str, str],
+        wsl_distro: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        self.calls += 1
+        raise self.error
+
+
+def _file_run(
+    tmp_path: Path, rel: str, text: str, *, phase: SqlPhase, schema: str = "mangos"
+) -> sqlplan.PhaseRun:
+    """A `PhaseRun` for `<tmp_path>/<rel>` as `expand()` would build it (`rel` posix).
+
+    `newline=""` because the assertions below are about BYTES. `write_text()` translates
+    `\\n` to `\\r\\n` on Windows, so without it a test asserting the client received
+    `b"SELECT 1;\\n"` fails on the platform this is developed on - and it would be
+    asserting the wrong thing anyway: a dump arrives from a clone or a download with
+    whatever line endings it has, and `apply()` streams the file's bytes untouched.
+    """
+    path = tmp_path / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if rel.endswith(".gz"):
+        with gzip.open(path, "wb") as fh:
+            fh.write(text.encode())
+    else:
+        path.write_text(text, encoding="utf-8", newline="")
+    return sqlplan.PhaseRun(phase, schema, path, None, phase.gzip, rel)
+
+
+def _run_apply(
+    runs: Sequence[sqlplan.PhaseRun],
+    exec_stdin: sqlplan.ExecStdin,
+    *,
+    sink: docker.OutputSink | None = None,
+    cancel: threading.Event | None = None,
+    wsl_distro: str | None = None,
+    client: str = "mysql",
+    password: str = "pw",
+    container: str = "c",
+) -> list[str]:
+    """`apply()` drained, with the arguments every test would otherwise repeat."""
+    return list(
+        sqlplan.apply(
+            runs,
+            container=container,
+            client=client,
+            password=password,
+            exec_stdin=exec_stdin,
+            sink=sink if sink is not None else (lambda _: None),
+            cancel=cancel,
+            wsl_distro=wsl_distro,
+        )
+    )
+
+
+FAIL = SqlPhase(name="realmd base", into="realmd", files=("x.sql",))
+WARN = SqlPhase(name="content updates", into="mangos", files=("x.sql",), on_error="warn")
+GZ = SqlPhase(name="world content", into="mangos", files=("x.sql.gz",), gzip=True)
+GZ_WARN = SqlPhase(
+    name="world updates", into="mangos", files=("x.sql.gz",), gzip=True, on_error="warn"
+)
+
+
+def test_apply_streams_each_file_as_root_with_the_password_in_env(tmp_path: Path) -> None:
+    ex = _Exec()
+    runs = (
+        _file_run(
+            tmp_path, "realmd.sql", "CREATE TABLE account (id INT);\n", phase=FAIL, schema="realmd"
+        ),
+        sqlplan.PhaseRun(FAIL, None, None, "SELECT 1", False, "statement 1"),
+    )
+    sunk: list[str] = []
+    lines = list(
+        sqlplan.apply(
+            runs,
+            container="tbc-db",
+            client="mariadb",
+            password="pw",
+            exec_stdin=ex,
+            sink=sunk.append,
+            cancel=None,
+        )
+    )
+    assert ex.calls == [
+        (
+            "tbc-db",
+            ("mariadb", "-u", "root", "realmd"),
+            b"CREATE TABLE account (id INT);\n",
+            {"MYSQL_PWD": "pw"},
+        ),
+        ("tbc-db", ("mariadb", "-u", "root"), b"SELECT 1", {"MYSQL_PWD": "pw"}),
+    ]
+    assert lines == ["realmd base: realmd.sql -> realmd", "realmd base: statement 1 (no schema)"]
+    assert "pw" not in " ".join(lines) and sunk == []
+
+
+def test_apply_inflates_gzip_on_the_way_in(tmp_path: Path) -> None:
+    ex = _Exec()
+    run = _file_run(
+        tmp_path, "TBCDB_1.9.0.sql.gz", "INSERT INTO item_template VALUES (1);\n", phase=GZ
+    )
+    _run_apply((run,), ex, client="mariadb")
+    assert ex.calls[0][2] == b"INSERT INTO item_template VALUES (1);\n"
+
+
+def test_apply_fail_policy_stops_naming_the_file_and_the_last_stderr_line(tmp_path: Path) -> None:
+    ex = _Exec(failing={"BROKEN": "Warning: x\nERROR 1064 (42000) at line 3: You have an error\n"})
+    runs = (
+        _file_run(tmp_path, "z1.sql", "BROKEN;\n", phase=FAIL, schema="realmd"),
+        _file_run(tmp_path, "z2.sql", "SELECT 2;\n", phase=FAIL, schema="realmd"),
+    )
+    sunk: list[str] = []
+    with pytest.raises(InstallerError, match=r"z1\.sql.*ERROR 1064 \(42000\) at line 3"):
+        _run_apply(runs, ex, sink=sunk.append)
+    assert len(ex.calls) == 1, "fail stops at the first failing file"
+    assert sunk == ["Warning: x", "ERROR 1064 (42000) at line 3: You have an error"]
+
+
+def test_apply_warn_policy_names_the_relative_path_and_continues(tmp_path: Path) -> None:
+    ex = _Exec(failing={"BROKEN": "ERROR 1050: Table already exists\n"})
+    runs = (
+        _file_run(tmp_path, "src/tbc-db/Updates/z1.sql", "BROKEN;\n", phase=WARN),
+        _file_run(tmp_path, "src/tbc-db/Updates/z2.sql", "SELECT 2;\n", phase=WARN),
+    )
+    lines = _run_apply(runs, ex)
+    assert len(ex.calls) == 2
+    assert lines == [
+        "content updates: src/tbc-db/Updates/z1.sql -> mangos",
+        "warning: src/tbc-db/Updates/z1.sql failed (ERROR 1050: Table already exists); "
+        "continuing because 'content updates' is on_error: warn",
+        "content updates: src/tbc-db/Updates/z2.sql -> mangos",
+    ]
+    assert str(tmp_path) not in " ".join(lines), "the log names files relative to the server dir"
+
+
+def test_apply_stops_on_cancel_before_the_next_file(tmp_path: Path) -> None:
+    ex = _Exec()
+    cancel = threading.Event()
+    runs = (
+        _file_run(tmp_path, "z1.sql", "SELECT 1;\n", phase=WARN),
+        _file_run(tmp_path, "z2.sql", "SELECT 2;\n", phase=WARN),
+    )
+    gen = sqlplan.apply(
+        runs,
+        container="c",
+        client="mysql",
+        password="pw",
+        exec_stdin=ex,
+        sink=lambda _: None,
+        cancel=cancel,
+    )
+    assert next(gen) == "content updates: z1.sql -> mangos"
+    cancel.set()
+    with pytest.raises(InstallerError, match="stopped"):
+        next(gen)
+    assert len(ex.calls) == 1
+
+
+# -- which daemon the import execs against ------------------------------------
+
+
+def test_apply_execs_against_the_distro_that_holds_the_container(tmp_path: Path) -> None:
+    """The value, not the parameter. Accepting `wsl_distro` and dropping it is invisible.
+
+    `test_docker.py::test_every_function_that_talks_to_docker_can_say_which_daemon`
+    parses signatures, so it cannot tell a forwarded distro from a forgotten
+    one - proved by mutation in H.5. This asserts the value arrives, for every
+    run in the plan, so an import into a WSL-resident install is asked of the
+    daemon that actually holds its database.
+    """
+    ex = _Exec()
+    runs = (
+        _file_run(tmp_path, "z1.sql", "SELECT 1;\n", phase=WARN),
+        sqlplan.PhaseRun(WARN, "mangos", None, "SELECT 2", False, "statement 1"),
+    )
+    _run_apply(runs, ex, wsl_distro="Ubuntu-22.04")
+    assert ex.distros == ["Ubuntu-22.04", "Ubuntu-22.04"]
+
+
+def test_apply_names_no_distro_when_the_install_is_local(tmp_path: Path) -> None:
+    """An install created here has no distro to name, and says so rather than guessing."""
+    ex = _Exec()
+    run = _file_run(tmp_path, "z1.sql", "SELECT 1;\n", phase=WARN)
+    _run_apply((run,), ex)
+    assert ex.distros == [None]
+
+
+# -- the three ways a run can go wrong, kept apart ----------------------------
+
+
+def test_apply_refuses_a_truncated_dump_the_client_would_have_swallowed(tmp_path: Path) -> None:
+    """A half-downloaded `.sql.gz`: `EOFError`, exit 0, and a database missing a third.
+
+    This is the exact shape H.4 was rewritten for. The client is fed however
+    many bytes inflated cleanly, that prefix is valid SQL, and it exits 0 - so
+    nothing downstream will ever notice. Only the read failure says anything,
+    and only if `apply()` hears it.
+    """
+    # Big enough that the truncated half is several of `docker._pump()`'s 1 MiB reads:
+    # the point is that whole chunks of valid SQL reach the client BEFORE the stream
+    # gives out, which is what makes the client's exit 0 so convincing.
+    path = tmp_path / "TBCDB_1.9.0.sql.gz"
+    with gzip.open(path, "wb") as fh:
+        fh.write(b"INSERT INTO item_template VALUES (1);\n" * 400_000)
+    whole = path.read_bytes()
+    path.write_bytes(whole[: len(whole) // 2])
+    run = sqlplan.PhaseRun(GZ, "mangos", path, None, True, "TBCDB_1.9.0.sql.gz")
+    ex = _PumpingExec()
+    with pytest.raises(InstallerError) as excinfo:
+        _run_apply((run,), ex)
+    assert "TBCDB_1.9.0.sql.gz" in str(excinfo.value)
+    assert "could not be read" in str(excinfo.value)
+    assert "EOFError" in str(excinfo.value), "which corruption it was is the actionable half"
+    assert isinstance(excinfo.value.__cause__, docker.SourceUnreadableError)
+    assert isinstance(excinfo.value.__cause__.__cause__, EOFError)
+    assert len(ex.sink.data) >= 1 << 20, "megabytes of valid SQL reached the client first"
+    assert ex.sink.closed, "the client still gets its EOF, so nothing is left waiting"
+
+
+def test_apply_refuses_a_dump_that_was_never_gzip_and_says_so_differently(tmp_path: Path) -> None:
+    """The other corruption, told apart from the first by `__cause__` and nothing else.
+
+    A truncated download and a file that is not a gzip at all get the same
+    sentence from `SourceUnreadableError` unless the cause's class survives
+    into what the user is shown. "Download it again" answers one of them.
+    """
+    path = tmp_path / "TBCDB_1.9.0.sql.gz"
+    path.write_bytes(b"<!DOCTYPE html><title>404 Not Found</title>")
+    run = sqlplan.PhaseRun(GZ, "mangos", path, None, True, "TBCDB_1.9.0.sql.gz")
+    with pytest.raises(InstallerError) as excinfo:
+        _run_apply((run,), _PumpingExec())
+    assert "BadGzipFile" in str(excinfo.value)
+    assert "EOFError" not in str(excinfo.value)
+
+
+def test_a_warn_phase_does_not_soften_a_dump_that_could_not_be_read(tmp_path: Path) -> None:
+    """`on_error: warn` is a policy about SQL, never about the operating system.
+
+    The same rule `expand()` keeps for "could not look": a phase may forgive a
+    statement its own sources got wrong, and may not forgive a file this
+    machine could not deliver - that is a database silently short by however
+    much the broken file held.
+    """
+    path = tmp_path / "z1.sql.gz"
+    path.write_bytes(b"not gzip at all")
+    run = sqlplan.PhaseRun(GZ_WARN, "mangos", path, None, True, "z1.sql.gz")
+    with pytest.raises(InstallerError):
+        _run_apply((run,), _PumpingExec())
+
+
+def test_apply_names_a_dump_it_could_not_open_without_blaming_the_database(
+    tmp_path: Path,
+) -> None:
+    """The file was gone before a single byte moved: no exec, and no SQL in the story."""
+    ex = _Exec()
+    run = sqlplan.PhaseRun(FAIL, "realmd", tmp_path / "vanished.sql", None, False, "vanished.sql")
+    with pytest.raises(InstallerError) as excinfo:
+        _run_apply((run,), ex)
+    assert "vanished.sql" in str(excinfo.value)
+    assert "could not be read" in str(excinfo.value)
+    assert "FileNotFoundError" in str(excinfo.value)
+    assert ex.calls == [], "nothing was sent to the database, so nothing may be blamed on it"
+
+
+def test_a_daemon_that_never_answered_is_not_reported_as_a_broken_dump(tmp_path: Path) -> None:
+    """Three situations, three sentences. This is the one no dump and no SQL caused.
+
+    `DockerCliMissingError` is a `DockerCommandError` is a `RuntimeError`, so
+    the very clause that catches `SourceUnreadableError` swallows it too unless
+    it is answered first - and the user is then told their download is corrupt
+    when what is actually missing is Docker.
+    """
+    ex = _Refusing(docker.DockerCliMissingError("there is no docker CLI on this machine"))
+    run = _file_run(tmp_path, "z1.sql", "SELECT 1;\n", phase=FAIL, schema="realmd")
+    with pytest.raises(InstallerError) as excinfo:
+        _run_apply((run,), ex)
+    assert "could not be read" not in str(excinfo.value)
+    assert "no docker CLI" in str(excinfo.value)
+    assert isinstance(excinfo.value.__cause__, docker.DockerCliMissingError)
+
+
+def test_a_bug_in_the_seam_is_not_dressed_up_as_a_corrupt_download(tmp_path: Path) -> None:
+    """The clause is `(RuntimeError, OSError)` and not `except Exception`, deliberately.
+
+    `SourceUnreadableError` exists precisely so this catch can be narrow: it is
+    the one type every read failure arrives as. Widening to `Exception` would
+    also swallow a `TypeError` from a seam whose signature drifted and report
+    it to the user as a corrupt dump, which is a bug report nobody can act on
+    and a whole afternoon looking at the wrong file.
+    """
+    ex = _Refusing(ValueError("the seam was called wrongly"))
+    run = _file_run(tmp_path, "z1.sql", "SELECT 1;\n", phase=FAIL, schema="realmd")
+    with pytest.raises(ValueError, match="called wrongly"):
+        _run_apply((run,), ex)
+
+
+def test_a_container_that_is_not_running_is_not_reported_as_a_broken_dump(
+    tmp_path: Path,
+) -> None:
+    """The daemon answered; it said no. Still not a file this side could not read."""
+    ex = _Refusing(docker.DockerCommandError("Error response from daemon: No such container: c"))
+    run = _file_run(tmp_path, "z1.sql", "SELECT 1;\n", phase=WARN)
+    with pytest.raises(InstallerError) as excinfo:
+        _run_apply((run,), ex)
+    assert "could not be read" not in str(excinfo.value)
+    assert "No such container" in str(excinfo.value)
+
+
+# -- what the client said, and what is done with it ---------------------------
+
+
+def test_apply_shows_a_warning_the_client_printed_even_though_it_succeeded(
+    tmp_path: Path,
+) -> None:
+    """`2>/dev/null` made visible: stderr reaches the sink whatever the exit code was.
+
+    Every shipped shell installer discarded the client's stderr, so
+    `[Warning] Using a password on the command line` and the deprecation
+    notices that precede a broken update went nowhere. Only the failing branch
+    needing them would put them back in the dark on the run that still worked.
+    """
+    sunk: list[str] = []
+
+    class _Noisy(_Exec):
+        def __call__(self, *args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+            proc = super().__call__(*args, **kwargs)  # type: ignore[arg-type]
+            return subprocess.CompletedProcess(proc.args, 0, "", "[Warning] deprecated syntax\n")
+
+    run = _file_run(tmp_path, "z1.sql", "SELECT 1;\n", phase=FAIL, schema="realmd")
+    lines = _run_apply((run,), _Noisy(), sink=sunk.append)
+    assert sunk == ["[Warning] deprecated syntax"]
+    assert lines == ["realmd base: z1.sql -> realmd"], "a warning is not a failure"
+
+
+def test_apply_falls_back_to_the_exit_code_when_the_client_printed_nothing(
+    tmp_path: Path,
+) -> None:
+    """A client killed by a signal exits 137 with both pipes empty (measured, H.5).
+
+    "z1.sql failed ()" names nothing anybody can act on; the number at least
+    says which client died and how.
+    """
+
+    class _Silent(_Exec):
+        def __call__(self, *args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+            proc = super().__call__(*args, **kwargs)  # type: ignore[arg-type]
+            return subprocess.CompletedProcess(proc.args, 137, "", "")
+
+    run = _file_run(tmp_path, "z1.sql", "SELECT 1;\n", phase=WARN)
+    lines = _run_apply((run,), _Silent())
+    assert lines[1] == (
+        "warning: z1.sql failed (the client exited 137); continuing because "
+        "'content updates' is on_error: warn"
+    )
+
+
+def test_apply_quotes_the_last_thing_the_client_said_not_the_last_line_it_printed(
+    tmp_path: Path,
+) -> None:
+    """mysql ends its stderr with a newline, and `splitlines()` leaves blanks behind it.
+
+    `lines[-1]` would quote the empty string and the reason would collapse into
+    the exit-code fallback, hiding the one line that says WHICH statement broke.
+    """
+    ex = _Exec(failing={"BROKEN": "ERROR 1064 (42000) at line 7: check the manual\n\n   \n"})
+    run = _file_run(tmp_path, "z1.sql", "BROKEN;\n", phase=WARN)
+    lines = _run_apply((run,), ex)
+    assert "ERROR 1064 (42000) at line 7: check the manual" in lines[1]
+    assert "exited 1" not in lines[1]
+
+
+def test_apply_logs_a_forgiven_failure_as_a_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The install log line is for the user; the log record is for the bug report."""
+    ex = _Exec(failing={"BROKEN": "ERROR 1050: Table already exists\n"})
+    run = _file_run(tmp_path, "src/Updates/z1.sql", "BROKEN;\n", phase=WARN)
+    with caplog.at_level(logging.WARNING, logger=sqlplan.logger.name):
+        _run_apply((run,), ex)
+    assert "src/Updates/z1.sql" in caplog.text
+    assert "ERROR 1050" in caplog.text
+
+
+# -- the rest of the contract -------------------------------------------------
+
+
+def test_apply_never_lets_the_password_out_of_the_environment(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`CREATE USER ... IDENTIFIED BY` is the one statement that carries the secret.
+
+    It goes over stdin and is named in the log by `rel` - `statement 1` - which
+    is why `PhaseRun` carries one at all. Describing a run by its SQL would put
+    the database password in every install log anybody ever pastes.
+    """
+    secret = "not-a-real-password-7f3a"
+    statement = f"CREATE USER 'mangos'@'%' IDENTIFIED BY '{secret}';"
+    ex = _Exec(failing={"CREATE USER": "ERROR 1396 (HY000): Operation CREATE USER failed\n"})
+    run = sqlplan.PhaseRun(WARN, "mangos", None, statement, False, "statement 1")
+    sunk: list[str] = []
+    with caplog.at_level(logging.DEBUG, logger=sqlplan.logger.name):
+        lines = _run_apply((run,), ex, sink=sunk.append, password=secret)
+    assert ex.calls[0][2] == statement.encode(), "the client still got the real statement"
+    assert ex.calls[0][3] == {"MYSQL_PWD": secret}
+    assert secret not in " ".join(lines)
+    assert secret not in " ".join(sunk)
+    assert secret not in caplog.text
+    assert secret not in " ".join(ex.calls[0][1])
+
+
+def test_apply_closes_each_dump_before_it_opens_the_next(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stream held open past its run is a file Windows will not let anyone delete.
+
+    The import is followed by stages that move and delete the source tree, and
+    a `gzip.GzipFile` nobody closed keeps a handle on a multi-gigabyte dump for
+    as long as the installer runs.
+    """
+    opened: list[BinaryIO] = []
+    real = sqlplan._open
+
+    def spy(run: sqlplan.PhaseRun) -> BinaryIO:
+        handle = real(run)
+        opened.append(handle)
+        return handle
+
+    monkeypatch.setattr(sqlplan, "_open", spy)
+    runs = (
+        _file_run(tmp_path, "z1.sql", "SELECT 1;\n", phase=WARN),
+        _file_run(tmp_path, "z2.sql.gz", "SELECT 2;\n", phase=GZ_WARN),
+    )
+    _run_apply(runs, _Exec())
+    assert len(opened) == 2
+    assert all(handle.closed for handle in opened)
+
+
+def test_apply_stops_before_the_first_file_when_cancel_is_already_set(tmp_path: Path) -> None:
+    """Stop pressed while the previous stage was still finishing: nothing is applied."""
+    ex = _Exec()
+    cancel = threading.Event()
+    cancel.set()
+    run = _file_run(tmp_path, "z1.sql", "SELECT 1;\n", phase=WARN)
+    with pytest.raises(InstallerError):
+        _run_apply((run,), ex, cancel=cancel)
+    assert ex.calls == []
+
+
+def test_the_cancel_message_says_a_half_written_import_needs_no_undoing(tmp_path: Path) -> None:
+    """The note is `native.IMPORT_CANCEL_NOTE`, imported and not restated (A10).
+
+    Cancelling between files leaves exactly the `partial` state
+    `MarkerGate.reset()` clears, so the user is told they can simply install
+    again - and told it in the one wording every other cancel in the app uses.
+    """
+    cancel = threading.Event()
+    cancel.set()
+    run = _file_run(tmp_path, "z1.sql", "SELECT 1;\n", phase=WARN)
+    with pytest.raises(InstallerError) as excinfo:
+        _run_apply((run,), _Exec(), cancel=cancel)
+    assert native.IMPORT_CANCEL_NOTE in str(excinfo.value)
+
+
+def test_apply_with_nothing_to_do_execs_nothing(tmp_path: Path) -> None:
+    ex = _Exec()
+    assert _run_apply((), ex) == []
+    assert ex.calls == []
+
+
+def test_the_fail_message_says_the_import_stopped_and_what_was_left_alone(
+    tmp_path: Path,
+) -> None:
+    """A stopped import is recoverable; a half-applied one the user must reason about is not.
+
+    Naming the schema as well as the file is what tells `realmd/z1.sql` from
+    the same file applied into `characters` by an `into_each` phase.
+    """
+    ex = _Exec(failing={"BROKEN": "ERROR 1064 (42000) at line 3: You have an error\n"})
+    run = _file_run(tmp_path, "z1.sql", "BROKEN;\n", phase=FAIL, schema="realmd")
+    with pytest.raises(InstallerError) as excinfo:
+        _run_apply((run,), ex)
+    message = str(excinfo.value)
+    assert "z1.sql" in message and "realmd" in message
+    assert "Nothing after it was applied" in message
+
+
+def test_a_schemaless_run_says_so_rather_than_naming_a_database(tmp_path: Path) -> None:
+    """Tortoise's `create_databases.sql` runs before any schema exists to run it in."""
+    ex = _Exec()
+    run = sqlplan.PhaseRun(FAIL, None, None, "CREATE DATABASE mangos;", False, "statement 1")
+    lines = _run_apply((run,), ex)
+    assert lines == ["realmd base: statement 1 (no schema)"]
+    assert ex.calls[0][1] == ("mysql", "-u", "root")
+
+
+def test_apply_yields_the_file_it_is_about_to_run_before_it_runs_it(tmp_path: Path) -> None:
+    """The install log is read while the import is running, and a big dump takes minutes.
+
+    Naming a file only once it has finished leaves the user watching a still
+    screen through the longest step of the install, which is exactly when they
+    conclude it has hung.
+    """
+    seen: list[str] = []
+
+    class _Watching(_Exec):
+        def __call__(self, *args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+            seen.append("exec")
+            return super().__call__(*args, **kwargs)  # type: ignore[arg-type]
+
+    run = _file_run(tmp_path, "z1.sql", "SELECT 1;\n", phase=WARN)
+    gen = sqlplan.apply(
+        (run,),
+        container="c",
+        client="mysql",
+        password="pw",
+        exec_stdin=_Watching(),
+        sink=lambda _: None,
+        cancel=None,
+    )
+    assert next(gen) == "content updates: z1.sql -> mangos"
+    assert seen == [], "the line arrives before the minutes of work it describes"
+    assert list(gen) == []
+    assert seen == ["exec"]
