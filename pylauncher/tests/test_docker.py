@@ -3545,6 +3545,19 @@ _DAEMON_AGNOSTIC: dict[str, str] = {
         "built; `git.ContainerGit._capture()`, the app's other `docker run` over a host "
         "bind, resolves `docker_program()` directly for the same reason."
     ),
+    "copy_from_image": (
+        "only an INSTALL reaches it - the conf stage, pulling `*.conf.dist` out of an image "
+        "this run just built - and an install is local by construction: "
+        "`install_wiring.installer_for_app()` passes no distro and says why ('an install "
+        "creates the server here'), because only an EXISTING install can live in a distro "
+        "the app has to name. Reaching a WSL daemon would also change what `dest` means: "
+        "`docker cp` resolves its host side wherever the CLI runs, so the same argv would "
+        "write the conf files into the distro's filesystem instead of the user's server "
+        "folder - and unlike `run_container`, whose mount sources are sealed inside an "
+        "opaque argv, there IS a translation for `dest` (`platform.wsl_linux_path()`). It "
+        "belongs to whoever holds the distro, not here: that is the caller, and no caller "
+        "has one yet."
+    ),
 }
 
 
@@ -4060,3 +4073,262 @@ def test_a_relative_mount_is_refused_before_any_container_starts(
     with pytest.raises(ValueError, match="absolute"):
         docker.run_container(spec, sink=lambda _line: None)
     assert seen == []
+
+
+def _copy_runner(
+    calls: list[list[str]],
+    *,
+    create_id: str = "0123456789abcdef",
+    create_stdout: str | None = None,
+    create_rc: int = 0,
+    create_stderr: str = "",
+    cp_fails: bool = False,
+    cp_stderr: str | None = None,
+    cp_raises: BaseException | None = None,
+    rm_fails: bool = False,
+) -> Callable[..., subprocess.CompletedProcess[str]]:
+    """A runner that answers `docker create` with an id and lets `cp`/`rm` succeed or fail.
+
+    Every knob is one exit path out of `copy_from_image()`, because the `rm`
+    guarantee is only a guarantee if each of them is asked separately: a single
+    happy-path test passes against an implementation that removes nothing when
+    anything goes wrong, which is the leak the function exists to close.
+    """
+
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        if cmd[:2] == ["docker", "create"]:
+            stdout = f"{create_id}\n" if create_stdout is None else create_stdout
+            return _completed(create_rc, stdout=stdout, stderr=create_stderr)
+        if cmd[:2] == ["docker", "cp"]:
+            if cp_raises is not None:
+                raise cp_raises
+            if cp_fails:
+                inside = cmd[2].partition(":")[2]
+                default = f"Error: No such container:path: {create_id}:{inside}"
+                return _completed(1, stderr=default if cp_stderr is None else cp_stderr)
+        if cmd[:2] == ["docker", "rm"] and rm_fails:
+            return _completed(1, stderr="Error response from daemon: removal already in progress")
+        return _completed()
+
+    return fake_run
+
+
+def _rm_calls(calls: list[list[str]]) -> list[list[str]]:
+    """Just the removals, so a test can say "exactly one" or "none at all"."""
+    return [cmd for cmd in calls if cmd[:2] == ["docker", "rm"]]
+
+
+def test_copy_from_image_creates_copies_and_removes_in_that_order(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No shell in the image, no bind mount, no root-owned files: create + cp + rm."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _copy_runner(calls))
+    monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
+    docker.copy_from_image("yulon.local/x:t", "/opt/etc", tmp_path / "etc")
+    assert calls == [
+        # `--entrypoint true`: `docker create` refuses an image with neither an
+        # ENTRYPOINT nor a CMD, and nothing is ever started.
+        ["docker", "create", "--entrypoint", "true", "yulon.local/x:t"],
+        ["docker", "cp", "0123456789abcdef:/opt/etc", str(tmp_path / "etc")],
+        ["docker", "rm", "-f", "0123456789abcdef"],
+    ]
+
+
+def test_the_container_id_is_the_last_stdout_line_not_the_whole_of_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    r"""A first-time pull can put a line on stdout ahead of the id; the id is still the id.
+
+    Taking `stdout.strip()` whole would hand `Unable to find image ...\nabc123`
+    to `docker cp` as a container name, and the copy would fail with a sentence
+    about a container nobody named.
+    """
+    calls: list[list[str]] = []
+    runner_fn = _copy_runner(
+        calls, create_stdout="Unable to find image 'yulon.local/x:t' locally\n\nabc123def456\n"
+    )
+    monkeypatch.setattr(docker.runner, "run", runner_fn)
+    monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
+    docker.copy_from_image("yulon.local/x:t", "/opt/etc", tmp_path / "etc")
+    assert calls[1] == ["docker", "cp", "abc123def456:/opt/etc", str(tmp_path / "etc")]
+    assert _rm_calls(calls) == [["docker", "rm", "-f", "abc123def456"]]
+
+
+def test_a_failed_copy_still_removes_the_container_it_created(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A stopped container per failed resume is the leak this guards against."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _copy_runner(calls, cp_fails=True))
+    monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
+    with pytest.raises(docker.DockerCommandError, match="No such container:path"):
+        docker.copy_from_image("yulon.local/x:t", "/nope", tmp_path / "nope")
+    assert calls[-1] == ["docker", "rm", "-f", "0123456789abcdef"]
+
+
+def test_a_create_that_prints_no_id_is_an_error_and_removes_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Without an id there is nothing to copy from and nothing to remove - say so."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _copy_runner(calls, create_id=""))
+    monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
+    with pytest.raises(docker.DockerCommandError, match="no container id"):
+        docker.copy_from_image("yulon.local/x:t", "/opt/etc", tmp_path / "etc")
+    assert [cmd for cmd in calls if cmd[1] in ("cp", "rm")] == []
+
+
+def test_a_create_that_fails_outright_removes_nothing_and_names_the_image(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No container was made, so a removal would be the only mistake left to make.
+
+    `docker rm -f ""` is not harmless noise: it exits non-zero, and the warning
+    it produces would blame the removal for an image that was never pulled.
+    """
+    calls: list[list[str]] = []
+    runner_fn = _copy_runner(
+        calls,
+        create_rc=125,
+        create_stdout="",
+        create_stderr="Unable to find image 'yulon.local/x:t' locally",
+    )
+    monkeypatch.setattr(docker.runner, "run", runner_fn)
+    monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
+    with pytest.raises(docker.DockerCommandError, match="Unable to find image"):
+        docker.copy_from_image("yulon.local/x:t", "/opt/etc", tmp_path / "etc")
+    assert _rm_calls(calls) == []
+
+
+def test_an_interrupted_copy_still_removes_the_container(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Cancel is not an exit status, and the container must not outlive it either.
+
+    `_run()` has no cancel event, so a stop during the copy arrives as whatever
+    the interpreter raises - `KeyboardInterrupt` from the CLI, and a
+    `BaseException` at that, which a `try/except Exception` around the copy
+    would let straight past the removal.
+    """
+    calls: list[list[str]] = []
+    runner_fn = _copy_runner(calls, cp_raises=KeyboardInterrupt())
+    monkeypatch.setattr(docker.runner, "run", runner_fn)
+    monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
+    with pytest.raises(KeyboardInterrupt):
+        docker.copy_from_image("yulon.local/x:t", "/opt/etc", tmp_path / "etc")
+    assert _rm_calls(calls) == [["docker", "rm", "-f", "0123456789abcdef"]]
+
+
+def test_an_unexpected_error_during_the_copy_is_not_dressed_up_as_a_copy_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A bug in this process is not the image's fault - but the container still goes."""
+    calls: list[list[str]] = []
+    runner_fn = _copy_runner(calls, cp_raises=MemoryError("out of memory"))
+    monkeypatch.setattr(docker.runner, "run", runner_fn)
+    monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
+    with pytest.raises(MemoryError):
+        docker.copy_from_image("yulon.local/x:t", "/opt/etc", tmp_path / "etc")
+    assert _rm_calls(calls) == [["docker", "rm", "-f", "0123456789abcdef"]]
+
+
+def test_a_removal_that_fails_is_logged_and_does_not_replace_the_copys_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Two things went wrong; the one that explains the install is the copy's."""
+    calls: list[list[str]] = []
+    runner_fn = _copy_runner(calls, cp_fails=True, rm_fails=True)
+    monkeypatch.setattr(docker.runner, "run", runner_fn)
+    monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
+    with caplog.at_level("WARNING"):
+        with pytest.raises(docker.DockerCommandError, match="No such container:path"):
+            docker.copy_from_image("yulon.local/x:t", "/nope", tmp_path / "nope")
+    assert _rm_calls(calls) == [["docker", "rm", "-f", "0123456789abcdef"]]
+    assert "removal already in progress" in caplog.text
+    assert "0123456789ab" in caplog.text
+
+
+def test_a_successful_removal_says_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The warning means a container was left behind; a clean run must not cry wolf."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _copy_runner(calls))
+    monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
+    with caplog.at_level("WARNING"):
+        docker.copy_from_image("yulon.local/x:t", "/opt/etc", tmp_path / "etc")
+    assert caplog.text == ""
+
+
+def test_a_missing_source_in_the_image_is_not_the_same_sentence_as_a_broken_copy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Docker blames a *container* for a path the *image* never had.
+
+    `Error: No such container:path: 0123456789abcdef:/opt/etc` is docker's own
+    wording, and read at face value it says the throwaway container vanished -
+    a machine problem, worth a retry. The truth is that this image does not ship
+    that file, which is a catalog bug that retrying forever cannot fix. So the
+    message leads with the image and the path, and the two failures stay two.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _copy_runner(calls, cp_fails=True))
+    monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
+    with pytest.raises(docker.DockerCommandError) as absent:
+        docker.copy_from_image("yulon.local/x:t", "/opt/etc", tmp_path / "etc")
+    assert "yulon.local/x:t has no /opt/etc" in str(absent.value)
+
+    calls.clear()
+    broken = _copy_runner(calls, cp_fails=True, cp_stderr="Error response from daemon: disk full")
+    monkeypatch.setattr(docker.runner, "run", broken)
+    with pytest.raises(docker.DockerCommandError) as failed:
+        docker.copy_from_image("yulon.local/x:t", "/opt/etc", tmp_path / "etc")
+    assert "has no /opt/etc" not in str(failed.value)
+    assert "could not copy /opt/etc out of yulon.local/x:t" in str(failed.value)
+    assert "disk full" in str(failed.value)
+
+
+def test_no_docker_cli_at_all_is_a_third_answer_and_stays_recognisable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Could not ask is neither the copy failed nor the image has no such path.
+
+    `DockerCliMissingError` carries the help text and nothing else on purpose,
+    so wrapping it in a sentence about the image would bury the one instruction
+    the user can act on. Nothing was created, so nothing is removed either.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _copy_runner(calls))
+    monkeypatch.setattr(docker.platform, "docker_program", lambda: None)
+    with pytest.raises(docker.DockerCliMissingError) as absent:
+        docker.copy_from_image("yulon.local/x:t", "/opt/etc", tmp_path / "etc")
+    assert str(absent.value) == docker.platform.DOCKER_CLI_MISSING_HELP
+    assert calls == [], "with no CLI to run, nothing may reach the spawn seam"
+
+
+def test_a_cli_that_disappears_mid_copy_is_still_could_not_ask(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Docker uninstalled between the create and the copy: the container is still ours.
+
+    The `DockerCliMissingError` must reach the caller unwrapped - rewrapping it
+    would say the image was missing a file, when nothing was ever asked. The
+    removal cannot work either, so this is the one path that genuinely leaks,
+    and the log has to say which container by name rather than repeating the
+    install-Docker help text a second time.
+    """
+    calls: list[list[str]] = []
+    programs = iter(["docker", None, None])
+    monkeypatch.setattr(docker.runner, "run", _copy_runner(calls))
+    monkeypatch.setattr(docker.platform, "docker_program", lambda: next(programs))
+    with caplog.at_level("WARNING"):
+        with pytest.raises(docker.DockerCliMissingError) as absent:
+            docker.copy_from_image("yulon.local/x:t", "/opt/etc", tmp_path / "etc")
+    assert str(absent.value) == docker.platform.DOCKER_CLI_MISSING_HELP
+    assert calls == [["docker", "create", "--entrypoint", "true", "yulon.local/x:t"]]
+    assert "0123456789ab" in caplog.text
+    assert docker.platform.DOCKER_CLI_MISSING_HELP not in caplog.text
