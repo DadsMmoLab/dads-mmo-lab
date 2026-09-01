@@ -1127,7 +1127,10 @@ where a docstring's authority came from.
 `sqlplan.apply()`. When the client rejects such a line it quotes the offending text back, so the
 secret arrives in `proc.stderr` — and `apply()` puts that text in three places, none redacted:
 
-- `sink(line)` — **the install log**, which is the file people paste into bug reports;
+- `sink(line)` — **the install log**. This is not merely "a log": it is the file users are
+  *encouraged* to attach to a bug report, a channel whose entire purpose is being handed to a
+  stranger. The same password in `logger.warning` sits on the user's disk; in `sink()` it is on
+  its way to a GitHub issue. **The two look equivalent in a diff and are not.**
 - the user-facing `InstallerError` on an `on_error: fail` phase;
 - `logger.warning` on an `on_error: warn` phase.
 
@@ -1148,6 +1151,15 @@ redaction sits on the path that game never takes, while the path it does take is
 place and "is never logged". A redaction that advertises coverage it does not deliver is worse than
 none, because it stops the next reader looking. Same family as §18 and as the run's standing rule
 about a confident reason with nothing behind it.
+
+**Bounding it honestly, so the next reader does not assume the worse case.** The database port is
+bound to **loopback** — `127.0.0.1:${DOCKER_DB_EXTERNAL_PORT:-{{DB_PORT}}}:3306` in both
+`shared/cmangos/base.yml.tmpl:46` and `wow-wotlk/native/base.yml.tmpl:62`, with the `127.0.0.1:`
+prefix hardcoded and only the port NUMBER overridable by the environment. (Verified by reading the
+templates, after the other session reported measuring it on all three gate boxes.) So a leaked
+password is **not remotely exploitable on its own**; it needs local access or another foothold. That
+does not excuse it — the secret is still in a file the user is encouraged to share, and it is the same
+secret across a reinstall — but this is **"rotate and fix", not "an exposed database"**.
 
 *Fix in flight* on `feat/7.3-j5-sqlplan-verify`: redact where client output enters the module rather
 than at each call site, because **K.7 will add a fourth site** and sprinkling is how the next one gets
