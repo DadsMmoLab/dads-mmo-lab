@@ -128,7 +128,12 @@ def test_render_refuses_an_unknown_token(tmp_path: Path) -> None:
 
 SECRET = "tbc-0123456789abcdef"
 """Shaped like the real one: `<password.prefix><hex>`, as `.db_password` holds it and as
-`CmangosInstaller._tokens()` carries it into the mapping K.4 hands `render()` whole."""
+`CmangosInstaller._secret_tokens()` carries it to the conf tables.
+
+Every mapping below is built by these tests, not by production: since 7.3 nothing in
+`yulon/` hands `render()` a secret — `_write_dockerfile` passes `_public_tokens()`. What
+this file proves is that the renderer refuses one anyway, for the caller who someday
+passes the wider set."""
 
 
 def test_render_refuses_a_dockerfile_template_that_names_the_password_token(

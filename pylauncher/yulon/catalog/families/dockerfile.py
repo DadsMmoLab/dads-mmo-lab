@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from yulon.catalog import composegen
-from yulon.catalog.native import Secrets
+from yulon.catalog.native import Secrets, secret_token_name
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -49,10 +49,14 @@ def secret_tokens(secret_type: type[Any]) -> frozenset[str]:
 
     Derived from the declaration rather than listed here, because a list is a
     thing somebody has to remember to extend. `native.Secrets` is where this app
-    declares what may never be printed, and `CmangosInstaller._tokens()` spells
-    each of its fields as the upper-cased token of the same name into contract
-    A6's one mapping — so reading the dataclass IS reading the declaration, and a
-    second secret added there arrives here already refused.
+    declares what may never be printed — so reading the dataclass IS reading the
+    declaration, and a second secret added there arrives here already refused.
+
+    The spelling comes from `native.secret_token_name()`, which is the same one
+    line `CmangosInstaller._secret_tokens()` spends to build the name->value
+    mapping its consumers fill from. Written twice, the two could drift, and the
+    drift is silent in the dangerous direction: the mapping would carry the
+    value under a new spelling while this refusal still looked for the old one.
 
     Measured on the unfixed code, 2026-09-01 (commit b8973c52): with this
     refusal written as one hard-coded name, a template spelling any OTHER
@@ -60,7 +64,7 @@ def secret_tokens(secret_type: type[Any]) -> frozenset[str]:
     `ENV SOAP_PASSWORD=tbc-0123456789abcdef` came back from `render()` — and the
     whole suite stayed green.
     """
-    return frozenset(field.name.upper() for field in fields(secret_type))
+    return frozenset(secret_token_name(field.name) for field in fields(secret_type))
 
 
 SECRET_TOKENS = secret_tokens(Secrets)
@@ -73,10 +77,19 @@ copied into a content-addressed image LAYER, so `docker history` prints it long 
 Dockerfile is gone and undoing it means finding and deleting every image built from that
 layer. Compose is "delete and rotate"; a Dockerfile is "you now have an artefact to hunt".
 
-The caller hands `render()` one mapping for the Dockerfile, the conf tables, the SQL and
-verify alike (contract A6), and that mapping carries the password because the conf tables
-need it (they are written 0600; this file is written 0644). Which is why the refusal lives
-here, in the renderer, rather than in a test over the shipped templates: a test protects a
+Since 7.3 nothing in production hands `render()` a secret: `CmangosInstaller` splits its
+tokens by capability and `_write_dockerfile` passes `_public_tokens()`, the half with no
+`Secrets` value in it. `_secret_tokens()` — public plus the password, which the conf tables
+genuinely need, and which is why they are written 0600 while this file is written 0644 —
+goes to `conf` and, when K.7 lands, to the SQL and verify. That is the first line of
+defence and it lives in the CALLER.
+
+This set is the second, kept as defence in depth against a future caller who passes the
+wider mapping without noticing: reversing the split is one identifier's difference at one
+call site. The only thing attacking it today is
+`test_a_dockerfile_template_the_glob_cannot_see_still_cannot_bake_the_secret`, which hands
+`render()` the secret-bearing mapping on purpose. The refusal lives here, in the renderer,
+rather than in a test over the shipped templates, because a test protects a
 LOCATION — and one was defeated by planting a template in `shared/cmangos/`, a folder its
 glob never walked; the glob was widened to the whole installers tree, and
 `install_wiring.py`'s `--installers-root` then points the ENGINE at a different tree
@@ -99,11 +112,14 @@ def render(template_dir: Path, tokens: Mapping[str, str]) -> tuple[str, str]:
     unfilled `{{TOKEN}}` — so a Dockerfile cannot ship a literal placeholder that `docker
     build` would happily read as a path. Unused tokens are fine, and the caller relies on
     that: `CmangosInstaller._write_dockerfile` passes the whole of
-    `CmangosInstaller._tokens(ctx)` — `entry_tokens(entry)` plus the per-install keys
-    (`DB_PASSWORD`, `REALM_HOST`, the three ports, `PROJECT_NAME`, `IMAGE_PREFIX`,
-    `IMAGE_TAG`) — while the two templates spend only `CORE_DIR` and `MAKE_JOBS`. The
-    mapping that arrives here therefore CARRIES the secret, deliberately (contract A6),
-    and keeping it out of both rendered files is this function's own job, below.
+    `CmangosInstaller._public_tokens(server_dir)` — `entry_tokens(entry)` plus the
+    per-install keys (`REALM_HOST`, the three ports, `PROJECT_NAME`, `IMAGE_PREFIX`,
+    `IMAGE_TAG`) — while the two templates spend only `CORE_DIR` and `MAKE_JOBS`.
+
+    Since 7.3 the mapping that arrives here from production carries NO secret; the
+    key-drop below and the by-name refusal further down are kept against a future caller
+    who passes the wider `_secret_tokens()` mapping instead, which is one identifier's
+    difference at that call site.
 
     The text comes back LF whatever the worktree holds. The shipped templates are LF in
     git's index and CRLF in a Windows checkout under `core.autocrlf=true`; reading them

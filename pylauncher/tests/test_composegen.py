@@ -1351,11 +1351,12 @@ def test_every_cmangos_entry_has_a_dockerfile_pair_that_fills_from_its_tokens(
     That last sentence is load-bearing and fragile, so: it holds only because
     `entry_tokens()` never contains `DB_PASSWORD`, which makes a template that
     spelled the token fail here as UNFILLED. Filling from the installer's real
-    mapping instead — the plausible "make this realistic" edit, since that is
-    what `CmangosInstaller._tokens()` hands `dockerfile.render()` — would delete
-    the check silently. Do not; and if you do, the guarantee is still
-    `dockerfile.SECRET_TOKEN`'s by-name refusal, covered in `test_dockerfile.py`
-    and `test_families_cmangos.py`.
+    mapping instead — the plausible "make this realistic" edit — would delete
+    the check silently. Note that since 7.3 the realistic mapping is
+    `CmangosInstaller._public_tokens()`, which has no secret in it either, so
+    the edit would look harmless AND still delete the check. Do not; and if you
+    do, the guarantee is still `dockerfile.SECRET_TOKENS`' by-name refusal,
+    covered in `test_dockerfile.py` and `test_families_cmangos.py`.
     """
     native = cmangos_native(entry)
     template_dir = TEMPLATES / str(native.dockerfile_dir)

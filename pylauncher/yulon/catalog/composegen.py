@@ -554,9 +554,12 @@ def entry_tokens(entry: CatalogEntry) -> dict[str, str]:
     `CORE_DIR` exist only for a `cmangos` block: `CORE_DIR` is the core's
     in-image install prefix, derived as the parent of `conf.source_dir`
     (`/opt/mangos/etc` → `/opt/mangos`), which is where the binaries, the
-    `etc/` bind and the `data/` bind all hang. `CmangosInstaller._tokens()`
-    adds the per-install ones (`DB_PASSWORD`, `REALM_HOST`, ports, project,
-    image prefix and tag) on top of this mapping (contract A6).
+    `etc/` bind and the `data/` bind all hang. `CmangosInstaller` adds the
+    per-install ones on top of this mapping, in TWO sets since 7.3:
+    `_public_tokens()` adds `REALM_HOST`, the three ports, the project name and
+    the image prefix and tag, and is what the build context is rendered from;
+    `_secret_tokens()` is that plus `DB_PASSWORD`, for the conf tables and
+    (K.7) the SQL and verify.
 
     Raises:
         ComposeGenError: the entry has no `install.native` block.

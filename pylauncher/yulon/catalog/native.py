@@ -403,6 +403,31 @@ class Secrets:
         return "Secrets(db_password=***)"
 
 
+def secret_token_name(field_name: str) -> str:
+    """The `{{TOKEN}}` a `Secrets` field stands for: `db_password` -> `DB_PASSWORD`.
+
+    One line, and it lives here so that it is spelled ONCE. Two modules derive
+    from `Secrets` and they must agree exactly or a protection stops covering
+    what it thinks it covers: `families/dockerfile.py` derives the NAMES it
+    refuses and drops (`SECRET_TOKENS`), and `families/cmangos.py` derives the
+    name->VALUE mapping the conf tables and the SQL spend (`secret_token_map`).
+    Both used to write `field.name.upper()` themselves, in different files,
+    with nothing holding them equal — and a divergence there is silent in the
+    dangerous direction: the mapping still carries the value under the new
+    spelling while the refusal still looks for the old one.
+
+    Removing the duplication rather than testing for it was the choice, because
+    a cross-module equality test is one more thing to keep and it can only
+    report a drift that this function makes impossible.
+
+    It takes the field NAME rather than a `Field` so a caller with only a
+    string can spend it, and it is deliberately not `str.upper` under a new
+    name: the grammar the catalog's templates use is what this states, and if
+    that grammar ever needs an exception it needs exactly one place to put it.
+    """
+    return field_name.upper()
+
+
 @dataclass(frozen=True)
 class StageContext:
     """Everything a stage body is handed. Frozen: a stage reads, the spine decides.
