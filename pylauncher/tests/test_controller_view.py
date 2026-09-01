@@ -1207,6 +1207,87 @@ def test_the_maintenance_tab_asks_the_distro_s_docker_what_is_running(
     assert not any("could not be found on this machine" in r for r in plan.refusals), plan.refusals
 
 
+def _scan_for_seams_without_a_distro(package: Path, source: Path) -> tuple[set[str], list[str]]:
+    """The matching behind the guard below, over any package and any call site.
+
+    Returns `(accepts, missing)`: every name in `package` that takes a
+    `wsl_distro`, and every call in `source` that names one of them without
+    passing it. A module-level helper rather than a body inline in the guard so
+    the regression test below can run THIS code over a synthetic package - a
+    second copy of the logic would prove nothing about the guard that ships.
+    """
+    import ast
+
+    accepts: set[str] = set()
+    modules: set[str] = set()
+    by_module: dict[str, set[str]] = {}
+    defined_in: dict[str, set[str]] = {}
+    for path in package.rglob("*.py"):
+        modules.add(path.stem)
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                defined_in.setdefault(path.stem, set()).add(node.name)
+                args = node.args
+                if any(a.arg == "wsl_distro" for a in args.args + args.kwonlyargs):
+                    # Not dunders: a constructor is spelled by its CLASS name at
+                    # the call site, so matching the bare name `__init__` only
+                    # ever catches somebody else's `super().__init__(parent)`.
+                    if not node.name.startswith("__"):
+                        accepts.add(node.name)
+                        by_module.setdefault(path.stem, set()).add(node.name)
+            elif isinstance(node, ast.ClassDef):
+                defined_in.setdefault(path.stem, set()).add(node.name)
+                if any(
+                    isinstance(stmt, ast.AnnAssign)
+                    and isinstance(stmt.target, ast.Name)
+                    and stmt.target.id == "wsl_distro"
+                    for stmt in node.body
+                ):
+                    accepts.add(node.name)
+                    by_module.setdefault(path.stem, set()).add(node.name)
+
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    missing: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            name = func.attr
+            receiver = ast.unparse(func.value)
+            # `self.<x>` and `self.services.<x>` are the view calling objects
+            # that were built WITH the distro; they are not the seam.
+            on_self = receiver.startswith("self")
+            # A MODULE-qualified call names exactly one function, and a
+            # package-wide set of bare NAMES cannot tell two of them apart.
+            # `apply` is both `networking.apply(plan, sql=sql)`, which reaches
+            # no daemon and takes no distro, and `sqlplan.apply(...)`, which
+            # reaches one and does - so from 7.3 the scan reported the former
+            # as a seam addressing the wrong docker.
+            #
+            # The exemption is only for a name the receiving module DEFINES
+            # itself and that definition takes no distro. A name that module
+            # merely RE-EXPORTS (`from yulon.apply import DockerSql`) resolves
+            # to a definition somewhere else, so it falls through to the
+            # package-wide check below - as does a bare name, an
+            # object-qualified call, and any receiver that is not a module
+            # stem. Resolving locally where it can is what makes this stricter
+            # than the bare-name scan; skipping what it cannot resolve would
+            # make it looser, and did until 2026-09-01.
+            if receiver in modules and name not in by_module.get(receiver, set()):
+                if name in defined_in.get(receiver, set()):
+                    continue
+        elif isinstance(func, ast.Name):
+            name, on_self = func.id, False
+        else:
+            continue
+        if name not in accepts or on_self:
+            continue
+        if not any(k.arg == "wsl_distro" for k in node.keywords):
+            missing.append(f"{name}() at {source.name}:{node.lineno}")
+    return accepts, missing
+
+
 def test_every_seam_for_wotlk_builds_says_which_daemon_it_means() -> None:
     """The guard for the test above, so the next seam added cannot be forgotten.
 
@@ -1236,34 +1317,20 @@ def test_every_seam_for_wotlk_builds_says_which_daemon_it_means() -> None:
     either constructor left the whole suite at 1196 passed. A class whose body
     annotates the field is collected by its CLASS name, which is how the call
     site spells it.
-    """
-    import ast
 
+    A MODULE-QUALIFIED CALL IS RESOLVED, AND ONLY WHERE IT RESOLVES. From 7.3
+    `X.f()` is exempt when `X.py` defines `f` itself and that definition takes
+    no distro - which is what keeps `networking.apply(plan, sql=sql)` out of the
+    report. It is NOT exempt when `X` merely re-exports `f` from elsewhere: the
+    first version of that rewrite skipped any name it could not find in `X`,
+    which handed every re-exported seam a free pass the older bare-name scan
+    would have caught. Dormant when found (no such call site existed), fixed
+    anyway - see the regression test below.
+    """
     package = Path(controller_view_module.__file__).parent.parent
-    accepts: set[str] = set()
-    modules: set[str] = set()
-    by_module: dict[str, set[str]] = {}
-    for path in package.rglob("*.py"):
-        modules.add(path.stem)
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-                args = node.args
-                if any(a.arg == "wsl_distro" for a in args.args + args.kwonlyargs):
-                    # Not dunders: a constructor is spelled by its CLASS name at
-                    # the call site, so matching the bare name `__init__` only
-                    # ever catches somebody else's `super().__init__(parent)`.
-                    if not node.name.startswith("__"):
-                        accepts.add(node.name)
-                        by_module.setdefault(path.stem, set()).add(node.name)
-            elif isinstance(node, ast.ClassDef):
-                if any(
-                    isinstance(stmt, ast.AnnAssign)
-                    and isinstance(stmt.target, ast.Name)
-                    and stmt.target.id == "wsl_distro"
-                    for stmt in node.body
-                ):
-                    accepts.add(node.name)
-                    by_module.setdefault(path.stem, set()).add(node.name)
+    accepts, missing = _scan_for_seams_without_a_distro(
+        package, Path(controller_view_module.__file__)
+    )
     assert {
         "send_command",
         "published_bindings",
@@ -1273,43 +1340,86 @@ def test_every_seam_for_wotlk_builds_says_which_daemon_it_means() -> None:
         "DockerMysql",
     } <= accepts, "the scan found no wsl_distro-aware functions, so it would pass on an empty repo"
 
-    source = Path(controller_view_module.__file__).read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    missing = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        if isinstance(func, ast.Attribute):
-            name = func.attr
-            receiver = ast.unparse(func.value)
-            # `self.<x>` and `self.services.<x>` are the view calling objects
-            # that were built WITH the distro; they are not the seam.
-            on_self = receiver.startswith("self")
-            # A MODULE-qualified call names exactly one function, and a
-            # package-wide set of bare NAMES cannot tell two of them apart.
-            # `apply` is both `networking.apply(plan, sql=sql)`, which reaches
-            # no daemon and takes no distro, and `sqlplan.apply(...)`, which
-            # reaches one and does - so from 7.3 the scan reported the former
-            # as a seam addressing the wrong docker. Resolving the receiver
-            # against the module that defines it makes this STRICTER where it
-            # can be, never looser: `apply.DockerSql(...)` and
-            # `maintenance.DockerMysql(...)`, the two seams the assertion above
-            # pins, are checked exactly as before, and a bare name or an
-            # object-qualified call still falls back to the package-wide set.
-            if receiver in modules and name not in by_module.get(receiver, set()):
-                continue
-        elif isinstance(func, ast.Name):
-            name, on_self = func.id, False
-        else:
-            continue
-        if name not in accepts or on_self:
-            continue
-        if not any(k.arg == "wsl_distro" for k in node.keywords):
-            missing.append(f"{name}() at controller_view.py:{node.lineno}")
     assert not missing, "these address the wrong docker on a WSL-resident server: " + ", ".join(
         missing
     )
+
+
+def test_the_seam_guard_sees_a_seam_reached_through_a_re_exporting_module(
+    tmp_path: Path,
+) -> None:
+    """A seam re-exported by another module must not walk past the guard above.
+
+    The 7.3 rewrite resolved `X.f()` against the definitions in `X.py` and
+    skipped the call when it found none - so a module that does
+    `from yulon.apply import DockerSql` and nothing else handed `X.DockerSql()`
+    a free pass, on a name the older bare-name scan flagged. That is the one
+    direction the guard's own docstring swore it would never move.
+
+    Both shapes live in the same synthetic package, because a fix for one that
+    breaks the other is not a fix: `holder.DockerSql(...)` is re-exported and
+    must be reported, `networking.apply(...)` is defined locally without a
+    distro and must not be.
+    """
+    package = tmp_path / "synth"
+    package.mkdir()
+    (package / "apply.py").write_text(
+        "class DockerSql:\n    wsl_distro: str | None = None\n", encoding="utf-8"
+    )
+    # Re-exports the seam and defines nothing of its own - the blind spot.
+    (package / "holder.py").write_text(
+        "from .apply import DockerSql\n\n__all__ = ['DockerSql']\n", encoding="utf-8"
+    )
+    # The 7.3 false positive: two different `apply`s, one of them distro-bearing.
+    (package / "networking.py").write_text("def apply(plan, sql=None):\n    return sql\n", "utf-8")
+    (package / "sqlplan.py").write_text(
+        "def apply(spec, *, wsl_distro=None):\n    return spec\n", encoding="utf-8"
+    )
+    caller = package / "caller.py"
+    caller.write_text(
+        "from . import holder, networking\n"
+        "\n"
+        "def build(plan, sql):\n"
+        "    networking.apply(plan, sql=sql)\n"
+        "    return holder.DockerSql(sql)\n",
+        encoding="utf-8",
+    )
+
+    accepts, missing = _scan_for_seams_without_a_distro(package, caller)
+
+    assert {
+        "DockerSql",
+        "apply",
+    } <= accepts, f"the synthetic package taught the scan nothing: {accepts}"
+    assert missing == ["DockerSql() at caller.py:5"], (
+        "line 5 re-exports its seam through `holder`, and the guard must still see it; "
+        "line 4 is a local `apply` that takes no distro and must stay exempt. "
+        f"got: {missing}"
+    )
+
+
+def test_the_seam_guard_still_exempts_networkings_own_apply() -> None:
+    """The 7.3 false positive, pinned by line so the fix above cannot revive it.
+
+    `networking.apply(plan, sql=sql)` at controller_view.py:166 is a different
+    `apply` from `sqlplan.apply(..., wsl_distro=...)`; it reaches no daemon.
+    Asserted here rather than left implicit in the guard's `not missing`, so a
+    regression names the call instead of just reddening the guard - and pinned
+    against the parse, so it fails loudly if that call site ever moves.
+    """
+    import ast
+
+    view = Path(controller_view_module.__file__)
+    calls = {
+        f"{ast.unparse(n.func.value)}.{n.func.attr}:{n.lineno}"
+        for n in ast.walk(ast.parse(view.read_text(encoding="utf-8")))
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+    }
+    assert "networking.apply:166" in calls, "the call this test pins has moved; re-pin it"
+
+    accepts, missing = _scan_for_seams_without_a_distro(view.parent.parent, view)
+    assert "apply" in accepts, "the scan no longer knows `apply` can take a distro"
+    assert "apply() at controller_view.py:166" not in missing, missing
 
 
 def test_for_wotlk_defaults_to_no_distro(qapp: object, tmp_path: Path) -> None:
