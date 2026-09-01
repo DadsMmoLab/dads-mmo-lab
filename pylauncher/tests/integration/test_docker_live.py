@@ -10,7 +10,9 @@ bringing the project up/down once per assertion would be slow for no gain.
 from __future__ import annotations
 
 import gzip
+import logging
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -326,15 +328,31 @@ def test_the_bind_mount_probe_actually_works_against_a_real_daemon(
 # ------------------------------------------------ 7.3: the CMaNGOS primitives
 
 
-def _busybox_containers() -> set[str]:
-    """Every container, running or exited, made from the busybox image — the leak census."""
-    proc = subprocess.run(
-        ["docker", "ps", "-aq", "--filter", f"ancestor={BUSYBOX_IMAGE}"],
-        capture_output=True,
-        text=True,
-        check=False,
+_COPIED_VIA = re.compile(r"copy_from_image\(\):.* via ([0-9a-f]{12})")
+"""`copy_from_image()`'s debug line, which is the only place it names its container.
+
+It creates that container anonymously — `docker create --entrypoint true
+<image>` — so nothing the daemon can be asked about it tells it apart from any
+other container made from the same image. The id in that log line does, which
+makes this the seam the leak census reads. Production is untouched by the
+choice: the line was already there for the failure path, which has to name the
+container it could not remove.
+"""
+
+
+def _copy_containers(log_text: str) -> list[str]:
+    """The containers `copy_from_image()` created during the captured window, in order."""
+    return _COPIED_VIA.findall(log_text)
+
+
+def _container_exists(container: str) -> bool:
+    """True while the daemon still knows this container — by id, prefix or name."""
+    return (
+        subprocess.run(
+            ["docker", "container", "inspect", container], capture_output=True, check=False
+        ).returncode
+        == 0
     )
-    return set(proc.stdout.split())
 
 
 def test_run_container_reads_the_client_read_only_and_writes_out_as_this_user(
@@ -438,24 +456,63 @@ def test_a_read_only_client_mount_refuses_a_write(tmp_path: Path, require_docker
 
 
 def test_copy_from_image_leaves_no_container_behind_either_way(
-    tmp_path: Path, require_docker: None
+    tmp_path: Path, require_docker: None, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A real create/cp/rm, then the failure path, and the census is unchanged after both.
+    """A real create/cp/rm, then the failure path, and NEITHER container survives it.
 
-    The pull is not politeness: `--filter ancestor=<image>` needs the image to
-    exist locally, and a census taken against an image this daemon has never
-    seen answers "no containers" for every one of them, leak included.
+    The census names the two containers this test caused to exist and asks the
+    daemon about those two. It used to be `docker ps -aq --filter
+    ancestor=busybox:1.36` sampled before and after, compared for set equality,
+    and that was wrong twice over — measured, not reasoned: with a foreign
+    busybox container being created and removed alongside it, 4 of 6 runs of
+    this gate failed (2026-09-01), and it had already failed three times today
+    from three unrelated sessions, once at a commit predating this work. It has
+    never once leaked.
+
+    * **The direction.** A leak is a container that exists AFTER and did not
+      exist BEFORE. Set equality also fails when something *disappears*, which
+      is nothing this gate is about — one of the reproduced failures was
+      exactly that, a foreign container present at the first sample and gone by
+      the second.
+    * **The exclusivity.** `after - before` would have fixed the direction and
+      still failed the other reproduced runs, because a census of every
+      busybox container on the daemon cannot tell ours from anyone else's, and
+      a foreign one created inside the window reads as our leak. Docker Desktop
+      is one daemon shared by every process on the box; another agent, another
+      pytest run, a `docker run busybox` in a terminal all land in that count.
+
+    A gate that goes red for reasons unrelated to its subject teaches people to
+    ignore it, which costs more than the flake does. So the count is replaced
+    by identity: `copy_from_image()` logs the id of the container it created,
+    the log is captured, and each id is inspected. Nothing on the daemon is
+    counted, so nothing anyone else does can move the answer.
+
+    The `len(...) == 2` is the guard that keeps this honest. Reading a log line
+    means a moved or renamed message would yield no ids at all, and a census of
+    nothing passes every time — the vacuous green this gate would then be. Two
+    ids, one per call, or the seam is reported broken.
+
+    The `docker pull` the old version opened with is gone with the filter that
+    needed it: `--filter ancestor=<image>` answers "no containers" for an image
+    the daemon has never seen, so a cold machine got a census that could not
+    see a leak. `docker create` pulls what it needs by itself.
     """
-    subprocess.run(["docker", "pull", BUSYBOX_IMAGE], capture_output=True, check=False)
-    before = _busybox_containers()
     dest = tmp_path / "passwd"
-    docker.copy_from_image(BUSYBOX_IMAGE, "/etc/passwd", dest)
-    assert dest.is_file()
-    assert "root:" in dest.read_text(encoding="utf-8")
-    with pytest.raises(docker.DockerCommandError):
-        docker.copy_from_image(BUSYBOX_IMAGE, "/no/such/path", tmp_path / "nope")
+    with caplog.at_level(logging.DEBUG, logger=docker.logger.name):
+        docker.copy_from_image(BUSYBOX_IMAGE, "/etc/passwd", dest)
+        assert dest.is_file()
+        assert "root:" in dest.read_text(encoding="utf-8")
+        with pytest.raises(docker.DockerCommandError):
+            docker.copy_from_image(BUSYBOX_IMAGE, "/no/such/path", tmp_path / "nope")
     assert not (tmp_path / "nope").exists()
-    assert _busybox_containers() == before
+
+    ours = _copy_containers(caplog.text)
+    assert len(ours) == 2, (
+        f"expected copy_from_image() to name one container per call and it named {ours} — "
+        "the debug line this census reads has moved, so the census proves nothing"
+    )
+    stranded = [container for container in ours if _container_exists(container)]
+    assert stranded == [], f"copy_from_image() left {stranded} behind"
 
 
 def test_exec_stdin_streams_a_gzipped_dump_and_sql_query_reads_it_back(

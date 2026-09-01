@@ -388,7 +388,15 @@ MARIADB_ROOT_PASSWORD = secrets.token_hex(8)
 _MARIADB_READY_SECONDS = 180.0
 CRASH_LOOP_CONTAINER = f"yulon-it-{_RUN_TAG}-crash"
 BUSYBOX_IMAGE = "busybox:1.36"
-"""The stand-in image, named once: the crash loop runs it and the leak census counts it."""
+"""The stand-in image, named once: the crash loop runs it and the primitives copy out of it.
+
+Never something a gate may *count* on this daemon. One daemon serves the whole
+box, so `docker ps --filter ancestor=busybox:1.36` answers for every process on
+it — the leak census that used to be written that way failed 4 runs in 6 with a
+foreign busybox container churning alongside it (2026-09-01), having leaked
+nothing. A gate here identifies the containers it made — by the per-run name it
+gave them, or by the id the function under test logged — and asks about those.
+"""
 
 
 def _container_volumes(container: str) -> tuple[str, ...]:
