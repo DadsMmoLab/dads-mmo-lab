@@ -917,6 +917,47 @@ was found by reading code; each is a line in a resolved compose document from a 
   re-pin when the catalog's differs, or exempt pinned sources from the gate) is a call for whoever
   owns 7.6 and its Tortoise pin, not a patch to make in passing.
 
+- **The extractor cannot read the game client at all on enforcing SELinux, and `Mount` has no way to
+  say so** — 2026-09-01, raised as a question by task H.1, **measured on `yulon-fedora-gate`**
+  (Fedora 44, SELinux Enforcing, Docker 29.7.2) rather than argued. `docker.Mount` emits no SELinux
+  label, and the plan's Group I builds `Mount(client_dir, CLIENT_MOUNT, read_only=True)` and
+  `Mount(data_dir, OUT_MOUNT)` with none. Five cases, busybox, one minute:
+
+  | case | mount | context | result |
+  |---|---|---|---|
+  | A. fresh dir, default label | none | `user_tmp_t` | **DENIED** |
+  | B. parent relabelled first, `data/` created after | none | `container_file_t` | ALLOWED |
+  | C. the relabel did not happen | none | `user_tmp_t` | **DENIED** |
+  | D. same dir | `:z` | `container_file_t` | ALLOWED |
+  | E. the user's client dir | `:ro` | `user_tmp_t` | **DENIED** |
+
+  **B settles the argument about `data/` in the reviewer's favour, and against my own first reading.**
+  `stage_generate_compose` relabels the whole server directory before extract runs, `data/` is created
+  under it afterwards, and it inherits `container_file_t` - so the write succeeds without `:z`. C
+  shows the exposure is real but narrow: that `chcon` is explicitly non-fatal, the compose-managed
+  binds self-heal at `up` through `{{BIND_LABEL}}`, and the extractor's ephemeral mount has no second
+  chance.
+
+  **E is the blocker, and nobody predicted it.** The game client is the user's own directory. It lives
+  OUTSIDE the server dir, so no `chcon` ever reaches it, and `:z`/`:Z` must never be used on it -
+  they recursively rewrite the labels of the user's client, which is exactly why `bind_mount_ok()`'s
+  probe bans them. So on any enforcing Fedora the extractor cannot read a single MPQ. Not a loss of
+  redundancy: a certain failure, on the one distribution most likely to hit it.
+
+  **The fix already exists in this codebase, for exactly this reason.** `--security-opt
+  label:disable` - what `platform.label_disable_args()` returns and what `git.py`'s read path already
+  uses for a repository it must not relabel. Measured: it read the client, and the client's context
+  was byte-identical before and after (`user_tmp_t` both times). It also let the data dir be written.
+
+  **This corrects the API shape recorded when H.1 landed.** A per-mount `label: str = ""` on `Mount`
+  is the wrong seam: `label:disable` is a **container-level** `--security-opt`, not a mount suffix.
+  The extractor's container holds both mounts - the client it must not touch and the data dir it must
+  write - and one container-wide flag serves both. So the field belongs on `ContainerRun`, not on
+  `Mount`, and Group I should ask `platform.label_disable_args(enforcing=selinux_enforcing())` for it,
+  which already keeps the three-outcome answer (enforcing / not / could-not-ask).
+  *Recorded, not fixed:* H.1 deliberately shipped no uncalled field, and Group I is where the caller
+  arrives. It must not land without this.
+
 
 ### One thing worth keeping
 
