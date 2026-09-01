@@ -74,6 +74,31 @@ def keys_in(text: str) -> set[str]:
     return found
 
 
+def service_names(compose_text: str) -> set[str]:
+    """Keys directly under `services:` — and ONLY there.
+
+    `networks:` and `volumes:` keys sit at the same two-space indent, so a whole-file
+    regex would count `tbc-net` and `db-data` as services; the scan stops at the next
+    top-level key.
+
+    Module-level rather than beside the CMaNGOS tests it was written for: the G.3
+    cross-check reads the service keys of EVERY shipped entry, WotLK included.
+    """
+    names: set[str] = set()
+    inside = False
+    for line in compose_text.splitlines():
+        if re.match(r"^services:\s*$", line):
+            inside = True
+            continue
+        if inside and re.match(r"^\S", line):
+            break
+        if inside:
+            match = re.match(r"^  ([A-Za-z0-9-]+):\s*$", line)
+            if match:
+                names.add(match.group(1))
+    return names
+
+
 def render(server_dir: Path) -> composegen.ComposePlan:
     return composegen.render(
         ENTRY, server_dir, templates_root=TEMPLATES, platform_id=lambda: "macos"
@@ -1028,52 +1053,104 @@ def test_tokens_a_family_does_not_have_stay_unfilled_and_therefore_loud(tmp_path
         )
 
 
-# -- G.3: the container prefix rebuilds the names it is derived from ----------
+# -- G.3: every service the catalog selects is a service the file defines ------
 
 
-@pytest.mark.parametrize(
-    "entry", load_catalog().games, ids=[game.id for game in load_catalog().games]
-)
-def test_the_container_prefix_rebuilds_the_container_names_of_every_shipped_entry(
-    entry: CatalogEntry,
+def test_every_service_the_catalog_selects_is_defined_in_the_rendered_compose_file(
+    tmp_path: Path,
 ) -> None:
-    """The invariant `_container_prefix()`'s docstring promises, over the real catalog.
+    """The two sides compared against each other, instead of each against a literal.
 
-    `{{CONTAINER_PREFIX}}` exists so a shared CMaNGOS template can write
-    `container_name: {{CONTAINER_PREFIX}}db` for service `db` and get the entry's own
-    `containers.db`. Nothing downstream re-checks that: `fill()` refuses an unfilled
-    placeholder, never a filled-but-wrong one, so a catalog entry that broke the naming
-    convention would render a compose file naming a container no service owns and the
-    first report would be `docker compose up`.
+    `docker.start_staged()` runs `compose up -d --no-deps <compose_services()...>`,
+    `repair_import()` selects `import_service`, and the native engine selects
+    `containers.client_data`; compose answers `no such service` and fails the install
+    for a name its file does not define. Nothing joined the two sides, and on
+    2026-09-01 they disagreed for three of the four shipped entries: `catalog.json`
+    declared `containers.services` as `db`/`realmd`/`mangosd` for TBC, Vanilla and
+    Tortoise, while `shared/cmangos/base.yml.tmpl` renders those services as
+    `{{CONTAINER_PREFIX}}db` and friends — `tbc-db`, `tbc-realmd`, `tbc-mangosd`.
+    Not live only because `FAMILIES` registered `azerothcore` alone; K.8 registers
+    `CmangosInstaller`, and that install would have died at the first `compose up`.
 
-    Gated on `containers.services`, NOT on the presence of a native block: the block is
-    what makes the token reachable through `render()`, but today only WotLK has one and
-    only the CMaNGOS entries follow the prefix convention, so a native-gated test would
-    skip every entry that this invariant is about and pass while proving nothing.
-    `containers.services` is exactly the list of suffixes the templates put the prefix
-    in front of, so the entries that declare it are the entries the invariant covers.
+    Two tests had covered this ground and neither could fail for it. The one that
+    read a compose file at all read the *bash* installer's, not the generated one;
+    its replacement asserted the catalog's literals in one half and the rendered
+    names in the other, and passed with both, because it never compared them. This
+    one renders through `composegen.render()` and reads the service keys back out —
+    the only form of the check that can see a disagreement.
+
+    Replaces `test_the_container_prefix_rebuilds_the_container_names_of_every_shipped_
+    entry`, which reconstructed what a template *would* write from
+    `containers.services` rather than reading what it did write. Every entry with a
+    native block, so WotLK — whose services and containers coincide, and whose spec
+    therefore keeps the default — guards the convention it established.
     """
-    services = entry.containers.services
-    if services is None:
-        pytest.skip(
-            f"{entry.id} does not declare containers.services, so each container is named "
-            "after its own service (AzerothCore) and there is no suffix to rebuild from"
+    catalog = load_catalog()
+    examined = 0
+    checked = 0
+    # Collected, not asserted inside the loop: an `assert` on the first bad entry
+    # stops the sweep, and the three CMaNGOS entries were wrong together — a run
+    # that named only TBC would have been read as one entry's typo.
+    problems: list[str] = []
+    for entry in catalog.games:
+        if entry.install.native is None:
+            continue
+        plan = composegen.render(
+            entry,
+            tmp_path / entry.id,
+            templates_root=TEMPLATES,
+            db_password="0123456789abcdef",
+            platform_id=lambda: "linux",
         )
-    prefix = composegen._container_prefix(entry)
-    assert prefix, f"{entry.id} has no shared container prefix at all"
-    rebuilt = tuple(prefix + service for service in services)
-    assert rebuilt == (entry.containers.db, entry.containers.auth, entry.containers.world), (
-        f"{entry.id}'s templates would write {rebuilt} where its containers are "
-        f"{(entry.containers.db, entry.containers.auth, entry.containers.world)}"
+        defined = service_names(plan.base)
+        spec = entry.container_spec()
+        selected = list(spec.compose_services())
+        if spec.import_service:
+            selected.append(spec.import_service)
+        if entry.containers.client_data:
+            selected.append(entry.containers.client_data)
+        # Assert the entry SELECTED something before checking what it selected.
+        # Without this the sweep is vacuous in the one direction that matters:
+        # the reviewer mutated `ContainerSpec.compose_services()` to
+        # `return self.services` -- empty for every shipped entry now that none
+        # declares one -- and `selected`, `missing` and `problems` were all empty
+        # while this test passed. The entry count below could not see it, because
+        # four entries really had been rendered. This is the standing rule landing
+        # on the test that inherited three deleted tests' weight: assert the value
+        # ARRIVES, never that the loop ran.
+        assert selected, (
+            f"{entry.id} selected no compose services at all, so this entry "
+            "compared nothing; `ContainerSpec.compose_services()` is answering empty"
+        )
+        checked += len(selected)
+        missing = [name for name in selected if name not in defined]
+        if missing:
+            problems.append(
+                f"{entry.id} selects {missing}, but its rendered docker-compose.yml "
+                f"defines {sorted(defined)}"
+            )
+        examined += 1
+    assert not problems, (
+        "`docker compose up` answers `no such service` and the install stops there:\n  "
+        + "\n  ".join(problems)
     )
-
-
-def test_the_shipped_catalog_still_has_entries_the_prefix_invariant_covers() -> None:
-    """The skip above must not be able to empty the invariant out without anyone noticing."""
-    covered = [game.id for game in load_catalog().games if game.containers.services is not None]
-    assert covered, (
-        "no shipped entry declares containers.services, so the container-prefix invariant "
-        "skipped every entry and asserted nothing"
+    # A sweep that renders nothing passes just as quietly as one that renders four
+    # correct files. Every shipped entry has a native block today, so the count is
+    # the entry count and not merely "more than none".
+    #
+    # Deliberately NOT `== 4`. A hard-coded number here rots on the fifth game
+    # while catching nothing extra: a broken fifth entry is reported by the
+    # `assert not problems` above, which fires first -- verified by mutation,
+    # 2026-09-02, by narrowing the sweep to one entry AND breaking that entry, and
+    # watching the failure come from `not problems` rather than from this line.
+    assert examined == len(catalog.games) > 0, (
+        f"the cross-check examined {examined} of {len(catalog.games)} shipped entries; "
+        "an entry without a native block renders nothing and is silently uncovered"
+    )
+    assert checked >= 3 * examined, (
+        f"only {checked} service names were compared across {examined} entries; "
+        "each shipped entry names at least a db, an auth and a world container, so "
+        "a lower number means something answered with an empty selection"
     )
 
 
@@ -1084,15 +1161,26 @@ def test_a_container_prefix_that_cannot_be_derived_is_refused_not_guessed() -> N
     character (`""`), one name a literal prefix of the others (`"db"`, so
     `{{CONTAINER_PREFIX}}db` renders `dbdb`), and an accidental character-wise prefix
     that eats the separator (`"abc"`). None of them raise on their own.
+
+    Each fixture below breaks exactly ONE of those rules, so the error it raises
+    identifies which branch answered. The suffix list is put on the fixture here rather
+    than read from the catalog: no shipped entry declares `containers.services` any more
+    (2026-09-01 — the CMaNGOS entries named their services after their containers, as
+    their template always did), and a fixture that read the field would have quietly
+    stopped reaching the rebuild branch at all.
     """
     tbc = load_catalog().get("wow-tbc")
-    assert tbc.containers.services == ("db", "realmd", "mangosd")
 
     def with_containers(db: str, auth: str, world: str) -> CatalogEntry:
         return tbc.model_copy(
             update={
                 "containers": tbc.containers.model_copy(
-                    update={"db": db, "auth": auth, "world": world}
+                    update={
+                        "db": db,
+                        "auth": auth,
+                        "world": world,
+                        "services": ("db", "realmd", "mangosd"),
+                    }
                 )
             }
         )
@@ -1103,34 +1191,17 @@ def test_a_container_prefix_that_cannot_be_derived_is_refused_not_guessed() -> N
         composegen._container_prefix(with_containers("db", "dbauth", "dbworld"))
     with pytest.raises(composegen.ComposeGenError, match="rebuilds abcdb"):
         composegen._container_prefix(with_containers("abc-db", "abcd-realmd", "abcx-mangosd"))
-    assert composegen._container_prefix(with_containers("x-db", "x-realmd", "x-mangosd")) == "x-"
+    accepted = with_containers("x-db", "x-realmd", "x-mangosd")
+    # Twice: the fixture is rebuilt per call and the function is pure, so a second
+    # ask must answer the same thing. A helper that mutated the entry it copied
+    # from would pass once and diverge here.
+    assert composegen._container_prefix(accepted) == "x-"
+    assert composegen._container_prefix(accepted) == "x-"
 
 
 # -- G.5: the shared CMaNGOS compose templates ---------------------------------
 
 CMANGOS_ENTRIES = [load_catalog().get(g) for g in ("wow-tbc", "wow-vanilla", "wow-tortoise")]
-
-
-def service_names(compose_text: str) -> set[str]:
-    """Keys directly under `services:` — and ONLY there.
-
-    `networks:` and `volumes:` keys sit at the same two-space indent, so a whole-file
-    regex would count `tbc-net` and `db-data` as services; the scan stops at the next
-    top-level key.
-    """
-    names: set[str] = set()
-    inside = False
-    for line in compose_text.splitlines():
-        if re.match(r"^services:\s*$", line):
-            inside = True
-            continue
-        if inside and re.match(r"^\S", line):
-            break
-        if inside:
-            match = re.match(r"^  ([A-Za-z0-9-]+):\s*$", line)
-            if match:
-                names.add(match.group(1))
-    return names
 
 
 def render_generated(entry: CatalogEntry, server_dir: Path) -> composegen.ComposePlan:
@@ -1160,7 +1231,17 @@ def test_the_shared_cmangos_templates_render_for_every_family_entry(
 
 
 def test_the_cmangos_services_are_named_after_their_containers(tmp_path: Path) -> None:
-    """`ContainerSpec.services` keeps its default, so `compose up -d --no-deps <db>` works."""
+    """The rendered file's service keys ARE the entry's container names.
+
+    This is the template's side of the AzerothCore convention, asserted against the
+    entry's own three names rather than against literals. `compose up -d --no-deps
+    <db>` then works with `ContainerSpec.services` left at its default — which is what
+    the entry does today, having stopped declaring `containers.services` on 2026-09-01;
+    the docstring here used to state that as a fact while the catalog was overriding it
+    with `db`/`realmd`/`mangosd`, and neither this test nor the catalog's own could see
+    the disagreement. `test_every_service_the_catalog_selects_is_defined_in_the_rendered_
+    compose_file` is the one that now compares the two sides.
+    """
     entry = load_catalog().get("wow-tbc")
     plan = render_generated(entry, tmp_path / "wow")
     services = service_names(plan.base)
