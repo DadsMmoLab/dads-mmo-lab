@@ -55,6 +55,20 @@ from yulon.log import get_logger
 
 logger = get_logger(__name__)
 
+CATALOG_ERROR_TAIL = "That is a catalog error in the app, not something to fix on this machine."
+"""The one sentence every refusal here about a malformed catalog entry ends in.
+
+Three refusals said it in two spellings until 2026-09-01 — two "a catalog
+error in the app", one "a bug in the app's catalog" — and a second wording for
+one thing drifts further from the first every time either is edited.
+`test_the_family_s_catalog_refusals_end_in_one_tail_and_not_two` holds the
+three together.
+
+Checked 2026-09-01: `sqlplan.py` carries `_CATALOG_ERROR`, the same sentence
+without "in the app", private to that module and ending six refusals there.
+Whether the two become one string is undecided, and is not decided here.
+"""
+
 DATA_DIR = "data"
 """Where extraction lands, relative to the server dir; the template binds it to /opt/*/data."""
 
@@ -170,8 +184,7 @@ class CmangosInstaller(StagedInstaller):
             # choice the user should go looking for.
             raise InstallerError(
                 f"{self.entry.name}'s catalog entry says its database password is generated "
-                "but names no file to keep it in. That is a catalog error in the app, not "
-                "something to fix on this machine."
+                f"but names no file to keep it in. {CATALOG_ERROR_TAIL}"
             )
         path = ctx.server_dir / plan.file
         if path.is_file():
@@ -313,14 +326,14 @@ class CmangosInstaller(StagedInstaller):
     def _data(self) -> CmangosData:
         """The typed block every family stage reads.
 
-        Its absence is a bug in the app's catalog, never something wrong with
-        this machine, and the refusal says so.
+        Its absence is a catalog error in the app, never something wrong with
+        this machine, and the refusal says so in `CATALOG_ERROR_TAIL`'s words.
         """
         data = self._native().cmangos
         if data is None:
             raise InstallerError(
                 f"{self.entry.name} says its family is cmangos but carries no `cmangos` block. "
-                "That is a bug in the app's catalog, not something to fix on this machine."
+                f"{CATALOG_ERROR_TAIL}"
             )
         return data
 
@@ -391,8 +404,7 @@ class CmangosInstaller(StagedInstaller):
                 return ref
         raise InstallerError(
             f"{service} is not one of the images this install builds "
-            f"({', '.join(self._native().images)}). That is a catalog error in the app, not "
-            "something to fix on this machine."
+            f"({', '.join(self._native().images)}). {CATALOG_ERROR_TAIL}"
         )
 
     def _user_args(self) -> tuple[str, ...]:
