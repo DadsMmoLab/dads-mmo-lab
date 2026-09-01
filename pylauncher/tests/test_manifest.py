@@ -265,3 +265,15 @@ def test_every_checked_in_index_and_its_items_validate(index_file: Path) -> None
     if item_dir.is_dir():
         orphans = sorted(p.stem for p in item_dir.glob("*.json"))
         assert set(orphans) <= set(index.items), f"not in {index_file.name}: {orphans}"
+
+
+def test_a_source_may_pin_a_full_commit_sha_and_nothing_else() -> None:
+    """A pin is a SHA, not a ref: a tag can be moved, and GitHub serves a fetch by hash
+    only for the full 40-hex object id (`uploadpack.allowReachableSHA1InWant`)."""
+    from yulon.manifest import Source
+
+    assert Source(repo="a/b").rev is None
+    assert Source(repo="a/b", rev="0123456789abcdef0123456789abcdef01234567").rev is not None
+    for bad in ("v1.0", "main", "0123456", "0123456789ABCDEF0123456789ABCDEF01234567"):
+        with pytest.raises(ValidationError):
+            Source(repo="a/b", rev=bad)

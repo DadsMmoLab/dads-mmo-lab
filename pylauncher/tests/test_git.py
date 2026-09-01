@@ -903,3 +903,104 @@ def test_container_git_takes_its_user_args_from_platform(
     monkeypatch.setattr(git.platform, "container_user_args", lambda **kwargs: [])
     unlabelled.clone(git.CloneSpec(url="https://example/core.git", dest=tmp_path / "core2"))
     assert "--user" not in seen[1]
+
+
+# -- commit pins -------------------------------------------------------------
+
+PIN = "0123456789abcdef0123456789abcdef01234567"
+BAD_PIN = "cafebabe" * 5  # 40 hex characters, and no such commit
+
+
+def test_a_pinned_source_is_fetched_by_hash_and_checked_out_detached(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """`rev` is honoured AFTER the clone, by hash, and never as a branch.
+
+    A `--depth 1` clone holds only the tip, so `git checkout <sha>` on it answers
+    "reference is not a tree" for every commit but one; the object has to be
+    fetched first, and the fetch keeps the clone's own depth. `--detach`
+    because a pin is not a branch: the next update must not drag it to the tip.
+    """
+    git.RunnerGit().clone(
+        git.CloneSpec(url="https://example/repo.git", dest=tmp_path / "core", rev=PIN)
+    )
+    fetch = next(argv for argv in seen if "fetch" in argv)
+    assert fetch[fetch.index("fetch") :] == ["fetch", "--depth=1", "origin", PIN]
+    checkout = next(argv for argv in seen if "checkout" in argv)
+    assert checkout[-3:] == ["checkout", "--detach", PIN]
+    assert seen.index(fetch) > 0, "the clone comes first; the pin is applied to it"
+    assert seen.index(fetch) < seen.index(checkout)
+
+
+def test_an_unpinned_source_never_checks_anything_out(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    git.RunnerGit().clone(git.CloneSpec(url="https://example/repo.git", dest=tmp_path / "core"))
+    assert not any("checkout" in argv for argv in seen)
+
+
+def test_updating_a_pinned_clone_re_applies_the_pin(seen: list[list[str]], tmp_path: Path) -> None:
+    """The update path resets to FETCH_HEAD (the tip); the pin must win afterwards."""
+    dest = tmp_path / "core"
+    (dest / ".git").mkdir(parents=True)
+    git.RunnerGit().clone(git.CloneSpec(url="https://example/repo.git", dest=dest, rev=PIN))
+    reset = next(index for index, argv in enumerate(seen) if "reset" in argv)
+    checkout = next(index for index, argv in enumerate(seen) if "checkout" in argv)
+    assert reset < checkout
+    assert seen[checkout][-3:] == ["checkout", "--detach", PIN]
+
+
+def test_container_git_pins_the_same_way(seen: list[list[str]], tmp_path: Path) -> None:
+    """Two implementations of one Protocol must not disagree about what they produce."""
+    dest = tmp_path / "core"
+    git.ContainerGit().clone(
+        git.CloneSpec(url="https://example/core.git", dest=dest, depth=None, rev=PIN)
+    )
+    fetch = next(argv for argv in seen if "fetch" in argv)
+    assert fetch[fetch.index("fetch") :] == ["fetch", "origin", PIN], "depth=None → no --depth"
+    checkout = next(argv for argv in seen if "checkout" in argv)
+    assert checkout[:3] == ["docker", "run", "--rm"], "still containerised"
+    assert checkout[-3:] == ["checkout", "--detach", PIN]
+
+
+def test_a_bad_pin_on_an_existing_clone_is_not_blamed_on_the_container(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    """A pin that does not exist is a catalog fault, and must read like one.
+
+    `ContainerGit.clone()`'s update path wraps its fetch/reset in the fallback
+    that exists for "containerised git cannot work on this host" — and the pin
+    used to sit inside it. A bad SHA therefore reached the user as
+    `containerized git update failed in <dest> (...); falling back to host git`,
+    the whole fetch ran a second time through host git, and only then did
+    `upload-pack: not our ref` appear underneath an explanation that was not
+    true. The fresh-clone path never did that: it pins outside the try, and a
+    `GitError` from the pin propagates. Both halves of one method now agree.
+    """
+    dest = tmp_path / "core"
+    (dest / ".git").mkdir(parents=True)
+    seen_argv: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen_argv.append(argv)
+        if BAD_PIN in argv:
+            return _completed(
+                returncode=128,
+                stderr=f"fatal: remote error: upload-pack: not our ref {BAD_PIN}",
+            )
+        return _completed()
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    # The fallback would fire if the pin were still inside the try: this host
+    # has a git, and the failure says nothing about Docker.
+    monkeypatch.setattr(git, "git_available", lambda: True)
+    caplog.set_level("WARNING")
+    with pytest.raises(git.GitError) as raised:
+        git.ContainerGit().clone(
+            git.CloneSpec(url="https://example/core.git", dest=dest, depth=None, rev=BAD_PIN)
+        )
+    assert "not our ref" in str(raised.value), "the real failure, not a container story"
+    logged = "\n".join(record.message for record in caplog.records)
+    assert "falling back to host git" not in logged, "a bad pin is not an environment problem"
+    assert not any(argv[0] == "git" for argv in seen_argv), "host git must not be tried"
+    assert sum(1 for argv in seen_argv if BAD_PIN in argv) == 1, "the pin is attempted once"

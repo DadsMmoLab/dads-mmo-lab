@@ -68,6 +68,16 @@ class Source(_Strict):
             "a three-hour build the wrong answer."
         ),
     )
+    rev: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{40}$",
+        description=(
+            "Commit to check out after the clone, or null for the branch tip. A PIN, not a "
+            "ref: only a full lowercase SHA is accepted, because a tag can be moved and a pinned "
+            "server must rebuild the same bytes, and because GitHub serves a fetch-by-hash only "
+            "for the full object id. Honoured by `git.CloneSpec.rev` (roadmap 7.3)."
+        ),
+    )
 
     @field_validator("repo")
     @classmethod

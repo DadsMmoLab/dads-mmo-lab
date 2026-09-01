@@ -241,6 +241,9 @@ class CloneSpec:
             because most sources are content-only; AzerothCore's core repo must
             pass None, since its CMake reads the revision out of git metadata
             and a shallow clone gives it the wrong answer.
+        rev: Full commit SHA to check out after the clone (and after every
+            update), or None for the tip of `branch`. A pin for cores whose
+            upstream moves under a gate — Tortoise is pinned the day 7.6 passes.
     """
 
     url: str
@@ -248,6 +251,7 @@ class CloneSpec:
     branch: str | None = None
     sparse_path: str | None = None
     depth: int | None = 1
+    rev: str | None = None
 
 
 class Git(Protocol):
@@ -351,6 +355,7 @@ class RunnerGit:
     def clone(self, spec: CloneSpec) -> None:
         if (spec.dest / ".git").is_dir():
             self._update(spec)
+            self._pin(spec)
             return
         if spec.dest.exists():
             shutil.rmtree(spec.dest)  # a non-git leftover; wow-manage.sh does the same
@@ -368,8 +373,9 @@ class RunnerGit:
             if spec.branch:
                 argv += ["--branch", spec.branch]
             _run_git([*argv, spec.url, str(spec.dest)])
-            return
-        self._sparse_clone(spec)
+        else:
+            self._sparse_clone(spec)
+        self._pin(spec)
 
     def _sparse_clone(self, spec: CloneSpec) -> None:
         assert spec.sparse_path is not None
@@ -422,6 +428,34 @@ class RunnerGit:
             cwd=spec.dest,
         )
         _run_git(["git", *_LINE_ENDING_ARGS, "reset", "--hard", "FETCH_HEAD"], cwd=spec.dest)
+
+    def _pin(self, spec: CloneSpec) -> None:
+        """Move the checkout to `spec.rev` when the source pins one; a no-op otherwise.
+
+        Fetched BY HASH first, because a shallow clone holds only the tip: `git
+        checkout <sha>` on a `--depth 1` clone answers "reference is not a tree"
+        for every commit but one. The fetch carries the clone's own depth so a
+        shallow clone stays the shape it was created with (see `_update()`).
+        `--detach` because a pin is not a branch: there is nothing to pull, and
+        an attached HEAD would let the next `reset --hard FETCH_HEAD` drag the
+        checkout back to the tip — which is why `clone()` re-applies the pin
+        after every update as well as after the first clone.
+        """
+        if spec.rev is None:
+            return
+        _run_git(
+            [
+                "git",
+                *_LINE_ENDING_ARGS,
+                *_HTTP_VERSION_ARGS,
+                "fetch",
+                *_pull_depth_args(spec.depth),
+                "origin",
+                spec.rev,
+            ],
+            cwd=spec.dest,
+        )
+        _run_git(["git", *_LINE_ENDING_ARGS, "checkout", "--detach", spec.rev], cwd=spec.dest)
 
 
 def _pull_depth_args(depth: int | None) -> list[str]:
@@ -541,16 +575,27 @@ class ContainerGit:
                     spec, ["fetch", *_pull_depth_args(spec.depth), "origin", spec.branch or "HEAD"]
                 )
                 self._run(spec, ["reset", "--hard", "FETCH_HEAD"])
-                return
             except GitError as exc:
                 if platform.DOCKER_CLI_MISSING_HELP not in str(exc) and git_available():
                     logger.warning(
                         f"containerized git update failed in {spec.dest} ({exc}); "
                         "falling back to host git"
                     )
+                    # Which updates AND pins, through host git — so the pin is
+                    # not skipped here, and must not be applied a second time.
                     RunnerGit().clone(spec)
                     return
                 raise
+            # Outside the try, and only on the path that did not fall back. The
+            # try exists for one question — "can containerised git work on this
+            # host at all?" — and a pin that does not exist is not an answer to
+            # it. Inside, a bad SHA reached the user as "containerized git
+            # update failed (...); falling back to host git", ran the whole
+            # fetch again through host git, and only then admitted to
+            # `upload-pack: not our ref`. The fresh-clone path below has always
+            # pinned outside its own fallback; this is that same rule.
+            self._pin(spec)
+            return
         if spec.dest.exists():
             shutil.rmtree(spec.dest)
         spec.dest.mkdir(parents=True, exist_ok=True)
@@ -586,6 +631,14 @@ class ContainerGit:
             # cone mode yields all four. Two implementations of one Protocol
             # must not disagree about what they produce.
             self._run(spec, ["sparse-checkout", "set", "--no-cone", spec.sparse_path.rstrip("/")])
+        self._pin(spec)
+
+    def _pin(self, spec: CloneSpec) -> None:
+        """`RunnerGit._pin()`, containerised: fetch by hash at the clone's depth, then detach."""
+        if spec.rev is None:
+            return
+        self._run(spec, ["fetch", *_pull_depth_args(spec.depth), "origin", spec.rev])
+        self._run(spec, ["checkout", "--detach", spec.rev])
 
     def _run(self, spec: CloneSpec, git_args: list[str]) -> None:
         """One containerized `git` invocation against this spec's destination."""

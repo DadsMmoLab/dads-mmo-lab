@@ -373,6 +373,20 @@
           "title": "Repo",
           "type": "string"
         },
+        "rev": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{40}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Commit to check out after the clone, or null for the branch tip. A PIN, not a ref: only a full lowercase SHA is accepted, because a tag can be moved and a pinned server must rebuild the same bytes, and because GitHub serves a fetch-by-hash only for the full object id. Honoured by `git.CloneSpec.rev` (roadmap 7.3).",
+          "title": "Rev"
+        },
         "sparse_path": {
           "anyOf": [
             {

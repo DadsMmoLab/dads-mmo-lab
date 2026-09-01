@@ -893,6 +893,30 @@ was found by reading code; each is a line in a resolved compose document from a 
   itself is otherwise exemplary: it refused rather than blocked, named both commands verbatim, and
   declined the docker-group join because there was nobody to ask.
 
+- **A commit pin added to a source that is already installed is never applied — no resume and no
+  repair will ever move that checkout to it** — 2026-09-01, found by reviewing the commit-pin work
+  (task G.1). Traced through the code and its tests, not reproduced on a box.
+  `StagedInstaller.already_cloned()` (`pylauncher/yulon/catalog/native.py:1061`) answers True when
+  the stage is recorded done AND the checkout's `origin` matches the source URL. Its three callers —
+  `AzerothCoreInstaller._clone_core` (`catalog/families/azerothcore.py:112`), `._clone_modules`
+  (`:164`) and `StagedInstaller.stage_clone_sources` (`native.py:1132`) — then yield
+  "already … leaving it exactly as it is" and skip `_clone()` entirely, so the seam is never
+  entered and `git.py`'s `_pin()` never runs. Give a source a `rev` in `catalog.json` after that
+  source has been cloned and recorded, and every later run reports success while leaving the
+  checkout on whatever commit it already had. That is precisely the case `CloneSpec.rev`'s own
+  docstring anticipates — "a pin for cores whose upstream moves under a gate — Tortoise is pinned
+  the day 7.6 passes" — and the day that pin lands is the day it silently does nothing on every
+  machine that already installed Tortoise. The module and content half is NOT affected:
+  `Applier.install()` (`pylauncher/yulon/apply.py:441`) has no such gate and re-clones and re-pins
+  unconditionally on every apply.
+  *Recorded, not fixed, and deliberately so:* the gate is 7.1's **"a resume must not be able to
+  change what is being built"** invariant, written into `already_cloned()`'s docstring after the
+  live Ubuntu gate (2026-08-30) lost its source tree to a fetch+reset on resume. A pin is arguably
+  the one change to a source a resume SHOULD adopt, which makes this a collision between two
+  correct rules rather than an oversight — so the fix (record the applied rev in the state file and
+  re-pin when the catalog's differs, or exempt pinned sources from the gate) is a call for whoever
+  owns 7.6 and its Tortoise pin, not a patch to make in passing.
+
 
 ### One thing worth keeping
 
