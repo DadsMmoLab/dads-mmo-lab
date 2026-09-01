@@ -64,6 +64,14 @@ ENV TZ=UTC
 # The compiler and the build helpers are dropped; every library the script
 # installed stays, because the image it installed them into is the one that ran
 # mangosd, realmd and the extractors.
+#
+# These are the `-dev` packages, not the lean versioned runtime ones TBC and
+# Vanilla use beside this file (`libboost-system1.74.0` and friends). That is
+# deliberate for now and it is not free: the `-dev` chain drags in headers,
+# static libraries and pkg-config nobody runs. It stays until the first Tortoise
+# gate can prove a trimmed runtime image still starts, because a runtime package
+# named wrongly here does not fail the build — it fails `./mangosd` forty minutes
+# later, on a machine nobody is watching. Trim it with a gate, not with a guess.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libace-dev default-libmysqlclient-dev libmysqlclient-dev \
     libssl-dev zlib1g-dev libbz2-dev \
