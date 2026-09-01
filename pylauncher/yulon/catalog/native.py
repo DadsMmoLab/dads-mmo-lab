@@ -56,6 +56,7 @@ import json
 import os
 import queue
 import re
+import subprocess
 import threading
 import time
 from collections.abc import Callable, Generator, Iterator, Sequence
@@ -519,6 +520,34 @@ class Seams:
     selinux_enforcing: Callable[[], bool | None] = platform.selinux_enforcing
     fs_type: Callable[[Path], str | None] = platform.filesystem_type
     keep_awake: Callable[[], AbstractContextManager[None]] = platform.keep_awake
+    # The 7.3 primitives. Four of the five real functions take a `wsl_distro`
+    # keyword that these types do not carry — exactly as `container_exists`,
+    # `start_db` and `start` above have not carried it since 7.1. **That
+    # erasure is a boundary held by convention, and nothing here enforces it.**
+    # Every `wsl_distro` value in this app originates from
+    # `controller.wsl_distro`, which is the MANAGEMENT path for a server that
+    # is already installed; `Seams` is constructed in exactly one place
+    # (`native.Seams(platform_id=platform_id)`) and no install-side caller
+    # holds a distro. `catalog_view.adopt_from_wsl()` is the only route to a
+    # WSL-resident server and it adopts an already-BUILT one: it never runs the
+    # installer and never reaches a stage. So Yu'lon installs against the local
+    # daemon and only manages a WSL-resident server, and the types say so.
+    #
+    # What nothing says is that it has to stay that way. A "re-run extraction
+    # on an adopted server" — or any repair that reached a stage on an adopted
+    # install — would hand these seams a container living on another daemon,
+    # and the erasure would then send all of them to the wrong one silently:
+    # `volume_exists` would answer "no such volume" for a database sitting
+    # right there, which is the destructive branch its own docstring exists
+    # for. No test would notice. Whether the boundary is meant to hold: the
+    # 7.3 contract states these field types and gives no reason, while
+    # `sqlplan.ExecStdin`/`SqlQuery` declare the keyword for the opposite
+    # reason. Nobody has reconciled the two — undecided.
+    run_container: Callable[..., docker.AttachedRun] = docker.run_container
+    copy_from_image: Callable[[str, str, Path], None] = docker.copy_from_image
+    exec_stdin: Callable[..., subprocess.CompletedProcess[str]] = docker.exec_stdin
+    sql_query: Callable[[str, str, str, str | None, str], str] = docker.sql_query
+    volume_exists: Callable[[str], bool] = docker.volume_exists
 
 
 class StagedInstaller:
