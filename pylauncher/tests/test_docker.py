@@ -3890,3 +3890,57 @@ def test_container_spec_translates_a_container_name_to_its_service() -> None:
     # command than a confidently wrong one.
     assert renamed.service_for("ac-database") == "ac-database"
     assert SPEC.service_for(SPEC.db) == SPEC.db
+
+
+# ------------------------------------------------------ 7.3: docker run by field
+
+
+def _flag_values(argv: list[str], flag: str) -> list[str]:
+    """Every value that follows `flag` in argv — how a run is audited by field, not by string."""
+    return [argv[i + 1] for i, item in enumerate(argv[:-1]) if item == flag]
+
+
+def test_a_container_run_is_audited_by_field_not_by_string(tmp_path: Path) -> None:
+    """Which mount is `:ro`, which user, which cwd — each readable from the argv on its own.
+
+    The extraction stage's whole safety argument is that the client is mounted
+    read-only and the output goes somewhere else; a test that matched one long
+    string would pass a reordered flag and fail a harmless one.
+    """
+    client = tmp_path / "client"
+    out = tmp_path / "out"
+    spec = docker.ContainerRun(
+        image="yulon.local/tbc-server:native-abc",
+        argv=("/opt/tools/ad", "-i", "/client", "-o", "/out"),
+        mounts=(docker.Mount(client, "/client", read_only=True), docker.Mount(out, "/out")),
+        workdir="/out",
+        env={"TERM": "dumb"},
+        user_args=("--user", "1000:1000"),
+        ulimits=("stack=-1",),
+    )
+    argv = spec.to_argv()
+    assert argv[:2] == ["run", "--rm"]
+    assert _flag_values(argv, "-v") == [f"{client}:/client:ro", f"{out}:/out"]
+    assert _flag_values(argv, "-w") == ["/out"]
+    assert _flag_values(argv, "-e") == ["TERM=dumb"]
+    assert _flag_values(argv, "--user") == ["1000:1000"]
+    assert _flag_values(argv, "--ulimit") == ["stack=-1"]
+    # The tool's own argv is verbatim after the image: docker stops reading
+    # options at the image name, so anything of ours after it would reach the tool.
+    image_at = argv.index("yulon.local/tbc-server:native-abc")
+    assert argv[image_at + 1 :] == ["/opt/tools/ad", "-i", "/client", "-o", "/out"]
+
+
+def test_a_bare_run_is_just_rm_image_and_command() -> None:
+    """No mounts, no user, no env: nothing is emitted for a field left at its default."""
+    spec = docker.ContainerRun(image="busybox:1.36", argv=("true",))
+    assert spec.to_argv() == ["run", "--rm", "busybox:1.36", "true"]
+
+
+def test_a_relative_mount_source_is_refused_before_docker_sees_it() -> None:
+    """Docker rejects a relative bind source daemon-side; the message should name our caller."""
+    spec = docker.ContainerRun(
+        image="busybox:1.36", argv=("true",), mounts=(docker.Mount(Path("data"), "/out"),)
+    )
+    with pytest.raises(ValueError, match="absolute"):
+        spec.to_argv()
