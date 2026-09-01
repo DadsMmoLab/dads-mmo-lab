@@ -23,8 +23,11 @@ re-pointed at the real method rather than staying quietly inert.
 from __future__ import annotations
 
 import gzip
+import inspect
+import os
 import threading
 from collections.abc import Callable, Iterable, Iterator
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -32,7 +35,7 @@ import pytest
 from tests.support_native import Recorder
 from yulon import docker, platform, resources
 from yulon.catalog import composegen, native
-from yulon.catalog.catalog import CatalogEntry, SqlPlan, load_catalog
+from yulon.catalog.catalog import CatalogEntry, PasswordPlan, SqlPlan, load_catalog
 from yulon.catalog.families import dockerfile, extract, sqlplan
 from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import InstallerError, InstallOptions
@@ -699,11 +702,11 @@ def test_the_seams_carry_every_new_double_through_to_the_engine() -> None:
 # -- the stages that are bound today ----------------------------------------
 
 
-def test_the_six_bound_stages_run_in_order_and_record_the_recorded_ones(tmp_path: Path) -> None:
-    """End to end over the stages K.2 binds; K.3-K.7 insert the rest between them.
+def test_the_bound_stages_run_in_order_and_record_the_recorded_ones(tmp_path: Path) -> None:
+    """End to end over the stages bound so far; K.4-K.7 insert the rest between them.
 
-    Also the only test that drives `lay_sql`/`on_clone`, so the SQL fixtures the
-    later tasks import are proved to land under the source that owns them.
+    Also drives `lay_sql`/`on_clone`, so the SQL fixtures the later tasks import
+    are proved to land under the source that owns them.
     """
     rec = Recorder()
     server_dir = tmp_path / "srv"
@@ -711,6 +714,7 @@ def test_the_six_bound_stages_run_in_order_and_record_the_recorded_ones(tmp_path
     said = install(rec, server_dir, client)
     assert [line for line in said if line.startswith("--- ")] == [
         "--- clone-sources",
+        "--- db-password",
         "--- generate-compose",
         "--- build",
         "--- start-db",
@@ -720,6 +724,12 @@ def test_the_six_bound_stages_run_in_order_and_record_the_recorded_ones(tmp_path
     state = native.read_state(server_dir, valid=engine(rec).stage_names())
     assert state is not None
     assert state.completed == ("clone-sources", "generate-compose", "build")
+    # `db-password` ran — the file is there — and is deliberately NOT in the
+    # record. The FILE is the evidence a secret exists; a state file that
+    # claimed one would survive the file being deleted, and the next run would
+    # mint a second password over a live database.
+    assert (server_dir / ".db_password").is_file()
+    assert "db-password" not in state.completed
     assert state.family == "cmangos"
     assert [spec.dest for spec in rec.clones] == [
         server_dir / "src" / "mangos-tbc",
@@ -787,3 +797,246 @@ def test_the_build_cancel_note_is_said_at_the_build_and_not_before_every_stage(
     # Not before every stage: no earlier stage carries it, and no later one either.
     assert said.count(native.BUILD_CANCEL_NOTE) == 1
     assert native.BUILD_CANCEL_NOTE not in said[:build_at]
+
+
+# -- db-password -------------------------------------------------------------
+
+
+def db_volume(server_dir: Path) -> str:
+    """`<compose project>_db-data` — recomputed here rather than asked of the engine.
+
+    The engine's `_db_volume()` is the code under test, so these tests build the
+    name from `composegen.project_name()` and the key the shared template
+    declares. `test_the_module_constants_are_the_shared_template_s_own_spellings`
+    is what ties `db-data` to `base.yml.tmpl`.
+    """
+    project = composegen.project_name(ENTRY.id, server_dir, platform_id=lambda: "linux")
+    return f"{project}_db-data"
+
+
+def entry_with_password(plan: PasswordPlan) -> CatalogEntry:
+    """`ENTRY` carrying a different `install.password`, still installable on linux."""
+    return ENTRY.model_copy(update={"install": ENTRY.install.model_copy(update={"password": plan})})
+
+
+def engine_for(entry: CatalogEntry, rec: Recorder, **overrides: object) -> CmangosInstaller:
+    return CmangosInstaller(
+        entry,
+        installers_root=resources.installers_dir(),
+        seams=rec.seams(**{"platform_id": lambda: "linux", **overrides}),
+    )
+
+
+def refuse_to_answer(name: str) -> bool:
+    """A `volume_exists` seam that fails the test if it is called at all.
+
+    `AssertionError` and not `DockerCommandError`: the stage catches the latter
+    and turns it into a refusal, which would hide the call being made.
+    """
+    raise AssertionError(f"the daemon was asked about {name}")
+
+
+def test_db_password_writes_the_generated_secret_with_the_trailing_newline_the_spine_strips(
+    tmp_path: Path,
+) -> None:
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    said = list(engine(Recorder())._db_password(context(server_dir)))
+    assert ENTRY.install.password.file is not None
+    secret = server_dir / ENTRY.install.password.file
+    assert secret.read_bytes() == (DB_PASSWORD + "\n").encode("utf-8")
+    assert secret.read_text(encoding="utf-8").strip() == DB_PASSWORD
+    assert any(ENTRY.install.password.file in line for line in said), said
+
+
+def test_db_password_keeps_a_secret_file_that_is_already_there_and_never_asks_docker(
+    tmp_path: Path,
+) -> None:
+    """A resume must not mint a second password, and must not need a daemon to know that.
+
+    The second context carries a DIFFERENT secret on purpose: an mtime is a
+    coarse oracle (an overwrite inside one filesystem timestamp tick moves
+    nothing), while the bytes on disk answer differently the second time only
+    if the stage really left them alone.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    ctx = context(server_dir)
+    list(engine(Recorder())._db_password(ctx))
+    assert ENTRY.install.password.file is not None
+    secret = server_dir / ENTRY.install.password.file
+    other = replace(ctx, secrets=native.Secrets(db_password="a-completely-different-secret"))
+    again = list(engine(Recorder(), volume_exists=refuse_to_answer)._db_password(other))
+    assert secret.read_text(encoding="utf-8").strip() == DB_PASSWORD
+    assert any("already" in line for line in again), again
+
+
+def test_the_secret_file_is_owner_only_on_posix_and_only_inherits_the_folder_acl_on_windows(
+    tmp_path: Path,
+) -> None:
+    """What the 0600 the writer asks for actually buys, per platform — measured, not assumed.
+
+    Measured on PKGAME-LAPTOP, Windows 11 26200, CPython 3.13.14, 2026-09-01:
+    `os.open(path, O_WRONLY|O_CREAT|O_TRUNC, 0o600)` leaves `st_mode & 0o777`
+    at `0o666`, byte-identical to a plain `open(path, "w")`, and `icacls` shows
+    the file carrying only the ACEs it inherited from its folder — under a
+    folder granting `BUILTIN\\Users:(RX)` the secret is readable by every local
+    user. A following `os.chmod(path, 0o600)` changes neither. So the mode is a
+    POSIX guarantee and nothing more, and this test pins both halves so
+    `_write_secret`'s note cannot quietly become false on either.
+
+    The CONSTANT is asserted as well as the file, because on Windows it is the
+    only thing that can be: the bytes on disk read `0o666` whatever the writer
+    asked for, so a widened `SECRET_FILE_MODE` is invisible there. That half is
+    an inspection rather than an observation, and it is here so the widening
+    cannot land green on a Windows machine and be caught only by Linux CI.
+    """
+    from yulon.catalog.families import cmangos
+
+    assert cmangos.SECRET_FILE_MODE == 0o600
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    list(engine(Recorder())._db_password(context(server_dir)))
+    assert ENTRY.install.password.file is not None
+    mode = (server_dir / ENTRY.install.password.file).stat().st_mode & 0o777
+    if os.name == "nt":
+        assert mode == 0o666, "Windows started honouring the mode: re-read _write_secret's note"
+    else:
+        assert mode == cmangos.SECRET_FILE_MODE
+
+
+def test_db_password_asks_about_the_volume_name_compose_gives_this_install(
+    tmp_path: Path,
+) -> None:
+    """One name, and it is `<project>_db-data` — the string `docker volume ls` prints."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    asked: list[str] = []
+
+    def watch(name: str) -> bool:
+        asked.append(name)
+        return False
+
+    list(engine(Recorder(), volume_exists=watch)._db_password(context(server_dir)))
+    assert asked == [db_volume(server_dir)]
+
+
+def test_db_password_refuses_when_the_file_is_gone_but_the_volume_exists(tmp_path: Path) -> None:
+    """The volume was initialised with the password the file held; a new one locks us out."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    rec.volumes.add(db_volume(server_dir))
+    with pytest.raises(InstallerError) as refusal:
+        list(engine(rec)._db_password(context(server_dir)))
+    assert ".db_password" in str(refusal.value)
+    assert db_volume(server_dir) in str(refusal.value)
+    assert not (server_dir / ".db_password").exists()
+
+
+def test_the_live_volume_refusal_names_a_way_to_delete_the_volume_the_server_tab_will_not(
+    tmp_path: Path,
+) -> None:
+    """The refusal may not send the user to a button that keeps volumes by design.
+
+    `controller_view`'s only removal action is "Stop and remove containers…",
+    and `docker.remove_staged()` passes no `-v` on purpose
+    (`test_remove_staged_never_passes_a_flag_that_would_delete_a_volume`); its
+    own armed warning says "the database lives in a Docker volume, which is
+    kept". Nothing in the app deletes a named volume. A refusal naming that
+    button would send the user round a loop ending at this same message, so it
+    names the command that does the job instead.
+
+    Red the day the Server tab grows a real volume-deleting action — at which
+    point the refusal should point at it rather than at a terminal.
+    """
+    from yulon.ui import controller_view
+
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    rec.volumes.add(db_volume(server_dir))
+    with pytest.raises(InstallerError) as refusal:
+        list(engine(rec)._db_password(context(server_dir)))
+    said = str(refusal.value)
+    assert f"docker volume rm {db_volume(server_dir)}" in said
+    assert "Server tab" not in said
+    assert "volume, which is kept" in inspect.getsource(controller_view)
+
+
+def test_db_password_refuses_when_docker_will_not_say_whether_the_volume_exists(
+    tmp_path: Path,
+) -> None:
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+
+    def unanswerable(name: str) -> bool:
+        raise docker.DockerCommandError("Cannot connect to the Docker daemon")
+
+    with pytest.raises(InstallerError, match="cannot prove") as refusal:
+        list(engine(Recorder(), volume_exists=unanswerable)._db_password(context(server_dir)))
+    assert "Cannot connect to the Docker daemon" in str(refusal.value)
+    assert not (server_dir / ".db_password").exists()
+
+
+def test_db_password_refuses_when_there_is_no_docker_cli_at_all(tmp_path: Path) -> None:
+    """`DockerCliMissingError` subclasses `DockerCommandError` and lands in the same branch.
+
+    Deliberate. Preflight already refuses a machine with no Docker, so reaching
+    here means Docker went away mid-install; the outcome is the one that
+    matters — nothing is written — and the sentence carries
+    `DOCKER_CLI_MISSING_HELP` verbatim, which is the actionable half. A second
+    branch would buy a second wording for an identical outcome and would drop
+    the volume name from it.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+
+    def no_cli(name: str) -> bool:
+        raise docker.DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP)
+
+    with pytest.raises(InstallerError) as refusal:
+        list(engine(Recorder(), volume_exists=no_cli)._db_password(context(server_dir)))
+    assert platform.DOCKER_CLI_MISSING_HELP in str(refusal.value)
+    assert db_volume(server_dir) in str(refusal.value)
+    assert not (server_dir / ".db_password").exists()
+
+
+def test_db_password_writes_nothing_for_a_fixed_password(tmp_path: Path) -> None:
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    entry = entry_with_password(PasswordPlan(mode="fixed", value="password"))
+    eng = engine_for(entry, Recorder(), volume_exists=refuse_to_answer)
+    said = list(eng._db_password(context(server_dir)))
+    assert list(server_dir.iterdir()) == []
+    assert any("fixed" in line for line in said), said
+
+
+def test_db_password_calls_a_generated_plan_with_no_file_a_catalog_error(tmp_path: Path) -> None:
+    """Not "this server uses a fixed password" — that sends the user looking in the wrong place.
+
+    Two fences already stand in front of this one: `PasswordPlan`'s validator
+    refuses the shape, and `resolve_secrets()` refuses it again before stage 1.
+    `model_construct` is what gets past them, and the branch is kept because
+    `plan.file` is `str | None` and mypy is owed a narrowing. What it must not
+    do is name the wrong defect on the way past.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    broken = PasswordPlan.model_construct(mode="generated", value=None, file=None, prefix="tbc-")
+    eng = engine_for(entry_with_password(broken), Recorder(), volume_exists=refuse_to_answer)
+    with pytest.raises(InstallerError) as refusal:
+        list(eng._db_password(context(server_dir)))
+    said = str(refusal.value)
+    assert "catalog" in said
+    assert "fixed" not in said
+    assert list(server_dir.iterdir()) == []
+
+
+def test_db_password_is_a_stage_that_is_never_recorded_and_follows_clone_sources() -> None:
+    """Never recorded because the FILE is the evidence; a state file must not claim a secret."""
+    stages = engine(Recorder()).stages()
+    names = [stage.name for stage in stages]
+    assert names.index("db-password") == names.index("clone-sources") + 1
+    stage = next(s for s in stages if s.name == "db-password")
+    assert stage.recorded is False
