@@ -12,12 +12,18 @@ decides everything the later ones only carry out:
   `ls -v` (`filevercmp`), which is what the shell installers used and what cmangos'
   `z2817_01_mangos_x.sql` naming assumes; a plain `sorted()` runs `z10` before `z9`.
 
+* `apply()` — carries it out: each run streamed on the stdin of `docker exec -i`, gzip
+  inflated on the way, with the phase's `fail`/`warn` policy over what the client says
+  back. Three failures stay three failures there — the SQL was rejected, the database
+  could not be asked, the dump could not be read — for the same reason `expand()` keeps
+  three answers below.
+
 Later tasks add `create_schemas()` (the implicit phase 0: databases, the app user,
-grants), `apply()` (streams each file on the stdin of `docker exec -i`, gzip inflated on
-the way, with the phase's `fail`/`warn` policy), and `verify()` + `write_marker()` (the
-completion record, written only after `verify()` returns no failing rule). The two
-Protocols and `MARKER_TABLE` below are their shared vocabulary, declared here so the
-transport shape has one spelling.
+grants) and `verify()` + `write_marker()` (the completion record, written only after
+`verify()` returns no failing rule). The two Protocols and `MARKER_TABLE` below are their
+shared vocabulary, declared here so the transport shape has one spelling — including
+which daemon holds the container, which a Protocol that dropped `wsl_distro` would make
+unsayable for every one of them at once.
 
 **A glob has three answers, not two.** "How many files matched?" hides a second question
 — "were you able to look?" — and `Path.glob`/`Path.rglob` answer both with one short
@@ -46,17 +52,22 @@ never logged.
 from __future__ import annotations
 
 import fnmatch
+import gzip
+import io
 import re
 import stat as stat_module
 import subprocess
-from collections.abc import Mapping, Sequence
+import threading
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import BinaryIO, Protocol
+from typing import BinaryIO, Protocol, cast
 
+from yulon import docker
 from yulon.catalog.catalog import SqlPhase, SqlPlan
 from yulon.catalog.composegen import ComposeGenError, fill
 from yulon.catalog.installer import InstallerError
+from yulon.catalog.native import IMPORT_CANCEL_NOTE
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -82,20 +93,57 @@ _CATALOG_ERROR = "That is a catalog error, not something to fix on this machine.
 class ExecStdin(Protocol):
     """`docker.exec_stdin`'s shape: `docker exec -i -e <env keys> <container> <argv>` fed `source`.
 
-    The real function takes a further defaulted `wsl_distro`; the protocol names only
-    what `apply()` passes, so a test fake may be the four parameters and nothing else.
+    **`wsl_distro` is part of the shape, not an implementation detail the seam may drop.**
+    A container name means nothing to a daemon that does not hold it: a server living
+    inside a WSL distro is `No such container` to Docker Desktop, and a variable set on
+    this side does not even reach a process in a distro unless `WSLENV` names it (it
+    arrives EMPTY, and the client reports an authentication failure against a perfectly
+    healthy database). `docker.exec_stdin()` carries both halves, and the two existing
+    `docker exec -i -e MYSQL_PWD` call sites in this app — `apply.DockerSql._argv()` and
+    `maintenance.DockerMysql._exec()` — both thread a distro for the same reason.
+
+    A Protocol that named only the four arguments the local case uses is where that gets
+    undone, silently: `apply()` cannot pass an argument its own seam type does not
+    declare, so an import into an existing WSL-resident install would go to the wrong
+    daemon with nothing in the code to show a choice had been made. Defaulted, so a
+    caller with no distro says nothing and a fake need not care; declared, so a caller
+    with one can be obeyed.
     """
 
     def __call__(
-        self, container: str, argv: Sequence[str], source: BinaryIO, *, env: Mapping[str, str]
+        self,
+        container: str,
+        argv: Sequence[str],
+        source: BinaryIO,
+        *,
+        env: Mapping[str, str],
+        wsl_distro: str | None = None,
     ) -> subprocess.CompletedProcess[str]: ...
 
 
 class SqlQuery(Protocol):
-    """`docker.sql_query`'s shape: one batch, skip-column-names statement; rows back as text."""
+    """`docker.sql_query`'s shape: one batch, skip-column-names statement; rows back as text.
+
+    Carries `wsl_distro` for the reason above, and one more of its own: this one is a
+    PROBE, and its answer decides whether an install runs at all. Asked of the wrong
+    daemon it reads as "nothing is imported" for a database that is fully populated, and
+    the import stage would run again over a working server.
+
+    Its result is stdout VERBATIM, trailing newline included, and a caller that reflexively
+    `.strip()`s it destroys something it cannot get back: under `--skip-column-names` one
+    row holding the empty string prints `"\\n"` while no rows print `""`, so stripping
+    collapses "one empty row" into "no rows". Count with `splitlines()`.
+    """
 
     def __call__(
-        self, container: str, client: str, password: str, schema: str | None, statement: str
+        self,
+        container: str,
+        client: str,
+        password: str,
+        schema: str | None,
+        statement: str,
+        *,
+        wsl_distro: str | None = None,
     ) -> str: ...
 
 
@@ -429,3 +477,159 @@ def _matches(server_dir: Path, pattern: str, phase: SqlPhase) -> list[Path]:
             )
         logger.warning(f"SQL phase '{phase.name}': nothing matched {pattern}, skipping it")
     return found
+
+
+def apply(
+    runs: Sequence[PhaseRun],
+    *,
+    container: str,
+    client: str,
+    password: str,
+    exec_stdin: ExecStdin,
+    sink: docker.OutputSink,
+    cancel: threading.Event | None,
+    wsl_distro: str | None = None,
+) -> Iterator[str]:
+    """Run every `PhaseRun` in order, streaming each file on the client's stdin.
+
+    Yields one line per run (for the install log, naming the run by its server-dir-relative
+    `rel`) BEFORE the work it describes, so the longest step of the install is not a still
+    screen, and pushes the client's stderr into `sink` line by line whatever the exit code
+    was — a warning the shell installers threw away with `2>/dev/null` is visible without
+    stopping anything. Policy comes from the run's phase: `fail` raises naming the file and
+    the client's last stderr line — the one that says which line of which statement — and
+    `warn` yields a warning naming the file and moves on.
+
+    `cancel` is checked before each run and never mid-file: a half-applied file is exactly
+    the `partial` state `MarkerGate.reset()` exists to clear, and the cancel note says so.
+
+    **Three ways a run can go wrong, and they are three different sentences.** `expand()`
+    already keeps "nothing matched" apart from "could not look"; the same distinction has
+    to survive the moment the bytes move, because the answer to each is different:
+
+    1. **The client rejected the SQL** — a non-zero exit with the client's own words. The
+       only one `on_error: warn` may soften, because it is the only one that is about the
+       sources rather than about this machine or the daemon.
+    2. **The database could not be asked** — no docker CLI, no such container, a container
+       that is not running. `DockerCliMissingError` is a `DockerCommandError` is a
+       `RuntimeError`, so the clause that catches a bad dump would swallow this one too
+       unless it is answered first — and the user would be told their download is corrupt
+       when what is missing is Docker.
+    3. **The dump could not be read** — `docker.SourceUnreadableError`, whose whole reason
+       for existing is this clause. `exec_stdin()` refuses to enumerate what a `BinaryIO`
+       may raise (a truncated `.sql.gz` raises `EOFError`, mangled deflate bytes
+       `zlib.error`, a file that was never gzip `gzip.BadGzipFile` — and only the last is
+       an `OSError`), so it normalises all of them to one `RuntimeError` subclass and keeps
+       the original as `__cause__`. `(RuntimeError, OSError)` is therefore enough, and the
+       cause is reported because WHICH corruption it was is the actionable half: "download
+       it again" answers a truncated file and not an unreadable one. This is never softened
+       by `warn`. It is the failure that used to pass: half a dump is valid SQL, so the
+       client exits 0 and every check afterwards agrees the import worked.
+
+    `wsl_distro` names the daemon holding `container`; see `ExecStdin`. It is forwarded on
+    every call rather than only when set, so there is no untested road on which the choice
+    quietly stops being made.
+    """
+    env = {"MYSQL_PWD": password}
+    for run in runs:
+        _check_cancel(cancel)
+        yield _describe(run)
+        argv = _client_argv(client, run.schema)
+        try:
+            with _open(run) as source:
+                proc = exec_stdin(container, argv, source, env=env, wsl_distro=wsl_distro)
+        except docker.DockerCommandError as exc:
+            raise InstallerError(
+                f"The import stopped: {run.rel} could not be sent to the database "
+                f"({exc}). Nothing after it was applied."
+            ) from exc
+        except (RuntimeError, OSError) as exc:
+            raise InstallerError(
+                f"The import stopped: {run.rel} could not be read ({_read_failure(exc)}). "
+                "The download may be incomplete; nothing after it was applied."
+            ) from exc
+        stderr = (proc.stderr or "").splitlines()
+        for line in stderr:
+            sink(line)
+        if proc.returncode == 0:
+            continue
+        reason = _last_line(stderr) or f"the client exited {proc.returncode}"
+        if run.phase.on_error == "fail":
+            raise InstallerError(
+                f"The import stopped: {run.rel} failed while loading into "
+                f"{run.schema or 'the server'} ({reason}). Nothing after it was applied."
+            )
+        logger.warning(f"SQL phase '{run.phase.name}': {run.rel} failed: {reason}")
+        yield (
+            f"warning: {run.rel} failed ({reason}); continuing because '{run.phase.name}' "
+            "is on_error: warn"
+        )
+
+
+def _read_failure(exc: BaseException) -> str:
+    """What the read actually raised, class and all.
+
+    `docker.SourceUnreadableError` normalises the TYPE so `apply()` has one clause to
+    catch, and its message carries the original's words but not its class — and the class
+    is the distinction that matters here. `EOFError` is a download that stopped;
+    `zlib.error` and `gzip.BadGzipFile` are bytes that arrived wrong; `PermissionError` is
+    a file this process may not open. Only the first two are answered by fetching it
+    again, so the report says which one happened rather than only that something did.
+    """
+    cause = exc.__cause__ or exc
+    return f"{type(cause).__name__}: {cause}"
+
+
+def _open(run: PhaseRun) -> BinaryIO:
+    """The bytes the client reads: the file (inflated when gzip) or the statement.
+
+    Opened here, at the moment it is streamed, and closed by the caller's `with` before
+    the next run. `expand()` deliberately probes nothing (see the module docstring), so
+    this is where a missing or unreadable file is first found out about — and a handle
+    held past its run is a file Windows will not let the later stages move or delete.
+    """
+    if run.path is None:
+        return io.BytesIO((run.statement or "").encode("utf-8"))
+    if run.gzip:
+        # `GzipFile` is a `BufferedIOBase`, which typeshed does not spell as
+        # `BinaryIO` although it reads exactly like one; the cast says so once.
+        return cast(BinaryIO, gzip.open(run.path, "rb"))
+    return cast(BinaryIO, run.path.open("rb"))
+
+
+def _client_argv(client: str, schema: str | None) -> list[str]:
+    """`mariadb -u root <schema>` — no `-p`, the password is in the exec environment."""
+    argv = [client, "-u", "root"]
+    if schema is not None:
+        argv.append(schema)
+    return argv
+
+
+def _describe(run: PhaseRun) -> str:
+    """`<phase>: <rel> -> <schema>`; a schema-less run says `(no schema)` instead.
+
+    By `rel`, never by the SQL: `CREATE USER ... IDENTIFIED BY` is a statement, and the
+    install log is something users paste into bug reports.
+    """
+    if run.schema is None:
+        return f"{run.phase.name}: {run.rel} (no schema)"
+    return f"{run.phase.name}: {run.rel} -> {run.schema}"
+
+
+def _last_line(lines: Sequence[str]) -> str:
+    """The last thing the client actually SAID, which is not `lines[-1]`.
+
+    Clients end their stderr with a newline, so `splitlines()` leaves blanks behind the
+    line that names which statement broke; quoting one of those would collapse the reason
+    into the exit-code fallback and hide the only useful sentence in the failure.
+    """
+    for line in reversed(lines):
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def _check_cancel(cancel: threading.Event | None) -> None:
+    """Stop between runs, with the one wording every cancel in the app uses (A10)."""
+    if cancel is not None and cancel.is_set():
+        raise InstallerError(f"The import was stopped. {IMPORT_CANCEL_NOTE}")
