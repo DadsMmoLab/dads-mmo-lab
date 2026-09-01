@@ -41,12 +41,16 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Mapping, Sequence
+import threading
+import time
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
+from yulon import docker, platform
 from yulon.catalog.catalog import ExtractPlan, ExtractTool
+from yulon.catalog.installer import InstallerError
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -305,14 +309,27 @@ def file_count(folder: Path) -> int:
     return total
 
 
+def counts(produces: Mapping[str, int], data_dir: Path) -> dict[str, int]:
+    """`{dir: files present}` — one walk per output folder, taken once and shared.
+
+    Split out of `shortfall()` so the gate and the sentence a user reads come
+    from the SAME walk. Counted twice, a folder that stopped listing between the
+    two calls makes the log line and the refusal disagree about the same number,
+    and the number is the whole content of both.
+    """
+    return {folder: file_count(data_dir / folder) for folder in produces}
+
+
+def short_of(seen: Mapping[str, int], produces: Mapping[str, int]) -> dict[str, tuple[int, int]]:
+    """The threshold rule over counts already taken; no filesystem in it at all."""
+    return {
+        folder: (seen[folder], need) for folder, need in produces.items() if seen[folder] < need
+    }
+
+
 def shortfall(produces: Mapping[str, int], data_dir: Path) -> dict[str, tuple[int, int]]:
     """`{dir: (have, need)}` for every output folder under its threshold; empty means all met."""
-    short: dict[str, tuple[int, int]] = {}
-    for folder, need in produces.items():
-        have = file_count(data_dir / folder)
-        if have < need:
-            short[folder] = (have, need)
-    return short
+    return short_of(counts(produces, data_dir), produces)
 
 
 def tool_satisfied(
@@ -372,3 +389,258 @@ def satisfied(
     if record is None or record.argv_hash != argv_hash(argv):
         return False
     return not shortfall(produces, data_dir)
+
+
+# ------------------------------------------------ running the plan, one container per tool
+
+CLIENT_MOUNT = "/client"
+"""Where the user's game client is mounted, read-only, in every extraction container."""
+
+OUT_MOUNT = "/out"
+"""Where `<server_dir>/data` is mounted read-write, and the container's working directory."""
+
+EXTRACT_CANCEL_NOTE = "Finished tools are kept; only the tool that was interrupted runs again."
+"""What a Stop costs in the extract stage — true because of the per-tool record."""
+
+EXTRACT_HARDENING: tuple[str, ...] = ("--network", "none", "--security-opt", "no-new-privileges")
+"""Two container options every extraction run gets, whatever the platform says.
+
+The threat is not `git.py`'s ("the repository chooses the program"), but it is
+not nothing either: these tools parse MPQ and WDT files, which are untrusted
+binary input from a client somebody downloaded, and a memory-safety bug in a
+C++ archive reader is the oldest bug there is. Both flags are free against a
+tool that reads a folder and writes another one:
+
+* `--network none` — nothing in an extraction plan resolves a name or opens a
+  socket, the image has no entrypoint script, and a payload that got in through
+  a malformed archive has nowhere to send anything. If a tool ever did want a
+  network the failure is immediate and legible, not silent.
+* `--security-opt no-new-privileges` — one of the two protections `container_t`
+  was providing for free until `container_security_args()` turns it off with
+  `label:disable` (`git.py` records the same pairing for the same reason). The
+  tools exec nothing, least of all anything setuid.
+
+**`--cap-drop ALL` and `--read-only` are deliberately NOT here.** Both change
+what the process may do to the filesystem it must write — `--read-only` its own
+root, `--cap-drop ALL` its ability to write a bind mount whose permissions do
+not already allow it — and on Linux `platform.container_user_args()` has already
+reduced the process to the invoking user, which is where most of `--cap-drop`'s
+value would have come from. What is left is Docker Desktop, where the tool runs
+as the image's root and where none of this can be measured from a test suite.
+`docker.ContainerRun` records that they are unmeasured against these tools;
+adding them on that footing would be shipping an install-blocking risk to buy
+back very little, and `security_args` is where a measured set lands later.
+"""
+
+
+class RunContainer(Protocol):
+    """`docker.run_container`'s shape, as a seam the tests fill with a recorder."""
+
+    def __call__(
+        self, spec: docker.ContainerRun, *, sink: docker.OutputSink, cancel: threading.Event | None
+    ) -> docker.AttachedRun: ...
+
+
+def container_security_args(*, enforcing: bool | None) -> tuple[str, ...]:
+    """Every container-level security option one extraction run gets, from one answer.
+
+    The hardening above, plus `platform.label_disable_args()`'s answer — asked
+    ONCE per plan by `run_plan()` and handed to every tool, so three containers
+    can never get three answers out of one `getenforce` that flickered.
+
+    **The SELinux half is a correctness fix, not defence in depth.** Measured on
+    `yulon-fedora-gate` (Fedora 44, Enforcing, Docker 29.7.2, 2026-09-01): a
+    confined container is DENIED the user's game client outright. `data/` is
+    fine without any label, because `stage_generate_compose` relabels the server
+    directory and `data/` is created under it afterwards and inherits
+    `container_file_t` — but the client is the user's own folder, somewhere else
+    entirely, and no `chcon` of ours ever reaches it. `:z`/`:Z` are not the
+    answer and must never be used on it: they RECURSIVELY relabel their source,
+    which here is somebody's game install, and that is the same reason
+    `docker.bind_mount_ok()`'s probe bans them. `label:disable` read the client
+    and left its context byte-identical, and let `data/` be written as well.
+
+    So this is one flag for the whole run rather than a suffix per mount: the
+    container holds both the folder it must not touch and the folder it must
+    write, and `platform.label_disable_args()` — `git.py`'s read path already
+    asks it — keeps the three answers three. On "could not ask" nothing is
+    added, because turning a container's confinement off is a security decision
+    and taking one on no evidence is what that function exists to prevent.
+    """
+    return (*EXTRACT_HARDENING, *platform.label_disable_args(enforcing=enforcing))
+
+
+def tool_run(
+    plan: ExtractPlan,
+    tool: ExtractTool,
+    *,
+    image_ref: str,
+    client_dir: Path,
+    data_dir: Path,
+    user_args: Sequence[str],
+    security_args: Sequence[str] = (),
+) -> docker.ContainerRun:
+    """The `docker run` for one tool, built by field so a test can assert it by field.
+
+    `--ulimit stack=-1` is data (`ulimit_stack_unlimited`): the vanilla vmap
+    extractor overflows the default stack on some maps and segfaults; nothing
+    else needs it, so nothing else gets it.
+
+    `user_args` and `security_args` both arrive already spelled, from
+    `platform.container_user_args()` and `container_security_args()`. Neither is
+    asked for here: this builds a description and asks the machine nothing, so a
+    test gets the same spec on every host it runs on.
+    """
+    return docker.ContainerRun(
+        image=image_ref,
+        argv=tuple(tool.argv),
+        mounts=(
+            docker.Mount(client_dir, CLIENT_MOUNT, read_only=True),
+            docker.Mount(data_dir, OUT_MOUNT),
+        ),
+        workdir=OUT_MOUNT,
+        user_args=tuple(user_args),
+        security_args=tuple(security_args),
+        ulimits=("stack=-1",) if plan.ulimit_stack_unlimited else (),
+    )
+
+
+def run_plan(
+    plan: ExtractPlan,
+    *,
+    image_ref: str,
+    client_dir: Path,
+    data_dir: Path,
+    run_container: RunContainer,
+    user_args: Sequence[str],
+    sink: docker.OutputSink,
+    cancel: threading.Event | None,
+    required_file: str | None = None,
+    client_build: int | None = None,
+    selinux_enforcing: Callable[[], bool | None] | None = None,
+) -> Iterator[str]:
+    """Run every tool the evidence does not vouch for, recording each as it finishes.
+
+    The evidence file is rewritten after every successful tool, not at the end,
+    so a Stop between tools loses nothing — that is the cancel note's whole
+    claim. Evidence written for another client or plan is replaced at the
+    start: its records are worthless, and keeping them would let a count that
+    happens to pass skip a tool that read the wrong archives.
+
+    `required_file` is the client spec's; `client_build` is only spoken, in the
+    shortfall refusal, because the count gate is the real check of the build.
+
+    `selinux_enforcing` is the seam for the one question here that is asked of
+    the machine. It is resolved at call time rather than bound as a default, so
+    a test that patches `platform.selinux_enforcing` is actually seen — the trap
+    `platform.container_user_args()` records against itself — and it is asked
+    exactly once, before the first container, for the reason
+    `container_security_args()` gives.
+
+    Raises:
+        InstallerError: a tool failed, was cancelled, could not be started at
+            all, or exited 0 with too few files.
+    """
+    data_dir.mkdir(parents=True, exist_ok=True)
+    ask = selinux_enforcing if selinux_enforcing is not None else platform.selinux_enforcing
+    security_args = container_security_args(enforcing=ask())
+    expected = expected_evidence(plan, client_dir, required_file)
+    current = read_evidence(data_dir)
+    if current is not None and not same_stage(current, expected):
+        yield "the extracted data is for another client or plan; extracting everything again"
+        current = None
+    if current is None:
+        current = expected
+        write_evidence(data_dir, current)
+    for tool in plan.tools:
+        if tool_satisfied(tool, data_dir, current, expected):
+            seen = counts(tool.produces, data_dir)
+            yield f"{tool.name}: already extracted ({_counts_text(seen)})"
+            continue
+        yield f"{tool.name}: running {' '.join(tool.argv)}"
+        spec = tool_run(
+            plan,
+            tool,
+            image_ref=image_ref,
+            client_dir=client_dir,
+            data_dir=data_dir,
+            user_args=user_args,
+            security_args=security_args,
+        )
+        run = run_container(spec, sink=sink, cancel=cancel)
+        current, seen = _conclude(tool, run, data_dir, current, cancel, client_build)
+        yield f"{tool.name}: done ({_counts_text(seen)})"
+
+
+def _conclude(
+    tool: ExtractTool,
+    run: docker.AttachedRun,
+    data_dir: Path,
+    current: Evidence,
+    cancel: threading.Event | None,
+    client_build: int | None,
+) -> tuple[Evidence, dict[str, int]]:
+    """Turn one tool's exit into a record, or into the refusal that explains it.
+
+    Four endings, kept four, because the sentence differs for each and three of
+    them are not "the extraction failed":
+
+    1. **Stopped.** `CANCELLED_RETURNCODE`, or a cancel token that was set while
+       the tool was exiting (`run_attached()` only reports the sentinel while it
+       is still reading, so a tool that finished in the same instant comes back
+       0 — recording it and marching on would start the NEXT tool after the user
+       said stop).
+    2. **Never started.** No docker CLI to run at all. "The tool failed" is a
+       sentence about a tool that ran; nothing did, and the help text is the
+       whole answer. `docker.cli_missing_run()` owns that shape, both halves of
+       it, because `docker run` returns the CONTAINER's status and a binary
+       missing inside the image genuinely exits 127.
+    3. **Failed.** Its exit status and its last words, which is all we know.
+    4. **Finished and fell short.** Exit 0 with too few files: an incomplete
+       client, the wrong expansion, a `data/` emptied by hand — or a folder
+       nobody could list, which `file_count()` deliberately walks to "too few"
+       so nothing is ever skipped on evidence nobody read. That is right, and it
+       leaves the CAUSE unknown, so the refusal names both possibilities rather
+       than accusing the user's client of a permissions problem in our own
+       output folder.
+
+    Only the fourth counts the folders, and it counts them once: the numbers in
+    the refusal are the numbers the gate read, and so are the ones in the
+    caller's "done" line.
+    """
+    if run.returncode == docker.CANCELLED_RETURNCODE or (cancel is not None and cancel.is_set()):
+        raise InstallerError(f"{tool.name} was stopped. {EXTRACT_CANCEL_NOTE}")
+    if docker.cli_missing_run(run):
+        raise InstallerError(
+            f"{tool.name} could not be started, so the client was never read. "
+            f"{docker.last_words(run.tail)}"
+        )
+    if run.returncode != 0:
+        raise InstallerError(
+            f"{tool.name} failed (exit {run.returncode}). Its last words were: "
+            f"{docker.last_words(run.tail)}"
+        )
+    seen = counts(tool.produces, data_dir)
+    short = short_of(seen, tool.produces)
+    if short:
+        told = ", ".join(
+            f"{folder}: {have} files, at least {need} expected"
+            for folder, (have, need) in short.items()
+        )
+        build = f" for client build {client_build}" if client_build is not None else ""
+        raise InstallerError(
+            f"{tool.name} finished but produced too little ({told}){build}. The server WILL "
+            f"fail to load maps from this, so nothing was recorded. Check that the client "
+            f"folder is a complete client of the right expansion, and that {data_dir} could "
+            "be read — a folder that could not be listed counts as empty here, and the log "
+            "names it — then try again."
+        )
+    record = ToolRecord(tool.name, argv_hash(tool.argv), int(time.time()))
+    updated = with_record(current, record)
+    write_evidence(data_dir, updated)
+    return updated, seen
+
+
+def _counts_text(seen: Mapping[str, int]) -> str:
+    """Counts already taken, as one clause of a log line."""
+    return ", ".join(f"{folder}: {have} files" for folder, have in seen.items())

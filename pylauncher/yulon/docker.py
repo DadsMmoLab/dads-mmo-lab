@@ -2351,6 +2351,26 @@ class AttachedRun:
     tail: tuple[str, ...] = ()
 
 
+def cli_missing_run(run: AttachedRun) -> bool:
+    """True if this result is "there was no docker CLI to run", not something a command said.
+
+    `_cli_missing()`'s rule for the streamed shape, and public because the
+    callers that need it are stages in other modules: a tool that never started
+    and a tool that started and failed are different sentences to a user, and
+    only this module knows which returncode and which text mean the first one.
+
+    Both halves are checked, for `_cli_missing()`'s reason and one more of its
+    own. `docker run` and `docker exec` return the CONTAINER's status, so 127 —
+    "command not found" — is a status a real container genuinely produces when
+    the image does not hold the binary it was asked for. That is the extraction
+    stage's most likely 127 by some distance, and reading it as "Docker is not
+    installed" would send the user to reinstall a Docker that is working.
+    """
+    return run.returncode == _CLI_MISSING_RETURNCODE and run.tail == (
+        platform.DOCKER_CLI_MISSING_HELP,
+    )
+
+
 def run_attached(
     argv: list[str],
     cwd: Path,
@@ -2843,7 +2863,7 @@ class ContainerRun:
     command line is world-readable. A secret goes through `exec_stdin()`, which
     forwards it from this process's environment and never spells it.
 
-    There is deliberately no field for `git.py`'s `_READ_ONLY_CONTAINER_ARGS`
+    There is deliberately no field NAMING `git.py`'s `_READ_ONLY_CONTAINER_ARGS`
     (`--network none --cap-drop ALL --security-opt no-new-privileges
     --read-only`). Those exist there because that container is handed a
     STRANGER'S repository — content this app did not make, which gets to choose
@@ -2852,7 +2872,7 @@ class ContainerRun:
     output to a bind mount; `--read-only` and a dropped capability set are not
     free there, and none of it has been measured against the extraction tools.
     A caller that wants hardening states it, and states why, at its own call
-    site rather than getting it silently from here.
+    site — which is what `security_args` is for.
     """
 
     image: str
@@ -2862,6 +2882,31 @@ class ContainerRun:
     env: Mapping[str, str] = field(default_factory=dict)
     user_args: tuple[str, ...] = ()
     ulimits: tuple[str, ...] = ()
+    security_args: tuple[str, ...] = ()
+    """The caller's container-level security decision, verbatim, or nothing.
+
+    `user_args`'s twin, and passed the same way and for the same reason: the
+    policy has one home in `platform` — `container_user_args()` there,
+    `label_disable_args()` here — and this module knows nothing about a
+    platform's rules (style-guide §3). Both answers arrive already spelled as
+    docker options so that neither decision is respelled at the seam.
+
+    **This is where the SELinux answer for a `docker run` lives, and `Mount` is
+    where it does not.** Measured on `yulon-fedora-gate` (Fedora 44, Enforcing,
+    Docker 29.7.2, 2026-09-01): a confined container cannot read the user's game
+    client at all, because the client is the user's own directory outside the
+    server folder, so no `chcon` of ours ever reaches it. The mount-suffix fix
+    is not available — `:z` and `:Z` RECURSIVELY relabel their source, and the
+    source here is somebody's game install — while `--security-opt
+    label:disable` read the client and left its context byte-identical. It is a
+    property of the RUN, not of one mount: the extraction container holds both
+    the client it must not touch and the `data/` it must write, and one
+    container-wide flag serves both.
+
+    Empty by default and emitted verbatim, so a run that states nothing gets
+    nothing: turning a container's confinement off is a decision, and a default
+    would be one nobody took.
+    """
 
     def to_argv(self) -> list[str]:
         """The `docker` argv (without the program name), fields in a fixed order.
@@ -2878,17 +2923,20 @@ class ContainerRun:
         `ContainerGit._capture()` — which is `run`, `--rm`, options, `-v`, `-w`,
         image, then theirs.
 
-        The user args sit right after `--rm` here rather than just before the
-        image as `git.py` places them. Docker reads its own options in any order
-        up to the image name, so the position carries no meaning; the test
-        audits by flag rather than by index for the same reason.
+        The user args, and the security args behind them, sit right after `--rm`
+        here rather than just before the image as `git.py` places them. Docker
+        reads its own options in any order up to the image name, so the position
+        carries no meaning; the test audits by flag rather than by index for the
+        same reason. Both go in verbatim: they arrive from `platform` already
+        spelled as options, and re-spelling either here would be a second
+        spelling of a decision that has one home.
 
         Raises:
             ValueError: a mount's host path is not absolute. Docker refuses a
                 relative bind source with a daemon-side error that names
                 neither the field nor the caller; refusing here does both.
         """
-        argv = ["run", "--rm", *self.user_args]
+        argv = ["run", "--rm", *self.user_args, *self.security_args]
         for limit in self.ulimits:
             argv += ["--ulimit", limit]
         for mount in self.mounts:
