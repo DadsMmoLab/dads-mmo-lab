@@ -1278,6 +1278,58 @@ standing rule's second exit.
 **unweighed rather than intentional**. "Inherited and shipped since 7.1" is not evidence it was
 decided, and writing it down this way is what stops the next reader treating silence as approval.
 
+### 22. The ownership check that guards the spine does not guard `apply.py` — 2026-09-01, OPEN
+
+**This is PR #142's shape, still open, in a second engine.** Found by asking a sharper question than
+"is this the only place": *is every caller that acts destructively **downstream** of it?* **A
+uniqueness claim can be true and still protect nothing.**
+
+`native.py`'s `read_claim()` genuinely **is** the only folder-ownership answer, and every
+`StagedInstaller` clone path is downstream of it — `run()` → `_guard()` → `read_claim`, then per-stage
+`refuse_unowned_checkout()` → `claimed_this_folder()` → `read_claim`, before `_clone()` →
+`git.clone`. No early exit past `_guard()`. The docstring's claim is accurate.
+
+**`yulon/apply.py` is a parallel destructive engine that never asks.** Verified:
+`grep -n "read_claim\|claimed_this_folder\|refuse_unowned\|is_ours" yulon/apply.py` → **no hits**;
+`apply.py` does not import `yulon.catalog.native` **at all**. So this is not a missed branch — **the
+check was never wired in.**
+
+The reachable path: `apply.py:441` `Applier.install()` → `apply.py:448` `self.git.clone(CloneSpec(...))`
+→ `git.py:355` `RunnerGit.clone`, which is **`shutil.rmtree(spec.dest)`** (`git.py:361`) when the dest
+exists without `.git`, or **`git reset --hard FETCH_HEAD`** (`git.py:430`) when it does. Reachable from
+the GUI at `ui/controller_view.py:1363` and from `wotlk_modules.apply_module()`. Also
+`Applier.remove()` → `shutil.rmtree` (`apply.py:494`, `:547`), and `_client()` →
+`shutil.copytree(..., dirs_exist_ok=True)` into the user's `client_dir/Interface/AddOns`
+(`apply.py:642`) with no gate at all.
+
+**Mitigating, and stated so the entry is not read as worse than it is:** the dest is
+`server_dir/modules/<id>`, a path the app creates — narrower than "an arbitrary user directory". But
+`azerothcore.py:139-143` records a user's own `modules/` tree as a **past incident**, so the narrowing
+is not as reassuring as it sounds. This is **wow-wotlk only** and entirely **pre-existing** — nothing
+in Phase 7.3 touches it.
+
+Two lesser notes from the same audit:
+- **`composegen.is_ours()` and `dockerfile._look()` are two independent implementations of one
+  file-level marker rule.** They agree today; **nothing enforces that they keep agreeing.**
+- **`catalog_view._looks_like()` fails OPEN** (`catalog_view.py:151-162`) — and it is the supply route
+  that admits a foreign folder into the `Applier`.
+
+### 23. A future-version state file is silently downgraded on disk — 2026-09-01, OPEN, pre-existing
+
+Both families share one state filename (`STATE_FILE = ".yulon-install.json"`, no family suffix). A
+**cross-family** file is refused by `_guard` on `game_id` (`native.py:894`) and `family` (`:899`) — but
+**after** a silent name-drop.
+
+The quiet case is a **same-family, future-version** state file: stage names the running binary does not
+know are dropped at `native.py:335` **with no log at any level**, `write_state` then persists the
+**post-filter** tuple (`:709`, `:377`), so **an older binary permanently strips the newer names from
+disk**, and the only user-facing line (`:667-669`) prints the already-filtered tuple. A downgrade is
+therefore lossy and silent in both directions.
+
+Unreachable for cmangos today (it is not in `FAMILIES` until K.8). Recorded now because **it is
+precisely the mechanism that would hide a `stages()`/`STAGE_NAMES` mismatch** — the thing K.2's
+inertness argument depends on being visible. **Note it in K.8's brief.**
+
 ### One thing worth keeping
 
 Three of these have an obvious fix that is **wrong**, and two of them arm a worse bug:
