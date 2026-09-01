@@ -955,8 +955,19 @@ was found by reading code; each is a line in a resolved compose document from a 
   write - and one container-wide flag serves both. So the field belongs on `ContainerRun`, not on
   `Mount`, and Group I should ask `platform.label_disable_args(enforcing=selinux_enforcing())` for it,
   which already keeps the three-outcome answer (enforcing / not / could-not-ask).
-  *Recorded, not fixed:* H.1 deliberately shipped no uncalled field, and Group I is where the caller
-  arrives. It must not land without this.
+  **FIXED 2026-09-01 in task I.5**, which is the task with the caller. `ContainerRun` gained
+  `security_args`, fed from `container_security_args(enforcing=platform.selinux_enforcing())` and
+  asked **once per plan** — container-level, as measured, with no `label` field on `Mount` and `:z`
+  never on an extraction mount. H.1 was right to ship no uncalled field.
+
+  **One residual risk, narrow and inherited rather than introduced.** "Could not ask" ships with
+  confinement **on**: `label_disable_args` adds nothing for `None`, so a host where `getenforce`
+  EXISTS but fails at runtime — the one case `selinux_enforcing()` answers `None` — still meets the
+  denial this entry describes. That is the right default (disabling container confinement on no
+  evidence is itself a decision, and it reuses `git.py`'s existing policy rather than inventing a
+  second one), and it is the same three-outcome discipline the rest of this list turns on. Recorded
+  so the next person seeing a Fedora denial checks whether `getenforce` answered at all before
+  assuming this entry is stale.
 
 - **`composegen.write_plan()` skips a CRLF file forever, and accuses the user when a read flickers** —
   2026-09-01, found while writing I.3's own version of the same "may we overwrite this" question, and
