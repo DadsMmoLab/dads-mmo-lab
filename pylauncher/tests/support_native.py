@@ -20,9 +20,13 @@ rather than answering each question the way the code under test would like.
 
 from __future__ import annotations
 
+import subprocess
+import threading
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import BinaryIO
 
 from yulon import docker, git, platform, resources
 from yulon.catalog import composegen, native, preflight
@@ -97,6 +101,72 @@ class Recorder:
     db_healthy: bool = True
     ready: bool = True
 
+    container_runs: list[docker.ContainerRun] = field(default_factory=list)
+    """Every `docker run` the engine asked for, as the typed spec — asserted by field."""
+
+    copied: list[tuple[str, str, Path]] = field(default_factory=list)
+    sql_calls: list[str] = field(default_factory=list)
+    """The first line of every stream fed to `exec_stdin`, plus every `sql_query` statement."""
+
+    distros: list[str | None] = field(default_factory=list)
+    """The `wsl_distro` of every `exec_stdin`/`sql_query` call, in order — recorded, not dropped.
+
+    `sqlplan.apply()` passes `wsl_distro=` on EVERY call, so a double without
+    the keyword is a `TypeError` on the first statement rather than a wrong
+    answer. Recording it is what makes the seam's daemon choice assertable:
+    both Protocols (`sqlplan.ExecStdin`, `sqlplan.SqlQuery`) declare the
+    keyword because a container name means nothing to a daemon that does not
+    hold it, and a double that accepted and discarded it would let a call go to
+    the wrong daemon with nothing in a test to show it.
+    """
+
+    volumes: set[str] = field(default_factory=set)
+    """Named volumes that EXIST on this machine (`docker volume inspect` answers)."""
+
+    run_result: docker.AttachedRun = docker.AttachedRun(0, ("extracted",))
+    produce: dict[str, int] = field(
+        default_factory=lambda: {
+            "dbc": 100,
+            "maps": 100,
+            "Buildings": 100,
+            "vmaps": 100,
+            "mmaps": 500,
+        }
+    )
+    """What a successful container run leaves under the `/out` mount — the real tools' shape.
+
+    The names and the counts are `wow-tbc`'s own `extract.tools[*].produces`
+    plus `mmaps.min_files`, and `test_families_cmangos.py` asserts that against
+    the catalog: a folder no tool produces would be a fixture the code never
+    looks at, and the shortfall it is supposed to exercise could never fire.
+    """
+
+    conf_dist: dict[str, str] = field(
+        default_factory=lambda: {
+            "mangosd.conf.dist": 'LoginDatabaseInfo = "old"\nDataDir = "."\nOther = 1\n',
+            "realmd.conf.dist": 'LoginDatabaseInfo = "old"\n',
+            "aiplayerbot.conf.dist": "AiPlayerbot.MinRandomBots = 50\n",
+            "ahbot.conf.dist": "AuctionHouseBot.Chance.Sell = 0\n",
+        }
+    )
+    failing_sql: str = ""
+    """A substring; any stream containing it exits 1 with a mariadb-shaped stderr."""
+
+    query_answer: str = "20000\n"
+    """What `sql_query` answers, VERBATIM — trailing newline and all.
+
+    `docker.sql_query()` returns the client's stdout untouched, and under
+    `--batch --skip-column-names` that distinction carries information no
+    caller can get back once it is gone: one row holding the empty string
+    prints `"\\n"`, no rows print `""`. A default of `"20000"` — no newline —
+    is a fixture more convenient than reality, and a double that can never
+    produce a trailing newline cannot exercise the branch it will be pointed
+    at. Set it to `""` or to `"\\n"` to drive those two apart.
+    """
+
+    on_clone: Callable[[Path], None] | None = None
+    """Called with the dest after each clone — the CMaNGOS tests lay SQL fixtures with it."""
+
     def probe(self) -> docker.ImportState:
         """What the databases read as — and `unreadable` until one is running.
 
@@ -148,12 +218,90 @@ class Recorder:
             raise docker.DockerCommandError(self.db_start_error)
         self.db_started = True
 
+    def run_container(
+        self,
+        spec: docker.ContainerRun,
+        *,
+        sink: docker.OutputSink,
+        cancel: threading.Event | None = None,
+    ) -> docker.AttachedRun:
+        """One `docker run --rm`: its output goes to the sink, its files land on the `/out` bind.
+
+        Nothing is produced when the run failed. A tool that segfaults leaves
+        the folder it was going to fill empty, and that emptiness is exactly
+        what `extract.shortfall()` reads — a double that filled `/out` anyway
+        would make every "the tool failed" test pass for the wrong reason.
+        """
+        self.calls.append(f"run:{spec.argv[0]}")
+        self.container_runs.append(spec)
+        sink(f"{spec.argv[0]} ran")
+        out = next((m.host for m in spec.mounts if m.guest == "/out"), None)
+        if out is not None and self.run_result.returncode == 0:
+            for name, count in self.produce.items():
+                folder = out / name
+                folder.mkdir(parents=True, exist_ok=True)
+                for index in range(count):
+                    (folder / f"{index:05d}.bin").write_bytes(b"x")
+        return self.run_result
+
+    def copy_from_image(self, image: str, src: str, dest: Path) -> None:
+        """`docker create`+`cp`+`rm`: a `.conf.dist` file, or the whole etc directory."""
+        self.calls.append(f"copy:{src}")
+        self.copied.append((image, src, dest))
+        if src.endswith(".conf.dist"):
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(self.conf_dist[Path(src).name], encoding="utf-8")
+            return
+        dest.mkdir(parents=True, exist_ok=True)
+        for name, text in self.conf_dist.items():
+            (dest / name).write_text(text, encoding="utf-8")
+
+    def exec_stdin(
+        self,
+        container: str,
+        argv: Sequence[str],
+        source: BinaryIO,
+        *,
+        env: Mapping[str, str],
+        wsl_distro: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        text = source.read().decode("utf-8", errors="replace")
+        first = text.strip().splitlines()[0] if text.strip() else ""
+        self.calls.append("sql")
+        self.sql_calls.append(first)
+        self.distros.append(wsl_distro)
+        if self.failing_sql and self.failing_sql in text:
+            return subprocess.CompletedProcess(
+                list(argv), 1, "", "ERROR 1064 (42000) at line 1: You have an error in your SQL"
+            )
+        return subprocess.CompletedProcess(list(argv), 0, "", "")
+
+    def sql_query(
+        self,
+        container: str,
+        client: str,
+        password: str,
+        schema: str | None,
+        statement: str,
+        *,
+        wsl_distro: str | None = None,
+    ) -> str:
+        self.calls.append("query")
+        self.sql_calls.append(statement)
+        self.distros.append(wsl_distro)
+        return self.query_answer
+
+    def volume_exists(self, name: str) -> bool:
+        return name in self.volumes
+
     def seams(self, **overrides: object) -> native.Seams:
         def clone(spec: git.CloneSpec) -> None:
             self.calls.append(f"clone:{spec.url}")
             self.clones.append(spec)
             (spec.dest / ".git").mkdir(parents=True, exist_ok=True)
             self.remotes[spec.dest] = spec.url
+            if self.on_clone is not None:
+                self.on_clone(spec.dest)
             if spec.url == ENTRY.emulator.sources[0].url:
                 # What the real repository leaves behind, not just `.git`.
                 path = spec.dest / composegen.BASE_FILE
@@ -209,6 +357,11 @@ class Recorder:
             selinux_enforcing=lambda: False,
             fs_type=lambda path: "ext4",
             keep_awake=lambda: nullcontext(),
+            run_container=self.run_container,
+            copy_from_image=self.copy_from_image,
+            exec_stdin=self.exec_stdin,
+            sql_query=self.sql_query,
+            volume_exists=self.volume_exists,
         )
         for key, value in overrides.items():
             setattr(seams, key, value)
