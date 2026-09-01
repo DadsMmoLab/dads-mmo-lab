@@ -1278,7 +1278,7 @@ standing rule's second exit.
 **unweighed rather than intentional**. "Inherited and shipped since 7.1" is not evidence it was
 decided, and writing it down this way is what stops the next reader treating silence as approval.
 
-### 22. The ownership check that guards the spine does not guard `apply.py` — 2026-09-01, OPEN
+### 22. The ownership guard exists, is reviewed, and is sitting in an unmerged PR — 2026-09-01, SEQUENCING
 
 **This is PR #142's shape, still open, in a second engine.** Found by asking a sharper question than
 "is this the only place": *is every caller that acts destructively **downstream** of it?* **A
@@ -1307,6 +1307,29 @@ the GUI at `ui/controller_view.py:1363` and from `wotlk_modules.apply_module()`.
 `azerothcore.py:139-143` records a user's own `modules/` tree as a **past incident**, so the narrowing
 is not as reassuring as it sounds. This is **wow-wotlk only** and entirely **pre-existing** — nothing
 in Phase 7.3 touches it.
+
+**CORRECTED THE SAME DAY — this is a SEQUENCING problem, not a missing guard.** The fix exists and is
+green in **open PR #142** (`fix/modules-tab-ownership`), which is **not** an ancestor of
+`yulon-phase7` (`git merge-base --is-ancestor` → not merged). That branch adds `_require_own_clone()`
+(7 occurrences) gating `install()`, `remove()` and `configure()`, plus the four-fact adoption rule and
+`server_dir_claim()`, which calls `native.read_claim(server_dir, valid=())` at `apply.py:221`.
+
+**Two consequences, and they are the actionable part:**
+1. **Do not "fix" this independently on `yulon-phase7`.** #142 is the side with the ownership work;
+   a second answer hands Baerthe two implementations to reconcile. Anything merged here that touches
+   `Applier` risks conflicting with it.
+2. **The exposure window is however long #142 takes to merge.** On `yulon-phase7` today,
+   `Applier.install()` → `git.clone` → `rmtree` / `reset --hard` is reachable from the GUI.
+
+**A method note worth more than the entry, because it nearly cost a wrong conclusion twice.** The
+audit's supporting claim was *"`apply.py` does not import `yulon.catalog.native` at all"* — true on
+`yulon-phase7`, and **still true at module scope on #142**, because the import is **deliberately
+deferred inside `server_dir_claim()`**: `apply.py` is imported by `networking`, `accounts`,
+`maintenance`, `repair` and the UI, and none of them should load the native install engine to read one
+JSON file. So **"does not import X" is a strictly weaker check than "does not call X", and a deferred
+import makes the two disagree.** The `read_claim|claimed_this_folder|refuse_unowned|is_ours` grep is
+the one that stays correct across that merge; the import-based half of the claim would have read as
+"still unguarded" over a branch that guards it.
 
 Two lesser notes from the same audit:
 - **`composegen.is_ours()` and `dockerfile._look()` are two independent implementations of one
