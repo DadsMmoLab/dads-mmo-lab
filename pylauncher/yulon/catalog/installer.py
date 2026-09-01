@@ -857,6 +857,26 @@ def installer_for(
     engine's `preflight()`, so an unsupported click is refused by whoever
     calls it.
 
+    There is a third state, because the DATA for a game arrives before the
+    engine that reads it: 7.3 writes the three CMaNGOS games' `native` blocks
+    in its first group and registers the family that consumes them four groups
+    later. An entry read on the block alone is therefore, for the length of
+    that gap, taken away from the bash script that installs it today and handed
+    an "install family this app does not have" refusal instead — a working path
+    traded for a dead end, so that code nobody has written yet can not run. So
+    the question here is whether THIS BUILD HAS the family
+    (`families.is_registered()`), not whether the entry names one, and an entry
+    whose family is missing goes back to its script. It says so in the log, in
+    a line naming the family and the script: a fallback nobody can see is how a
+    misspelled family becomes a week of wondering why the new engine never
+    runs. When there is no script left to fall back to, `family_for()` raises
+    the sentence it already raises, unchanged — an entry with neither an engine
+    nor a script IS the app bug that sentence describes.
+
+    That middle branch is a bridge with a demolition date on it. 7.2 deletes
+    the script path, which is the thing it falls back to, so it goes out with
+    the same commit and this returns to deciding on one fact again.
+
     `import_probe`/`reset_unfinished` are per-game seams the CALLER supplies
     (`install_wiring.py`), because `catalog/` must not import a controller
     package. They are ignored on the script path, which runs its import
@@ -868,9 +888,16 @@ def installer_for(
     exceptions and a dataclass — buys nothing but an import.
     """
     from yulon.catalog import native
-    from yulon.catalog.families import family_for
+    from yulon.catalog.families import family_for, is_registered
 
-    if entry.install.native is None:
+    block = entry.install.native
+    if block is None:
+        return Installer(entry, installers_root=installers_root, platform_id=platform_id)
+    if not is_registered(block.family) and entry.install.script:
+        logger.info(
+            f"{entry.id} names install family {block.family!r}, which has no engine in this "
+            f"build; installing it with {entry.install.script} instead"
+        )
         return Installer(entry, installers_root=installers_root, platform_id=platform_id)
     return family_for(entry)(
         entry,

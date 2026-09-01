@@ -345,8 +345,16 @@ def _say(ctx: native.StageContext) -> Iterator[str]:
 def test_families_maps_each_id_to_its_class_and_an_unknown_one_is_a_sentence() -> None:
     assert FAMILIES["azerothcore"] is AzerothCoreInstaller
     assert family_for(ENTRY) is AzerothCoreInstaller
+    # TBC used to stand in for "no native block at all". Since G.4 it stands in
+    # for the other refusal: the block is there and names `cmangos`, whose class
+    # K.8 registers. `installer_for()` never reaches this for TBC — an
+    # unregistered family goes back to the script — but `family_for()` is public
+    # and still owes a sentence rather than a `KeyError`.
+    with pytest.raises(InstallerError, match="install family this app does not have"):
+        family_for(TBC)
+    bare = TBC.model_copy(update={"install": TBC.install.model_copy(update={"native": None})})
     with pytest.raises(InstallerError, match="install.native"):
-        family_for(TBC)  # no native block yet in 7.1
+        family_for(bare)
 
 
 def test_a_family_must_agree_with_the_entry_about_its_family(tmp_path: Path) -> None:
