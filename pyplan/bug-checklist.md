@@ -1192,7 +1192,8 @@ missed. Update this entry to FIXED with the mutation evidence when it lands.
 (`create` is empty) while still splicing `{{DB_PASSWORD}}` into `IDENTIFIED BY '...'` through
 `expand()`'s token fill. That looked like the same gap one layer up. It is not: `composegen.render()`
 calls `_refuse_unsafe(password, ...)` at `composegen.py:318`, and
-`_UNSAFE_SCALAR_CHARS = frozenset("$\"\;#{}
+`_UNSAFE_SCALAR_CHARS = frozenset("$\"\;#{}
+
 	'")` **includes the single quote, the backslash
 and both line breaks** — so such a password is refused when the compose files are generated, which is
 stage 4 of 12, six stages before `import`.
@@ -1204,6 +1205,57 @@ silently. Named here so that edit gets challenged.
 validating its schemas, so a plan with an empty `create` and a bogus `marker_db` is refused by
 `expand()` and silently accepted here. The two call sites are not equivalent — and **Tortoise is
 exactly the empty-`create` case**, so the asymmetry sits on a live path.
+
+### 20. The secret-in-a-generated-file rule was decided for compose and never carried to the Dockerfile — 2026-09-01, OPEN
+
+Found while implementing K.2, by asking a question the plan did not raise. **Nothing exploits it
+today; the exposure is one template edit away.**
+
+`CmangosInstaller._tokens(ctx)` is ONE mapping used for the Dockerfile, the conf tables, the SQL
+statements and verify — and it contains `DB_PASSWORD`. **K.4 hands that whole mapping to
+`dockerfile.render()`** (plan ~line 4884). `dockerfile.render()` → `_render_one()` →
+`composegen.fill()`, which refuses an **unfilled** `{{TOKEN}}` and says nothing about a spelled one —
+its own docstring: *"Unused tokens are fine."*
+
+**The compose side refuses this explicitly, and deliberately.** `composegen.generate()`
+(`composegen.py` ~L322–329) raises `ComposeGenError` when a compose template contains
+`{{DB_PASSWORD}}` while `password.mode == "generated"` — *"spell it `${DB_ROOT_PASSWORD:?…}` so the
+secret stays in .env"* — and additionally omits the key from the token map in that mode, described in
+the source as "belt to the refusal's braces". **`wow-tbc` is `mode: "generated"`.**
+
+So the decision *the secret must not be rendered into a generated file* was taken once, for compose,
+and not carried across. **A Dockerfile is the worse of the two:** it sits in the build context, and
+through an `ENV` or `RUN` it lands in an image layer that `docker history` prints — surviving long
+after the file is deleted.
+
+Verified today: none of the six shipped `Dockerfile.tmpl`/`dockerignore.tmpl` names `{{DB_PASSWORD}}`.
+K.2 added `test_no_dockerfile_template_names_the_secret_this_one_mapping_carries`, mutation-verified
+by adding `ENV DB_PASSWORD={{DB_PASSWORD}}` to `wow-tbc/native/Dockerfile.tmpl`.
+
+**A test over today's templates is not the same guard as a by-name refusal**, which is what compose
+has. **Decide before K.4 lands:** give `dockerfile.render()` the same refusal, or split `_tokens()` so
+the Dockerfile mapping cannot carry the secret at all. Recorded as undecided rather than settled with
+a docstring.
+
+### 21. `_stream()`/`_pump()` leak a running worker when the generator is abandoned — 2026-09-01, OPEN, inherited
+
+`CmangosInstaller._stream()` starts a worker thread and joins it only after the queue drains. If the
+consumer abandons the generator — a downstream exception, a partial `list()` — `GeneratorExit` fires
+at the `yield`, `worker.join()` is skipped, and **the worker keeps running and keeps pushing into a
+queue nobody reads.** For the extract stage that is a live multi-hour extraction with no owner.
+
+**The shape is inherited, not new:** `native.py:1507`'s `_pump()` is byte-identical in structure and
+has shipped since 7.1.
+
+**Mitigated in practice, by ordering rather than by structure** (see the sixth standing rule):
+`LogPanel.stop()` sets the cancel event **before** `request_stop()`, so `run_container(cancel=…)`
+returns and the daemon thread ends by itself; `install_wiring.py:208` exhausts the generator. An
+abandonment *without* a cancel is not prevented by anything.
+
+Not fixed: a `join()` in a `finally` would block the abandoner for the remaining hours of the run,
+which is worse. Options not yet weighed: setting the cancel event in the `finally`, a bounded join, or
+a weak reference. **No note anywhere says `_pump`'s hole was ever considered**, which is why this is
+recorded rather than assumed intentional.
 
 ### One thing worth keeping
 
