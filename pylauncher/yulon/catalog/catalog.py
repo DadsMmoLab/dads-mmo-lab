@@ -10,6 +10,7 @@ table (README §13), database names, what client the user must supply
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
@@ -197,6 +198,264 @@ class AzerothCoreData(_Strict):
     )
 
 
+MpqDepth = int | Literal["recursive"]
+"""How deep under `Data/` the MPQ count looks: a `find -maxdepth` value, or everywhere.
+
+TBC's script searched with no depth limit, Vanilla's with `-maxdepth 1`, Tortoise's with
+`-maxdepth 2` — three scripts, three numbers, so it is data (roadmap 7.3)."""
+
+
+class ClientSpec(_Strict):
+    """What the user's client folder must look like before an install may read it.
+
+    Refusals and warnings only — `families/clientdir.py` turns these into preflight
+    checks, never into a "Continue anyway?" prompt, because the engine cannot ask.
+    """
+
+    required_file: str | None = Field(
+        default=None,
+        description=(
+            "A file that proves the expansion, relative to the client dir (`Data/expansion.MPQ` "
+            "for TBC, `Data/dbc.MPQ` for Vanilla). None disables this one rule — Tortoise's "
+            "7272 client has no single defining file — while `Data/` and the MPQ count still apply."
+        ),
+    )
+    min_mpq: int = Field(default=5, ge=1, description="Fewer MPQs than this is a WARNING.")
+    mpq_depth: MpqDepth = "recursive"
+    locale_mpq_required: bool = Field(
+        default=False,
+        description=(
+            "TBC keeps its DBC data in `Data/<locale>/*.MPQ`; none at depth 2 is a warning."
+        ),
+    )
+    near_client_warn_gb: float = Field(
+        default=8.0,
+        gt=0,
+        description=(
+            "Warn when the client's volume has less free space than this (extraction scratch)."
+        ),
+    )
+
+    @field_validator("mpq_depth")
+    @classmethod
+    def _depth_is_positive(cls, value: MpqDepth) -> MpqDepth:
+        if isinstance(value, int) and value < 1:
+            raise ValueError("mpq_depth must be >= 1 or 'recursive'")
+        return value
+
+
+class DockerfileSpec(_Strict):
+    """Tokens the per-game `Dockerfile.tmpl` takes from data."""
+
+    make_jobs: int = Field(
+        default=2,
+        ge=1,
+        description=(
+            "`make -j`. 2 is the scripts' number, chosen for a 16 GB Steam Deck: 2 GB per "
+            "compiler job was measured on AzerothCore, and an OOM-killed gcc presents as "
+            "'dies at the same % every retry'."
+        ),
+    )
+
+
+class ExtractTool(_Strict):
+    """One extractor run: its argv inside the image and what it must leave under `data/`."""
+
+    name: str = Field(min_length=1)
+    argv: tuple[str, ...] = Field(min_length=1)
+    produces: dict[str, int] = Field(
+        min_length=1,
+        description="Directory under `data/` → minimum file count that means the tool finished.",
+    )
+
+    @field_validator("produces")
+    @classmethod
+    def _counts_are_positive(cls, value: dict[str, int]) -> dict[str, int]:
+        for directory, count in value.items():
+            if count < 1:
+                raise ValueError(f"produces[{directory!r}] must be >= 1")
+        return value
+
+
+class RetrySpec(_Strict):
+    """Re-run named tools once when their log matches (Vanilla's vmap extractor segfaults)."""
+
+    when_log_matches: str = Field(min_length=1)
+    tools: tuple[str, ...] = Field(min_length=1)
+
+
+class ExtractPlan(_Strict):
+    """The extraction stage as data: which image's tools, in which order, with what evidence."""
+
+    image: str = Field(min_length=1, description="One of `NativeInstall.images`.")
+    tools: tuple[ExtractTool, ...] = Field(min_length=1)
+    ulimit_stack_unlimited: bool = Field(
+        default=False, description="`--ulimit stack=-1`; Vanilla's vmap tools need it."
+    )
+    retry: RetrySpec | None = None
+    stage_client: bool = Field(
+        default=False,
+        description=(
+            "Fallback if a tool insists on writing beside the client: lay a symlink farm "
+            "(`cp -rs /client /work`) on a tmpfs and run there. Still no writes into the client."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _retry_names_real_tools(self) -> ExtractPlan:
+        if self.retry is not None:
+            known = {tool.name for tool in self.tools}
+            unknown = sorted(set(self.retry.tools) - known)
+            if unknown:
+                raise ValueError(f"retry names tools that do not exist: {unknown}")
+        return self
+
+
+class MmapPlan(_Strict):
+    """The movement-map generator: its argv, and whether a shortfall refuses or warns."""
+
+    argv: tuple[str, ...] = Field(min_length=1)
+    min_files: int = Field(default=500, ge=1)
+    required: bool = Field(
+        default=True,
+        description=(
+            "False (Tortoise) turns a shortfall into a warning: bots need mmaps, a solo realm "
+            "does not."
+        ),
+    )
+
+
+class ConfPatch(_Strict):
+    """One conf file's `Key = value` table; values take the `{{TOKEN}}` grammar."""
+
+    keys: dict[str, str] = Field(min_length=1)
+    match_commented: bool = Field(
+        default=False,
+        description=(
+            "Also rewrite a `# Key = ...` line. The Vanilla `AiPlayerbot.SyncLevel*` seds relied "
+            "on this; everywhere else a commented key is left alone and the value is appended."
+        ),
+    )
+
+
+class ConfPatchTable(_Strict):
+    """Where the `.conf.dist` files come from inside the image, and how each is patched."""
+
+    source_dir: str = Field(
+        min_length=1, description="Absolute in-image dir of the `.conf.dist` files."
+    )
+    files: dict[str, ConfPatch] = Field(min_length=1)
+
+    @field_validator("source_dir")
+    @classmethod
+    def _absolute(cls, value: str) -> str:
+        if not value.startswith("/"):
+            raise ValueError(f"source_dir must be an absolute in-image path, got {value!r}")
+        return value
+
+
+class SqlPhase(_Strict):
+    """One ordered step of the import: files (globs, relative to the server dir) or statements.
+
+    Exactly one of `files`/`statements`; at most one of `into`/`into_each` (neither is a
+    schema-less run, e.g. Tortoise's own `create_databases.sql`). `into_each` maps a schema
+    to ITS glob, so `files` has no meaning beside it and `statements` cannot be split per db.
+    Statements take the `{{TOKEN}}` grammar and are filled by `sqlplan.expand()` (A10).
+    """
+
+    name: str = Field(min_length=1)
+    into: str | None = None
+    into_each: dict[str, str] | None = None
+    files: tuple[str, ...] = ()
+    statements: tuple[str, ...] = ()
+    gzip: bool = False
+    sort: Literal["natural", "name"] = "natural"
+    on_error: Literal["fail", "warn"] = Field(
+        default="fail",
+        description=(
+            "`warn` logs every failing file by name and continues — the scripts' "
+            "`2>/dev/null`, made visible."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _one_source_one_target(self) -> SqlPhase:
+        if self.into is not None and self.into_each is not None:
+            raise ValueError(f"phase {self.name!r}: `into` and `into_each` are alternatives")
+        if self.into_each is not None:
+            if self.statements:
+                raise ValueError(f"phase {self.name!r}: `into_each` takes globs, not `statements`")
+            if self.files:
+                raise ValueError(
+                    f"phase {self.name!r}: `into_each` carries its own globs; drop `files`"
+                )
+            if not self.into_each:
+                raise ValueError(f"phase {self.name!r}: `into_each` is empty")
+            return self
+        if bool(self.files) == bool(self.statements):
+            raise ValueError(f"phase {self.name!r}: exactly one of `files` or `statements`")
+        return self
+
+
+class VerifyRule(_Strict):
+    """A COUNT query that must reach `min` before the import marker may be written."""
+
+    db: str = Field(min_length=1)
+    query: str = Field(min_length=1)
+    min: int = Field(ge=0)
+
+
+class PlayerData(_Strict):
+    """A table whose rows mean 'somebody's server' — the import probe refuses, never drops."""
+
+    db: str = Field(min_length=1)
+    table: str = Field(min_length=1)
+    exclude_usernames: tuple[str, ...] = Field(
+        default=(),
+        description="Seeded accounts (ADMINISTRATOR, GAMEMASTER...) that do not count as players.",
+    )
+
+
+class SqlPlan(_Strict):
+    """The whole import: schemas to create, ordered phases, verify rules, the marker's home."""
+
+    create: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Schemas phase 0 creates with the app user and grants; empty when upstream's SQL "
+            "does it."
+        ),
+    )
+    phases: tuple[SqlPhase, ...] = Field(min_length=1)
+    verify: tuple[VerifyRule, ...] = ()
+    player_data: tuple[PlayerData, ...] = ()
+    marker_db: str = Field(
+        min_length=1, description="Where `yulon_install` (the marker table) lives."
+    )
+
+    def plan_hash(self) -> str:
+        """16 hex of sha256 over the canonical JSON of this plan.
+
+        Recorded in the marker row. Canonical (sorted keys, no whitespace, JSON mode) so a
+        reordered `catalog.json` is the same plan and an edited glob is a new one; and a
+        DIFFERENT hash in a marker still reads `imported` — a finished import from an older
+        plan is never `partial` (phase7-decisions, "Probe").
+        """
+        canonical = json.dumps(self.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+class CmangosData(_Strict):
+    """Everything the CMaNGOS family needs that differs per game (roadmap 7.3)."""
+
+    client: ClientSpec
+    dockerfile: DockerfileSpec
+    extract: ExtractPlan
+    mmaps: MmapPlan
+    conf: ConfPatchTable
+    sql: SqlPlan
+
+
 class NativeInstall(_Strict):
     """What the native install engine needs that is a fact about THIS game (roadmap 6.2, 7.1).
 
@@ -250,6 +509,7 @@ class NativeInstall(_Strict):
     azerothcore: AzerothCoreData | None = Field(
         default=None, description="Present exactly when `family` is azerothcore (7.3 validates)."
     )
+    cmangos: CmangosData | None = None
     soap_port: int = Field(default=7878, gt=0, lt=65536)
     min_ram_gb: float = Field(
         default=6.0,
@@ -286,6 +546,29 @@ class NativeInstall(_Strict):
             self.min_data_root_gb + self.min_server_dir_gb,
             self.warn_data_root_gb + self.warn_server_dir_gb,
         )
+
+    @model_validator(mode="after")
+    def _exactly_the_family_block(self) -> NativeInstall:
+        """`family` names exactly the typed block that is present — no more, no fewer.
+
+        A `cmangos` block on an `azerothcore` entry is a typo that would otherwise be data
+        nobody reads; a missing block is an engine that starts and fails at stage two.
+        Also pins `extract.image` to a built image, so the extractors run from something
+        the build overlay produces.
+        """
+        blocks = {"azerothcore": self.azerothcore, "cmangos": self.cmangos}
+        present = sorted(name for name, block in blocks.items() if block is not None)
+        if present != [self.family]:
+            raise ValueError(
+                f"family is {self.family!r} but the blocks present are {present}; "
+                f"exactly the `{self.family}` block must be present"
+            )
+        if self.cmangos is not None and self.cmangos.extract.image not in self.images:
+            raise ValueError(
+                f"cmangos.extract.image {self.cmangos.extract.image!r} is not one of images "
+                f"{list(self.images)}"
+            )
+        return self
 
 
 class Install(_Strict):

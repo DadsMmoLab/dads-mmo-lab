@@ -819,6 +819,7 @@ class Applier:
                         dest=clone,
                         branch=manifest.source.branch,
                         sparse_path=manifest.source.sparse_path,
+                        rev=manifest.source.rev,
                     )
                 )
             except GitError as exc:  # one failure vocabulary for the whole applier

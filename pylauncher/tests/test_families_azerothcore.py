@@ -44,7 +44,9 @@ from tests.support_native import (
 )
 from yulon import docker, git, platform, resources, runner
 from yulon.catalog import composegen, native, preflight
+from yulon.catalog import families as family_registry
 from yulon.catalog import installer as installer_module
+from yulon.catalog.catalog import load_catalog
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.installer import (
     DockerNeedsReLoginError,
@@ -63,24 +65,92 @@ def test_the_family_decides_which_engine_installs_and_linux_no_longer_keeps_the_
     """One place decides, from `catalog.json` data — now on `install.native` (7.1, A1).
 
     WotLK is native on every platform, Linux included: the flip is one JSON key.
-    The three CMaNGOS entries have no `native` block yet, so they keep the
-    script path on Linux and, off Linux, the 6.1 refusal — which still comes
-    from `Installer`, the one place that words it, until 7.2 deletes it.
+    The three CMaNGOS entries carry a `native` block from G.4 and STILL take the
+    script path, because that block names a family (`cmangos`) `FAMILIES` has no
+    engine for until K.8. That is what the second fact `installer_for()` reads
+    is for: for the several groups between the data landing and the engine
+    landing, dispatching on the block alone would take these three games away
+    from the only thing that installs them and hand them a refusal instead. Off
+    Linux they still meet the 6.1 refusal, which comes from `Installer`, the one
+    place that words it, until 7.2 deletes it.
     """
     assert isinstance(installer_for(ENTRY, platform_id=lambda: "linux"), AzerothCoreInstaller)
     assert isinstance(installer_for(ENTRY, platform_id=lambda: "macos"), AzerothCoreInstaller)
     assert isinstance(installer_for(ENTRY, platform_id=lambda: "windows"), AzerothCoreInstaller)
-    assert isinstance(installer_for(TBC, platform_id=lambda: "linux"), Installer)
-    assert isinstance(installer_for(TBC, platform_id=lambda: "macos"), Installer)
-    assert isinstance(installer_for(TBC, platform_id=lambda: "windows"), Installer)
+    for game_id in ("wow-tbc", "wow-vanilla", "wow-tortoise"):
+        entry = load_catalog().get(game_id)
+        assert entry.install.native is not None and entry.install.native.family == "cmangos"
+        assert isinstance(installer_for(entry, platform_id=lambda: "linux"), Installer), game_id
+        assert isinstance(installer_for(entry, platform_id=lambda: "macos"), Installer), game_id
+        assert isinstance(installer_for(entry, platform_id=lambda: "windows"), Installer), game_id
+
+
+def test_a_family_with_no_engine_yet_falls_back_to_the_script_and_says_so(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The fallback is logged, because a silent one is how a typo becomes a mystery.
+
+    A family id that no engine claims has two causes and they need opposite
+    responses: data that arrived ahead of its engine (`cmangos`, today), and a
+    misspelling that will never match anything. Both look identical from the
+    outside — the game installs, exactly as it did last week — so the only thing
+    that can tell the second story is a line in the log naming the family that
+    was not found and the script that ran instead.
+    """
+    with caplog.at_level("INFO", logger="yulon.catalog.installer"):
+        engine_for_tbc = installer_for(load_catalog().get("wow-tbc"), platform_id=lambda: "linux")
+    assert isinstance(engine_for_tbc, Installer)
+    said = "\n".join(record.getMessage() for record in caplog.records)
+    assert "cmangos" in said and "install-wow-tbc.sh" in said
+
+
+def test_no_engine_and_no_script_left_is_the_app_bug_family_for_words() -> None:
+    """The third state, and the one 7.2 turns the middle branch into.
+
+    The fallback needs something to fall back TO. Once the bash path is gone an
+    entry naming an unregistered family has neither an engine nor a script, and
+    that is precisely the app bug `family_for()` already has a sentence for — so
+    the sentence is not written a second time here. `model_copy` rather than a
+    catalog edit: `Install.script` is still a required non-empty string, so this
+    state cannot be reached through `catalog.json` today.
+    """
+    tbc = load_catalog().get("wow-tbc")
+    scriptless = tbc.model_copy(update={"install": tbc.install.model_copy(update={"script": ""})})
+    with pytest.raises(InstallerError, match="install family this app does not have"):
+        installer_for(scriptless, platform_id=lambda: "linux")
+
+
+def test_the_same_entry_dispatches_to_its_family_the_day_the_family_is_registered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of the fallback: it is the REGISTRY that is missing, not the data.
+
+    K.8 adds one line to `FAMILIES`, and these three entries must move to the
+    family engine on that line alone — no catalog edit, no second flip. A
+    stand-in class is registered for the duration of this test rather than
+    weakening the shipped registry, so what is proved is the dispatch rule and
+    not a property of `CmangosInstaller`, which does not exist yet.
+    """
+    tbc = load_catalog().get("wow-tbc")
+
+    class _StandIn(AzerothCoreInstaller):
+        family = "cmangos"
+
+    assert family_registry.is_registered("cmangos") is False, "K.8 has landed; retire this test"
+    monkeypatch.setattr(
+        family_registry, "FAMILIES", {**family_registry.FAMILIES, "cmangos": _StandIn}
+    )
+    assert family_registry.is_registered("cmangos") is True
+    assert isinstance(installer_for(tbc, platform_id=lambda: "linux"), _StandIn)
+    assert isinstance(installer_for(ENTRY, platform_id=lambda: "linux"), AzerothCoreInstaller)
 
 
 def test_the_entry_names_its_family_and_a_scriptless_entry_still_reads_as_scripted() -> None:
-    """`family` is catalog data; an entry without a `native` block has not been asked yet."""
+    """`family` is catalog data; `platforms`/`script_platforms` still say "scripted"."""
     assert ENTRY.install.native is not None
     assert ENTRY.install.native.family == "azerothcore"
     assert AzerothCoreInstaller.family == ENTRY.install.native.family
-    assert TBC.install.native is None
+    assert TBC.install.native is not None and TBC.install.native.family == "cmangos"
     assert TBC.install.scripted_platforms() == TBC.install.platforms
     assert TBC.install.uses_script("linux") is True
     assert TBC.install.is_native("linux") is False

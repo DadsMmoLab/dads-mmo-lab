@@ -627,6 +627,106 @@ def test_the_install_root_is_stripped_only_from_paths_actually_under_it() -> Non
         {"type": "bind", "source": "/home/pk/srv/modules", "target": "/azerothcore/modules"},
         root="/home/pk/srv/",
     ) == ("bind", "./modules", "/azerothcore/modules", "rw")
+    # The same property on the other separator, because the Windows capture is read by the same
+    # rule: `C:\gate\wotlk-server-backup` is a different tree from `C:\gate\wotlk-server` and a
+    # mount of it must not be reported as this install's own `./-backup`.
+    assert sc.volume_from_config(
+        {
+            "type": "bind",
+            "source": r"C:\gate\wotlk-server-backup\modules",
+            "target": "/azerothcore/modules",
+        },
+        root=r"C:\gate\wotlk-server",
+    ) == ("bind", r"C:\gate\wotlk-server-backup\modules", "/azerothcore/modules", "rw")
+    assert sc.volume_from_config(
+        {"type": "bind", "source": r"C:\gate\wotlk-server", "target": "/srv"},
+        root="C:/gate/wotlk-server",
+    ) == ("bind", ".", "/srv", "rw")
+    # A trailing separator on the install dir is the same install dir, in either spelling.
+    assert sc.volume_from_config(
+        {
+            "type": "bind",
+            "source": r"C:\gate\wotlk-server\modules",
+            "target": "/azerothcore/modules",
+        },
+        root="C:\\gate\\wotlk-server\\",
+    ) == ("bind", "./modules", "/azerothcore/modules", "rw")
+
+
+def test_a_windows_capture_normalises_to_the_same_relative_shape_as_a_linux_one() -> None:
+    """`docker compose config --format json` on Windows reports a bind source as a backslashed
+    absolute host path — `C:\\gate\\wotlk-server\\env\\dist\\etc` against a `root` of
+    `C:\\gate\\wotlk-server` — where the same install on Linux reports `/home/pk/srv/env/dist/etc`
+    against `/home/pk/srv`. One committed fixture serves all three platforms, so both have to
+    reduce to the SAME `./env/dist/etc`; while they did not, the compose-diff gate reported three
+    services as differing purely on the separator and could not be run on Windows at all
+    (measured on `yulon-win11-gate`, 2026-08-31).
+
+    Which rules apply is decided by the SHAPE of the path — a drive letter or a UNC prefix — and
+    never by the host this test happens to run on, so a Windows capture reduces the same way on
+    Linux CI and a POSIX capture the same way on the Windows gate.
+    """
+    linux = sc.volume_from_config(
+        {
+            "type": "bind",
+            "source": "/home/pk/srv/env/dist/etc",
+            "target": "/azerothcore/env/dist/etc",
+        },
+        root="/home/pk/srv",
+    )
+    assert linux == ("bind", "./env/dist/etc", "/azerothcore/env/dist/etc", "rw")
+    assert (
+        sc.volume_from_config(
+            {
+                "type": "bind",
+                "source": r"C:\gate\wotlk-server\env\dist\etc",
+                "target": "/azerothcore/env/dist/etc",
+            },
+            root=r"C:\gate\wotlk-server",
+        )
+        == linux
+    )
+
+
+def test_a_windows_path_is_compared_case_insensitively_and_a_posix_one_is_not() -> None:
+    """`C:\\Gate` and `c:\\gate` are one directory on Windows and the drive letter's case is not
+    even stable across the tools that report it, so the Windows-shaped comparison folds case —
+    including the drive letter — and a capture whose root came back differently cased still
+    strips. `/home/pk/SRV` and `/home/pk/srv` are two directories on Linux, so the POSIX-shaped
+    comparison keeps case and refuses to strip: silently lowercasing there would be the sibling
+    bug the strip rule exists to avoid.
+
+    A UNC install root is in scope and needs no special case: the comparison is segment by
+    segment, so `\\\\build\\gate\\wotlk-server` behaves exactly like a lettered drive.
+    """
+    assert sc.volume_from_config(
+        {
+            "type": "bind",
+            "source": r"c:\GATE\WotLK-Server\env\dist\etc",
+            "target": "/azerothcore/env/dist/etc",
+        },
+        root=r"C:\gate\wotlk-server",
+    ) == ("bind", "./env/dist/etc", "/azerothcore/env/dist/etc", "rw")
+    assert sc.volume_from_config(
+        {"type": "bind", "source": "/home/pk/SRV/modules", "target": "/azerothcore/modules"},
+        root="/home/pk/srv",
+    ) == ("bind", "/home/pk/SRV/modules", "/azerothcore/modules", "rw")
+    assert sc.volume_from_config(
+        {
+            "type": "bind",
+            "source": r"\\build\gate\wotlk-server\env\dist\etc",
+            "target": "/azerothcore/env/dist/etc",
+        },
+        root=r"\\build\gate\wotlk-server",
+    ) == ("bind", "./env/dist/etc", "/azerothcore/env/dist/etc", "rw")
+    assert sc.volume_from_config(
+        {
+            "type": "bind",
+            "source": r"\\build\gate\wotlk-server-backup\modules",
+            "target": "/azerothcore/modules",
+        },
+        root=r"\\build\gate\wotlk-server",
+    ) == ("bind", r"\\build\gate\wotlk-server-backup\modules", "/azerothcore/modules", "rw")
 
 
 def test_only_the_selinux_label_is_dropped_from_the_mode_column() -> None:
