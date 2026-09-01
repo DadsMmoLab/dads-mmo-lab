@@ -1073,6 +1073,50 @@ was found by reading code; each is a line in a resolved compose document from a 
   could act on.
 
 
+### 18. Two ways the process itself stopped reporting — 2026-09-01
+
+Neither is a defect in the launcher. Both are ways the machinery around it went quiet, which is the
+same failure this file keeps recording one layer down.
+
+**18a. After upstream squash-merges one of our PRs, its copy of a shared file is a snapshot of our
+own past — and taking it is a silent revert, not a conflict resolution.**
+
+`#140` was squash-merged, so `upstream/Yulon`'s `19d821f6` carries this branch's Phase 7.1 work as one
+commit sharing no history with the branch that wrote it. The merge-base stayed back at `4044f59b`, and
+`git merge upstream/Yulon` reported **add/add conflicts on all nine files Phase 7.3 had extended** —
+not one of them a real disagreement.
+
+The trap is the resolution, not the conflict. In an add/add conflict on a file you do not own,
+**"theirs" looks like the safe, polite choice.** It is not: upstream's `extract.py` is the pre-I.4/I.5
+version, its `sqlplan.py` still has the Protocols without `wsl_distro`, its `docker.py` still has
+`argv = ["run", "--rm", *self.user_args]` from before `security_args`, and its `bug-checklist.md`
+still says "Recorded, not fixed" about something I.5 fixed. And the failure mode is that it
+**resolves cleanly and the suite may still pass**, because the work it reverted is newer than the
+tests upstream is carrying.
+
+What was actually done: measure the delta the correct way round (`git diff <ours> upstream/Yulon`
+over the whole tree — **35 insertions against 2957 deletions**), **read all 35**, confirm every one is
+an older version of something later work replaced, then `git merge -s ours --no-ff` with the audit in
+the commit message, and verify with `git diff --stat <pre-merge-sha> HEAD` that the tree is
+untouched. Only one of the 35 was not merely older wording, and it took a `git grep` to establish
+that `shortfall()` still existed with that loop split into a helper.
+
+**18b. On this repository an open pull request is the only thing that makes CI exist.**
+
+`ci.yml` has no bare `push:` trigger — deliberately, and its own comment states the trade: "a topic
+branch with no PR open gets no CI. Open the PR (draft is enough) and it does." The triggers are
+`main`, `Yulon`, `release/**`, `v*` tags, and `pull_request`.
+
+So the moment `#140` merged, `yulon-phase7` had **no CI at all**, and every merge onto it was verified
+only by a local run. Nothing reported a failure, because nothing ran — and **"no runs found" reads
+exactly like "not looked yet"**, which is the same shape as the gate that skipped and read like a
+pass (§ throughout this file, and the standing rule: ask the machine, never the artifact).
+
+The fix is to open the draft PR at the START of a long-lived working branch rather than at the end.
+Done here as **#143**, and the branch is green verified by SHA (run `33538836096`,
+`headSha == 18cbacdd`) — by SHA because `gh pr checks` will happily show a green run that predates
+the current head.
+
 ### One thing worth keeping
 
 Three of these have an obvious fix that is **wrong**, and two of them arm a worse bug:
