@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -426,14 +427,55 @@ def fill(text: str, tokens: Mapping[str, str]) -> str:
     containing a literal `{{...}}`, which compose accepts happily as a string
     and which fails somewhere else entirely. Unused tokens are fine; unfilled
     ones are not.
+
+    The refusal NAMES the token, and quotes nothing that was substituted. Every
+    token is replaced before the leftover `{{` is looked for, so a window of the
+    RESULT can hold a value that was filled in — on the shipped Tortoise
+    statement `CREATE USER … IDENTIFIED BY '{{DB_PASSWORD}}'` that was eight
+    characters of a constant prefix, and one shape over
+    (`SELECT {{NOPE}} /*{{DB_PASSWORD}}*/`) it was the whole password, in a
+    user-facing error whose tail invites the user to report it. The name is also
+    the more useful message: `conf`, `sqlplan` and `native`'s ready markers all
+    re-raise this text about a file the traceback never mentions.
     """
     out = text
     for key, value in tokens.items():
         out = out.replace("{{" + key + "}}", value)
-    start = out.find("{{")
-    if start >= 0:
-        raise ComposeGenError(f"unfilled compose placeholder near: {out[start:start + 40]!r}")
+    if "{{" in out:
+        raise ComposeGenError(f"unfilled compose placeholder {_leftover(text, tokens)}")
     return out
+
+
+_TOKEN = re.compile(r"\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}")
+
+
+def _leftover(text: str, tokens: Mapping[str, str]) -> str:
+    """Name the first `{{` the TEMPLATE spells that no token filled, without quoting a value.
+
+    Read off the template rather than off the rendered text, which is the whole
+    point: the template is data this repo ships and can be quoted freely, while
+    the rendered text is where a secret has just been substituted.
+
+    Three answers, because there are three ways a `{{` survives: a token nobody
+    filled (named, the ordinary case); a `{{` the template never closes as a
+    `{{TOKEN}}`, which is a typo in the template and is quoted as one; and a
+    `{{` that arrived inside a filled VALUE, which is not the template's fault
+    and is described rather than shown.
+    """
+    index = 0
+    while (index := text.find("{{", index)) >= 0:
+        filled = next((key for key in tokens if text.startswith("{{" + key + "}}", index)), None)
+        if filled is not None:
+            index += len(filled) + 4
+            continue
+        match = _TOKEN.match(text, index)
+        if match is None:
+            return (
+                f"near {text[index:index + 40]!r} in the template, which is not a closed "
+                "{{TOKEN}}"
+            )
+        return "{{" + match.group(1) + "}}"
+    return "introduced by a filled value, not by the template"
 
 
 _fill = fill

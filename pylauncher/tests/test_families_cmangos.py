@@ -27,7 +27,7 @@ from tests.support_native import Recorder
 from yulon import docker, platform, resources
 from yulon.catalog import composegen, native
 from yulon.catalog.catalog import CatalogEntry, SqlPlan, load_catalog
-from yulon.catalog.families import extract, sqlplan
+from yulon.catalog.families import dockerfile, extract, sqlplan
 from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import InstallerError, InstallOptions
 
@@ -255,25 +255,70 @@ def test_tokens_omit_logs_db_when_the_entry_has_no_extra_schema(tmp_path: Path) 
 def test_no_dockerfile_template_names_the_secret_this_one_mapping_carries() -> None:
     """`_tokens()` is handed to `dockerfile.render()` whole (K.4), and it holds `DB_PASSWORD`.
 
-    `composegen.generate()` refuses a compose template that names
-    `{{DB_PASSWORD}}` in generated mode by name, so the secret stays in `.env`.
-    `dockerfile.render()` has NO such refusal — it calls `composegen.fill()`
-    directly, and `fill()` minds unfilled placeholders, not spelled ones. So
-    the day a `Dockerfile.tmpl` spells `{{DB_PASSWORD}}` the password is
-    rendered into a file in the build context and, if it reaches an `ENV` or a
-    `RUN`, into an image layer that `docker history` prints.
+    A tripwire over the shipped templates, kept — but it is no longer what
+    stands between the mapping and the secret. `dockerfile.SECRET_TOKEN` is:
+    `render()` now refuses the token BY NAME, the way `composegen.generate()`
+    refuses it in a compose template, and drops the key from the mapping it
+    fills with. This test says the shipped six are clean; the refusal says the
+    seventh cannot happen wherever it is put.
 
-    Nothing today does it — this test is what says so out loud, and it is the
-    only thing standing between the mapping and that day. Who decided the
-    Dockerfile may see the secret: undecided; the plan hands the whole mapping
-    to `render()` without saying, and `composegen`'s refusal shows the opposite
-    decision was taken for the file next to it.
+    Which is the correction this test needed. A reviewer defeated the version
+    that globbed `*/native/` by planting
+    `catalog/installers/shared/cmangos/Dockerfile.tmpl` spelling
+    `ENV DB_PASSWORD={{DB_PASSWORD}}`: the guard passed, the whole suite passed,
+    and `render()` returned a Dockerfile with the password in it. That folder is
+    not hypothetical — the compose templates for all three CMaNGOS games live
+    there, and `NativeInstall.dockerfile_dir` is an unvalidated `str | None`. So
+    the walk is now the whole installers tree rather than one directory shape;
+    `test_a_dockerfile_template_the_glob_cannot_see_still_cannot_bake_the_secret`
+    is the property version of the same sentence.
     """
-    templates = sorted(resources.installers_dir().glob("*/native/Dockerfile.tmpl"))
-    templates += sorted(resources.installers_dir().glob("*/native/dockerignore.tmpl"))
+    root = resources.installers_dir()
+    templates = sorted(root.rglob("Dockerfile.tmpl")) + sorted(root.rglob("dockerignore.tmpl"))
     assert templates, "no Dockerfile templates found; this test would pass vacuously"
+    assert len(templates) >= 6, "the three shipped CMaNGOS pairs, at least"
     for path in templates:
         assert "{{DB_PASSWORD}}" not in path.read_text(encoding="utf-8"), path
+
+
+def test_a_dockerfile_template_the_glob_cannot_see_still_cannot_bake_the_secret(
+    tmp_path: Path,
+) -> None:
+    """The reviewer's bypass of the test above, reproduced and now refused.
+
+    The glob is a LOCATION; the refusal is a PROPERTY. The bypass planted
+    `catalog/installers/shared/cmangos/Dockerfile.tmpl` spelling
+    `ENV DB_PASSWORD={{DB_PASSWORD}}` — a folder the old `*/native/` glob never
+    walked, and not a hypothetical one: the compose templates for all three
+    CMaNGOS games already live at `shared/cmangos/`, and `dockerfile_dir` is an
+    unvalidated `str | None`. With that file in place the guard test above and
+    the whole suite passed clean while `render()` returned a Dockerfile with the
+    password in it. The glob is widened to the whole tree as a tripwire; this is
+    the guarantee.
+
+    Rendered from the REAL `_tokens()` mapping, so what is refused is the object
+    K.4 hands over rather than a convenient stand-in.
+    """
+    folder = tmp_path / "shared" / "cmangos"
+    folder.mkdir(parents=True)
+    (folder / "Dockerfile.tmpl").write_text(
+        f"{composegen.GENERATED_MARKER} - do not hand-edit.\n"
+        "FROM debian:12\nENV DB_PASSWORD={{DB_PASSWORD}}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    (folder / "dockerignore.tmpl").write_text(
+        f"{composegen.GENERATED_MARKER} - do not hand-edit.\n*\n", encoding="utf-8", newline="\n"
+    )
+    tokens = engine(Recorder())._tokens(context(tmp_path / "srv"))
+    assert tokens["DB_PASSWORD"] == DB_PASSWORD, "the whole mapping, secret included (K.4)"
+    with pytest.raises(dockerfile.DockerfileError, match="DB_PASSWORD") as caught:
+        dockerfile.render(folder, tokens)
+    assert DB_PASSWORD not in str(caught.value)
+    # The refusal's own words, not the belt's. Dropping the key from the mapping ALSO
+    # stops the render — as an unfilled placeholder — so without this line the test
+    # would stay green with the by-name refusal deleted, which is the bug it is here for.
+    assert "docker history" in str(caught.value)
 
 
 def test_image_ref_names_the_built_server_image_and_refuses_an_unknown_service(

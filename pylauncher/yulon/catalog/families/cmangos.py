@@ -147,18 +147,22 @@ class CmangosInstaller(StagedInstaller):
         compose template that so much as spells `{{DB_PASSWORD}}` in that mode,
         by name, so the secret stays in `.env`.
 
-        **There is no equivalent refusal on the Dockerfile side, and this same
-        mapping is what `write-dockerfile` hands to `dockerfile.render()`.**
-        `render()` fills through `composegen.fill()`, which minds an UNFILLED
-        placeholder and says nothing about a spelled one, so a `Dockerfile.tmpl`
-        that named the token would render the password into the build context
-        and — through an `ENV` or a `RUN` — into an image layer `docker history`
-        prints. No shipped template does;
-        `test_no_dockerfile_template_names_the_secret_this_one_mapping_carries`
-        is what keeps saying so. Whether the Dockerfile is meant to be able to
-        see the secret at all: undecided — the 7.3 contract (A6) specifies this
-        single mapping for the Dockerfile, the conf tables, the SQL and verify
-        alike, and gives no reason.
+        This same mapping is what `write-dockerfile` hands to
+        `dockerfile.render()`, whole — and the Dockerfile side now takes the
+        same decision by itself rather than trusting the caller with it.
+        `dockerfile.SECRET_TOKEN` refuses a template that so much as spells
+        `{{DB_PASSWORD}}`, by name and by path, and drops the key from the
+        mapping it fills with, so nothing this mapping carries can reach a file
+        in the build context. It is the harder case of the two: a compose file
+        holding the secret is the user's own file (delete it, rotate, done),
+        while a Dockerfile is copied into a content-addressed image layer that
+        `docker history` prints long after the file is deleted.
+
+        So: the Dockerfile may NOT see the secret — the question 7.3 left
+        undecided when contract A6 specified one mapping for the Dockerfile, the
+        conf tables, the SQL and verify alike. Handing the whole mapping over
+        stays A6's shape; what changed is that `render()` no longer takes the
+        password from it.
         """
         native_block = self._native()
         server_dir = ctx.server_dir

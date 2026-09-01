@@ -40,6 +40,25 @@ DOCKERIGNORE = ".dockerignore"
 TEMPLATE = "Dockerfile.tmpl"
 IGNORE_TEMPLATE = "dockerignore.tmpl"
 
+SECRET_TOKEN = "DB_PASSWORD"
+"""The one token in the installer's mapping that may not reach a file this module writes.
+
+`composegen.generate()` took this decision for the compose files and refuses the token by
+name; the same decision, for a stronger reason, applies here. A secret in a compose file
+is in a file the user owns — delete it, rotate, done. A secret in a Dockerfile is copied
+into a content-addressed image LAYER, so `docker history` prints it long after the
+Dockerfile is gone and undoing it means finding and deleting every image built from that
+layer. Compose is "delete and rotate"; a Dockerfile is "you now have an artefact to hunt".
+
+The caller hands `render()` one mapping for the Dockerfile, the conf tables, the SQL and
+verify alike (contract A6), and that mapping carries the password because the conf tables
+need it (they are written 0600; this file is written 0644). Which is why the refusal lives
+here, in the renderer, rather than in a test over the shipped templates: a test protects a
+LOCATION — and one was defeated by planting a template in `shared/cmangos/`, a folder its
+glob never walked — while the refusal protects the property, for any template dir any
+`dockerfile_dir` ever names.
+"""
+
 
 class DockerfileError(RuntimeError):
     """A template could not be rendered, or a file in the way is not ours to replace."""
@@ -57,10 +76,20 @@ def render(template_dir: Path, tokens: Mapping[str, str]) -> tuple[str, str]:
     The text comes back LF whatever the worktree holds. The shipped templates are LF in
     git's index and CRLF in a Windows checkout under `core.autocrlf=true`; reading them
     in text mode translates that away, and `write()` is what keeps it translated away.
+
+    `SECRET_TOKEN` is dropped from the mapping before either half is filled — belt to the
+    refusal's braces, exactly as `composegen.generate()` does it. A template that spelled
+    the token is refused by name below; were that refusal ever removed, the token would
+    then be UNFILLED rather than quietly rendering the password into the build context.
+
+    Raises:
+        DockerfileError: a template could not be read, a placeholder was left unfilled,
+            or a template names `{{DB_PASSWORD}}`.
     """
+    safe = {key: value for key, value in tokens.items() if key != SECRET_TOKEN}
     return (
-        _render_one(template_dir / TEMPLATE, tokens),
-        _render_one(template_dir / IGNORE_TEMPLATE, tokens),
+        _render_one(template_dir / TEMPLATE, safe),
+        _render_one(template_dir / IGNORE_TEMPLATE, safe),
     )
 
 
@@ -76,6 +105,14 @@ def _render_one(path: Path, tokens: Mapping[str, str]) -> str:
         template = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise DockerfileError(f"the template {path} could not be read: {exc}") from exc
+    if "{{" + SECRET_TOKEN + "}}" in template:
+        raise DockerfileError(
+            f"{{{{{SECRET_TOKEN}}}}} appears in {path}, but a generated file in the build "
+            "context is not where the database password may go: a Dockerfile is copied into "
+            "an image layer, and `docker history` prints that layer long after the file is "
+            "deleted. The install writes the password into the 0600 `.conf` files at run "
+            "time; keep it out of the image."
+        )
     try:
         filled = composegen.fill(template, tokens)
     except composegen.ComposeGenError as exc:
