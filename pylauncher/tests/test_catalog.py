@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
-from yulon import resources
 from yulon.catalog import composegen
 from yulon.catalog.catalog import (
     CATALOG_FILE,
@@ -48,18 +46,6 @@ def test_wotlk_entry_matches_the_controller_spec() -> None:
     assert wotlk.emulator.sources[0].url == (
         "https://github.com/mod-playerbots/azerothcore-wotlk.git"
     )
-
-
-def test_install_scripts_exist_in_the_repo() -> None:
-    """Phase 3a wraps the existing scripts — every referenced path must be real."""
-    installers = resources.installers_dir()
-    for game in load_catalog().games:
-        assert (installers / game.install.script).is_file(), game.install.script
-        for pm, variant in game.install.script_variants.items():
-            assert (installers / variant).is_file(), f"{game.id} {pm}: {variant}"
-            assert game.install.script_for(pm) == variant
-        assert game.install.script_for(None) == game.install.script
-        assert game.install.script_for("zypper") == game.install.script
 
 
 def test_script_variant_keys_must_be_known_package_managers() -> None:
@@ -247,36 +233,6 @@ def test_the_old_password_fields_are_gone_not_ignored() -> None:
         )
 
 
-def _compose_services_declared(script: Path) -> dict[str, str]:
-    """Map compose SERVICE key -> `container_name:` for every services block in a script.
-
-    The installers write their `docker-compose.yml` from a heredoc, so the file the
-    user ends up with is readable straight out of the script. A service with no
-    `container_name:` maps to "" — compose then names the container itself.
-    """
-    services: dict[str, str] = {}
-    in_services = False
-    current: str | None = None
-    for line in script.read_text(encoding="utf-8").splitlines():
-        if line == "services:":
-            in_services, current = True, None
-            continue
-        if not in_services or not line.strip():
-            continue
-        if not line.startswith(" "):  # `volumes:`, `networks:`, the heredoc terminator
-            in_services, current = False, None
-            continue
-        key = re.match(r"^  ([a-z][a-z0-9_.-]*):\s*$", line)
-        if key:
-            current = key.group(1)
-            services.setdefault(current, "")
-            continue
-        name = re.match(r"^\s+container_name:\s*(\S+)\s*$", line)
-        if name and current:
-            services[current] = name.group(1)
-    return services
-
-
 def test_cmangos_games_select_compose_services_not_container_names() -> None:
     """Every CMaNGOS installer names its services db/realmd/mangosd (Discord, 2026-08-26).
 
@@ -293,25 +249,6 @@ def test_cmangos_games_select_compose_services_not_container_names() -> None:
         "ac-authserver",
         "ac-worldserver",
     )
-
-
-def test_no_catalog_compose_service_is_really_a_container_name() -> None:
-    """The invariant behind the bug: what `compose up` selects must be a service key.
-
-    Only decided for compose files this repo writes; WotLK's base file comes from
-    the AzerothCore checkout, so a service missing from the script proves nothing.
-    """
-    installers = resources.installers_dir()
-    for game in load_catalog().games:
-        declared = _compose_services_declared(installers / game.install.script)
-        if not declared:
-            continue
-        container_names = {name for name in declared.values() if name}
-        for service in game.container_spec().compose_services():
-            assert service not in container_names or service in declared, (
-                f"{game.id}: `docker compose up {service}` names a CONTAINER, not a service; "
-                f"this compose file declares {sorted(declared)}"
-            )
 
 
 def test_every_source_says_where_it_lands() -> None:

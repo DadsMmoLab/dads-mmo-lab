@@ -485,23 +485,31 @@ def test_every_installer_writes_the_bot_population_that_was_decided() -> None:
     sweep rather than a list of five paths: a sixth installer, or a seventh
     spelling in an existing one, is caught the day it is added rather than the
     day someone counts the bots that logged in.
+
+    Until 7.2 the sweep matched the five bash installers, twice each, and held
+    those ten numbers to `BOT_POPULATION`. Those files are gone and nothing
+    under `catalog/installers/` writes the number any more, so the sweep now
+    expects nothing and exists to catch a NEW shipped file that hard-codes one.
+    The `catalog.json` assertions below it are the ones with teeth today.
     """
+    scanned = 0
     written: dict[str, list[str]] = {}
     for path in sorted(TEMPLATES.rglob("*")):
         if not path.is_file():
             continue
+        scanned += 1
         text = path.read_text(encoding="utf-8", errors="replace")
         found = [m.group("ac") or m.group("cmangos") for m in _BOT_POPULATION_WRITE.finditer(text)]
         if found:
             written[path.relative_to(TEMPLATES).as_posix()] = found
 
-    assert written == {
-        "wow-tbc/install-wow-tbc.sh": [BOT_POPULATION, BOT_POPULATION],
-        "wow-vanilla/install-wow-vanilla.sh": [BOT_POPULATION, BOT_POPULATION],
-        "wow-wotlk/install-wow-wotlk-fedora.sh": [BOT_POPULATION, BOT_POPULATION],
-        "wow-wotlk/install-wow-wotlk-ubuntu.sh": [BOT_POPULATION, BOT_POPULATION],
-        "wow-wotlk/install-wow-wotlk.sh": [BOT_POPULATION, BOT_POPULATION],
-    }, "an installer ships a bot population that is not the one that was decided"
+    # An empty expectation is satisfied by scanning nothing at all, which is
+    # what a moved or renamed installers root would produce.
+    assert scanned >= 12, f"{TEMPLATES} holds {scanned} files; this sweep is looking nowhere"
+    assert written == {}, (
+        "a file under catalog/installers/ hard-codes a bot population; the number "
+        f"belongs in catalog.json, which says {BOT_POPULATION}"
+    )
 
     # The sixth place is the native path's data, which the scan above cannot
     # see: it lives in `catalog.json`, not under `catalog/installers/`.
