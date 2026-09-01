@@ -23,11 +23,11 @@ a file and not the state file: a state file must never be the thing that
 claims a secret exists.
 
 `STAGE_NAMES` is the whole tuple from the start; `stages()` binds the six the
-spine already owns, and K.3-K.7 insert the rest in that order. The two are
-allowed to disagree in the meantime because nothing in the app reads
-`STAGE_NAMES` — `stage_names()`, derived from `stages()`, is what the spine
-validates a resume against — and because this class is not in `FAMILIES` until
-the tuple is whole. K.8 pins the equality.
+spine already owns, and K.3-K.7 insert the rest in that order — `conf` and
+`import` are what is left. The two are allowed to disagree in the meantime
+because nothing in the app reads `STAGE_NAMES` — `stage_names()`, derived from
+`stages()`, is what the spine validates a resume against — and because this
+class is not in `FAMILIES` until the tuple is whole. K.8 pins the equality.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ from typing import ClassVar, cast
 from yulon import docker, platform
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CmangosData, NativeInstall
-from yulon.catalog.families import dockerfile
+from yulon.catalog.families import dockerfile, extract
 from yulon.catalog.installer import InstallerError
 from yulon.catalog.native import (
     BUILD_CANCEL_NOTE,
@@ -129,6 +129,8 @@ class CmangosInstaller(StagedInstaller):
             Stage("write-dockerfile", self._write_dockerfile),
             Stage("generate-compose", self.stage_generate_compose),
             Stage("build", self.stage_build, cancel_note=BUILD_CANCEL_NOTE),
+            Stage("extract", self._extract, cancel_note=extract.EXTRACT_CANCEL_NOTE),
+            Stage("mmaps", self._mmaps, cancel_note=extract.MMAPS_CANCEL_NOTE),
             Stage("start-db", self.stage_start_db, recorded=False),
             Stage("up", self.stage_up, recorded=False),
             Stage("ready", self.stage_ready, recorded=False),
@@ -314,6 +316,121 @@ class CmangosInstaller(StagedInstaller):
                 yield f"Wrote {name}"
             else:
                 yield f"{name} is already exactly what this install needs."
+
+    def _extract(self, ctx: StageContext) -> Iterator[str]:
+        """Pull dbc/maps/vmaps out of the client, mounted read-only: one container per tool.
+
+        The Tortoise script's model (`-i /client -o /out`, `:ro`, `-u`) adopted
+        for every CMaNGOS game: nothing is ever written into the client, no
+        `sudo chown` afterwards, and an interrupted run leaves only our own
+        partial folders under `data/`. Skipping is per TOOL and lives in
+        `extract.run_plan()`: a completion record, the `produces` counts and
+        the stage-level facts (plan hash, client path, required-file size and
+        mtime) must all agree — which is why the required file and the client
+        build are handed over here. This body only resolves what the module
+        cannot know: which image, which uid, where the client is, and what this
+        machine's SELinux says.
+
+        **Every seam is passed, none is left to default.** `run_plan`'s
+        `selinux_enforcing` parameter defaults to `platform.selinux_enforcing`
+        bound at IMPORT, exactly like `platform.container_user_args()`'s
+        `platform_id` — the trap `_user_args()` was written against. Letting it
+        default would ask the real host, so an install on an enforcing box
+        would get the right answer for the wrong reason and a test faking the
+        platform would get the host's answer and never see it. The seam already
+        exists and `stage_generate_compose` asks the same one; asking it twice
+        in two ways is how the two come to disagree.
+        """
+        data = self._data()
+        client_dir = ctx.client_dir
+        if client_dir is None:
+            raise InstallerError(
+                f"{self.entry.name} needs the game client folder to extract its maps from, and "
+                "none was given. Pick the client folder and try again."
+            )
+        data_dir = ctx.server_dir / DATA_DIR
+        data_dir.mkdir(parents=True, exist_ok=True)
+        image_ref = self._image_ref(ctx, data.extract.image)
+        user_args = self._user_args()
+        yield f"Extracting server data from {client_dir} into {data_dir} (the client is read-only)."
+        yield from self._stream(
+            lambda sink: extract.run_plan(
+                data.extract,
+                image_ref=image_ref,
+                client_dir=client_dir,
+                data_dir=data_dir,
+                run_container=self._seams.run_container,
+                user_args=user_args,
+                sink=sink,
+                cancel=ctx.cancel,
+                required_file=data.client.required_file,
+                client_build=self.entry.client.build,
+                selinux_enforcing=self._seams.selinux_enforcing,
+            )
+        )
+        self._check_cancel(ctx.cancel)
+        yield "Extraction finished."
+
+    def _mmaps(self, ctx: StageContext) -> Iterator[str]:
+        """Generate movement maps from the extracted maps; the long stage after the build.
+
+        Same evidence rule as one extraction tool (record + count), and
+        `required: false` (Tortoise) turns a shortfall into a warning inside
+        `extract.run_mmaps()`, which also refuses when `data/` holds no
+        extraction evidence at all. A resume after a kill wipes `data/mmaps`
+        and starts over — that is the cancel note, and it is true because the
+        generator has no resumable state of its own.
+
+        **`ctx.client_dir` is not read here, and that is the whole safety
+        argument of the stage.** `run_mmaps()` removes `data_dir / MMAPS_DIR`
+        before it generates, and the proof that no folder of the user's can
+        reach that `rmtree` had three legs inside `extract.py` before anything
+        called it — the signature takes no client path (unlike `run_plan`
+        above), `MMAPS_DIR` is one relative component, and `MmapPlan` carries
+        no folder field. This is the first caller, so this line is the fourth
+        leg: `data_dir` is the server's own directory and a `ctx.client_dir`
+        put in its place would read identically on the page.
+        `test_no_mmaps_container_is_handed_anything_that_names_the_users_client`
+        is what asserts it rather than trusting the reading.
+
+        **No `label:disable`, and deliberately not by precedent.** The extract
+        stage above turns SELinux confinement off for its containers because
+        they mount the user's client, which lives outside the server directory
+        and which no `chcon` of ours reaches (`yulon-fedora-gate`, Fedora 44
+        Enforcing, Docker 29.7.2, 2026-09-01). This container has no client
+        mount at all: its single bind is `data/` under the server directory,
+        measured readable and writable while confined on that same box, because
+        `data/` inherits `container_file_t` from the relabel
+        `stage_generate_compose` does. Copying the flag across would disable a
+        container's confinement to buy nothing.
+
+        That argument holds only while `generate-compose` runs BEFORE this
+        stage. It does — `stages()` and `STAGE_NAMES` both put it at index 3
+        against 5 and 6 — and
+        `test_the_relabel_that_lets_mmaps_run_confined_happens_before_the_first_extraction`
+        asserts the order over a live install, because a guard whose
+        correctness is its position in a sequence is disarmed silently by a
+        reordering that looks unrelated.
+        """
+        data = self._data()
+        data_dir = ctx.server_dir / DATA_DIR
+        data_dir.mkdir(parents=True, exist_ok=True)
+        image_ref = self._image_ref(ctx, data.extract.image)
+        user_args = self._user_args()
+        yield "Generating movement maps (this can take an hour or more)."
+        yield from self._stream(
+            lambda sink: extract.run_mmaps(
+                data.mmaps,
+                image_ref=image_ref,
+                data_dir=data_dir,
+                run_container=self._seams.run_container,
+                user_args=user_args,
+                sink=sink,
+                cancel=ctx.cancel,
+            )
+        )
+        self._check_cancel(ctx.cancel)
+        yield "Map generation finished."
 
     # -- what only the engine knows ---------------------------------------
 

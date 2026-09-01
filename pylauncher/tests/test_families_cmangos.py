@@ -209,22 +209,29 @@ def test_stages_are_unique_and_a_subset_of_the_pinned_names_in_order() -> None:
 
 
 def test_the_unbound_half_of_the_pinned_tuple_is_inert_until_its_stages_land() -> None:
-    """K.3-K.7 bind the other six names; nothing in the app reads the tuple before then.
+    """K.6-K.7 bind the last two names; nothing in the app reads the tuple before then.
 
     `stage_names()` — not `STAGE_NAMES` — is what the spine validates a resume
     against (`_guard`, `_ownership`, `with_stage`), and it is derived from
-    `stages()`. So the six names with no `Stage` behind them cannot be recorded,
-    cannot be read back out of a state file, and cannot reorder one: a state
-    file naming `extract` today has that name DROPPED on the way in, which is
-    the same rule an unknown name has always had. The engine is also not in
-    `FAMILIES` yet, so no user reaches it at all.
+    `stages()`. So a name with no `Stage` behind it cannot be recorded, cannot
+    be read back out of a state file, and cannot reorder one: a state file
+    naming `conf` today has that name DROPPED on the way in, which is the same
+    rule an unknown name has always had. The engine is also not in `FAMILIES`
+    yet, so no user reaches it at all.
+
+    The smuggled name is `conf` because K.5 bound `extract`, which is what this
+    test used to smuggle. That substitution is the whole maintenance burden of
+    this test, and it is deliberate: the assertion is about the names that are
+    still unbound, so it has to be re-pointed as each one lands, and the day
+    the tuple is whole (K.8) this test goes away with it.
     """
     from yulon.catalog.families import FAMILIES
 
     assert "cmangos" not in FAMILIES
     bound = engine(Recorder()).stage_names()
     assert set(bound) < set(CmangosInstaller.STAGE_NAMES)
-    smuggled = native.InstallState(game_id=ENTRY.id, install_id="x").with_stage("extract", bound)
+    assert "conf" not in bound, "K.6 landed: smuggle a name that is still unbound, or drop this"
+    smuggled = native.InstallState(game_id=ENTRY.id, install_id="x").with_stage("conf", bound)
     assert smuggled.completed == ()
 
 
@@ -757,12 +764,13 @@ def test_the_seams_carry_every_new_double_through_to_the_engine() -> None:
 
 
 def test_the_bound_stages_run_in_order_and_record_the_recorded_ones(tmp_path: Path) -> None:
-    """End to end over the stages bound so far; K.5-K.7 insert the rest between them.
+    """End to end over the stages bound so far; K.6-K.7 insert the rest between them.
 
     Also drives `lay_sql`/`on_clone`, so the SQL fixtures the later tasks import
     are proved to land under the source that owns them — and it is the only
-    test here that reaches `_write_dockerfile` through `run()` rather than by
-    calling the body, so the `Stage` really is wired to the method.
+    test here that reaches `_write_dockerfile`, `_extract` and `_mmaps` through
+    `run()` rather than by calling the bodies, so each `Stage` really is wired
+    to its method and the two long stages really do sit after the build.
     """
     rec = Recorder()
     server_dir = tmp_path / "srv"
@@ -774,13 +782,22 @@ def test_the_bound_stages_run_in_order_and_record_the_recorded_ones(tmp_path: Pa
         "--- write-dockerfile",
         "--- generate-compose",
         "--- build",
+        "--- extract",
+        "--- mmaps",
         "--- start-db",
         "--- up",
         "--- ready",
     ]
     state = native.read_state(server_dir, valid=engine(rec).stage_names())
     assert state is not None
-    assert state.completed == ("clone-sources", "write-dockerfile", "generate-compose", "build")
+    assert state.completed == (
+        "clone-sources",
+        "write-dockerfile",
+        "generate-compose",
+        "build",
+        "extract",
+        "mmaps",
+    )
     # The pair really landed, from the whole install rather than from a direct
     # call to the body, and the password is in neither: `_tokens()` hands the
     # secret over and `dockerfile.render()` is what keeps it out of the context.
@@ -1541,3 +1558,277 @@ def test_write_dockerfile_is_recorded_and_sits_between_db_password_and_generate_
     stage = next(s for s in stages if s.name == "write-dockerfile")
     assert stage.recorded is True
     assert stage.cancel_note == "", "only `build` costs anything to stop (A4)"
+
+
+# -- extract + mmaps ----------------------------------------------------------
+
+
+def _expected_user_args() -> tuple[str, ...]:
+    """What `platform.container_user_args()` answers for the Linux engine `engine()` builds.
+
+    Asked of `platform.py` rather than spelled out, because the uid:gid policy
+    is `test_platform.py`'s to prove and the question here is only whether the
+    engine's answer reaches the container spec. Not a tautology: the seam says
+    `linux`, so on a Linux runner this is a real `--user uid:gid` pair and an
+    engine that handed `run_plan` nothing would be caught. On a Windows runner
+    both sides are `()` and the assertion buys nothing there — which is why
+    `test_user_args_ask_platform_py_through_the_seam_and_not_the_real_host` is
+    the test that proves the policy, with faked ids.
+    """
+    return tuple(platform.container_user_args(platform_id=lambda: "linux"))
+
+
+def _mmaps_runs(rec: Recorder) -> list[docker.ContainerRun]:
+    """Every recorded run whose argv is the mmaps plan's — the generator, never a tool."""
+    assert CMANGOS is not None
+    return [run for run in rec.container_runs if run.argv == CMANGOS.mmaps.argv]
+
+
+def test_extract_runs_every_tool_read_only_as_the_user_in_out(tmp_path: Path) -> None:
+    """Audit by field: client `:ro` at /client, data rw at /out, cwd /out, `--user` on Linux."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    client = client_folder(tmp_path)
+    rec = Recorder()
+    eng = engine(rec)
+    said = list(eng._extract(context(server_dir, client)))
+    assert CMANGOS is not None
+    tools = CMANGOS.extract.tools
+    assert [run.argv for run in rec.container_runs] == [tool.argv for tool in tools]
+    for run in rec.container_runs:
+        mounts = {m.guest: m for m in run.mounts}
+        assert mounts["/client"].host == client and mounts["/client"].read_only is True
+        assert mounts["/out"].host == server_dir / "data" and mounts["/out"].read_only is False
+        assert run.workdir == "/out"
+        assert run.user_args == _expected_user_args()
+        assert run.image == eng._image_ref(context(server_dir), CMANGOS.extract.image)
+    evidence = extract.read_evidence(server_dir / "data")
+    assert evidence is not None
+    assert [record.name for record in evidence.tools] == [tool.name for tool in tools]
+    assert evidence.client_path == str(client.resolve())
+    assert evidence.required_file_size is not None, "the required file's size is the resume rule"
+    assert any("Extraction finished" in line for line in said)
+
+
+def test_extract_needs_the_client_folder(tmp_path: Path) -> None:
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    with pytest.raises(InstallerError, match="client"):
+        list(engine(rec)._extract(context(server_dir, None)))
+    assert rec.container_runs == [], "nothing was run against a client that was never given"
+
+
+def test_extract_second_run_skips_finished_tools_and_redoes_only_the_lost_one(
+    tmp_path: Path,
+) -> None:
+    """The data/ folders plus the completion records drive the gate — not the state file."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    client = client_folder(tmp_path)
+    rec = Recorder()
+    eng = engine(rec)
+    list(eng._extract(context(server_dir, client)))
+    first = len(rec.container_runs)
+    assert first == 3, "a skip is only observable once something has actually run"
+    list(eng._extract(context(server_dir, client, completed=["extract"])))
+    assert len(rec.container_runs) == first, "every tool had a record and its counts; none re-ran"
+    assert CMANGOS is not None
+    lost = next(iter(CMANGOS.extract.tools[0].produces))
+    for path in (server_dir / "data" / lost).iterdir():
+        path.unlink()
+    list(eng._extract(context(server_dir, client, completed=["extract"])))
+    reran = rec.container_runs[first:]
+    assert [run.argv for run in reran] == [CMANGOS.extract.tools[0].argv]
+
+
+def test_extract_refuses_a_tool_that_exits_zero_with_a_shortfall(tmp_path: Path) -> None:
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    client = client_folder(tmp_path)
+    rec = Recorder()
+    rec.produce = {name: 3 for name in rec.produce}
+    with pytest.raises(InstallerError) as refusal:
+        list(engine(rec)._extract(context(server_dir, client)))
+    assert str(ENTRY.client.build) in str(refusal.value), "the refusal names the client build"
+    assert len(rec.container_runs) == 1, "the first tool fell short; nothing after it ran"
+    evidence = extract.read_evidence(server_dir / "data")
+    assert evidence is None or evidence.tools == (), "a record for a failed tool is never written"
+
+
+def test_extract_refuses_a_failed_tool_naming_it(tmp_path: Path) -> None:
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    rec.run_result = docker.AttachedRun(2, ("ad: cannot open /client/Data/expansion.MPQ",))
+    with pytest.raises(InstallerError, match="expansion.MPQ"):
+        list(engine(rec)._extract(context(server_dir, client_folder(tmp_path))))
+    assert len(rec.container_runs) == 1, "the first tool failed; nothing after it ran"
+
+
+def test_mmaps_runs_the_generator_over_data_and_records_it(tmp_path: Path) -> None:
+    """mmaps needs extraction evidence first (`run_mmaps` refuses without it), so extract runs."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    client = client_folder(tmp_path)
+    rec = Recorder()
+    eng = engine(rec)
+    list(eng._extract(context(server_dir, client)))
+    extracted = len(rec.container_runs)
+    said = list(eng._mmaps(context(server_dir)))
+    assert CMANGOS is not None
+    mmaps_runs = rec.container_runs[extracted:]
+    assert [run.argv for run in mmaps_runs] == [CMANGOS.mmaps.argv]
+    run = mmaps_runs[0]
+    assert {m.guest: m.host for m in run.mounts} == {"/out": server_dir / "data"}
+    assert run.workdir == "/out"
+    assert run.user_args == _expected_user_args()
+    assert run.image == eng._image_ref(context(server_dir), CMANGOS.extract.image)
+    assert len(list((server_dir / "data" / "mmaps").iterdir())) >= CMANGOS.mmaps.min_files
+    assert any("Map generation finished" in line for line in said)
+    list(eng._mmaps(context(server_dir, completed=["mmaps"])))
+    assert len(rec.container_runs) == extracted + 1, "an evidenced mmaps run is not repeated"
+
+
+def test_mmaps_refuses_before_any_extraction(tmp_path: Path) -> None:
+    server_dir = tmp_path / "srv"
+    (server_dir / "data").mkdir(parents=True)
+    rec = Recorder()
+    with pytest.raises(InstallerError, match="no extraction evidence"):
+        list(engine(rec)._mmaps(context(server_dir)))
+    assert rec.container_runs == []
+
+
+def test_no_mmaps_container_is_handed_anything_that_names_the_users_client(tmp_path: Path) -> None:
+    """`run_mmaps` deletes `data/mmaps`; this is the call site that keeps the client away from it.
+
+    Three legs held the guarantee inside `extract.py` before anything called
+    it: `run_mmaps`'s signature takes no client path, `MMAPS_DIR` is a single
+    relative component, and `MmapPlan` carries no folder field. This engine is
+    the first caller, and the leg it owns is the one that cannot be seen by
+    reading the call — `data_dir=ctx.server_dir / DATA_DIR` and
+    `data_dir=ctx.client_dir` are the same shape on the page, and the second
+    would hand `shutil.rmtree` a folder inside somebody's game install.
+
+    So the spec is audited by field rather than by eye: the mmaps container
+    gets exactly one mount, it is the server's own `data/`, and no mount, no
+    argument and no environment value under that container is the client folder
+    or anything beneath it. The `ctx` handed to `_mmaps` here DOES carry a
+    client dir, deliberately — a body that reached for `ctx.client_dir` would
+    find one rather than a `None` that fails for a different reason — and the
+    client sits beside the server dir under `tmp_path`, so neither is an
+    ancestor of the other and `is_relative_to` can only answer True on a real
+    mistake.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    client = client_folder(tmp_path)
+    rec = Recorder()
+    eng = engine(rec)
+    list(eng._extract(context(server_dir, client)))
+    list(eng._mmaps(context(server_dir, client)))
+    runs = _mmaps_runs(rec)
+    assert len(runs) == 1
+    for run in runs:
+        assert [(m.host, m.guest) for m in run.mounts] == [(server_dir / "data", "/out")]
+        for mount in run.mounts:
+            assert not mount.host.is_relative_to(client), f"{mount.guest} reaches the client"
+        spoken = (*run.argv, *run.env.values(), run.workdir or "", run.image)
+        assert not any(str(client) in text for text in spoken)
+
+
+def test_extract_and_mmaps_carry_the_stage_kinds_own_cancel_notes() -> None:
+    notes = {s.name: s.cancel_note for s in engine(Recorder()).stages()}
+    assert notes["extract"] == extract.EXTRACT_CANCEL_NOTE
+    assert notes["mmaps"] == extract.MMAPS_CANCEL_NOTE
+    assert "only the tool that was interrupted" in notes["extract"]
+    assert "restarts from the beginning" in notes["mmaps"]
+
+
+def test_the_selinux_answer_reaches_every_extraction_container_and_no_mmaps_one(
+    tmp_path: Path,
+) -> None:
+    """`label:disable` where the client is mounted; never on the one container without one.
+
+    Two facts in one test because they are one decision taken twice, in
+    opposite directions, and neither is safe to read off the other:
+
+    * The extraction containers hold the USER's client, which lives outside the
+      server directory and which no `chcon` of ours ever reaches; on an
+      enforcing box a confined container is denied it outright
+      (`yulon-fedora-gate`, Fedora 44, Docker 29.7.2, 2026-09-01). They get the
+      flag, and the ANSWER comes from the seam — `run_plan`'s
+      `selinux_enforcing` parameter defaults to `platform.selinux_enforcing`,
+      bound at import, so an engine that let it default would ask the real host
+      and these two runs would agree instead of differing.
+    * The mmaps container binds `data/` under the server directory and nothing
+      else, and `stage_generate_compose` has already relabelled that directory,
+      so it is readable and writable while confined. The flag would turn a
+      container's confinement off to buy nothing at all, and `run_mmaps` is
+      right to omit it. What transfers from the extract stage is the evidence,
+      not the decision.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    client = client_folder(tmp_path)
+    disable = ("--security-opt", "label:disable")
+
+    fedora = Recorder()
+    eng = engine(fedora, selinux_enforcing=lambda: True)
+    list(eng._extract(context(server_dir, client)))
+    tools = list(fedora.container_runs)
+    list(eng._mmaps(context(server_dir)))
+    assert tools, "no extraction container ran, so this proves nothing about either half"
+    for run in tools:
+        assert run.security_args == (*extract.EXTRACT_HARDENING, *disable)
+    for run in _mmaps_runs(fedora):
+        assert run.security_args == extract.EXTRACT_HARDENING
+        assert "label:disable" not in run.security_args
+
+    ubuntu = Recorder()
+    other = tmp_path / "srv2"
+    other.mkdir()
+    list(engine(ubuntu, selinux_enforcing=lambda: False)._extract(context(other, client)))
+    for run in ubuntu.container_runs:
+        assert run.security_args == extract.EXTRACT_HARDENING
+
+
+def test_the_relabel_that_lets_mmaps_run_confined_happens_before_the_first_extraction(
+    tmp_path: Path,
+) -> None:
+    """A guard whose correctness is its POSITION in a sequence; a reorder must fail here.
+
+    `run_mmaps` carries no `label:disable` because its one bind, `data/` under
+    the server directory, inherits `container_file_t` from the relabel
+    `stage_generate_compose` does. That relabel was confirmed on
+    `yulon-fedora-gate` (Fedora 44, Enforcing, Docker 29.7.2, 2026-09-01); what
+    was NOT confirmed until these two stages were bound is that it happens
+    FIRST, because until then there was no pipeline to ask.
+
+    So both halves are asserted, and the live one is the point: a reorder of
+    `stages()` that looked like housekeeping would move a confined container in
+    front of the `chcon` that makes its bind readable, and the symptom would be
+    a Fedora install that fails hours in with a permission error. It fails here
+    instead.
+    """
+    rec = Recorder()
+
+    def relabel(path: Path) -> bool:
+        rec.calls.append("relabel")
+        return rec.relabel(path)
+
+    server_dir = tmp_path / "srv"
+    install(
+        rec,
+        server_dir,
+        client_folder(tmp_path),
+        selinux_enforcing=lambda: True,
+        relabel=relabel,
+    )
+    assert rec.relabelled == [server_dir], "the Fedora shape did not relabel; nothing was ordered"
+    first_container = next(i for i, call in enumerate(rec.calls) if call.startswith("run:"))
+    assert rec.calls.index("relabel") < first_container
+    names = [stage.name for stage in engine(rec).stages()]
+    assert names.index("generate-compose") < names.index("extract") < names.index("mmaps")
+    pinned = CmangosInstaller.STAGE_NAMES
+    assert pinned.index("generate-compose") < pinned.index("extract") < pinned.index("mmaps")
