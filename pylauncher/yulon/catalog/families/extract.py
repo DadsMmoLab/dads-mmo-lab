@@ -42,6 +42,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -50,7 +51,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from yulon import docker, platform
-from yulon.catalog.catalog import ExtractPlan, ExtractTool, RetrySpec
+from yulon.catalog.catalog import ExtractPlan, ExtractTool, MmapPlan, RetrySpec
 from yulon.catalog.installer import InstallerError
 from yulon.log import get_logger
 
@@ -926,3 +927,191 @@ def _conclude(
 def _counts_text(seen: Mapping[str, int]) -> str:
     """Counts already taken, as one clause of a log line."""
     return ", ".join(f"{folder}: {have} files" for folder, have in seen.items())
+
+
+# ------------------------------------------------ the mmaps stage: one tool, and one wipe
+
+MMAPS_TOOL = "mmaps"
+"""The name this stage records itself under, in the same evidence file the tools use."""
+
+MMAPS_DIR = "mmaps"
+"""The folder this stage writes, and the folder it removes: `<data_dir>/mmaps`.
+
+Held as a module constant rather than read off `MmapPlan`, deliberately. This
+stage removes a folder, and a catalog field naming that folder would be one
+edit away from naming somewhere else, while a constant is not. `run_mmaps()` is
+given no client path either, so the two inputs to `data_dir / MMAPS_DIR` are the
+server's own data directory and this string. Both of those are pinned where they
+are CHOSEN rather than where they meet — grep for `MmapPlan.model_fields` in
+`tests/test_extract.py` — because an assertion that one happy path removed
+`data/mmaps` would keep passing on the day a field pointed it elsewhere.
+"""
+
+MMAPS_CANCEL_NOTE = (
+    "Map generation restarts from the beginning; the extracted maps it reads are kept."
+)
+"""What a Stop costs in the mmaps stage, yielded by the spine before it begins (A4).
+
+True of a Stop at any moment inside the stage: nothing is recorded until the
+tool exits 0 with enough files, so there is no partial state to resume into, and
+the only folder touched is `mmaps` itself.
+"""
+
+MMAPS_CLEARED_NOTE = (
+    "The mmaps folder was removed before this attempt so generation could start clean, "
+    "so there is no earlier one left to fall back on."
+)
+"""The clause every refusal carries when the wipe already happened — and only then.
+
+A shortfall before a wipe and a shortfall after one are different facts about
+somebody's disk. "map generation failed (exit 139)" is true of both and complete
+about neither: after a wipe the machine is a folder poorer than the sentence
+implies, and the user needs to know that the next attempt is not optional.
+"""
+
+
+def _remove_tree(path: Path) -> bool:
+    """Remove `path` and everything under it; False when there was nothing to remove.
+
+    One fallible call answers both questions. `is_dir()` and then `rmtree()` is
+    two reads of one filesystem and therefore two answers that can disagree —
+    the I.3 incident — and here the disagreement decides whether a folder that
+    is still on disk gets generated over.
+
+    `FileNotFoundError` IS the "nothing there" answer, so the first install
+    costs no extra `stat`. Anything else (a `mmaps` that is a file, a folder
+    held open, a permission that says no) is raised for the caller to turn into
+    a refusal, because "the removal did not happen" and "there was nothing to
+    remove" must not arrive at the same place.
+    """
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def run_mmaps(
+    plan: MmapPlan,
+    *,
+    image_ref: str,
+    data_dir: Path,
+    run_container: RunContainer,
+    user_args: Sequence[str],
+    sink: docker.OutputSink,
+    cancel: threading.Event | None,
+) -> Iterator[str]:
+    """Generate `data/mmaps` from the extracted maps and vmaps, unless the evidence vouches for it.
+
+    The same three-part rule as `run_plan`, asked of the evidence file the
+    extract stage wrote — with one difference that has to be said out loud,
+    because it makes a whole class of check useless here. This stage reads no
+    client, so it has no independently measured facts to compare the file
+    against: it passes `current` as BOTH the evidence and the expectation.
+    `same_stage()`'s four fields therefore agree by construction and can refuse
+    nothing. What can refuse is `satisfied()`'s `client_facts_complete` veto (a
+    bit written by whichever run could not measure the client, read back off the
+    file), the record for THIS argv, and the counts. Whatever notices a swapped
+    client, it is not anything in here: it is `run_plan`, which replaces the
+    whole file — this stage's record included — when the stage facts move.
+
+    Without a record the folder is wiped first. The premise is MoveMapGen's
+    behaviour — it skips maps it already finds output for — which is the 7.3
+    plan's stated reason for the wipe (2026-08-26) and is NOT re-measured here;
+    if it is ever measured false, the wipe stops being justified and this is the
+    paragraph to come back to. Taking it as given, generating over a folder left
+    by an interrupted run produces a permanently partial set that passes every
+    later gate, which is the failure this stage is arranged around.
+
+    Deleting is not free, and the order below is what limits the damage:
+
+    * A cancel token that is already set is answered BEFORE the wipe. That is
+      the one ending where "do not remove it" costs nothing, so it is taken.
+    * A removal that fails refuses on the spot. The alternative — carrying on
+      over a folder that is still there — is the exact failure above.
+    * The four endings that can follow a wipe (stopped, never started, failed,
+      too few files) each say `MMAPS_CLEARED_NOTE` when the wipe happened and do
+      not when it did not. A user whose docker CLI vanished between two stages
+      is told they are now short a folder, rather than being left to find out.
+
+    `required: false` (data) turns a shortfall into a warning AND records the
+    run, so an optional stage that produced little is not regenerated on every
+    resume. The threshold for the skip test is then 0; `min_files` is only what
+    the warning names.
+
+    The counts after the run are taken once and the gate, the refusal and the
+    done line are all made of that one walk, for `counts()`'s reason.
+
+    Raises:
+        InstallerError: no extraction evidence yet, a Stop, a folder that could
+            not be removed, a tool that never started, a tool that failed, or a
+            shortfall on a required plan.
+    """
+    current = read_evidence(data_dir)
+    if current is None:
+        raise InstallerError(
+            f"{data_dir} holds no extraction evidence, so there are no maps to generate movement "
+            "data from. The extract stage has to finish first."
+        )
+    produces = {MMAPS_DIR: plan.min_files if plan.required else 0}
+    if satisfied(MMAPS_TOOL, plan.argv, produces, data_dir, current, current):
+        yield f"mmaps: already generated ({_counts_text(counts(produces, data_dir))})"
+        return
+    if cancel is not None and cancel.is_set():
+        raise InstallerError(
+            f"map generation was stopped before it started, so nothing was removed. "
+            f"{MMAPS_CANCEL_NOTE}"
+        )
+    out = data_dir / MMAPS_DIR
+    try:
+        wiped = _remove_tree(out)
+    except OSError as exc:
+        raise InstallerError(
+            f"{out} could not be removed ({exc}), and MoveMapGen skips every map it finds output "
+            "for — so generating over what is there would leave a permanently partial set that "
+            "looks finished. Nothing was run. Close whatever is using that folder, or remove it "
+            "by hand, then try again."
+        ) from exc
+    cleared = f" {MMAPS_CLEARED_NOTE}" if wiped else ""
+    if wiped:
+        yield "mmaps: removed a folder no finished run vouches for, so generation starts clean"
+    yield f"mmaps: running {' '.join(plan.argv)}"
+    run = run_container(
+        docker.ContainerRun(
+            image=image_ref,
+            argv=tuple(plan.argv),
+            mounts=(docker.Mount(data_dir, OUT_MOUNT),),
+            workdir=OUT_MOUNT,
+            user_args=tuple(user_args),
+            security_args=EXTRACT_HARDENING,
+        ),
+        sink=sink,
+        cancel=cancel,
+    )
+    if run.returncode == docker.CANCELLED_RETURNCODE or (cancel is not None and cancel.is_set()):
+        raise InstallerError(f"map generation was stopped.{cleared} {MMAPS_CANCEL_NOTE}")
+    if docker.cli_missing_run(run):
+        raise InstallerError(
+            f"map generation could not be started, so no movement data was written."
+            f"{cleared} {docker.last_words(run.tail)}"
+        )
+    if run.returncode != 0:
+        raise InstallerError(
+            f"map generation failed (exit {run.returncode}).{cleared} Its last words were: "
+            f"{docker.last_words(run.tail)}"
+        )
+    wanted = {MMAPS_DIR: plan.min_files}
+    seen = counts(wanted, data_dir)
+    short = short_of(seen, wanted)
+    if short:
+        have, need = short[MMAPS_DIR]
+        message = f"mmaps holds {have} files where at least {need} were expected"
+        if plan.required:
+            raise InstallerError(
+                f"{message}.{cleared} Creatures would not move properly, so nothing was "
+                "recorded. Check the extracted maps and vmaps, then try again."
+            )
+        yield f"warning: {message}; this server treats movement maps as optional, continuing"
+    record = ToolRecord(MMAPS_TOOL, argv_hash(plan.argv), int(time.time()))
+    write_evidence(data_dir, with_record(current, record))
+    yield f"mmaps: done ({_counts_text(seen)})"

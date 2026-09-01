@@ -16,15 +16,17 @@ needless re-run only costs an hour.
 
 from __future__ import annotations
 
+import inspect
 import json
 import threading
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from yulon import docker, platform
-from yulon.catalog.catalog import ExtractPlan, ExtractTool, RetrySpec
+from yulon.catalog.catalog import ExtractPlan, ExtractTool, MmapPlan, RetrySpec
 from yulon.catalog.families import extract
 from yulon.catalog.installer import InstallerError
 
@@ -1717,3 +1719,549 @@ def test_an_output_folder_named_with_whitespace_is_refused_rather_than_silently_
         data_dir=tmp_path / "data",
         user_args=(),
     )
+
+
+# --- the mmaps stage: one tool, and the only folder this installer deletes ---------------------
+#
+# Everything above re-runs a tool that did not finish. This stage REMOVES what
+# is there first, because MoveMapGen skips every map it already finds output
+# for, so generating over a folder left behind by an interrupted run would
+# produce a permanently partial set that passes every later gate.
+#
+# That makes three questions worth asking of every test here, and none of them
+# is asked of `run_plan`:
+#
+#   * WHAT is removed — the answer has to be a folder this app made, under the
+#     `data/` it owns, and it has to stay that whatever a catalog says;
+#   * WHETHER the removal is followed by a run — a wipe and then a cancel, a
+#     missing docker CLI or a crash leaves the user with less than they had,
+#     and every one of those endings has to say so;
+#   * WHICH part of the skip rule can actually refuse. `run_mmaps` hands
+#     `satisfied()` the SAME evidence on both sides, so `same_stage()`'s four
+#     fields agree by construction; the parts that can disagree are the
+#     `client_facts_complete` veto, the record for this argv, and the counts.
+
+MMAPS = MmapPlan(
+    argv=("/opt/bin/MoveMapGen", "--silent", "--threads", "2"), min_files=3, required=True
+)
+MMAPS_WRITES = {"/opt/bin/MoveMapGen": {"mmaps": 3}}
+
+
+def mmaps(
+    plan: MmapPlan, runner: Runner, tmp_path: Path, *, cancel: threading.Event | None = None
+) -> list[str]:
+    return list(
+        extract.run_mmaps(
+            plan,
+            image_ref="yulon.local/x-server:1",
+            data_dir=tmp_path / "server" / "data",
+            run_container=runner,
+            user_args=("--user", "1000:1000"),
+            sink=lambda _line: None,
+            cancel=cancel,
+        )
+    )
+
+
+def test_mmaps_runs_in_data_only_with_the_plan_argv_and_records_itself(tmp_path: Path) -> None:
+    run(PLAN, Runner(FULL), tmp_path)
+    runner = Runner(MMAPS_WRITES)
+    mmaps(MMAPS, runner, tmp_path)
+    (spec,) = runner.specs
+    assert spec.argv == MMAPS.argv
+    assert spec.workdir == "/out"
+    assert [mount.guest for mount in spec.mounts] == ["/out"]
+    assert spec.user_args == ("--user", "1000:1000")
+    evidence = extract.read_evidence(tmp_path / "server" / "data")
+    assert evidence is not None and evidence.record_for(extract.MMAPS_TOOL) is not None
+    again = Runner(MMAPS_WRITES)
+    assert any("already" in line for line in mmaps(MMAPS, again, tmp_path))
+    assert again.specs == []
+
+
+def test_mmaps_without_a_record_wipes_the_partial_folder_and_regenerates(tmp_path: Path) -> None:
+    run(PLAN, Runner(FULL), tmp_path)
+    data = tmp_path / "server" / "data"
+    fill(data, "mmaps", 3)
+    (data / "mmaps" / "stale").write_bytes(b"x")
+    runner = Runner(MMAPS_WRITES)
+    mmaps(MMAPS, runner, tmp_path)
+    assert len(runner.specs) == 1
+    assert not (data / "mmaps" / "stale").exists()
+
+
+def test_mmaps_shortfall_refuses_when_required_and_warns_when_not(tmp_path: Path) -> None:
+    run(PLAN, Runner(FULL), tmp_path)
+    with pytest.raises(InstallerError) as caught:
+        mmaps(MMAPS, Runner({"/opt/bin/MoveMapGen": {"mmaps": 1}}), tmp_path)
+    assert "mmaps holds 1 files where at least 3 were expected" in str(caught.value)
+    assert "Creatures would not move properly, so nothing was recorded" in str(caught.value)
+    refused = extract.read_evidence(tmp_path / "server" / "data")
+    assert refused is not None and refused.record_for(extract.MMAPS_TOOL) is None
+    optional = MmapPlan(argv=MMAPS.argv, min_files=3, required=False)
+    said = mmaps(optional, Runner({"/opt/bin/MoveMapGen": {"mmaps": 1}}), tmp_path)
+    assert any("warning" in line for line in said)
+    again = Runner({"/opt/bin/MoveMapGen": {"mmaps": 1}})
+    mmaps(optional, again, tmp_path)
+    assert again.specs == [], "an optional shortfall is recorded, not regenerated on every resume"
+
+
+def test_mmaps_before_extraction_is_refused(tmp_path: Path) -> None:
+    """A12: no evidence file means no maps to read, and the tool is not started to find out.
+
+    Asserted on the refusal's own words rather than on `match="extract"`, which
+    is the loose assertion a neighbour answers for: with the check deleted the
+    run reaches the shortfall refusal instead, whose "Check the extracted maps
+    and vmaps" contains "extract" and passes a test that was meant to prove the
+    stage never ran. `runner.specs` is the other half — a container that was
+    started has already been given the `data/` mount.
+    """
+    runner = Runner({})
+    with pytest.raises(InstallerError) as caught:
+        mmaps(MMAPS, runner, tmp_path)
+    assert "holds no extraction evidence" in str(caught.value)
+    assert "The extract stage has to finish first." in str(caught.value)
+    assert runner.specs == []
+
+
+def test_mmaps_cancel_names_its_own_note(tmp_path: Path) -> None:
+    run(PLAN, Runner(FULL), tmp_path)
+    runner = Runner(MMAPS_WRITES)
+    runner.cancel_after = 1
+    with pytest.raises(InstallerError, match=extract.MMAPS_CANCEL_NOTE):
+        mmaps(MMAPS, runner, tmp_path, cancel=threading.Event())
+
+
+# --- what is removed, and the two places that decide it ----------------------------------------
+
+
+def test_the_wipe_target_is_built_from_the_data_dir_and_a_constant_no_catalog_names() -> None:
+    """The wipe's inputs, audited where they are CHOSEN rather than where they meet.
+
+    PR #142's shape was a uniqueness claim that protected nothing because the
+    caller reaching `rmtree` never asked it. The equivalent here is asserting
+    "it removed `data/mmaps`" on one happy path and calling the question
+    settled — a later `MmapPlan` field naming its own output folder would pass
+    that assertion on the day it was written and point the removal somewhere
+    else on the day it shipped.
+
+    So the two inputs are pinned instead of the one result. `data_dir` is the
+    only path `run_mmaps` is given — there is no client parameter to confuse it
+    with — and `MMAPS_DIR` is a bare relative component with no anchor and no
+    `..`, so `data_dir / MMAPS_DIR` cannot leave `data_dir` however either is
+    spelled. `MmapPlan` carrying no folder field is the third leg: no catalog
+    entry has anywhere to write a different name.
+    """
+    parameters = inspect.signature(extract.run_mmaps).parameters
+    assert set(parameters) == {
+        "plan",
+        "image_ref",
+        "data_dir",
+        "run_container",
+        "user_args",
+        "sink",
+        "cancel",
+    }
+    assert "client" not in " ".join(parameters)
+    folder = Path(extract.MMAPS_DIR)
+    assert folder.parts == (extract.MMAPS_DIR,)
+    assert not folder.is_absolute() and folder.anchor == "" and ".." not in folder.parts
+    assert set(MmapPlan.model_fields) == {"argv", "min_files", "required"}
+
+
+def test_the_run_hands_rmtree_the_mmaps_folder_and_a_skip_hands_it_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the audit: what the run actually handed `rmtree`.
+
+    The client sits beside `server/` in this fixture, holding the file
+    `expected_evidence()` measures, and the sibling extract output (`dbc`,
+    `maps`, `vmaps`) sits inside the same `data/` the wipe happens in — so a
+    removal that took `data_dir` itself, or anything derived from the client,
+    would be visible here rather than inferred.
+
+    The second half is the ending the first half cannot see: once the evidence
+    vouches for the folder, nothing is removed at all. A wipe placed before the
+    skip test would still pass every assertion above.
+    """
+    run(PLAN, Runner(FULL), tmp_path)
+    data = tmp_path / "server" / "data"
+    fill(data, "mmaps", 1)
+    removed: list[Path] = []
+    real_rmtree = extract.shutil.rmtree
+
+    def recording(path: Path, *args: object, **kwargs: object) -> None:
+        removed.append(Path(path))
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(extract.shutil, "rmtree", recording)
+    mmaps(MMAPS, Runner(MMAPS_WRITES), tmp_path)
+    assert removed == [data / "mmaps"]
+    assert (tmp_path / "client" / "Data" / "expansion.MPQ").is_file()
+    assert extract.file_count(data / "dbc") == 3
+    assert extract.file_count(data / "maps") == 2
+    assert extract.file_count(data / "vmaps") == 2
+
+    skipping = Runner(MMAPS_WRITES)
+    mmaps(MMAPS, skipping, tmp_path)
+    assert skipping.specs == []
+    assert removed == [data / "mmaps"], "a folder the evidence vouches for is not wiped"
+
+
+# --- a wipe that is not followed by a run ------------------------------------------------------
+
+
+def test_a_stop_that_arrived_before_the_stage_started_removes_nothing(tmp_path: Path) -> None:
+    """The one ending where "do not wipe" is free, so it is taken.
+
+    A cancel token that is already set when the stage begins means the user
+    pressed Stop and this stage has done nothing yet. Wiping and then reading
+    the same token back off the container would cost them a finished mmaps
+    folder for a decision they made before it started.
+    """
+    run(PLAN, Runner(FULL), tmp_path)
+    data = tmp_path / "server" / "data"
+    fill(data, "mmaps", 7)
+    already = threading.Event()
+    already.set()
+    runner = Runner(MMAPS_WRITES)
+    with pytest.raises(InstallerError) as caught:
+        mmaps(MMAPS, runner, tmp_path, cancel=already)
+    assert "stopped" in str(caught.value)
+    assert extract.MMAPS_CLEARED_NOTE not in str(caught.value)
+    assert runner.specs == []
+    assert extract.file_count(data / "mmaps") == 7
+
+
+def test_a_folder_that_could_not_be_removed_refuses_before_the_tool_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Third outcome: the removal neither happened nor was assumed to have happened.
+
+    Generating over a folder that is still there is the one thing the wipe
+    exists to prevent, so a removal that failed cannot be shrugged off and
+    followed by a run. Nothing ran and nothing was lost — the folder is still
+    exactly as full as it was.
+    """
+    run(PLAN, Runner(FULL), tmp_path)
+    data = tmp_path / "server" / "data"
+    fill(data, "mmaps", 7)
+
+    def refuse(path: Path, *args: object, **kwargs: object) -> None:
+        raise PermissionError(13, "in use by another process")
+
+    monkeypatch.setattr(extract.shutil, "rmtree", refuse)
+    runner = Runner(MMAPS_WRITES)
+    with pytest.raises(InstallerError) as caught:
+        mmaps(MMAPS, runner, tmp_path)
+    assert "could not be removed" in str(caught.value)
+    assert runner.specs == []
+    assert extract.file_count(data / "mmaps") == 7
+
+
+def _mmaps_stopped() -> Runner:
+    """Ending 1, and only ending 1: the cancel sentinel with no configured failure."""
+    runner = Runner(MMAPS_WRITES)
+    runner.cancel_after = 1
+    return runner
+
+
+def _mmaps_never_started() -> Runner:
+    """Ending 2: both halves of `cli_missing_run()`'s sentinel and nothing else."""
+    return Runner({}, fail={"/opt/bin/MoveMapGen": (127, platform.DOCKER_CLI_MISSING_HELP)})
+
+
+def _mmaps_crashed() -> Runner:
+    """Ending 3: an ordinary non-zero status with ordinary last words."""
+    return Runner({}, fail={"/opt/bin/MoveMapGen": SEGFAULT})
+
+
+def _mmaps_fell_short() -> Runner:
+    """Ending 4: exit 0, having written one file where three were asked for."""
+    return Runner({"/opt/bin/MoveMapGen": {"mmaps": 1}})
+
+
+MMAPS_ENDINGS = [
+    pytest.param(_mmaps_stopped, "was stopped", id="stopped"),
+    pytest.param(_mmaps_never_started, "could not be started", id="never-started"),
+    pytest.param(_mmaps_crashed, "failed (exit 139)", id="failed"),
+    pytest.param(_mmaps_fell_short, "at least 3 were expected", id="fell-short"),
+]
+
+
+@pytest.mark.parametrize(("make_runner", "says"), MMAPS_ENDINGS)
+def test_every_refusal_after_a_wipe_says_the_earlier_mmaps_are_gone(
+    tmp_path: Path, make_runner: Callable[[], Runner], says: str
+) -> None:
+    """A shortfall after a wipe is not the same fact as a shortfall before one.
+
+    All four of these leave the stage with no record, so the next attempt starts
+    over — but the user's disk is not where it was. They had a folder; it was
+    removed so MoveMapGen would not skip past what was in it; and then nothing
+    replaced it. A refusal that says only "failed (exit 139)" describes a
+    machine that is one folder poorer than the sentence implies.
+
+    Each fixture trips exactly one of the four endings, so "it raised" cannot
+    stand in for "this rule caught it": the cancel sentinel with no configured
+    failure, both halves of the CLI-missing sentinel, a 139 that is neither, and
+    an exit 0 that wrote too little.
+    """
+    run(PLAN, Runner(FULL), tmp_path)
+    fill(tmp_path / "server" / "data", "mmaps", 5)
+    with pytest.raises(InstallerError) as caught:
+        mmaps(MMAPS, make_runner(), tmp_path, cancel=threading.Event())
+    message = str(caught.value)
+    assert says in message
+    assert extract.MMAPS_CLEARED_NOTE in message
+
+
+@pytest.mark.parametrize(("make_runner", "says"), MMAPS_ENDINGS)
+def test_a_refusal_with_nothing_to_wipe_does_not_claim_a_folder_was_removed(
+    tmp_path: Path, make_runner: Callable[[], Runner], says: str
+) -> None:
+    """The same four endings on a first install, where there was nothing there.
+
+    Without this the "cleared" clause could be an unconditional string and every
+    assertion above would still pass, while a first-time install was told it had
+    lost a folder it never had.
+    """
+    run(PLAN, Runner(FULL), tmp_path)
+    assert not (tmp_path / "server" / "data" / "mmaps").exists()
+    with pytest.raises(InstallerError) as caught:
+        mmaps(MMAPS, make_runner(), tmp_path, cancel=threading.Event())
+    message = str(caught.value)
+    assert says in message
+    assert extract.MMAPS_CLEARED_NOTE not in message
+
+
+def test_a_generator_that_never_started_is_not_map_generation_failing(tmp_path: Path) -> None:
+    """`run_plan`'s ending 2, kept here: "it failed (exit 127)" is about a tool that ran.
+
+    Both halves of the sentinel, for `docker.cli_missing_run()`'s reason —
+    `docker run` returns the CONTAINER's status, so a MoveMapGen missing inside
+    the image genuinely exits 127, and reading that as "docker is not installed"
+    sends the user to reinstall Docker.
+    """
+    run(PLAN, Runner(FULL), tmp_path)
+    with pytest.raises(InstallerError) as missing:
+        mmaps(MMAPS, _mmaps_never_started(), tmp_path)
+    assert "could not be started" in str(missing.value)
+    assert platform.DOCKER_CLI_MISSING_HELP in str(missing.value)
+    assert "exit 127" not in str(missing.value)
+    real = Runner({}, fail={"/opt/bin/MoveMapGen": (127, "exec /opt/bin/MoveMapGen: not found")})
+    with pytest.raises(InstallerError) as caught:
+        mmaps(MMAPS, real, tmp_path)
+    assert "exit 127" in str(caught.value) and "not found" in str(caught.value)
+    assert "could not be started" not in str(caught.value)
+
+
+# --- the counts, walked once ------------------------------------------------------------------
+
+
+def test_the_shortfall_refusal_quotes_the_number_the_gate_read_after_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One walk decides the refusal, and the refusal is made of that walk's number.
+
+    `mmaps` is a single folder, so a second `shortfall()` inside the `if short:`
+    block produces an identical sentence for as long as the filesystem holds
+    still — which is exactly the way I.4's version of this survived a whole
+    file. So the fixture does not hold still: the folder answers 1 the first
+    time it is walked and 0 to anything after that, which is the only thing that
+    tells the two versions apart.
+
+    One walk, not two: `satisfied()` answers False on the missing record before
+    it reaches its count part, so the skip gate never touches the folder on a
+    run that is about to regenerate it.
+    """
+    run(PLAN, Runner(FULL), tmp_path)
+    walked: list[Path] = []
+    real_count = extract.file_count
+
+    def counting(folder: Path) -> int:
+        walked.append(folder)
+        if folder.name == extract.MMAPS_DIR:
+            return 1 if walked.count(folder) == 1 else 0
+        return real_count(folder)
+
+    monkeypatch.setattr(extract, "file_count", counting)
+    with pytest.raises(InstallerError) as caught:
+        mmaps(MMAPS, Runner({"/opt/bin/MoveMapGen": {"mmaps": 1}}), tmp_path)
+    data = tmp_path / "server" / "data"
+    assert walked == [data / "mmaps"]
+    assert "mmaps holds 1 files where at least 3 were expected" in str(caught.value)
+
+
+def test_the_warning_and_the_done_line_quote_that_same_number(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The optional path says the number twice, and both times it is the gate's.
+
+    A `required: false` plan yields a warning naming the count AND a done line
+    naming it again, which is two chances to walk the folder again and tell the
+    user two different numbers about one folder. The fixture answers 1 once and
+    0 after, so either extra walk shows up as a 0 in a sentence.
+    """
+    run(PLAN, Runner(FULL), tmp_path)
+    walked: list[Path] = []
+    real_count = extract.file_count
+
+    def counting(folder: Path) -> int:
+        walked.append(folder)
+        if folder.name == extract.MMAPS_DIR:
+            return 1 if walked.count(folder) == 1 else 0
+        return real_count(folder)
+
+    monkeypatch.setattr(extract, "file_count", counting)
+    optional = MmapPlan(argv=MMAPS.argv, min_files=3, required=False)
+    said = mmaps(optional, Runner({"/opt/bin/MoveMapGen": {"mmaps": 1}}), tmp_path)
+    data = tmp_path / "server" / "data"
+    assert walked == [data / "mmaps"]
+    assert any("mmaps holds 1 files where at least 3 were expected" in line for line in said)
+    assert any("done (mmaps: 1 files)" in line for line in said)
+
+
+# --- the container this stage builds ------------------------------------------------------------
+
+
+def test_the_mmaps_container_gives_up_the_network_and_new_privileges_and_no_label(
+    tmp_path: Path,
+) -> None:
+    """The hardening every extraction run gets, and the SELinux flag this one does not.
+
+    `container_security_args()` adds `label:disable` because the extraction
+    container has to read the user's game client, which is outside the server
+    folder and which no `chcon` of ours reaches (measured on
+    `yulon-fedora-gate`, Fedora 44 Enforcing, Docker 29.7.2, 2026-09-01, and
+    recorded on `docker.ContainerRun.security_args`). This container has no
+    client mount at all: its one bind is the `data/` under the server directory,
+    which that same measurement found readable and writable while confined. So
+    the label flag would be turning a container's confinement off for nothing,
+    which is the decision `platform.label_disable_args()` exists to make nobody
+    take by default.
+    """
+    run(PLAN, Runner(FULL), tmp_path)
+    runner = Runner(MMAPS_WRITES)
+    mmaps(MMAPS, runner, tmp_path)
+    (spec,) = runner.specs
+    assert spec.security_args == extract.EXTRACT_HARDENING
+    assert "label:disable" not in spec.security_args
+    assert spec.mounts == (docker.Mount(tmp_path / "server" / "data", "/out"),)
+    assert spec.env == {}
+    assert spec.ulimits == ()
+
+
+# --- which part of the skip rule can actually refuse -------------------------------------------
+
+
+def test_evidence_that_cannot_identify_its_client_never_licenses_a_skip_of_mmaps(
+    tmp_path: Path,
+) -> None:
+    """The veto is the part of the rule that compares two different values here.
+
+    `run_mmaps` hands `satisfied()` the same `Evidence` on both sides, so
+    `same_stage()`'s four fields agree by construction and cannot refuse
+    anything — asserted below so the claim is not left as a comment. The veto
+    can refuse, because the bit it reads was written by whichever run measured
+    (or failed to measure) the client, and it survives being written to the file
+    and read back. Flipping it on disk turns a skip into a wipe and a re-run.
+    """
+    run(PLAN, Runner(FULL), tmp_path)
+    data = tmp_path / "server" / "data"
+    mmaps(MMAPS, Runner(MMAPS_WRITES), tmp_path)
+    recorded = extract.read_evidence(data)
+    assert recorded is not None
+    assert extract.same_stage(recorded, recorded) is True
+
+    skipping = Runner(MMAPS_WRITES)
+    mmaps(MMAPS, skipping, tmp_path)
+    assert skipping.specs == []
+
+    extract.write_evidence(data, replace(recorded, client_facts_complete=False))
+    blind = Runner(MMAPS_WRITES)
+    said = mmaps(MMAPS, blind, tmp_path)
+    assert len(blind.specs) == 1
+    assert any("no finished run vouches for" in line for line in said)
+
+
+def test_an_edited_mmaps_argv_regenerates_rather_than_skipping(tmp_path: Path) -> None:
+    """The record is name AND argv: a catalog edit to the thread count is a different run."""
+    run(PLAN, Runner(FULL), tmp_path)
+    mmaps(MMAPS, Runner(MMAPS_WRITES), tmp_path)
+    edited = MmapPlan(
+        argv=("/opt/bin/MoveMapGen", "--silent", "--threads", "4"), min_files=3, required=True
+    )
+    runner = Runner(MMAPS_WRITES)
+    said = mmaps(edited, runner, tmp_path)
+    assert [spec.argv for spec in runner.specs] == [edited.argv]
+    assert any("no finished run vouches for" in line for line in said)
+
+
+def test_a_re_extract_for_another_client_drops_the_mmaps_record_and_one_tool_re_running_does_not(
+    tmp_path: Path,
+) -> None:
+    """What this stage's own evidence can and cannot notice, both halves.
+
+    `run_mmaps` compares an evidence with itself, so nothing inside it detects a
+    changed client; what does is `run_plan`, which replaces the whole file —
+    every record, this stage's included — when the stage facts move. That is the
+    protection, and it lives one stage away, so it is pinned here rather than
+    assumed.
+
+    The half that is NOT protected is pinned with it: a single tool re-running
+    against the same client leaves this stage's record in place, and the mmaps
+    folder is skipped even though the maps under it were written again. That is
+    a deliberate limit — the evidence records which tools ran, not which files
+    fed which — and a test saying so is what stops it being read as a promise.
+    """
+    run(PLAN, Runner(FULL), tmp_path)
+    data = tmp_path / "server" / "data"
+    mmaps(MMAPS, Runner(MMAPS_WRITES), tmp_path)
+
+    (data / "dbc" / "f0").unlink()
+    same_client = Runner(FULL)
+    run(PLAN, same_client, tmp_path)
+    assert same_client.names() == ["ad"]
+    after_one_tool = extract.read_evidence(data)
+    assert after_one_tool is not None
+    assert after_one_tool.record_for(extract.MMAPS_TOOL) is not None
+    skipping = Runner(MMAPS_WRITES)
+    mmaps(MMAPS, skipping, tmp_path)
+    assert skipping.specs == []
+
+    (tmp_path / "client" / "Data" / "expansion.MPQ").write_bytes(b"MPQ" * 200)
+    run(PLAN, Runner(FULL), tmp_path)
+    after_another_client = extract.read_evidence(data)
+    assert after_another_client is not None
+    assert after_another_client.record_for(extract.MMAPS_TOOL) is None
+    regenerating = Runner(MMAPS_WRITES)
+    mmaps(MMAPS, regenerating, tmp_path)
+    assert len(regenerating.specs) == 1
+
+
+def test_the_mmaps_cancel_note_promises_exactly_what_the_stage_delivers(tmp_path: Path) -> None:
+    """Restarts from the beginning; the extracted maps it reads are kept — both halves.
+
+    The note is yielded by the spine before this stage does anything (A4), so it
+    has to be true of a Stop pressed at any moment inside it. It is true because
+    nothing is recorded until the tool exits 0 with enough files, and because
+    the only folder this stage touches is its own.
+    """
+    run(PLAN, Runner(FULL), tmp_path)
+    data = tmp_path / "server" / "data"
+    before = extract.read_evidence(data)
+    runner = Runner(MMAPS_WRITES)
+    runner.cancel_after = 1
+    with pytest.raises(InstallerError) as caught:
+        mmaps(MMAPS, runner, tmp_path, cancel=threading.Event())
+    assert "was stopped" in str(caught.value)
+    assert extract.MMAPS_CANCEL_NOTE in str(caught.value)
+    after = extract.read_evidence(data)
+    assert after == before, "the extract stage's records are untouched by a stopped mmaps run"
+    assert after is not None and after.record_for(extract.MMAPS_TOOL) is None
+    assert extract.file_count(data / "maps") == 2
+    assert extract.file_count(data / "vmaps") == 2
+    assert extract.file_count(data / "dbc") == 3
+    again = Runner(MMAPS_WRITES)
+    mmaps(MMAPS, again, tmp_path)
+    assert len(again.specs) == 1, "it starts from the beginning rather than being skipped"
