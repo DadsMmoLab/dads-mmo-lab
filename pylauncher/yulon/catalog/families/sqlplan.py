@@ -18,12 +18,26 @@ decides everything the later ones only carry out:
   could not be asked, the dump could not be read — for the same reason `expand()` keeps
   three answers below.
 
-Later tasks add `create_schemas()` (the implicit phase 0: databases, the app user,
-grants) and `verify()` + `write_marker()` (the completion record, written only after
-`verify()` returns no failing rule). The two Protocols and `MARKER_TABLE` below are their
-shared vocabulary, declared here so the transport shape has one spelling — including
-which daemon holds the container, which a Protocol that dropped `wsl_distro` would make
-unsayable for every one of them at once.
+* `create_schemas()` — the implicit phase 0: the databases, the app user, its grants.
+
+* `verify()` + `write_marker()` — the completion record, written only after `verify()`
+  returns no failing rule, because an import whose `warn` phases all failed would
+  otherwise read `imported` forever.
+
+The two Protocols and `MARKER_TABLE` below are their shared vocabulary, declared here so
+the transport shape has one spelling — including which daemon holds the container, which
+a Protocol that dropped `wsl_distro` would make unsayable for every one of them at once.
+Every function here that talks to a database takes it and forwards it, unconditionally:
+phase 0, the probe and the marker have to land on the daemon `apply()` streams into, and
+because the Protocol DEFAULTS the argument, a function that quietly stopped passing it
+would still type-check.
+
+**A query has three answers, not two, for the same reason a glob does.** `sql_query()`
+returns stdout verbatim: `""` is no rows, `"\\n"` is one row holding the empty string.
+"Yes", "no" and "could not ask" are three verdicts, and `verify()` keeps them apart —
+a rule it could not answer is a FAILING rule with its own sentence, never a count of
+zero (which a `min: 0` rule would then pass, letting the marker be written over an
+empty database) and never an exception (the caller has one code path).
 
 **A glob has three answers, not two.** "How many files matched?" hides a second question
 — "were you able to look?" — and `Path.glob`/`Path.rglob` answer both with one short
@@ -58,6 +72,7 @@ import re
 import stat as stat_module
 import subprocess
 import threading
+import time
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -88,6 +103,22 @@ _GLOB_META = frozenset("*?[")
 """What makes a path component a pattern rather than a name."""
 
 _CATALOG_ERROR = "That is a catalog error, not something to fix on this machine."
+
+_IDENTIFIER = re.compile(r"[A-Za-z0-9_]+")
+"""What may be written into SQL with NOTHING around it (`CHARACTER SET <charset>`)."""
+
+_UNQUOTABLE = frozenset("'\\") | frozenset(map(chr, range(0x20))) | frozenset("\x7f")
+"""What may not appear in a value spliced into `'...'`; there is no escaping here.
+
+The quote and the backslash are the obvious two. The control characters are the
+half that is easy to miss and easier to exploit: `create_schemas()` builds its
+script by JOINING LINES, and the client ends a statement at `;` on a line, so a
+newline inside a password does not have to escape the quotes to add statements —
+it closes the line it is on and writes the next one itself, and
+`IDENTIFIED BY 'x<newline>GRANT ALL ...'` is a grant nothing here intended. `\\r`
+does the same on a client that treats it as a line end and is invisible in a
+pasted password either way.
+"""
 
 
 class ExecStdin(Protocol):
@@ -633,3 +664,249 @@ def _check_cancel(cancel: threading.Event | None) -> None:
     """Stop between runs, with the one wording every cancel in the app uses (A10)."""
     if cancel is not None and cancel.is_set():
         raise InstallerError(f"The import was stopped. {IMPORT_CANCEL_NOTE}")
+
+
+def create_schemas(
+    plan: SqlPlan,
+    *,
+    container: str,
+    client: str,
+    password: str,
+    schemas: Mapping[str, str],
+    user: str,
+    charset: str,
+    exec_stdin: ExecStdin,
+    wsl_distro: str | None = None,
+) -> None:
+    """The implicit phase 0: databases, the app user, its grants. Skipped when `create` is empty.
+
+    Idempotent (`IF NOT EXISTS`, then `ALTER USER` to the current secret) so a
+    resume over a database that already has them is a no-op rather than an
+    error. One secret: the app user gets the same password the root account
+    has, exactly as the scripts did with one `DB_PASSWORD` — the emulator
+    connects as `user`, the import streams as root. The password appears in
+    this SQL text, unavoidably (`IDENTIFIED BY`), and only here: it goes over
+    stdin, this text is never logged, and `_run_sql()` takes it back out of
+    whatever the client says about it.
+
+    Three values are spliced in, and each is checked for the splice it lands in.
+    `password` and `user` go inside `'...'`, which has no escaping — see
+    `_UNQUOTABLE`. `charset` goes in with nothing around it at all, and
+    `DbFacts.charset` is a free-text catalog field with no pattern on it, so it
+    must be a plain identifier. The schema names come from `schemas` after
+    `_check_plan_schemas()` has refused any the game does not have, in the same
+    words `expand()` uses.
+
+    `wsl_distro` names the daemon holding `container`; see `ExecStdin`. Phase 0
+    has to reach the same daemon `apply()` streams into, or the databases exist
+    in neither place the user will look.
+    """
+    if not plan.create:
+        return
+    _check_plan_schemas(plan, schemas)
+    _refuse_unquotable(password, "the database password")
+    _refuse_unquotable(user, "the database user name")
+    if not _IDENTIFIER.fullmatch(charset):
+        raise InstallerError(
+            f"the database charset {charset!r} is not a plain identifier, and it is written "
+            f"into `CREATE DATABASE ... CHARACTER SET` with nothing around it. {_CATALOG_ERROR}"
+        )
+    names = [schemas[name] for name in plan.create]
+    lines = [f"CREATE DATABASE IF NOT EXISTS `{name}` CHARACTER SET {charset};" for name in names]
+    lines.append(f"CREATE USER IF NOT EXISTS '{user}'@'%' IDENTIFIED BY '{password}';")
+    lines.append(f"ALTER USER '{user}'@'%' IDENTIFIED BY '{password}';")
+    lines += [f"GRANT ALL PRIVILEGES ON `{name}`.* TO '{user}'@'%';" for name in names]
+    lines.append("FLUSH PRIVILEGES;")
+    _run_sql(
+        "\n".join(lines) + "\n",
+        what="creating the databases and the application user",
+        container=container,
+        client=client,
+        password=password,
+        schema=None,
+        exec_stdin=exec_stdin,
+        wsl_distro=wsl_distro,
+    )
+
+
+def verify(
+    plan: SqlPlan,
+    *,
+    container: str,
+    client: str,
+    password: str,
+    sql_query: SqlQuery,
+    wsl_distro: str | None = None,
+) -> tuple[str, ...]:
+    """Every verify rule, in order; one sentence per rule that FAILED, `()` when all pass.
+
+    The gate before `write_marker()`: the family raises when this is non-empty
+    and writes no marker, because an import whose `warn` phases all failed
+    would otherwise read `imported` forever. `rule.db` is the schema as it is
+    on the server: the plan's names are the server's names (A10).
+
+    **Four ways a rule fails, and they are four different sentences**, because
+    the answer to each is a different thing to do:
+
+    1. **The count is short** — the only one that is about the DUMPS. The
+       database answered; there is simply not enough in it.
+    2. **The query could not be answered** — the client failed, the table does
+       not exist, the container is not running, there is no docker CLI
+       (`DockerCliMissingError` is a `DockerCommandError`). A failing rule, never
+       an exception: the caller has one code path and the sentence says which it
+       was.
+    3. **No rows at all** — `sql_query()` returns stdout verbatim, so this is
+       `""`. It is NOT a count of zero. A `COUNT(*)` always answers with exactly
+       one row, so nothing back means the question was not the one we think we
+       asked — and `VerifyRule.min` is `ge=0`, so reading it as zero would let a
+       `min: 0` rule PASS an unanswerable query and the marker be written over an
+       empty database.
+    4. **Something that is not one number** — two rows, or one row that is not
+       an integer (the empty string included, which is what a single empty row
+       looks like). `splitlines()[0]` would read the first of two rows as if it
+       were the count.
+
+    3 and 4 are why the answer is never `.strip()`ed as a whole: under
+    `--skip-column-names` one row holding the empty string prints `"\\n"` and no
+    rows print `""`, and stripping collapses those two into each other. Count
+    with `splitlines()`; an individual row may be trimmed.
+    """
+    failed: list[str] = []
+    for rule in plan.verify:
+        try:
+            answer = sql_query(
+                container, client, password, rule.db, rule.query, wsl_distro=wsl_distro
+            )
+        except docker.DockerCommandError as exc:
+            failed.append(f"{rule.db}: `{rule.query}` could not be answered ({exc})")
+            continue
+        rows = answer.splitlines()
+        if not rows:
+            failed.append(
+                f"{rule.db}: `{rule.query}` came back with no rows at all, so there is no "
+                "count to check. A COUNT query always answers with one row, so this is not "
+                "a count of zero."
+            )
+            continue
+        if len(rows) != 1:
+            failed.append(
+                f"{rule.db}: `{rule.query}` came back with {len(rows)} rows, which is not a count"
+            )
+            continue
+        try:
+            count = int(rows[0].strip())
+        except ValueError:
+            failed.append(f"{rule.db}: `{rule.query}` answered {rows[0]!r}, which is not a count")
+            continue
+        if count < rule.min:
+            failed.append(f"{rule.db}: `{rule.query}` is {count}, expected at least {rule.min}")
+            continue
+        logger.info(f"verified {rule.db}: {rule.query} = {count} (>= {rule.min})")
+    return tuple(failed)
+
+
+def write_marker(
+    plan: SqlPlan,
+    *,
+    container: str,
+    client: str,
+    password: str,
+    exec_stdin: ExecStdin,
+    wsl_distro: str | None = None,
+) -> None:
+    """Record that this plan finished, in `<marker_db>.yulon_install`.
+
+    Only ever called after `verify()` returned `()`; the row is what
+    `MarkerGate.probe()` reads as `imported`. The plan hash is stored so an
+    upgrade that changes the plan can be SEEN in the log — it is never a
+    reason to re-import (see the probe's table: a mismatched hash is a
+    finished import from an older plan).
+
+    Written to the daemon that holds `container`, like everything else here: a
+    marker on the wrong daemon is a probe that reads `partial` forever and an
+    install that repeats itself every time it is asked to run.
+    """
+    text = (
+        f"CREATE TABLE IF NOT EXISTS `{plan.marker_db}`.`{MARKER_TABLE}` "
+        "(plan_hash CHAR(16) NOT NULL, finished_unix BIGINT NOT NULL);\n"
+        f"INSERT INTO `{plan.marker_db}`.`{MARKER_TABLE}` (plan_hash, finished_unix) "
+        f"VALUES ('{plan.plan_hash()}', {int(time.time())});\n"
+    )
+    _run_sql(
+        text,
+        what="writing the import marker",
+        container=container,
+        client=client,
+        password=password,
+        schema=plan.marker_db,
+        exec_stdin=exec_stdin,
+        wsl_distro=wsl_distro,
+    )
+
+
+def _run_sql(
+    text: str,
+    *,
+    what: str,
+    container: str,
+    client: str,
+    password: str,
+    schema: str | None,
+    exec_stdin: ExecStdin,
+    wsl_distro: str | None = None,
+) -> None:
+    """One SQL script over stdin, as an `InstallerError` whichever way it goes wrong.
+
+    Two of `apply()`'s three failures reach here, and they stay apart for the
+    same reason they do there: a non-zero exit is the CLIENT rejecting the SQL,
+    while `DockerCommandError` is the database not having been asked at all —
+    no CLI, no such container, a container that is not running. The third
+    (a dump that could not be read) cannot happen: the source is a `BytesIO`
+    this module just built. Neither may escape as a bare `RuntimeError` from a
+    stage whose every other error the installer shows as an `InstallerError`.
+    """
+    try:
+        proc = exec_stdin(
+            container,
+            _client_argv(client, schema),
+            io.BytesIO(text.encode("utf-8")),
+            env={"MYSQL_PWD": password},
+            wsl_distro=wsl_distro,
+        )
+    except docker.DockerCommandError as exc:
+        raise InstallerError(
+            f"The import stopped while {what}: the database could not be asked "
+            f"({_redact(str(exc), password)})."
+        ) from exc
+    if proc.returncode != 0:
+        reason = _last_line((proc.stderr or "").splitlines()) or f"exit {proc.returncode}"
+        raise InstallerError(f"The import stopped while {what}: {_redact(reason, password)}")
+
+
+def _redact(said: str, password: str) -> str:
+    """Take the password back out of whatever the client said about it.
+
+    `create_schemas()` builds the one script in this app that CONTAINS the
+    secret, and a client quotes back the line it could not parse:
+    `ERROR 1064 (42000) at line 5: ... near ''hunter2'@'%''`. That sentence
+    becomes an `InstallerError`, which the installer shows and the user pastes
+    into a bug report. Redacting a short password may also blank an innocent
+    word elsewhere in the line; that is the harmless direction of the mistake.
+    """
+    return said.replace(password, "***") if password else said
+
+
+def _refuse_unquotable(value: str, what: str) -> None:
+    """A value spliced into `'...'` must survive it; see `_UNQUOTABLE` for what does not.
+
+    Generated passwords are hex and the fixed one passed `composegen._refuse_unsafe`,
+    so this is a second lock on a door that should already be shut — and it is a
+    different door: that one is about YAML, this one about a joined SQL script.
+    """
+    bad = sorted(set(value) & _UNQUOTABLE)
+    if bad:
+        raise InstallerError(
+            f"{what} contains {' '.join(repr(char) for char in bad)}, which cannot be written "
+            "into SQL safely — there is no escaping inside the quotes it goes in. Use letters, "
+            "digits and simple punctuation."
+        )
