@@ -707,6 +707,98 @@ def test_is_unmodified_tells_upstreams_own_file_from_one_somebody_edited(
     assert git.ContainerGit().is_unmodified(tmp_path / "not-a-checkout", "x") is None
 
 
+# -- what HEAD carries ------------------------------------------------------
+#
+# A separate question from the one above, and the reason it exists: `status`
+# answers about the working tree and the index, so it is silent about commits.
+
+
+@pytest.mark.parametrize(
+    "impl", [git.RunnerGit(), git.ContainerGit()], ids=["host", "containerized"]
+)
+def test_no_local_commits_counts_what_head_has_that_the_reset_target_does_not(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, impl: git.HistoryReader
+) -> None:
+    """Zero and only zero means moving HEAD onto that ref discards no history.
+
+    Both implementations answer the same three ways, because a caller narrowing
+    to `HistoryReader` never learns which one it got — and this is a guard's
+    input, so a disagreement between them would be a guard that means different
+    things on Windows than on Linux.
+    """
+    dest = tmp_path / "core"
+    (dest / ".git").mkdir(parents=True)
+    answers: list[subprocess.CompletedProcess[str]] = []
+    seen_argv: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen_argv.append(argv)
+        return answers.pop(0)
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    answers += [_completed(stdout="abc123\n"), _completed(stdout="0\n")]
+    assert impl.no_local_commits(dest, "wotlk") is True
+    assert seen_argv[-1][-3:] == ["rev-list", "--count", "refs/remotes/origin/wotlk..HEAD"]
+
+    answers += [_completed(stdout="abc123\n"), _completed(stdout="3\n")]
+    assert impl.no_local_commits(dest, "wotlk") is False
+
+    # No branch on the manifest: the ref the update would reset to is whatever
+    # `fetch origin HEAD` lands on, so the local stand-in is origin/HEAD.
+    answers += [_completed(stdout="abc123\n"), _completed(stdout="0\n")]
+    assert impl.no_local_commits(dest, None) is True
+    assert seen_argv[-1][-1] == "refs/remotes/origin/HEAD..HEAD"
+
+    # No such remote-tracking ref — a `git init` + `git pull` checkout has no
+    # origin/HEAD — is None, not True. "Nothing to compare against" is not
+    # "nothing to lose", and every caller fails closed on None.
+    answers.append(_completed(returncode=1))
+    assert impl.no_local_commits(dest, None) is None
+    # And so is a git that would not answer the count.
+    answers += [_completed(stdout="abc123\n"), _completed(returncode=128, stderr="broken")]
+    assert impl.no_local_commits(dest, "wotlk") is None
+    assert impl.no_local_commits(tmp_path / "not-a-checkout", "wotlk") is None
+
+
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+def test_a_committed_change_is_invisible_to_status_and_visible_to_the_count(
+    tmp_path: Path,
+) -> None:
+    """The measurement the fourth adoption fact rests on, against real git.
+
+    Every other test in this file mocks `runner.run`, and that is right for
+    argv decisions. This one is not an argv decision: it is the claim that
+    `git status --porcelain` and `rev-list <ref>..HEAD` answer DIFFERENTLY about
+    the same checkout, and a mock proves nothing about that. If they ever agreed
+    there would be no reason for `no_local_commits()` to exist, and the guard
+    that calls it could be "simplified" back into the bug it was written for.
+
+    Local repositories only — `git init` and a clone over a filesystem path. No
+    network, no container, nothing cloned from anywhere.
+    """
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    author = ["-c", "user.email=t@example", "-c", "user.name=t"]
+    subprocess.run(["git", "init", "-q", "-b", "main", "."], cwd=upstream, check=True)
+    (upstream / "a.txt").write_text("upstream\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=upstream, check=True)
+    subprocess.run([*["git", *author], "commit", "-qm", "one"], cwd=upstream, check=True)
+
+    dest = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", str(upstream), str(dest)], check=True)
+    impl = git.RunnerGit()
+    assert impl.is_unmodified(dest, ".") is True
+    assert impl.no_local_commits(dest, "main") is True
+
+    (dest / "mine.txt").write_text("three evenings\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=dest, check=True)
+    subprocess.run([*["git", *author], "commit", "-qm", "mine"], cwd=dest, check=True)
+
+    # The whole point, in two lines: the tree is spotless and the history is not.
+    assert impl.is_unmodified(dest, ".") is True
+    assert impl.no_local_commits(dest, "main") is False
+
+
 def test_both_git_implementations_check_out_the_same_sparse_tree(
     seen: list[list[str]], tmp_path: Path
 ) -> None:

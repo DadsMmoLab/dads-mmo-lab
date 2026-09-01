@@ -291,6 +291,39 @@ class TreeReader(Protocol):
     def is_unmodified(self, dest: Path, relative_path: str) -> bool | None: ...
 
 
+@runtime_checkable
+class HistoryReader(Protocol):
+    """ "Does HEAD carry anything the update would not?" — the third read-only question.
+
+    `TreeReader` answers about the working tree and the index. This one answers
+    about COMMITS, and the two are genuinely different facts: a checkout in
+    which somebody committed their own work is perfectly clean by `status`.
+    Anything that reads "clean" as "there is nothing of the user's here" is
+    reading a question with more states than the answer it is holding.
+
+    A third one-method Protocol rather than a method on `TreeReader`, for the
+    reason `TreeReader` is not a method on `RemoteReader`: a fake satisfies a
+    Protocol by having the methods, so widening an existing one silently stops
+    every existing fake from narrowing and sends the question to the host CLI
+    instead. Both concrete implementations here have all three methods, so a
+    real `Git` narrows to all three.
+    """
+
+    def no_local_commits(self, dest: Path, branch: str | None) -> bool | None: ...
+
+
+def _reset_target_ref(branch: str | None) -> str:
+    """The remote-tracking ref an update of `branch` would end up resetting to.
+
+    Both update paths here fetch `origin <branch or HEAD>` and then
+    `reset --hard FETCH_HEAD`, and with the default refspec that fetch also
+    moves `refs/remotes/origin/<branch>`. So the local ref that stands for
+    "what the update will make this checkout be" is that one, and
+    `refs/remotes/origin/HEAD` when the caller named no branch.
+    """
+    return f"refs/remotes/origin/{branch}" if branch else "refs/remotes/origin/HEAD"
+
+
 def same_repo(existing: str, wanted: str) -> bool:
     """Do two clone URLs name the same repository?
 
@@ -400,6 +433,46 @@ class RunnerGit:
             logger.debug(f"could not ask git about {relative_path} in {dest}: {exc}")
             return None
         return not proc.stdout.strip()
+
+    def no_local_commits(self, dest: Path, branch: str | None) -> bool | None:
+        """Is every commit on HEAD already on the ref an update would reset to? None = cannot ask.
+
+        The question `is_unmodified()` cannot answer. `git status --porcelain`
+        compares the working tree and the index against HEAD, so a checkout in
+        which the user COMMITTED their work is clean by that test and stays
+        clean no matter how much of their work is in it. `reset --hard
+        FETCH_HEAD` then moves HEAD, and those commits are only reachable
+        through the reflog.
+
+        `rev-list --count <ref>..HEAD` is the whole answer: it counts the
+        commits reachable from HEAD and not from the ref, so zero means moving
+        HEAD onto that ref discards no history.
+
+        `None` when git could not be asked, and — deliberately — also when
+        there is no such remote-tracking ref. A checkout built by
+        `_sparse_clone()`'s `git init` + `git pull origin <branch>` has
+        `refs/remotes/origin/<branch>` but NO `refs/remotes/origin/HEAD`
+        (measured 2026-09-01), so a caller that named no branch gets `None`
+        there rather than a guess. "Nothing to compare against" is not "nothing
+        to lose", and every caller fails closed on `None`.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        ref = _reset_target_ref(branch)
+        try:
+            # Verified separately so a MISSING ref is told apart from a
+            # `rev-list` that failed for some other reason. Both refuse, but
+            # only one of them is worth a different debug line.
+            _run_git(["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd=dest)
+        except GitError as exc:
+            logger.debug(f"{dest} has no {ref} to compare HEAD against: {exc}")
+            return None
+        try:
+            proc = _run_git(["git", "rev-list", "--count", f"{ref}..HEAD"], cwd=dest)
+        except GitError as exc:
+            logger.debug(f"could not ask git what {dest} has that {ref} does not: {exc}")
+            return None
+        return proc.stdout.strip() == "0"
 
     def clone(self, spec: CloneSpec) -> None:
         if (spec.dest / ".git").is_dir():
@@ -586,6 +659,34 @@ class ContainerGit:
             logger.debug(f"could not ask git about {relative_path} in {dest}: {exc}")
             return None
         return not proc.stdout.strip()
+
+    def no_local_commits(self, dest: Path, branch: str | None) -> bool | None:
+        """Is every commit on HEAD already on the ref an update would reset to? None = cannot ask.
+
+        Containerized like the other two read-only questions, and for the same
+        reason: this class exists for a machine that may have no git, so a
+        question answered on the host would put the second prerequisite back.
+
+        `RunnerGit.no_local_commits()` carries the reasoning — what the count
+        means, and why a missing remote-tracking ref is `None` rather than a
+        guess. Both refusals here are the same `None` for the same reason.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        ref = _reset_target_ref(branch)
+        try:
+            self._capture(
+                dest, ["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], writes=False
+            )
+        except GitError as exc:
+            logger.debug(f"{dest} has no {ref} to compare HEAD against: {exc}")
+            return None
+        try:
+            proc = self._capture(dest, ["rev-list", "--count", f"{ref}..HEAD"], writes=False)
+        except GitError as exc:
+            logger.debug(f"could not ask git what {dest} has that {ref} does not: {exc}")
+            return None
+        return proc.stdout.strip() == "0"
 
     def clone(self, spec: CloneSpec) -> None:
         if (spec.dest / ".git").is_dir():

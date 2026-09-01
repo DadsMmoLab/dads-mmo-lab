@@ -23,14 +23,24 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Literal, Protocol
 
 from yulon import platform, runner
-from yulon.catalog import composegen, native
-from yulon.git import CloneSpec, Git, GitError, RemoteReader, RunnerGit, TreeReader, same_repo
+from yulon.catalog import composegen
+from yulon.git import (
+    CloneSpec,
+    Git,
+    GitError,
+    HistoryReader,
+    RemoteReader,
+    RunnerGit,
+    TreeReader,
+    same_repo,
+)
 from yulon.log import get_logger
 from yulon.manifest import Db, Deploy, Manifest, ManifestType, Patch, SqlStep, When
 from yulon.ownership import Ownership
@@ -195,7 +205,18 @@ def server_dir_claim(server_dir: Path) -> Ownership:
     `valid=()` because the stage names are the install engine's business and the
     only field read here is the identity; an unknown stage name being dropped
     from `completed` cannot change that answer.
+
+    `catalog.native` is imported INSIDE this function, and it is the only thing
+    in this module that wants it. Naming it at module scope would make the
+    game-agnostic apply engine — imported by `networking`, `accounts`,
+    `maintenance`, `repair` and the UI — drag the whole native install engine
+    (docker, the staged installer, threads and queues) in behind it, for one
+    JSON file at the server dir. It is not a cycle today; it is a dependency
+    nobody asking `Applier` to run some SQL should have to load. `Applier`
+    takes this as a seam, so the production default is the only caller.
     """
+    from yulon.catalog import native
+
     claim = native.read_claim(server_dir, valid=())
     state = claim.state
     if state is None:
@@ -205,11 +226,38 @@ def server_dir_claim(server_dir: Path) -> Ownership:
     return Ownership.OWNED
 
 
+_SERVER_DIR_CLAIM: Callable[[Path], Ownership] = server_dir_claim
+"""`server_dir_claim()` under a name that `Applier.__init__`'s parameter cannot shadow.
+
+The seam is called `server_dir_claim` because that is the question it answers,
+and inside that signature the name is the parameter. This is how the default
+still reaches the function."""
+
+
 def write_clone_claim(clone: Path, *, item_id: str, url: str) -> None:
     """Record that this app put `item_id`'s clone here. Raises `OSError` if it cannot.
 
     `url` is written for a human reading the file; it is never what ownership is
     decided on, because a URL is what everybody with the same catalog entry has.
+
+    **Written somewhere else in the same directory and then renamed over the
+    real name, never straight into it.** A plain write opens `CLAIM_FILE` for
+    truncation and then fills it, so a full disk, a killed process or a lost
+    power cable at the wrong instant leaves a HALF file at that name — and a
+    half file is the worst of the three possible states. It does not parse; a
+    claim that does not parse reads `UNKNOWN`; `UNKNOWN` refuses every caller;
+    and `remove()`'s relocation licence needs a claim that PARSES, so it refuses
+    too. The user is then left with a module this app installed, that this app
+    will not uninstall, and no route back that does not involve finding and
+    deleting a dotfile by hand. That is a permanent lockout caused entirely by
+    metadata this app alone writes and reads.
+
+    `os.replace()` of a fully written file is atomic on POSIX and on Windows, so
+    a reader sees the old claim or the new one and never a fraction of either.
+    The temporary file has to be in the SAME directory — a rename across
+    filesystems is a copy, which is exactly the tearing being avoided — and the
+    clone directory is where it goes. It is cleaned up on failure so a refusal
+    never leaves debris inside a checkout `git status` will report on.
     """
     payload = {
         "version": CLAIM_VERSION,
@@ -217,7 +265,15 @@ def write_clone_claim(clone: Path, *, item_id: str, url: str) -> None:
         "clone_id": composegen.install_id(clone),
         "url": url,
     }
-    (clone / CLAIM_FILE).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    fd, name = tempfile.mkstemp(dir=clone, prefix=CLAIM_FILE + ".", suffix=".tmp")
+    os.close(fd)
+    tmp = Path(name)
+    try:
+        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, clone / CLAIM_FILE)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 _CLIENT_NAMES: dict[str, tuple[str, ...]] = {
@@ -581,6 +637,8 @@ class Applier:
         dbc: DbcCopier | None = None,
         remote_url: Callable[[Path], str | None] | None = None,
         unmodified: Callable[[Path, str], bool | None] | None = None,
+        no_local_commits: Callable[[Path, str | None], bool | None] | None = None,
+        server_dir_claim: Callable[[Path], Ownership] | None = None,
     ) -> None:
         self.server_dir = server_dir
         self.git: Git = git if git is not None else RunnerGit()
@@ -615,6 +673,30 @@ class Applier:
                 if isinstance(self.git, TreeReader)
                 else RunnerGit().is_unmodified
             )
+        )
+        # "Does HEAD carry commits the update would throw away?", narrowed the
+        # same way again. The third question and not a rephrasing of the second:
+        # `unmodified` compares the tree and the index against HEAD, so it
+        # answers "clean" for a checkout somebody has committed their own work
+        # into. Only `_may_adopt()` asks this, and it is the fact that keeps
+        # adoption from meaning "clean tree, therefore nothing of yours here".
+        self.no_local_commits: Callable[[Path, str | None], bool | None] = (
+            no_local_commits
+            if no_local_commits is not None
+            else (
+                self.git.no_local_commits
+                if isinstance(self.git, HistoryReader)
+                else RunnerGit().no_local_commits
+            )
+        )
+        # "Did this app create the server directory this clone is under?" — a
+        # seam rather than a module-level call, for the reason the two above are
+        # seams: it reaches outside the process, and a test of the guard should
+        # not need a real native-engine state file on disk to state its answer.
+        # The default is this module's own `server_dir_claim()`, which is where
+        # the `catalog.native` import lives and why it lives inside a function.
+        self.server_dir_claim: Callable[[Path], Ownership] = (
+            server_dir_claim if server_dir_claim is not None else _SERVER_DIR_CLAIM
         )
 
     # -- public ------------------------------------------------------------
@@ -680,7 +762,15 @@ class Applier:
         return self._report("install", manifest, log)
 
     def configure(self, manifest: Manifest, values: Mapping[str, str] | None = None) -> ApplyReport:
-        """Re-apply the value-bearing steps: configure-time patches/SQL and conf keys."""
+        """Re-apply the value-bearing steps: configure-time patches/SQL and conf keys.
+
+        **Nothing in the shipped app calls this yet** — every `.configure(` in
+        the tree is in a test (grepped, 2026-09-01). The ownership guard below
+        is correct and it is not live protection for anything a user can press:
+        the Modules tab binds Install and Remove only. Kept because the manifest
+        primitive it applies is real and its UI is a roadmap item, but do not
+        count it when reasoning about what actually guards a user today.
+        """
         vals = self._values(manifest, values)
         log = _Log()
         clone = self.clone_dir(manifest)
@@ -750,9 +840,9 @@ class Applier:
            enough on its own here, where `catalog.native` needs its record
            corroborated by `origin`.
         4. A checkout of the right repository with no claim, in a server
-           directory this app installed, with nothing modified in it: adopted.
-           `_may_adopt()` has the three facts and why one or two of them would
-           not do.
+           directory this app installed, with nothing modified in it and no
+           commits of its own: adopted. `_may_adopt()` has the four facts and
+           why three of them were not enough.
         5. Everything else is a checkout this app did not make. `origin` is
            asked only to say WHICH refusal — a different repository, this
            repository, or a git that would not answer — because every branch
@@ -800,6 +890,18 @@ class Applier:
         given the same licence, because there the same input would authorise
         `git reset --hard` inside a copy somebody may be keeping precisely
         because it is not the original.
+
+        **Be exact about what that weaker path proves, because it returns before
+        `remote_url()` is ever reached.** It never asks git anything: its whole
+        evidence is a `.git` directory plus a file at `CLAIM_FILE`'s name whose
+        JSON has this version, this item id, and some other folder's
+        `install_id()`. It does NOT establish that the checkout is a checkout of
+        the manifest's repository. Writing such a file needs local write access
+        to this exact path under a server directory, which is inside the trust
+        boundary already, and it is not a new asymmetry — the `OWNED` path is
+        origin-blind for the same reason and by the same design (the claim is
+        its own corroboration). Recorded so the next reader does not mistake
+        "this app's own handwriting" for "this is the right repository".
         """
         if not clone.exists():
             return
@@ -879,7 +981,8 @@ class Applier:
                 f"{rel} is a checkout of {remote}, not of {url}. Nothing was changed. Move that "
                 f"folder aside and then {retry}.{self._removal_note(action, manifest)}"
             )
-        if url and self._may_adopt(clone, remote, url):
+        branch = manifest.source.branch if manifest.source is not None else None
+        if url and self._may_adopt(clone, remote, url, branch):
             return
         raise ApplyError(
             f"{rel} is already a git checkout and there is no record here of one this app "
@@ -905,17 +1008,25 @@ class Applier:
             f"moving or deleting this folder is not by itself an uninstall."
         )
 
-    def _may_adopt(self, clone: Path, remote: str, url: str) -> bool:
-        """Adopt an existing checkout of the RIGHT repository — on three facts, not one.
+    def _may_adopt(self, clone: Path, remote: str, url: str, branch: str | None) -> bool:
+        """Adopt an existing checkout of the RIGHT repository — on four facts, not one.
 
-        The gap this closes: a module installed by a build older than the claim
-        file has no claim, so the first Install after that change is refused,
-        for every existing user of every module. A migration on `origin` alone
-        would have undone the guard exactly — a matching `origin` is what
-        EVERYBODY with this catalog entry has, and "the user's own checkout of
-        the right repository" is the case the guard was written for.
+        The gap this narrows: a module installed by a build older than the claim
+        file has no claim, so the first Install after that change is refused. A
+        migration on `origin` alone would have undone the guard exactly — a
+        matching `origin` is what EVERYBODY with this catalog entry has, and
+        "the user's own checkout of the right repository" is the case the guard
+        was written for.
 
-        Three independent facts, and a hand-installed module fails one of them:
+        **It does not close that gap for every existing user, and the commit
+        that introduced it said it did.** A module whose upstream ships no
+        `include.sh` gets one written by `install()` itself; that file is
+        untracked; fact 3 asks about the whole tree; so exactly those modules
+        fail adoption and their users still get the refusal and its remedy. The
+        behaviour is right — see the paragraph on untracked files below — but
+        the claim was overbroad, and this is where a reader will look for it.
+
+        Four independent facts, and a hand-installed module fails one of them:
 
         1. `origin` names the repository the manifest does (established by the
            caller, and passed in so this reads as one rule rather than half of
@@ -930,26 +1041,50 @@ class Applier:
            exactly the tracked changes `status` reports, so an empty answer is a
            proof that adopting costs nothing, and `None` — git could not be
            asked — is not that proof and refuses.
+        4. HEAD carries no commit the update would not. **`status` is not this
+           question and cannot be made into it.** It compares the working tree
+           and the index against HEAD; it says nothing at all about what HEAD
+           itself is. A user who cloned this catalog's own repository into a
+           directory this app created and then COMMITTED their customisations
+           has a perfectly clean tree, passes facts 1-3, and the update that
+           adoption authorises — `fetch` + `reset --hard FETCH_HEAD` — moves
+           HEAD off those commits and leaves them reachable only through the
+           reflog. So the fourth fact asks git the question the third one only
+           looks like: `rev-list <the ref this would reset to>..HEAD` is empty.
+           `None` — no such remote-tracking ref, or git could not be asked —
+           refuses, per `Ownership`'s three outcomes: "nothing to compare
+           against" is not "nothing to lose". `branch` is the manifest's,
+           because the manifest's is what the update will fetch.
 
-        The whole tree, `"."`, not one path: there is no file in a module clone
-        this app can point at as the one that matters. That also means an
-        UNTRACKED file blocks adoption, which is stricter than the harm requires
-        (a hard reset does not delete untracked files) and stricter than is
-        ideal: `install()` itself `touch`es `include.sh` in a module whose
-        repository does not ship one, so exactly those modules will not adopt
-        and their users get the refusal and its remedy instead. Deliberate.
-        The direction of the error is a re-clone, and the alternative — deciding
-        which untracked files in a folder are innocent — is the reasoning that
-        loses work.
+           This is the third time in this codebase that a question with more
+           states than the answer being carried has produced a bug (see
+           `native.read_claim()`'s absent-vs-unreadable collapse and
+           `read_clone_claim()`'s note about it). "Clean" and "has nothing of
+           the user's in it" are different facts, and only one of them is what
+           `status` returns.
+
+        The whole tree, `"."`, not one path, for fact 3: there is no file in a
+        module clone this app can point at as the one that matters. That also
+        means an UNTRACKED file blocks adoption, which is stricter than the harm
+        requires — a hard reset does not delete untracked files — and it is the
+        `include.sh` case above. Deliberate, and NOT allowlisted even for that
+        one generated name: the file this app writes is empty, a user's
+        `include.sh` need not be, so an exact-name allowlist would have to
+        become a content check to be safe, and a content check is the first step
+        of deciding which of somebody's untracked files are innocent. The
+        direction of this error is a re-clone; the direction of that one is lost
+        work.
         """
-        if server_dir_claim(self.server_dir) is not Ownership.OWNED:
+        if self.server_dir_claim(self.server_dir) is not Ownership.OWNED:
             return False
         if self.unmodified(clone, ".") is not True:
             return False
+        if self.no_local_commits(clone, branch) is not True:
+            return False
         logger.info(
             f"adopting the existing checkout at {_rel(self.server_dir, clone)}: it is a clean "
-            f"checkout of {remote} (the manifest's {url}) inside a server directory this app "
-            f"installed"
+            f"checkout of {remote} (the manifest's {url}) with no commits of its own, inside a "
+            f"server directory this app installed"
         )
         return True
 

@@ -28,11 +28,19 @@ LUA = "env/dist/etc/modules/lua_scripts"
 class _FakeGit:
     """Writes `files` (relative path → text) into the clone dir instead of cloning."""
 
-    def __init__(self, files: dict[str, str], *, unmodified: bool | None = None) -> None:
+    def __init__(
+        self,
+        files: dict[str, str],
+        *,
+        unmodified: bool | None = None,
+        no_local_commits: bool | None = None,
+    ) -> None:
         self.files = files
         self.calls: list[CloneSpec] = []
         self.unmodified = unmodified
+        self._no_local_commits = no_local_commits
         self.asked_about: list[str] = []
+        self.branches_asked: list[str | None] = []
 
     def is_unmodified(self, dest: Path, relative_path: str) -> bool | None:
         """The `TreeReader` half of a real `Git`, so no test reaches the host's.
@@ -43,6 +51,16 @@ class _FakeGit:
         """
         self.asked_about.append(relative_path)
         return self.unmodified
+
+    def no_local_commits(self, dest: Path, branch: str | None) -> bool | None:
+        """The `HistoryReader` half, `None` by default for the same reason.
+
+        A separate answer from `is_unmodified` because it is a separate
+        question: `status` compares the working tree and index against HEAD and
+        says nothing whatever about what HEAD itself carries.
+        """
+        self.branches_asked.append(branch)
+        return self._no_local_commits
 
     def clone(self, spec: CloneSpec) -> None:
         self.calls.append(spec)
@@ -943,6 +961,84 @@ def test_a_claim_copied_from_another_folder_describes_a_folder_that_is_not_here(
     assert apply_module.read_clone_claim(elsewhere, item_id="mod-ah-bot") is Ownership.UNKNOWN
 
 
+def _torn_write(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Make every `Path.write_text` put half its bytes on disk and then fail.
+
+    A full disk, a killed process, a laptop lid closing: the file exists and its
+    content stops in the middle. Injected at `Path.write_text` rather than at
+    any one call so the property under test is about the OUTCOME on disk — a
+    writer that opens the claim path directly is torn where it matters, and one
+    that writes somewhere else first is torn where it does not.
+
+    Returns the paths that were torn, because WHERE the half file landed is
+    itself load-bearing: a rename is only atomic within one filesystem, so the
+    file being renamed over the claim has to have been written beside it.
+    """
+    torn: list[Path] = []
+
+    def half(self: Path, data: str, **kwargs: Any) -> int:
+        torn.append(self)
+        written = data[: max(1, len(data) // 2)].encode("utf-8")
+        self.write_bytes(written)
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(Path, "write_text", half)
+    return torn
+
+
+def test_a_torn_claim_write_never_leaves_a_file_that_reads_as_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A half-written claim is the one failure that locks the user out for good.
+
+    A truncated file does not parse, a file that does not parse reads `UNKNOWN`,
+    and `UNKNOWN` refuses every caller — including `remove()`, whose relocation
+    licence also needs a claim that PARSES. So a failure in metadata this app
+    alone writes and reads would take away the only in-app uninstall, with no
+    way back that does not involve deleting a file by hand.
+
+    The claim therefore has to appear at its name whole or not at all: written
+    somewhere else in the same directory first, then renamed over. Renaming
+    within a directory is the one filesystem operation that cannot half-happen.
+    """
+    clone = tmp_path / "modules" / "mod-ah-bot"
+    clone.mkdir(parents=True)
+    torn = _torn_write(monkeypatch)
+
+    with pytest.raises(OSError):
+        apply_module.write_clone_claim(clone, item_id="mod-ah-bot", url=OWNED_URL)
+
+    assert apply_module.read_clone_claim(clone, item_id="mod-ah-bot") is Ownership.UNCLAIMED
+    assert list(clone.iterdir()) == []  # and no debris under a name nothing will ever read
+    # Beside the claim, not somewhere else: `os.replace()` is atomic within one
+    # filesystem and a copy across two, and a copy is the tearing being avoided.
+    assert [p.parent for p in torn] == [clone]
+
+
+def test_a_torn_claim_write_leaves_the_claim_that_was_already_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same property where it costs the most: a re-install over an owned clone.
+
+    `install()` rewrites the claim on every press. If that write can tear, then
+    one bad moment during an ordinary update turns a working install into one
+    that cannot be uninstalled — and the folder it happens to is precisely the
+    folder this app made.
+    """
+    clone = tmp_path / "modules" / "mod-ah-bot"
+    clone.mkdir(parents=True)
+    apply_module.write_clone_claim(clone, item_id="mod-ah-bot", url=OWNED_URL)
+    before = (clone / apply_module.CLAIM_FILE).read_bytes()
+    _torn_write(monkeypatch)
+
+    with pytest.raises(OSError):
+        apply_module.write_clone_claim(clone, item_id="mod-ah-bot", url=OWNED_URL)
+
+    assert apply_module.read_clone_claim(clone, item_id="mod-ah-bot") is Ownership.OWNED
+    assert (clone / apply_module.CLAIM_FILE).read_bytes() == before
+    assert [p.name for p in clone.iterdir()] == [apply_module.CLAIM_FILE]
+
+
 def test_a_first_install_needs_no_folder_and_the_second_updates_this_apps_own(
     tmp_path: Path,
 ) -> None:
@@ -1163,10 +1259,10 @@ def test_a_sourceless_manifest_still_asks_whose_folder_it_is_rewriting(tmp_path:
 
 # --------------------------------------------------------------- adoption
 #
-# Every module installed by a build older than the claim file has no claim, so
-# the first Install after the guard landed refused all of them. Adoption closes
-# that without weakening the guard, on three independent facts — and a test for
-# each of them failing on its own.
+# A module installed by a build older than the claim file has no claim, so the
+# first Install after the guard landed refused it. Adoption closes that without
+# weakening the guard, on four independent facts — and a test for each of them
+# failing on its own.
 
 
 def _installed_by_this_app(server_dir: Path) -> None:
@@ -1193,13 +1289,14 @@ def _existing_module(server_dir: Path) -> Path:
     return clone
 
 
-def test_a_module_from_an_older_build_is_adopted_when_all_three_facts_agree(
+def test_a_module_from_an_older_build_is_adopted_when_all_four_facts_agree(
     tmp_path: Path,
 ) -> None:
-    """The migration: matching origin, a server dir this app installed, a clean tree."""
+    """The migration: matching origin, a server dir this app installed, a clean tree, no
+    commits of the user's own."""
     clone = _existing_module(tmp_path)
     _installed_by_this_app(tmp_path)
-    git = _FakeGit({"README.md": "upstream\n"}, unmodified=True)
+    git = _FakeGit({"README.md": "upstream\n"}, unmodified=True, no_local_commits=True)
     applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
     m = parse_manifest(OWNED_ITEM)
 
@@ -1216,7 +1313,7 @@ def test_a_stranger_s_checkout_in_a_folder_this_app_installed_is_not_adopted(
     """Fact 1 alone fails: same server dir, clean tree, a DIFFERENT repository."""
     clone, before = _user_module(tmp_path, checkout_of="someone else's")
     _installed_by_this_app(tmp_path)
-    git = _FakeGit({}, unmodified=True)
+    git = _FakeGit({}, unmodified=True, no_local_commits=True)
     applier = Applier(tmp_path, git=git, remote_url=_Origins("https://github.com/them/mod-ah-bot"))
 
     with pytest.raises(ApplyError, match="them/mod-ah-bot"):
@@ -1237,7 +1334,7 @@ def test_a_hand_installed_module_in_someone_else_s_server_dir_is_not_adopted(
     exactly why the evidence is kept outside it.
     """
     clone, before = _user_module(tmp_path, checkout_of="the same repo, by hand")
-    git = _FakeGit({}, unmodified=True)
+    git = _FakeGit({}, unmodified=True, no_local_commits=True)
     applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
 
     with pytest.raises(ApplyError, match="no record"):
@@ -1259,7 +1356,7 @@ def test_a_checkout_with_local_work_in_it_is_not_adopted(
     """
     clone, before = _user_module(tmp_path, checkout_of="the same repo, edited")
     _installed_by_this_app(tmp_path)
-    git = _FakeGit({}, unmodified=answer)
+    git = _FakeGit({}, unmodified=answer, no_local_commits=True)
     applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
 
     with pytest.raises(ApplyError, match="no record"):
@@ -1267,6 +1364,58 @@ def test_a_checkout_with_local_work_in_it_is_not_adopted(
 
     assert git.calls == []
     assert (clone / "src" / "mine.cpp").read_bytes() == before
+
+
+@pytest.mark.parametrize("answer", [False, None], ids=["committed", "git-could-not-say"])
+def test_a_checkout_carrying_the_user_s_own_commits_is_not_adopted(
+    tmp_path: Path, answer: bool | None
+) -> None:
+    """Fact 4 alone fails, and it is the fact the first three cannot see.
+
+    `git status --porcelain` — the whole of fact 3 — compares the working tree
+    and the index against HEAD. A user who cloned this catalog's own repository
+    into a server directory this app created and then COMMITTED their changes
+    has a perfectly clean tree by that test, so facts 1-3 all pass and adoption
+    used to succeed. The very next thing `install()` does is `git.clone()`,
+    which on an existing checkout runs `fetch` + `reset --hard FETCH_HEAD` and
+    throws those commits away — work no check had ever looked at.
+
+    So the fourth fact is a question about HEAD itself: are there commits here
+    that the ref this update would reset to does not already carry? `None` —
+    git could not be asked, or there is no such remote-tracking ref to compare
+    against — refuses like a "no", per `Ownership`'s three-outcome rule.
+    """
+    clone, before = _user_module(tmp_path, checkout_of="the same repo, committed to")
+    _installed_by_this_app(tmp_path)
+    git = _FakeGit({}, unmodified=True, no_local_commits=answer)
+    applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
+
+    with pytest.raises(ApplyError, match="no record"):
+        applier.install(parse_manifest(OWNED_ITEM))
+
+    assert git.calls == []
+    assert (clone / "src" / "mine.cpp").read_bytes() == before
+
+
+def test_the_commit_question_is_asked_about_the_branch_the_update_would_reset_to(
+    tmp_path: Path,
+) -> None:
+    """The manifest's branch, not whatever this checkout happens to be on.
+
+    `git.clone()` over an existing checkout fetches `origin <branch or HEAD>`
+    and resets to `FETCH_HEAD`, so the ref that decides what survives is the
+    manifest's — asking about any other one would be answering a question
+    nobody is about to act on.
+    """
+    _existing_module(tmp_path)
+    _installed_by_this_app(tmp_path)
+    git = _FakeGit({"README.md": "upstream\n"}, unmodified=True, no_local_commits=True)
+    applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
+    branched = {**OWNED_ITEM, "source": {"repo": "azerothcore/mod-ah-bot", "branch": "wotlk"}}
+
+    applier.install(parse_manifest(branched))
+
+    assert git.branches_asked == ["wotlk"]
 
 
 def test_a_copied_server_folder_does_not_adopt_the_clones_in_the_copy(tmp_path: Path) -> None:
@@ -1286,7 +1435,7 @@ def test_a_copied_server_folder_does_not_adopt_the_clones_in_the_copy(tmp_path: 
             family="azerothcore",
         ),
     )
-    git = _FakeGit({}, unmodified=True)
+    git = _FakeGit({}, unmodified=True, no_local_commits=True)
     applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
 
     with pytest.raises(ApplyError, match="no record"):
@@ -1312,7 +1461,7 @@ def test_a_repository_that_tracks_the_claim_file_s_name_does_not_lock_the_module
     clone = _existing_module(tmp_path)
     (clone / apply_module.CLAIM_FILE).write_text('{"upstream": "ours"}\n', encoding="utf-8")
     _installed_by_this_app(tmp_path)
-    git = _FakeGit({"README.md": "upstream\n"}, unmodified=True)
+    git = _FakeGit({"README.md": "upstream\n"}, unmodified=True, no_local_commits=True)
     applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
 
     assert apply_module.read_clone_claim(clone, item_id="mod-ah-bot") is Ownership.UNKNOWN

@@ -891,6 +891,37 @@ was found by reading code; each is a line in a resolved compose document from a 
   a clone's actual `origin` therefore no longer runs for the clones this app owns — which are the
   only clones this can happen to.
 
+- **A clean working tree is not "nothing of the user's is here", and adoption read it as one** —
+  2026-09-01, found by adversarial review of the guard the day after it landed, fixed the same day.
+  `Applier._may_adopt()` took a checkout on three facts, and its third was
+  `is_unmodified(clone, ".")` — `git status --porcelain`, which compares the working tree and the
+  index **against HEAD** and is therefore silent about HEAD itself. A user who cloned the catalog's
+  own repository into a server directory this app created and then COMMITTED their customisations
+  had a spotless tree: all three facts passed, adoption succeeded, and the very next call was
+  `git.clone()` → `fetch` + `reset --hard FETCH_HEAD`, which moved HEAD off those commits and left
+  them reachable only through the reflog. *Fixed* by a fourth fact and a third read-only git seam,
+  `HistoryReader.no_local_commits()`: `rev-list <the ref this update would reset to>..HEAD` must be
+  empty, and a `None` — no such remote-tracking ref, or git could not be asked — refuses.
+  **Third instance of one pattern in this codebase**, after `native.read_claim()` collapsing
+  absent-vs-unreadable and `read_clone_claim()`'s note about it: *a question with more states than
+  the answer being carried*. Worth stating as a review question in its own right — "how many states
+  does the thing you asked about have, and how many does your variable hold?"
+
+- **Adoption does NOT rescue every existing user, and the commit that added it said it did** —
+  2026-09-01. `201990d2`'s message claims adoption "closes the 'every existing module user is
+  refused on first Install' gap". Proved false against real git for one population: a module whose
+  upstream ships no `include.sh` gets one written by `install()` itself, that file is untracked,
+  `is_unmodified(clone, ".")` reports untracked files, so adoption is refused for exactly those
+  modules and their users still meet the refusal and its remedy.
+  *Behaviour is correct and stays; only the claim was wrong.* Refusing costs a re-clone, and a
+  `reset --hard` would not have deleted an untracked file anyway, so the guard errs in the cheap
+  direction. **Deliberately not allowlisted**, including as an exact match on that one generated
+  name: the `include.sh` this app writes is empty and a user's need not be, so a name-only
+  allowlist would have to grow a content check to be safe — and a content check is the first step
+  of deciding which of somebody's untracked files are innocent, which is the reasoning that loses
+  work. The correction is written into `Applier._may_adopt()`'s docstring, where a reader will
+  actually look; a pushed commit message cannot be amended.
+
 
 ### One thing worth keeping
 
