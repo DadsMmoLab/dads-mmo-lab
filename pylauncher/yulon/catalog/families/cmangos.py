@@ -331,15 +331,33 @@ class CmangosInstaller(StagedInstaller):
         cannot know: which image, which uid, where the client is, and what this
         machine's SELinux says.
 
-        **Every seam is passed, none is left to default.** `run_plan`'s
-        `selinux_enforcing` parameter defaults to `platform.selinux_enforcing`
-        bound at IMPORT, exactly like `platform.container_user_args()`'s
-        `platform_id` — the trap `_user_args()` was written against. Letting it
-        default would ask the real host, so an install on an enforcing box
-        would get the right answer for the wrong reason and a test faking the
-        platform would get the host's answer and never see it. The seam already
-        exists and `stage_generate_compose` asks the same one; asking it twice
-        in two ways is how the two come to disagree.
+        **Every seam is passed, none is left to default — and NOT for the
+        reason written here until 2026-09-01.** That reason was that
+        `run_plan`'s `selinux_enforcing` is bound at IMPORT like
+        `platform.container_user_args()`'s `platform_id`, so a test faking the
+        platform would never be seen. It was wrong, and it was wrong in the
+        direction that gets cited. Asked of the interpreter rather than read
+        (CPython 3.13.14, 2026-09-01):
+        `signature(extract.run_plan).parameters["selinux_enforcing"].default`
+        is `None`, and
+        `signature(platform.container_user_args).parameters["platform_id"].default
+        is platform.detect` is `True`. The second is the import-bound trap
+        `_user_args()` is written against; the first is not one.
+        `extract.py:755` had it right all along — the module attribute is
+        resolved INSIDE the call, so a `monkeypatch` of
+        `platform.selinux_enforcing` is seen whether this stage passes the seam
+        or not.
+
+        What passing it actually buys: `self._seams.selinux_enforcing` and the
+        `platform` attribute are DIFFERENT objects, and
+        `stage_generate_compose` asks the seam. Omitting the argument would put
+        one question about one machine — is SELinux enforcing? — to two
+        answerers inside a single install, so a faked Fedora would relabel for
+        one answer and extract under the other. Deleting the argument was
+        mutated on 2026-09-01 and
+        `test_the_selinux_answer_reaches_every_extraction_container_and_no_mmaps_one`
+        killed it; the decision is load-bearing even though the old reason for
+        it was not true.
         """
         data = self._data()
         client_dir = ctx.client_dir
@@ -348,8 +366,7 @@ class CmangosInstaller(StagedInstaller):
                 f"{self.entry.name} needs the game client folder to extract its maps from, and "
                 "none was given. Pick the client folder and try again."
             )
-        data_dir = ctx.server_dir / DATA_DIR
-        data_dir.mkdir(parents=True, exist_ok=True)
+        data_dir = self._data_dir(ctx)
         image_ref = self._image_ref(ctx, data.extract.image)
         user_args = self._user_args()
         yield f"Extracting server data from {client_dir} into {data_dir} (the client is read-only)."
@@ -391,7 +408,16 @@ class CmangosInstaller(StagedInstaller):
         leg: `data_dir` is the server's own directory and a `ctx.client_dir`
         put in its place would read identically on the page.
         `test_no_mmaps_container_is_handed_anything_that_names_the_users_client`
-        is what asserts it rather than trusting the reading.
+        is what asserts it rather than trusting the reading — by ENUMERATING
+        `ContainerRun`'s fields, since until 2026-09-01 it listed five of the
+        eight by hand and a mutant that put `ctx.client_dir` into `user_args`
+        as a real `-v` bind passed it (killed only by a neighbouring test that
+        happens to pin `user_args`).
+
+        The fifth leg is `_data_dir()`: `data_dir` itself must resolve inside
+        the server directory, because `run_mmaps()` deletes `data/mmaps` and a
+        `data/` that is a symlink into a client would carry that delete there
+        without any of the four legs above noticing.
 
         **No `label:disable`, and deliberately not by precedent.** The extract
         stage above turns SELinux confinement off for its containers because
@@ -413,8 +439,7 @@ class CmangosInstaller(StagedInstaller):
         reordering that looks unrelated.
         """
         data = self._data()
-        data_dir = ctx.server_dir / DATA_DIR
-        data_dir.mkdir(parents=True, exist_ok=True)
+        data_dir = self._data_dir(ctx)
         image_ref = self._image_ref(ctx, data.extract.image)
         user_args = self._user_args()
         yield "Generating movement maps (this can take an hour or more)."
@@ -433,6 +458,48 @@ class CmangosInstaller(StagedInstaller):
         yield "Map generation finished."
 
     # -- what only the engine knows ---------------------------------------
+
+    def _data_dir(self, ctx: StageContext) -> Path:
+        """`data/` under the server directory — refused if it resolves anywhere else.
+
+        Both stages that use it write into this folder through a bind mount and
+        `run_mmaps()` deletes `data/mmaps` outright, so where the name LANDS is
+        a safety question and not a convenience one.
+
+        Measured on this branch before the check existed (2026-09-01): with
+        `data` made a symlink into a game client, `mkdir(exist_ok=True)`
+        succeeds without noticing, `shutil.rmtree(data/mmaps)` followed the link
+        and removed real client content, and the extraction bind would have
+        written into the client the `:ro` mount exists to protect. The sibling
+        shape is safe by accident and only by accident: when `data/mmaps` itself
+        is the symlink, `rmtree` refuses with "Cannot call rmtree on a symbolic
+        link" — which is `shutil`'s rule, not ours, and it does not cover the
+        parent.
+
+        Nothing in this app produces either shape; the path is built from
+        `ctx.server_dir` and carries no client-derived component. The check is
+        therefore about what somebody else can put on disk between two runs —
+        it costs one `resolve()` per stage, it refuses instead of repairing, and
+        it says which link it found. Someone symlinking `data/` onto a bigger
+        disk is refused too, deliberately: the install folder as a whole can be
+        put wherever they like, and telling them so is cheaper than deciding
+        which outside destinations are the harmless ones.
+        """
+        server_dir = ctx.server_dir
+        data_dir = server_dir / DATA_DIR
+        landing = data_dir.resolve()
+        if not landing.is_relative_to(server_dir.resolve()):
+            raise InstallerError(
+                f"{data_dir} leads to {landing}, which is outside this install's folder "
+                f"({server_dir}). This install writes extracted game data into that folder and "
+                "deletes a folder inside it when it regenerates movement maps, so a link pointing "
+                "elsewhere would let it overwrite and delete files that are not its own — a game "
+                "client's, if that is where the link goes. Nothing was run and nothing was "
+                f"removed. Remove the link so {DATA_DIR} can be this install's own folder, or "
+                "install this server in the folder you want its data to live in."
+            )
+        data_dir.mkdir(parents=True, exist_ok=True)
+        return data_dir
 
     def _native(self) -> NativeInstall:
         native_block = self.entry.install.native

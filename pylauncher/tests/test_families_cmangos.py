@@ -28,8 +28,8 @@ import inspect
 import os
 import subprocess
 import threading
-from collections.abc import Callable, Iterable, Iterator
-from dataclasses import replace
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from dataclasses import fields, is_dataclass, replace
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -1584,6 +1584,46 @@ def _mmaps_runs(rec: Recorder) -> list[docker.ContainerRun]:
     return [run for run in rec.container_runs if run.argv == CMANGOS.mmaps.argv]
 
 
+def _every_string_in(value: object) -> Iterator[str]:
+    """Every string reachable from one `ContainerRun` field, however it is nested.
+
+    Written to be exhaustive by CONSTRUCTION rather than by a list somebody
+    keeps current: a dataclass is walked field by field (so `Mount.host` is
+    reached inside `mounts`), a mapping gives up its keys as well as its values
+    (so an `-e CLIENT=…` name is not a blind spot), any other iterable is
+    walked, and anything else is rendered with `str()` rather than skipped.
+    Nothing returns early on a type it does not recognise, which is the only way
+    a field added after this was written is still audited.
+    """
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, Path):
+        yield str(value)
+    elif is_dataclass(value) and not isinstance(value, type):
+        for member in fields(value):
+            yield from _every_string_in(getattr(value, member.name))
+    elif isinstance(value, Mapping):
+        for key, item in value.items():
+            yield from _every_string_in(key)
+            yield from _every_string_in(item)
+    elif isinstance(value, Iterable):
+        for item in value:
+            yield from _every_string_in(item)
+    else:
+        yield str(value)
+
+
+def _spoken_by_field(run: docker.ContainerRun) -> dict[str, tuple[str, ...]]:
+    """What each of `ContainerRun`'s fields says, keyed by field name.
+
+    `dataclasses.fields()` is the enumeration; the field NAMES are only carried
+    so a failure says which field leaked, never to choose which ones to look at.
+    """
+    return {
+        member.name: tuple(_every_string_in(getattr(run, member.name))) for member in fields(run)
+    }
+
+
 def test_extract_runs_every_tool_read_only_as_the_user_in_out(tmp_path: Path) -> None:
     """Audit by field: client `:ro` at /client, data rw at /out, cwd /out, `--user` on Linux."""
     server_dir = tmp_path / "srv"
@@ -1657,12 +1697,26 @@ def test_extract_refuses_a_tool_that_exits_zero_with_a_shortfall(tmp_path: Path)
 
 
 def test_extract_refuses_a_failed_tool_naming_it(tmp_path: Path) -> None:
+    """Named for the TOOL's name, so that is what is asserted — not the fixture's own echo.
+
+    Until 2026-09-01 the match was `expansion.MPQ`, which is the tail this test
+    itself put into `run_result` and which comes back in the refusal's "last
+    words". That is the fixture answering itself: the refusal could stop naming
+    the tool entirely and this test would still be green. The name comes off
+    the plan rather than being typed, so a renamed tool cannot leave a literal
+    behind that nothing produces.
+    """
     server_dir = tmp_path / "srv"
     server_dir.mkdir()
+    assert CMANGOS is not None
+    failed = CMANGOS.extract.tools[0]
     rec = Recorder()
     rec.run_result = docker.AttachedRun(2, ("ad: cannot open /client/Data/expansion.MPQ",))
-    with pytest.raises(InstallerError, match="expansion.MPQ"):
+    with pytest.raises(InstallerError) as refusal:
         list(engine(rec)._extract(context(server_dir, client_folder(tmp_path))))
+    message = str(refusal.value)
+    assert failed.name in message, f"the refusal does not name the tool that failed: {message}"
+    assert "expansion.MPQ" in message, "the tool's own last words are quoted too"
     assert len(rec.container_runs) == 1, "the first tool failed; nothing after it ran"
 
 
@@ -1710,15 +1764,39 @@ def test_no_mmaps_container_is_handed_anything_that_names_the_users_client(tmp_p
     `data_dir=ctx.client_dir` are the same shape on the page, and the second
     would hand `shutil.rmtree` a folder inside somebody's game install.
 
-    So the spec is audited by field rather than by eye: the mmaps container
-    gets exactly one mount, it is the server's own `data/`, and no mount, no
-    argument and no environment value under that container is the client folder
-    or anything beneath it. The `ctx` handed to `_mmaps` here DOES carry a
-    client dir, deliberately — a body that reached for `ctx.client_dir` would
-    find one rather than a `None` that fails for a different reason — and the
-    client sits beside the server dir under `tmp_path`, so neither is an
-    ancestor of the other and `is_relative_to` can only answer True on a real
-    mistake.
+    So the spec is audited by field rather than by eye — and the fields are
+    ENUMERATED off `ContainerRun` rather than listed here. Until 2026-09-01
+    they were listed: argv, the env VALUES, workdir, image, plus the mounts,
+    five of the eight. This mutant, in `_mmaps`, passed that audit:
+
+        user_args = (*self._user_args(), "-v", f"{ctx.client_dir}:/client:ro")
+
+    It hands the mmaps container the user's client as a real bind. Measured
+    that day on `yulon-ubuntu`: run alone, this test reported `1 passed`; the
+    file went red only at `test_mmaps_runs_the_generator_over_data_and_records_it`,
+    which pins `run.user_args` for its own unrelated reason. A guarantee a
+    neighbour happens to hold is not held by the test named for it, so the
+    walk now covers `user_args`, `ulimits`, `security_args` and env KEYS, and a
+    ninth field on the day it is added.
+
+    The `ctx` handed to `_mmaps` here DOES carry a client dir, deliberately — a
+    body that reached for `ctx.client_dir` would find one rather than a `None`
+    that fails for a different reason — and the client sits beside the server
+    dir under `tmp_path`, so neither is an ancestor of the other.
+
+    Both spellings of the client path are looked for, because a body that said
+    `ctx.client_dir.resolve()` would otherwise slip through wherever `tmp_path`
+    is reached by a link.
+
+    An `is_relative_to(client)` leg over the mounts stood here until
+    2026-09-01 and was REMOVED rather than repaired. It was lexical, so a `..`
+    component or a symlinked `data/` walked past it; and made non-lexical with
+    `.resolve()` it still could not fail under this fixture, because the exact
+    mount equality on the line above already settles the `mounts` field and
+    nothing here builds a link. It was catching nothing either way, which is
+    worse than absent — a line that reads as a guard is counted as one. The
+    resolved question is asked where a fixture actually builds the link:
+    `test_a_data_folder_that_leads_out_of_the_install_is_refused_before_anything_runs`.
     """
     server_dir = tmp_path / "srv"
     server_dir.mkdir()
@@ -1731,10 +1809,64 @@ def test_no_mmaps_container_is_handed_anything_that_names_the_users_client(tmp_p
     assert len(runs) == 1
     for run in runs:
         assert [(m.host, m.guest) for m in run.mounts] == [(server_dir / "data", "/out")]
-        for mount in run.mounts:
-            assert not mount.host.is_relative_to(client), f"{mount.guest} reaches the client"
-        spoken = (*run.argv, *run.env.values(), run.workdir or "", run.image)
-        assert not any(str(client) in text for text in spoken)
+        spoken = _spoken_by_field(run)
+        seen = {text for texts in spoken.values() for text in texts}
+        assert (
+            str(server_dir / "data") in seen and run.image in seen
+        ), "the field walk found neither the data mount nor the image, so it audited nothing"
+        for field_name, texts in spoken.items():
+            for text in texts:
+                for spelling in (str(client), str(client.resolve())):
+                    assert spelling not in text, f"{field_name} names the client: {text!r}"
+
+
+def test_a_data_folder_that_leads_out_of_the_install_is_refused_before_anything_runs(
+    tmp_path: Path,
+) -> None:
+    """`data/` may be a link, and a link is where `rmtree` goes. Both stages, both attempts.
+
+    The fixture violates exactly one rule: `data/` under the server directory
+    resolves outside it. Everything else is a valid install — a real server
+    folder, a client that passes the TBC `ClientSpec`, a seam that answers
+    `linux` — so a refusal here can only be about the link.
+
+    What it cost while nothing refused, measured on this branch on 2026-09-01
+    before `_data_dir()` existed: `mkdir(parents=True, exist_ok=True)` returns
+    happily on a pre-existing symlink, `run_mmaps()` then hands
+    `shutil.rmtree` `data/mmaps` down the link, and the client's own folder was
+    gone afterwards. The sibling shape — `data/mmaps` itself being the link —
+    survives, because `shutil` refuses with "Cannot call rmtree on a symbolic
+    link"; that is `shutil`'s rule about its own last component and it says
+    nothing about the parent.
+
+    Asked TWICE, because a refusal that quietly repairs what it refuses would
+    answer differently the second time: both calls must refuse the same way and
+    the client must still be whole after both.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    client = client_folder(tmp_path)
+    kept = client / "Data" / "common.MPQ"
+    data = server_dir / "data"
+    try:
+        data.symlink_to(client, target_is_directory=True)
+    except (OSError, NotImplementedError):  # pragma: no cover - needs privilege on Windows
+        pytest.skip("cannot create a directory symlink on this machine")
+    if data.resolve() == data:  # pragma: no cover - resolution disabled
+        pytest.skip("symlinks are not resolved on this filesystem")
+    rec = Recorder()
+    eng = engine(rec)
+    for attempt in (1, 2):
+        for stage in (eng._extract, eng._mmaps):
+            with pytest.raises(InstallerError) as refusal:
+                list(stage(context(server_dir, client)))
+            said = str(refusal.value)
+            assert str(data) in said, f"attempt {attempt}: the refusal does not name the link"
+            assert (
+                str(client.resolve()) in said
+            ), f"attempt {attempt}: the refusal does not say where the link leads"
+        assert rec.container_runs == [], f"attempt {attempt}: a container ran over a linked data/"
+        assert kept.is_file(), f"attempt {attempt}: the client lost content to a refused install"
 
 
 def test_extract_and_mmaps_carry_the_stage_kinds_own_cancel_notes() -> None:
@@ -1757,10 +1889,16 @@ def test_the_selinux_answer_reaches_every_extraction_container_and_no_mmaps_one(
       server directory and which no `chcon` of ours ever reaches; on an
       enforcing box a confined container is denied it outright
       (`yulon-fedora-gate`, Fedora 44, Docker 29.7.2, 2026-09-01). They get the
-      flag, and the ANSWER comes from the seam — `run_plan`'s
-      `selinux_enforcing` parameter defaults to `platform.selinux_enforcing`,
-      bound at import, so an engine that let it default would ask the real host
-      and these two runs would agree instead of differing.
+      flag, and the ANSWER comes from the seam. **Not because `run_plan`'s
+      parameter is import-bound** — this docstring said so until 2026-09-01 and
+      it was false, twice over: that default is `None` and the module attribute
+      is looked up inside the call (`extract.py:755`), so a `monkeypatch` of
+      `platform.selinux_enforcing` would be seen either way. What the two
+      engines below prove is the thing that IS true: the two host shapes differ
+      only in what the SEAM answers, so an engine that asked the module instead
+      would give both of them the runner's own answer and the two would agree
+      instead of differing. `_extract`'s docstring carries the interpreter
+      output that settled it.
     * The mmaps container binds `data/` under the server directory and nothing
       else, and `stage_generate_compose` has already relabelled that directory,
       so it is readable and writable while confined. The flag would turn a
