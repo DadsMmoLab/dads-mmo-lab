@@ -2876,3 +2876,59 @@ class ContainerRun:
         argv.append(self.image)
         argv.extend(self.argv)
         return argv
+
+
+def run_container(
+    spec: ContainerRun, *, sink: OutputSink, cancel: threading.Event | None = None
+) -> AttachedRun:
+    """Run one throwaway container attached, streaming its output to `sink`.
+
+    `run_attached()` does the work, so this has the build's cancel semantics
+    (the client is abandoned; the daemon finishes the container — the caller's
+    `Stage.cancel_note` says so, and the spine yields it) and the build's
+    bounded tail. Output is read merged because the tools this exists for —
+    the map, vmap and mmap extractors — print their progress to stderr, which
+    `runner.stream()` otherwise withholds until the tool has exited.
+
+    Four different things can come back, and they stay four, because a stage
+    that cannot tell them apart says the wrong sentence to the user:
+
+    * `0` — the tool ran and was happy.
+    * `CANCELLED_RETURNCODE` — the user pressed Stop. Not an exit status the
+      tool produced, and not a reason to say the extraction failed.
+    * `_CLI_MISSING_RETURNCODE` with `DOCKER_CLI_MISSING_HELP` as the whole
+      tail — nothing was spawned at all. "Could not ask", not "it answered no".
+    * anything else — what the container exited with, its last lines kept.
+      `docker run` uses 125 for an image it could not find or pull, so the
+      caller reads the words rather than inventing a meaning for the number.
+
+    A bad spec is none of those. `to_argv()` raises `ValueError` for a relative
+    mount source and that is left to propagate: it says this code built the
+    wrong command, where an `AttachedRun` would say the user's machine could
+    not run the tool, and the install engine treats those very differently.
+
+    **This addresses the local daemon and takes no `wsl_distro`** — the one
+    function in this module that reaches the spawn seam without being able to
+    name a distro, which is why it is listed in the completeness test's
+    `_DAEMON_AGNOSTIC` rather than growing the parameter. A bind mount is the
+    reason: `Mount.host` is a path on THIS machine, `to_argv()` is pure and
+    translates nothing, and handing a Windows drive path to a docker living
+    inside a distro mounts a directory that does not exist there.
+    Making this WSL-capable is a question about where the mounts are built, not
+    one this function can answer alone — the same shape as the SELinux label
+    `Mount` deliberately leaves to its caller. `git.ContainerGit._capture()`,
+    the app's other `docker run` over a host bind, resolves `docker_program()`
+    directly for exactly this reason.
+
+    The cwd handed to the docker client is this process's own and nothing
+    depends on it: `to_argv()` refuses a relative mount source, so no path in
+    the argv is resolved against it. The container's working directory is
+    `spec.workdir`, which is the one that matters.
+
+    `sink` is required, not optional as in `run_attached()`: every caller of
+    this is a stage that has a log panel to fill, and a run whose only trace
+    is a 200-line tail after an hour is the silence phase 6 measured against.
+    """
+    argv = spec.to_argv()
+    logger.info(f"run_container(): `docker {' '.join(argv)}`")
+    return run_attached(argv, Path.cwd(), sink=sink, cancel=cancel, merge_stderr=True)

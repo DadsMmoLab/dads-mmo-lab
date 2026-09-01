@@ -3536,6 +3536,15 @@ def test_no_wsl_on_this_host_is_the_existing_missing_cli_answer(
 # completeness test below.
 _DAEMON_AGNOSTIC: dict[str, str] = {
     "_docker": "the seam itself - it takes the distro and builds the argv",
+    "run_container": (
+        "a host bind mount is a local-daemon concept: `Mount.host` is a path on THIS "
+        "machine and `to_argv()` translates nothing, so forwarding a distro would send "
+        "a Windows drive path to a docker that cannot see it - a container silently "
+        "mounting the wrong directory, which is worse than the missing-CLI answer it "
+        "gives today. Making it WSL-capable is a question about where the mounts are "
+        "built; `git.ContainerGit._capture()`, the app's other `docker run` over a host "
+        "bind, resolves `docker_program()` directly for the same reason."
+    ),
 }
 
 
@@ -3944,3 +3953,110 @@ def test_a_relative_mount_source_is_refused_before_docker_sees_it() -> None:
     )
     with pytest.raises(ValueError, match="absolute"):
         spec.to_argv()
+
+
+# ----------------------------------------- 7.3: one attached `docker run`
+
+
+def test_run_container_streams_the_spelled_argv_with_stderr_merged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The argv is `to_argv()`'s, and progress on stderr reaches the sink live.
+
+    The extractors print their progress to stderr, which `runner.stream()`
+    otherwise holds back until the tool has exited — an hour of extraction as
+    an hour of blank panel, the same trade `build_staged()` refuses.
+    """
+    seen, merged = _stream_double(monkeypatch, ["extracting 1/3", "extracting 2/3"])
+    monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
+    spec = docker.ContainerRun(
+        image="busybox:1.36",
+        argv=("sh", "-c", "true"),
+        mounts=(docker.Mount(tmp_path, "/out"),),
+        workdir="/out",
+    )
+    heard: list[str] = []
+    run = docker.run_container(spec, sink=heard.append)
+    assert seen == [["docker", *spec.to_argv()]]
+    assert merged == [True]
+    assert heard == ["extracting 1/3", "extracting 2/3"]
+    assert run.returncode == 0
+    assert run.tail == ("extracting 1/3", "extracting 2/3")
+
+
+def test_a_cancelled_container_run_reports_the_cancel_not_a_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same contract as the build: a Stop is not an exit status the tool produced."""
+    _stream_double(monkeypatch, ["still going"])
+    monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
+    cancel = docker.threading.Event()
+    cancel.set()
+    spec = docker.ContainerRun(image="busybox:1.36", argv=("sleep", "600"))
+    run = docker.run_container(spec, sink=lambda _line: None, cancel=cancel)
+    assert run.returncode == docker.CANCELLED_RETURNCODE
+
+
+def test_a_container_that_exited_non_zero_keeps_the_words_that_say_why(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing image and a tool that failed are both non-zero, and neither is a cancel.
+
+    `docker run` answers an image it cannot pull with 125 and a sentence on
+    stderr; the extractor answers a corrupt MPQ with its own status and its own
+    sentence. Both have to arrive as themselves — the caller decides what to
+    say, and it cannot decide from a status this function flattened.
+    """
+    monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
+    monkeypatch.setattr(
+        docker.runner,
+        "stream",
+        _stream_that_fails(
+            "Unable to find image 'yulon.local/nope:native-abc' locally",
+            "Error response from daemon: pull access denied",
+            returncode=125,
+        ),
+    )
+    spec = docker.ContainerRun(image="yulon.local/nope:native-abc", argv=("true",))
+    run = docker.run_container(spec, sink=lambda _line: None)
+    assert run.returncode == 125
+    assert run.returncode not in (0, docker.CANCELLED_RETURNCODE)
+    assert "pull access denied" in run.tail[-1]
+
+
+def test_a_host_with_no_docker_cli_is_told_apart_from_a_container_that_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The third state is "could not ask", and it carries help text, not an exit code.
+
+    Nothing is spawned: the answer comes back before `runner.stream()` is
+    reached, so a caller that reports "the extractor failed" for this would be
+    naming the wrong culprit entirely.
+    """
+    seen, _merged = _stream_double(monkeypatch, ["never read"])
+    monkeypatch.setattr(docker.platform, "docker_program", lambda: None)
+    spec = docker.ContainerRun(image="busybox:1.36", argv=("true",))
+    run = docker.run_container(spec, sink=lambda _line: None)
+    assert run.returncode == docker._CLI_MISSING_RETURNCODE
+    assert run.returncode not in (0, docker.CANCELLED_RETURNCODE)
+    assert run.tail == (docker.platform.DOCKER_CLI_MISSING_HELP,)
+    assert seen == [], "a host with no docker CLI must not reach the spawn seam"
+
+
+def test_a_relative_mount_is_refused_before_any_container_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`to_argv()`'s refusal is a caller bug, and it must not be dressed up as a run.
+
+    A `ValueError` reaching the stage says "this code built a bad spec"; an
+    `AttachedRun` with a non-zero status would say "your machine could not run
+    the extractor", and the install engine would retry it forever.
+    """
+    seen, _merged = _stream_double(monkeypatch, ["never read"])
+    monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
+    spec = docker.ContainerRun(
+        image="busybox:1.36", argv=("true",), mounts=(docker.Mount(Path("data"), "/out"),)
+    )
+    with pytest.raises(ValueError, match="absolute"):
+        docker.run_container(spec, sink=lambda _line: None)
+    assert seen == []
