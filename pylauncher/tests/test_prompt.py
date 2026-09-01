@@ -257,7 +257,7 @@ def test_a_declined_prompt_is_still_shown_in_the_log() -> None:
 
 
 def _has_bash() -> bool:
-    from yulon.catalog.installer import bash_available
+    from tests.support_bash import bash_available
 
     try:
         return bash_available()

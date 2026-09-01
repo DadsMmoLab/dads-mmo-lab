@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.support_bash import bash_available
 from yulon import runner
-from yulon.catalog.installer import bash_available
 from yulon.runner import creationflags, run, stream
 
 # Not just `which bash`: on Windows that finds the Store alias for WSL, which fails
