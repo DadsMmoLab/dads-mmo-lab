@@ -2937,13 +2937,16 @@ def run_container(
 _MISSING_IN_IMAGE = re.compile(r"No such container:path|Could not find the file", re.IGNORECASE)
 """How `docker cp` says the source path was not in there, across CLI generations.
 
-Both spellings, because they are the same fact told by different halves of
-docker: the modern client stats the path itself and answers `No such
-container:path`, older ones asked the daemon and relayed `Could not find the
-file`. Matching only the newer one would send a whole class of "this image does
-not ship that file" through as an unexplained copy failure on any host whose
-docker is a year behind, and the two answers are not worth keeping apart -
-what differs is the wording, not the situation.
+Both spellings, because they are the same fact told by two different halves of
+docker - the CLI when it stats the path itself, the daemon when it is the one
+asked - and which of them answers is not something this code can predict.
+Measured on Engine 29.6.2, a missing source in a real image comes back as
+`Could not find the file <path> in container <id>`; `No such container:path`
+is the other half's wording. An earlier version of this comment attributed each
+spelling to a CLI generation, newest-first, and had them the wrong way round.
+Matching only one would send a whole class of "this image does not ship that
+file" through as an unexplained copy failure, and the two are not worth keeping
+apart: what differs is the wording, not the situation.
 """
 
 
