@@ -4851,3 +4851,232 @@ def test_exec_stdin_can_say_which_daemon_so_it_needs_no_allowlist_entry() -> Non
     """
     assert "exec_stdin" not in _DAEMON_AGNOSTIC
     assert "wsl_distro" in _seam_reachers()["exec_stdin"]
+
+
+# --- sql_query(): one batch-mode statement (H.5) ----------------------------
+
+
+def test_sql_query_asks_in_batch_mode_with_the_password_in_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--batch --skip-column-names`: rows and nothing else, so a caller never parses a border."""
+    _spawn_double(monkeypatch)
+    answer = docker.sql_query(
+        "tbc-database", "mariadb", "hunter2", "tbcrealmd", "SELECT COUNT(*) FROM account"
+    )
+    spawned = _FakePopen.instances[-1]
+    assert spawned.command == [
+        "docker",
+        "exec",
+        "-i",
+        "-e",
+        "MYSQL_PWD",
+        "tbc-database",
+        "mariadb",
+        "-u",
+        "root",
+        "--batch",
+        "--skip-column-names",
+        "tbcrealmd",
+    ]
+    assert "hunter2" not in " ".join(spawned.command)
+    assert spawned.env is not None and spawned.env["MYSQL_PWD"] == "hunter2"
+    # The statement travels on stdin like a dump file does: no SQL in argv either.
+    assert spawned.stdin.written == b"SELECT COUNT(*) FROM account"
+    assert answer == "3\n"
+
+
+def test_sql_query_without_a_schema_names_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`SHOW DATABASES` has no schema to select; the argv must end at the flags."""
+    _spawn_double(monkeypatch)
+    docker.sql_query("tbc-database", "mariadb", "hunter2", None, "SHOW DATABASES")
+    assert _FakePopen.instances[-1].command[-1] == "--skip-column-names"
+
+
+def test_a_failed_query_raises_with_the_clients_words_and_not_the_password(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The client's stderr names the user and the reason; the message must add nothing."""
+
+    class _Denied(_FakePopen):
+        def __init__(self, command: list[str], **kwargs: object) -> None:
+            super().__init__(command, **kwargs)  # type: ignore[arg-type]
+            self.returncode = 1
+            self.stderr = io.BytesIO(
+                b"ERROR 1045 (28000): Access denied for user 'root'@'localhost' "
+                b"(using password: YES)\n"
+            )
+
+    _spawn_double(monkeypatch)
+    monkeypatch.setattr(docker.subprocess, "Popen", _Denied)
+    with pytest.raises(docker.DockerCommandError) as excinfo:
+        docker.sql_query("tbc-database", "mariadb", "hunter2", None, "SELECT 1")
+    assert "Access denied" in str(excinfo.value)
+    assert "hunter2" not in str(excinfo.value)
+
+
+def test_a_query_that_matched_nothing_is_an_answer_and_not_a_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No rows is a VERDICT. The marker probe asks exactly this and must read it as one.
+
+    `SELECT 1 FROM realmlist WHERE id = 1` against an empty table exits 0 with
+    nothing on stdout - the database was asked and it answered "no". Raising
+    here would make "the table is empty" indistinguishable from "the container
+    is not running", and the probe would refuse an install it should have run.
+    """
+    _spawn_double(monkeypatch, stdout=b"")
+    assert docker.sql_query("db", "mariadb", "hunter2", "realmd", "SELECT 1 WHERE 0") == ""
+
+
+def test_one_row_holding_an_empty_value_is_not_no_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--skip-column-names` makes these two look alike, so stdout is returned VERBATIM.
+
+    A row whose only column is the empty string prints one empty line; no rows
+    at all print nothing. `.strip()` on the way out would flatten both to `""`
+    and a caller counting `splitlines()` would see zero rows where there is
+    one. The trailing newline is the only thing that tells them apart, so this
+    function keeps it and lets the caller decide.
+    """
+    _spawn_double(monkeypatch, stdout=b"\n")
+    one_empty_row = docker.sql_query("db", "mariadb", "hunter2", "realmd", "SELECT ''")
+    _spawn_double(monkeypatch, stdout=b"")
+    no_rows = docker.sql_query("db", "mariadb", "hunter2", "realmd", "SELECT '' WHERE 0")
+    assert one_empty_row == "\n" and no_rows == ""
+    assert len(one_empty_row.splitlines()) == 1 and len(no_rows.splitlines()) == 0
+
+
+def test_a_database_that_could_not_be_asked_is_not_a_query_that_failed(
+    no_docker: list[list[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Third outcome, and the one a retry might fix - so it keeps its own type.
+
+    The condition is produced rather than mimicked: the `no_docker` fixture
+    empties the resolver cache and makes `_which` find nothing, so this is the
+    road a box with no Docker installed actually walks through
+    `platform.docker_program()`. A `Popen` that raises proves nothing was
+    spawned - the first version of this test patched only `_which` and passed
+    against the REAL docker on this machine, because a resolved CLI is cached.
+
+    `DockerCliMissingError` is a `DockerCommandError`, so a caller that wants
+    them apart must ask for the narrower type FIRST - pinned here because the
+    wide clause reads as correct.
+    """
+
+    def spawned(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a child was started on a host that has no docker")
+
+    monkeypatch.setattr(docker.subprocess, "Popen", spawned)
+    with pytest.raises(docker.DockerCliMissingError) as excinfo:
+        docker.sql_query("db", "mariadb", "hunter2", None, "SELECT 1")
+    assert docker.platform.DOCKER_CLI_MISSING_HELP in str(excinfo.value)
+    assert "SELECT 1" not in str(excinfo.value), "nothing was asked; do not blame the statement"
+    assert no_docker == []
+
+
+def test_a_stopped_container_and_a_broken_statement_do_not_read_alike(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both exit non-zero; docker's words and the client's words are what part them.
+
+    `sqlplan.verify()` reports a failing rule and moves on; a container that
+    went away has to stop the stage. The message is the only place that
+    difference survives, so nothing may normalise it into "the query failed".
+    """
+    _spawn_double(
+        monkeypatch,
+        returncode=1,
+        stdout=b"",
+        stderr=b"Error response from daemon: container abc is not running\n",
+    )
+    with pytest.raises(docker.DockerCommandError) as stopped:
+        docker.sql_query("db", "mariadb", "hunter2", None, "SELECT 1")
+    _spawn_double(
+        monkeypatch,
+        returncode=1,
+        stdout=b"",
+        stderr=b"ERROR 1064 (42000) at line 1: You have an error in your SQL syntax\n",
+    )
+    with pytest.raises(docker.DockerCommandError) as broken:
+        docker.sql_query("db", "mariadb", "hunter2", None, "SELEKT 1")
+    assert "is not running" in str(stopped.value)
+    assert "ERROR 1064" in str(broken.value)
+    assert not isinstance(stopped.value, docker.DockerCliMissingError)
+
+
+def test_a_client_that_died_without_a_word_still_says_something(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Measured against a real mariadb:11 (2026-09-01): a killed client says nothing.
+
+    `kill -9` on the client mid-query - a container hitting its memory limit
+    does the same - gives exit 137 with BOTH pipes empty. `exited 137: ` with a
+    dangling colon names nothing at all, so the message falls back to whatever
+    the run left behind and finally to a phrase, and the STATUS is what the
+    reader is left with. This is the one non-zero shape whose reason has to
+    come from the exit code rather than from words.
+    """
+    _spawn_double(monkeypatch, returncode=137, stdout=b"", stderr=b"")
+    with pytest.raises(docker.DockerCommandError) as silent:
+        docker.sql_query("db", "mariadb", "hunter2", None, "SELECT SLEEP(30)")
+    assert "137" in str(silent.value)
+    assert not str(silent.value).rstrip().endswith(":"), "the message trails off into nothing"
+    # A client that put its reason on stdout instead is not left mute either.
+    _spawn_double(monkeypatch, returncode=1, stdout=b"could not connect\n", stderr=b"")
+    with pytest.raises(docker.DockerCommandError) as spoke_elsewhere:
+        docker.sql_query("db", "mariadb", "hunter2", None, "SELECT 1")
+    assert "could not connect" in str(spoke_elsewhere.value)
+
+
+def test_a_wsl_resident_database_is_queried_through_that_distros_docker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The distro is threaded through, secret and all, or the answer is about nothing.
+
+    Asked of Docker Desktop, a container living in a distro answers `No such
+    container` - and a `MYSQL_PWD` set on this side arrives EMPTY inside the
+    distro unless `WSLENV` names it, which reads as an authentication failure
+    against a perfectly healthy database. Both halves are `exec_stdin()`'s job;
+    this asserts `sql_query()` actually hands it the distro to do them with.
+    """
+    _spawn_double(monkeypatch)
+    monkeypatch.setattr(docker.platform, "_which", lambda name, path=None: "wsl.exe")
+    monkeypatch.delenv("WSLENV", raising=False)
+    docker.sql_query("db", "mariadb", "hunter2", "realmd", "SELECT 1", wsl_distro="dml-arch")
+    spawned = _FakePopen.instances[-1]
+    assert spawned.command[:5] == ["wsl.exe", "-d", "dml-arch", "--", "docker"]
+    assert spawned.env is not None
+    assert spawned.env["MYSQL_PWD"] == "hunter2"
+    assert "MYSQL_PWD" in spawned.env["WSLENV"].split(":")
+
+
+def test_sql_query_can_say_which_daemon_so_it_needs_no_allowlist_entry() -> None:
+    """A probe that asks the wrong daemon reports an install that is right there.
+
+    Nothing `sql_query()` sends has a host side to translate - a container name
+    and bytes on a pipe - so the reason `run_container` and `copy_from_image`
+    are on the allowlist does not apply, and it forwards the distro like the
+    two `docker exec -e MYSQL_PWD` call sites that came before it.
+    """
+    assert "sql_query" not in _DAEMON_AGNOSTIC
+    assert "wsl_distro" in _seam_reachers()["sql_query"]
+
+
+def test_the_password_reaches_no_log_line_on_the_way_to_the_database(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A debug log is what a user attaches to a bug report, so it may not hold the secret.
+
+    The `assert caplog.text` is not decoration: without it this passes on a
+    function that logs nothing at all, and would keep passing after a later
+    change started logging the whole argv. It pins that DEBUG logging happened
+    AND that the secret was not in it.
+    """
+    _spawn_double(monkeypatch)
+    with caplog.at_level("DEBUG", logger="yulon.docker"):
+        docker.sql_query("tbc-database", "mariadb", "hunter2", "realmd", "SELECT 1")
+    assert caplog.text, "nothing was logged at all; this test would pin nothing"
+    assert "exec" in caplog.text, "the command was not logged; the assertion below is vacuous"
+    assert "hunter2" not in caplog.text
+    # And not in what the child was spawned with, nor in the result's own `args`.
+    assert "hunter2" not in " ".join(_FakePopen.instances[-1].command)
