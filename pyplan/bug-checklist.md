@@ -872,6 +872,27 @@ was found by reading code; each is a line in a resolved compose document from a 
   the probe's own pull rather than an answer about the folder" and carried on — the three-outcome
   discipline behaving correctly against a real-world failure it had never seen.
 
+- **`--provision` never asks for a sudo password, so the packaged artifact cannot provision any
+  password-sudo Linux box** — 2026-09-01, found on clean Arch during the 7.1 gate. The shipped
+  `.tar.gz`'s headless entry point runs `ensure_docker()`, finds `sudo -n` refused, and SKIPS:
+
+      skipped: pacman -Sy --noconfirm docker docker-compose docker-buildx: exit 1 sudo: a password is required
+      skipped: systemctl enable --now docker: exit 1 sudo: a password is required
+      docker_group: "not-asked"   ok: false   docker_ready: false
+
+  Running it under a real pty changed nothing — no question is ever asked on that path, so there was
+  nothing for a driver to answer. The GUI gets a dialog and the CLI install harness prompts through
+  `_terminal_prompter`; `--provision` alone has neither.
+  Most Linux desktops have password sudo, so for them the artifact's headless provisioning can only
+  ever hand back a list of commands to paste. That may be the intended contract for a non-interactive
+  flag — but it is nowhere stated, and the 7.1 gate line asks for the PACKAGED ARTIFACT to install a
+  server, which on those machines it cannot do unaided.
+  *Recorded, not fixed:* the choice is between teaching `--provision` to prompt on a tty (it would
+  then not be non-interactive), giving it an explicit `--sudo-askpass`/stdin contract, or stating
+  plainly that provisioning on password-sudo Linux is a GUI-only path. Worth noting the behaviour
+  itself is otherwise exemplary: it refused rather than blocked, named both commands verbatim, and
+  declined the docker-group join because there was nobody to ask.
+
 
 ### One thing worth keeping
 
