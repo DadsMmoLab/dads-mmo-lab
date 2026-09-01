@@ -1128,8 +1128,10 @@ def _adopt_with_identification(
     """Drive `adopt_from_wsl()` with `_identify()` pinned to `answer`.
 
     Returns what the view answered, what it emitted, and every dialog it raised
-    as (title, text) - both the `DIFFERENT` refusal notice and the `UNVERIFIED`
-    confirm, in the order they were shown. Pinning the identification is
+    as (title, text). At most ONE can appear: `DIFFERENT` returns before the
+    `UNVERIFIED` branch is reached, so the list is never longer than one entry -
+    said here because the previous wording promised an ordering that cannot be
+    observed. Pinning the identification is
     deliberate: the branch is the subject here, and what produces each member is
     the subject of the two tests above.
 
@@ -1239,7 +1241,7 @@ def test_declining_the_unverified_confirm_adopts_nothing(
     ], "a refusal leaves no trace at all, so a support question cannot see it"
 
 
-def test_the_unverified_confirm_offers_two_buttons_and_defaults_to_refusing(
+def test_the_unverified_confirm_offers_yes_and_no_and_defaults_to_refusing(
     qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Yes/No, defaulting to No - the two arguments that decide what Enter does.
@@ -1283,6 +1285,46 @@ def test_the_unverified_confirm_offers_two_buttons_and_defaults_to_refusing(
     no = QMessageBox.StandardButton.No
     assert buttons & yes and buttons & no, f"both buttons must be offered, got {buttons!r}"
     assert default is no, f"Enter must refuse, not adopt; default was {default!r}"
+
+
+def test_closing_the_unverified_confirm_without_answering_adopts_nothing(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Escape, or the window's X, is not consent.
+
+    `QMessageBox.question` returns `NoButton` (0) when the dialog is dismissed
+    without pressing either button. The gate is spelled
+    `is not StandardButton.Yes` rather than the more natural
+    `is StandardButton.No` precisely because of this, and the difference is
+    invisible to every other test: a reviewer mutated the gate to `is No` on
+    2026-09-02 and the ENTIRE SUITE passed, while the mutant adopted the folder
+    for a user who answered nothing and logged "the user was asked and said yes".
+
+    A comment declared that case. A declaration is not a guard - this is.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.NoButton
+    )
+    folder = _folder(tmp_path, "dismissed", _compose_naming("whatever"))
+    server = _server_in(folder)
+    monkeypatch.setattr(wsl, "find_servers", lambda include=(): (server,))
+    monkeypatch.setattr(
+        catalog_view, "_identify", lambda entry, server_dir: Identification.UNVERIFIED
+    )
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        LogPanel(),
+        home=tmp_path,
+        pick_wsl_server=lambda _f: server,
+    )
+    emitted: list[tuple[object, ...]] = []
+    view.adopted.connect(lambda *a: emitted.append(a))
+
+    assert view.adopt_from_wsl(CATALOG.get("wow-wotlk")) is False
+    assert emitted == [], "dismissing the dialog adopted the folder"
 
 
 def test_an_unverified_adoption_names_the_folder_in_the_dialog_it_shows(

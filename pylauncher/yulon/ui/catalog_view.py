@@ -189,7 +189,10 @@ def _identify(entry: CatalogEntry, server_dir: Path) -> Identification:
     That chain was re-read link by link on 2026-09-02, in the code rather than
     from the earlier note, and each link is where it says:
 
-      - `adopt_from_wsl()` below emits `adopted` for an `UNVERIFIED` folder;
+      - `adopt_from_wsl()` below emits `adopted` for an `UNVERIFIED` folder
+        once the user answers yes to the confirm (it was unconditional when
+        this chain was first written, and the chain still holds, because the
+        user can say yes);
       - `catalog.json` gives `wow-wotlk` `"has_manifests": true`, and it is the
         only entry of the four that carries it;
       - `controller_view.ControllerServices.for_wotlk()` passes that same
@@ -495,6 +498,22 @@ class CatalogView(QWidget):
             # adoption moves to just before the emit instead, where it describes
             # something that actually happened - which is what the ordering fix
             # this replaces was really about.
+            # The cost sentence is CONDITIONAL, because the flat version was not
+            # true. "Installing or removing a module writes into that folder and
+            # deletes files under it" describes `Applier`, which only exists for an
+            # entry with `has_manifests` - `wow-wotlk` alone of the four. For TBC,
+            # Vanilla and Tortoise `controller_view` passes `applier=None` and
+            # DISABLES both module buttons, so the user was being warned about an
+            # action they cannot perform. It errs safe, which is exactly why it
+            # survived review of the previous wording: a sentence spelled like a
+            # true one, aimed at the cost this time instead of the remedy.
+            cost = (
+                "Installing or removing a module from its tab writes into that "
+                "folder and deletes files under it."
+                if entry.has_manifests
+                else "Its tab will run docker commands against containers that "
+                "may not be the ones in that folder."
+            )
             if (
                 QMessageBox.question(
                     self,
@@ -502,16 +521,23 @@ class CatalogView(QWidget):
                     f"Yu'lon could not read a compose file in {chosen.server_dir}, so "
                     f"nothing confirms that {chosen.project} in {chosen.distro} is a "
                     f"{entry.name} install.\n\n"
-                    "Adopt it anyway? Installing or removing a module from its tab "
-                    "writes into that folder and deletes files under it, so say yes "
-                    "only if you are sure this is the right folder.",
+                    f"Adopt it anyway? {cost} So say yes only if you are sure this "
+                    "is the right folder.",
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     QMessageBox.StandardButton.No,
                 )
                 is not QMessageBox.StandardButton.Yes
             ):
                 # Default No, and anything that is not an explicit Yes refuses.
-                # Closing the dialog with the window chrome returns neither button.
+                #
+                # `is not ... Yes` and NOT `is ... No`, which is how most people
+                # would write it. `QMessageBox.question` returns `NoButton` (0) when
+                # the dialog is closed with the window chrome or Escape, and
+                # `NoButton is not No`, so the `is No` spelling ADOPTS in exactly the
+                # case this comment used to only declare. It survived the whole suite
+                # when a reviewer mutated it on 2026-09-02;
+                # `test_closing_the_unverified_confirm_without_answering_adopts_nothing`
+                # is what makes the distinction fail now.
                 logger.info(
                     f"declined to adopt {entry.id} from {chosen.distro}: nothing "
                     f"confirmed {chosen.server_dir} is a {entry.name} install"
