@@ -64,6 +64,32 @@ class DockerCliMissingError(DockerCommandError):
     """
 
 
+class SourceUnreadableError(RuntimeError):
+    """Raised when the stream `exec_stdin()` was pumping stopped being readable.
+
+    Deliberately NOT a `DockerCommandError`: docker did as it was told, the
+    container is fine, and a caller that reads the two apart would otherwise
+    tell a user with a half-downloaded file that their container refused the
+    import. What broke is the file on this side.
+
+    It exists because the alternative is no type at all. `source` is a
+    `BinaryIO`, so what it raises belongs to whoever opened it: a truncated
+    `.sql.gz` — a download over a flaky connection, the commonest corruption
+    there is — raises `EOFError`, mangled deflate bytes raise `zlib.error`, a
+    file that is not gzip at all raises `gzip.BadGzipFile`, and only the last
+    of those three is an `OSError`. Letting each one through as it came would
+    hand every caller the same open-ended set to catch that this module just
+    stopped trying to enumerate; the apply stages catch
+    `(RuntimeError, OSError)`, and being a `RuntimeError` is what makes that
+    clause enough. The original is kept as `__cause__`, so nothing about which
+    corruption it was is lost — it just stops being the caller's problem to
+    predict.
+
+    `BaseException` is not wrapped. A `KeyboardInterrupt` mid-pump is the user
+    stopping the import, not a broken dump, and it travels on unchanged.
+    """
+
+
 @dataclass(frozen=True)
 class ContainerSpec:
     """How one server install is addressed: its containers, services and ports.
@@ -3105,11 +3131,25 @@ def exec_stdin(
       exit status and stderr say why, so the broken pipe is not the error and
       replacing `ERROR 1045: Access denied` with `[Errno 32] Broken pipe`
       would name nothing the user can fix.
-    * reading raises when the SOURCE is unreadable, and `gzip.BadGzipFile` is
-      an `OSError` too. Swallowed the same way, a corrupt or truncated dump
-      feeds the client half a file — still valid SQL, so it exits 0 and every
-      check downstream agrees the import worked. That one is raised, after the
-      child has been reaped so nothing is left running behind it.
+    * reading raises when the SOURCE is unreadable. Swallowed the same way, a
+      corrupt or truncated dump feeds the client half a file — still valid
+      SQL, so it exits 0 and every check downstream agrees the import worked.
+      That one is raised, as `SourceUnreadableError`.
+
+    Which is a matter of one `finally`, not of a longer `except`. The first
+    version of this caught `OSError` on the read side because `gzip.BadGzipFile`
+    is one — and a TRUNCATED `.sql.gz`, the failure a flaky download actually
+    produces, raises `EOFError` instead, while mangled deflate bytes raise
+    `zlib.error`. Neither is an `OSError`; both left this function before the
+    child was waited for and before the readers were joined, leaking a live
+    `docker exec` and two threads per failed import. Widening the clause to
+    those two would have been wrong again at the third, because `source` is a
+    `BinaryIO` and what it raises is the caller's choice, not this module's —
+    a `KeyboardInterrupt` mid-pump is not even an `Exception`. So the child is
+    reaped and the readers joined on EVERY way out, which needs to know
+    nothing about types, and the read failure is normalised on its way past
+    (see `SourceUnreadableError`) so a caller does not inherit the same
+    open-ended set to catch.
 
     Returns:
         A text `CompletedProcess`. NOT raised on non-zero exit: `sqlplan.apply()`
@@ -3123,8 +3163,15 @@ def exec_stdin(
         DockerCliMissingError: there is no docker CLI to run (nor `wsl.exe` for
             a distro), or the one resolved earlier has since been uninstalled
             (the `OSError` road). "Could not ask", never "it answered no".
-        OSError: `source` could not be read. The child has already been waited
-            for when this leaves.
+        SourceUnreadableError: `source` could not be read — truncated, corrupt,
+            or anything else it chose to raise, kept as `__cause__`.
+
+    Guaranteed on the way out whatever was raised, this included and a
+    `KeyboardInterrupt` too: the child's stdin is closed, the child has been
+    waited for, and both reader threads have been joined. Nothing is left
+    running behind a failure. This promise is about the exit, not about a type
+    — the earlier wording named `OSError`, and the exceptions it did not name
+    were exactly the ones that leaked.
     """
     prefix = platform.docker_prefix(wsl_distro)
     if prefix is None:
@@ -3164,12 +3211,18 @@ def exec_stdin(
     )
     for reader in readers:
         reader.start()
-    unreadable = _pump(source, proc.stdin, container)
-    returncode = proc.wait()
-    for reader in readers:
-        reader.join()
-    if unreadable is not None:
-        raise unreadable
+    try:
+        _pump(source, proc.stdin, container)
+    finally:
+        # Unconditional, and a `finally` rather than a list of clauses,
+        # because the pump can end in a way this module does not get to
+        # choose: `source` is the caller's object and a Ctrl+C is nobody's.
+        # `_pump` has closed the child's stdin by now on every one of those
+        # roads, so the client sees EOF and this wait is not the one that
+        # hangs.
+        returncode = proc.wait()
+        for reader in readers:
+            reader.join()
     return subprocess.CompletedProcess(
         list(command),
         returncode,
@@ -3178,33 +3231,39 @@ def exec_stdin(
     )
 
 
-def _pump(source: BinaryIO, sink: IO[bytes], container: str) -> OSError | None:
+def _pump(source: BinaryIO, sink: IO[bytes], container: str) -> None:
     """Copy `source` into `sink` and close it, telling the two failures apart.
 
-    Returned rather than raised, so `exec_stdin()` can reap the child first: a
-    read failure that propagated from here would leave a live `docker exec`
-    and two reader threads behind it.
+    The `except` sits around the WRITE alone, which is the only side whose
+    failures this function can name. Its own docstring used to promise the
+    read side was an `OSError`; it is whatever `source` decides, so nothing is
+    caught around the read but the wrap that gives it one type — see
+    `SourceUnreadableError`. `BaseException` passes through untouched.
 
-    Returns:
-        The error `source` raised, or None. A failure of the WRITE side is not
-        an error at all — see `exec_stdin()`.
+    `sink` is closed on every way out, including that one. Without the EOF a
+    client that has read everything it was sent waits forever, and the
+    `proc.wait()` that follows would wait with it.
+
+    Raises:
+        SourceUnreadableError: `source` could not be read, whatever it raised.
     """
-    unreadable: OSError | None = None
     try:
         while True:
             try:
                 chunk = source.read(_STDIN_CHUNK_BYTES)
-            except OSError as exc:
-                unreadable = exc
-                break
+            except Exception as exc:
+                raise SourceUnreadableError(
+                    f"the dump being streamed into {container} could not be read: {exc}"
+                ) from exc
             if not chunk:
                 break
-            sink.write(chunk)
-    except OSError as exc:
-        logger.debug(f"stdin of docker exec {container} closed early: {exc}")
+            try:
+                sink.write(chunk)
+            except OSError as exc:
+                logger.debug(f"stdin of docker exec {container} closed early: {exc}")
+                break
     finally:
         try:
             sink.close()  # without EOF a client that read everything waits forever
         except OSError as exc:
             logger.debug(f"stdin of docker exec {container} would not close: {exc}")
-    return unreadable

@@ -13,6 +13,9 @@ import gzip
 import io
 import re
 import subprocess
+import threading
+import time
+import zlib
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
@@ -4371,11 +4374,83 @@ class _UnreadableSource(io.BytesIO):
         raise gzip.BadGzipFile("Not a gzipped file (b'IN')")
 
 
+_DUMP_LINES = b"INSERT INTO `creature_template` VALUES (1,'a');\n" * 120_000
+"""A few megabytes of plausible dump, so a corrupt stream fails only PART WAY IN.
+
+Bigger than `_STDIN_CHUNK_BYTES`, so every fixture below writes real chunks to
+the client before the read side gives out - which is the whole danger: what
+already arrived is valid SQL and the client is happy with it.
+"""
+
+
+def _gzip_dump(damage: Callable[[bytes], bytes]) -> gzip.GzipFile:
+    """A REAL `.sql.gz` reader over a real gzip stream that `damage` has spoiled.
+
+    Not a double that raises a chosen exception. The gap this covers survived
+    a test whose source raised `gzip.BadGzipFile` on demand, because what that
+    test got wrong was WHICH exception a spoiled dump actually raises - so the
+    corruption has to be real and the exception has to come out of `gzip`.
+    """
+    return gzip.GzipFile(fileobj=io.BytesIO(damage(gzip.compress(_DUMP_LINES))))
+
+
+def _truncated(blob: bytes) -> bytes:
+    """A download that stopped early - the failure a flaky connection produces."""
+    return blob[: -len(blob) // 8]
+
+
+def _bit_flipped(blob: bytes) -> bytes:
+    """One byte of the deflate stream mangled on the way to disk."""
+    spoiled = bytearray(blob)
+    spoiled[20] ^= 0xFF
+    return bytes(spoiled)
+
+
+class _InterruptedSource(io.BytesIO):
+    """Ctrl+C landing mid-pump: a `BaseException`, so no `except Exception` sees it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reads = 0
+
+    def read(self, size: int | None = -1) -> bytes:
+        self.reads += 1
+        if self.reads > 1:
+            raise KeyboardInterrupt
+        return b"INSERT INTO t VALUES (1);\n"
+
+
+class _SlowPipe(io.BytesIO):
+    """A child pipe that takes a moment to answer.
+
+    Without this a reader thread over a `BytesIO` has already finished before
+    anyone could ask, and `is_alive()` reads False whether or not the code
+    joined - the assertion would pass against the bug it exists to catch.
+    Answering slowly means a reader that was never joined is still alive at
+    the moment the exception arrives.
+    """
+
+    def read(self, size: int | None = -1) -> bytes:
+        time.sleep(0.3)
+        return super().read(size)
+
+
+class _RecordingThread(threading.Thread):
+    """Every reader `exec_stdin()` starts, kept where a test can question it."""
+
+    started: list[_RecordingThread] = []
+
+    def start(self) -> None:
+        _RecordingThread.started.append(self)
+        super().start()
+
+
 class _FakePopen:
     """The one `subprocess.Popen` `exec_stdin()` makes, recorded field by field."""
 
     instances: list[_FakePopen] = []
     stdin_factory: Callable[[], _Stdin] = _Stdin
+    pipe_factory: Callable[[bytes], io.BytesIO] = io.BytesIO
     next_returncode = 0
     next_stdout = b"3\n"
     next_stderr = b""
@@ -4393,8 +4468,8 @@ class _FakePopen:
         self.command = command
         self.env = env
         self.stdin = _FakePopen.stdin_factory()
-        self.stdout = io.BytesIO(_FakePopen.next_stdout)
-        self.stderr = io.BytesIO(_FakePopen.next_stderr)
+        self.stdout = _FakePopen.pipe_factory(_FakePopen.next_stdout)
+        self.stderr = _FakePopen.pipe_factory(_FakePopen.next_stderr)
         self.returncode = _FakePopen.next_returncode
         self.waited = False
         _FakePopen.instances.append(self)
@@ -4411,8 +4486,16 @@ def _spawn_double(
     returncode: int = 0,
     stdout: bytes = b"3\n",
     stderr: bytes = b"",
+    slow_readers: bool = False,
 ) -> None:
     _FakePopen.instances.clear()
+    if slow_readers:
+        # Both halves of the reaping guarantee, made observable: readers that
+        # answer slowly are still alive if nobody joined them, and every thread
+        # `exec_stdin()` starts is recorded where the test can reach it.
+        _RecordingThread.started.clear()
+        monkeypatch.setattr(_FakePopen, "pipe_factory", staticmethod(_SlowPipe))
+        monkeypatch.setattr(docker.threading, "Thread", _RecordingThread)
     monkeypatch.setattr(_FakePopen, "stdin_factory", staticmethod(stdin_factory))
     monkeypatch.setattr(_FakePopen, "next_returncode", returncode)
     monkeypatch.setattr(_FakePopen, "next_stdout", stdout)
@@ -4664,11 +4747,96 @@ def test_a_source_that_cannot_be_read_is_never_reported_as_a_finished_import(
     still reaped so nothing is left running behind it.
     """
     _spawn_double(monkeypatch)
-    with pytest.raises(gzip.BadGzipFile):
+    with pytest.raises(docker.SourceUnreadableError) as caught:
         docker.exec_stdin("db", ["mariadb"], _UnreadableSource(), env={})
+    assert isinstance(caught.value.__cause__, gzip.BadGzipFile)
     spawned = _FakePopen.instances[-1]
     assert spawned.waited, "the child was left unreaped"
     assert spawned.stdin.closed, "the client would wait forever on a pipe nobody closed"
+
+
+def _assert_reaped(source: object) -> None:
+    """The guarantee itself: no child running, no reader thread still going.
+
+    Asserted instead of the exception type on purpose. Which exception a
+    spoiled dump raises is what the first version of this got wrong; what the
+    caller actually needs is that whichever one it was, nothing was left
+    behind - so that is what every case below checks.
+    """
+    spawned = _FakePopen.instances[-1]
+    assert spawned.waited, f"{source} left a live docker exec behind"
+    assert spawned.stdin.closed, "the client would wait forever on a pipe nobody closed"
+    assert _RecordingThread.started, "no reader threads were recorded; the double missed them"
+    alive = [reader for reader in _RecordingThread.started if reader.is_alive()]
+    assert not alive, f"{len(alive)} reader thread(s) still running when the error propagated"
+
+
+def test_a_truncated_dump_leaves_no_child_or_reader_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The likeliest corruption of all, and the one `except OSError` cannot see.
+
+    A download cut short by a flaky connection raises `EOFError` out of the
+    gzip reader - measured at twelve different cut points, from one byte off
+    the end to mid-file, every one of them `EOFError`. `EOFError` is NOT an
+    `OSError`, so the clause written for `gzip.BadGzipFile` never runs and the
+    exception leaves before the child is waited for.
+    """
+    _spawn_double(monkeypatch, slow_readers=True)
+    with pytest.raises(docker.SourceUnreadableError) as caught:
+        docker.exec_stdin("db", ["mariadb"], _gzip_dump(_truncated), env={})
+    assert isinstance(caught.value.__cause__, EOFError)
+    assert _FakePopen.instances[-1].stdin.written, "no data flowed; the fixture proves nothing"
+    _assert_reaped("a truncated dump")
+
+
+def test_a_bit_flipped_dump_leaves_no_child_or_reader_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The second escape: mangled deflate bytes raise `zlib.error`, also not an `OSError`.
+
+    Two known exception families that are not `OSError` is the argument
+    against listing them. `source` is a `BinaryIO`, so what it raises is the
+    CALLER'S choice - the third family arrives with the third caller, and any
+    fix that names types would miss it too.
+    """
+    _spawn_double(monkeypatch, slow_readers=True)
+    with pytest.raises(docker.SourceUnreadableError) as caught:
+        docker.exec_stdin("db", ["mariadb"], _gzip_dump(_bit_flipped), env={})
+    assert isinstance(caught.value.__cause__, zlib.error)
+    _assert_reaped("a bit-flipped dump")
+
+
+def test_ctrl_c_mid_pump_leaves_no_child_or_reader_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stop pressed while a multi-gigabyte dump is streaming leaks the same way.
+
+    `KeyboardInterrupt` is a `BaseException`, so it escapes `except OSError`
+    and `except Exception` alike - which is why the reaping is a `finally` and
+    not a wider list of clauses. It is re-raised UNCHANGED: wrapping Ctrl+C in
+    an error about the dump would tell the user their file is broken when they
+    are the one who stopped it.
+    """
+    _spawn_double(monkeypatch, slow_readers=True)
+    with pytest.raises(KeyboardInterrupt):
+        docker.exec_stdin("db", ["mariadb"], _InterruptedSource(), env={})
+    _assert_reaped("an interrupted pump")
+
+
+def test_an_unreadable_source_is_one_type_a_caller_can_catch() -> None:
+    """What Group J has to catch, pinned where a change to it fails a test.
+
+    The apply stages are planned around `except (RuntimeError, OSError)`.
+    Re-raising whatever the reader felt like would move the type problem up a
+    level - an `EOFError` reaching a stage becomes a raw traceback instead of
+    a reported failure - so the read side is normalised to ONE type here.
+    Being a `RuntimeError` is what makes the planned clause enough.
+    """
+    assert issubclass(docker.SourceUnreadableError, RuntimeError)
+    # Not a DockerCommandError: docker did nothing wrong, and a stage that
+    # reads these apart says "the container refused" for a bad download.
+    assert not issubclass(docker.SourceUnreadableError, docker.DockerCommandError)
 
 
 def test_exec_stdin_can_say_which_daemon_so_it_needs_no_allowlist_entry() -> None:
