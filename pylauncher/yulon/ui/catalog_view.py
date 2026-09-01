@@ -472,6 +472,52 @@ class CatalogView(QWidget):
                 "different server.",
             )
             return False
+        if identified is Identification.UNVERIFIED:
+            # ASK, do not announce. This used to be a `QMessageBox.warning` - a
+            # notice with an OK button - and a notice cannot refuse. Three things
+            # made that the wrong instrument, and the owner chose the confirm:
+            #
+            #   1. The user has never seen this folder. `_qt_wsl_server_picker`
+            #      offers "{project}  -  {distro}  (running)"; `server_dir` appears
+            #      for the FIRST time in this dialog. Charging the user for a fact
+            #      they were never shown, with nowhere to say "that is not it".
+            #   2. The click carried no information. `adopt_from_wsl` returned True
+            #      whether the box was dismissed or not, so a user who clicked
+            #      through produced exactly what a clean verification produced -
+            #      the bool problem this function was fixed for, one layer up in
+            #      the UI.
+            #   3. The stated cost is FILE DELETION, and
+            #      `test_an_unverified_adoption_reaches_the_applier_with_no_ownership_check`
+            #      proves it reachable rather than asserting it.
+            #
+            # BEFORE the client-folder prompt, so a user who declines is not first
+            # made to go and find their WoW install. The record of an unverified
+            # adoption moves to just before the emit instead, where it describes
+            # something that actually happened - which is what the ordering fix
+            # this replaces was really about.
+            if (
+                QMessageBox.question(
+                    self,
+                    "Adopt without checking?",
+                    f"Yu'lon could not read a compose file in {chosen.server_dir}, so "
+                    f"nothing confirms that {chosen.project} in {chosen.distro} is a "
+                    f"{entry.name} install.\n\n"
+                    "Adopt it anyway? Installing or removing a module from its tab "
+                    "writes into that folder and deletes files under it, so say yes "
+                    "only if you are sure this is the right folder.",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                is not QMessageBox.StandardButton.Yes
+            ):
+                # Default No, and anything that is not an explicit Yes refuses.
+                # Closing the dialog with the window chrome returns neither button.
+                logger.info(
+                    f"declined to adopt {entry.id} from {chosen.distro}: nothing "
+                    f"confirmed {chosen.server_dir} is a {entry.name} install"
+                )
+                return False
+
         client_dir: Path | None = None
         if entry.install.requires_client_dir:
             # Still on the Windows side: the client is the user's own WoW
@@ -485,39 +531,15 @@ class CatalogView(QWidget):
                 return False
 
         if identified is Identification.UNVERIFIED:
-            # Adoption continues - see `_identify()` - but not in silence. The
-            # user is the only party who can know whether this folder is the
-            # server they meant, and the tab about to open can write into it.
-            #
-            # AFTER the client-dir prompt, not before it. Sitting above it, both
-            # the log line and the dialog fired for an adoption the user then
-            # CANCELLED by dismissing that picker: the function returns False and
-            # nothing is adopted, but the log had recorded an unverified adoption
-            # that never happened and the user had been told it was being adopted.
-            # Only the three `requires_client_dir` entries could reach that, and
-            # none of them carries `has_manifests`, so nothing was at risk of
-            # deletion - the record was simply false, which is enough.
+            # Deliberately here and not beside the question above: this line is a
+            # record, and a record written before the client-folder prompt
+            # described adoptions the user then cancelled. It now cannot be
+            # written unless the adoption is one line from being emitted.
             logger.warning(
                 f"adopting {entry.id} from {chosen.distro} UNVERIFIED: no readable compose "
-                f"file in {chosen.server_dir}, so nothing confirms it is a {entry.name} install"
+                f"file in {chosen.server_dir}, so nothing confirms it is a {entry.name} "
+                "install - the user was asked and said yes"
             )
-            QMessageBox.warning(
-                self,
-                "Adopted without checking",
-                f"Yu'lon could not read a compose file in {chosen.server_dir}, so nothing "
-                f"confirms that {chosen.project} in {chosen.distro} is a {entry.name} "
-                "install — it is being adopted on your word rather than on evidence.\n\n"
-                # NOT "remove the server from Yu'lon". There is no such action:
-                # `AppState.forget()` has zero production callers (only
-                # tests/test_state.py), and the one "Forget" button in the UI
-                # forgets an interrupted restore record, not a server. Naming a
-                # remedy that does not exist is the same defect this branch was
-                # written to fix - a sentence spelled exactly like a true one.
-                "If this is the wrong folder, close Yu'lon and do not use this "
-                "server's tab: installing or removing a module writes into that "
-                "folder and deletes files under it.",
-            )
-
         logger.info(
             f"adopting {entry.id} from WSL distro {chosen.distro}: "
             f"project {chosen.project} at {chosen.server_dir}"

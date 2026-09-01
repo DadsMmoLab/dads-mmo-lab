@@ -648,6 +648,11 @@ def test_adopting_a_wsl_server_remembers_the_distro_it_lives_in(
     """
     monkeypatch.setattr(wsl, "find_servers", lambda include=(): (_WSL_SERVER,))
     panel = LogPanel()
+    # This folder is unidentifiable, so the confirm is reached. Answering it
+    # explicitly rather than leaning on a fixture default: before the notice
+    # became a confirm this test was silently adopting a folder nothing could
+    # identify, and never said so.
+    _user_confirms_unverified(monkeypatch, yes=True)
     view = CatalogView(
         CATALOG,
         lambda e: _FakeInstaller(e, []),
@@ -722,6 +727,11 @@ def test_a_client_folder_is_still_asked_for_when_the_game_needs_one(
     client = tmp_path / "client"
     client.mkdir()
     panel = LogPanel()
+    # This folder is unidentifiable, so the confirm is reached. Answering it
+    # explicitly rather than leaning on a fixture default: before the notice
+    # became a confirm this test was silently adopting a folder nothing could
+    # identify, and never said so.
+    _user_confirms_unverified(monkeypatch, yes=True)
     view = CatalogView(
         CATALOG,
         lambda e: _FakeInstaller(e, []),
@@ -783,13 +793,26 @@ def test_an_adoption_the_user_cancels_is_never_announced_as_unverified(
         "warning",
         lambda _parent, title, text, *a, **k: shown.append((title, text)),
     )
+    # yes=True is load-bearing, and this test passed WITHOUT it for the wrong
+    # reason. `conftest._no_modal_dialogs` answers `question` with No, so the
+    # confirm refused the adoption and the function returned before the client
+    # picker was ever reached - every assertion below held, and none of them was
+    # testing what the name says. Caught 2026-09-02 by asking why a test about a
+    # cancelled picker still passed when the picker was never shown.
+    asked = _user_confirms_unverified(monkeypatch, yes=True)
+    picked: list[object] = []
+
+    def _cancel(*args: object) -> None:
+        picked.append(args)
+        return None
+
     panel = LogPanel()
     view = CatalogView(
         CATALOG,
         lambda e: _FakeInstaller(e, []),
         panel,
         home=tmp_path,
-        pick_dir=lambda *_: None,  # the user cancels
+        pick_dir=_cancel,  # the user cancels
         pick_wsl_server=lambda _f: server,
     )
     got: list[tuple[object, ...]] = []
@@ -798,6 +821,10 @@ def test_an_adoption_the_user_cancels_is_never_announced_as_unverified(
     with caplog.at_level("WARNING"):
         assert view.adopt_from_wsl(entry) is False
 
+    assert [a[0] for a in asked] == [
+        "Adopt without checking?"
+    ], "the confirm was never reached, so what follows it was never exercised"
+    assert picked, "the client picker was never shown; this test stopped short of its subject"
     assert got == [], "nothing was adopted, so nothing may have been emitted"
     assert shown == [], f"the user was told about an adoption that did not happen: {shown}"
     assert not [
@@ -957,6 +984,11 @@ def test_adopting_continues_when_there_is_no_compose_file_to_read(
     )
     monkeypatch.setattr(wsl, "find_servers", lambda include=(): (unreadable,))
     panel = LogPanel()
+    # This folder is unidentifiable, so the confirm is reached. Answering it
+    # explicitly rather than leaning on a fixture default: before the notice
+    # became a confirm this test was silently adopting a folder nothing could
+    # identify, and never said so.
+    _user_confirms_unverified(monkeypatch, yes=True)
     view = CatalogView(
         CATALOG,
         lambda e: _FakeInstaller(e, []),
@@ -1060,18 +1092,50 @@ def test_identify_is_unverified_when_the_compose_file_is_there_but_unreadable(
     assert catalog_view._identify(entry, folder) is Identification.UNVERIFIED
 
 
+def _user_confirms_unverified(
+    monkeypatch: pytest.MonkeyPatch, *, yes: bool
+) -> list[tuple[str, str]]:
+    """Answer the "Adopt without checking?" confirm, and record what it asked.
+
+    `conftest._no_modal_dialogs` answers `question` with `No`, which is the right
+    default for a fixture that exists to stop a modal blocking the run - but it
+    means every test reaching `UNVERIFIED` now refuses adoption unless it says
+    otherwise. That is deliberate: when the notice became a confirm, SEVEN tests
+    in this file went red, and every one of them had been quietly adopting a
+    folder nothing could identify. Making each say `yes=True` is the point, not
+    the cost.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    asked: list[tuple[str, str]] = []
+    button = QMessageBox.StandardButton.Yes if yes else QMessageBox.StandardButton.No
+
+    def answer(*args: object, **kwargs: object) -> object:
+        asked.append((str(args[1]), str(args[2])))
+        return button
+
+    monkeypatch.setattr(QMessageBox, "question", answer)
+    return asked
+
+
 def _adopt_with_identification(
     answer: Identification,
     *,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    confirm: bool = True,
 ) -> tuple[bool, list[tuple[object, ...]], list[tuple[str, str]]]:
     """Drive `adopt_from_wsl()` with `_identify()` pinned to `answer`.
 
-    Returns what the view answered, what it emitted, and every warning dialog
-    it raised as (title, text). Pinning the identification is deliberate: the
-    branch is the subject here, and what produces each member is the subject of
-    the two tests above.
+    Returns what the view answered, what it emitted, and every dialog it raised
+    as (title, text) - both the `DIFFERENT` refusal notice and the `UNVERIFIED`
+    confirm, in the order they were shown. Pinning the identification is
+    deliberate: the branch is the subject here, and what produces each member is
+    the subject of the two tests above.
+
+    `confirm` is what the user clicks in the `UNVERIFIED` question. It defaults to
+    yes so the caller that is testing something else does not have to care, and
+    every caller that IS testing the refusal passes False explicitly.
     """
     from PySide6.QtWidgets import QMessageBox
 
@@ -1082,6 +1146,14 @@ def _adopt_with_identification(
         return QMessageBox.StandardButton.Ok
 
     monkeypatch.setattr(QMessageBox, "warning", record_warning)
+
+    button = QMessageBox.StandardButton.Yes if confirm else QMessageBox.StandardButton.No
+
+    def record_question(*args: object, **kwargs: object) -> object:
+        dialogs.append((str(args[1]), str(args[2])))
+        return button
+
+    monkeypatch.setattr(QMessageBox, "question", record_question)
     folder = _folder(tmp_path, f"server-{answer.value}", _compose_naming("whatever"))
     server = _server_in(folder)
     monkeypatch.setattr(wsl, "find_servers", lambda include=(): (server,))
@@ -1103,15 +1175,21 @@ def _adopt_with_identification(
 def test_each_identification_gets_its_own_answer_at_the_call_site(
     qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Refuse / proceed silently / proceed and say so - one outcome per member.
+    """Refuse / proceed silently / ask - one outcome per member.
 
     The bool version had two outcomes for three questions, so this asserts the
     third is not quietly spelled like either of the others: `MATCHES` must show
-    NO dialog (a warning on the happy path teaches people to click through
-    them), and `UNVERIFIED` must both emit and warn.
+    NO dialog (a dialog on the happy path teaches people to click through them),
+    `DIFFERENT` refuses without asking, and `UNVERIFIED` ASKS.
 
-    Enumerated for the same reason as the production test: a fourth member
-    lands here with no outcome recorded and fails.
+    That last one used to be a notice, and a notice cannot refuse - the user
+    clicked OK and the adoption happened either way, which is the same
+    two-answers-for-three-questions shape this whole branch is about, moved up
+    into the UI. The companion test below drives the other half, where the user
+    says no.
+
+    Enumerated for the same reason as the production test: a fourth member lands
+    here with no outcome recorded and fails.
     """
     outcomes: dict[Identification, tuple[bool, int, tuple[str, ...]]] = {}
     for answer in Identification:
@@ -1124,9 +1202,87 @@ def test_each_identification_gets_its_own_answer_at_the_call_site(
     assert outcomes == {
         Identification.MATCHES: (True, 1, ()),
         Identification.DIFFERENT: (False, 0, ("That is a different server",)),
-        Identification.UNVERIFIED: (True, 1, ("Adopted without checking",)),
+        Identification.UNVERIFIED: (True, 1, ("Adopt without checking?",)),
     }
     assert set(outcomes) == set(Identification), "an Identification member with no outcome"
+
+
+def test_declining_the_unverified_confirm_adopts_nothing(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The half a notice could not have: the user says no, and nothing happens.
+
+    This is the entire reason the notice became a confirm. Before, `adopt_from_wsl`
+    returned True whether the box was dismissed or not, so a user who clicked
+    through produced exactly what a clean verification produced and the click
+    carried no information.
+
+    Asserts the refusal three ways, because "returned False" alone would also be
+    true of a crash: nothing emitted, no WARNING recorded (the record is reserved
+    for adoptions that happened), and the question really was asked - without that
+    last one this test would pass just as well if the branch were deleted
+    entirely.
+    """
+    with caplog.at_level(logging.DEBUG, logger="yulon.ui.catalog_view"):
+        answered, emitted, dialogs = _adopt_with_identification(
+            Identification.UNVERIFIED, tmp_path=tmp_path, monkeypatch=monkeypatch, confirm=False
+        )
+
+    assert answered is False
+    assert emitted == [], "declined, so nothing may reach the controller"
+    assert [d[0] for d in dialogs] == ["Adopt without checking?"], "the user was never asked"
+    assert not [
+        r for r in caplog.records if r.levelno == logging.WARNING
+    ], "an adoption that did not happen was recorded as if it had"
+    assert [
+        r for r in caplog.records if "declined" in r.getMessage()
+    ], "a refusal leaves no trace at all, so a support question cannot see it"
+
+
+def test_the_unverified_confirm_offers_two_buttons_and_defaults_to_refusing(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Yes/No, defaulting to No - the two arguments that decide what Enter does.
+
+    A confirm whose default button is Yes is a notice with extra steps: the user
+    presses Enter to dismiss what looks like a warning and has adopted the folder.
+    Neither the buttons nor the default is observable from the outcome, so nothing
+    else in this file can pin them - `conftest._no_modal_dialogs` and the helper
+    both ignore those arguments and return a button of their own choosing.
+
+    This is the one place the call's ARGUMENTS are the subject rather than its
+    answer, so it reads them off the call rather than inferring them.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    calls: list[tuple[object, ...]] = []
+
+    def record(*args: object, **kwargs: object) -> object:
+        calls.append(args)
+        return QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(QMessageBox, "question", record)
+    folder = _folder(tmp_path, "unpinned", _compose_naming("whatever"))
+    server = _server_in(folder)
+    monkeypatch.setattr(wsl, "find_servers", lambda include=(): (server,))
+    monkeypatch.setattr(
+        catalog_view, "_identify", lambda entry, server_dir: Identification.UNVERIFIED
+    )
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        LogPanel(),
+        home=tmp_path,
+        pick_wsl_server=lambda _f: server,
+    )
+    view.adopt_from_wsl(CATALOG.get("wow-wotlk"))
+
+    assert len(calls) == 1, "the confirm was not asked exactly once"
+    buttons, default = calls[0][3], calls[0][4]
+    yes = QMessageBox.StandardButton.Yes
+    no = QMessageBox.StandardButton.No
+    assert buttons & yes and buttons & no, f"both buttons must be offered, got {buttons!r}"
+    assert default is no, f"Enter must refuse, not adopt; default was {default!r}"
 
 
 def test_an_unverified_adoption_names_the_folder_in_the_dialog_it_shows(
@@ -1231,6 +1387,11 @@ def test_an_unverified_adoption_reaches_the_applier_with_no_ownership_check(
     assert catalog_view._identify(entry, folder) is Identification.UNVERIFIED
     server = _server_in(folder, project="wow-server-playerbots")
     monkeypatch.setattr(wsl, "find_servers", lambda include=(): (server,))
+    # This folder is unidentifiable, so the confirm is reached. Answering it
+    # explicitly rather than leaning on a fixture default: before the notice
+    # became a confirm this test was silently adopting a folder nothing could
+    # identify, and never said so.
+    _user_confirms_unverified(monkeypatch, yes=True)
     view = CatalogView(
         CATALOG,
         lambda e: _FakeInstaller(e, []),
