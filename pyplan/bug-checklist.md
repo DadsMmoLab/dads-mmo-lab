@@ -1501,6 +1501,41 @@ default in place. **The guard to add first** is a test that patches `platform.se
 asserts the value **arrives** — not that the parameter exists. That distinction is this run's third
 standing rule and it has caught three separate defects.
 
+### 28. The gaming-mode script cannot be used from the artifact it exists for — 2026-09-01, OPEN, packaging
+
+`catalog/installers/steam-deck/setup-gaming-mode.sh` exists so a Steam Deck user can start a stack
+from a Steam library entry, and its header documents the flow at line 31: **Games -> Add a Non-Steam
+Game -> Browse**, pointing Steam at the file. A Steam non-Steam-game shortcut stores an **absolute
+path**.
+
+On Linux Yu'lon ships as an **AppImage** (`.github/workflows/release.yml`, "Package AppImage",
+`appimagetool "$APPDIR" "Yulon-${YULON_REF}-x86_64.AppImage"`), and the script is inside it: the spec
+ships `catalog/installers/` as a **tree** (`build/pylauncher.spec:29-31`), so the file lands at
+`usr/bin/catalog/installers/steam-deck/` within the bundle. An AppImage self-mounts under
+`/tmp/.mount_<name>XXXXXX/` with a fresh random suffix per launch and unmounts on exit — so the path
+the user Browses to exists only while that particular run is live. The documented flow therefore works
+**once**: on the second launch the shortcut points into a mount that is gone.
+
+**Verified here, 2026-09-01:** the AppImage is the Linux release artifact; a plain tarball is built
+beside it (the workflow says why: "an AppImage cannot run without FUSE"); the script ships inside the
+bundle as part of the installers tree; and the header does instruct the Browse flow.
+**NOT verified here:** the random-per-launch mount path itself, which is asserted from AppImage's
+documented runtime behaviour and has **not** been measured on a Deck or on any Linux box in this
+project. It is the load-bearing link and it is the one taken on trust — measure it before acting.
+
+The tarball and the Windows zip give stable paths and are unaffected. But **Steam Deck gaming mode is
+the AppImage case**, so the one artifact this script exists for is the one it cannot be used from.
+Nothing copies the script out of the bundle, and nothing tells the user to.
+
+**Not a script change.** The fix is a packaging decision with at least three shapes: the app copies the
+script to a stable location (`~/.local/share/yulon/`) during a Steam Deck install; the release ships it
+as a loose file beside the AppImage; or the app grows a "Set up gaming mode" action that writes the
+shortcut itself. Choosing is owner work.
+
+**Interim, on `fix/steam-deck-pins-that-do-not-pin`:** the Steam block now says to copy the file out of
+the bundle first, and why. That is a warning, not a fix — a user who does not read the header still
+hits it, and per §1 nothing outside `pyplan/` points a user at the header at all.
+
 ### One thing worth keeping
 
 Three of these have an obvious fix that is **wrong**, and two of them arm a worse bug:
