@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from enum import Enum
 from pathlib import Path
 
 from PySide6.QtCore import Signal
@@ -136,7 +137,31 @@ def _qt_wsl_server_picker(found: tuple[wsl.FoundServer, ...]) -> wsl.FoundServer
     return found[labels.index(choice)]
 
 
-def _looks_like(entry: CatalogEntry, server_dir: Path) -> bool:
+class Identification(Enum):
+    """What `_identify()` established about a folder: three answers, not two.
+
+    `_looks_like()` answered this question with a bool, and a bool has room for
+    two of the three - so "I could not check" was returned as True and arrived
+    at the caller spelled exactly like "this is that game". The two are not the
+    same claim and the caller has to be able to act on the difference, so they
+    are separate members here.
+    """
+
+    MATCHES = "matches"
+    """The compose file was read and names a container this entry uses."""
+
+    DIFFERENT = "different"
+    """The compose file was read and names none of them - evidence of another game."""
+
+    UNVERIFIED = "unverified"
+    """No evidence either way: no compose file to read, or the read failed.
+
+    Deliberately NOT a refusal. See `_identify()` for why adoption continues on
+    this answer, and what the caller owes the user in exchange.
+    """
+
+
+def _identify(entry: CatalogEntry, server_dir: Path) -> Identification:
     """Does the compose file in `server_dir` name any container this game uses?
 
     Discovery finds compose PROJECTS, not WoW servers - `docker compose ls`
@@ -148,20 +173,56 @@ def _looks_like(entry: CatalogEntry, server_dir: Path) -> bool:
     The catalog's container names are the evidence; the project name is a folder
     name and proves nothing.
 
-    True when the file cannot be read at all. The folder lives inside a distro
-    and is reached over a UNC path, and that read can fail for reasons unrelated
-    to which game it is - refusing on "I could not check" would block the
-    migration this feature exists to provide.
+    `UNVERIFIED` rather than a refusal when the file cannot be read at all. The
+    folder lives inside a distro and is reached over a UNC path, and that read
+    can fail for reasons unrelated to which game it is - refusing on "I could
+    not check" would block the migration this feature exists to provide. That
+    reasoning is unchanged and is why this still does not refuse.
+
+    WITHDRAWN, from the version of this docstring that said True on an
+    unreadable file: "Adopting one under the wrong catalog entry produces a tab
+    whose every button names containers that do not exist" as a statement of the
+    WHOLE cost. It is still a cost, and it is still the one the `DIFFERENT`
+    branch is written for; it is no longer the largest. A folder that merely
+    *looked* adoptable reaches file deletion, which is not an annoyance.
+
+    That chain was re-read link by link on 2026-09-02, in the code rather than
+    from the earlier note, and each link is where it says:
+
+      - `adopt_from_wsl()` below emits `adopted` for an `UNVERIFIED` folder;
+      - `catalog.json` gives `wow-wotlk` `"has_manifests": true`, and it is the
+        only entry of the four that carries it;
+      - `controller_view.ControllerServices.for_wotlk()` passes that same
+        `server_dir` into `wotlk_modules.applier()` when `entry.has_manifests`,
+        and `apply.Applier.__init__` keeps it as `self.server_dir`;
+      - `apply.Applier.install()` clones into
+        `server_dir / CLONE_DIRS[type] / id`, and `git.RunnerGit.clone()`
+        `shutil.rmtree()`s that destination BEFORE the first git invocation.
+
+    The precondition on the deletion, which the earlier note left out: it fires
+    only when the destination already exists AND is not itself a git checkout
+    (`(dest / ".git").is_dir()` sends it down the update path instead). What is
+    deleted is that subdirectory of the adopted folder, not the adopted folder
+    itself - still the user's files, still without anyone having established
+    that the folder is ours. Because the rmtree precedes the fetch, a clone that
+    was never going to succeed deletes anyway. All of this is asserted in
+    `test_an_unverified_adoption_reaches_the_applier_with_no_ownership_check`,
+    which drives it with only `runner.run` doubled.
+
+    So the answer widened instead of hardening: the migration keeps working, and
+    the caller - and the user - are told which of the three they got.
     """
     compose = compose_file(server_dir)
     if compose is None:
-        return True
+        return Identification.UNVERIFIED
     try:
         text = compose.read_text(encoding="utf-8", errors="ignore")
     except OSError:
-        return True
+        return Identification.UNVERIFIED
     spec = entry.container_spec()
-    return any(name and name in text for name in (spec.db, spec.auth, spec.world))
+    if any(name and name in text for name in (spec.db, spec.auth, spec.world)):
+        return Identification.MATCHES
+    return Identification.DIFFERENT
 
 
 class CatalogView(QWidget):
@@ -398,7 +459,8 @@ class CatalogView(QWidget):
         if chosen is None:
             return False
 
-        if not _looks_like(entry, chosen.server_dir):
+        identified = _identify(entry, chosen.server_dir)
+        if identified is Identification.DIFFERENT:
             QMessageBox.warning(
                 self,
                 "That is a different server",
@@ -410,7 +472,6 @@ class CatalogView(QWidget):
                 "different server.",
             )
             return False
-
         client_dir: Path | None = None
         if entry.install.requires_client_dir:
             # Still on the Windows side: the client is the user's own WoW
@@ -422,6 +483,40 @@ class CatalogView(QWidget):
             )
             if client_dir is None:
                 return False
+
+        if identified is Identification.UNVERIFIED:
+            # Adoption continues - see `_identify()` - but not in silence. The
+            # user is the only party who can know whether this folder is the
+            # server they meant, and the tab about to open can write into it.
+            #
+            # AFTER the client-dir prompt, not before it. Sitting above it, both
+            # the log line and the dialog fired for an adoption the user then
+            # CANCELLED by dismissing that picker: the function returns False and
+            # nothing is adopted, but the log had recorded an unverified adoption
+            # that never happened and the user had been told it was being adopted.
+            # Only the three `requires_client_dir` entries could reach that, and
+            # none of them carries `has_manifests`, so nothing was at risk of
+            # deletion - the record was simply false, which is enough.
+            logger.warning(
+                f"adopting {entry.id} from {chosen.distro} UNVERIFIED: no readable compose "
+                f"file in {chosen.server_dir}, so nothing confirms it is a {entry.name} install"
+            )
+            QMessageBox.warning(
+                self,
+                "Adopted without checking",
+                f"Yu'lon could not read a compose file in {chosen.server_dir}, so nothing "
+                f"confirms that {chosen.project} in {chosen.distro} is a {entry.name} "
+                "install — it is being adopted on your word rather than on evidence.\n\n"
+                # NOT "remove the server from Yu'lon". There is no such action:
+                # `AppState.forget()` has zero production callers (only
+                # tests/test_state.py), and the one "Forget" button in the UI
+                # forgets an interrupted restore record, not a server. Naming a
+                # remedy that does not exist is the same defect this branch was
+                # written to fix - a sentence spelled exactly like a true one.
+                "If this is the wrong folder, close Yu'lon and do not use this "
+                "server's tab: installing or removing a module writes into that "
+                "folder and deletes files under it.",
+            )
 
         logger.info(
             f"adopting {entry.id} from WSL distro {chosen.distro}: "
