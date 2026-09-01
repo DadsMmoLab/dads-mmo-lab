@@ -2932,3 +2932,112 @@ def run_container(
     argv = spec.to_argv()
     logger.info(f"run_container(): `docker {' '.join(argv)}`")
     return run_attached(argv, Path.cwd(), sink=sink, cancel=cancel, merge_stderr=True)
+
+
+_MISSING_IN_IMAGE = re.compile(r"No such container:path|Could not find the file", re.IGNORECASE)
+"""How `docker cp` says the source path was not in there, across CLI generations.
+
+Both spellings, because they are the same fact told by two different halves of
+docker - the CLI when it stats the path itself, the daemon when it is the one
+asked - and which of them answers is not something this code can predict.
+Measured on Engine 29.6.2, a missing source in a real image comes back as
+`Could not find the file <path> in container <id>`; `No such container:path`
+is the other half's wording. An earlier version of this comment attributed each
+spelling to a CLI generation, newest-first, and had them the wrong way round.
+Matching only one would send a whole class of "this image does not ship that
+file" through as an unexplained copy failure, and the two are not worth keeping
+apart: what differs is the wording, not the situation.
+"""
+
+
+def copy_from_image(image: str, src: str, dest: Path) -> None:
+    """Copy `src` out of `image` into `dest` on the host, without running anything.
+
+    `docker create` + `docker cp` + `docker rm`, which is how the conf stage
+    gets `*.conf.dist` out of a built image on every platform: no shell in the
+    image is needed, no bind mount has to be shareable with Docker Desktop, and
+    the files arrive owned by this user rather than by root — a bind mount
+    written from inside the container is what needed the `sudo chown` the
+    scripts did.
+
+    `--entrypoint true`, because `docker create` refuses an image that declares
+    neither an ENTRYPOINT nor a CMD ("Error response from daemon: no command
+    specified", measured against docker 29.6.2), and an image built around a
+    server binary may well be one. Note that inheriting one counts: a Dockerfile
+    that says nothing about either still gets its base image's, so only an
+    image that clears them — or a `FROM scratch` — actually hits this. Nothing
+    is ever started, so the command named here never runs.
+
+    `docker cp`'s own rules apply to `dest`: a directory `src` copied to a
+    `dest` that already exists lands INSIDE it, and to one that does not exist
+    becomes it. The caller chooses which by whether it made `dest` first.
+
+    **This addresses the local daemon and takes no `wsl_distro`**, which is why
+    it is listed in the completeness test's `_DAEMON_AGNOSTIC`; the reason
+    recorded there is that only an install reaches this, and an install is local
+    by construction (`install_wiring.installer_for_app()` says so and passes no
+    distro), while `dest` is a host path that `docker cp` resolves on whichever
+    side of the WSL boundary the CLI runs.
+
+    The created container is removed whether or not the copy worked. A failed
+    `cp` on every resume would otherwise leave one more stopped container each
+    time, and `docker ps -a` is not somewhere a user looks. `finally` rather
+    than `except`, so a cancel — which arrives here as `KeyboardInterrupt`,
+    since `_run()` has no cancel event to watch — takes the container with it
+    too.
+
+    Three different failures reach the caller and they stay three, because the
+    stage above says a different sentence to each:
+
+    * `DockerCliMissingError` — nothing was asked of Docker at all. Re-raised
+      untouched: it carries `DOCKER_CLI_MISSING_HELP` and nothing else on
+      purpose, and wrapping it in a sentence about the image would bury the one
+      instruction the user can act on.
+    * the image does not ship `src` — a catalog bug, which no amount of retrying
+      fixes. Docker's own wording for it blames a *container* (`No such
+      container:path: 0123456789ab:/opt/etc`), and read at face value that says
+      the throwaway container vanished, which is a machine problem and reads as
+      worth a retry. So the message leads with the image and the path.
+    * anything else the copy hit — a full disk, a permission, a daemon that went
+      away mid-stream. Docker's stderr is kept whole; only the lead changes.
+
+    Raises:
+        DockerCliMissingError: there was no docker CLI to run.
+        DockerCommandError: the create failed, the create printed no id, or the
+            copy failed. The removal's own failure is logged, not raised: the
+            copy's error is the one that explains anything.
+    """
+    created = _run(["create", "--entrypoint", "true", image])
+    # The id is the LAST stdout line: a first-time pull prints its progress on
+    # stderr, but some CLI versions have put a line on stdout before the id.
+    lines = [line.strip() for line in created.stdout.splitlines() if line.strip()]
+    container = lines[-1] if lines else ""
+    if not container:
+        raise DockerCommandError(f"docker create {image} printed no container id")
+    logger.debug(f"copy_from_image(): {image}:{src} -> {dest} via {container[:12]}")
+    try:
+        _run(["cp", f"{container}:{src}", str(dest)])
+    except DockerCliMissingError:
+        # Ahead of the DockerCommandError clause, which is its base class and
+        # would otherwise swallow it into a sentence about the image.
+        raise
+    except DockerCommandError as exc:
+        if _MISSING_IN_IMAGE.search(str(exc)):
+            raise DockerCommandError(f"{image} has no {src} to copy out: {exc}") from exc
+        raise DockerCommandError(f"could not copy {src} out of {image}: {exc}") from exc
+    finally:
+        removal = _docker(["rm", "-f", container])
+        if removal.returncode != 0:
+            if _cli_missing(removal):
+                # `removal.stderr` here is the whole install-Docker help text,
+                # and it has already reached the user through the error being
+                # raised past this. What the log needs is the container that is
+                # now genuinely stranded, by name.
+                logger.warning(
+                    f"no docker CLI left to remove {container[:12]} with; it is still "
+                    f"there, and `docker rm -f {container[:12]}` clears it once docker is back"
+                )
+            else:
+                logger.warning(
+                    f"could not remove {container[:12]} after the copy: {removal.stderr.strip()}"
+                )
