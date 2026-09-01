@@ -3964,6 +3964,40 @@ def test_a_bare_run_is_just_rm_image_and_command() -> None:
     assert spec.to_argv() == ["run", "--rm", "busybox:1.36", "true"]
 
 
+def test_the_security_args_reach_the_argv_verbatim_and_before_the_image() -> None:
+    """The container-level security decision, spelled by whoever took it.
+
+    `platform.label_disable_args()` answers in docker options already, and this
+    field carries that answer through unchanged — respelling it here would be a
+    second spelling of one security decision. It has to land before the image
+    name: docker stops reading its own options there, so a `--security-opt`
+    after it would be handed to the tool as an argument.
+    """
+    spec = docker.ContainerRun(
+        image="busybox:1.36",
+        argv=("true",),
+        security_args=("--security-opt", "label:disable", "--network", "none"),
+    )
+    argv = spec.to_argv()
+    assert _flag_values(argv, "--security-opt") == ["label:disable"]
+    assert _flag_values(argv, "--network") == ["none"]
+    assert argv.index("--security-opt") < argv.index("busybox:1.36")
+
+
+def test_a_run_that_never_started_is_told_apart_from_one_that_exited_127() -> None:
+    """Both halves of the sentinel, because `docker run` returns the CONTAINER's status.
+
+    127 is what a shell reports for "command not found", and an image asked for
+    a binary it does not hold produces exactly that — so the code alone would
+    read a working Docker as a missing one.
+    """
+    help_text = docker.platform.DOCKER_CLI_MISSING_HELP
+    assert docker.cli_missing_run(docker.AttachedRun(127, (help_text,)))
+    assert not docker.cli_missing_run(docker.AttachedRun(127, ("exec ad: no such file",)))
+    assert not docker.cli_missing_run(docker.AttachedRun(127, ()))
+    assert not docker.cli_missing_run(docker.AttachedRun(0, (help_text,)))
+
+
 def test_a_relative_mount_source_is_refused_before_docker_sees_it() -> None:
     """Docker rejects a relative bind source daemon-side; the message should name our caller."""
     spec = docker.ContainerRun(

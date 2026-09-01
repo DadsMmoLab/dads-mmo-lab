@@ -17,12 +17,16 @@ needless re-run only costs an hour.
 from __future__ import annotations
 
 import json
+import threading
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 
+from yulon import docker, platform
 from yulon.catalog.catalog import ExtractPlan, ExtractTool
 from yulon.catalog.families import extract
+from yulon.catalog.installer import InstallerError
 
 AD = ExtractTool(
     name="dbc and maps",
@@ -586,3 +590,522 @@ def test_a_hand_built_evidence_defaults_to_having_identified_its_client() -> Non
     constructions silently unskippable forever.
     """
     assert extract.Evidence("p", "/c", 1, 2, ()).client_facts_complete is True
+
+
+# --- running the plan: one container per tool -----------------------------------------------
+#
+# `run_plan` is where the evidence rule above meets a real `docker run`, and
+# where three questions that each have three answers have to stay apart:
+#
+#   * how a tool ended — exit 0, non-zero, stopped by the user, or never started
+#     at all because there was no docker CLI to start it;
+#   * what its output folders say — enough files, too few, or a folder nobody
+#     could list (I.4 walks that last one to "too few" on purpose, and the
+#     refusal has to say so rather than blame the user's client for it);
+#   * whether a tool has run — recorded, recorded for another argv, or not yet.
+#
+# The container is described by field, so every one of those is asserted by
+# field too: which mount is `:ro`, which security option is on the RUN and not
+# on a mount, and how many times the machine was asked about SELinux.
+
+
+def _flag_values(argv: list[str], flag: str) -> list[str]:
+    """Every value that follows `flag` — the same by-field audit `test_docker.py` uses."""
+    return [argv[i + 1] for i, item in enumerate(argv[:-1]) if item == flag]
+
+
+class Runner:
+    """A `run_container` double: records every spec by field and fabricates the tool's output."""
+
+    def __init__(
+        self,
+        writes: Mapping[str, Mapping[str, int]],
+        *,
+        fail: Mapping[str, tuple[int, str]] | None = None,
+    ) -> None:
+        self.writes = writes
+        self.fail = dict(fail or {})
+        self.specs: list[docker.ContainerRun] = []
+        self.cancel_after: int | None = None
+
+    def __call__(
+        self, spec: docker.ContainerRun, *, sink: docker.OutputSink, cancel: threading.Event | None
+    ) -> docker.AttachedRun:
+        self.specs.append(spec)
+        sink(f"ran {spec.argv[0]}")
+        out = next(mount.host for mount in spec.mounts if mount.guest == "/out")
+        for folder, count in self.writes.get(spec.argv[0], {}).items():
+            fill(out, folder, count)
+        if spec.argv[0] in self.fail:
+            code, words = self.fail.pop(spec.argv[0])
+            return docker.AttachedRun(code, (words,))
+        if self.cancel_after is not None and len(self.specs) >= self.cancel_after:
+            if cancel is not None:
+                cancel.set()
+            return docker.AttachedRun(docker.CANCELLED_RETURNCODE, ())
+        return docker.AttachedRun(0, ())
+
+    def names(self) -> list[str]:
+        return [Path(spec.argv[0]).name for spec in self.specs]
+
+
+FULL = {
+    "/opt/bin/ad": {"dbc": 3, "maps": 2},
+    "/opt/bin/vmap_extractor": {"Buildings": 2},
+    "/opt/bin/vmap_assembler": {"vmaps": 2},
+}
+
+
+def run(
+    plan: ExtractPlan,
+    runner: Runner,
+    tmp_path: Path,
+    *,
+    cancel: threading.Event | None = None,
+    enforcing: bool | None = None,
+) -> list[str]:
+    """Drive `run_plan` to exhaustion, with the SELinux answer stated rather than measured.
+
+    `enforcing` goes through the seam on every call, including its `None`
+    default. A test that let the real probe answer would assert whatever THIS
+    machine is — on Windows always "could not tell" — and would pass for a
+    reason that has nothing to do with the code.
+    """
+    folder = client(tmp_path) if not (tmp_path / "client").exists() else tmp_path / "client"
+    return list(
+        extract.run_plan(
+            plan,
+            image_ref="yulon.local/x-server:1",
+            client_dir=folder,
+            data_dir=tmp_path / "server" / "data",
+            run_container=runner,
+            user_args=("--user", "1000:1000"),
+            sink=lambda _line: None,
+            cancel=cancel,
+            required_file=REQUIRED,
+            client_build=8606,
+            selinux_enforcing=lambda: enforcing,
+        )
+    )
+
+
+def test_each_tool_runs_once_with_the_client_read_only_and_data_at_out(tmp_path: Path) -> None:
+    runner = Runner(FULL)
+    run(PLAN, runner, tmp_path)
+    assert runner.names() == ["ad", "vmap_extractor", "vmap_assembler"]
+    for spec in runner.specs:
+        assert spec.image == "yulon.local/x-server:1"
+        assert spec.workdir == "/out"
+        assert spec.user_args == ("--user", "1000:1000")
+        assert spec.ulimits == ()
+        by_guest = {mount.guest: mount for mount in spec.mounts}
+        assert by_guest["/client"].read_only is True
+        assert by_guest["/client"].host == tmp_path / "client"
+        assert by_guest["/out"].read_only is False
+        assert by_guest["/out"].host == tmp_path / "server" / "data"
+    evidence = extract.read_evidence(tmp_path / "server" / "data")
+    assert evidence is not None
+    assert [record.name for record in evidence.tools] == [AD.name, VMAP.name, ASSEMBLE.name]
+
+
+def test_ulimit_stack_unlimited_is_passed_by_field(tmp_path: Path) -> None:
+    runner = Runner(FULL)
+    run(ExtractPlan(image="server", tools=(AD,), ulimit_stack_unlimited=True), runner, tmp_path)
+    assert runner.specs[0].ulimits == ("stack=-1",)
+
+
+def test_a_second_run_skips_every_recorded_tool(tmp_path: Path) -> None:
+    run(PLAN, Runner(FULL), tmp_path)
+    again = Runner(FULL)
+    said = run(PLAN, again, tmp_path)
+    assert again.specs == []
+    assert sum("already extracted" in line for line in said) == 3
+    assert f"{AD.name}: already extracted (dbc: 3 files, maps: 2 files)" in said
+
+
+def test_a_tool_with_passing_counts_but_no_record_runs_again_and_finished_tools_do_not(
+    tmp_path: Path,
+) -> None:
+    """The kill-after-threshold case: counts pass, no record, so ONLY that tool re-runs.
+
+    The first run is the SAME plan object as the second on purpose. A one-tool
+    `ExtractPlan` hashes differently, so the stage facts would not match and
+    every tool would re-run — which proves nothing this test is about.
+    """
+    with pytest.raises(InstallerError):
+        run(PLAN, Runner({"/opt/bin/ad": {"dbc": 3, "maps": 2}}), tmp_path)
+    data = tmp_path / "server" / "data"
+    fill(data, "Buildings", 2)  # as a killed extractor leaves it: past its threshold, unfinished
+    assert extract.shortfall(VMAP.produces, data) == {}, "the count gate alone would skip this"
+    runner = Runner(FULL)
+    run(PLAN, runner, tmp_path)
+    assert runner.names() == ["vmap_extractor", "vmap_assembler"]
+
+
+def test_evidence_for_another_client_forces_a_full_re_extract(tmp_path: Path) -> None:
+    run(PLAN, Runner(FULL), tmp_path)
+    data = tmp_path / "server" / "data"
+    old = extract.read_evidence(data)
+    assert old is not None
+    extract.write_evidence(
+        data,
+        extract.Evidence(old.plan_hash, "/another/client", 300, old.required_file_mtime, old.tools),
+    )
+    runner = Runner(FULL)
+    said = run(PLAN, runner, tmp_path)
+    assert runner.names() == ["ad", "vmap_extractor", "vmap_assembler"]
+    assert any("another client" in line for line in said)
+    fresh = extract.read_evidence(data)
+    assert fresh is not None and fresh.client_path == str((tmp_path / "client").resolve())
+
+
+def test_an_edited_plan_forces_a_full_re_extract_too(tmp_path: Path) -> None:
+    """The plan hash is one of the four stage facts, and the whole point of hashing it."""
+    run(PLAN, Runner(FULL), tmp_path)
+    edited = ExtractPlan(image="server", tools=(AD, VMAP, ASSEMBLE), ulimit_stack_unlimited=True)
+    runner = Runner(FULL)
+    said = run(edited, runner, tmp_path)
+    assert runner.names() == ["ad", "vmap_extractor", "vmap_assembler"]
+    assert any("another client or plan" in line for line in said)
+
+
+def test_a_tool_that_exits_zero_but_falls_short_is_refused_naming_counts_and_build(
+    tmp_path: Path,
+) -> None:
+    runner = Runner({**FULL, "/opt/bin/ad": {"dbc": 3, "maps": 1}})
+    with pytest.raises(InstallerError) as caught:
+        run(PLAN, runner, tmp_path)
+    message = str(caught.value)
+    assert "maps" in message and "1" in message and "2" in message
+    assert "8606" in message
+    assert "fail to load maps" in message
+    assert runner.names() == ["ad"]
+    evidence = extract.read_evidence(tmp_path / "server" / "data")
+    assert evidence is not None and evidence.tools == ()
+
+
+def test_the_shortfall_refusal_does_not_blame_the_client_for_a_folder_nobody_could_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I.4 walks "could not list it" to "too few files"; the sentence has to say so.
+
+    The count gate has three inputs and two answers — enough, too few, and a
+    folder that would not open — and the third is deliberately folded into the
+    second so nothing is skipped on evidence nobody read. That is right, and it
+    leaves the refusal's *cause* unknown: told only to check the client, a user
+    whose `data/` is unreadable is sent to look at the one thing that is fine.
+    So the refusal names both, and names the folder whose files it counted.
+    """
+    real_iterdir = Path.iterdir
+
+    def refuse(self: Path) -> object:
+        if self.name == "maps":
+            raise PermissionError(13, "denied")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", refuse)
+    with pytest.raises(InstallerError) as caught:
+        run(PLAN, Runner(FULL), tmp_path)
+    message = str(caught.value)
+    assert str(tmp_path / "server" / "data") in message
+    assert "could not be listed" in message
+    assert "maps: 0 files, at least 2 expected" in message
+
+
+def test_a_failing_tool_stops_the_plan_with_its_last_words(tmp_path: Path) -> None:
+    runner = Runner(FULL, fail={"/opt/bin/vmap_extractor": (1, "cannot open Data")})
+    with pytest.raises(InstallerError, match="cannot open Data"):
+        run(PLAN, runner, tmp_path)
+    evidence = extract.read_evidence(tmp_path / "server" / "data")
+    assert evidence is not None and [r.name for r in evidence.tools] == [AD.name]
+
+
+def test_a_container_that_never_started_is_not_the_tool_failing(tmp_path: Path) -> None:
+    """The fourth thing `run_container` can answer: there was no docker CLI to run.
+
+    "The tool failed (exit 127)" is a sentence about a tool that ran. Nothing
+    ran, no client was ever opened, and the help text is the whole answer — so
+    it is said as its own thing, exactly as `docker._cli_missing()` tells the
+    same two shapes apart for the unstreamed calls.
+    """
+    runner = Runner(FULL, fail={"/opt/bin/ad": (127, platform.DOCKER_CLI_MISSING_HELP)})
+    with pytest.raises(InstallerError) as caught:
+        run(PLAN, runner, tmp_path)
+    message = str(caught.value)
+    assert "could not be started" in message
+    assert platform.DOCKER_CLI_MISSING_HELP in message
+    assert "exit 127" not in message
+    assert "last words" not in message
+
+
+def test_a_tool_that_really_exits_127_is_still_the_tool_failing(tmp_path: Path) -> None:
+    """Both halves of the sentinel are checked. `docker run` returns the CONTAINER's
+    status, so a command missing inside the image genuinely exits 127, and reading
+    that as "docker is not installed" would send the user to reinstall Docker."""
+    runner = Runner(FULL, fail={"/opt/bin/ad": (127, "exec /opt/bin/ad: no such file")})
+    with pytest.raises(InstallerError) as caught:
+        run(PLAN, runner, tmp_path)
+    message = str(caught.value)
+    assert "exit 127" in message and "no such file" in message
+    assert "could not be started" not in message
+
+
+def test_a_cancel_keeps_finished_tools_and_says_so(tmp_path: Path) -> None:
+    runner = Runner(FULL)
+    runner.cancel_after = 2
+    cancel = threading.Event()
+    with pytest.raises(InstallerError, match=extract.EXTRACT_CANCEL_NOTE):
+        run(PLAN, runner, tmp_path, cancel=cancel)
+    evidence = extract.read_evidence(tmp_path / "server" / "data")
+    assert evidence is not None and [r.name for r in evidence.tools] == [AD.name]
+    again = Runner(FULL)
+    run(PLAN, again, tmp_path)
+    assert again.names() == ["vmap_extractor", "vmap_assembler"]
+
+
+def test_a_cancel_between_tools_is_a_stop_and_not_a_success(tmp_path: Path) -> None:
+    """Stop pressed while a tool was exiting: it returns 0 and the token is set.
+
+    `run_attached()` reports `CANCELLED_RETURNCODE` only while it is still
+    reading; a tool that finished in the same instant comes back 0. Recording
+    it and marching on would start the NEXT tool after the user said stop.
+    """
+    cancel = threading.Event()
+
+    class StopsQuietly(Runner):
+        def __call__(
+            self,
+            spec: docker.ContainerRun,
+            *,
+            sink: docker.OutputSink,
+            cancel: threading.Event | None,
+        ) -> docker.AttachedRun:
+            result = super().__call__(spec, sink=sink, cancel=cancel)
+            if cancel is not None:
+                cancel.set()
+            return result
+
+    runner = StopsQuietly(FULL)
+    with pytest.raises(InstallerError, match=extract.EXTRACT_CANCEL_NOTE):
+        run(PLAN, runner, tmp_path, cancel=cancel)
+    assert runner.names() == ["ad"]
+    evidence = extract.read_evidence(tmp_path / "server" / "data")
+    assert evidence is not None and evidence.tools == ()
+
+
+def test_the_cancel_note_promises_exactly_what_the_per_tool_record_delivers() -> None:
+    """The words, pinned once, because the refusal tests cannot pin them.
+
+    A4 has the spine yield this note straight after `--- extract`, so it is the
+    user's whole picture of what pressing Stop costs. What it CLAIMS is proved
+    by the cancel tests — the resume really does run only the unfinished tools —
+    but they match the refusal against the constant itself, which would accept
+    any sentence at all, including one that told the user the opposite.
+    """
+    assert extract.EXTRACT_CANCEL_NOTE == (
+        "Finished tools are kept; only the tool that was interrupted runs again."
+    )
+
+
+def test_the_cancel_sentinel_alone_is_a_stop_even_with_no_token(tmp_path: Path) -> None:
+    """The run's own answer, not only the caller's token.
+
+    `CANCELLED_RETURNCODE` is negative on purpose — no container can exit with
+    it — so it means "stopped" all by itself. Read only through the token, a
+    stop would be missed by any caller that passed no token, or one whose token
+    is not the object the docker layer was watching, and the tool after it would
+    start.
+    """
+    runner = Runner(FULL)
+    runner.cancel_after = 1
+    with pytest.raises(InstallerError, match=extract.EXTRACT_CANCEL_NOTE):
+        run(PLAN, runner, tmp_path, cancel=None)
+    assert runner.names() == ["ad"]
+    evidence = extract.read_evidence(tmp_path / "server" / "data")
+    assert evidence is not None and evidence.tools == ()
+
+
+def test_the_evidence_is_rewritten_after_every_tool_and_not_at_the_end(tmp_path: Path) -> None:
+    """The cancel note's whole claim, asserted from inside the run.
+
+    Written once at the end instead, a Stop after five hours of `ad` would find
+    an evidence file with no records in it and start again from the first tool,
+    and `EXTRACT_CANCEL_NOTE` would be a promise the code does not keep. The
+    first entry also pins that the stage facts are on disk BEFORE any tool runs.
+    """
+    data = tmp_path / "server" / "data"
+    seen: list[list[str] | None] = []
+
+    class Watching(Runner):
+        def __call__(
+            self,
+            spec: docker.ContainerRun,
+            *,
+            sink: docker.OutputSink,
+            cancel: threading.Event | None,
+        ) -> docker.AttachedRun:
+            found = extract.read_evidence(data)
+            seen.append(None if found is None else [record.name for record in found.tools])
+            return super().__call__(spec, sink=sink, cancel=cancel)
+
+    run(PLAN, Watching(FULL), tmp_path)
+    assert seen == [[], [AD.name], [AD.name, VMAP.name]]
+
+
+def test_each_output_folder_is_walked_once_per_tool_and_not_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate's numbers and the user's numbers come from the same walk.
+
+    Counted separately for the threshold and for the line, a folder that stops
+    listing between the two — the case `file_count()` is written around — makes
+    the refusal and the log disagree about the one number both are made of.
+    Four walks for this plan: `ad`'s two folders, `vmap`'s one, `assemble`'s one.
+    """
+    walked: list[Path] = []
+    real_count = extract.file_count
+
+    def counting(folder: Path) -> int:
+        walked.append(folder)
+        return real_count(folder)
+
+    monkeypatch.setattr(extract, "file_count", counting)
+    run(PLAN, Runner(FULL), tmp_path)
+    data = tmp_path / "server" / "data"
+    assert walked == [data / "dbc", data / "maps", data / "Buildings", data / "vmaps"]
+
+
+# --- the container-level security decision --------------------------------------------------
+
+
+def test_tool_run_puts_the_security_decision_on_the_run_and_never_a_label_on_a_mount(
+    tmp_path: Path,
+) -> None:
+    """`:z`/`:Z` recursively relabel their mount source, and one of these mounts is the
+    user's own game install. The flag is container-level for exactly that reason."""
+    spec = extract.tool_run(
+        PLAN,
+        AD,
+        image_ref="yulon.local/x:1",
+        client_dir=tmp_path / "client",
+        data_dir=tmp_path / "data",
+        user_args=(),
+        security_args=("--security-opt", "label:disable"),
+    )
+    assert spec.security_args == ("--security-opt", "label:disable")
+    argv = spec.to_argv()
+    assert _flag_values(argv, "-v") == [
+        f"{tmp_path / 'client'}:/client:ro",
+        f"{tmp_path / 'data'}:/out",
+    ]
+    for value in _flag_values(argv, "-v"):
+        assert not value.endswith((":z", ":Z")), value
+    assert extract.CLIENT_MOUNT == "/client" and extract.OUT_MOUNT == "/out"
+
+
+@pytest.mark.parametrize(
+    ("enforcing", "labelled"),
+    [(True, True), (False, False), (None, False)],
+    ids=["enforcing", "not-enforcing", "could-not-ask"],
+)
+def test_label_disable_is_added_only_when_selinux_is_known_to_be_enforcing(
+    tmp_path: Path, enforcing: bool | None, labelled: bool
+) -> None:
+    """Three answers, not two. Turning a container's confinement off on "could not
+    ask" would be a security decision taken on no evidence — the mistake
+    `platform.selinux_enforcing()` exists to keep visible."""
+    runner = Runner(FULL)
+    run(PLAN, runner, tmp_path, enforcing=enforcing)
+    assert runner.specs
+    for spec in runner.specs:
+        assert ("label:disable" in spec.security_args) is labelled
+        assert ("label:disable" in _flag_values(spec.to_argv(), "--security-opt")) is labelled
+
+
+def test_the_selinux_question_is_asked_once_for_the_whole_plan(tmp_path: Path) -> None:
+    """One fallible probe, one answer, handed to every tool.
+
+    Asked per tool, three containers could get three different answers out of
+    one `getenforce` that flickered — and the tool that heard "not enforcing"
+    would be denied the client with nothing to explain it.
+    """
+    asked: list[int] = []
+
+    def ask() -> bool:
+        asked.append(1)
+        return True
+
+    runner = Runner(FULL)
+    list(
+        extract.run_plan(
+            PLAN,
+            image_ref="yulon.local/x-server:1",
+            client_dir=client(tmp_path),
+            data_dir=tmp_path / "server" / "data",
+            run_container=runner,
+            user_args=(),
+            sink=lambda _line: None,
+            cancel=None,
+            required_file=REQUIRED,
+            selinux_enforcing=ask,
+        )
+    )
+    assert len(asked) == 1
+    assert len(runner.specs) == 3
+    assert all("label:disable" in spec.security_args for spec in runner.specs)
+
+
+def test_the_selinux_seam_defaults_to_the_real_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Left unset, the machine is actually asked — and resolved at call time, so a
+    monkeypatch on `platform` is seen (a default bound at import would not be)."""
+    monkeypatch.setattr(platform, "selinux_enforcing", lambda: True)
+    runner = Runner(FULL)
+    list(
+        extract.run_plan(
+            PLAN,
+            image_ref="yulon.local/x-server:1",
+            client_dir=client(tmp_path),
+            data_dir=tmp_path / "server" / "data",
+            run_container=runner,
+            user_args=(),
+            sink=lambda _line: None,
+            cancel=None,
+        )
+    )
+    assert runner.specs
+    assert all("label:disable" in spec.security_args for spec in runner.specs)
+
+
+def test_every_extraction_container_gives_up_the_network_and_new_privileges(
+    tmp_path: Path,
+) -> None:
+    """Defence in depth for a tool that parses an untrusted binary client, and half of
+    what `container_t` was providing for free until `label:disable` turned it off.
+
+    `--cap-drop ALL` and `--read-only` are deliberately NOT here: they change
+    what the process may do to the folder it must write, on the platform this
+    suite cannot measure (Docker Desktop, where the tool runs as the image's
+    root), and `docker.ContainerRun` records that neither has been measured
+    against these tools.
+    """
+    runner = Runner(FULL)
+    run(PLAN, runner, tmp_path, enforcing=True)
+    assert runner.specs
+    for spec in runner.specs:
+        argv = spec.to_argv()
+        assert _flag_values(argv, "--network") == ["none"]
+        assert "no-new-privileges" in _flag_values(argv, "--security-opt")
+        assert "--cap-drop" not in argv and "--read-only" not in argv
+        assert argv.index("--network") < argv.index("yulon.local/x-server:1")
+
+
+def test_the_security_args_are_the_platform_rule_and_not_a_second_spelling_of_it() -> None:
+    """One home for "how does a container reach a host folder on an enforcing box"."""
+    assert extract.container_security_args(enforcing=True) == (
+        *extract.EXTRACT_HARDENING,
+        *platform.label_disable_args(enforcing=True),
+    )
+    assert extract.container_security_args(enforcing=False) == extract.EXTRACT_HARDENING
+    assert extract.container_security_args(enforcing=None) == extract.EXTRACT_HARDENING
