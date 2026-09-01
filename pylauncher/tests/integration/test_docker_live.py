@@ -342,19 +342,53 @@ def test_run_container_reads_the_client_read_only_and_writes_out_as_this_user(
 ) -> None:
     """The extraction model, live: `/client` `:ro`, `/out` rw, cwd `/out`, `-u uid:gid`.
 
-    The relative `copy.txt` proves the workdir; the owner check proves no
-    `sudo chown` will ever be needed; the client listing proves nothing was
-    written where the user's files live.
+    The relative `copy.txt` proves the workdir — drop `-w` and it lands in the
+    image's own cwd and `out/` stays empty — and the owner check proves no
+    `sudo chown` will ever be needed. The client listing is a statement about
+    THIS argv, which only reads `/client`: it would hold with the `:ro` gone
+    too, so it is not what gates the mount. The test below it is, by asking a
+    container to write there and being refused.
 
     The container is ASKED who it is (`id -u` / `id -g`) rather than trusting
-    that a `--user` in the argv arrived, and both platforms' answers are
-    asserted. A host-side `st_uid` check alone exists only where `os.getuid`
-    does, so on Docker Desktop the whole user half of `ContainerRun` would be
-    gated by nothing at all — and the two platforms want opposite answers:
-    `platform.container_user_args()` passes `--user uid:gid` on Linux and
-    deliberately passes none on Docker Desktop, where the image's own root is
-    right and the file still arrives owned by the logged-in user.
+    that a `--user` in the argv arrived. Two separate things want that question,
+    and the first version of this test conflated them into one that gated
+    neither on this machine:
+
+    * **`to_argv()` splicing `user_args` into the argv at all.** That is what
+      the `4242:4242` probe is for, and it is the same number the mutation
+      control used. It runs on EVERY platform, because it names the uid itself
+      rather than asking `platform` for one — busybox's default user is root, so
+      a probe that passes no `--user` and a `to_argv()` that drops the one it
+      was given produce the same `0 0`, and the assertion would be a fact about
+      the image rather than about this module. That is exactly what the first
+      version asserted on Docker Desktop: reran with `*self.user_args` deleted
+      from `to_argv()`, it still passed (review, 2026-09-01).
+    * **`platform.container_user_args()`'s policy**, which is what the second
+      run gates and which genuinely differs per platform: `--user uid:gid` on
+      Linux, deliberately none on Docker Desktop, where the image's own root is
+      right and the file still arrives owned by the logged-in user. On Docker
+      Desktop the `0 0` there is a statement about the policy being empty — it
+      is TRUE of a broken `to_argv()` too, and no longer has to carry that
+      weight now that the probe above does.
+
+    A host-side `st_uid` check cannot stand in for either: `os.getuid` exists
+    only on Linux, so on Docker Desktop it does not run.
     """
+    asked = ("--user", "4242:4242")
+    probe_heard: list[str] = []
+    probe = docker.run_container(
+        docker.ContainerRun(
+            image=BUSYBOX_IMAGE, argv=("sh", "-c", "id -u; id -g"), user_args=asked
+        ),
+        sink=probe_heard.append,
+    )
+    assert probe.returncode == 0, probe.tail
+    probe_reported = [line.strip() for line in probe_heard if line.strip().isdigit()]
+    assert probe_reported[-2:] == ["4242", "4242"], (
+        f"asked for {asked[1]} and the container reported {probe_reported[-2:]} — to_argv() is "
+        f"not putting user_args in the argv: {probe_heard}"
+    )
+
     client = tmp_path / "client"
     client.mkdir()
     (client / "a.txt").write_text("alpha\n", encoding="utf-8")
@@ -377,6 +411,9 @@ def test_run_container_reads_the_client_read_only_and_writes_out_as_this_user(
         assert user_args[0] == "--user", user_args
         assert ":".join(reported[-2:]) == user_args[1], heard
     else:
+        # Docker Desktop: the policy is to pass none, so the image's own root
+        # is the right answer. `to_argv()` is gated by the probe above, not
+        # here — nothing this branch asserts depends on it.
         assert reported[-2:] == ["0", "0"], heard
     getuid = getattr(os, "getuid", None)
     if getuid is not None:
