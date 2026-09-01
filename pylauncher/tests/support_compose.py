@@ -35,9 +35,13 @@ still caught:
   `test_a_renamed_named_volume_is_caught_at_the_top_level_not_at_the_mount`. The KIND survives,
   so a bind where a managed volume belongs is still reported, and so does READ-ONLY: only the
   SELinux label characters are dropped from the mode column (below), never `ro`.
-* bind source → relative to the install dir. It is an absolute host path that is `/home/pk/...`
-  on the proven box and a pytest tmp dir here. Only paths actually under the install dir are
-  stripped, so a sibling `/home/pk/srv-backup` stays absolute rather than becoming `./-backup`.
+* bind source → relative to the install dir, always with forward slashes. It is an absolute host
+  path that is `/home/pk/...` on the proven box, `C:\\...` on the Windows gate and a pytest tmp
+  dir here, and ONE committed fixture has to serve all three. Only paths actually under the
+  install dir are stripped, so a sibling `/home/pk/srv-backup` stays absolute rather than
+  becoming `./-backup`. `_under()` carries that comparison and the Windows rules: `\\` is a
+  separator and case is folded only for a path SHAPED like a Windows one, never because of the
+  host the reduction happens to run on.
 * mount mode → `ro` or `rw`, and nothing else. The label characters (`z`, `Z`) are this engine's
   SELinux suffix, which the proven install has no equivalent for; that is the whole of the
   justification, so it buys the removal of exactly those characters. `ro` is readable on both
@@ -306,13 +310,53 @@ def volume_from_string(spec: str) -> tuple[str, str, str, str]:
     return "volume", "<named>", target, mode
 
 
+# A drive letter (`C:\`, `c:/`) or a UNC share (`\\build\gate`, `//build/gate`) — the two
+# spellings of a rooted Windows host path, and the only thing that makes `\` a separator.
+_WINDOWS_ROOTED = re.compile(r"[A-Za-z]:[\\/]|[\\/]{2}[^\\/]")
+
+
+def _under(source: str, base: str) -> str | None:
+    """`source`'s path below the install dir `base`, `""` when it IS it, `None` when it is neither.
+
+    Segment by segment, never by characters: a plain `startswith` rewrites a sibling
+    `/home/pk/srv-backup` mount into this install's own `./-backup` and hides a mount of the
+    wrong tree, and `C:\\gate\\wotlk-server-backup` against `C:\\gate\\wotlk-server` is the same
+    trap on the other separator.
+
+    WHICH RULES APPLY IS DECIDED BY THE SHAPE OF THE PATH, never by the host. This runs on all
+    three platforms and reduces captures taken on the other two, so `os.name` would give Linux
+    CI a different answer than the Windows gate for the same bytes. A drive letter or a UNC
+    prefix on BOTH paths is what says "Windows", and it buys exactly two rules:
+
+    * `\\` is a separator as well as `/`. On POSIX it is a legal filename character and stays one.
+    * Case is folded, drive letter included: `c:\\GATE` and `C:\\gate` are one directory on
+      Windows and no tool reporting them agrees on the case. POSIX paths are NOT folded —
+      `/home/pk/SRV` and `/home/pk/srv` are two directories, and lowercasing them to make the
+      Windows case work would BE the sibling bug this function exists to avoid.
+
+    A UNC root needs no special case: it has no drive letter, and a comparison that never reads
+    one behaves the same for `\\\\build\\gate\\wotlk-server` as for a lettered drive.
+    """
+    windows = bool(_WINDOWS_ROOTED.match(source) and _WINDOWS_ROOTED.match(base))
+    raw = (lambda path: path.replace("\\", "/")) if windows else (lambda path: path)
+    fold = (lambda seg: seg.lower()) if windows else (lambda seg: seg)
+    parts = [seg for seg in raw(source).split("/") if seg]
+    root_parts = [fold(seg) for seg in raw(base).split("/") if seg]
+    if [fold(seg) for seg in parts[: len(root_parts)]] != root_parts:
+        return None
+    return "/".join(parts[len(root_parts) :])
+
+
 def volume_from_config(entry: dict[str, Any], *, root: str | None) -> tuple[str, str, str, str]:
     """A `compose config` volume object as (type, source, target, mode); binds relative to `root`.
 
-    `root` is stripped only from a path that IS the install dir or lies under it — a plain
-    `startswith` would rewrite a sibling `/home/pk/srv-backup` mount into this install's own
-    `./-backup` and hide a mount of the wrong tree. Read-only arrives as its own field here and
-    in the mode column on the other side; both end up as the same `ro`.
+    `root` is stripped only from a path that IS the install dir or lies under it, by `_under()`,
+    which carries the reason and the Windows rules. The relative form is written with forward
+    slashes whichever separator the capture used, so ONE committed fixture serves all three
+    platforms; a source that is not under the install dir is left exactly as captured, because
+    an absolute path this install does not own is a real difference and has to be readable as
+    the mount it names. Read-only arrives as its own field here and in the mode column on the
+    other side; both end up as the same `ro`.
     """
     kind = str(entry["type"])
     target = str(entry["target"]).rstrip("/")
@@ -320,9 +364,9 @@ def volume_from_config(entry: dict[str, Any], *, root: str | None) -> tuple[str,
     if kind == "volume":
         return "volume", "<named>", target, mode
     source = str(entry["source"])
-    base = root.rstrip("/") if root else None
-    if base and (source == base or source.startswith(f"{base}/")):
-        source = f".{source[len(base):]}"
+    below = _under(source, root) if root else None
+    if below is not None:
+        source = f"./{below}" if below else "."
     return kind, source or ".", target, mode
 
 
