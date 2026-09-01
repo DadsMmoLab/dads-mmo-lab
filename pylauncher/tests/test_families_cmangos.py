@@ -7,11 +7,17 @@ it proves the family's control flow, its refusals, what a resume repeats, and
 that every `docker run` it asks for is shaped the way the design says (client
 `:ro`, `--user` on Linux, cwd `/out`), asserted by FIELD on `ContainerRun`.
 
-The import gate is swapped for a `CallableGate` over `Recorder.probe/reset` in
-every end-to-end test: `MarkerGate`'s five branches are `test_sqlplan.py`'s
-to prove; this file proves the family's reaction to each answer. `engine()`
-attaches that gate to the engine it builds and the `gated` fixture hands it
-back from `_gate()` — no digging through seams.
+The import gate is meant to be swapped for a `CallableGate` over
+`Recorder.probe/reset`: `MarkerGate`'s five branches are `test_sqlplan.py`'s to
+prove, and this file is to prove the family's reaction to each answer. That is
+not wired yet and cannot be — K.6 is what binds the `import` stage and names
+the method resolving the gate, and no such method exists in `yulon/` on this
+branch. `engine()` already attaches the pair as `_test_gate`, and the `gated`
+fixture patches `CmangosInstaller._gate` with `raising=False`, which today adds
+an attribute nothing calls;
+`test_the_import_gate_seam_has_not_landed_so_the_gated_fixture_is_inert` is
+what says so out loud, and it goes red the day K.6 lands so the fixture is
+re-pointed at the real method rather than staying quietly inert.
 """
 
 from __future__ import annotations
@@ -138,9 +144,26 @@ def install(rec: Recorder, server_dir: Path, client_dir: Path, **overrides: obje
     )
 
 
+GATE_METHOD_AT_IMPORT = hasattr(CmangosInstaller, "_gate")
+"""Whether the engine carried a `_gate` BEFORE the `gated` fixture patched one on.
+
+Read at import because `gated` is autouse: inside any test body
+`hasattr(CmangosInstaller, "_gate")` is True whether K.6 landed or not, since
+`monkeypatch.setattr(..., raising=False)` puts the attribute on the class
+itself. The question only has an honest answer once.
+"""
+
+
 @pytest.fixture(autouse=True)
 def gated(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every engine's import gate is the one `engine()` attached (see the module docstring)."""
+    """Every engine's import gate is to be the one `engine()` attached — once there is one.
+
+    `raising=False` is kept rather than fixed, because there is nothing here
+    for a strict patch to hit: `CmangosInstaller` has no `_gate` on this branch
+    and `raising=True` would error in every test in this file. It is the
+    inertness that is dangerous, not the keyword, so it is asserted instead —
+    see `test_the_import_gate_seam_has_not_landed_so_the_gated_fixture_is_inert`.
+    """
 
     def gate(self: CmangosInstaller, ctx: native.StageContext) -> native.ImportGate:
         attached = getattr(self, "_test_gate", None)
@@ -197,6 +220,36 @@ def test_the_unbound_half_of_the_pinned_tuple_is_inert_until_its_stages_land() -
     assert set(bound) < set(CmangosInstaller.STAGE_NAMES)
     smuggled = native.InstallState(game_id=ENTRY.id, install_id="x").with_stage("extract", bound)
     assert smuggled.completed == ()
+
+
+def test_the_import_gate_seam_has_not_landed_so_the_gated_fixture_is_inert() -> None:
+    """Red on the day K.6 lands, deliberately: the `gated` fixture must be re-pointed then.
+
+    `gated` patches `CmangosInstaller._gate` with `raising=False`, and no
+    `_gate` exists anywhere in `yulon/`. The hazard is not the missing method,
+    which is only K.6 not having happened; it is a RENAME. If K.6 calls the
+    gate resolver anything else, `monkeypatch.setattr` goes on quietly adding
+    an unused attribute, the fixture silently stops overriding anything, and
+    every end-to-end test here starts driving the real `MarkerGate` at a
+    machine that is not there — a failure with no line in this file pointing
+    at its cause.
+
+    So the assertion is on what makes the inertness HARMLESS rather than on
+    the name: while no `import` stage is bound, no body asks for a gate and
+    nothing reads the attribute either way. The day a stage named `import`
+    appears, this fails, and K.6 has to point `gated` at whatever it really
+    called the method — with `raising=True`, which by then it can afford.
+
+    The name is asked about too, but through `GATE_METHOD_AT_IMPORT`: `gated`
+    is autouse and puts `_gate` on the class, so a `hasattr` in here would
+    answer True on this branch and the check would pass for the wrong reason.
+    """
+    assert (
+        "import" not in engine(Recorder()).stage_names()
+    ), "K.6 bound the import stage: point `gated` at the real gate method, with raising=True"
+    assert (
+        not GATE_METHOD_AT_IMPORT
+    ), "`_gate` exists now, so `gated` can and must patch it with raising=True"
 
 
 def test_the_module_constants_are_the_shared_template_s_own_spellings() -> None:
@@ -513,6 +566,53 @@ def test_the_run_container_double_leaves_nothing_when_the_run_failed(tmp_path: P
     assert list(out.iterdir()) == []
 
 
+def extract_run(client: Path, out: Path) -> docker.ContainerRun:
+    """The shape K.5 will ask the double for: the client `:ro` FIRST, `/out` second.
+
+    Two mounts in an order where "the first mount" and "the `/out` mount" are
+    different directories, because that is the only arrangement in which the
+    double's choice between them is observable. Every other `ContainerRun` in
+    this file carries a single mount, so a `Recorder` that ignored `guest` and
+    filled `spec.mounts[0]` would answer all of them correctly.
+    """
+    return docker.ContainerRun(
+        image="yulon.local/cmangos-tbc-server:t",
+        argv=("/opt/mangos/bin/tools/ad",),
+        mounts=(docker.Mount(client, "/client", read_only=True), docker.Mount(out, "/out")),
+        workdir="/out",
+    )
+
+
+def test_the_run_container_double_lays_its_output_under_out_and_not_under_the_first_mount(
+    tmp_path: Path,
+) -> None:
+    """A double that cannot express the real run's shape cannot be asked about it.
+
+    The real extraction run mounts two directories — the user's client
+    read-only and the server's `data/` at `/out` — and `Recorder.run_container`
+    picks the second by `guest == "/out"`. With one mount per fixture that
+    selection is never exercised: replacing it with `spec.mounts[0].host`
+    passed all 1774 tests (2026-09-01). The client half is what makes it fail,
+    and it is also the half whose emptiness is the extraction stage's safety
+    argument — an interrupted tool must leave nothing in the user's client.
+    """
+    rec = Recorder()
+    client = client_folder(tmp_path)
+    out = tmp_path / "srv" / "data"
+    out.mkdir(parents=True)
+    spec = extract_run(client, out)
+    assert spec.mounts[0].guest != "/out", "the fixture must not be single-mount-shaped"
+
+    before = sorted(p.name for p in (client / "Data").iterdir())
+    assert rec.run_container(spec, sink=lambda line: None).returncode == 0
+    assert rec.container_runs == [spec]
+    assert extract.file_count(out / "dbc") == 100
+    assert extract.file_count(out / "mmaps") == 500
+    # Nothing landed on the read-only mount, and nothing beside it either.
+    assert sorted(p.name for p in client.iterdir()) == ["Data"]
+    assert sorted(p.name for p in (client / "Data").iterdir()) == before
+
+
 def test_the_copy_double_answers_for_one_conf_file_and_for_the_whole_etc_directory(
     tmp_path: Path,
 ) -> None:
@@ -611,3 +711,34 @@ def test_clone_sources_consults_the_record_under_its_own_stage_name(tmp_path: Pa
     assert first == 3
     assert again.clones == [], "\n".join(said)
     assert any("already in src/mangos-tbc" in line for line in said)
+
+
+# -- the copy a Stop reads ---------------------------------------------------
+
+
+def test_the_build_cancel_note_is_said_at_the_build_and_not_before_every_stage(
+    tmp_path: Path,
+) -> None:
+    """It is copy about the BUILD, and the spine says it for whichever stage claims it.
+
+    `stages()` is where this family claims it, and `cancel_note=` is one
+    keyword: dropping it left all 23 tests in this file green (2026-09-01), so
+    the sentence a user reads when they press Stop three hours into a compile
+    was nobody's. Two properties, because the AzerothCore incident it mirrors
+    (`test_families_azerothcore.py`, review 2026-08-23) was not a missing
+    sentence but a misplaced one — said as the second line of every install, so
+    a user who stopped during the 2.4 GB clone was told Docker was finishing a
+    build step. `OPENING_NOTE` is the line that is true of every stage; this
+    one belongs to the build alone, and the spine emits it directly under the
+    stage banner.
+    """
+    rec = Recorder(images=False)
+    said = install(rec, tmp_path / "srv", client_folder(tmp_path))
+    assert native.OPENING_NOTE in said
+    assert said.index(native.OPENING_NOTE) == 1
+    build_at = said.index("--- build")
+    # Said at the build: the banner, then the note, and nothing between them.
+    assert said[build_at + 1] == native.BUILD_CANCEL_NOTE
+    # Not before every stage: no earlier stage carries it, and no later one either.
+    assert said.count(native.BUILD_CANCEL_NOTE) == 1
+    assert native.BUILD_CANCEL_NOTE not in said[:build_at]
