@@ -64,7 +64,14 @@ logger = get_logger(__name__)
 MARKER_TABLE = "yulon_install"
 """The table `write_marker()` creates in `plan.marker_db`; its presence is the import record."""
 
-_DIGITS = re.compile(r"(\d+)")
+_DIGITS = re.compile(r"([0-9]+)")
+"""`c_isdigit`: ASCII only, like `_is_alpha`/`_is_alnum` below.
+
+Python's `\\d` also matches `٣` and `९`, which `_prefix()`'s `_is_alnum` would then treat as
+a non-digit — one function splitting a run the other refuses to. C asks `c_isdigit` in both
+places and sees a UTF-8 name as bytes that are neither letters nor digits, so `[0-9]` is
+both the consistent answer and the faithful one.
+"""
 
 _GLOB_META = frozenset("*?[")
 """What makes a path component a pattern rather than a name."""

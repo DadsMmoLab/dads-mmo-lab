@@ -182,6 +182,23 @@ def test_natural_key_cuts_the_file_suffix_the_way_the_C_scanner_does() -> None:
     assert sorted(reversed(order), key=sqlplan.natural_key) == order
 
 
+def test_natural_key_stops_cutting_at_a_character_no_suffix_may_contain() -> None:
+    """`match_suffix()`'s third arm, which no other name in this module exercises.
+
+    A character that can never appear inside a suffix (`-`, and every punctuation mark but
+    `.`) also clears the pending candidate, so `a.b-c.sql` cuts to `a.b-c` while `a.b.sql`
+    cuts all the way back to `a`. Drop that arm and both cut to `a`, the cut pass ties, and
+    each pair below comes out reversed - which is the whole reason the cut exists. Both
+    were captured from `ls -v`; the second is the shape a hand-edited cmangos update takes.
+    """
+    order = ["a.b.sql", "a.b-c.sql"]
+    assert sorted(order) != order
+    assert sorted(reversed(order), key=sqlplan.natural_key) == order
+    realistic = ["z1_mangos.v2.sql", "z1_mangos.v2-fix.sql"]
+    assert sorted(realistic) != realistic
+    assert sorted(reversed(realistic), key=sqlplan.natural_key) == realistic
+
+
 def test_natural_key_puts_a_dotfile_before_every_name_that_has_no_leading_dot() -> None:
     """`Path.glob('*.sql')` returns `.gitignore` (unlike the `glob` module), so the key
     has to have an opinion about it, and C's is unconditional: a leading dot wins before
