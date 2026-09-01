@@ -203,10 +203,17 @@ def gather(
     enforcing = selinux() if here == "linux" else None
     server_fs = fs_type(server_dir) if here == "linux" else None
     # The server folder is probed here rather than inside the `Facts(...)` call
-    # below so that the two bind probes run in the order they are reported, and
-    # so the first thing to ask Docker for a container is still the server
-    # folder's probe — the call `_preflight_lines()` wraps its error handler
-    # around.
+    # below, so that the two bind probes run in the order they are reported.
+    # Left inline it would be the client that goes first: the client block sits
+    # above a `return` whose arguments are evaluated after it.
+    #
+    # An earlier draft of this comment also claimed the order mattered because
+    # `_preflight_lines()` wraps its `DockerCommandError` handler around the
+    # first Docker call. A review checked, and it does not: `bind_mount_ok()`
+    # and `images_built()` both go through `_docker()`, which hands back a
+    # `CompletedProcess` and never raises that error. The only call here that
+    # can is `port_conflicts()`, and it runs last either way. The hoist is right
+    # for the order it produces; it was never right for that reason.
     bind = probe(server_dir) if ready else None
     spec = _client_spec(entry)
     client_checks: tuple[Check, ...] = ()
