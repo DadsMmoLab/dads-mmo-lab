@@ -36,7 +36,7 @@ import hashlib
 import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from yulon import platform
 from yulon.catalog.catalog import CatalogEntry, NativeInstall
@@ -342,16 +342,19 @@ def render(
     # explicit `world_env` overriding both — that is the seam a settings
     # surface arrives through.
     #
-    # The `else {}` is not harmless. An entry that says `family: "azerothcore"`
-    # and omits the `azerothcore` block validates today, renders here without
-    # complaint, and hands the user mod-playerbots' OWN bot population instead
+    # The `else {}` used to be a hole. An entry that said `family: "azerothcore"`
+    # and omitted the `azerothcore` block validated, rendered here without
+    # complaint, and handed the user mod-playerbots' OWN bot population instead
     # of the one that was decided — the same-button-different-world divergence
     # the 2026-08-24 `docker compose config` diff was run to catch, arriving
-    # this time through a missing block rather than a missing key. Nothing
-    # covers it because every test asserts against the shipped catalogue, which
-    # has the block. What closes it is the exactly-one-family-block validator
-    # on `NativeInstall` (contract A14, added with the CMaNGOS models); until
-    # that exists this branch is a hole, not a default.
+    # through a missing block rather than a missing key, and covered by nothing
+    # because every test asserts against the shipped catalogue, which has the
+    # block. `NativeInstall._exactly_the_family_block` (contract A14, added with
+    # the CMaNGOS models) now closes it: no entry can reach this line saying
+    # `azerothcore` without the block, so the branch is the honest default for
+    # the `cmangos` family — which carries no `world_env`, because a CMaNGOS
+    # server is configured through its `.conf` files and not through container
+    # environment.
     entry_env = native.azerothcore.world_env if native.azerothcore is not None else {}
     env = dict(world_env) if world_env is not None else {**DEFAULT_WORLD_ENV, **entry_env}
     base = fill(
@@ -371,6 +374,13 @@ def render(
             "IMAGE_TAG": tag,
             "CONTAINER_USER": container_user(platform_id),
             "BIND_LABEL": bind_label,
+            # The catalog facts (contract A6), last so the install-identity keys
+            # above stay the authority on any name the two sets ever share. A
+            # token no template uses costs nothing — `fill()` minds unfilled
+            # placeholders, not unused values — so the WotLK files render byte
+            # for byte as before (A16), and `MAKE_JOBS`/`CORE_DIR` are simply
+            # absent for a non-`cmangos` entry rather than blank.
+            **entry_tokens(entry),
         },
     )
     override = fill(
@@ -417,6 +427,56 @@ def fill(text: str, tokens: Mapping[str, str]) -> str:
 
 _fill = fill
 """The pre-7.1 private name, kept so nothing that imported it moves twice."""
+
+
+def _container_prefix(entry: CatalogEntry) -> str:
+    """The part the three container names share: `ac-` for WotLK, `tbc-` for TBC.
+
+    The shared CMaNGOS templates name services `{{CONTAINER_PREFIX}}db`,
+    `..realmd`, `..mangosd` so they equal the entry's container names — the
+    AzerothCore convention `docker.start_database()` relies on. Derived rather
+    than declared, so the catalog cannot say two different things; the
+    invariants test asserts the rendered names against `containers.*`.
+    """
+    names = [entry.containers.db, entry.containers.auth, entry.containers.world]
+    return os.path.commonprefix(names)
+
+
+def entry_tokens(entry: CatalogEntry) -> dict[str, str]:
+    """The per-game tokens every template, conf value and SQL statement may use.
+
+    Facts the entry already states, spelled once: `DB_HOST` is the DB container
+    (the conf files reach it by that name, not the scripts' bare `db`), the
+    schema names are `databases.*`, and `LOGS_DB` is the first `extra` schema
+    — omitted, not blanked, when there is none, so a template that wants it
+    fails in `fill()` instead of writing `;;` into a conf. `MAKE_JOBS` and
+    `CORE_DIR` exist only for a `cmangos` block: `CORE_DIR` is the core's
+    in-image install prefix, derived as the parent of `conf.source_dir`
+    (`/opt/mangos/etc` → `/opt/mangos`), which is where the binaries, the
+    `etc/` bind and the `data/` bind all hang. `CmangosInstaller._tokens()`
+    adds the per-install ones (`DB_PASSWORD`, `REALM_HOST`, ports, project,
+    image prefix and tag) on top of this mapping (contract A6).
+
+    Raises:
+        ComposeGenError: the entry has no `install.native` block.
+    """
+    native = _native_of(entry)
+    tokens = {
+        "DB_IMAGE": native.db.image,
+        "DB_HOST": entry.containers.db,
+        "DB_USER": native.db.user,
+        "AUTH_DB": entry.databases.auth,
+        "WORLD_DB": entry.databases.world,
+        "CHAR_DB": entry.databases.characters,
+        "CONTAINER_PREFIX": _container_prefix(entry),
+        "CLIENT_BUILD": str(entry.client.build),
+    }
+    if entry.databases.extra:
+        tokens["LOGS_DB"] = entry.databases.extra[0]
+    if native.cmangos is not None:
+        tokens["MAKE_JOBS"] = str(native.cmangos.dockerfile.make_jobs)
+        tokens["CORE_DIR"] = str(PurePosixPath(native.cmangos.conf.source_dir).parent)
+    return tokens
 
 
 def _env_block(env: Mapping[str, str]) -> str:
