@@ -1173,12 +1173,32 @@ missed. Update this entry to FIXED with the mutation evidence when it lands.
    used `"utf8mb4; DROP DATABASE mangos"`, which **any** rule refusing `;` also refuses. The test
    pinned "semicolons are refused", never "the rule is an identifier fullmatch".
 
-**Open design note, deliberately not fixed here.** That charset rule's right home is a `pattern=` on
-the pydantic `DbFacts.charset` field (`catalog.py:143`, currently `charset: str = "utf8mb4"` with no
-pattern and no catalog-conformance test), so a bad entry fails when the catalog **loads** rather than
-as a runtime `InstallerError` part-way through an install. Refusing no real value today — all three
-`catalog.json` charsets and the default are `utf8mb4` — but `"utf8mb4 COLLATE utf8mb4_unicode_ci"` is
-a natural spelling for a future catalog author and would be refused mid-install.
+**Open design note, deliberately not fixed here.**
+
+- [ ] **`DbFacts.charset` has no `pattern=`, so a bad catalog entry fails mid-install instead of at
+      load.** `sqlplan.create_schemas()` refuses a charset that is not a plain identifier, because
+      `CHARACTER SET <charset>` is the one splice in that script with nothing around the value. The
+      check is right and in the wrong place: it raises an `InstallerError` during phase 0, after the
+      containers are up and the user has been told the install is running, for a defect entirely
+      visible in `catalog.json`. `catalog.py:143` is `charset: str = "utf8mb4"` — no `pattern`, and
+      no conformance test asserts the shipped entries satisfy the rule `sqlplan` applies to them.
+      Right home: `Field(pattern=r"[A-Za-z0-9_]+")` plus a conformance test over every shipped entry,
+      making it a load-time refusal and a failing test in CI. **The runtime check should stay even
+      then** — `create_schemas()` takes `charset` as a `str`, not a `DbFacts`, so the model cannot be
+      the only guard without changing that signature.
+
+**One more, CHECKED and found already closed — recorded so nobody removes the thing that closes it.**
+`_refuse_unquotable(password, ...)` runs only inside `create_schemas()`, and Tortoise never reaches it
+(`create` is empty) while still splicing `{{DB_PASSWORD}}` into `IDENTIFIED BY '...'` through
+`expand()`'s token fill. That looked like the same gap one layer up. It is not: `composegen.render()`
+calls `_refuse_unsafe(password, ...)` at `composegen.py:318`, and
+`_UNSAFE_SCALAR_CHARS = frozenset("$\"\;#{}
+	'")` **includes the single quote, the backslash
+and both line breaks** — so such a password is refused when the compose files are generated, which is
+stage 4 of 12, six stages before `import`.
+**But it is guarded by STAGE ORDERING, not by the function that appears to own the rule.** Anything
+that reorders the stages, or removes `_refuse_unsafe` from `render()` as redundant, reopens it
+silently. Named here so that edit gets challenged.
 
 **Also known, harmless only by ordering:** `create_schemas()` returns on `if not plan.create` *before*
 validating its schemas, so a plan with an empty `create` and a bogus `marker_db` is refused by
