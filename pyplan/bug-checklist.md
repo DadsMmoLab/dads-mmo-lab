@@ -1005,6 +1005,27 @@ was found by reading code; each is a line in a resolved compose document from a 
   The right moment to decide is J.2's review — either widen the mode, or make the Dockerfile's user
   and the conf mode answer to one place instead of two.
 
+- **`Path("/etc/x").is_absolute()` is FALSE on Windows, so a path-escape check built on it admits
+  the one pattern it exists to refuse — and the test that would catch it passes on Linux CI** —
+  2026-09-01, found while writing `sqlplan._matches`, measured on this laptop, and filed here rather
+  than in that module because it is a trap for **any** escape check in this codebase.
+
+  Two measurements, both on Windows Python:
+  - `Path("/etc/x").is_absolute()` -> **False**. A rooted POSIX pattern is not "absolute" to a
+    `WindowsPath`, so a guard reading `if Path(pattern).is_absolute(): refuse` waves it through.
+  - `Path("C:/srv") / "/etc/x"` -> **`C:\etc\x`**. The join then discards the server directory and
+    escapes to the drive root — which is exactly what the guard existed to prevent.
+
+  So the check admits the pattern **and** the join escapes, on the same platform, and the two halves
+  only line up there. On Linux the guard works and any test of it passes, which is why CI is no help:
+  the platform that needs the check is the one where it silently is not there.
+
+  *The fix is to test the pattern's own spelling rather than ask `Path` what it thinks* — a leading
+  `/` or `\`, a drive letter, and `..` segments, refused as text. Anyone adding a new escape check
+  should do the same, and should write at least one test whose expectation is stated in terms of the
+  pattern string rather than a `Path` predicate.
+  *Found independently by two sessions working J.3 in parallel.*
+
 
 ### One thing worth keeping
 
