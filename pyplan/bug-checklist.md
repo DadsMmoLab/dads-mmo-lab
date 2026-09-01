@@ -893,17 +893,17 @@ was found by reading code; each is a line in a resolved compose document from a 
 
 - **A clean working tree is not "nothing of the user's is here", and adoption read it as one** —
   2026-09-01, found by adversarial review of the guard the day after it landed, fixed the same day.
-  `Applier._may_adopt()` took a checkout on three facts, and its third was
-  `is_unmodified(clone, ".")` — `git status --porcelain`, which compares the working tree and the
-  index **against HEAD** and is therefore silent about HEAD itself. A user who cloned the catalog's
-  own repository into a server directory this app created and then COMMITTED their customisations
-  had a spotless tree: all three facts passed, adoption succeeded, and the very next call was
-  `git.clone()` → `fetch` + `reset --hard FETCH_HEAD`, which moved HEAD off those commits and left
-  them reachable only through the reflog. *Fixed* by a fourth fact and a third read-only git seam,
-  `HistoryReader.no_local_commits()`: `rev-list FETCH_HEAD..HEAD` must be empty, and a `None` — git
-  could not be asked, or the fetch could not reach the remote — refuses. (The first version of that
-  fact compared against a remote-tracking ref instead, which was wrong for every branchless
-  manifest; see the entry below.)
+  `Applier._may_adopt()` (renamed `_adoption_refusal()` on 2026-09-01) took a checkout on three
+  facts, and its third was `is_unmodified(clone, ".")` — `git status --porcelain`, which compares
+  the working tree and the index **against HEAD** and is therefore silent about HEAD itself. A
+  user who cloned the catalog's own repository into a server directory this app created and then
+  COMMITTED their customisations had a spotless tree: all three facts passed, adoption succeeded,
+  and the very next call was `git.clone()` → `fetch` + `reset --hard FETCH_HEAD`, which moved HEAD
+  off those commits and left them reachable only through the reflog. *Fixed* by a fourth fact and
+  a third read-only git seam, `HistoryReader.no_local_commits()`: `rev-list FETCH_HEAD..HEAD` must
+  be empty, and a `None` — git could not be asked, or the fetch could not reach the remote —
+  refuses. (The first version of that fact compared against a remote-tracking ref instead, which
+  was wrong for every branchless manifest; see the entry below.)
   **Third instance of one pattern in this codebase**, after `native.read_claim()` collapsing
   absent-vs-unreadable and `read_clone_claim()`'s note about it: *a question with more states than
   the answer being carried*. Worth stating as a review question in its own right — "how many states
@@ -921,8 +921,8 @@ was found by reading code; each is a line in a resolved compose document from a 
   name: the `include.sh` this app writes is empty and a user's need not be, so a name-only
   allowlist would have to grow a content check to be safe — and a content check is the first step
   of deciding which of somebody's untracked files are innocent, which is the reasoning that loses
-  work. The correction is written into `Applier._may_adopt()`'s docstring, where a reader will
-  actually look; a pushed commit message cannot be amended.
+  work. The correction is written into `Applier._adoption_refusal()`'s docstring, where a reader
+  will actually look; a pushed commit message cannot be amended.
 
 - **`git fetch origin HEAD` moves no remote-tracking ref, and a docstring said it moved one** —
   2026-09-01, found by verification review reproducing it end-to-end with the app's own `RunnerGit`
@@ -946,6 +946,23 @@ was found by reading code; each is a line in a resolved compose document from a 
   prose claim about what an external tool does, and a mock can only ever confirm the argv you
   already believed in. *Review question:* when a docstring asserts what a tool writes, reads or
   moves, which test would fail if that sentence were false — and does it use the real tool?
+
+- **One refusal for five different facts, and for one of them it said the opposite of the truth** —
+  2026-09-01, found by verification review of the fix above, fixed the same day. Adoption carried
+  "adopted / not adopted" out of a check whose last two facts have THREE answers each, so every
+  failure raised the same sentence: "there is no record here of one this app made … throws away
+  anything you have changed there." Correct for the fact it was written for, and untrue in both
+  halves for the case the network fetch created: an offline user reaches fact 4 having already
+  proved the folder is one this app installed (fact 2) and has nothing uncommitted in it (fact 3),
+  gets `None` for want of a connection, and is then told there is no record of the folder and that
+  they have changes to lose. *Refusing is right* — the install could not have fetched either — so
+  only the wording was fixed: `_may_adopt()` became `_adoption_refusal()` and returns the fact that
+  stopped it, and each outcome has its own sentence, with the offline one pointing at the internet
+  connection instead of at a folder to move aside.
+  **Fourth instance of the same pattern**, and the sharpest, because it was in the message that
+  reports the pattern: a question with more states than the answer being carried. *Review question:*
+  when one message serves several failures, is there a caller for whom it states something nobody
+  established?
 
 
 ### One thing worth keeping

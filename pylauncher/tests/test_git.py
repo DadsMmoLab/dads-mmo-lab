@@ -790,8 +790,9 @@ def test_the_containerized_history_question_fetches_in_a_container_that_has_a_ne
     `--network none` — so a fetch asked as a "read" fails on every machine, on
     every module, with a docker flag as its cause and nothing in the message
     saying so. It must go through the write container, the same one `_update()`
-    fetches with. The mount it brings is safe only because `_may_adopt()` has
-    already established that this app created the server directory.
+    fetches with. The mount it brings is safe only because
+    `_adoption_refusal()` has already established that this app created the
+    server directory.
 
     The count that follows needs no network and stays a read, so the hardened
     container is not given up for the whole question.

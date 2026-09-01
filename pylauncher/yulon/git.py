@@ -477,13 +477,16 @@ class RunnerGit:
         comparison stops predicting the update and simply reads it.
 
         **The cost is a network round trip inside an adoption check**, and it is
-        paid knowingly. `_may_adopt()` asks this fact last, only once the claim
-        file and the clean tree have both said yes, and the update is about to
-        fetch the same refs a moment later. Nothing is written outside `.git`
-        and no working tree is touched. When the network is down the fetch
-        fails, this returns `None`, and `_may_adopt()` refuses — the same
-        direction as every other `None` here, and an install that could not have
-        fetched anyway.
+        paid knowingly. `_adoption_refusal()` asks this fact last, only once the
+        claim file and the clean tree have both said yes, and the update is
+        about to fetch the same refs a moment later. Nothing is written outside
+        `.git` and no working tree is touched. When the network is down the
+        fetch fails, this returns `None`, and `_adoption_refusal()` refuses —
+        the same direction as every other `None` here, and an install that could
+        not have fetched anyway. The refusal says which of the two it is: an
+        offline user is told the remote could not be reached, and never that
+        they have commits of their own, because this answer establishes nothing
+        about that.
 
         Depth is deliberately not passed, for `_update()`'s reason: `git fetch
         --depth=1` truncates a full clone in place. Verified on a depth-1 clone
@@ -721,12 +724,12 @@ class ContainerGit:
         carries `--network none`, so a reader container cannot reach a remote at
         all. That brings the read-write mount and, on an enforcing SELinux box,
         the recursive `:z` relabel of `dest`. Safe only because of WHERE this is
-        asked: `_may_adopt()` reaches fact 4 only after `server_dir_claim()` has
-        said this app created the server directory, so the folder relabelled is
-        one this app owns and is about to `fetch` into anyway — the very same
-        container `_update()` runs. A future caller that asked this about a
-        FOREIGN checkout would be relabelling somebody else's repository in
-        order to decide whether to leave it alone; do not add one.
+        asked: `_adoption_refusal()` reaches fact 4 only after
+        `server_dir_claim()` has said this app created the server directory, so
+        the folder relabelled is one this app owns and is about to `fetch` into
+        anyway — the very same container `_update()` runs. A future caller that
+        asked this about a FOREIGN checkout would be relabelling somebody else's
+        repository in order to decide whether to leave it alone; do not add one.
 
         The `rev-list` that follows stays `writes=False`: it answers from the
         objects the fetch just landed, needs no network, and there is no reason

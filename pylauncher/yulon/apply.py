@@ -26,6 +26,7 @@ import subprocess
 import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import IO, Literal, Protocol
 
@@ -616,6 +617,92 @@ class _Log:
     skipped: list[str] = field(default_factory=list)
 
 
+class _NoAdoption(Enum):
+    """Why an existing checkout was not adopted — one value per fact, per answer.
+
+    `Applier._adoption_refusal()` asks three questions of a checkout whose
+    `origin` already matches, and each of the last two has THREE answers, not
+    two. Carrying only "adopted / not adopted" out of that made one sentence do
+    the work of five, and one of the five was a lie: fact 4 fetches, so a user
+    with no internet connection reaches it having passed facts 2 and 3 — the
+    folder is provably one this app installed and provably has nothing
+    uncommitted in it — and was then told there was no record of it and that
+    continuing would throw away their changes. Both halves untrue, to the one
+    user who had done nothing at all.
+
+    So the answer that leaves the guard is the fact that stopped it, and
+    `_no_adoption_message()` turns each into its own sentence. Collapsing states
+    into one answer is the fault this whole guard exists to undo (`Ownership`
+    counts the three times it has bitten this codebase); it would be a poor joke
+    to re-commit it in the message that reports it.
+
+    Fact 2 is the one place two answers still share a value, and it is on
+    purpose: a server dir with no `.yulon-install.json` and one whose file will
+    not parse both arrive as `NO_RECORD`. Neither says this app installed the
+    folder, so the user's situation and their remedy are the same either way —
+    unlike facts 3 and 4, where "no" and "could not ask" describe two different
+    people. Written down rather than left to be discovered.
+    """
+
+    NO_RECORD = "no-record"
+    EDITED = "edited"
+    TREE_UNSEEN = "tree-unseen"
+    COMMITTED = "committed"
+    HISTORY_UNSEEN = "history-unseen"
+
+
+def _no_adoption_message(refusal: _NoAdoption, rel: str, retry: str) -> str:
+    """The sentence each refusal gets: what was found, and what to do about it.
+
+    Written out one by one rather than assembled from clauses, because the whole
+    point is that they differ — a template with a hole in it is how they became
+    the same sentence in the first place. What they share is the remedy, and the
+    remedy is shared because it really is the same: move the folder aside and
+    press the button again. Except when nobody could look, where the remedy is
+    to make looking possible.
+    """
+    aside = (
+        "Move that folder aside — a module clone holds nothing but the module, so re-cloning "
+        f"it costs only the download — and then {retry}."
+    )
+    messages = {
+        _NoAdoption.NO_RECORD: (
+            f"{rel} is already a git checkout and there is no record here of one this app "
+            f"made. Continuing would run `git fetch` and `git reset --hard` over it, which "
+            f"throws away anything you have changed there, so nothing was touched. {aside}"
+        ),
+        _NoAdoption.EDITED: (
+            f"{rel} is a checkout of the repository this module comes from, but it has "
+            f"changes in it that were never committed. Continuing would run `git fetch` and "
+            f"`git reset --hard` over it, which throws those changes away, so nothing was "
+            f"touched. {aside}"
+        ),
+        _NoAdoption.TREE_UNSEEN: (
+            f"{rel} is a checkout of the repository this module comes from, but git would "
+            f"not say whether anything in it has been changed. Adopting it would mean "
+            f"running `git fetch` and `git reset --hard` over a folder this app could not "
+            f"look inside first, so nothing was touched. {aside}"
+        ),
+        _NoAdoption.COMMITTED: (
+            f"{rel} is a checkout of the repository this module comes from with nothing "
+            f"uncommitted in it, but it carries commits of your own. Continuing would run "
+            f"`git fetch` and `git reset --hard` over it, which moves those commits off the "
+            f"branch and leaves them reachable only through git's reflog, so nothing was "
+            f"touched. {aside}"
+        ),
+        _NoAdoption.HISTORY_UNSEEN: (
+            f"{rel} is a checkout of the repository this module comes from and nothing in it "
+            f"has been changed, but this app could not reach that repository to check whether "
+            f"the checkout also carries commits of its own. It will not run `git fetch` and "
+            f"`git reset --hard` over a folder it could not finish checking, so nothing was "
+            f"touched. That check needs the internet: get back online and {retry}. If the "
+            f"checkout is your own work rather than an older install, move that folder aside "
+            f"and {retry} instead."
+        ),
+    }
+    return messages[refusal]
+
+
 # ------------------------------------------------------------------- engine
 
 
@@ -678,8 +765,9 @@ class Applier:
         # same way again. The third question and not a rephrasing of the second:
         # `unmodified` compares the tree and the index against HEAD, so it
         # answers "clean" for a checkout somebody has committed their own work
-        # into. Only `_may_adopt()` asks this, and it is the fact that keeps
-        # adoption from meaning "clean tree, therefore nothing of yours here".
+        # into. Only `_adoption_refusal()` asks this, and it is the fact that
+        # keeps adoption from meaning "clean tree, therefore nothing of yours
+        # here".
         self.no_local_commits: Callable[[Path, str | None], bool | None] = (
             no_local_commits
             if no_local_commits is not None
@@ -841,8 +929,9 @@ class Applier:
            corroborated by `origin`.
         4. A checkout of the right repository with no claim, in a server
            directory this app installed, with nothing modified in it and no
-           commits of its own: adopted. `_may_adopt()` has the four facts and
-           why three of them were not enough.
+           commits of its own: adopted. `_adoption_refusal()` has the four
+           facts, why three of them were not enough, and — when one of them
+           says no — which one the user is told about.
         5. Everything else is a checkout this app did not make. `origin` is
            asked only to say WHICH refusal — a different repository, this
            repository, or a git that would not answer — because every branch
@@ -982,14 +1071,16 @@ class Applier:
                 f"folder aside and then {retry}.{self._removal_note(action, manifest)}"
             )
         branch = manifest.source.branch if manifest.source is not None else None
-        if url and self._may_adopt(clone, remote, url, branch):
+        # A manifest with no source never clones, so there is no repository to
+        # be a checkout OF and nothing to adopt: the folder is somebody else's
+        # by definition, which is what `NO_RECORD` says.
+        refusal = (
+            self._adoption_refusal(clone, remote, url, branch) if url else _NoAdoption.NO_RECORD
+        )
+        if refusal is None:
             return
         raise ApplyError(
-            f"{rel} is already a git checkout and there is no record here of one this app "
-            f"made. Continuing would run `git fetch` and `git reset --hard` over it, which "
-            f"throws away anything you have changed there, so nothing was touched. Move that "
-            f"folder aside — a module clone holds nothing but the module, so re-cloning it "
-            f"costs only the download — and then {retry}.{self._removal_note(action, manifest)}"
+            _no_adoption_message(refusal, rel, retry) + self._removal_note(action, manifest)
         )
 
     def _removal_note(self, action: When, manifest: Manifest) -> str:
@@ -1008,8 +1099,15 @@ class Applier:
             f"moving or deleting this folder is not by itself an uninstall."
         )
 
-    def _may_adopt(self, clone: Path, remote: str, url: str, branch: str | None) -> bool:
+    def _adoption_refusal(
+        self, clone: Path, remote: str, url: str, branch: str | None
+    ) -> _NoAdoption | None:
         """Adopt an existing checkout of the RIGHT repository — on four facts, not one.
+
+        `None` is the adoption; anything else is the fact that stopped it, which
+        the caller turns into that fact's own sentence. Which fact, and which of
+        its answers, is the whole of what a refused user needs to hear — see
+        `_NoAdoption`.
 
         The gap this narrows: a module installed by a build older than the claim
         file has no claim, so the first Install after that change is refused. A
@@ -1040,7 +1138,9 @@ class Applier:
         3. The checkout is unmodified. `git reset --hard FETCH_HEAD` destroys
            exactly the tracked changes `status` reports, so an empty answer is a
            proof that adopting costs nothing, and `None` — git could not be
-           asked — is not that proof and refuses.
+           asked — is not that proof and refuses. It refuses under its own
+           name (`TREE_UNSEEN`, not `EDITED`): nobody established that this
+           checkout has anything uncommitted in it.
         4. HEAD carries no commit the update would not. **`status` is not this
            question and cannot be made into it.** It compares the working tree
            and the index against HEAD; it says nothing at all about what HEAD
@@ -1054,9 +1154,12 @@ class Applier:
            `no_local_commits()` has run the update's own fetch to put a truthful
            commit behind `FETCH_HEAD`. `None` — git could not be asked, or the
            fetch could not reach the remote — refuses, per `Ownership`'s three
-           outcomes: "nothing to compare against" is not "nothing to lose".
-           `branch` is the manifest's, because the manifest's is what the update
-           will fetch.
+           outcomes: "nothing to compare against" is not "nothing to lose". It
+           refuses as `HISTORY_UNSEEN` rather than `COMMITTED`, because the
+           commonest way to reach it is a machine that is offline, and telling
+           somebody who has committed nothing that their commits are in the way
+           would be the collapse this fact was added to end. `branch` is the
+           manifest's, because the manifest's is what the update will fetch.
 
            **This fact costs a network round trip, and that is why it is asked
            last.** It runs only once facts 2 and 3 have both said yes, moments
@@ -1090,17 +1193,26 @@ class Applier:
         work.
         """
         if self.server_dir_claim(self.server_dir) is not Ownership.OWNED:
-            return False
-        if self.unmodified(clone, ".") is not True:
-            return False
-        if self.no_local_commits(clone, branch) is not True:
-            return False
+            return _NoAdoption.NO_RECORD
+        # `is False` / `is not True` throughout, never truthiness: the whole
+        # point is that these seams answer three things, and which of the two
+        # refusals it is decides what the user is told.
+        clean = self.unmodified(clone, ".")
+        if clean is not True:
+            if clean is False:
+                return _NoAdoption.EDITED
+            return _NoAdoption.TREE_UNSEEN
+        nothing_of_theirs = self.no_local_commits(clone, branch)
+        if nothing_of_theirs is not True:
+            if nothing_of_theirs is False:
+                return _NoAdoption.COMMITTED
+            return _NoAdoption.HISTORY_UNSEEN
         logger.info(
             f"adopting the existing checkout at {_rel(self.server_dir, clone)}: it is a clean "
             f"checkout of {remote} (the manifest's {url}) with no commits of its own, inside a "
             f"server directory this app installed"
         )
-        return True
+        return None
 
     # -- steps -------------------------------------------------------------
 

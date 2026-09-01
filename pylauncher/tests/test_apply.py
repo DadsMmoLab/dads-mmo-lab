@@ -1344,31 +1344,43 @@ def test_a_hand_installed_module_in_someone_else_s_server_dir_is_not_adopted(
     assert (clone / "src" / "mine.cpp").read_bytes() == before
 
 
-@pytest.mark.parametrize("answer", [False, None], ids=["edited", "git-could-not-say"])
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [(False, "changes in it that were never committed"), (None, "git would not say")],
+    ids=["edited", "git-could-not-say"],
+)
 def test_a_checkout_with_local_work_in_it_is_not_adopted(
-    tmp_path: Path, answer: bool | None
+    tmp_path: Path, answer: bool | None, expected: str
 ) -> None:
     """Fact 3 alone fails. `None` is "could not ask", and refuses like a "no".
 
     `git fetch` + `git reset --hard FETCH_HEAD` destroys precisely what
     `git status` reports, so an empty answer is the proof that adopting costs
     nothing — and no answer at all is not that proof.
+
+    Both refuse, and they say different things while refusing: telling a user
+    whose git could not be run that they have uncommitted changes is telling
+    them something nobody established.
     """
     clone, before = _user_module(tmp_path, checkout_of="the same repo, edited")
     _installed_by_this_app(tmp_path)
     git = _FakeGit({}, unmodified=answer, no_local_commits=True)
     applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
 
-    with pytest.raises(ApplyError, match="no record"):
+    with pytest.raises(ApplyError, match=expected):
         applier.install(parse_manifest(OWNED_ITEM))
 
     assert git.calls == []
     assert (clone / "src" / "mine.cpp").read_bytes() == before
 
 
-@pytest.mark.parametrize("answer", [False, None], ids=["committed", "git-could-not-say"])
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [(False, "commits of your own"), (None, "could not reach that repository")],
+    ids=["committed", "git-could-not-say"],
+)
 def test_a_checkout_carrying_the_user_s_own_commits_is_not_adopted(
-    tmp_path: Path, answer: bool | None
+    tmp_path: Path, answer: bool | None, expected: str
 ) -> None:
     """Fact 4 alone fails, and it is the fact the first three cannot see.
 
@@ -1380,21 +1392,68 @@ def test_a_checkout_carrying_the_user_s_own_commits_is_not_adopted(
     which on an existing checkout runs `fetch` + `reset --hard FETCH_HEAD` and
     throws those commits away — work no check had ever looked at.
 
-    So the fourth fact is a question about HEAD itself: are there commits here
-    that the ref this update would reset to does not already carry? `None` —
-    git could not be asked, or there is no such remote-tracking ref to compare
-    against — refuses like a "no", per `Ownership`'s three-outcome rule.
+    So the fourth fact is a question about HEAD itself: does HEAD carry commits
+    that `FETCH_HEAD` does not, after `no_local_commits()` has run the update's
+    own fetch to put a truthful commit behind that ref? `None` — no `.git`
+    directory, a fetch that could not reach the remote, or a `rev-list` that
+    would not answer — refuses like a "no", per `Ownership`'s three-outcome
+    rule. It does not refuse in the same WORDS: an offline user has committed
+    nothing and must not be told they have.
     """
     clone, before = _user_module(tmp_path, checkout_of="the same repo, committed to")
     _installed_by_this_app(tmp_path)
     git = _FakeGit({}, unmodified=True, no_local_commits=answer)
     applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
 
-    with pytest.raises(ApplyError, match="no record"):
+    with pytest.raises(ApplyError, match=expected):
         applier.install(parse_manifest(OWNED_ITEM))
 
     assert git.calls == []
     assert (clone / "src" / "mine.cpp").read_bytes() == before
+
+
+def test_a_fact_that_said_no_and_one_that_could_not_be_asked_never_share_a_sentence(
+    tmp_path: Path,
+) -> None:
+    """The three-outcome rule, applied to the words the user actually reads.
+
+    Facts 3 and 4 each refuse for two different reasons — the answer was "no",
+    or there was no answer — and those are not the same news. The offline case
+    is the sharpest: fact 4 fetches, so a user with no connection gets `None`
+    for a checkout that facts 2 and 3 have just proved is in a folder this app
+    made and has nothing uncommitted in it. Told "there is no record here of one
+    this app made" and "throws away anything you have changed there", they are
+    told the opposite of their own situation twice in one sentence.
+
+    Collapsing outcomes into one answer is the defect this entire guard exists
+    to undo (`Ownership`'s docstring counts the three times it has bitten this
+    codebase). It must not come back in the message that reports it.
+    """
+    said: dict[str, str] = {}
+    for name, unmodified, no_local_commits in (
+        ("edited", False, True),
+        ("tree-unknown", None, True),
+        ("committed", True, False),
+        ("offline", True, None),
+    ):
+        server_dir = tmp_path / name
+        _user_module(server_dir, checkout_of="the same repo")
+        _installed_by_this_app(server_dir)
+        applier = Applier(
+            server_dir,
+            git=_FakeGit({}, unmodified=unmodified, no_local_commits=no_local_commits),
+            remote_url=_Origins(OWNED_URL),
+        )
+        with pytest.raises(ApplyError) as err:
+            applier.install(parse_manifest(OWNED_ITEM))
+        said[name] = str(err.value)
+
+    assert len(set(said.values())) == len(said), said
+    # and each one is about its own fact, not about somebody else's
+    assert "commits of your own" in said["committed"]
+    assert "commits of your own" not in said["offline"]
+    assert "could not reach that repository" in said["offline"]
+    assert "no record here" not in said["offline"]
 
 
 def test_the_commit_question_is_asked_about_the_branch_the_update_would_reset_to(
