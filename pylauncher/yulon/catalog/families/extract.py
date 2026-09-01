@@ -41,6 +41,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -49,7 +50,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from yulon import docker, platform
-from yulon.catalog.catalog import ExtractPlan, ExtractTool
+from yulon.catalog.catalog import ExtractPlan, ExtractTool, RetrySpec
 from yulon.catalog.installer import InstallerError
 from yulon.log import get_logger
 
@@ -470,6 +471,99 @@ def container_security_args(*, enforcing: bool | None) -> tuple[str, ...]:
     return (*EXTRACT_HARDENING, *platform.label_disable_args(enforcing=enforcing))
 
 
+STAGE_MOUNT = "/work"
+"""Where the `stage_client` symlink farm is laid: the container's own writable layer.
+
+Deliberately not a third bind and not a tmpfs. `--rm` takes the layer away with
+the container, the farm is symlinks rather than bytes so it costs nothing to
+build, and a third mount would be a third place to get the SELinux answer right
+for — `container_security_args()`'s flag is container-wide precisely so that the
+number of mounts stops mattering.
+"""
+
+STAGE_FAILED_RETURNCODE = 91
+"""What `STAGE_SCRIPT` exits with when the farm could not be laid — before the tool ran.
+
+Read together with `STAGE_FAILED_MARKER` and never alone: 91 is an ordinary
+status a C++ extractor may exit with on its own, and reading it as "the farm
+failed" would tell a user their tool never started when it had run for an hour.
+`docker.cli_missing_run()` demands both halves of its sentinel for the same
+reason and this follows it.
+"""
+
+STAGE_FAILED_MARKER = "yulon: the staged copy of the client could not be built"
+"""The words `STAGE_SCRIPT` prints on that path; the other half of the signal."""
+
+STAGE_SCRIPT = (
+    "mkdir -p /work && cp -rs /client/. /work && cd /work || "
+    '{ echo "yulon: the staged copy of the client could not be built"; exit 91; }; '
+    '"$@"; status=$?; '
+    "for name in $YULON_OUT_DIRS; do "
+    '[ -e "$name" ] && mkdir -p "/out/$name" && cp -r "$name/." "/out/$name/"; '
+    "done; exit $status"
+)
+"""The `stage_client` fallback: a symlink farm of the client inside the container.
+
+For a tool that insists on cwd = client and writes beside `Data/`: `cp -rs` lays
+symlinks to the read-only mount in a folder of the container's own writable
+layer (gone with `--rm`), the tool runs there, and whatever it produced is
+copied to `/out`. The client mount stays `:ro` — the point of the whole model —
+and the argv's `/client` paths are rewritten to `/work` so the tool reads
+through the farm. Data, not code: `stage_client: true`.
+
+Three details are load-bearing and each of them is a wrong sentence avoided:
+
+* **The farm's own failure is not the tool's.** `mkdir`, `cp -rs` and `cd` are
+  one chain, and if any of them gives up the script says so in its own words and
+  exits `STAGE_FAILED_RETURNCODE` WITHOUT running `"$@"`. `_conclude()` then
+  says the tool never ran, rather than reporting a status the tool never
+  produced.
+* **The copy-back is by content into a folder we make.** This bullet used to say
+  the plan's `cp -r "$name" /out/` nests as `/out/Buildings/Buildings` on a
+  second pass. **It does not, and that reason is withdrawn.** Re-measured
+  2026-09-01 on `debian:stable-slim` (GNU coreutils) and `alpine:3.20`
+  (BusyBox), running the plan's script twice against one persistent `/out`:
+  both merged flat into `/out/Buildings/`, identically. A relative source with
+  an existing destination *directory* derives `dest/basename(src)`; only
+  `cp -r "$name" "/out/$name"` nests, which both images also confirmed and
+  which nothing here ever proposed. Anyone who meets `cp -r "$name" /out/` in
+  an older draft should know it is not known-broken.
+
+  The shipped spelling stays on two grounds that survive the re-measurement. It
+  is idempotent across passes by construction rather than by a convention of
+  `cp`'s about trailing components, so the invariant is visible in the line
+  instead of in a manual page. And it is the only one that puts a `produces`
+  name containing a slash where the count gate looks: measured the same day, a
+  `produces` entry `Cameras/Buildings` lands at `/out/Buildings` under the
+  plan's form and at `/out/Cameras/Buildings` under this one, while `counts()`
+  reads `data_dir / folder` — so the plan's form would refuse that install for
+  having produced nothing. No catalog entry names a slashed folder today and
+  nothing in `ExtractTool` forbids one.
+* **`$status` is the tool's.** Saved before the copy loop, so a `[ -e ]` that
+  found nothing cannot turn a failed extraction into a success, and a successful
+  extraction whose output folder is missing still reaches the count gate as
+  "produced too little" rather than as a shell error.
+"""
+
+
+def _staged_argv(argv: Sequence[str]) -> tuple[str, ...]:
+    """The tool's own argv with `/client` paths pointed at the farm instead.
+
+    Whole path components only: `/client` and anything under `/client/` move,
+    while a longer name that merely starts with those letters (`/clientele`) is
+    left alone — a prefix test without the separator would rewrite it into
+    `/workele`.
+    """
+    return tuple(
+        (
+            STAGE_MOUNT + arg[len(CLIENT_MOUNT) :]
+            if arg == CLIENT_MOUNT or arg.startswith(CLIENT_MOUNT + "/")
+            else arg
+        )
+        for arg in argv
+    )
+
+
 def tool_run(
     plan: ExtractPlan,
     tool: ExtractTool,
@@ -484,24 +578,136 @@ def tool_run(
 
     `--ulimit stack=-1` is data (`ulimit_stack_unlimited`): the vanilla vmap
     extractor overflows the default stack on some maps and segfaults; nothing
-    else needs it, so nothing else gets it.
+    else needs it, so nothing else gets it. `stage_client` is data too: it swaps
+    the argv for the `STAGE_SCRIPT` wrapper, the cwd for the farm, and names the
+    tool's output folders in the environment so the script knows what to copy
+    back. Neither changes a mount — the client is `:ro` in both modes.
 
     `user_args` and `security_args` both arrive already spelled, from
     `platform.container_user_args()` and `container_security_args()`. Neither is
     asked for here: this builds a description and asks the machine nothing, so a
     test gets the same spec on every host it runs on.
+
+    Raises:
+        InstallerError: the plan stages the client and one of this tool's output
+            folders is named with whitespace. `for name in $YULON_OUT_DIRS`
+            splits on it, so the folder would be looked for under two names that
+            do not exist, nothing would be copied back, and the count gate would
+            report the user's client as incomplete for a mistake in our catalog.
     """
+    argv: tuple[str, ...] = tuple(tool.argv)
+    workdir = OUT_MOUNT
+    env: dict[str, str] = {}
+    if plan.stage_client:
+        loose = sorted(name for name in tool.produces if any(ch.isspace() for ch in name))
+        if loose:
+            raise InstallerError(
+                f"{tool.name} stages the client, and its output folders {loose} are named with "
+                "whitespace, which the staging script splits on — the catalog must name them "
+                "without it."
+            )
+        argv = ("sh", "-c", STAGE_SCRIPT, "sh", *_staged_argv(tool.argv))
+        workdir = STAGE_MOUNT
+        env = {"YULON_OUT_DIRS": " ".join(tool.produces)}
     return docker.ContainerRun(
         image=image_ref,
-        argv=tuple(tool.argv),
+        argv=argv,
         mounts=(
             docker.Mount(client_dir, CLIENT_MOUNT, read_only=True),
             docker.Mount(data_dir, OUT_MOUNT),
         ),
-        workdir=OUT_MOUNT,
+        workdir=workdir,
+        env=env,
         user_args=tuple(user_args),
         security_args=tuple(security_args),
         ulimits=("stack=-1",) if plan.ulimit_stack_unlimited else (),
+    )
+
+
+def _retry_matches(
+    retry: RetrySpec, run: docker.AttachedRun, cancel: threading.Event | None
+) -> bool:
+    """Did this ending look like the one the recipe names — and is another go the right answer?
+
+    Five ways to answer "no", and every one of them is a decision rather than a
+    fall-through:
+
+    * **Exit 0.** Nothing failed; there is nothing to retry.
+    * **The user pressed Stop** — `CANCELLED_RETURNCODE`, or a token set while
+      the tool was exiting. A stopped tool's last lines can say anything,
+      including the very words the recipe matches on, and starting a fresh
+      container after somebody pressed Stop is the one thing the cancel path
+      exists to prevent.
+    * **Nothing was started at all** — no docker CLI. Running a program that is
+      not there a second time is not a recipe for anything.
+    * **The tail does not match.** The ordinary "this is a different failure".
+    * **The pattern is not a usable regular expression.** A bug in our catalog,
+      not in the user's machine: it is logged once, loudly, and answered "no
+      retry", so what reaches the user is the tool's own failure — which is
+      true — instead of a `re.error` out of a stage that is otherwise all
+      yielded lines.
+    """
+    if run.returncode == 0 or run.returncode == docker.CANCELLED_RETURNCODE:
+        return False
+    if cancel is not None and cancel.is_set():
+        return False
+    if docker.cli_missing_run(run):
+        return False
+    try:
+        return re.search(retry.when_log_matches, "\n".join(run.tail)) is not None
+    except re.error as exc:
+        logger.warning(
+            f"the retry recipe's pattern {retry.when_log_matches!r} is not a usable regular "
+            f"expression ({exc}), so nothing is re-run and the tool's own failure stands"
+        )
+        return False
+
+
+def _retry_applies(
+    retry: RetrySpec, tool: ExtractTool, run: docker.AttachedRun, cancel: threading.Event | None
+) -> bool:
+    """`_retry_matches`, plus the one thing a matching log is not enough for.
+
+    The recipe must name the tool that just failed. It normally does — Vanilla's
+    names `vmap extract`, which is the thing that segfaults, and `vmap assemble`
+    with it because the assembler's input changed — but a recipe that named only
+    OTHER tools would re-run them, skip past the crash with `continue`, and leave
+    the tool that actually failed with no record and no refusal. Every later tool
+    would then be satisfied, the stage would end with a success line, and the
+    server would fail to load maps hours later. A recipe that cannot cover the
+    failure does not apply to it, and the tool's own failure stands.
+    """
+    if not _retry_matches(retry, run, cancel):
+        return False
+    if tool.name not in retry.tools:
+        logger.warning(
+            f"{tool.name} failed the way the retry recipe describes, but the recipe re-runs "
+            f"{list(retry.tools)}, which does not include it; retrying those would leave the "
+            "tool that failed un-run and report an extraction nobody finished, so its failure "
+            "stands instead"
+        )
+        return False
+    return True
+
+
+def _tool_named(plan: ExtractPlan, name: str) -> ExtractTool:
+    """The plan's tool of that name, or the sentence that says the recipe is wrong.
+
+    `ExtractPlan`'s own validator refuses a recipe naming a tool the plan does
+    not have, so this cannot be reached from `catalog.json`; a plan built in code
+    can still name a stranger, and one sentence beats a `StopIteration` from a
+    generator expression halfway through an extraction.
+    """
+    for tool in plan.tools:
+        if tool.name == name:
+            return tool
+    raise InstallerError(f"the retry recipe names {name!r}, which is not a tool of this plan")
+
+
+def _stage_failed(run: docker.AttachedRun) -> bool:
+    """Did `STAGE_SCRIPT` give up before the tool ran? Both halves, never one."""
+    return run.returncode == STAGE_FAILED_RETURNCODE and any(
+        STAGE_FAILED_MARKER in line for line in run.tail
     )
 
 
@@ -530,6 +736,21 @@ def run_plan(
     `required_file` is the client spec's; `client_build` is only spoken, in the
     shortfall refusal, because the count gate is the real check of the build.
 
+    Two of the plan's fields are fallbacks, and both are said out loud rather
+    than done quietly, because "it needed help" and "it went fine" are different
+    facts about somebody's machine:
+
+    * **`retry`** — the vanilla extractors crash on some maps and succeed on the
+      next attempt. When a failure's log matches the recipe, the tools the recipe
+      NAMES run again, once for the whole plan, and the log says which and why.
+      A second matching crash is not retried again: it falls through to the
+      refusal, which says it was already the retry. A crash that does not match
+      is never retried and nothing in the log mentions one.
+    * **`stage_client`** — `tool_run` wraps the tool in `STAGE_SCRIPT`. The
+      wrapper is per-tool and invisible here, except that a farm that could not
+      be built is reported as "the tool never ran" rather than as a status the
+      tool never produced.
+
     `selinux_enforcing` is the seam for the one question here that is asked of
     the machine. It is resolved at call time rather than bound as a default, so
     a test that patches `platform.selinux_enforcing` is actually seen — the trap
@@ -552,23 +773,66 @@ def run_plan(
     if current is None:
         current = expected
         write_evidence(data_dir, current)
-    for tool in plan.tools:
-        if tool_satisfied(tool, data_dir, current, expected):
-            seen = counts(tool.produces, data_dir)
-            yield f"{tool.name}: already extracted ({_counts_text(seen)})"
-            continue
-        yield f"{tool.name}: running {' '.join(tool.argv)}"
-        spec = tool_run(
+
+    def spec_for(which: ExtractTool) -> docker.ContainerRun:
+        """One `tool_run` for both attempts: a retry is the same container, run again."""
+        return tool_run(
             plan,
-            tool,
+            which,
             image_ref=image_ref,
             client_dir=client_dir,
             data_dir=data_dir,
             user_args=user_args,
             security_args=security_args,
         )
-        run = run_container(spec, sink=sink, cancel=cancel)
-        current, seen = _conclude(tool, run, data_dir, current, cancel, client_build)
+
+    retried = False
+    for tool in plan.tools:
+        if tool_satisfied(tool, data_dir, current, expected):
+            seen = counts(tool.produces, data_dir)
+            yield f"{tool.name}: already extracted ({_counts_text(seen)})"
+            continue
+        yield f"{tool.name}: running {' '.join(tool.argv)}"
+        run = run_container(spec_for(tool), sink=sink, cancel=cancel)
+        if not retried and plan.retry is not None and _retry_applies(plan.retry, tool, run, cancel):
+            # The vanilla extractors crash on some maps and succeed on the next
+            # attempt; the recipe (data) names which tools to run again, once.
+            #
+            # "Once" has two guards and they are not the same guard.
+            # `_retry_applies` is the reachable one: the recipe must cover the
+            # tool that failed, so the pass always re-runs it and always
+            # concludes it. `retried` is structural — with that rule every
+            # recipe tool carries a fresh record when the pass ends, so no later
+            # crash can reach here at all — and it stays because it is what
+            # bounds this to one pass if the rule above is ever relaxed. A
+            # second matching crash inside the pass never comes back here: it
+            # goes straight to _conclude, which refuses it saying it was already
+            # the retry.
+            retried = True
+            names = ", ".join(plan.retry.tools)
+            yield (
+                f"{tool.name} crashed the way the retry recipe expects; "
+                f"running {names} again once"
+            )
+            for name in plan.retry.tools:
+                again = _tool_named(plan, name)
+                yield f"{again.name}: retrying {' '.join(again.argv)}"
+                run = run_container(spec_for(again), sink=sink, cancel=cancel)
+                current, seen = _conclude(
+                    again,
+                    run,
+                    data_dir,
+                    current,
+                    cancel,
+                    client_build,
+                    staged=plan.stage_client,
+                    retried=True,
+                )
+                yield f"{again.name}: done ({_counts_text(seen)})"
+            continue
+        current, seen = _conclude(
+            tool, run, data_dir, current, cancel, client_build, staged=plan.stage_client
+        )
         yield f"{tool.name}: done ({_counts_text(seen)})"
 
 
@@ -579,10 +843,13 @@ def _conclude(
     current: Evidence,
     cancel: threading.Event | None,
     client_build: int | None,
+    *,
+    staged: bool = False,
+    retried: bool = False,
 ) -> tuple[Evidence, dict[str, int]]:
     """Turn one tool's exit into a record, or into the refusal that explains it.
 
-    Four endings, kept four, because the sentence differs for each and three of
+    Five endings, kept five, because the sentence differs for each and four of
     them are not "the extraction failed":
 
     1. **Stopped.** `CANCELLED_RETURNCODE`, or a cancel token that was set while
@@ -595,8 +862,17 @@ def _conclude(
        whole answer. `docker.cli_missing_run()` owns that shape, both halves of
        it, because `docker run` returns the CONTAINER's status and a binary
        missing inside the image genuinely exits 127.
-    3. **Failed.** Its exit status and its last words, which is all we know.
-    4. **Finished and fell short.** Exit 0 with too few files: an incomplete
+    3. **The staged farm could not be laid.** `stage_client` only: `STAGE_SCRIPT`
+       gave up before `"$@"`, so the tool never started and the status is one no
+       tool produced. Both halves of the signal are demanded, and only for a plan
+       that actually stages — a tool is free to exit 91 on its own and to print
+       whatever it likes while doing it.
+    4. **Failed.** Its exit status and its last words, which is all we know —
+       plus, when this attempt WAS the one retry the recipe asks for, that fact.
+       "vmap extract failed (exit 139)" is equally true of the first crash and
+       of the second, and a user who reads it after a second attempt they were
+       not told about goes looking for a first one the message never mentions.
+    5. **Finished and fell short.** Exit 0 with too few files: an incomplete
        client, the wrong expansion, a `data/` emptied by hand — or a folder
        nobody could list, which `file_count()` deliberately walks to "too few"
        so nothing is ever skipped on evidence nobody read. That is right, and it
@@ -604,7 +880,7 @@ def _conclude(
        than accusing the user's client of a permissions problem in our own
        output folder.
 
-    Only the fourth counts the folders, and it counts them once: the numbers in
+    Only the fifth counts the folders, and it counts them once: the numbers in
     the refusal are the numbers the gate read, and so are the ones in the
     caller's "done" line.
     """
@@ -615,9 +891,15 @@ def _conclude(
             f"{tool.name} could not be started, so the client was never read. "
             f"{docker.last_words(run.tail)}"
         )
-    if run.returncode != 0:
+    if staged and _stage_failed(run):
         raise InstallerError(
-            f"{tool.name} failed (exit {run.returncode}). Its last words were: "
+            f"{tool.name} never ran: the staged copy of the client could not be built inside "
+            f"the container, so no client was read. {docker.last_words(run.tail)}"
+        )
+    if run.returncode != 0:
+        after = ", and that was already the one retry the plan's recipe asks for" if retried else ""
+        raise InstallerError(
+            f"{tool.name} failed (exit {run.returncode}){after}. Its last words were: "
             f"{docker.last_words(run.tail)}"
         )
     seen = counts(tool.produces, data_dir)

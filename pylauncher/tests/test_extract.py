@@ -18,13 +18,13 @@ from __future__ import annotations
 
 import json
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import pytest
 
 from yulon import docker, platform
-from yulon.catalog.catalog import ExtractPlan, ExtractTool
+from yulon.catalog.catalog import ExtractPlan, ExtractTool, RetrySpec
 from yulon.catalog.families import extract
 from yulon.catalog.installer import InstallerError
 
@@ -614,8 +614,28 @@ def _flag_values(argv: list[str], flag: str) -> list[str]:
     return [argv[i + 1] for i, item in enumerate(argv[:-1]) if item == flag]
 
 
+def tool_program(spec: docker.ContainerRun) -> str:
+    """The extractor's own program, whether it ran directly or through the staging wrapper.
+
+    `stage_client` wraps the argv in `sh -c <script> sh <the tool...>`, so
+    `argv[0]` stops naming the tool and starts naming a shell. A double that
+    keyed its behaviour on `argv[0]` would answer every staged run with "I know
+    nothing about `sh`" — no fabricated output, no configured failure — and a
+    staging test would then pass or fail on the count gate rather than on the
+    staging. This reads the tool back out of the wrapper, so the same `Runner`
+    means the same thing in both modes.
+    """
+    return spec.argv[4] if spec.argv[:2] == ("sh", "-c") else spec.argv[0]
+
+
 class Runner:
-    """A `run_container` double: records every spec by field and fabricates the tool's output."""
+    """A `run_container` double: records every spec by field and fabricates the tool's output.
+
+    Its fabricated output goes straight to the `/out` mount even for a staged
+    run, where the real tool writes into the farm and `STAGE_SCRIPT` copies the
+    result across. That is the same net effect, and the copy itself is shell —
+    proved against a real `cp -rs`, not against this class.
+    """
 
     def __init__(
         self,
@@ -632,12 +652,13 @@ class Runner:
         self, spec: docker.ContainerRun, *, sink: docker.OutputSink, cancel: threading.Event | None
     ) -> docker.AttachedRun:
         self.specs.append(spec)
-        sink(f"ran {spec.argv[0]}")
+        program = tool_program(spec)
+        sink(f"ran {program}")
         out = next(mount.host for mount in spec.mounts if mount.guest == "/out")
-        for folder, count in self.writes.get(spec.argv[0], {}).items():
+        for folder, count in self.writes.get(program, {}).items():
             fill(out, folder, count)
-        if spec.argv[0] in self.fail:
-            code, words = self.fail.pop(spec.argv[0])
+        if program in self.fail:
+            code, words = self.fail.pop(program)
             return docker.AttachedRun(code, (words,))
         if self.cancel_after is not None and len(self.specs) >= self.cancel_after:
             if cancel is not None:
@@ -646,7 +667,7 @@ class Runner:
         return docker.AttachedRun(0, ())
 
     def names(self) -> list[str]:
-        return [Path(spec.argv[0]).name for spec in self.specs]
+        return [Path(tool_program(spec)).name for spec in self.specs]
 
 
 FULL = {
@@ -810,6 +831,43 @@ def test_the_shortfall_refusal_does_not_blame_the_client_for_a_folder_nobody_cou
     assert str(tmp_path / "server" / "data") in message
     assert "could not be listed" in message
     assert "maps: 0 files, at least 2 expected" in message
+
+
+def test_the_shortfall_refusal_quotes_the_number_the_gate_read_and_walks_the_folder_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fifth ending is the one that counts, and it counts once. Nothing said so.
+
+    `counts()` and `short_of()` are split apart precisely so the threshold and
+    the sentence come from ONE walk, and `counts()`'s docstring names the
+    incident: a folder that stops listing between two walks makes the refusal
+    and the log disagree about the number both are made of. The walked-once
+    tests only ever exercise a tool that succeeded, so rebuilding the refusal's
+    numbers with a second `shortfall(tool.produces, data_dir)` inside the `if
+    short:` block survived the whole file — the message is identical while the
+    filesystem holds still.
+
+    So the fixture does not hold still. `maps` answers 1 on its first walk and 0
+    on any later one, which is the only thing that distinguishes the two
+    versions: one walk quotes the 1 the gate decided on, two walks quote a 0 the
+    gate never saw. `dbc` is left alone and passes, so the run reaches ending
+    five and no other.
+    """
+    walked: list[Path] = []
+    real_count = extract.file_count
+
+    def counting(folder: Path) -> int:
+        walked.append(folder)
+        if folder.name == "maps":
+            return 1 if walked.count(folder) == 1 else 0
+        return real_count(folder)
+
+    monkeypatch.setattr(extract, "file_count", counting)
+    with pytest.raises(InstallerError) as caught:
+        run(PLAN, Runner(FULL), tmp_path)
+    data = tmp_path / "server" / "data"
+    assert walked == [data / "dbc", data / "maps"]
+    assert "maps: 1 files, at least 2 expected" in str(caught.value)
 
 
 def test_a_failing_tool_stops_the_plan_with_its_last_words(tmp_path: Path) -> None:
@@ -1109,3 +1167,553 @@ def test_the_security_args_are_the_platform_rule_and_not_a_second_spelling_of_it
     )
     assert extract.container_security_args(enforcing=False) == extract.EXTRACT_HARDENING
     assert extract.container_security_args(enforcing=None) == extract.EXTRACT_HARDENING
+
+
+# --- the retry recipe and the staged-client fallback ------------------------------------------
+#
+# Two fallbacks that live in the catalog as data, and each has THREE outcomes
+# rather than two, because a user who cannot tell them apart is told the wrong
+# thing about their own machine.
+#
+# The retry: no rule matched (a plain failure, and nothing in the log mentions a
+# retry at all), the rule matched and the second attempt worked (the log names
+# which tools ran again and why), or the rule matched and the second attempt
+# failed too (a refusal that says it was ALREADY the retry, so the same crash
+# twice does not read as the first one).
+#
+# The farm: it was not needed, it was built and the tool ran inside it, or it
+# could not be built — which is emphatically not "the tool failed", because the
+# tool never started. `STAGE_SCRIPT` says so in its own words and with its own
+# status, and both halves are demanded before that sentence is used, exactly as
+# `docker.cli_missing_run()` demands both halves of its sentinel.
+
+RETRY = RetrySpec(
+    when_log_matches="Segmentation fault|core dumped", tools=(VMAP.name, ASSEMBLE.name)
+)
+RETRY_PLAN = ExtractPlan(
+    image="server", tools=(AD, VMAP, ASSEMBLE), ulimit_stack_unlimited=True, retry=RETRY
+)
+STAGED_PLAN = ExtractPlan(image="server", tools=(VMAP,), stage_client=True)
+SEGFAULT = (139, "Segmentation fault (core dumped)")
+
+
+def test_a_matching_crash_re_runs_the_named_tools_once_and_continues(tmp_path: Path) -> None:
+    """Outcome two: the recipe matched, the second attempt worked, and the log says so.
+
+    The whole transcript, in order, rather than four `any()`s over it. A retry
+    that ran the right containers and then said the wrong thing about them
+    satisfies every loose assertion here — including the one that only asks
+    whether the word "retry" appears somewhere — and the transcript IS the
+    user's only account of why a tool ran twice. The last line is load-bearing
+    too: the outer loop reaches `vmap assemble` after the recipe already ran it,
+    and finds a record rather than running it a third time.
+    """
+    runner = Runner(FULL, fail={"/opt/bin/vmap_extractor": SEGFAULT})
+    said = run(RETRY_PLAN, runner, tmp_path)
+    assert runner.names() == ["ad", "vmap_extractor", "vmap_extractor", "vmap_assembler"]
+    assert said == [
+        f"{AD.name}: running /opt/bin/ad -i /client -o /out",
+        f"{AD.name}: done (dbc: 3 files, maps: 2 files)",
+        f"{VMAP.name}: running /opt/bin/vmap_extractor -d /client/Data",
+        f"{VMAP.name} crashed the way the retry recipe expects; "
+        f"running {VMAP.name}, {ASSEMBLE.name} again once",
+        f"{VMAP.name}: retrying /opt/bin/vmap_extractor -d /client/Data",
+        f"{VMAP.name}: done (Buildings: 2 files)",
+        f"{ASSEMBLE.name}: retrying /opt/bin/vmap_assembler Buildings vmaps",
+        f"{ASSEMBLE.name}: done (vmaps: 2 files)",
+        f"{ASSEMBLE.name}: already extracted (vmaps: 2 files)",
+    ]
+    evidence = extract.read_evidence(tmp_path / "server" / "data")
+    assert evidence is not None and len(evidence.tools) == 3
+
+
+def test_a_crash_that_does_not_match_the_recipe_is_a_plain_failure(tmp_path: Path) -> None:
+    """Outcome one: no rule matched, so nothing is re-run and nothing is said about a retry."""
+    runner = Runner(FULL, fail={"/opt/bin/vmap_extractor": (1, "no such archive")})
+    said: list[str] = []
+    with pytest.raises(InstallerError, match="no such archive") as caught:
+        said.extend(run(RETRY_PLAN, runner, tmp_path))
+    assert runner.names() == ["ad", "vmap_extractor"]
+    assert not any("retry" in line.lower() for line in said)
+    assert "retry" not in str(caught.value).lower()
+
+
+def test_a_second_matching_crash_is_a_failure_not_a_loop_and_says_it_was_the_retry(
+    tmp_path: Path,
+) -> None:
+    """Outcome three, and the sentence that keeps it apart from outcome one.
+
+    "vmap extract failed (exit 139)" is true of the first crash and of the
+    second, and a user reading it after the retry silently ran would go looking
+    for a first attempt the message says nothing about. The refusal names the
+    retry, and the tool runs exactly twice — the recipe is one more attempt, not
+    a loop.
+    """
+
+    class AlwaysCrash(Runner):
+        def __call__(
+            self,
+            spec: docker.ContainerRun,
+            *,
+            sink: docker.OutputSink,
+            cancel: threading.Event | None,
+        ) -> docker.AttachedRun:
+            self.specs.append(spec)
+            out = next(mount.host for mount in spec.mounts if mount.guest == "/out")
+            if tool_program(spec) == "/opt/bin/ad":
+                fill(out, "dbc", 3)
+                fill(out, "maps", 2)
+                return docker.AttachedRun(0, ())
+            return docker.AttachedRun(139, ("core dumped",))
+
+    runner = AlwaysCrash(FULL)
+    with pytest.raises(InstallerError, match="core dumped") as caught:
+        run(RETRY_PLAN, runner, tmp_path)
+    assert runner.names() == ["ad", "vmap_extractor", "vmap_extractor"]
+    message = str(caught.value)
+    assert "exit 139" in message
+    assert "already the one retry" in message
+
+
+def test_a_first_failure_is_never_told_as_though_it_had_been_retried(tmp_path: Path) -> None:
+    """The other side of the same sentence: outcome one must not borrow outcome three's words."""
+    runner = Runner(FULL, fail={"/opt/bin/vmap_extractor": (1, "no such archive")})
+    with pytest.raises(InstallerError) as caught:
+        run(RETRY_PLAN, runner, tmp_path)
+    assert "already the one retry" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("returncode", "with_token"),
+    [(docker.CANCELLED_RETURNCODE, False), (139, True)],
+    ids=["the-sentinel", "the-token"],
+)
+def test_a_stop_whose_last_words_match_the_recipe_is_a_stop_and_not_a_retry(
+    tmp_path: Path, returncode: int, with_token: bool
+) -> None:
+    """A stopped tool's last lines can say anything, including the recipe's own words.
+
+    Both shapes of a stop are tried with a tail the recipe matches: the docker
+    layer's sentinel, and a tool that exited while the token was being set. Read
+    only as "a non-zero exit whose log matches", either one starts a fresh
+    container after the user pressed Stop — the one thing the cancel path exists
+    to prevent — and `runner.names()` is what tells the two apart, because the
+    refusal is the same sentence either way.
+    """
+    token = threading.Event() if with_token else None
+
+    class CrashesOnTheWayOut(Runner):
+        def __call__(
+            self,
+            spec: docker.ContainerRun,
+            *,
+            sink: docker.OutputSink,
+            cancel: threading.Event | None,
+        ) -> docker.AttachedRun:
+            self.specs.append(spec)
+            out = next(mount.host for mount in spec.mounts if mount.guest == "/out")
+            if tool_program(spec) == "/opt/bin/ad":
+                fill(out, "dbc", 3)
+                fill(out, "maps", 2)
+                return docker.AttachedRun(0, ())
+            if cancel is not None:
+                cancel.set()
+            return docker.AttachedRun(returncode, ("Segmentation fault (core dumped)",))
+
+    runner = CrashesOnTheWayOut(FULL)
+    with pytest.raises(InstallerError, match=extract.EXTRACT_CANCEL_NOTE):
+        run(RETRY_PLAN, runner, tmp_path, cancel=token)
+    assert runner.names() == ["ad", "vmap_extractor"]
+
+
+def test_a_container_that_never_started_is_not_retried(tmp_path: Path) -> None:
+    """Running a missing docker CLI a second time is not a recipe for anything."""
+    missing = RetrySpec(when_log_matches=".", tools=(VMAP.name,))
+    plan = ExtractPlan(image="server", tools=(AD, VMAP), retry=missing)
+    runner = Runner(FULL, fail={"/opt/bin/vmap_extractor": (127, platform.DOCKER_CLI_MISSING_HELP)})
+    with pytest.raises(InstallerError, match="could not be started"):
+        run(plan, runner, tmp_path)
+    assert runner.names() == ["ad", "vmap_extractor"]
+
+
+def test_a_recipe_that_does_not_name_the_tool_that_failed_does_not_apply_to_it(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A matching log is not enough: the recipe has to be able to cover the failure.
+
+    Re-running only OTHER tools and then stepping past the crash leaves the tool
+    that failed with no record and no refusal, every later tool satisfied, and a
+    stage that ends by saying it worked — the extraction reported as finished by
+    the one thing that did not finish. Nothing is re-run, the tool's own failure
+    stands, and the mismatch is logged because it is a bug in our catalog.
+    """
+    elsewhere = RetrySpec(when_log_matches="core dumped", tools=(ASSEMBLE.name,))
+    plan = ExtractPlan(image="server", tools=(AD, VMAP, ASSEMBLE), retry=elsewhere)
+    runner = Runner(FULL, fail={"/opt/bin/vmap_extractor": SEGFAULT})
+    with caplog.at_level("WARNING"):
+        with pytest.raises(InstallerError, match="core dumped") as caught:
+            run(plan, runner, tmp_path)
+    assert runner.names() == ["ad", "vmap_extractor"]
+    assert "already the one retry" not in str(caught.value)
+    assert any(ASSEMBLE.name in record.message for record in caplog.records)
+    evidence = extract.read_evidence(tmp_path / "server" / "data")
+    assert evidence is not None and [record.name for record in evidence.tools] == [AD.name]
+
+
+def test_a_recipe_whose_pattern_is_not_a_regex_is_a_plain_failure_and_is_logged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A catalog bug must not reach the user as a `re.error` out of a stage of yields.
+
+    The safe answer is "no retry": what the user then reads is the tool's own
+    failure, which is true, instead of a traceback about a bracket.
+    """
+    broken = RetrySpec(when_log_matches="core dumped[", tools=(VMAP.name,))
+    plan = ExtractPlan(image="server", tools=(AD, VMAP), retry=broken)
+    runner = Runner(FULL, fail={"/opt/bin/vmap_extractor": SEGFAULT})
+    with caplog.at_level("WARNING"):
+        with pytest.raises(InstallerError, match="core dumped"):
+            run(plan, runner, tmp_path)
+    assert runner.names() == ["ad", "vmap_extractor"]
+    assert any("core dumped[" in record.message for record in caplog.records)
+
+
+def test_retry_matches_answers_every_ending_and_not_just_the_regex() -> None:
+    """The decision as a table, so no single ending can answer for another."""
+    matching = docker.AttachedRun(139, ("Segmentation fault (core dumped)",))
+    assert extract._retry_matches(RETRY, matching, None) is True
+    assert extract._retry_matches(RETRY, docker.AttachedRun(0, ("core dumped",)), None) is False
+    assert extract._retry_matches(RETRY, docker.AttachedRun(1, ("nope",)), None) is False
+    cancelled = docker.AttachedRun(docker.CANCELLED_RETURNCODE, ("core dumped",))
+    assert extract._retry_matches(RETRY, cancelled, None) is False
+    stopped = threading.Event()
+    stopped.set()
+    assert extract._retry_matches(RETRY, matching, stopped) is False
+    assert extract._retry_matches(RETRY, matching, threading.Event()) is True
+    never_started = docker.AttachedRun(127, (platform.DOCKER_CLI_MISSING_HELP,))
+    anything = RetrySpec(when_log_matches=".", tools=(VMAP.name,))
+    assert extract._retry_matches(anything, never_started, None) is False
+
+
+def test_the_retried_containers_are_built_the_same_way_as_the_first_attempt(
+    tmp_path: Path,
+) -> None:
+    """The retry is another `tool_run`, not a second spelling of one.
+
+    The SELinux answer in particular: a retried container that lost
+    `label:disable` would be denied the client on an enforcing box, and the
+    "retry" in the log would be the last thing the user saw work.
+    """
+    runner = Runner(FULL, fail={"/opt/bin/vmap_extractor": SEGFAULT})
+    run(RETRY_PLAN, runner, tmp_path, enforcing=True)
+    first, retried = runner.specs[1], runner.specs[2]
+    assert tool_program(first) == tool_program(retried) == "/opt/bin/vmap_extractor"
+    assert retried.security_args == first.security_args
+    assert "label:disable" in retried.security_args
+    assert retried.user_args == ("--user", "1000:1000")
+    assert retried.ulimits == ("stack=-1",)
+    assert retried.argv == first.argv and retried.mounts == first.mounts
+
+
+def test_the_retry_walks_each_output_folder_once_and_never_the_crashed_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One walk per attempt that finished, and none for the attempt that crashed.
+
+    The crashed run is refused before any counting — counting it would put a
+    number in the log that describes half a tool's work — and the retried run's
+    numbers come from the same single walk the gate used.
+    """
+    walked: list[Path] = []
+    real_count = extract.file_count
+
+    def counting(folder: Path) -> int:
+        walked.append(folder)
+        return real_count(folder)
+
+    monkeypatch.setattr(extract, "file_count", counting)
+    run(RETRY_PLAN, Runner(FULL, fail={"/opt/bin/vmap_extractor": SEGFAULT}), tmp_path)
+    data = tmp_path / "server" / "data"
+    assert walked[:4] == [data / "dbc", data / "maps", data / "Buildings", data / "vmaps"]
+    assert walked.count(data / "Buildings") == 1
+
+
+def _stopped_on_the_first_tool() -> Runner:
+    """Ending 1, and only ending 1: the cancel sentinel, with no configured failure."""
+    runner = Runner(FULL)
+    runner.cancel_after = 1
+    return runner
+
+
+def _first_tool_never_started() -> Runner:
+    """Ending 2: both halves of `cli_missing_run()`'s sentinel and nothing else."""
+    return Runner(FULL, fail={"/opt/bin/ad": (127, platform.DOCKER_CLI_MISSING_HELP)})
+
+
+def _the_farm_could_not_be_laid() -> Runner:
+    """Ending 3: both halves of the staging sentinel, on the one plan that stages."""
+    return Runner(
+        FULL,
+        fail={
+            "/opt/bin/vmap_extractor": (
+                extract.STAGE_FAILED_RETURNCODE,
+                extract.STAGE_FAILED_MARKER,
+            )
+        },
+    )
+
+
+def _first_tool_crashed_plainly() -> Runner:
+    """Ending 4: an ordinary non-zero status with ordinary last words, on a plan with
+    no retry recipe — so it is refused where it stands rather than run again."""
+    return Runner(FULL, fail={"/opt/bin/ad": SEGFAULT})
+
+
+@pytest.mark.parametrize(
+    ("plan", "make_runner", "says"),
+    [
+        pytest.param(PLAN, _stopped_on_the_first_tool, "was stopped", id="stopped"),
+        pytest.param(PLAN, _first_tool_never_started, "could not be started", id="never-started"),
+        pytest.param(STAGED_PLAN, _the_farm_could_not_be_laid, "never ran", id="farm-not-laid"),
+        pytest.param(PLAN, _first_tool_crashed_plainly, "failed (exit 139)", id="failed"),
+    ],
+)
+def test_none_of_the_four_refusing_endings_walks_an_output_folder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    plan: ExtractPlan,
+    make_runner: Callable[[], Runner],
+    says: str,
+) -> None:
+    """`_conclude` says only the fifth ending counts the folders. Four say it here.
+
+    The two "walked once" tests above only ever exercise a tool that succeeded
+    and a crash the retry recipe rescues, so the plain crash — ending 4, which
+    reaches `_conclude` and raises from it — had nothing asserting it counts
+    nothing. Moving `counts()` above `if run.returncode != 0` survived the whole
+    file. The cost is only wasted I/O over a half-written `data/` on a run that
+    is already refused, but the invariant is claimed in the docstring, and a
+    claimed invariant with no test is the one that quietly stops being true.
+
+    Three of these four also satisfy `returncode != 0`, so "it raised" would not
+    say which rule caught the run; each case asserts the sentence its own ending
+    produces, and each fixture trips exactly one — the cancel sentinel with no
+    configured failure, both halves of the CLI-missing sentinel, both halves of
+    the staging sentinel on the only plan that stages, and a 139 that is none of
+    them. Every case fails on the FIRST tool of its plan, so an empty `walked`
+    means nothing was walked at all rather than nothing since the last success.
+    """
+    walked: list[Path] = []
+    real_count = extract.file_count
+
+    def counting(folder: Path) -> int:
+        walked.append(folder)
+        return real_count(folder)
+
+    monkeypatch.setattr(extract, "file_count", counting)
+    with pytest.raises(InstallerError) as caught:
+        run(plan, make_runner(), tmp_path)
+    assert says in str(caught.value)
+    assert walked == []
+
+
+def test_a_recipe_naming_a_tool_the_plan_does_not_have_is_said_not_raised_blank() -> None:
+    """The model validator makes this unreachable from `catalog.json`; a plan built in
+    code can still name a stranger, and a sentence beats a `StopIteration`."""
+    assert extract._tool_named(PLAN, VMAP.name) is VMAP
+    with pytest.raises(InstallerError, match="not a tool of this plan"):
+        extract._tool_named(PLAN, "no such tool")
+
+
+def test_a_plan_with_no_recipe_runs_no_retry_at_all(tmp_path: Path) -> None:
+    """The default is nothing: `retry=None` and a crash that would have matched."""
+    assert PLAN.retry is None
+    runner = Runner(FULL, fail={"/opt/bin/vmap_extractor": SEGFAULT})
+    with pytest.raises(InstallerError, match="core dumped"):
+        run(PLAN, runner, tmp_path)
+    assert runner.names() == ["ad", "vmap_extractor"]
+
+
+# --- the staged client: a symlink farm in the container's own writable layer -------------------
+
+
+def test_stage_client_wraps_the_tool_in_a_symlink_farm_and_never_mounts_the_client_writable(
+    tmp_path: Path,
+) -> None:
+    runner = Runner(FULL)
+    run(STAGED_PLAN, runner, tmp_path)
+    (spec,) = runner.specs
+    assert spec.workdir == extract.STAGE_MOUNT
+    assert spec.argv[:2] == ("sh", "-c")
+    assert "cp -rs /client/. /work" in spec.argv[2]
+    assert spec.argv[3:] == ("sh", "/opt/bin/vmap_extractor", "-d", "/work/Data")
+    assert spec.env == {"YULON_OUT_DIRS": "Buildings"}
+    by_guest = {mount.guest: mount for mount in spec.mounts}
+    assert by_guest["/client"].read_only is True
+    assert set(by_guest) == {"/client", "/out"}
+
+
+def test_a_plan_that_does_not_stage_the_client_is_left_exactly_as_it_was(tmp_path: Path) -> None:
+    """The fallback that was not needed: no wrapper, no environment, cwd still `/out`."""
+    assert PLAN.stage_client is False
+    spec = extract.tool_run(
+        PLAN,
+        VMAP,
+        image_ref="yulon.local/x:1",
+        client_dir=tmp_path / "client",
+        data_dir=tmp_path / "data",
+        user_args=(),
+    )
+    assert spec.argv == VMAP.argv
+    assert spec.workdir == extract.OUT_MOUNT
+    assert spec.env == {}
+
+
+def test_the_staged_farm_is_not_a_third_mount_and_keeps_the_container_wide_label_decision(
+    tmp_path: Path,
+) -> None:
+    """A third bind would be a third place to get the SELinux answer right; `--rm` takes
+    the container's own layer with it, so the farm needs neither a mount nor a label."""
+    runner = Runner(FULL)
+    run(STAGED_PLAN, runner, tmp_path, enforcing=True)
+    (spec,) = runner.specs
+    assert [mount.guest for mount in spec.mounts] == ["/client", "/out"]
+    assert "label:disable" in spec.security_args
+    argv = spec.to_argv()
+    assert _flag_values(argv, "-w") == ["/work"]
+    for value in _flag_values(argv, "-v"):
+        assert not value.endswith((":z", ":Z")), value
+    assert _flag_values(argv, "-e") == ["YULON_OUT_DIRS=Buildings"]
+
+
+def test_only_client_paths_are_rewritten_into_the_farm() -> None:
+    """`/client` and things under it move; a longer name that merely starts the same does not."""
+    assert extract._staged_argv(("/opt/bin/x", "/client", "/client/Data", "-o", "/out")) == (
+        "/opt/bin/x",
+        "/work",
+        "/work/Data",
+        "-o",
+        "/out",
+    )
+    assert extract._staged_argv(("/clientele", "client", "x/client")) == (
+        "/clientele",
+        "client",
+        "x/client",
+    )
+
+
+def test_the_stage_script_names_the_same_mount_points_the_module_does() -> None:
+    """One home per path: a script that hard-coded a fourth spelling would drift silently."""
+    assert extract.STAGE_MOUNT == "/work"
+    assert f"cp -rs {extract.CLIENT_MOUNT}/. {extract.STAGE_MOUNT}" in extract.STAGE_SCRIPT
+    assert f"cd {extract.STAGE_MOUNT} ||" in extract.STAGE_SCRIPT
+    assert f'"{extract.OUT_MOUNT}/$name/"' in extract.STAGE_SCRIPT
+    assert extract.STAGE_FAILED_MARKER in extract.STAGE_SCRIPT
+    assert f"exit {extract.STAGE_FAILED_RETURNCODE}" in extract.STAGE_SCRIPT
+
+
+def test_the_stage_script_copies_out_by_content_into_a_folder_it_makes_itself() -> None:
+    """Not because the plan's `cp -r "$name" /out/` nests — re-measured, it does not.
+
+    That was this test's original reason and it was wrong: run twice against one
+    persistent `/out` on `debian:stable-slim` and `alpine:3.20` (2026-09-01),
+    the plan's spelling merged flat into `/out/Buildings/` on both. The reason
+    that survived is the one this assertion is really about — `mkdir -p
+    "/out/$name"` plus a copy by content is the only spelling that puts a
+    `produces` name with a slash in it where `counts()` looks. `Cameras/
+    Buildings` lands at `/out/Buildings` under the plan's form, which the count
+    gate reads as nothing produced; here it lands at `/out/Cameras/Buildings`.
+    Nothing in `ExtractTool` forbids such a name.
+
+    The negative half stays for the same reason, not the retired one, and is
+    a single-rule fixture: the plan's spelling is the one that mislays a
+    slashed name.
+    """
+    assert 'cp -r "$name/." "/out/$name/"' in extract.STAGE_SCRIPT
+    assert 'mkdir -p "/out/$name"' in extract.STAGE_SCRIPT
+    assert 'cp -r "$name" /out/' not in extract.STAGE_SCRIPT
+
+
+def test_the_stage_script_exits_with_the_tools_status_and_not_the_copy_loops() -> None:
+    """The wrapper must not launder the tool's exit status.
+
+    `$?` is saved before the copy-back and restored at the end. Left to fall out
+    of the loop, the container's status would be the last `cp`'s — or the last
+    `[ -e ]`'s, which is 1 for a tool that produced nothing — and `_conclude`
+    would read a crashed extraction as a success, or a clean one as a failure,
+    depending on which folder happened to exist. Measured against a real daemon
+    too: a tool exiting 3 inside the farm gives a container that exits 3, with
+    its output still copied out.
+    """
+    assert "status=$?; " in extract.STAGE_SCRIPT
+    assert extract.STAGE_SCRIPT.endswith("exit $status")
+
+
+def test_a_staged_farm_that_could_not_be_built_is_not_the_tool_failing(tmp_path: Path) -> None:
+    """The third outcome of the fallback, and it is not one of the tool's four.
+
+    "vmap extract failed (exit 91)" is a sentence about a tool that ran; the
+    script gave up before `"$@"` and the tool never started, so the refusal says
+    that instead — and no client was read either way.
+    """
+    gave_up = (extract.STAGE_FAILED_RETURNCODE, extract.STAGE_FAILED_MARKER)
+    runner = Runner(FULL, fail={"/opt/bin/vmap_extractor": gave_up})
+    with pytest.raises(InstallerError) as caught:
+        run(STAGED_PLAN, runner, tmp_path)
+    message = str(caught.value)
+    assert "never ran" in message
+    assert extract.STAGE_FAILED_MARKER in message
+    assert "exit 91" not in message
+    evidence = extract.read_evidence(tmp_path / "server" / "data")
+    assert evidence is not None and evidence.tools == ()
+
+
+def test_a_tool_that_really_exits_ninety_one_is_still_the_tool_failing(tmp_path: Path) -> None:
+    """Both halves of the marker, the way `cli_missing_run()` demands both of its own.
+
+    91 is an ordinary status a C++ extractor may exit with, and the same words
+    could appear in a tool's log; neither alone means the farm failed, and a plan
+    that stages nothing has no farm to fail in the first place — so even both
+    halves together are not enough without `stage_client`.
+    """
+    gave_up = (extract.STAGE_FAILED_RETURNCODE, extract.STAGE_FAILED_MARKER)
+    runner = Runner(FULL, fail={"/opt/bin/ad": gave_up})
+    with pytest.raises(InstallerError, match="exit 91") as unstaged:
+        run(PLAN, runner, tmp_path)
+    assert "never ran" not in str(unstaged.value)
+    words_only = Runner(FULL, fail={"/opt/bin/vmap_extractor": (1, extract.STAGE_FAILED_MARKER)})
+    with pytest.raises(InstallerError, match="exit 1") as caught:
+        run(STAGED_PLAN, words_only, tmp_path)
+    assert "never ran" not in str(caught.value)
+    status_only = Runner(
+        FULL, fail={"/opt/bin/vmap_extractor": (extract.STAGE_FAILED_RETURNCODE, "aborting")}
+    )
+    with pytest.raises(InstallerError, match="exit 91") as status_caught:
+        run(STAGED_PLAN, status_only, tmp_path)
+    assert "never ran" not in str(status_caught.value)
+
+
+def test_an_output_folder_named_with_whitespace_is_refused_rather_than_silently_lost(
+    tmp_path: Path,
+) -> None:
+    """`for name in $YULON_OUT_DIRS` splits on whitespace: two halves, neither of which
+    exists, nothing copied, and a count gate that then blames the user's client."""
+    spaced = ExtractTool(name="odd", argv=("/opt/bin/x",), produces={"two words": 1})
+    plan = ExtractPlan(image="server", tools=(spaced,), stage_client=True)
+    with pytest.raises(InstallerError, match="whitespace"):
+        extract.tool_run(
+            plan,
+            spaced,
+            image_ref="yulon.local/x:1",
+            client_dir=tmp_path / "client",
+            data_dir=tmp_path / "data",
+            user_args=(),
+        )
+    extract.tool_run(
+        ExtractPlan(image="server", tools=(spaced,)),
+        spaced,
+        image_ref="yulon.local/x:1",
+        client_dir=tmp_path / "client",
+        data_dir=tmp_path / "data",
+        user_args=(),
+    )
