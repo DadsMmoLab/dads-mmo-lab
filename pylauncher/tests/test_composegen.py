@@ -725,6 +725,49 @@ def test_fill_is_the_one_public_substitution_and_refuses_a_leftover_token() -> N
     assert composegen._fill is composegen.fill, "the old private name is an alias, not a copy"
 
 
+def test_an_unfilled_placeholder_is_named_and_never_quotes_what_was_substituted() -> None:
+    """The message says WHICH token, and quotes no filled text — because filled text is
+    where the secret is.
+
+    `fill()` substitutes every token first and only then looks for a leftover `{{`, so a
+    window of the RESULT can hold a value that was filled in. On the shipped Tortoise
+    statement that leaked eight characters of a constant prefix; one shape over — a token
+    the template comments out next to an unfilled one — it is the whole password, in a
+    user-facing error whose tail invites the user to report it.
+
+    The name is also simply the better message: every caller (`conf`, `sqlplan`,
+    `native`'s ready markers) re-raises this text about a file the traceback never names,
+    and "unfilled placeholder `{{NOPE}}`" beats forty characters of context.
+    """
+    secret = "tortoise-0123456789abcdef"
+    with pytest.raises(composegen.ComposeGenError) as caught:
+        composegen.fill("SELECT {{NOPE}} /*{{DB_PASSWORD}}*/", {"DB_PASSWORD": secret})
+    assert "{{NOPE}}" in str(caught.value)
+    assert secret not in str(caught.value)
+    with pytest.raises(composegen.ComposeGenError) as caught:
+        composegen.fill(
+            "CREATE USER '{{DB_USER}}'@'%' IDENTIFIED BY '{{DB_PASSWORD}}'",
+            {"DB_PASSWORD": secret},
+        )
+    assert "{{DB_USER}}" in str(caught.value)
+    assert secret not in str(caught.value)
+
+
+def test_a_leftover_brace_with_no_token_to_name_says_which_of_the_two_it_is() -> None:
+    """Two leftovers have no token name to report, and they have different remedies.
+
+    A `{{` the template spells but never closes as a `{{TOKEN}}` is a template bug, and
+    the template is quoted for it — template text is data in this repo, never a secret.
+    A `{{` a filled VALUE carried in is not the template's fault at all, and quoting it
+    is exactly the leak above, so it is described rather than shown.
+    """
+    with pytest.raises(composegen.ComposeGenError, match="not a closed"):
+        composegen.fill("root: {{ DB_HOST }}\n", {"DB_HOST": "db"})
+    with pytest.raises(composegen.ComposeGenError, match="a filled value") as caught:
+        composegen.fill("root: {{X}}\n", {"X": "{{oops"})
+    assert "oops" not in str(caught.value)
+
+
 # -- generated-password mode: the secret lives in .env and nowhere else --------
 
 
@@ -1215,6 +1258,15 @@ def test_every_cmangos_entry_has_a_dockerfile_pair_that_fills_from_its_tokens(
     wider mapping — because that is all a build-time render has: the image is
     built before any per-install secret or port is in hand. A template reaching
     for `DB_PASSWORD` therefore raises here, not in front of a user.
+
+    That last sentence is load-bearing and fragile, so: it holds only because
+    `entry_tokens()` never contains `DB_PASSWORD`, which makes a template that
+    spelled the token fail here as UNFILLED. Filling from the installer's real
+    mapping instead — the plausible "make this realistic" edit, since that is
+    what `CmangosInstaller._tokens()` hands `dockerfile.render()` — would delete
+    the check silently. Do not; and if you do, the guarantee is still
+    `dockerfile.SECRET_TOKEN`'s by-name refusal, covered in `test_dockerfile.py`
+    and `test_families_cmangos.py`.
     """
     native = cmangos_native(entry)
     template_dir = TEMPLATES / str(native.dockerfile_dir)

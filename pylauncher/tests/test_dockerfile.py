@@ -18,6 +18,7 @@ project can ship silently:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -120,6 +121,84 @@ def test_render_refuses_an_unknown_token(tmp_path: Path) -> None:
     (folder / "Dockerfile.tmpl").write_text("FROM x\nRUN {{NOT_A_TOKEN}}\n", encoding="utf-8")
     with pytest.raises(dockerfile.DockerfileError, match="NOT_A_TOKEN"):
         dockerfile.render(folder, TOKENS)
+
+
+# -- render: the secret may not reach a generated file ------------------------
+
+SECRET = "tbc-0123456789abcdef"
+"""Shaped like the real one: `<password.prefix><hex>`, as `.db_password` holds it and as
+`CmangosInstaller._tokens()` carries it into the mapping K.4 hands `render()` whole."""
+
+
+def test_render_refuses_a_dockerfile_template_that_names_the_password_token(
+    tmp_path: Path,
+) -> None:
+    """The decision `composegen.generate()` took for the compose files, taken here too.
+
+    A compose file holding the secret is a file the user owns: delete it, rotate, done. A
+    Dockerfile holding it is baked into a content-addressed image layer, so `docker
+    history` prints it long after the file is gone and undoing it means hunting every
+    image built from that layer. So this is refused BY NAME, the way `generate()` refuses
+    it, rather than being left to `fill()` — which minds an unfilled placeholder and has
+    no opinion at all about a spelled one.
+
+    The mapping deliberately CARRIES `DB_PASSWORD`: that is the shape K.4 hands over, and
+    it is what makes this fixture violate exactly one rule. Without the key the template
+    would fail as merely unfilled and the test would prove nothing about the refusal.
+    """
+    folder = templates(tmp_path)
+    (folder / "Dockerfile.tmpl").write_text(
+        "FROM debian:12\nENV DB_PASSWORD={{DB_PASSWORD}}\n", encoding="utf-8", newline="\n"
+    )
+    with pytest.raises(
+        dockerfile.DockerfileError, match=r"DB_PASSWORD.*Dockerfile\.tmpl"
+    ) as caught:
+        dockerfile.render(folder, {**TOKENS, "DB_PASSWORD": SECRET})
+    assert "docker history" in str(caught.value), "the refusal's own words, not fill()'s"
+    assert SECRET not in str(caught.value), "a refusal about a secret does not print it"
+
+
+def test_render_refuses_a_dockerignore_template_that_names_the_password_token(
+    tmp_path: Path,
+) -> None:
+    """Both halves fill from the same mapping through the same `fill()`, and `write()`
+    lays the `.dockerignore` with a plain `write_text` (0644), so the second half needs
+    the refusal as much as the first. Named by its own path: a pair is not one file."""
+    folder = templates(tmp_path)
+    (folder / "dockerignore.tmpl").write_text(
+        "*\n!src/core\n# root pw {{DB_PASSWORD}}\n", encoding="utf-8", newline="\n"
+    )
+    with pytest.raises(
+        dockerfile.DockerfileError, match=r"DB_PASSWORD.*dockerignore\.tmpl"
+    ) as caught:
+        dockerfile.render(folder, {**TOKENS, "DB_PASSWORD": SECRET})
+    assert "docker history" in str(caught.value)
+    assert "Dockerfile.tmpl" not in str(caught.value), "the half that was fine is not accused"
+    assert SECRET not in str(caught.value)
+
+
+def test_render_never_hands_the_secret_to_the_substitution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Belt to the refusal's braces, as `generate()` does it: the key is dropped from the
+    mapping `fill()` sees, so a template that spelled the token would fail as UNFILLED
+    even with the refusal gone. Asserted at the seam, because with the refusal in place
+    there is no rendered text that could show the difference.
+    """
+    seen: list[dict[str, str]] = []
+    real = composegen.fill
+
+    def spy(text: str, tokens: Mapping[str, str]) -> str:
+        seen.append(dict(tokens))
+        return real(text, tokens)
+
+    monkeypatch.setattr(composegen, "fill", spy)
+    text, ignore = dockerfile.render(templates(tmp_path), {**TOKENS, "DB_PASSWORD": SECRET})
+    assert len(seen) == 2, "one call per template half"
+    for tokens in seen:
+        assert "DB_PASSWORD" not in tokens
+        assert tokens["CORE_DIR"] == "/opt/mangos", "the rest of the mapping is untouched"
+    assert SECRET not in text and SECRET not in ignore
 
 
 def test_render_names_a_missing_template(tmp_path: Path) -> None:
