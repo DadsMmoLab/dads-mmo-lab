@@ -23,8 +23,8 @@ a file and not the state file: a state file must never be the thing that
 claims a secret exists.
 
 `STAGE_NAMES` is the whole tuple from the start; `stages()` binds the six the
-spine already owns, and K.3-K.7 insert the rest in that order — `conf` and
-`import` are what is left. The two are allowed to disagree in the meantime
+spine already owns, and K.3-K.7 insert the rest in that order — `import` is
+what is left. The two are allowed to disagree in the meantime
 because nothing in the app reads `STAGE_NAMES` — `stage_names()`, derived from
 `stages()`, is what the spine validates a resume against — and because this
 class is not in `FAMILIES` until the tuple is whole. K.8 pins the equality.
@@ -42,7 +42,7 @@ from typing import ClassVar, cast
 from yulon import docker, platform
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CmangosData, NativeInstall
-from yulon.catalog.families import dockerfile, extract
+from yulon.catalog.families import conf, dockerfile, extract
 from yulon.catalog.installer import InstallerError
 from yulon.catalog.native import (
     BUILD_CANCEL_NOTE,
@@ -131,6 +131,7 @@ class CmangosInstaller(StagedInstaller):
             Stage("build", self.stage_build, cancel_note=BUILD_CANCEL_NOTE),
             Stage("extract", self._extract, cancel_note=extract.EXTRACT_CANCEL_NOTE),
             Stage("mmaps", self._mmaps, cancel_note=extract.MMAPS_CANCEL_NOTE),
+            Stage("conf", self._conf),
             Stage("start-db", self.stage_start_db, recorded=False),
             Stage("up", self.stage_up, recorded=False),
             Stage("ready", self.stage_ready, recorded=False),
@@ -431,6 +432,93 @@ class CmangosInstaller(StagedInstaller):
         )
         self._check_cancel(ctx.cancel)
         yield "Map generation finished."
+
+    def _conf(self, ctx: StageContext) -> Iterator[str]:
+        """Materialise the `.conf.dist` files once, then patch the table's keys in place.
+
+        Copy-once and patch-in-place is the whole difference from the scripts,
+        which overwrote every conf on every run: a user's other edits survive a
+        resume. `conf.materialise()` copies only what is missing, in one
+        `docker cp` of the whole source dir; `conf.apply_table()` rewrites
+        `Key = value` lines through the same token grammar as everything else
+        and returns the files whose bytes changed — none means every key
+        already read back equal, which is this stage's evidence.
+
+        **The record is not what skips the copy.** `materialise()` asks `etc/`,
+        `ctx.state` is not read here at all, and a resume carrying `conf` in
+        `completed` reaches this body exactly like a first run — the same rule
+        `_write_dockerfile` is written against, for the same reason: the files
+        are the thing, and a state file that outlived them would leave an
+        install with no confs and nothing to notice it.
+
+        The password reaches these files because the emulator reads files, and
+        `conf.CONF_MODE` is what that costs. What the mode buys is not the same
+        everywhere — see `_write_secret` below, which measured the same
+        question for `.db_password` — and `conf.py`'s constant carries the
+        other half: `0o600` is correct only while the images run as root. No
+        line this stage yields carries the value.
+
+        Two `except` shapes, and they are not interchangeable. `materialise()`
+        re-raises `copy_from_image`'s errors untouched (its `CopyFromImage`
+        docstring says why: `DockerCliMissingError` subclasses
+        `DockerCommandError` and carries the only actionable help), so this is
+        where they become a sentence. Its OWN refusal — the image not shipping
+        a `.dist` the table names — is an `InstallerError` and passes straight
+        through: `InstallerError` subclasses `RuntimeError`, so a clause
+        broadened to catch it would dress a catalog/image disagreement up as a
+        machine that could not copy a file.
+
+        The cast is about two spellings of one seam and nothing else, and it is
+        the shape `_user_args()` already carries. `Seams.copy_from_image` is a
+        positional `Callable[[str, str, Path], None]` (K.2) while
+        `conf.CopyFromImage` is a Protocol declaring the parameter NAMES, and a
+        `Callable` has no names to offer, so mypy refuses the pass-through.
+        Checked 2026-09-01: `docker.copy_from_image`, `Recorder.copy_from_image`
+        and every double in `test_families_cmangos.py` spell them `image`,
+        `src` and `dest`, and `materialise()` calls the seam positionally, so
+        nothing can be relying on a name it does not have.
+        """
+        data = self._data()
+        etc_dir = ctx.server_dir / ETC_DIR
+        image_ref = self._image_ref(ctx, data.extract.image)
+        try:
+            copied = conf.materialise(
+                data.conf,
+                image_ref=image_ref,
+                etc_dir=etc_dir,
+                copy_from_image=cast("conf.CopyFromImage", self._seams.copy_from_image),
+            )
+        except docker.DockerCommandError as exc:
+            raise InstallerError(
+                f"The configuration files could not be copied out of the server image "
+                f"{image_ref}: {exc}"
+            ) from exc
+        except OSError as exc:
+            # `materialise()` wraps none of its own file work — the mkdir, the
+            # moves and the chmods are bare — so this arm is the one that turns
+            # a full disk or a read-only server directory into a sentence.
+            raise InstallerError(f"{etc_dir} could not be written: {exc}") from exc
+        for path in copied:
+            yield f"Copied {path.name} out of the server image."
+        try:
+            changed = conf.apply_table(data.conf, etc_dir, self._tokens(ctx))
+        except InstallerError:
+            # MUST stay ahead of the broad clause: every refusal `apply_table()`
+            # raises is already the sentence a user reads, and naming a file it
+            # has just named would say it twice.
+            raise
+        except (RuntimeError, OSError) as exc:
+            # Defence in depth, the same shape `_write_dockerfile` carries and
+            # for the same reason: `run()` catches `InstallerError` and nothing
+            # else, so an escape from here is a traceback in a dialog.
+            raise InstallerError(
+                f"the configuration files in {etc_dir} could not be patched "
+                f"({type(exc).__name__}: {exc})."
+            ) from exc
+        if not changed:
+            yield "The configuration files already say what this install needs."
+        for path in changed:
+            yield f"Patched {path.name}."
 
     # -- what only the engine knows ---------------------------------------
 
