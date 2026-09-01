@@ -23,7 +23,10 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from yulon.catalog.catalog import ClientSpec, MpqDepth
-from yulon.catalog.preflight import Check
+from yulon.catalog.preflight import GIB, Check
+from yulon.log import get_logger
+
+logger = get_logger(__name__)
 
 DATA_DIR = "Data"
 """Where every WoW client keeps its archives; its absence means "not a client"."""
@@ -34,6 +37,9 @@ MPQ_CHECK = "the client's archives"
 LOCALE_CHECK = "the client's locale"
 REPACK_CHECK = "the client's origin"
 SPACE_CHECK = "free space next to the client"
+
+REPACK_FILE = "realmlist.wtf"
+"""A pre-configured client ships one at the root; a retail install keeps it under Data/<locale>/."""
 
 PICK_THE_CLIENT = f"Pick the game folder that holds the {DATA_DIR} directory, then try again."
 """One sentence for every refusal that is really "that is not a client folder".
@@ -51,10 +57,10 @@ invent a refusal on a machine with room, and rounding it up would hide the one
 warning worth printing. Whoever reads it reports `unchecked`, the way
 `preflight.evaluate()` does with every measurement it could not take.
 
-This is vocabulary, not a guard. Nothing in this module reads the value —
-`_warnings()` is still empty — so the alias asks Task I.2's space rule to be
-written against three answers instead of two. The guard that stops `None` from
-collapsing into zero has to be I.2's own test, next to the code that reads it.
+`_space_check()` is the one reader, and it tests `free is None` rather than
+`not free`: a drive with nothing left on it answered the question, and a
+0 GB warning is the answer a user can act on. `None` never reaches the
+comparison at all.
 """
 
 
@@ -129,8 +135,182 @@ def validate(
 
 
 def _warnings(client_dir: Path, data: Path, spec: ClientSpec, free_bytes: FreeBytes) -> list[Check]:
-    """The rules that warn (Task I.2 fills this in); nothing yet."""
-    return []
+    """The rules that warn. Extraction usually survives every one of them, so none refuses.
+
+    In reading order: the archive count is the rule that most often decides an
+    install, the locale and repack rules explain a count that looks fine but is
+    not, and free space is about the machine rather than the folder.
+
+    Each rule has THREE answers. "Could not look" is `unchecked` — the verdict
+    `preflight.evaluate()` gives every measurement it could not take — and it
+    is never rounded to a pass or to the smallest number. An unreadable client
+    reported as "too few archives" sends a user to re-download a folder that
+    was intact, and the permission problem is still there when they come back.
+    """
+    locales = _locales(data)
+    checks = [_mpq_check(data, spec)]
+    if spec.locale_mpq_required:
+        checks.append(_locale_check(data, locales))
+    checks.append(_repack_check(client_dir, data, locales))
+    checks.append(_space_check(client_dir, spec, free_bytes))
+    return checks
+
+
+def _locales(data: Path) -> tuple[Path, ...] | None:
+    """The locale folders, or `None` for "the folder would not be listed".
+
+    Read once and handed to both rules that want it, so an unreadable `Data/`
+    cannot come out `unchecked` in one row and a confident `pass` in the next.
+    Two rules calling `locale_dirs()` separately is how "could not read this
+    folder" turns into "this folder has no locales in it, so it is a repack".
+    """
+    try:
+        return locale_dirs(data)
+    except OSError as exc:
+        logger.info(f"could not list the folders under {data}: {exc}")
+        return None
+
+
+def _mpq_check(data: Path, spec: ClientSpec) -> Check:
+    """Fewer archives than the expansion ships is the incomplete-download smell.
+
+    A warning, not a refusal: a client with the right expansion MPQ but fewer
+    patches extracts, and the `produces` counts in `extract.py` are what prove
+    it did.
+
+    `mpq_files()` RAISES where the folder cannot be walked, precisely so this
+    rule can tell "two archives" from "would not say" (I.1 chose `iterdir()`
+    over `rglob()` for it). Catching that and answering with the count sentence
+    anyway would throw the distinction away in the one place it is visible.
+    """
+    where = _where(data, spec.mpq_depth)
+    try:
+        found = mpq_files(data, spec.mpq_depth)
+    except OSError as exc:
+        logger.info(f"could not list the archives under {data}: {exc}")
+        return Check(
+            MPQ_CHECK,
+            "unchecked",
+            f"the archives {where} could not be listed — that is not a pass",
+            "Check that the folder opens for you; if it does not, extraction will find "
+            "nothing in it either.",
+        )
+    if len(found) < spec.min_mpq:
+        return Check(
+            MPQ_CHECK,
+            "warn",
+            f"{len(found)} MPQ archives {where}; a complete client has at least {spec.min_mpq}",
+            "Finish or repeat the client download — if extraction reports too few maps, "
+            "this is why.",
+        )
+    return Check(MPQ_CHECK, "pass", f"{len(found)} MPQ archives {where}")
+
+
+def _where(data: Path, depth: MpqDepth) -> str:
+    """Where the count looked, in the words of the spec that asked for it.
+
+    Said in the detail because the number alone is useless: "4 archives" sends
+    a user hunting through a client that is not short of anything, when the
+    rule simply never opened the locale folder holding the other two.
+    """
+    if not isinstance(depth, int):
+        return f"anywhere under {data}"
+    if depth == 1:
+        return f"directly in {data}"
+    return f"in {data}, up to {depth} folders deep"
+
+
+def _locale_check(data: Path, locales: tuple[Path, ...] | None) -> Check:
+    """This expansion keeps its DBC data in `Data/<locale>/`; a stripped copy has none."""
+    if locales is None:
+        return Check(
+            LOCALE_CHECK,
+            "unchecked",
+            f"the folders under {data} could not be listed, so whether this client has its "
+            "locale archives is unknown — that is not a pass",
+            "Check that the folder opens for you, then start the install again.",
+        )
+    if not locales:
+        return Check(
+            LOCALE_CHECK,
+            "warn",
+            f"no locale folder holding archives under {data} (enUS, deDE, ...), and this "
+            "expansion keeps its DBC data in one",
+            "Reinstall the client from a complete download if extraction comes up short on "
+            "DBC files.",
+        )
+    names = ", ".join(folder.name for folder in locales)
+    return Check(LOCALE_CHECK, "pass", f"locale archives in {names}")
+
+
+def _repack_check(client_dir: Path, data: Path, locales: tuple[Path, ...] | None) -> Check:
+    """`realmlist.wtf` at the root and no locale folder: a stripped, pre-pointed repack.
+
+    Such clients have had their archives rearranged and extract incompletely or
+    not at all. The heuristic is exactly what the scripts eyeballed; it warns
+    rather than refuses because a hand-moved realmlist on a full client is also
+    a thing people do.
+
+    Both halves are required, and the file is read first: with no `realmlist.wtf`
+    at the root the answer is settled by evidence that WAS obtained, so an
+    unlistable `Data/` does not turn every ordinary client into a shrug.
+    """
+    if not (client_dir / REPACK_FILE).is_file():
+        return Check(REPACK_CHECK, "pass", f"no {REPACK_FILE} at the root of {client_dir}")
+    if locales is None:
+        return Check(
+            REPACK_CHECK,
+            "unchecked",
+            f"{REPACK_FILE} sits at the root of {client_dir}, and the folders under {data} "
+            "could not be listed to tell a repack from a full client — that is not a pass",
+            "Check that the folder opens for you, then start the install again.",
+        )
+    if not locales:
+        return Check(
+            REPACK_CHECK,
+            "warn",
+            f"{REPACK_FILE} sits at the root of {client_dir} and there is no locale folder, "
+            "which is how a repack looks",
+            "Use a clean client of this expansion if extraction comes up short — repacks have "
+            "rearranged archives and often extract incompletely.",
+        )
+    return Check(REPACK_CHECK, "pass", "nothing suggests a repack")
+
+
+def _space_check(client_dir: Path, spec: ClientSpec, free_bytes: FreeBytes) -> Check:
+    """Room on the CLIENT's own drive, which is not the one preflight measures.
+
+    On Docker Desktop a shared folder is cached on the drive it lives on, and
+    the scripts' extractors were seen to stall on a drive with no room for that
+    cache. The client can sit on a different drive from the server folder, so
+    preflight's own space checks say nothing about this one. Data carries the
+    figure; nothing is measured here.
+
+    `free is None` is "could not ask" and answers `unchecked`; zero is a real
+    measurement of a full drive and answers `warn`. Folding the two together
+    either invents "0 GB free" on a roomy machine or hides a genuinely full one.
+    """
+    free = free_bytes(client_dir)
+    if free is None:
+        return Check(
+            SPACE_CHECK,
+            "unchecked",
+            f"the free space on the drive holding {client_dir} could not be measured — "
+            "that is not a pass",
+            f"Make sure that drive has at least {spec.near_client_warn_gb:.0f} GB free before "
+            "extraction starts.",
+        )
+    gigabytes = free / GIB
+    if gigabytes < spec.near_client_warn_gb:
+        return Check(
+            SPACE_CHECK,
+            "warn",
+            f"{gigabytes:.0f} GB free on the drive holding the client; "
+            f"{spec.near_client_warn_gb:.0f} GB is the comfortable figure, because extraction "
+            "reads the client through Docker's file sharing and that cache lands on this drive",
+            "Free some space on that drive, or move the client to one that has room.",
+        )
+    return Check(SPACE_CHECK, "pass", f"{gigabytes:.0f} GB free on the drive holding the client")
 
 
 def mpq_files(data: Path, depth: MpqDepth) -> tuple[Path, ...]:
