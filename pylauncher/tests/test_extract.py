@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import pytest
@@ -833,6 +833,43 @@ def test_the_shortfall_refusal_does_not_blame_the_client_for_a_folder_nobody_cou
     assert "maps: 0 files, at least 2 expected" in message
 
 
+def test_the_shortfall_refusal_quotes_the_number_the_gate_read_and_walks_the_folder_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fifth ending is the one that counts, and it counts once. Nothing said so.
+
+    `counts()` and `short_of()` are split apart precisely so the threshold and
+    the sentence come from ONE walk, and `counts()`'s docstring names the
+    incident: a folder that stops listing between two walks makes the refusal
+    and the log disagree about the number both are made of. The walked-once
+    tests only ever exercise a tool that succeeded, so rebuilding the refusal's
+    numbers with a second `shortfall(tool.produces, data_dir)` inside the `if
+    short:` block survived the whole file — the message is identical while the
+    filesystem holds still.
+
+    So the fixture does not hold still. `maps` answers 1 on its first walk and 0
+    on any later one, which is the only thing that distinguishes the two
+    versions: one walk quotes the 1 the gate decided on, two walks quote a 0 the
+    gate never saw. `dbc` is left alone and passes, so the run reaches ending
+    five and no other.
+    """
+    walked: list[Path] = []
+    real_count = extract.file_count
+
+    def counting(folder: Path) -> int:
+        walked.append(folder)
+        if folder.name == "maps":
+            return 1 if walked.count(folder) == 1 else 0
+        return real_count(folder)
+
+    monkeypatch.setattr(extract, "file_count", counting)
+    with pytest.raises(InstallerError) as caught:
+        run(PLAN, Runner(FULL), tmp_path)
+    data = tmp_path / "server" / "data"
+    assert walked == [data / "dbc", data / "maps"]
+    assert "maps: 1 files, at least 2 expected" in str(caught.value)
+
+
 def test_a_failing_tool_stops_the_plan_with_its_last_words(tmp_path: Path) -> None:
     runner = Runner(FULL, fail={"/opt/bin/vmap_extractor": (1, "cannot open Data")})
     with pytest.raises(InstallerError, match="cannot open Data"):
@@ -1401,6 +1438,85 @@ def test_the_retry_walks_each_output_folder_once_and_never_the_crashed_attempt(
     assert walked.count(data / "Buildings") == 1
 
 
+def _stopped_on_the_first_tool() -> Runner:
+    """Ending 1, and only ending 1: the cancel sentinel, with no configured failure."""
+    runner = Runner(FULL)
+    runner.cancel_after = 1
+    return runner
+
+
+def _first_tool_never_started() -> Runner:
+    """Ending 2: both halves of `cli_missing_run()`'s sentinel and nothing else."""
+    return Runner(FULL, fail={"/opt/bin/ad": (127, platform.DOCKER_CLI_MISSING_HELP)})
+
+
+def _the_farm_could_not_be_laid() -> Runner:
+    """Ending 3: both halves of the staging sentinel, on the one plan that stages."""
+    return Runner(
+        FULL,
+        fail={
+            "/opt/bin/vmap_extractor": (
+                extract.STAGE_FAILED_RETURNCODE,
+                extract.STAGE_FAILED_MARKER,
+            )
+        },
+    )
+
+
+def _first_tool_crashed_plainly() -> Runner:
+    """Ending 4: an ordinary non-zero status with ordinary last words, on a plan with
+    no retry recipe — so it is refused where it stands rather than run again."""
+    return Runner(FULL, fail={"/opt/bin/ad": SEGFAULT})
+
+
+@pytest.mark.parametrize(
+    ("plan", "make_runner", "says"),
+    [
+        pytest.param(PLAN, _stopped_on_the_first_tool, "was stopped", id="stopped"),
+        pytest.param(PLAN, _first_tool_never_started, "could not be started", id="never-started"),
+        pytest.param(STAGED_PLAN, _the_farm_could_not_be_laid, "never ran", id="farm-not-laid"),
+        pytest.param(PLAN, _first_tool_crashed_plainly, "failed (exit 139)", id="failed"),
+    ],
+)
+def test_none_of_the_four_refusing_endings_walks_an_output_folder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    plan: ExtractPlan,
+    make_runner: Callable[[], Runner],
+    says: str,
+) -> None:
+    """`_conclude` says only the fifth ending counts the folders. Four say it here.
+
+    The two "walked once" tests above only ever exercise a tool that succeeded
+    and a crash the retry recipe rescues, so the plain crash — ending 4, which
+    reaches `_conclude` and raises from it — had nothing asserting it counts
+    nothing. Moving `counts()` above `if run.returncode != 0` survived the whole
+    file. The cost is only wasted I/O over a half-written `data/` on a run that
+    is already refused, but the invariant is claimed in the docstring, and a
+    claimed invariant with no test is the one that quietly stops being true.
+
+    Three of these four also satisfy `returncode != 0`, so "it raised" would not
+    say which rule caught the run; each case asserts the sentence its own ending
+    produces, and each fixture trips exactly one — the cancel sentinel with no
+    configured failure, both halves of the CLI-missing sentinel, both halves of
+    the staging sentinel on the only plan that stages, and a 139 that is none of
+    them. Every case fails on the FIRST tool of its plan, so an empty `walked`
+    means nothing was walked at all rather than nothing since the last success.
+    """
+    walked: list[Path] = []
+    real_count = extract.file_count
+
+    def counting(folder: Path) -> int:
+        walked.append(folder)
+        return real_count(folder)
+
+    monkeypatch.setattr(extract, "file_count", counting)
+    with pytest.raises(InstallerError) as caught:
+        run(plan, make_runner(), tmp_path)
+    assert says in str(caught.value)
+    assert walked == []
+
+
 def test_a_recipe_naming_a_tool_the_plan_does_not_have_is_said_not_raised_blank() -> None:
     """The model validator makes this unreachable from `catalog.json`; a plan built in
     code can still name a stranger, and a sentence beats a `StopIteration`."""
@@ -1496,14 +1612,25 @@ def test_the_stage_script_names_the_same_mount_points_the_module_does() -> None:
     assert f"exit {extract.STAGE_FAILED_RETURNCODE}" in extract.STAGE_SCRIPT
 
 
-def test_the_stage_script_copies_out_by_content_so_a_resume_cannot_nest_a_folder() -> None:
-    """`cp -r Buildings /out/` a second time makes `/out/Buildings/Buildings`.
+def test_the_stage_script_copies_out_by_content_into_a_folder_it_makes_itself() -> None:
+    """Not because the plan's `cp -r "$name" /out/` nests — re-measured, it does not.
 
-    The counts would still pass — the files are all there, one level down — and
-    the server would find no vmaps at all. Copying the folder's CONTENT into a
-    folder we make ourselves is the shape that survives a second pass.
+    That was this test's original reason and it was wrong: run twice against one
+    persistent `/out` on `debian:stable-slim` and `alpine:3.20` (2026-09-01),
+    the plan's spelling merged flat into `/out/Buildings/` on both. The reason
+    that survived is the one this assertion is really about — `mkdir -p
+    "/out/$name"` plus a copy by content is the only spelling that puts a
+    `produces` name with a slash in it where `counts()` looks. `Cameras/
+    Buildings` lands at `/out/Buildings` under the plan's form, which the count
+    gate reads as nothing produced; here it lands at `/out/Cameras/Buildings`.
+    Nothing in `ExtractTool` forbids such a name.
+
+    The negative half stays for the same reason, not the retired one, and is
+    a single-rule fixture: the plan's spelling is the one that mislays a
+    slashed name.
     """
     assert 'cp -r "$name/." "/out/$name/"' in extract.STAGE_SCRIPT
+    assert 'mkdir -p "/out/$name"' in extract.STAGE_SCRIPT
     assert 'cp -r "$name" /out/' not in extract.STAGE_SCRIPT
 
 

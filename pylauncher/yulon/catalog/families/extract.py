@@ -518,11 +518,27 @@ Three details are load-bearing and each of them is a wrong sentence avoided:
   exits `STAGE_FAILED_RETURNCODE` WITHOUT running `"$@"`. `_conclude()` then
   says the tool never ran, rather than reporting a status the tool never
   produced.
-* **The copy-back is by content into a folder we make.** `cp -r "$name" /out/`
-  lands as `/out/Buildings/Buildings` when `/out/Buildings` already exists — a
-  second pass, a resume, a re-run after an edited argv — and every file would
-  still be there, one level too deep, so the count gate would pass and the
-  server would find no vmaps.
+* **The copy-back is by content into a folder we make.** This bullet used to say
+  the plan's `cp -r "$name" /out/` nests as `/out/Buildings/Buildings` on a
+  second pass. **It does not, and that reason is withdrawn.** Re-measured
+  2026-09-01 on `debian:stable-slim` (GNU coreutils) and `alpine:3.20`
+  (BusyBox), running the plan's script twice against one persistent `/out`:
+  both merged flat into `/out/Buildings/`, identically. A relative source with
+  an existing destination *directory* derives `dest/basename(src)`; only
+  `cp -r "$name" "/out/$name"` nests, which both images also confirmed and
+  which nothing here ever proposed. Anyone who meets `cp -r "$name" /out/` in
+  an older draft should know it is not known-broken.
+
+  The shipped spelling stays on two grounds that survive the re-measurement. It
+  is idempotent across passes by construction rather than by a convention of
+  `cp`'s about trailing components, so the invariant is visible in the line
+  instead of in a manual page. And it is the only one that puts a `produces`
+  name containing a slash where the count gate looks: measured the same day, a
+  `produces` entry `Cameras/Buildings` lands at `/out/Buildings` under the
+  plan's form and at `/out/Cameras/Buildings` under this one, while `counts()`
+  reads `data_dir / folder` — so the plan's form would refuse that install for
+  having produced nothing. No catalog entry names a slashed folder today and
+  nothing in `ExtractTool` forbids one.
 * **`$status` is the tool's.** Saved before the copy loop, so a `[ -e ]` that
   found nothing cannot turn a failed extraction into a success, and a successful
   extraction whose output folder is missing still reaches the count gate as
