@@ -32,7 +32,9 @@ below `materialise()` on the side of the seam that does the opening, and it is a
 `InstallerError` naming the path — for a file that is missing, is a directory, or is not
 UTF-8. That last one needs saying out loud: a `UnicodeDecodeError` is a `ValueError`, not
 an `OSError`, so the obvious `except OSError` lets it escape a resume as a raw traceback
-about a byte offset in a file it does not name.
+about a byte offset in a file it does not name. `_write()` answers to that rule from the
+other side and for the same reason — a `UnicodeEncodeError` is a `ValueError` too — so the
+two are one decision rather than two.
 
 **Where a conf comes from, and what is never done to it again.** `materialise()` copies
 the image's `*.conf.dist` out ONCE per file and strips the suffix; `apply_table()` patches
@@ -372,6 +374,22 @@ def _write(path: Path, text: str) -> None:
     by anyone else even for an instant (the database password is in it). `newline=""` for
     the same reason `_read` has it: text mode on Windows would turn every `\\n` into
     `\\r\\n` and convert an LF conf on a developer's machine.
+
+    `UnicodeEncodeError` is caught beside `OSError` for the reason `_read` catches
+    `UnicodeDecodeError`: it is a `ValueError` too, so the obvious `except OSError` misses
+    it and a resume ends in a raw traceback about a character position in a file it does
+    not name — the same defect one function away, given the same answer. It is reachable
+    rather than theoretical: `json.loads` accepts a lone surrogate, so a `"\\ud800"` in a
+    `catalog.json` conf value survives `fill()` and `_line`'s line-break check (a
+    surrogate is not a newline) and arrives here as text UTF-8 cannot encode.
+
+    Caught SPECIFICALLY, not as `ValueError` and not as `Exception`. `UnicodeEncodeError`
+    is the only `UnicodeError` a write can raise, so the parent class buys nothing; and
+    anything else escaping this block is a bug in the caller or in this module rather than
+    a state of the machine — a non-`str` `text` is a `TypeError`, and the `encoding` and
+    `newline` whose spelling could raise `LookupError` or `ValueError` are literals on the
+    line above. Reporting one of those as "the conf could not be written" would dress a
+    seam bug up as a bad file, which is the mistake this project is briefed against.
     """
     tmp = path.with_name(f"{path.name}{_TEMP_SUFFIX}")
     try:
@@ -379,7 +397,7 @@ def _write(path: Path, text: str) -> None:
             fh.write(text)
         os.chmod(tmp, CONF_MODE)
         os.replace(tmp, path)
-    except OSError as exc:
+    except (OSError, UnicodeEncodeError) as exc:
         raise InstallerError(
             f"{path} could not be written ({exc}), so it was left as it was."
         ) from exc

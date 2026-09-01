@@ -27,6 +27,7 @@ this project has shipped in neighbouring modules already:
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import stat
@@ -893,6 +894,38 @@ def test_apply_table_keeps_the_old_conf_when_the_write_fails(
     with pytest.raises(InstallerError, match=r"mangosd\.conf"):
         conf.apply_table(TABLE, etc, TOKENS)
     assert (etc / "mangosd.conf").read_bytes() == before
+    assert sorted(p.name for p in etc.iterdir()) == ["mangosd.conf", "realmd.conf"]
+
+
+def test_apply_table_names_a_conf_whose_value_cannot_be_encoded(tmp_path: Path) -> None:
+    r"""The write-side twin of `test_apply_table_names_a_conf_that_is_not_utf8`.
+
+    A `UnicodeEncodeError` is a `ValueError` for the same reason a
+    `UnicodeDecodeError` is, so the `except OSError` that misses one misses the
+    other, and the user gets a raw traceback about a character position in a file
+    it never names - mid-resume, where the read-side version of exactly this was
+    already ruled unacceptable one function away.
+
+    The value is built the way it would really arrive, not by raising the
+    exception by hand: `json.loads` accepts a lone surrogate, so `"\ud800"` in a
+    `catalog.json` conf value survives into the model, through `fill()`, past the
+    line-break check in `_line` (a surrogate is not a newline), and reaches
+    `fh.write()`, which has no UTF-8 to encode it as.
+
+    The two properties the atomic write buys are asserted alongside the message,
+    because they are what makes this defect minor rather than serious: the conf on
+    disk is still the old one, and no `.yulon-new` is left beside it.
+    """
+    surrogate = json.loads(r'"\ud800"')
+    table = ConfPatchTable(
+        source_dir=TABLE.source_dir,
+        files={"realmd.conf": ConfPatch(keys={"DataDir": surrogate})},
+    )
+    etc = _materialised(tmp_path)
+    before = (etc / "realmd.conf").read_bytes()
+    with pytest.raises(InstallerError, match=r"realmd\.conf"):
+        conf.apply_table(table, etc, TOKENS)
+    assert (etc / "realmd.conf").read_bytes() == before
     assert sorted(p.name for p in etc.iterdir()) == ["mangosd.conf", "realmd.conf"]
 
 
