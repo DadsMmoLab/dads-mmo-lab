@@ -46,10 +46,15 @@ to the same question.
 FreeBytes = Callable[[Path], int | None]
 """Free space on the volume holding a path, or `None` for "could not ask".
 
-`None` is a third answer and never a small number: rounding it down invents a
-refusal on a machine with room, and rounding it up hides the one warning that
-was worth printing. Whoever reads it reports `unchecked`, the way
+`None` is a third answer and never a small number: rounding it down would
+invent a refusal on a machine with room, and rounding it up would hide the one
+warning worth printing. Whoever reads it reports `unchecked`, the way
 `preflight.evaluate()` does with every measurement it could not take.
+
+This is vocabulary, not a guard. Nothing in this module reads the value —
+`_warnings()` is still empty — so the alias asks Task I.2's space rule to be
+written against three answers instead of two. The guard that stops `None` from
+collapsing into zero has to be I.2's own test, next to the code that reads it.
 """
 
 

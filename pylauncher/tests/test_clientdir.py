@@ -49,16 +49,22 @@ def verdicts(checks: tuple[object, ...]) -> dict[str, str]:
 
 
 def test_no_client_folder_is_a_refusal_that_names_what_to_pick() -> None:
+    """Nothing chosen is its own sentence: there is no path to name back at the user."""
     (check,) = clientdir.validate(None, TBC, free_bytes=lambda _p: PLENTY)
     assert check.verdict == "refuse"
-    assert "Data" in check.remedy
+    assert "no client folder was chosen" in check.detail
+    assert clientdir.DATA_DIR in check.remedy
 
 
 def test_a_folder_without_data_is_refused(tmp_path: Path) -> None:
-    (tmp_path / "client").mkdir()
-    (check,) = clientdir.validate(tmp_path / "client", TBC, free_bytes=lambda _p: PLENTY)
+    """The folder is real but holds no `Data/`, which is what "not a client" means here."""
+    folder = tmp_path / "client"
+    folder.mkdir()
+    (check,) = clientdir.validate(folder, TBC, free_bytes=lambda _p: PLENTY)
     assert check.verdict == "refuse"
-    assert "Data" in check.detail
+    assert check.detail == (
+        f"{folder} has no {clientdir.DATA_DIR} directory, so it is not a game client"
+    )
 
 
 def test_a_missing_required_file_is_refused_by_name(tmp_path: Path) -> None:
@@ -85,19 +91,34 @@ def test_a_good_client_passes_every_rule(tmp_path: Path) -> None:
 
 
 def test_a_file_chosen_instead_of_a_folder_is_refused(tmp_path: Path) -> None:
-    """The picker can hand back Wow.exe; `is_dir()` is what tells that apart from a folder."""
+    """The picker can hand back Wow.exe; `is_dir()` is what tells that apart from a folder.
+
+    The sentence is asserted and not merely the refusal. `Wow.exe / "Data"` is
+    not a directory either, so deleting this rule still refuses — with the
+    generic "no Data directory" line, which tells someone holding a file to go
+    looking inside it for a folder. Only the detail tells the two apart.
+    """
     chosen = tmp_path / "Wow.exe"
     chosen.write_bytes(b"MZ")
     (check,) = clientdir.validate(chosen, TBC, free_bytes=lambda _p: PLENTY)
     assert check.verdict == "refuse"
-    assert str(chosen) in check.detail
+    assert check.detail == f"{chosen} is a file, not a folder"
     assert check.remedy
 
 
 def test_a_client_dir_that_does_not_exist_is_refused(tmp_path: Path) -> None:
-    """A path remembered from a previous install that has since been deleted."""
-    (check,) = clientdir.validate(tmp_path / "gone", TBC, free_bytes=lambda _p: PLENTY)
+    """A path remembered from a previous install that has since been deleted.
+
+    The same trap as the file above: a path that is gone has no `Data/` either,
+    so the generic refusal covers for this rule unless the sentence is pinned.
+    "Is not there" is the one that sends the user back to the picker instead of
+    into a folder that no longer exists.
+    """
+    gone = tmp_path / "gone"
+    (check,) = clientdir.validate(gone, TBC, free_bytes=lambda _p: PLENTY)
     assert check.verdict == "refuse"
+    assert check.detail == f"{gone} is not there"
+    assert check.remedy
 
 
 def test_every_refusal_says_what_to_do_next(tmp_path: Path) -> None:
@@ -162,11 +183,12 @@ def test_a_client_that_clears_the_refusals_reaches_the_warn_table(
 def test_a_volume_that_will_not_answer_is_never_a_refusal(tmp_path: Path) -> None:
     """`free_bytes` may answer `None` — "could not ask", which is not "no space".
 
-    No rule here reads it yet (the space rule is Task I.2), and this pins the
-    boundary that task inherits: an unanswerable measurement must never become
-    a refusal, and it must never become a pass either. The verdicts a `None`
-    produces are the verdicts `PLENTY` produces, minus whatever I.2's space
-    rule then reports as `unchecked`.
+    This does not guard the boundary; at I.1 there is nothing to guard. No rule
+    here reads the value (the space rule is Task I.2), so no None-versus-zero
+    mistake could make this test fail. What it records is the shape I.2 starts
+    from — a `None` changes no verdict and drops no row — so that a diff which
+    breaks that shape is visible. The guard itself belongs to I.2, written
+    against the rule that finally reads the number.
     """
     folder = client(tmp_path)
     unmeasured = clientdir.validate(folder, TBC, free_bytes=lambda _p: None)
