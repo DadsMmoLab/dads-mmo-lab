@@ -1265,6 +1265,25 @@ mapping (or resolver) that conf/SQL/verify must ask for. Keep `render()`'s by-na
 in depth. Add a test proving every build-context writer receives a mapping without `DB_PASSWORD`, and
 make `dockerfile.write()` reject secret content if it stays a public bypass around `render()`.
 
+**CONFIRMED INDEPENDENTLY, BY A DIFFERENT METHOD, THE SAME DAY.** K.4's own adversarial review
+reached the identical conclusion by **mutation** rather than by reasoning, which is the strongest form
+of agreement available here:
+
+- **M15 — a SECOND secret key in `_tokens()` renders straight into the Dockerfile, and the mutation
+  SURVIVES ALL 1960 TESTS.** The by-name refusal covers **one name**, not the property. This is
+  precisely Codex's "ambient authority" point, arrived at from the opposite direction.
+- **D4 — `dockerfile.write()` accepts hand-built marked text containing a secret and writes it.** It
+  validates only the generated marker, never content — exactly the public bypass Codex named.
+
+**What the review also established, and it bounds how much the tripwire is worth:** a template placed
+**outside `resources.installers_dir()`** makes the `rglob` tripwire blind, and **`--installers-root`
+(`install_wiring.py:195`) is a real flag** that repoints the whole tree. So the tripwire is a
+*location* guard by construction. The refusal inside `render()` is what actually covers the property —
+and it held against **five** attacks routed through `render()`. **K.4's central argument was correct
+and could not be broken; it is simply incomplete**, because §20's premise was two claims and K.4
+refuted only the first ("a guard someone must remember at every render site"), never the second
+("a mapping that structurally cannot carry the secret needs nobody to remember anything").
+
 **On deferring it:** rejected, and the reason is one to keep. *"This is the contract-forming change
 and later migration only becomes harder."* **K.7 is the next consumer and it needs the password for
 SQL — so the split must land BEFORE K.7, not after Group K.**
