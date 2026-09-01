@@ -1143,6 +1143,7 @@ class StagedInstaller:
                     branch=source.branch,
                     sparse_path=source.sparse_path,
                     depth=source.depth,
+                    rev=source.rev,
                 )
             )
         yield "Sources are in place."

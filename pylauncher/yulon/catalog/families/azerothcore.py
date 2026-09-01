@@ -126,6 +126,7 @@ class AzerothCoreInstaller(StagedInstaller):
                 # catalog.json because its CMake reads the revision out of git
                 # history and a shallow clone hands the build the wrong answer.
                 depth=source.depth,
+                rev=source.rev,
             )
         )
         yield f"{source.repo} is in place."
@@ -174,6 +175,7 @@ class AzerothCoreInstaller(StagedInstaller):
                     branch=source.branch,
                     sparse_path=source.sparse_path,
                     depth=source.depth,
+                    rev=source.rev,
                 )
             )
         yield "Modules are in place."
