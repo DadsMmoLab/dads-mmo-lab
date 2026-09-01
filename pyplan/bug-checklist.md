@@ -1565,8 +1565,32 @@ inline, a value read from a file, anything not a declared field — is invisible
 
 **What the capability split changes, and what it does not.** `feat/7.3-token-sets-by-capability` gives
 `_public_tokens(server_dir)` no `StageContext` at all, so `ctx.secrets` is not in lexical scope where
-the build-context mapping is built. That closes the case above at the source, and it is the right level
-— the fix is structural rather than a guard someone must remember. **It does not close the general
+the build-context mapping is built.
+
+**CORRECTED 2026-09-02, and the correction is the point of this entry.** What stood here was: *"That
+closes the case above at the source, and it is the right level — the fix is structural rather than a
+guard someone must remember."* **That was wrong, and I wrote it.** Two independent reviewers refuted it
+by execution, each one refuting the round before:
+
+- `_public_tokens(self, server_dir)` can reach the password through `self.resolve_secrets(server_dir)`,
+  a public inherited method taking exactly the two things in scope. K.3's `db-password` stage wrote the
+  password into `server_dir` two stages earlier, so `resolve_secrets` no longer mints — it reads the real
+  install password back off disk. Six lines, full suite green, `ENV ROOT_PASSWORD=…` in a Dockerfile.
+- Then: it needs neither a method nor a cache. `generate-compose` writes the plaintext password into
+  `<server_dir>/.env` as `DB_ROOT_PASSWORD=`, **one stage before `build`**. A file read in
+  `_public_tokens` leaks it, uncached and deterministic. Full suite green again.
+
+So the split is **a price, not a wall**: it raises the cost of writing that leak, and it removes the
+secret from the mapping by default. It does not make the leak unwritable, and no arrangement of
+parameters can, while the build context itself holds the plaintext — which it has since K.3.
+
+**The lesson, which is the reason to keep this paragraph rather than silently correct it:** every round
+here stated a guarantee, and the next reviewer found it too strong. A claim of the form *"X cannot
+happen"* is a standing invitation, and three of them in a row were wrong. State what was measured and
+when. See [[guards-that-prove-declarations]] — this is the same failure at the level of a design
+argument rather than a test.
+
+**It does not close the general
 case**: a secret MINTED inside `_public_tokens` rather than passed into it is still unreachable by a
 by-name refusal, because it was never a field of anything.
 
