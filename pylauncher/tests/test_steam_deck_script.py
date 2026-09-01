@@ -13,11 +13,14 @@ anything the caller prepended — which is why the stubs are functions.
 the no-tty tests read: the defect they pin is a `read` that returns instantly
 at EOF *where a sleep belonged*, so "did it sleep" is the question.
 
-Three tests remain source-shape reads of the script text (`_code()`), and their
-docstrings say so: they pin how a line is spelled, not what the script does, and
-a harmless respelling fails them exactly as a real defect would. Comment lines
-are stripped before those reads, so a rule quoted in the header cannot satisfy
-an assertion about the code.
+Some tests remain source-shape reads of the script text (`_code()`): they pin
+how a line is spelled, not what the script does, and a harmless respelling fails
+them exactly as a real defect would. Comment lines are stripped before those
+reads, so a rule quoted in the header cannot satisfy an assertion about the code.
+Each such test says so in its own docstring, which is where the fact belongs --
+this sentence used to give the number, and the number was wrong (it said three;
+there are four `_code()` call sites). A count of its own contents is the one
+thing a module docstring cannot keep true.
 """
 
 from __future__ import annotations
@@ -186,6 +189,12 @@ def test_a_server_dir_without_a_compose_file_exits_1(tmp_path: Path) -> None:
     assert result.returncode == 1
     assert "docker-compose.yml" in result.stdout
     assert str(tmp_path) in result.stdout
+    # Restored 2026-09-02 after review. This diff had replaced the `"wow-wotlk"`
+    # assertion with the `tmp_path` one rather than keeping both, and that made
+    # `GAME_ID="$2"` -> `"$3"` killable ONLY by the source-shape pin below --
+    # which is precisely what that pin's docstring says it is not for. `$1` is
+    # covered behaviourally by the path; `$2` needs this line.
+    assert "wow-wotlk" in result.stdout
 
 
 @needs_bash
@@ -275,18 +284,32 @@ def test_with_a_terminal_enter_still_stops_the_server(tmp_path: Path) -> None:
     env = {**os.environ, "YULON_GAMING_MODE_PAUSE": "0", **stubs.env}
     master, slave = pty.openpty()
     try:
-        with subprocess.Popen(
+        # NOT a `with` block, deliberately. `Popen.__exit__` ends in an
+        # unbounded `self.wait()` (CPython 3.12 subprocess.py special-cases only
+        # KeyboardInterrupt), so on TimeoutExpired the block exits, waits
+        # forever, and the `finally` below never runs -- and closing `master` is
+        # the only thing that gives the child EOF and lets it die. Measured
+        # 2026-09-02: with the ENTER seam mutated away, this test under the old
+        # `with` form returned rc=124 from a 100s outer timeout instead of
+        # failing. A test that WEDGES the suite when its subject regresses is
+        # worse than no test, because CI reports a stuck job rather than a red one.
+        proc = subprocess.Popen(
             ["bash", str(SCRIPT), str(_server_dir(tmp_path)), "wow-wotlk", "ready"],
             stdin=slave,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             env=env,
-        ) as proc:
+        )
+        try:
             os.close(slave)
             slave = -1
             os.write(master, b"\n")
             stdout, _ = proc.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            raise
     finally:
         if slave != -1:
             os.close(slave)
