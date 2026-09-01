@@ -23,9 +23,9 @@ import subprocess
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -2763,3 +2763,116 @@ def _first_populated_ancestor(path: Path) -> Path | None:
         if probe == probe.parent:
             return None
         probe = probe.parent
+
+
+# ------------------------------------------- containers, copies and exec (7.3)
+
+
+@dataclass(frozen=True)
+class Mount:
+    """One host directory a container gets to see, and whether it may write there.
+
+    `read_only` is a field rather than a caller-supplied `:ro` suffix because it
+    is the extraction stage's whole safety argument (phase 7): the user's client
+    is mounted read-only, so an interrupted run can leave nothing behind in it.
+    A suffix is a string convention; a field is something a test asserts by name.
+
+    **No SELinux label is emitted, and that is a decision the CALLER still owns.**
+    Everywhere else in this app a bind mount carries one: `composegen` fills
+    `{{BIND_LABEL}}` with `platform.bind_label()`'s answer on every generated
+    host bind, and `git.ContainerGit` asks the same function for its writable
+    clone mount. Neither answer belongs here. `to_argv()` is pure — it asks the
+    machine nothing — and the SELinux question has three answers (enforcing, not
+    enforcing, could not ask) that `platform.bind_label()` already keeps three;
+    re-asking it from a dataclass would be a second spelling of one security
+    decision, which is the mistake `_probe_selinux_argv()` was written against.
+
+    It is also not one label for the whole run. `:z` RECURSIVELY relabels the
+    mount source, so it is right for a directory this app created (the server's
+    `data/`) and wrong for the user's game client, exactly as it is wrong for
+    `$HOME` in `bind_mount_ok()`'s probe. Whoever builds these mounts has to
+    answer per mount, and until a caller needs to, no field is invented for it.
+    """
+
+    host: Path
+    guest: str
+    read_only: bool = False
+
+
+@dataclass(frozen=True)
+class ContainerRun:
+    """One `docker run --rm`, described rather than spelled.
+
+    `to_argv()` derives the argv from typed fields so a test can audit it by
+    field — which mount is `:ro`, which user it runs as, where its cwd is —
+    instead of matching a string that a reordered flag would silently break.
+
+    `user_args` is passed in rather than computed here because the uid:gid
+    policy has exactly one home, `platform.container_user_args()`, and this
+    module knows nothing about a platform's rules (style-guide §3).
+
+    `env` is for values that are not secrets. `to_argv()` is pure, so every
+    variable named here lands in the command line as `-e NAME=value`, and a
+    command line is world-readable. A secret goes through `exec_stdin()`, which
+    forwards it from this process's environment and never spells it.
+
+    There is deliberately no field for `git.py`'s `_READ_ONLY_CONTAINER_ARGS`
+    (`--network none --cap-drop ALL --security-opt no-new-privileges
+    --read-only`). Those exist there because that container is handed a
+    STRANGER'S repository — content this app did not make, which gets to choose
+    what git executes. What this class describes is an image this app built from
+    its own Dockerfile, running a tool this app named, and needing to write its
+    output to a bind mount; `--read-only` and a dropped capability set are not
+    free there, and none of it has been measured against the extraction tools.
+    A caller that wants hardening states it, and states why, at its own call
+    site rather than getting it silently from here.
+    """
+
+    image: str
+    argv: tuple[str, ...]
+    mounts: tuple[Mount, ...] = ()
+    workdir: str | None = None
+    env: Mapping[str, str] = field(default_factory=dict)
+    user_args: tuple[str, ...] = ()
+    ulimits: tuple[str, ...] = ()
+
+    def to_argv(self) -> list[str]:
+        """The `docker` argv (without the program name), fields in a fixed order.
+
+        `--rm` always. Every run this describes is a tool that runs to
+        completion and leaves its result on a bind mount; a container left
+        behind per extraction tool is a leak nobody sees until `docker ps -a`.
+
+        Every option precedes the image on purpose: docker stops reading its
+        own options at the image name, so anything after it belongs to the
+        tool — which is why `argv` is copied verbatim at the end. Same shape as
+        the two argvs this module and `git.py` already spell by hand —
+        `bind_mount_ok()`'s probe, and the one built inline in
+        `ContainerGit._capture()` — which is `run`, `--rm`, options, `-v`, `-w`,
+        image, then theirs.
+
+        The user args sit right after `--rm` here rather than just before the
+        image as `git.py` places them. Docker reads its own options in any order
+        up to the image name, so the position carries no meaning; the test
+        audits by flag rather than by index for the same reason.
+
+        Raises:
+            ValueError: a mount's host path is not absolute. Docker refuses a
+                relative bind source with a daemon-side error that names
+                neither the field nor the caller; refusing here does both.
+        """
+        argv = ["run", "--rm", *self.user_args]
+        for limit in self.ulimits:
+            argv += ["--ulimit", limit]
+        for mount in self.mounts:
+            if not mount.host.is_absolute():
+                raise ValueError(f"bind mount source must be absolute, got {mount.host!r}")
+            suffix = ":ro" if mount.read_only else ""
+            argv += ["-v", f"{mount.host}:{mount.guest}{suffix}"]
+        if self.workdir is not None:
+            argv += ["-w", self.workdir]
+        for name, value in self.env.items():
+            argv += ["-e", f"{name}={value}"]
+        argv.append(self.image)
+        argv.extend(self.argv)
+        return argv
