@@ -19,12 +19,13 @@ project can ship silently:
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
 from yulon import resources
-from yulon.catalog import composegen
+from yulon.catalog import composegen, native
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.families import dockerfile
 
@@ -199,6 +200,147 @@ def test_render_never_hands_the_secret_to_the_substitution(
         assert "DB_PASSWORD" not in tokens
         assert tokens["CORE_DIR"] == "/opt/mangos", "the rest of the mapping is untouched"
     assert SECRET not in text and SECRET not in ignore
+
+
+@dataclass(frozen=True)
+class _TwoSecrets:
+    """A stand-in secret declaration with two fields, for the derivation rule alone."""
+
+    db_password: str
+    soap_password: str
+
+
+def test_the_refused_tokens_are_derived_from_the_secret_declarations_fields() -> None:
+    """`SECRET_TOKENS` is `secret_tokens(native.Secrets)`, not a list somebody maintains.
+
+    Two links, one assertion each. The synthetic type shows the RULE generalises past the
+    single field `Secrets` happens to declare today — one token per field, the field name
+    upper-cased — which a set built from one real field could never show. The equality
+    shows the shipped constant is that function applied to the real declaration: written
+    out as a literal instead, it survives untouched while `native.Secrets` grows a second
+    field, and that combination is exactly the mutation that found the one-name version
+    (added `soap_password` to `Secrets`; the whole suite stayed green).
+    """
+    assert dockerfile.secret_tokens(_TwoSecrets) == {"DB_PASSWORD", "SOAP_PASSWORD"}
+    assert dockerfile.SECRET_TOKENS == dockerfile.secret_tokens(native.Secrets)
+    assert "DB_PASSWORD" in dockerfile.SECRET_TOKENS, "today's declaration, refused"
+
+
+@pytest.mark.parametrize("token", sorted(dockerfile.SECRET_TOKENS))
+def test_every_token_the_secret_declaration_produces_is_refused_in_a_template(
+    token: str, tmp_path: Path
+) -> None:
+    """One case per field of `native.Secrets`, generated from the declaration itself.
+
+    A secret added there brings its own case here with nothing to remember, which is what
+    deriving the set buys. The parametrize list IS the current answer, so this docstring
+    does not restate it; the test below is what shows the machinery carries a second one.
+
+    NOT the guard against an empty `SECRET_TOKENS`. Measured 2026-09-01 by mutating
+    `secret_tokens()` to `return frozenset()`: pytest's default for an empty parameter set
+    is SKIP, so this test silently vanishes rather than failing. What caught that mutant
+    was the sibling assertion `"DB_PASSWORD" in dockerfile.SECRET_TOKENS` in the test
+    above. A parametrized test cannot guard the non-emptiness of its own parameters.
+    """
+    folder = templates(tmp_path)
+    (folder / "Dockerfile.tmpl").write_text(
+        "FROM debian:12\nENV X={{" + token + "}}\n", encoding="utf-8", newline="\n"
+    )
+    with pytest.raises(dockerfile.DockerfileError, match=token) as caught:
+        dockerfile.render(folder, {**TOKENS, token: SECRET})
+    assert "docker history" in str(caught.value)
+    assert SECRET not in str(caught.value)
+
+
+def test_render_refuses_a_template_naming_a_second_declared_secret_not_just_the_password(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whatever `SECRET_TOKENS` holds is refused — the defeat that made the set a set.
+
+    Measured on the unfixed code (b8973c52), where the refusal was one hard-coded name:
+    a template spelling `{{SOAP_PASSWORD}}`, with that key in the mapping the caller hands
+    over whole, rendered `ENV SOAP_PASSWORD=tbc-0123456789abcdef` into the Dockerfile and
+    the whole suite stayed green.
+
+    The SET is patched rather than `native.Secrets` because the declaration is read once,
+    at import; the derivation from the declaration is the test above, and this is the
+    other link. One rule violated: the template spells a refused token. The key is in the
+    mapping, so `fill()` would have been perfectly happy with it.
+    """
+    monkeypatch.setattr(dockerfile, "SECRET_TOKENS", frozenset({"DB_PASSWORD", "SOAP_PASSWORD"}))
+    folder = templates(tmp_path)
+    (folder / "Dockerfile.tmpl").write_text(
+        "FROM debian:12\nENV SOAP_PASSWORD={{SOAP_PASSWORD}}\n", encoding="utf-8", newline="\n"
+    )
+    with pytest.raises(
+        dockerfile.DockerfileError, match=r"SOAP_PASSWORD.*Dockerfile\.tmpl"
+    ) as caught:
+        dockerfile.render(folder, {**TOKENS, "SOAP_PASSWORD": SECRET})
+    assert "docker history" in str(caught.value), "the refusal's own words, not fill()'s"
+    assert SECRET not in str(caught.value), "a refusal about a secret does not print it"
+
+
+def test_render_drops_every_refused_token_from_the_mapping_it_fills_with(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The belt covers the whole set, not the first entry: neither key reaches `fill()`.
+
+    Same seam as the single-key test above, over two tokens, because a belt written as one
+    `!=` comparison passes that one and lets everything else through.
+    """
+    monkeypatch.setattr(dockerfile, "SECRET_TOKENS", frozenset({"DB_PASSWORD", "SOAP_PASSWORD"}))
+    seen: list[dict[str, str]] = []
+    real = composegen.fill
+
+    def spy(text: str, tokens: Mapping[str, str]) -> str:
+        seen.append(dict(tokens))
+        return real(text, tokens)
+
+    monkeypatch.setattr(composegen, "fill", spy)
+    secrets = {"DB_PASSWORD": SECRET, "SOAP_PASSWORD": "tbc-fedcba9876543210"}
+    text, ignore = dockerfile.render(templates(tmp_path), {**TOKENS, **secrets})
+    assert len(seen) == 2, "one call per template half"
+    for tokens in seen:
+        assert not (secrets.keys() & tokens.keys()), "no refused key reaches the substitution"
+        assert tokens["CORE_DIR"] == "/opt/mangos", "the rest of the mapping is untouched"
+    for value in secrets.values():
+        assert value not in text and value not in ignore
+
+
+def test_a_spaced_placeholder_is_refused_as_unfilled_and_not_by_the_secret_rule(
+    tmp_path: Path,
+) -> None:
+    """`{{ DB_PASSWORD }}` is refused too — by `fill()`, and the message has to say so.
+
+    `composegen.fill()` substitutes by literal `out.replace("{{" + key + "}}", value)`,
+    so the spaced spelling is never matched at all, with or without the key in the
+    mapping. A `{{` therefore survives and `fill()` raises "not a closed placeholder". The
+    by-name refusal never sees it either, for the same reason: it looks for the exact
+    `{{DB_PASSWORD}}`.
+
+    WITHDRAWN, from the docstring this replaces: "the belt is what does it ... a change to
+    the belt would turn this near-miss into a rendered password silently". Both sentences
+    were false, and were disproved by mutation on 2026-09-01: with the belt removed
+    (`safe = dict(tokens)`) this test PASSED, while
+    `test_render_never_hands_the_secret_to_the_substitution` and
+    `test_render_drops_every_refused_token_from_the_mapping_it_fills_with` failed. Those
+    two guard the belt; this one never did. A test's stated reason for existing is not
+    checked by running it, which is how a false one got past review here.
+
+    What it does pin, and the reason to keep it: WHICH rule fired, "unfilled" and "not a
+    closed", and NOT "docker history". A near-miss reported as a secret violation would
+    send the next reader to the wrong guard.
+    """
+    folder = templates(tmp_path)
+    (folder / "Dockerfile.tmpl").write_text(
+        "FROM debian:12\nENV PW={{ DB_PASSWORD }}\n", encoding="utf-8", newline="\n"
+    )
+    with pytest.raises(dockerfile.DockerfileError, match="not a closed") as caught:
+        dockerfile.render(folder, {**TOKENS, "DB_PASSWORD": SECRET})
+    said = str(caught.value)
+    assert "unfilled" in said, "fill()'s rule fired, not the by-name refusal's"
+    assert "docker history" not in said
+    assert SECRET not in said
 
 
 def test_render_names_a_missing_template(tmp_path: Path) -> None:
@@ -430,9 +572,15 @@ def test_write_says_it_could_not_tell_when_a_directory_is_in_the_way(tmp_path: P
 
 
 def test_write_refuses_text_that_carries_no_marker(tmp_path: Path) -> None:
+    """The `.dockerignore` half is `render()`'s own, so the Dockerfile's missing marker is
+    the one thing wrong with this pair. Unmarked text is unrendered text as well — nothing
+    `render()` returns lacks the marker — and the marker check runs FIRST so this failure
+    is reported as the missing marker rather than as unknown provenance."""
+    _, ignore = dockerfile.render(templates(tmp_path), TOKENS)
     server = server_dir(tmp_path)
-    with pytest.raises(dockerfile.DockerfileError, match="marker"):
-        dockerfile.write(server, "FROM x\n", f"{composegen.GENERATED_MARKER}\n.git\n")
+    with pytest.raises(dockerfile.DockerfileError, match="marker") as caught:
+        dockerfile.write(server, "FROM x\n", ignore)
+    assert "did not come from" not in str(caught.value)
     assert not (server / "Dockerfile").exists()
 
 
@@ -440,13 +588,53 @@ def test_write_refuses_ignore_text_that_carries_no_marker(tmp_path: Path) -> Non
     """The `.dockerignore` half is guarded too, and by its own name.
 
     An unmarked `.dockerignore` written once is a file this engine can never rewrite:
-    the next install would refuse the whole folder as somebody else's.
+    the next install would refuse the whole folder as somebody else's. The Dockerfile half
+    is `render()`'s own so that the ignore half is the only thing wrong here.
     """
+    text, _ = dockerfile.render(templates(tmp_path), TOKENS)
     server = server_dir(tmp_path)
     with pytest.raises(dockerfile.DockerfileError, match=r"\.dockerignore") as caught:
-        dockerfile.write(server, f"{composegen.GENERATED_MARKER}\nFROM x\n", "*\n")
+        dockerfile.write(server, text, "*\n")
     assert "marker" in str(caught.value)
     assert not (server / "Dockerfile").exists() and not (server / ".dockerignore").exists()
+
+
+def test_write_refuses_marked_text_that_did_not_come_from_render(tmp_path: Path) -> None:
+    """The D4 defeat: `write()` is a public entry point and it used to trust its caller.
+
+    Measured on the unfixed code (b8973c52): `write()` was handed marked text reading
+    `ENV PW=tbc-0123456789abcdef`, wrote both files, and the password sat in the build
+    context — it validated the marker it generates itself and nothing about the content.
+    It cannot recognise the value (the secrets live in `native.Secrets`, which never
+    reaches this signature), so what it requires instead is `render()`'s own output, which
+    inherits `render()`'s refusal whole.
+
+    One rule violated: the text is not rendered. It carries the marker, and the folder is
+    empty, so neither of the other two refusals has anything to say about it.
+    """
+    _, ignore = dockerfile.render(templates(tmp_path), TOKENS)
+    server = server_dir(tmp_path)
+    poisoned = f"{composegen.GENERATED_MARKER}\nFROM debian:12\nENV PW={SECRET}\n"
+    with pytest.raises(dockerfile.DockerfileError, match="did not come from") as caught:
+        dockerfile.write(server, poisoned, ignore)
+    assert "render()" in str(caught.value), "and the sentence says what to do instead"
+    assert list(server.iterdir()) == [], "nothing written on a refusal"
+
+
+def test_write_refuses_rendered_text_that_was_edited_after_it_was_rendered(
+    tmp_path: Path,
+) -> None:
+    """A string operation on rendered text yields a plain `str`, and that is the intent.
+
+    Text edited after the render is not the text `render()` checked, so the guarantee
+    `write()` inherits no longer covers it. The edit here is innocent; the point is that
+    the seam does not care, because it cannot tell an innocent edit from a pasted secret.
+    """
+    text, ignore = dockerfile.render(templates(tmp_path), TOKENS)
+    server = server_dir(tmp_path)
+    with pytest.raises(dockerfile.DockerfileError, match="did not come from"):
+        dockerfile.write(server, text.replace("debian:12", "debian:13"), ignore)
+    assert list(server.iterdir()) == []
 
 
 def test_write_names_the_file_it_could_not_lay_down(tmp_path: Path) -> None:

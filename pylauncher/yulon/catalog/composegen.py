@@ -502,18 +502,23 @@ def _container_prefix(entry: CatalogEntry) -> str:
     whole design is that a bad value is loud, the answer is checked here:
 
     * an empty prefix is refused outright. It cannot be right for any entry.
-    * an entry that declares `containers.services` — every CMaNGOS game does,
-      because its services (`db`/`realmd`/`mangosd`) differ from its containers
-      — must have the prefix rebuild all three container names from those
-      service names exactly. That is literally the `{{CONTAINER_PREFIX}}<service>`
-      the templates write, checked against the catalog instead of assumed.
+    * an entry that declares `containers.services` must have the prefix rebuild
+      all three container names from those service names exactly. That is
+      literally the `{{CONTAINER_PREFIX}}<service>` the templates write, checked
+      against the catalog instead of assumed.
 
-    An entry that leaves `services` out names each container after its service
-    (AzerothCore: service `ac-database` IS container `ac-database`), so there is
-    no suffix to rebuild from and its templates spell the names out in full;
-    only the empty check applies to it.
-    `test_the_container_prefix_rebuilds_the_container_names_of_every_shipped_entry`
-    runs the same invariant over every entry in the shipped catalog.
+    No shipped entry declares `services` since 2026-09-01, so only the empty
+    check applies to any of them: every entry names each container after its own
+    service (AzerothCore's `ac-database` IS both; the shared CMaNGOS templates
+    write `{{CONTAINER_PREFIX}}db` as the SERVICE key too, which renders
+    `tbc-db`). Read the second rule as a constraint on a future entry rather than
+    as a description of the catalog — and note what it demands: an entry it
+    accepts has `container == prefix + service`, so its `compose_services()` are
+    the bare suffixes, which is exactly the shape `docker compose up` rejects.
+    That is how the three CMaNGOS entries passed this check for a week while
+    selecting three services their own compose file did not define.
+    `test_every_service_the_catalog_selects_is_defined_in_the_rendered_compose_file`
+    is what now compares the selected names against the rendered ones.
     """
     names = (entry.containers.db, entry.containers.auth, entry.containers.world)
     prefix = os.path.commonprefix(list(names))

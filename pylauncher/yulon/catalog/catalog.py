@@ -713,11 +713,15 @@ class Containers(_Strict):
         default=None,
         description=(
             "Compose SERVICE names for db/auth/world, in that order, when they differ from the "
-            "container names above. AzerothCore names a service and its container the same thing "
-            "and may leave this out; every CMaNGOS game does not — its services are "
-            "db/realmd/mangosd while its containers are <game>-db/-realmd/-mangosd — and "
-            "MUST say so. `docker compose up` takes services, and a container name it does not "
-            "know fails outright with `no such service` (Discord report, 2026-08-26)."
+            "container names above. `docker compose up` takes services, and a container name "
+            "it does not know fails outright with `no such service` (Discord report, "
+            "2026-08-26). No shipped entry needs it: AzerothCore names a service and its "
+            "container the same thing, and the generated CMaNGOS stack follows that convention "
+            "too — shared/cmangos/base.yml.tmpl writes its service keys as "
+            "{{CONTAINER_PREFIX}}db/-realmd/-mangosd, which ARE tbc-db and friends. Saying "
+            "db/realmd/mangosd here, as the three CMaNGOS entries did until 2026-09-01, named "
+            "the bash installers' services and would have failed every generated install at "
+            "the first `compose up`."
         ),
     )
     db_import: str | None = Field(

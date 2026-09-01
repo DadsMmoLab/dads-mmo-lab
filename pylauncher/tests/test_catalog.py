@@ -233,22 +233,13 @@ def test_the_old_password_fields_are_gone_not_ignored() -> None:
         )
 
 
-def test_cmangos_games_select_compose_services_not_container_names() -> None:
-    """Every CMaNGOS installer names its services db/realmd/mangosd (Discord, 2026-08-26).
-
-    Its containers are `<game>-db` and friends, and `docker compose up <container>`
-    answers `no such service`, so the catalog must spell the services out. For
-    AzerothCore the two names coincide and the container names are the answer.
-    """
-    catalog = load_catalog()
-    for game_id in ("wow-tbc", "wow-vanilla", "wow-tortoise"):
-        spec = catalog.get(game_id).container_spec()
-        assert spec.compose_services() == ("db", "realmd", "mangosd"), game_id
-    assert catalog.get("wow-wotlk").container_spec().compose_services() == (
-        "ac-database",
-        "ac-authserver",
-        "ac-worldserver",
-    )
+# `test_cmangos_games_select_compose_services_not_container_names` stood here until
+# 2026-09-01. It asserted the catalog's own literals (`db`/`realmd`/`mangosd`) in one
+# half and the WotLK container names in the other, so its two halves disagreed about
+# what a compose service is while both passed — a restatement cannot fail for the
+# reason its name claims. What it meant to check lives in `test_composegen.py`'s
+# `test_every_service_the_catalog_selects_is_defined_in_the_rendered_compose_file`,
+# which renders the real templates and reads the service keys back.
 
 
 def test_every_source_says_where_it_lands() -> None:

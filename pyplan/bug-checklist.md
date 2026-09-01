@@ -1501,6 +1501,135 @@ default in place. **The guard to add first** is a test that patches `platform.se
 asserts the value **arrives** — not that the parameter exists. That distinction is this run's third
 standing rule and it has caught three separate defects.
 
+### 28. The gaming-mode script cannot be used from the artifact it exists for — 2026-09-01, OPEN, packaging
+
+`catalog/installers/steam-deck/setup-gaming-mode.sh` exists so a Steam Deck user can start a stack
+from a Steam library entry, and its header documents the flow at line 31: **Games -> Add a Non-Steam
+Game -> Browse**, pointing Steam at the file. A Steam non-Steam-game shortcut stores an **absolute
+path**.
+
+On Linux Yu'lon ships as an **AppImage** (`.github/workflows/release.yml`, "Package AppImage",
+`appimagetool "$APPDIR" "Yulon-${YULON_REF}-x86_64.AppImage"`), and the script is inside it: the spec
+ships `catalog/installers/` as a **tree** (`build/pylauncher.spec:29-31`), so the file lands at
+`usr/bin/catalog/installers/steam-deck/` within the bundle. An AppImage self-mounts under
+`/tmp/.mount_<name>XXXXXX/` with a fresh random suffix per launch and unmounts on exit — so the path
+the user Browses to exists only while that particular run is live. The documented flow therefore works
+**once**: on the second launch the shortcut points into a mount that is gone.
+
+**Verified here, 2026-09-01:** the AppImage is the Linux release artifact; a plain tarball is built
+beside it (the workflow says why: "an AppImage cannot run without FUSE"); the script ships inside the
+bundle as part of the installers tree; and the header does instruct the Browse flow.
+**NOT verified here:** the random-per-launch mount path itself, which is asserted from AppImage's
+documented runtime behaviour and has **not** been measured on a Deck or on any Linux box in this
+project. It is the load-bearing link and it is the one taken on trust — measure it before acting.
+
+The tarball and the Windows zip give stable paths and are unaffected. But **Steam Deck gaming mode is
+the AppImage case**, so the one artifact this script exists for is the one it cannot be used from.
+Nothing copies the script out of the bundle, and nothing tells the user to.
+
+**Not a script change.** The fix is a packaging decision with at least three shapes: the app copies the
+script to a stable location (`~/.local/share/yulon/`) during a Steam Deck install; the release ships it
+as a loose file beside the AppImage; or the app grows a "Set up gaming mode" action that writes the
+shortcut itself. Choosing is owner work.
+
+**Interim, on `fix/steam-deck-pins-that-do-not-pin`:** the Steam block now says to copy the file out of
+the bundle first, and why. That is a warning, not a fix — a user who does not read the header still
+hits it, and per §1 nothing outside `pyplan/` points a user at the header at all.
+
+### 29. The Dockerfile refusal covers declared FIELD NAMES, not secrets — 2026-09-02, OPEN, residual
+
+Found by the independent review of `fix/dockerfile-refuses-any-secret-not-one-name` (merged at
+`092bad91`), and **not a regression** — the merged change is strictly better than what preceded it.
+It is the part the change does not reach.
+
+`dockerfile.SECRET_TOKENS` is `frozenset(f.name.upper() for f in fields(native.Secrets))`. That moved
+the coupling from *one hard-coded name* to *the declaration*, which was the point. But the mapping
+handed to `render()` is still built by hand, and **nothing asserts that every secret-bearing key in it
+corresponds to a `Secrets` field.** Proved on the VM against the real module, as a probe rather than by
+reading:
+
+```
+render() with an undeclared secret key -> type _Rendered | secret in text: True
+write() accepted it: ['Dockerfile', '.dockerignore']
+Dockerfile on disk contains the secret: True
+```
+
+The key was `SOAP_PASSWORD`; `native.Secrets` has no `soap_password` field; the value went into the
+build context and `write()` had no objection.
+
+**The dangerous direction is the one the docstring does not mention.** `secret_tokens()`'s docstring
+states the relationship as fact — "`_tokens()` spells each of its fields as the upper-cased token of
+the same name ... so reading the dataclass IS reading the declaration". True today **by convention
+only**. A secret that enters the mapping from somewhere other than `Secrets` — a `token_hex` generated
+inline, a value read from a file, anything not a declared field — is invisible to this refusal.
+
+**What the capability split changes, and what it does not.** `feat/7.3-token-sets-by-capability` gives
+`_public_tokens(server_dir)` no `StageContext` at all, so `ctx.secrets` is not in lexical scope where
+the build-context mapping is built. That closes the case above at the source, and it is the right level
+— the fix is structural rather than a guard someone must remember. **It does not close the general
+case**: a secret MINTED inside `_public_tokens` rather than passed into it is still unreachable by a
+by-name refusal, because it was never a field of anything.
+
+**This is the "defects live between the parts" shape.** The relationship between what `_tokens()` puts
+in the mapping and what `Secrets` declares has no owner, so nothing checks it. A cheap enumerating
+guard exists and is the recommendation: for each `f in dataclasses.fields(native.Secrets)`, assert that
+every key in the mapping whose VALUE equals `getattr(ctx.secrets, f.name)` is spelled `f.name.upper()`.
+That checks the relationship by enumeration instead of restating a list, and it catches a
+correctly-valued secret filed under a wrong name — which is exactly the case the by-name refusal is
+blind to.
+
+**Also fix the docstring either way:** it should stop asserting the link as though something enforced
+it. A sentence that describes a convention in the voice of a guarantee is how the next reader concludes
+the case is covered.
+
+### 30. `_container_prefix()`'s rebuild branch is satisfiable only by the bug it should refuse — 2026-09-02, OPEN
+
+Found by the independent review of `fix/cmangos-compose-service-names` (merged at `08fb785e`), which
+fixed the *consequence* and left this. `composegen.py`, `_container_prefix()`, the rebuild branch.
+
+The branch derives a container prefix by checking `container == prefix + service` for every declared
+service. The reviewer probed it on the real `wow-tbc` entry, and the result is the wrong way round:
+
+```
+services = ("tbc-db","tbc-realmd","tbc-mangosd")   # the CORRECT declaration
+  -> REFUSED: prefix 'tbc-' rebuilds tbc-tbc-db, tbc-tbc-realmd, tbc-tbc-mangosd
+services = ("db","realmd","mangosd")               # the BUG that section 26 was about
+  -> ACCEPTED, prefix='tbc-', compose_services() == ('db','realmd','mangosd')
+```
+
+So it is not "a constraint satisfied by no shipped entry", which is how the implementer described it.
+**It is a constraint satisfiable only by the defect** — any entry it accepts has bare-suffix
+`compose_services()`, which is exactly what `docker compose up` rejects with *no such service*. And its
+refusal message — *"Name every container after its service with one shared prefix in front of it"* —
+is a set of instructions for reproducing the bug, handed to whoever adds the fifth game.
+
+**Not urgent, and it does not block K.8**: no shipped entry declares `containers.services` any more,
+and `FAMILIES` registers only `azerothcore` today. The cross-check added on that branch catches the
+consequence for any entry that ships, so this cannot bite silently — it bites the next person to add an
+entry, at the moment they follow the error message's advice.
+
+**Recommended: make it refuse rather than warn.** Since the cross-check now covers the separator-eaten
+case the rebuild branch was written for, delete the branch and refuse `containers.services` outright
+for any entry carrying an `install.native` block. That removes a field whose only correct value is
+"absent" — the boundary argument: if the fix has to be remembered at the next site, it is at the wrong
+level.
+
+**Two docstrings still carry the false model at the point of declaration**, which is where someone will
+read it:
+- `composegen.py`, `_container_prefix`: the correction was *appended below* a bullet that still asserts
+  *"That is literally the `{{CONTAINER_PREFIX}}<service>` the templates write"*. In the shipped template
+  the prefix precedes a hard-coded literal suffix, never a `containers.services` value — that sentence
+  is true only in the buggy configuration. Rewrite the bullet; do not annotate it.
+- `catalog.py`, `Containers.services`: the field still opens with *"when they differ from the container
+  names above"*, and nothing at the declaration warns that a native-rendered entry setting it
+  *correctly* is rejected. One sentence, or resolve the above and delete the field.
+
+**Also noted by the same review, lower:** the cross-check is one-directional (`selected` is a subset of
+`defined`), so a `service_names()` helper that *over*-reports only makes it more permissive — a mutation
+dropping its stop-at-top-level rule was killed by a TBC-only equality test, not by the cross-check. And
+that helper's `^  ([A-Za-z0-9-]+):` excludes `_`, so an underscored service key would read as undefined:
+loud, therefore acceptable, but undocumented.
+
 ### One thing worth keeping
 
 Three of these have an obvious fix that is **wrong**, and two of them arm a worse bug:
