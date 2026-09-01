@@ -3041,6 +3041,13 @@ def copy_from_image(image: str, src: str, dest: Path) -> None:
     container = lines[-1] if lines else ""
     if not container:
         raise DockerCommandError(f"docker create {image} printed no container id")
+    # Load-bearing past the debugging. The container is created anonymously, so
+    # this id is the only thing that distinguishes it from any other container
+    # made from the same image — including the ones belonging to whatever else
+    # shares this daemon. The live leak gate reads it for exactly that reason;
+    # it used to count the daemon's containers for the image instead, and went
+    # red 4 runs in 6 when anything else on the box touched one. Move or rename
+    # this line and that gate fails loudly rather than passing on an empty set.
     logger.debug(f"copy_from_image(): {image}:{src} -> {dest} via {container[:12]}")
     try:
         _run(["cp", f"{container}:{src}", str(dest)])
