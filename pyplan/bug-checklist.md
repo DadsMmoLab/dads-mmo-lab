@@ -1438,6 +1438,43 @@ Enumerated at argv level across `yulon/` and `main.py`: the **only** volume argv
 `docker.py:679` `["volume","inspect",...]`, which is read-only. No `volume rm`, no `volume prune`, no
 `down -v`, no `--volumes`. `remove_staged` is `["compose","down","-t",…,"--remove-orphans"]`.
 
+### 26. The three CMaNGOS entries name compose services that the rendered file does not have — 2026-09-01, OPEN, goes LIVE at K.8
+
+Found by **F.2's reviewer**, while reviewing a 7.2 deletion — a 7.3 defect surfaced from an unrelated
+task. Verified independently here:
+
+```
+wow-tbc / wow-vanilla / wow-tortoise   catalog compose_services() -> ('db', 'realmd', 'mangosd')
+shared/cmangos/base.yml.tmpl service keys -> {{CONTAINER_PREFIX}}db, ...realmd, ...mangosd
+                                          -> rendered for wow-tbc: tbc-db, tbc-realmd, tbc-mangosd
+wow-wotlk                              compose_services() -> None  (uses the default; consistent)
+```
+
+`docker.start_staged()` runs `compose up -d --no-deps db realmd mangosd`. Against the file this repo
+actually generates that answers **`no such service`** — every one of the three is missing.
+
+**Not live today** only because `FAMILIES` registers `azerothcore` alone; `CmangosInstaller` exists but
+is unregistered. **K.8 is the task that registers it, so K.8 is when this becomes a broken install.**
+Fix before K.8, not after.
+
+**Two test-level reasons nobody caught it**, both worth more than the bug:
+1. The deleted `test_no_catalog_compose_service_is_really_a_container_name` was the **only** test that
+   cross-checked declared services against a compose file — and it read the **bash script**, so
+   restoring it verbatim would catch nothing. Its replacement,
+   `test_cmangos_games_select_compose_services_not_container_names`, **restates literals instead of
+   cross-checking**, and its two halves already contradict each other while both pass.
+2. `test_composegen.py::test_the_cmangos_services_are_named_after_their_containers` carries the
+   docstring *"`ContainerSpec.services` keeps its default"* — **false**; the catalog sets
+   `containers.services` explicitly. A true-sounding premise attached to a passing test.
+
+**The test that should exist** (five lines, and it fails today, which is the point): for every entry,
+assert every name in `container_spec().compose_services()` appears as a service key in the **rendered**
+`base` from `composegen.render()`. Cross-check, not restatement.
+
+**Also minor, same branch:** `test_no_bash_installer_ships` has **no `scanned >= N` vacuity guard** —
+mutation-proven: rename the installers root and it passes while its two siblings in the same file
+fail. Inconsistent with the guard F.2 deliberately added two files over.
+
 ### One thing worth keeping
 
 Three of these have an obvious fix that is **wrong**, and two of them arm a worse bug:
