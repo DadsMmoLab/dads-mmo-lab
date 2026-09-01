@@ -22,9 +22,11 @@ re-pointed at the real method rather than staying quietly inert.
 
 from __future__ import annotations
 
+import ast
 import gzip
 import inspect
 import os
+import subprocess
 import threading
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import replace
@@ -32,6 +34,7 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
+import yulon
 from tests.support_native import Recorder
 from yulon import docker, platform, resources
 from yulon.catalog import composegen, native
@@ -389,8 +392,59 @@ def test_image_ref_names_the_built_server_image_and_refuses_an_unknown_service(
         eng._image_ref(context(server_dir), "no-such-service")
 
 
+def test_the_family_s_catalog_refusals_end_in_one_tail_and_not_two(tmp_path: Path) -> None:
+    """Three refusals about a malformed entry, one sentence — they said it two ways.
+
+    Until 2026-09-01 two ended "That is a catalog error in the app…" and the
+    third "That is a bug in the app's catalog…", 65 lines apart. A second
+    wording for one thing drifts further from the first every time either is
+    edited, which is why `test_sqlplan.py` asserts two of its refusals are the
+    SAME string rather than merely that both complain.
+
+    `_native()` is deliberately not among them: its refusal ("has no
+    `install.native` section") carries no tail at all, and whether it should is
+    a separate question this does not settle.
+    """
+    from yulon.catalog.families import cmangos
+
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    no_block = ENTRY.model_copy(
+        update={
+            "install": ENTRY.install.model_copy(
+                update={
+                    "native": (
+                        ENTRY.install.native.model_copy(update={"cmangos": None})
+                        if ENTRY.install.native is not None
+                        else None
+                    )
+                }
+            )
+        }
+    )
+    no_file = entry_with_password(
+        PasswordPlan.model_construct(mode="generated", value=None, file=None, prefix="tbc-")
+    )
+    said: list[str] = []
+    with pytest.raises(InstallerError) as from_block:
+        engine_for(no_block, Recorder(), volume_exists=refuse_to_answer)._data()
+    said.append(str(from_block.value))
+    with pytest.raises(InstallerError) as from_image:
+        engine(Recorder())._image_ref(context(server_dir), "no-such-service")
+    said.append(str(from_image.value))
+    with pytest.raises(InstallerError) as from_password:
+        eng = engine_for(no_file, Recorder(), volume_exists=refuse_to_answer)
+        list(eng._db_password(context(server_dir)))
+    said.append(str(from_password.value))
+
+    assert len(said) == 3
+    for refusal in said:
+        assert refusal.endswith(cmangos.CATALOG_ERROR_TAIL), refusal
+        assert refusal != cmangos.CATALOG_ERROR_TAIL, "the tail is a tail, not the whole refusal"
+
+
 def test_the_typed_blocks_refuse_a_catalog_that_does_not_carry_them(tmp_path: Path) -> None:
-    """`_native()`/`_data()` say "a bug in the app's catalog", never a machine's."""
+    """`_native()`/`_data()` name a catalog error in the app, never a machine's."""
     no_cmangos = ENTRY.model_copy(
         update={
             "install": ENTRY.install.model_copy(
@@ -849,6 +903,58 @@ def test_db_password_writes_the_generated_secret_with_the_trailing_newline_the_s
     assert any(ENTRY.install.password.file in line for line in said), said
 
 
+def test_the_line_that_says_the_password_was_written_says_to_back_the_file_up(
+    tmp_path: Path,
+) -> None:
+    """The advice is the warning that this file is the way back into the database.
+
+    The stage writes the file once and says one sentence about it; the refusal
+    that explains what the file was worth is only reached after it is already
+    gone, which is too late to act on. So the advice is load-bearing where it
+    stands, and it is pinned by its own words rather than left to the
+    filename assertion above.
+
+    Dropping "Back that file up" from the success line survived the whole
+    suite before this test existed (mutation M16, 2026-09-01).
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    said = list(engine(Recorder())._db_password(context(server_dir)))
+    assert len(said) == 1, said
+    assert "Back that file up" in said[0]
+    assert db_volume(server_dir) in said[0]
+
+
+def test_db_password_turns_a_write_that_fails_into_a_sentence_and_not_a_traceback(
+    tmp_path: Path,
+) -> None:
+    """A stage that raises `OSError` reaches the user as a traceback, not as a refusal.
+
+    The failure is a real one rather than a patched call: `.db_password` is a
+    DIRECTORY here, so `os.open()` raises before a byte is written
+    (`IsADirectoryError` on POSIX, `PermissionError` on Windows — both
+    `OSError`). `Path.is_file()` is False for a directory, so the stage takes
+    the same write branch it takes for a missing file, which is the branch
+    under test.
+
+    `__cause__` is asserted, not just the type: the sentence is only useful
+    while it still carries what the operating system said, and `raise ... from
+    exc` is what keeps that.
+
+    Removing the `except OSError` wrapper made nothing in the suite red before
+    this test existed (mutation M14, 2026-09-01).
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    assert ENTRY.install.password.file is not None
+    (server_dir / ENTRY.install.password.file).mkdir()
+    with pytest.raises(InstallerError) as refusal:
+        list(engine(Recorder())._db_password(context(server_dir)))
+    assert isinstance(refusal.value.__cause__, OSError)
+    assert ENTRY.install.password.file in str(refusal.value)
+    assert "could not be written" in str(refusal.value)
+
+
 def test_db_password_keeps_a_secret_file_that_is_already_there_and_never_asks_docker(
     tmp_path: Path,
 ) -> None:
@@ -871,19 +977,48 @@ def test_db_password_keeps_a_secret_file_that_is_already_there_and_never_asks_do
     assert any("already" in line for line in again), again
 
 
+def file_aces(path: Path) -> list[str]:
+    """The access-control entries `icacls` lists for `path`, one string per entry.
+
+    The listing is the block before the first blank line; the first entry
+    shares its line with the path, and a wrapped continuation of a long entry
+    carries no `:(`, so the entries are the lines that do.
+
+    Callers read these for the `(I)` inherited flag and never for a principal:
+    the names are localised. Measured on PKGAME-LAPTOP (Windows 11 26200,
+    Norwegian, CPython 3.13.14, 2026-09-01) the built-in groups printed as
+    `NT-MYNDIGHET\\SYSTEM` and `BUILTIN\\Administratorer`, so a test matching
+    `BUILTIN\\Users` there would fail for the language and not for the ACL.
+    """
+    listing = subprocess.run(
+        ["icacls", str(path)], capture_output=True, text=True, check=True
+    ).stdout
+    return [line.strip() for line in listing.split("\n\n")[0].splitlines() if ":(" in line]
+
+
 def test_the_secret_file_is_owner_only_on_posix_and_only_inherits_the_folder_acl_on_windows(
     tmp_path: Path,
 ) -> None:
     """What the 0600 the writer asks for actually buys, per platform — measured, not assumed.
 
-    Measured on PKGAME-LAPTOP, Windows 11 26200, CPython 3.13.14, 2026-09-01:
+    Measured on PKGAME-LAPTOP, Windows 11 26200, CPython 3.13.14, 2026-09-01,
+    and reproduced there on 2026-09-01 while this assertion was written:
     `os.open(path, O_WRONLY|O_CREAT|O_TRUNC, 0o600)` leaves `st_mode & 0o777`
-    at `0o666`, byte-identical to a plain `open(path, "w")`, and `icacls` shows
-    the file carrying only the ACEs it inherited from its folder — under a
-    folder granting `BUILTIN\\Users:(RX)` the secret is readable by every local
-    user. A following `os.chmod(path, 0o600)` changes neither. So the mode is a
-    POSIX guarantee and nothing more, and this test pins both halves so
-    `_write_secret`'s note cannot quietly become false on either.
+    at `0o666`, byte-identical to a plain `open(path, "w")`, and every ACE
+    `icacls` prints for the file carries `(I)` — the file has no entry of its
+    own and grants exactly what its folder grants. Under a folder granting
+    `BUILTIN\\Users:(RX)` the secret is readable by every local user. A
+    following `os.chmod(path, 0o600)` changes neither.
+
+    So the mode is a POSIX guarantee and nothing more, and both halves are
+    asserted here rather than only described. The Windows half turns red the
+    day `_write_secret` grows the explicit DACL its "Open: Windows ACLs" note
+    weighs, because an entry granted that way is not inherited and carries no
+    `(I)`. That red was produced rather than reasoned about, on PKGAME-LAPTOP
+    on 2026-09-01: `icacls <file> /inheritance:r /grant:r <user>:(F)` over a
+    file written exactly as this stage writes it left one entry,
+    `PKGAME-LAPTOP\\perzi:(F)`, which this assertion rejects. It is recorded
+    because Linux CI skips this branch and can never show it.
 
     The CONSTANT is asserted as well as the file, because on Windows it is the
     only thing that can be: the bytes on disk read `0o666` whatever the writer
@@ -898,9 +1033,13 @@ def test_the_secret_file_is_owner_only_on_posix_and_only_inherits_the_folder_acl
     server_dir.mkdir()
     list(engine(Recorder())._db_password(context(server_dir)))
     assert ENTRY.install.password.file is not None
-    mode = (server_dir / ENTRY.install.password.file).stat().st_mode & 0o777
+    secret = server_dir / ENTRY.install.password.file
+    mode = secret.stat().st_mode & 0o777
     if os.name == "nt":
         assert mode == 0o666, "Windows started honouring the mode: re-read _write_secret's note"
+        aces = file_aces(secret)
+        assert aces, f"icacls listed no entry for {secret}; the parse, not the ACL, is wrong"
+        assert all("(I)" in ace for ace in aces), aces
     else:
         assert mode == cmangos.SECRET_FILE_MODE
 
@@ -934,21 +1073,80 @@ def test_db_password_refuses_when_the_file_is_gone_but_the_volume_exists(tmp_pat
     assert not (server_dir / ".db_password").exists()
 
 
+VOLUME_DELETING_PAIRS = (("volume", "rm"), ("volume", "prune"))
+"""Consecutive argv words that delete a named volume, whatever surrounds them."""
+
+
+def volume_deleting_spellings(source: str) -> list[tuple[str, str]]:
+    """Every place `source` spells a docker command that would delete a named volume.
+
+    Two forms, tagged `"argv"` and `"text"`, because one module's argument list
+    is another's shell line: a list or tuple of string constants running
+    `volume rm`/`volume prune`, or a `down` carrying `-v`/`--volumes`; and any
+    string constant containing those same words separated by single spaces.
+
+    Both forms are searched because either alone is blind to the other —
+    `["volume", "rm", name]` and `"docker volume rm"` are the same action, and
+    a text search sees only the second. `-v` counts only beside `down`: on its
+    own it is a bind mount, which every `docker run` in this app passes.
+
+    Syntax, not behaviour: this reads source and cannot say whether the line
+    runs. That is the point — it is meant to fire while the action is being
+    written, before anyone wires it to a button.
+    """
+    found: list[tuple[str, str]] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.List | ast.Tuple):
+            words = [
+                el.value
+                for el in node.elts
+                if isinstance(el, ast.Constant) and isinstance(el.value, str)
+            ]
+            pairs = list(zip(words, words[1:], strict=False))
+            if any(pair in pairs for pair in VOLUME_DELETING_PAIRS) or (
+                "down" in words and ("-v" in words or "--volumes" in words)
+            ):
+                found.append(("argv", " ".join(words)))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            said = " ".join(node.value.split()).lower()
+            if any(
+                phrase in said
+                for phrase in ("volume rm", "volume prune", "down -v", "down --volumes")
+            ):
+                found.append(("text", " ".join(node.value.split())[:100]))
+    return found
+
+
+def app_modules() -> list[Path]:
+    """Every `.py` file the shipped `yulon` package contains."""
+    return sorted(Path(yulon.__file__).parent.rglob("*.py"))
+
+
 def test_the_live_volume_refusal_names_a_way_to_delete_the_volume_the_server_tab_will_not(
     tmp_path: Path,
 ) -> None:
     """The refusal may not send the user to a button that keeps volumes by design.
 
-    `controller_view`'s only removal action is "Stop and remove containers…",
-    and `docker.remove_staged()` passes no `-v` on purpose
+    `controller_view`'s removal action is "Stop and remove containers…", and
+    `docker.remove_staged()` passes no `-v` on purpose
     (`test_remove_staged_never_passes_a_flag_that_would_delete_a_volume`); its
     own armed warning says "the database lives in a Docker volume, which is
-    kept". Nothing in the app deletes a named volume. A refusal naming that
-    button would send the user round a loop ending at this same message, so it
-    names the command that does the job instead.
+    kept". A refusal naming that button would send the user round a loop
+    ending at this same message, so it names the command that does the job
+    instead.
 
-    Red the day the Server tab grows a real volume-deleting action — at which
-    point the refusal should point at it rather than at a terminal.
+    The tripwire is the SCAN, not the wording check under it. Every module the
+    `yulon` package ships is read for a docker command that deletes a named
+    volume — in argv form anywhere, and in prose everywhere but this family's
+    own file, where the refusal and the note above it say the words on
+    purpose. It goes red the day any part of the app grows such an action, the
+    Server tab included, at which point this refusal should point at it rather
+    than at a terminal.
+
+    The wording check is kept because it says which sentence the loop would
+    have ended at, but it is not what fails:
+    `test_the_scan_sees_a_volume_deleting_action_the_wording_check_is_blind_to`
+    is the reproduction of it passing with the action present.
     """
     from yulon.ui import controller_view
 
@@ -962,6 +1160,53 @@ def test_the_live_volume_refusal_names_a_way_to_delete_the_volume_the_server_tab
     assert f"docker volume rm {db_volume(server_dir)}" in said
     assert "Server tab" not in said
     assert "volume, which is kept" in inspect.getsource(controller_view)
+
+    own_file = Path(inspect.getsourcefile(CmangosInstaller) or "").resolve()
+    offenders = [
+        f"{path.name}: {kind} {spelling}"
+        for path in app_modules()
+        for kind, spelling in volume_deleting_spellings(path.read_text(encoding="utf-8"))
+        if not (kind == "text" and path.resolve() == own_file)
+    ]
+    assert offenders == [], offenders
+
+
+A_NEW_SERVER_TAB_ACTION = '''
+
+DELETE_VOLUME_IDLE = "Delete the database and start over…"
+
+
+def delete_the_database_volume(name: str) -> None:
+    """Exactly the action this refusal's premise says the app does not have."""
+    docker._run(["volume", "rm", name])
+'''
+"""A plausible volume-deleting action, appended to `controller_view`'s real source.
+
+It breaks one rule and one only: it spells a docker argv that deletes a named
+volume. Its constant, its name and its docstring are the ordinary ones such an
+action would carry, so nothing but the argv can be what a scan reacts to.
+"""
+
+
+def test_the_scan_sees_a_volume_deleting_action_the_wording_check_is_blind_to() -> None:
+    """Why the wording check is not the tripwire, reproduced rather than argued.
+
+    Run 2026-09-01 (K.3 review, and again here): with a real volume-deleting
+    action present in `controller_view`, `"volume, which is kept" in source`
+    is still true, because that substring belongs to the REMOVE_IDLE warning
+    and an ADDED action removes nothing. A test whose name promised to go red
+    the day the Server tab grew such an action was therefore green with the
+    action sitting in the file. Only the scan reacts to it.
+    """
+    from yulon.ui import controller_view
+
+    clean = inspect.getsource(controller_view)
+    grown = clean + A_NEW_SERVER_TAB_ACTION
+
+    assert volume_deleting_spellings(clean) == []
+    # The old assertion, applied to the grown module: green, and it should not be.
+    assert "volume, which is kept" in grown
+    assert [kind for kind, _ in volume_deleting_spellings(grown)] == ["argv"]
 
 
 def test_db_password_refuses_when_docker_will_not_say_whether_the_volume_exists(
