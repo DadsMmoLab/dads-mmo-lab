@@ -1475,6 +1475,32 @@ assert every name in `container_spec().compose_services()` appears as a service 
 mutation-proven: rename the installers root and it passes while its two siblings in the same file
 fail. Inconsistent with the guard F.2 deliberately added two files over.
 
+### 27. The import-bound SELinux seam is in `docker.py`, not in `run_plan` — 2026-09-01, OPEN, latent
+
+`docker.bind_mount_ok(… selinux_enforcing: Callable[[], bool | None] = platform.selinux_enforcing)`
+(`docker.py:2728`) **is** bound at import. Asked of the interpreter, not read off the page:
+`signature(docker.bind_mount_ok).parameters["selinux_enforcing"].default is platform.selinux_enforcing`
+→ **True**.
+
+This is the real instance of the trap `container_user_args()` documents against itself — and the one
+**K.5 wrongly attributed to `extract.run_plan()`**, whose default is `None` with a late module lookup
+(`extract.py:755`, correct). K.5's docstring took a true fact about one function and asserted it about
+another that does the reverse; corrected on `fix/mmaps-audit-and-the-claim-that-was-backwards`, where
+the replacement now carries the interpreter output instead of a claim.
+
+**Latent, not live — and the reason is luck, not wiring.** Its production caller,
+`preflight._default_bind_probe` (`preflight.py:257`), passes **no** seam, so on a real machine the
+default runs and asks the real host — which is the right answer by accident. Under test it never runs
+at all: `test_preflight.py` fakes one level up (`bind_mount_ok=lambda _p: …`). `test_docker.py` passes
+`selinux_enforcing=` explicitly at 3147 and 3207 and **omits it at 3188/3191/3303/3325/3377/3393/3418**,
+so those calls take the runner's own host answer — **green today only because every runner is
+non-enforcing. A Fedora runner is what would change that.**
+
+**Fix:** have `preflight` thread its own seam for this question (it has none), rather than changing the
+default in place. **The guard to add first** is a test that patches `platform.selinux_enforcing` and
+asserts the value **arrives** — not that the parameter exists. That distinction is this run's third
+standing rule and it has caught three separate defects.
+
 ### One thing worth keeping
 
 Three of these have an obvious fix that is **wrong**, and two of them arm a worse bug:
