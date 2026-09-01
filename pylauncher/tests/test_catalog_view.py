@@ -736,6 +736,75 @@ def test_a_client_folder_is_still_asked_for_when_the_game_needs_one(
     assert got == [("wow-tbc", tbc_server.server_dir, client, "dml-arch")]
 
 
+def test_an_adoption_the_user_cancels_is_never_announced_as_unverified(
+    qapp: object,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Cancelling the client picker means nothing was adopted, so nothing may say it was.
+
+    The `UNVERIFIED` warning and its log line used to sit ABOVE the client-folder
+    prompt. A user who dismissed that picker got `adopt_from_wsl()` returning False
+    and no adoption at all - after being told the server was being adopted, and
+    with the log recording an unverified adoption that never happened.
+
+    Only the three `requires_client_dir` entries could reach that ordering, and
+    none of them carries `has_manifests`, so no file was ever at risk. The record
+    was simply false, and a false record of a security-relevant decision is worth
+    a test on its own.
+
+    This asserts the ORDER by its consequence rather than by reading the source:
+    the folder is unidentifiable (no compose file at all, so `_identify()` answers
+    `UNVERIFIED`) and the picker refuses, so the only way to reach the warning is
+    to emit it before asking. Moving the block back above the prompt fails here.
+    """
+    server = wsl.FoundServer(
+        distro="dml-arch",
+        project="wow-tbc-server",
+        running=False,
+        server_dir=tmp_path / "unidentifiable",
+    )
+    server.server_dir.mkdir()
+    monkeypatch.setattr(wsl, "find_servers", lambda include=(): (server,))
+    assert catalog_view.compose_file(server.server_dir) is None, (
+        "fixture must be UNVERIFIED: a readable compose file here would make this "
+        "test pass through the MATCHES/DIFFERENT branch instead"
+    )
+    entry = CATALOG.get("wow-tbc")
+    assert entry.install.requires_client_dir, (
+        "fixture must reach the client-dir prompt; an entry that skips it cannot "
+        "exercise the ordering this test exists for"
+    )
+
+    shown: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        catalog_view.QMessageBox,
+        "warning",
+        lambda _parent, title, text, *a, **k: shown.append((title, text)),
+    )
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        home=tmp_path,
+        pick_dir=lambda *_: None,  # the user cancels
+        pick_wsl_server=lambda _f: server,
+    )
+    got: list[tuple[object, ...]] = []
+    view.adopted.connect(lambda *a: got.append(a))
+
+    with caplog.at_level("WARNING"):
+        assert view.adopt_from_wsl(entry) is False
+
+    assert got == [], "nothing was adopted, so nothing may have been emitted"
+    assert shown == [], f"the user was told about an adoption that did not happen: {shown}"
+    assert not [
+        r for r in caplog.records if "UNVERIFIED" in r.getMessage()
+    ], "the log recorded an unverified adoption that never happened"
+
+
 def test_the_wsl_adopt_button_exists_where_a_distro_could_hold_a_server(
     qapp: object, tmp_path: Path
 ) -> None:
@@ -956,12 +1025,24 @@ def test_identify_produces_every_answer_it_declares(qapp: object, tmp_path: Path
 def test_identify_is_unverified_when_the_compose_file_is_there_but_unreadable(
     qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The `OSError` arm, told apart from the missing-file arm by the file's contents.
+    """The `OSError` arm, reached by denying a read of a file that IS there.
 
-    The compose file here names ANOTHER game's container, so a read that quietly
-    succeeded would answer `DIFFERENT` and a read that was skipped would answer
-    `MATCHES`. Only the arm under test can answer `UNVERIFIED`, which is what
-    makes the fixture worth anything.
+    The compose file names ANOTHER game's container, so a read that quietly
+    succeeded would answer `DIFFERENT` rather than `UNVERIFIED`. That is what this
+    fixture pins, and it is the whole of what it pins.
+
+    WITHDRAWN, because it was false: "a read that was skipped would answer
+    `MATCHES`". A skipped read answers `UNVERIFIED` too, through the missing-file
+    arm one line above - the SAME member - so this fixture cannot by itself tell
+    the two `UNVERIFIED` arms apart. Shown by mutation on 2026-09-02: replacing
+    `compose = compose_file(server_dir)` with `compose = None` leaves this test
+    PASSING, and the mutant dies instead in
+    `test_identify_produces_every_answer_it_declares` via its `MATCHES` fixture.
+    The `assert catalog_view.compose_file(folder) == denied` line below proves the
+    file exists; it does not prove which arm ran.
+
+    A discrimination claim that does not discriminate is exactly the failure this
+    branch exists to fix, so it is recorded here rather than quietly corrected.
     """
     entry = CATALOG.get("wow-wotlk")
     folder = _folder(tmp_path, "unreadable", _compose_naming("mangos-db"))
@@ -1131,8 +1212,15 @@ def test_an_unverified_adoption_reaches_the_applier_with_no_ownership_check(
     `yulon/ui/controller_view.py` passes that same `server_dir` to
     `wotlk_modules.applier()`.
 
-    The ONLY double here is `yulon.runner.run`, the subprocess seam - so the
-    deletion, the paths and the ordering are all the shipping code's. The seam
+    The only double ON THE CLONE PATH is `yulon.runner.run`, the subprocess seam,
+    so the deletion, the paths and the ordering are all the shipping code's.
+
+    Narrowed from a flat "the ONLY double here", which was false: `wsl.find_servers`
+    is patched too (there is no other way to reach this code), and three autouse
+    conftest fixtures are live, one of which suppresses modal dialogs. None of them
+    touches the clone, so the conclusion stands - but a categorical claim that is
+    not true is precisely what this branch was written to stop, and it should not
+    appear in the test that carries the branch's own argument. The seam
     records whether the file was still there at the moment git was first asked
     to do anything, which is what "before it fetches anything" means.
     """

@@ -472,25 +472,6 @@ class CatalogView(QWidget):
                 "different server.",
             )
             return False
-        if identified is Identification.UNVERIFIED:
-            # Adoption continues - see `_identify()` - but not in silence. The
-            # user is the only party who can know whether this folder is the
-            # server they meant, and the tab about to open can write into it.
-            logger.warning(
-                f"adopting {entry.id} from {chosen.distro} UNVERIFIED: no readable compose "
-                f"file in {chosen.server_dir}, so nothing confirms it is a {entry.name} install"
-            )
-            QMessageBox.warning(
-                self,
-                "Adopted without checking",
-                f"Yu'lon could not read a compose file in {chosen.server_dir}, so nothing "
-                f"confirms that {chosen.project} in {chosen.distro} is a {entry.name} "
-                "install — it is being adopted on your word rather than on evidence.\n\n"
-                "If this is the wrong folder, remove the server from Yu'lon instead of "
-                "using its tab: installing or removing a module writes into that folder "
-                "and deletes files under it.",
-            )
-
         client_dir: Path | None = None
         if entry.install.requires_client_dir:
             # Still on the Windows side: the client is the user's own WoW
@@ -502,6 +483,40 @@ class CatalogView(QWidget):
             )
             if client_dir is None:
                 return False
+
+        if identified is Identification.UNVERIFIED:
+            # Adoption continues - see `_identify()` - but not in silence. The
+            # user is the only party who can know whether this folder is the
+            # server they meant, and the tab about to open can write into it.
+            #
+            # AFTER the client-dir prompt, not before it. Sitting above it, both
+            # the log line and the dialog fired for an adoption the user then
+            # CANCELLED by dismissing that picker: the function returns False and
+            # nothing is adopted, but the log had recorded an unverified adoption
+            # that never happened and the user had been told it was being adopted.
+            # Only the three `requires_client_dir` entries could reach that, and
+            # none of them carries `has_manifests`, so nothing was at risk of
+            # deletion - the record was simply false, which is enough.
+            logger.warning(
+                f"adopting {entry.id} from {chosen.distro} UNVERIFIED: no readable compose "
+                f"file in {chosen.server_dir}, so nothing confirms it is a {entry.name} install"
+            )
+            QMessageBox.warning(
+                self,
+                "Adopted without checking",
+                f"Yu'lon could not read a compose file in {chosen.server_dir}, so nothing "
+                f"confirms that {chosen.project} in {chosen.distro} is a {entry.name} "
+                "install — it is being adopted on your word rather than on evidence.\n\n"
+                # NOT "remove the server from Yu'lon". There is no such action:
+                # `AppState.forget()` has zero production callers (only
+                # tests/test_state.py), and the one "Forget" button in the UI
+                # forgets an interrupted restore record, not a server. Naming a
+                # remedy that does not exist is the same defect this branch was
+                # written to fix - a sentence spelled exactly like a true one.
+                "If this is the wrong folder, close Yu'lon and do not use this "
+                "server's tab: installing or removing a module writes into that "
+                "folder and deletes files under it.",
+            )
 
         logger.info(
             f"adopting {entry.id} from WSL distro {chosen.distro}: "
