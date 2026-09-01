@@ -1582,6 +1582,54 @@ blind to.
 it. A sentence that describes a convention in the voice of a guarantee is how the next reader concludes
 the case is covered.
 
+### 30. `_container_prefix()`'s rebuild branch is satisfiable only by the bug it should refuse — 2026-09-02, OPEN
+
+Found by the independent review of `fix/cmangos-compose-service-names` (merged at `08fb785e`), which
+fixed the *consequence* and left this. `composegen.py`, `_container_prefix()`, the rebuild branch.
+
+The branch derives a container prefix by checking `container == prefix + service` for every declared
+service. The reviewer probed it on the real `wow-tbc` entry, and the result is the wrong way round:
+
+```
+services = ("tbc-db","tbc-realmd","tbc-mangosd")   # the CORRECT declaration
+  -> REFUSED: prefix 'tbc-' rebuilds tbc-tbc-db, tbc-tbc-realmd, tbc-tbc-mangosd
+services = ("db","realmd","mangosd")               # the BUG that section 26 was about
+  -> ACCEPTED, prefix='tbc-', compose_services() == ('db','realmd','mangosd')
+```
+
+So it is not "a constraint satisfied by no shipped entry", which is how the implementer described it.
+**It is a constraint satisfiable only by the defect** — any entry it accepts has bare-suffix
+`compose_services()`, which is exactly what `docker compose up` rejects with *no such service*. And its
+refusal message — *"Name every container after its service with one shared prefix in front of it"* —
+is a set of instructions for reproducing the bug, handed to whoever adds the fifth game.
+
+**Not urgent, and it does not block K.8**: no shipped entry declares `containers.services` any more,
+and `FAMILIES` registers only `azerothcore` today. The cross-check added on that branch catches the
+consequence for any entry that ships, so this cannot bite silently — it bites the next person to add an
+entry, at the moment they follow the error message's advice.
+
+**Recommended: make it refuse rather than warn.** Since the cross-check now covers the separator-eaten
+case the rebuild branch was written for, delete the branch and refuse `containers.services` outright
+for any entry carrying an `install.native` block. That removes a field whose only correct value is
+"absent" — the boundary argument: if the fix has to be remembered at the next site, it is at the wrong
+level.
+
+**Two docstrings still carry the false model at the point of declaration**, which is where someone will
+read it:
+- `composegen.py`, `_container_prefix`: the correction was *appended below* a bullet that still asserts
+  *"That is literally the `{{CONTAINER_PREFIX}}<service>` the templates write"*. In the shipped template
+  the prefix precedes a hard-coded literal suffix, never a `containers.services` value — that sentence
+  is true only in the buggy configuration. Rewrite the bullet; do not annotate it.
+- `catalog.py`, `Containers.services`: the field still opens with *"when they differ from the container
+  names above"*, and nothing at the declaration warns that a native-rendered entry setting it
+  *correctly* is rejected. One sentence, or resolve the above and delete the field.
+
+**Also noted by the same review, lower:** the cross-check is one-directional (`selected` is a subset of
+`defined`), so a `service_names()` helper that *over*-reports only makes it more permissive — a mutation
+dropping its stop-at-top-level rule was killed by a TBC-only equality test, not by the cross-check. And
+that helper's `^  ([A-Za-z0-9-]+):` excludes `_`, so an underscored service key would read as undefined:
+loud, therefore acceptable, but undocumented.
+
 ### One thing worth keeping
 
 Three of these have an obvious fix that is **wrong**, and two of them arm a worse bug:
