@@ -17,6 +17,22 @@ from yulon.catalog.native import StagedInstaller
 FAMILIES: Mapping[str, type[StagedInstaller]] = {"azerothcore": AzerothCoreInstaller}
 
 
+def is_registered(family: str) -> bool:
+    """Does THIS build have an engine for `family`? The question, not the mapping.
+
+    Catalog data outruns the engines that read it: the `cmangos` blocks land in
+    7.3's group G and the class that consumes them is registered above four
+    groups later, so between the two there is a shipped entry naming a family
+    that does not exist here. `installer.installer_for()` has to be able to tell
+    that state apart from a typo, and it cannot read `FAMILIES` to do it —
+    importing this package at its module scope is the cycle its own in-function
+    import exists to avoid, and an import moved inside a branch is the same
+    coupling with the name filed off. A predicate lives here, where the mapping
+    does, and the registry stays this package's business.
+    """
+    return family in FAMILIES
+
+
 def family_for(entry: CatalogEntry) -> type[StagedInstaller]:
     """The engine class for `entry`'s `install.native.family`.
 

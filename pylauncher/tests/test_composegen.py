@@ -506,6 +506,22 @@ def test_every_installer_writes_the_bot_population_that_was_decided() -> None:
     min_bots = ENTRY.install.native.azerothcore.world_env["AC_AI_PLAYERBOT_MIN_RANDOM_BOTS"]
     assert min_bots == BOT_POPULATION
 
+    # And from G.4 there are three more of it: the CMaNGOS entries write the
+    # same number as an `aiplayerbot.conf` value instead of compose
+    # environment. The plan for that task supplied 1600/2000 for TBC and
+    # 600/800 for Vanilla — the pre-2026-08-28 numbers, copied out of the
+    # scripts as they were before the decision reached them. Writing those
+    # would have re-opened this exact bug on the side of it no scan of
+    # `catalog/installers/` can see.
+    for game_id in ("wow-tbc", "wow-vanilla", "wow-tortoise"):
+        cmangos = load_catalog().get(game_id).install.native
+        assert cmangos is not None and cmangos.cmangos is not None
+        bots = cmangos.cmangos.conf.files.get("aiplayerbot.conf")
+        if bots is None:
+            continue
+        assert bots.keys["AiPlayerbot.MinRandomBots"] == BOT_POPULATION, game_id
+        assert bots.keys["AiPlayerbot.MaxRandomBots"] == BOT_POPULATION, game_id
+
 
 def test_the_image_refs_match_the_services_the_build_overlay_actually_builds(
     tmp_path: Path,

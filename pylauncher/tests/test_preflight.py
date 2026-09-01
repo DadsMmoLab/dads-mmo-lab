@@ -259,8 +259,16 @@ def test_no_daemon_is_a_refusal_and_everything_under_it_is_unchecked() -> None:
 
 
 def test_an_entry_with_no_native_data_is_refused_rather_than_guessed_at() -> None:
+    """TBC with its block taken away, because since G.4 every shipped entry has one.
+
+    The entry used to be its own example. It is a `model_copy` now rather than a
+    different game, so the case this refusal exists for — floors and templates
+    asked of an entry that never declared any — is still made against a real
+    catalog entry and not a hand-built stub that could drift from one.
+    """
     tbc = load_catalog().get("wow-tbc")
-    report = preflight.evaluate(tbc, SERVER_DIR, facts())
+    bare = tbc.model_copy(update={"install": tbc.install.model_copy(update={"native": None})})
+    report = preflight.evaluate(bare, SERVER_DIR, facts())
     assert not report.ok()
     assert "catalog.json" in report.message()
 

@@ -9,6 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from yulon import resources
+from yulon.catalog import composegen
 from yulon.catalog.catalog import (
     CATALOG_FILE,
     ClientSpec,
@@ -380,18 +381,6 @@ def test_wotlk_native_block_names_its_family_images_database_and_ready_markers()
         type(native).model_validate({**native.model_dump(), "world_env": {}})
 
 
-def test_the_three_cmangos_entries_have_no_native_block_yet() -> None:
-    """7.1 dispatches only WotLK natively; the CMaNGOS blocks arrive with 7.3's models.
-
-    F.4 changes the `platforms` assertion to `()` in 7.2; G.4 deletes this test
-    when the three entries get their `native` blocks in 7.3.
-    """
-    catalog = load_catalog()
-    for game_id in ("wow-tbc", "wow-vanilla", "wow-tortoise"):
-        assert catalog.get(game_id).install.native is None, game_id
-        assert catalog.get(game_id).install.platforms == ("linux",), game_id
-
-
 @pytest.mark.parametrize("missing", ["family", "images", "image_prefix", "db", "ready"])
 def test_a_native_block_without_its_facts_is_refused(missing: str) -> None:
     native = load_catalog().get("wow-wotlk").install.native
@@ -649,3 +638,104 @@ def test_mpq_depth_is_a_positive_int_or_recursive() -> None:
         ClientSpec(mpq_depth=0)
     with pytest.raises(ValidationError):
         ClientSpec(mpq_depth="deep")  # type: ignore[arg-type]
+
+
+# -- the CMaNGOS data (7.3, task G.4) -----------------------------------------
+
+CMANGOS_GAMES = ("wow-tbc", "wow-vanilla", "wow-tortoise")
+
+
+@pytest.mark.parametrize("game_id", CMANGOS_GAMES)
+def test_the_cmangos_entries_carry_a_full_family_block(game_id: str) -> None:
+    """The data lands in 7.3 while the engine that reads it is still four groups away.
+
+    `platforms` deliberately still says `["linux"]` and the entries keep their
+    `script`. The plan for this task had both go — `"platforms": []`, no
+    `script` — on the strength of 7.2 having already deleted the bash path. It
+    has not: those three scripts are the only thing that installs these games
+    today, `FAMILIES` has no `cmangos` engine to replace them with until K.8,
+    and `Install.platforms` carries `min_length=1` so an empty list is not even
+    a value this model accepts. What changes here is the DATA; what installs
+    the game is asserted in `test_families_azerothcore.py`, on the dispatcher.
+    """
+    entry = load_catalog().get(game_id)
+    native = entry.install.native
+    assert native is not None and native.family == "cmangos"
+    assert native.cmangos is not None
+    assert native.templates == "shared/cmangos"
+    assert native.dockerfile_dir == f"{game_id}/native"
+    assert native.images == ("server",)
+    assert native.image_prefix.startswith("yulon.local/cmangos-")
+    assert native.db.client == "mariadb"
+    assert entry.install.password.mode == "generated"
+    assert entry.install.password.file == ".db_password"
+    assert entry.install.platforms == ("linux",)
+    assert entry.install.script
+    assert entry.install.requires_client_dir is True
+    for source in entry.emulator.sources:
+        assert source.dest.startswith("src/")
+
+
+def test_tbc_carries_the_script_values_verbatim() -> None:
+    """The eleven AHBot tuples and six spell_template columns are install-wow-tbc.sh's."""
+    cm = load_catalog().get("wow-tbc").install.native
+    assert cm is not None and cm.cmangos is not None
+    ahbot = cm.cmangos.conf.files["ahbot.conf"].keys
+    assert len(ahbot) == 11
+    assert ahbot["AuctionHouseBot.Loot.Creature.WorldBoss"] == "-10, 2, 1, 1"
+    assert ahbot["AuctionHouseBot.Items.Profession"] == "250, 300, 0, 50"
+    hotfix = next(p for p in cm.cmangos.sql.phases if p.name == "spell_template hotfix")
+    assert hotfix.statements[0].count("ADD COLUMN IF NOT EXISTS") == 6
+    assert "EffectBonusCoefficientFromAP3" in hotfix.statements[0]
+    assert cm.cmangos.client.required_file == "Data/expansion.MPQ"
+    assert cm.cmangos.client.locale_mpq_required is True
+    assert [p.name for p in cm.cmangos.sql.phases][-1] == "expansion unlock"
+    assert cm.ready.world == "Avg Diff:" and cm.ready.auth is None
+    assert cm.ready.regex is False, "a literal marker; the spine re.escapes it (A5)"
+
+
+def test_vanilla_and_tortoise_carry_their_deltas() -> None:
+    vanilla = load_catalog().get("wow-vanilla").install.native
+    assert vanilla is not None and vanilla.cmangos is not None
+    assert vanilla.cmangos.client.required_file == "Data/dbc.MPQ"
+    assert vanilla.cmangos.client.mpq_depth == 1
+    assert vanilla.cmangos.extract.ulimit_stack_unlimited is True
+    assert vanilla.cmangos.extract.retry is not None
+    assert vanilla.cmangos.extract.retry.tools == ("vmap extract", "vmap assemble")
+    bots = vanilla.cmangos.conf.files["aiplayerbot.conf"]
+    assert bots.match_commented is True
+    assert bots.keys["AiPlayerbot.SyncLevelMaxAbove"] == "5"
+    names = [p.name for p in vanilla.cmangos.sql.phases]
+    assert "dbc data" not in names and "expansion unlock" not in names
+    assert vanilla.cmangos.sql.verify[0].min == 17000
+
+    tortoise = load_catalog().get("wow-tortoise").install.native
+    assert tortoise is not None and tortoise.cmangos is not None
+    assert tortoise.db.image == "mariadb:10.6"
+    assert tortoise.cmangos.client.required_file is None
+    assert tortoise.cmangos.client.mpq_depth == 2
+    assert tortoise.cmangos.mmaps.required is False
+    assert tortoise.cmangos.sql.create == ()
+    assert tortoise.cmangos.sql.marker_db == "tw_world"
+    char_info = tortoise.cmangos.conf.files["mangosd.conf"].keys["CharacterDatabase.Info"]
+    assert char_info.endswith(';{{CHAR_DB}}"'), "raw catalog value: the token, not the schema name"
+    tokens = composegen.entry_tokens(load_catalog().get("wow-tortoise")) | {"DB_PASSWORD": "x"}
+    filled = composegen.fill(char_info, tokens)
+    assert filled.endswith(';tw_char"')
+    assert tortoise.ready.fatal is not None and "Could not open" in tortoise.ready.fatal
+    assert tortoise.ready.regex is True, "alternations; the spine must not re.escape them (A5)"
+    assert load_catalog().get("wow-tortoise").install.password.prefix == "tortoise-"
+
+
+def test_tortoise_still_clones_the_fork_that_carries_the_playerbots() -> None:
+    """The plan for G.4 respelled this source as `Penqle/tortoise-wow` on `main`.
+
+    Tortoise V2 is `Shyalya/tortoise-wow` on branch `playerbots-integration-gh`
+    — the fork with the CMaNGOS playerbots integrated, which is the whole reason
+    this game is in the catalog. Penqle's main is the upstream it was forked
+    from, and swapping the pin would build a bot-less server that still passes
+    every other assertion in this file.
+    """
+    source = load_catalog().get("wow-tortoise").emulator.sources[0]
+    assert source.repo == "Shyalya/tortoise-wow"
+    assert source.branch == "playerbots-integration-gh"
