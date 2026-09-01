@@ -575,17 +575,27 @@ class ContainerGit:
                     spec, ["fetch", *_pull_depth_args(spec.depth), "origin", spec.branch or "HEAD"]
                 )
                 self._run(spec, ["reset", "--hard", "FETCH_HEAD"])
-                self._pin(spec)
-                return
             except GitError as exc:
                 if platform.DOCKER_CLI_MISSING_HELP not in str(exc) and git_available():
                     logger.warning(
                         f"containerized git update failed in {spec.dest} ({exc}); "
                         "falling back to host git"
                     )
+                    # Which updates AND pins, through host git — so the pin is
+                    # not skipped here, and must not be applied a second time.
                     RunnerGit().clone(spec)
                     return
                 raise
+            # Outside the try, and only on the path that did not fall back. The
+            # try exists for one question — "can containerised git work on this
+            # host at all?" — and a pin that does not exist is not an answer to
+            # it. Inside, a bad SHA reached the user as "containerized git
+            # update failed (...); falling back to host git", ran the whole
+            # fetch again through host git, and only then admitted to
+            # `upload-pack: not our ref`. The fresh-clone path below has always
+            # pinned outside its own fallback; this is that same rule.
+            self._pin(spec)
+            return
         if spec.dest.exists():
             shutil.rmtree(spec.dest)
         spec.dest.mkdir(parents=True, exist_ok=True)
