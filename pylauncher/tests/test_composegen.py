@@ -446,13 +446,6 @@ def test_the_generated_stack_configures_the_bot_population(tmp_path: Path) -> No
     plan = render(tmp_path / "wow")
     assert f'AC_AI_PLAYERBOT_MIN_RANDOM_BOTS: "{BOT_POPULATION}"' in plan.override
     assert f'AC_AI_PLAYERBOT_MAX_RANDOM_BOTS: "{BOT_POPULATION}"' in plan.override
-    machine's population is not a default for every machine — a preflight-passing
-    laptop can install successfully and then be unusable. Making them data is
-    what lets a capacity-aware default, or a user setting, exist later.
-    """
-    plan = render(tmp_path / "wow")
-    assert 'AC_AI_PLAYERBOT_MIN_RANDOM_BOTS: "500"' in plan.override
-    assert 'AC_AI_PLAYERBOT_MAX_RANDOM_BOTS: "500"' in plan.override
 
     # Data, not code — and the structural flags stay behind in the constant.
     assert "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS" not in composegen.DEFAULT_WORLD_ENV
