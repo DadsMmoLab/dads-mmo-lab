@@ -958,6 +958,37 @@ was found by reading code; each is a line in a resolved compose document from a 
   *Recorded, not fixed:* H.1 deliberately shipped no uncalled field, and Group I is where the caller
   arrives. It must not land without this.
 
+- **`composegen.write_plan()` skips a CRLF file forever, and accuses the user when a read flickers** —
+  2026-09-01, found while writing I.3's own version of the same "may we overwrite this" question, and
+  **confirmed by running the real `write_plan()`**, not a reconstruction. Two defects, both in merged,
+  shipping code (`yulon/catalog/composegen.py`, `is_ours()` and `write_plan()`):
+
+  1. **The unchanged-file skip uses `read_text()`, which translates `
+` to `
+`.** So a
+     byte-for-byte CRLF copy of our own compose file compares EQUAL, the write is skipped, and the
+     CRLF stays on disk permanently — the skip preserving the exact thing it should repair. Measured:
+     with a CRLF copy present, `write_plan()` returned `()` and left it. I.3's `_look()` avoids this
+     by opening with `newline=""`.
+  2. **Each file is read twice — once by `is_ours()`, once for the equality check.** A transient
+     failure on the FIRST read makes `is_ours()` swallow the `OSError` and answer `False`, producing
+     *"was not written by Yu'lon"* — an accusation against a file we did write. A failure on the
+     SECOND read is not caught at all and escapes as a raw `PermissionError`. Both measured with a
+     stateful `Path.open`.
+
+  **Severity: real, currently low-probability.** `write_plan`'s targets are pure engine output with no
+  shipped starting content, so the CRLF skip needs a `git` round-trip of a generated file or an editor
+  with the wrong default. The double-read bites on any transient read during a resume, which is an
+  installer-robustness gap rather than a rare one.
+
+  *Recorded, not fixed, and the reason matters.* I.3 deferred it saying a change there would risk the
+  A16 byte snapshot. **That justification does not hold** — the reviewer checked, and `render()`
+  (which A16 exercises) and `is_ours()`/`write_plan()` are disjoint with no shared helpers. The honest
+  reason to defer is scope: `write_plan` is load-bearing, has two other callers, and has its own test
+  suite with no CRLF or double-read coverage yet. Fixing it is its own task, and it should consolidate
+  with `dockerfile._look()` rather than grow a second three-way answer beside it — the same question
+  currently gets an honest three-way answer for a Dockerfile and a two-way one for a compose file.
+
 
 ### One thing worth keeping
 
