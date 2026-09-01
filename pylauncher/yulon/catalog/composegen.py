@@ -389,10 +389,21 @@ def render(
     )
     build = fill(
         texts["build.yml.tmpl"],
-        # `.` and not the absolute path: the server dir IS the checkout, and
-        # compose resolves a relative context against the file's own directory,
-        # so a moved folder keeps building.
-        {"BUILD_CONTEXT": "."},
+        {
+            # `.` and not the absolute path: the server dir IS the checkout, and
+            # compose resolves a relative context against the file's own
+            # directory, so a moved folder keeps building.
+            "BUILD_CONTEXT": ".",
+            # The catalog facts here too, for `CONTAINER_PREFIX`. A build block
+            # is merged into the base file BY SERVICE NAME, and the shared
+            # CMaNGOS overlay is one template for three games whose services
+            # are `tbc-`, `vanilla-` and `tortoise-` prefixed, so it can only
+            # spell its service key as a token. WotLK's overlay names its four
+            # services in full and uses none of these — unused tokens cost
+            # nothing (`fill()` minds unfilled placeholders, not unused
+            # values), so its render stays byte-identical (A16).
+            **entry_tokens(entry),
+        },
     )
     return ComposePlan(base, override, build, {"DB_ROOT_PASSWORD": password} if generated else {})
 
