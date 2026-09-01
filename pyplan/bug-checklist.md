@@ -1243,7 +1243,33 @@ severity.
 **A test over today's templates is not the same guard as a by-name refusal**, which is what compose
 has.
 
-**RECOMMENDATION: split `_tokens()`, do not refuse by name.** A by-name refusal is a guard someone
+**DECIDED 2026-09-01 by an adversarial review from a second model (Codex), which found the hole both
+of our own agents missed. Verdict: needs-attention — "do not ship Position B as the final contract."**
+
+K.4 shipped the mapping WHOLE, arguing the refusal lives *inside* `dockerfile.render()` rather than at
+a render site, so "the fourth caller inherits it by doing nothing". **That claim is false, and here is
+why:** a caller inherits the protection only if it *chooses that renderer*. A new stage can take
+`_tokens(ctx)` and reach disk through `composegen.fill()`, direct formatting, serialization, or
+logging — and none of `render()`'s checks apply. Worse, **`dockerfile.write()` validates only the
+generated marker, not secret CONTENT**, so even a caller reusing the writer while bypassing `render()`
+can persist secret-bearing text into the build context.
+
+**The deeper point, which neither of our agents reached:** conf's legitimate need for the password is
+not a violation, but it **disproves the abstraction** — a shared `dict[str, str]` conveys **no
+authority distinction** between consumers allowed and forbidden to handle secrets. That is ambient
+authority, and every consumer has it by default.
+
+**THE THIRD DESIGN, better than both of ours: capability-scoped token sets.** A public/build mapping
+that *cannot* contain secrets, handed out by default; plus an explicitly obtained secret-bearing
+mapping (or resolver) that conf/SQL/verify must ask for. Keep `render()`'s by-name refusal as defence
+in depth. Add a test proving every build-context writer receives a mapping without `DB_PASSWORD`, and
+make `dockerfile.write()` reject secret content if it stays a public bypass around `render()`.
+
+**On deferring it:** rejected, and the reason is one to keep. *"This is the contract-forming change
+and later migration only becomes harder."* **K.7 is the next consumer and it needs the password for
+SQL — so the split must land BEFORE K.7, not after Group K.**
+
+*(Superseded recommendation, kept as the record: split `_tokens()` rather than refuse by name.)* A by-name refusal is a guard someone
 must remember to add at **every render site**, and K.4 is only the third consumer of `_tokens()`;
 there will be a fourth, and the fourth is where it gets missed. This is the same argument that put
 §19's redaction at the boundary instead of the call sites — **a mapping that structurally cannot carry
