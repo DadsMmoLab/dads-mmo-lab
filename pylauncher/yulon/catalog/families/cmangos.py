@@ -11,8 +11,11 @@ the third CMaNGOS game costs a catalog entry plus templates, no Python
 
 Every body here is a thin wrapper: it pulls one typed block off the entry,
 resolves the few values only the engine knows (the built image reference, the
-uid:gid policy, the token mapping, the secret) and hands them to a stage-kind
-module (`dockerfile`, `extract`, `conf`, `sqlplan`). The spine
+uid:gid policy, the right token mapping of the two, the secret) and hands them
+to a stage-kind module (`dockerfile`, `extract`, `conf`, `sqlplan`). Two
+mappings and not one since 7.3: `_public_tokens()` for whatever writes into the
+build context, `_secret_tokens()` for the consumers that must have the
+password. Contract A6 said one; mutation M15 said why that was wrong. The spine
 (`StagedInstaller`) owns clone, compose, build, start-db, up and ready, it
 owns the import branch table, and it yields every stage's cancel note — this
 family only supplies the `MarkerGate` and runs the SQL plan when the table
@@ -36,6 +39,7 @@ import os
 import queue
 import threading
 from collections.abc import Callable, Iterator
+from dataclasses import fields
 from pathlib import Path
 from typing import ClassVar, cast
 
@@ -47,6 +51,7 @@ from yulon.catalog.installer import InstallerError
 from yulon.catalog.native import (
     BUILD_CANCEL_NOTE,
     INSTALL_REALM_HOST,
+    Secrets,
     Stage,
     StageContext,
     StagedInstaller,
@@ -100,6 +105,31 @@ half of that trade.
 What the number actually buys is not the same on every platform this app ships
 to — see `_write_secret`, which measured it.
 """
+
+
+def secret_token_map(secrets: Secrets) -> dict[str, str]:
+    """Every field of the `Secrets` handed in, as `{FIELD_NAME_UPPERCASED: value}`.
+
+    DERIVED from the secret type's own fields, not listed here. A secret added
+    to `native.Secrets` is therefore carried by `_secret_tokens()` and absent
+    from `_public_tokens()` by construction, with nobody to remember either
+    half. Listing the names instead is what K.4 had, and what mutation M15
+    defeated on 2026-09-01: a second secret key added to the single `_tokens()`
+    mapping rendered `ENV ROOT_PASSWORD=<the password>` into a Dockerfile while
+    all 1872 tests passed, because the protection covered the NAME
+    `DB_PASSWORD` and not the property.
+
+    `fields()` is asked of the INSTANCE, so a subclass carrying a second secret
+    answers with both fields — which is how
+    `test_the_secret_mapping_carries_a_second_secret_nobody_listed` adds one
+    without editing `native.py`, and why the derivation is testable at all.
+
+    The spelling `db_password` -> `DB_PASSWORD` is the token grammar every
+    template in the app already uses, and
+    `test_the_secret_mapping_spells_each_field_the_way_the_templates_do` pins
+    it against the shipped conf tables, which name `{{DB_PASSWORD}}` literally.
+    """
+    return {field.name.upper(): getattr(secrets, field.name) for field in fields(secrets)}
 
 
 class CmangosInstaller(StagedInstaller):
@@ -250,24 +280,27 @@ class CmangosInstaller(StagedInstaller):
         is not read here at all, and a resume that has `write-dockerfile` in
         `completed` reaches this body exactly like a first run.
 
-        **Why `_tokens(ctx)` goes over WHOLE, secret included** — decided at K.4,
-        2026-09-01, against `bug-checklist.md` §20's recommendation, which was
-        recorded before the fix it argues about existed. §20's case against a
-        by-name refusal was that it is *a guard someone must remember at every
-        render site*. That is not where the refusal landed: `dockerfile.render()`
-        refuses `{{DB_PASSWORD}}` by name and drops the key from the mapping it
-        fills with, INSIDE the renderer, so the next caller of `render()`
-        inherits both without doing anything and §20's own test — if the
-        protection has to be remembered at the next site, it is at the wrong
-        level — is met. Taking the key out here would add a third copy of one
-        rule at a call site, which is the level §19 and §20 both argue against,
-        and it is the copy a later site forgets.
+        **Why `_public_tokens(ctx.server_dir)` and not `_secret_tokens(ctx)`.**
+        K.4 handed `render()` one mapping WHOLE, password included, and leaned
+        on the renderer to drop `DB_PASSWORD` and refuse a template naming it.
+        That covered a name, and K.4's own review broke it (M15, 2026-09-01):
+        a second secret key added to the single mapping —
+        `"ROOT_PASSWORD": ctx.secrets.db_password` — rendered
+        `ENV ROOT_PASSWORD=tbc-0123456789abcdef` into a Dockerfile with all
+        1872 tests green. Splitting the mapping by capability is contract A6's
+        answer, taken at 7.3 before K.7's SQL and verify arrived to inherit the
+        old shape.
 
-        What that does NOT close, and this stage cannot: a future stage writing
-        into the build context WITHOUT going through `dockerfile.render()` still
-        gets the password in its mapping by default. Splitting `_tokens()` is
-        where that would be answered — a change to contract A6, not to this
-        stage — and narrowing at this one call site would do nothing for it.
+        The narrowing is NOT at this call site: `_public_tokens()` is a method
+        with no `StageContext` in its signature, so the secret is out of scope
+        wherever the build mapping is built, and a later stage writing into the
+        build context gets the safe set by asking for the same method rather
+        than by remembering a rule here.
+
+        `render()`'s by-name refusal and its key drop STAY, as defence in
+        depth: the glob-bypass test in `test_families_cmangos.py` hands
+        `render()` the SECRET-bearing mapping on purpose, so the renderer's own
+        refusal is still proved by a test this stage does not go through.
         """
         native_block = self._native()
         if native_block.dockerfile_dir is None:
@@ -277,7 +310,7 @@ class CmangosInstaller(StagedInstaller):
             )
         template_dir = self.installers_root / native_block.dockerfile_dir
         try:
-            text, ignore = dockerfile.render(template_dir, self._tokens(ctx))
+            text, ignore = dockerfile.render(template_dir, self._public_tokens(ctx.server_dir))
             written = dockerfile.write(ctx.server_dir, text, ignore)
         except dockerfile.DockerfileError as exc:
             # Already the sentence a user reads — `stage_generate_compose` passes
@@ -290,7 +323,7 @@ class CmangosInstaller(StagedInstaller):
             # the clause below would otherwise catch a refusal and rewrap its
             # sentence inside a second one. Nothing in the `try` raises one as
             # this stands — `_native()` has already succeeded above, so the copy
-            # of that check inside `_tokens()` cannot fire — which is precisely
+            # of that check inside `_public_tokens()` cannot fire — precisely
             # why the ordering has to be written down rather than remembered.
             raise
         except (RuntimeError, OSError) as exc:
@@ -526,7 +559,7 @@ class CmangosInstaller(StagedInstaller):
         for path in copied:
             yield f"Copied {path.name} out of the server image."
         try:
-            changed = conf.apply_table(data.conf, etc_dir, self._tokens(ctx))
+            changed = conf.apply_table(data.conf, etc_dir, self._secret_tokens(ctx))
         except InstallerError:
             # MUST stay ahead of the broad clause: every refusal `apply_table()`
             # raises is already the sentence a user reads, and naming a file it
@@ -609,42 +642,44 @@ class CmangosInstaller(StagedInstaller):
             )
         return data
 
-    def _tokens(self, ctx: StageContext) -> dict[str, str]:
-        """The one token mapping for the Dockerfile, the conf tables, the SQL statements and verify.
+    def _public_tokens(self, server_dir: Path) -> dict[str, str]:
+        """The token mapping a writer into the BUILD CONTEXT gets: catalog plus install, no secret.
+
+        **The parameter list is the guarantee.** This method is handed a
+        `server_dir`, never a `StageContext`, so `ctx.secrets` is not in scope
+        in this body and a key added to this mapping has nothing to read a
+        secret out of. That is a different kind of protection from refusing a
+        name: `dockerfile.render()` drops `DB_PASSWORD`, one key, and K.4's
+        review broke it by adding a SECOND (M15, 2026-09-01 —
+        `"ROOT_PASSWORD": ctx.secrets.db_password` next to the first). With the
+        single mapping that mutation rendered
+        `ENV ROOT_PASSWORD=tbc-0123456789abcdef` into a Dockerfile and all 1872
+        tests still passed. Written here it does not compile into anything: the
+        value it needs is one method over.
 
         `composegen.entry_tokens()` is the catalog-derived set the compose
         templates use (`DB_IMAGE` … `MAKE_JOBS`, `CORE_DIR` being the in-image
         install prefix, `LOGS_DB` absent rather than empty when the entry has
-        no extra schema); this adds what only an install knows. The same
-        grammar and the same `composegen.fill()` everywhere — a value between
-        a template and a conf table cannot become a silent literal, because an
-        unknown token is refused.
+        no extra schema); this adds what only an install knows — the compose
+        project name, the image tag and prefix, the host ports, the realm host.
+        The same grammar and the same `composegen.fill()` everywhere, so a
+        value between a template and a conf table cannot become a silent
+        literal: an unknown token is refused.
 
-        `DB_PASSWORD` is in here because the conf tables need it: conf files
-        are written 0600 and the emulator reads them, and the compose templates
-        never see it in generated mode — `composegen.generate()` refuses a
-        compose template that so much as spells `{{DB_PASSWORD}}` in that mode,
-        by name, so the secret stays in `.env`.
+        Two stages wrote into the server dir `docker build` is pointed at when
+        this split landed: `write-dockerfile`, which takes THIS mapping through
+        `dockerfile.render()`, and `generate-compose`, which takes no mapping
+        from this class at all — `composegen.generate()` builds its own from
+        `entry_tokens(entry)` and refuses a compose template naming
+        `{{DB_PASSWORD}}` in generated mode.
 
-        This same mapping is what `write-dockerfile` hands to
-        `dockerfile.render()`, whole — and the Dockerfile side now takes the
-        same decision by itself rather than trusting the caller with it.
-        `dockerfile.SECRET_TOKEN` refuses a template that so much as spells
-        `{{DB_PASSWORD}}`, by name and by path, and drops the key from the
-        mapping it fills with, so nothing this mapping carries can reach a file
-        in the build context. It is the harder case of the two: a compose file
-        holding the secret is the user's own file (delete it, rotate, done),
-        while a Dockerfile is copied into a content-addressed image layer that
-        `docker history` prints long after the file is deleted.
-
-        So: the Dockerfile may NOT see the secret — the question 7.3 left
-        undecided when contract A6 specified one mapping for the Dockerfile, the
-        conf tables, the SQL and verify alike. Handing the whole mapping over
-        stays A6's shape; what changed is that `render()` no longer takes the
-        password from it.
+        Why the Dockerfile is the harder half: a secret in a compose file sits
+        in a file the user owns — delete it, rotate, done — while a Dockerfile
+        is copied into a content-addressed image LAYER that `docker history`
+        prints long after the file is gone, and undoing that means finding
+        every image built from the layer.
         """
         native_block = self._native()
-        server_dir = ctx.server_dir
         platform_id = self._seams.platform_id
         return {
             **composegen.entry_tokens(self.entry),
@@ -656,9 +691,30 @@ class CmangosInstaller(StagedInstaller):
             "DB_PORT": str(self.entry.ports.db),
             "AUTH_PORT": str(self.entry.ports.auth),
             "WORLD_PORT": str(self.entry.ports.world),
-            "DB_PASSWORD": ctx.secrets.db_password,
             "REALM_HOST": INSTALL_REALM_HOST,
         }
+
+    def _secret_tokens(self, ctx: StageContext) -> dict[str, str]:
+        """`_public_tokens()` plus every secret in `ctx.secrets` — for consumers that need one.
+
+        Opting IN is the whole point, and it is opt-in by asking for a
+        different method rather than by passing a flag: a flag defaults safe
+        but leaves the secret in scope in one body, so the M15 mutation stays
+        writable inside the safe branch and a flipped default reaches every
+        caller at once.
+
+        `conf` is the consumer today, and it is the case that proves the
+        abstraction needs two sets rather than none: the emulator reads its
+        `.conf` files, so the password has to be IN them, and `conf.CONF_MODE`
+        (0600) is what that costs. K.7's `import` stage is the next — the
+        shipped SQL carries `CREATE USER … IDENTIFIED BY '{{DB_PASSWORD}}'`,
+        and verify connects with it.
+
+        The secret half is derived by `secret_token_map()` from the fields of
+        the `Secrets` instance, so adding a secret to `native.Secrets` extends
+        this mapping and cannot extend `_public_tokens()`.
+        """
+        return {**self._public_tokens(ctx.server_dir), **secret_token_map(ctx.secrets)}
 
     def _image_ref(self, ctx: StageContext, service: str) -> str:
         """The fully qualified reference of the image `service` names in `native.images`.
