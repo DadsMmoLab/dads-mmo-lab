@@ -11,10 +11,15 @@ from pydantic import ValidationError
 from yulon import resources
 from yulon.catalog.catalog import (
     CATALOG_FILE,
+    ClientSpec,
     DbFacts,
     EmulatorSource,
+    ExtractPlan,
+    NativeInstall,
     PasswordPlan,
     ReadyMarkers,
+    SqlPhase,
+    SqlPlan,
     load_catalog,
     parse_catalog,
 )
@@ -477,3 +482,170 @@ def test_wotlk_names_no_script_platform_but_still_ships_its_scripts_until_7_2() 
     assert wotlk.install.platforms == ("linux", "macos", "windows")
     assert wotlk.install.native is not None
     assert wotlk.install.script == "wow-wotlk/install-wow-wotlk.sh"
+
+
+# -- the CMaNGOS blocks (7.3, task G.2) ---------------------------------------
+
+SQL_PLAN = {
+    "create": ["mangos", "realmd"],
+    "phases": [
+        {"name": "realmd base", "into": "realmd", "files": ["src/core/sql/base/realmd.sql"]},
+        {
+            "name": "hotfix",
+            "into": "mangos",
+            "statements": ["UPDATE x SET y = 1"],
+            "on_error": "warn",
+        },
+        {"name": "schema", "files": ["src/core/sql/create_databases.sql"]},
+        {
+            "name": "core updates",
+            "into_each": {"mangos": "src/core/sql/updates/mangos/*.sql"},
+            "sort": "natural",
+            "on_error": "warn",
+        },
+    ],
+    "verify": [{"db": "mangos", "query": "SELECT COUNT(*) FROM item_template", "min": 10000}],
+    "player_data": [{"db": "characters", "table": "characters"}],
+    "marker_db": "mangos",
+}
+
+CMANGOS = {
+    "client": {"required_file": "Data/expansion.MPQ", "min_mpq": 6},
+    "dockerfile": {"make_jobs": 2},
+    "extract": {
+        "image": "server",
+        "tools": [
+            {
+                "name": "dbc and maps",
+                "argv": ["/opt/mangos/bin/tools/ad", "-i", "/client"],
+                "produces": {"dbc": 100},
+            },
+            {
+                "name": "vmap extract",
+                "argv": ["/opt/mangos/bin/tools/vmap_extractor"],
+                "produces": {"Buildings": 100},
+            },
+        ],
+        "retry": {"when_log_matches": "Segmentation fault|core dumped", "tools": ["vmap extract"]},
+    },
+    "mmaps": {"argv": ["/opt/mangos/bin/tools/MoveMapGen", "--silent"], "min_files": 500},
+    "conf": {
+        "source_dir": "/opt/mangos/etc",
+        "files": {"mangosd.conf": {"keys": {"DataDir": '"/opt/mangos/data"'}}},
+    },
+    "sql": SQL_PLAN,
+}
+
+NATIVE_CMANGOS = {
+    "family": "cmangos",
+    "templates": "shared/cmangos",
+    "dockerfile_dir": "wow-x/native",
+    "image_prefix": "yulon.local/cmangos-x-",
+    "images": ["server"],
+    "db": {"image": "mariadb:11", "client": "mariadb", "user": "mangos"},
+    "ready": {"world": "Avg Diff:"},
+    "cmangos": CMANGOS,
+}
+
+
+def test_the_cmangos_block_validates_and_fills_its_defaults() -> None:
+    native = NativeInstall.model_validate(NATIVE_CMANGOS)
+    assert native.cmangos is not None
+    assert native.cmangos.client.mpq_depth == "recursive"
+    assert native.cmangos.client.locale_mpq_required is False
+    assert native.cmangos.client.near_client_warn_gb == 8.0
+    assert native.cmangos.extract.ulimit_stack_unlimited is False
+    assert native.cmangos.extract.stage_client is False
+    assert native.cmangos.mmaps.required is True
+    assert native.cmangos.conf.files["mangosd.conf"].match_commented is False
+    phases = native.cmangos.sql.phases
+    assert phases[0].on_error == "fail" and phases[0].sort == "natural" and phases[0].gzip is False
+    assert phases[2].into is None and phases[2].into_each is None, "schema-less is allowed"
+    assert native.dockerfile_dir == "wow-x/native", "B.3's field, unchanged by 7.3"
+    assert native.ready.regex is False, "A5: markers are literals unless the entry says regex"
+
+
+def test_the_family_names_exactly_the_block_that_is_present() -> None:
+    """`family` and the typed block must agree; one without the other is a typo, not a choice."""
+    with pytest.raises(ValidationError, match="cmangos"):
+        NativeInstall.model_validate({**NATIVE_CMANGOS, "cmangos": None})
+    with pytest.raises(ValidationError, match="azerothcore"):
+        NativeInstall.model_validate({**NATIVE_CMANGOS, "azerothcore": {"world_env": {}}})
+    with pytest.raises(ValidationError, match="cmangos"):
+        NativeInstall.model_validate(
+            {**NATIVE_CMANGOS, "family": "azerothcore", "azerothcore": {"world_env": {}}}
+        )
+    ac = NativeInstall.model_validate(
+        {
+            "family": "azerothcore",
+            "templates": "wow-wotlk/native",
+            "image_prefix": "yulon.local/ac-wotlk-",
+            "images": ["worldserver"],
+            "db": {"image": "mysql:8.4", "client": "mysql", "user": "root"},
+            "ready": {"world": "ready..."},
+            "azerothcore": {"world_env": {}},
+        }
+    )
+    assert ac.cmangos is None and ac.dockerfile_dir is None
+
+
+def test_the_extract_plan_refuses_an_unknown_retry_tool_and_an_unbuilt_image() -> None:
+    with pytest.raises(ValidationError, match="retry"):
+        ExtractPlan.model_validate(
+            {**CMANGOS["extract"], "retry": {"when_log_matches": "x", "tools": ["not a tool"]}}
+        )
+    with pytest.raises(ValidationError, match="images"):
+        NativeInstall.model_validate(
+            {
+                **NATIVE_CMANGOS,
+                "cmangos": {**CMANGOS, "extract": {**CMANGOS["extract"], "image": "tools"}},
+            }
+        )
+
+
+def test_an_sql_phase_is_files_or_statements_into_one_place() -> None:
+    with pytest.raises(ValidationError, match="files"):
+        SqlPhase.model_validate({"name": "empty", "into": "mangos"})
+    with pytest.raises(ValidationError, match="files"):
+        SqlPhase.model_validate(
+            {"name": "both", "into": "mangos", "files": ["a.sql"], "statements": ["SELECT 1"]}
+        )
+    with pytest.raises(ValidationError, match="into"):
+        SqlPhase.model_validate(
+            {
+                "name": "two places",
+                "into": "mangos",
+                "into_each": {"realmd": "x/*.sql"},
+                "files": ["a.sql"],
+            }
+        )
+    with pytest.raises(ValidationError, match="into_each"):
+        SqlPhase.model_validate(
+            {
+                "name": "statements per db",
+                "into_each": {"realmd": "x/*.sql"},
+                "statements": ["SELECT 1"],
+            }
+        )
+
+
+def test_the_plan_hash_is_canonical_and_moves_with_the_plan() -> None:
+    """The import marker records it; a reordered JSON file must not read as a new plan,
+    a changed file list must."""
+    plan = SqlPlan.model_validate(SQL_PLAN)
+    again = SqlPlan.model_validate(
+        {**SQL_PLAN, "marker_db": "mangos", "create": ["mangos", "realmd"]}
+    )
+    assert plan.plan_hash() == again.plan_hash()
+    assert len(plan.plan_hash()) == 16 and int(plan.plan_hash(), 16) >= 0
+    changed = SqlPlan.model_validate({**SQL_PLAN, "create": ["mangos"]})
+    assert changed.plan_hash() != plan.plan_hash()
+
+
+def test_mpq_depth_is_a_positive_int_or_recursive() -> None:
+    assert ClientSpec(mpq_depth=1).mpq_depth == 1
+    assert ClientSpec(mpq_depth="recursive").mpq_depth == "recursive"
+    with pytest.raises(ValidationError):
+        ClientSpec(mpq_depth=0)
+    with pytest.raises(ValidationError):
+        ClientSpec(mpq_depth="deep")  # type: ignore[arg-type]
