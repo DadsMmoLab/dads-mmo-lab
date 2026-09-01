@@ -5114,3 +5114,135 @@ def test_the_password_reaches_no_log_line_on_the_way_to_the_database(
     assert "hunter2" not in caplog.text
     # And not in what the child was spawned with, nor in the result's own `args`.
     assert "hunter2" not in " ".join(_FakePopen.instances[-1].command)
+
+
+# --- volume_exists(): the one question the CMaNGOS `db-password` refusal needs ---
+#
+# The three outcomes below were taken from a live daemon (Docker 29.6.2, Windows)
+# rather than from memory, because the whole function is a claim about Docker's
+# wording. Captured 2026-09-01:
+#
+#   $ docker volume inspect --format {{.Name}} k1-no-such-9f3a
+#   exit 1, stderr: Error response from daemon: get k1-no-such-9f3a: no such volume
+#   $ docker volume inspect --format {{.Name}} k1-probe-vol-9f3a   # after `volume create`
+#   exit 0, stdout: k1-probe-vol-9f3a
+#   $ DOCKER_HOST=tcp://127.0.0.1:2999 docker volume inspect --format {{.Name}} anything_db-data
+#   exit 1, stderr: error during connect: Get "http://127.0.0.1:2999/v1.55/volumes/anything_db-data":
+#                   dial tcp 127.0.0.1:2999: connectex: No connection could be made because the
+#                   target machine actively refused it.
+#
+# Note the last one: a daemon that will not talk exits 1, exactly like a missing
+# volume does, and on Windows it does NOT say "Cannot connect to the Docker
+# daemon at unix://..." - that is the Linux socket wording. So the two are told
+# apart by the stderr TEXT and by nothing else, which is why the absent branch
+# matches a substring and everything else refuses.
+
+_DAEMON_SAYS_ABSENT = "Error response from daemon: get missing_db-data: no such volume"
+"""Verbatim from the live daemon above, with only the volume name changed."""
+
+_DAEMON_WILL_NOT_TALK = (
+    'error during connect: Get "http://127.0.0.1:2999/v1.55/volumes/anything_db-data": '
+    "dial tcp 127.0.0.1:2999: connectex: No connection could be made because the "
+    "target machine actively refused it."
+)
+"""Verbatim from a live CLI pointed at a dead daemon, on the OS the launcher ships to."""
+
+
+def _volume_proc(
+    returncode: int, stdout: str = "", stderr: str = ""
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(["docker", "volume", "inspect"], returncode, stdout, stderr)
+
+
+def _volume_double(monkeypatch: pytest.MonkeyPatch) -> list[tuple[list[str], str | None]]:
+    """Stand in for `_docker`, recording the argv AND the daemon it was aimed at.
+
+    The distro is recorded because the module's completeness guard is an AST walk
+    over the signature: a `volume_exists()` that accepts `wsl_distro` and then
+    drops it on the floor keeps that guard green while asking Docker Desktop
+    about a WSL-resident install's volume - which answers "no such volume", the
+    one answer that tells the caller it is safe to write a new password over a
+    database initialised with the old one.
+    """
+    seen: list[tuple[list[str], str | None]] = []
+
+    def answering(
+        argv: list[str],
+        cwd: Path | None = None,
+        timeout: float | None = None,
+        *,
+        wsl_distro: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        seen.append((argv, wsl_distro))
+        name = argv[-1]
+        if name == "wow-tbc-1234abcd_db-data":
+            return _volume_proc(0, stdout=f"{name}\n")
+        if name == "missing_db-data":
+            return _volume_proc(1, stderr=_DAEMON_SAYS_ABSENT)
+        return _volume_proc(1, stderr=_DAEMON_WILL_NOT_TALK)
+
+    monkeypatch.setattr(docker, "_docker", answering)
+    return seen
+
+
+def test_volume_exists_tells_absent_from_unanswerable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`no such volume` is an answer; a daemon that will not talk is not one (7.3 db-password).
+
+    The two failures exit 1 identically - so if the middle branch were widened to
+    "any failure means absent", the CMaNGOS installer would write a freshly
+    generated password over a database it can no longer open, on nothing more
+    than a daemon hiccup.
+    """
+    seen = _volume_double(monkeypatch)
+    assert docker.volume_exists("wow-tbc-1234abcd_db-data") is True
+    assert docker.volume_exists("missing_db-data") is False
+    with pytest.raises(docker.DockerCommandError, match="actively refused"):
+        docker.volume_exists("anything_db-data")
+    # Audit by argv: one `volume inspect` per question, the name last, never a shell.
+    argvs = [argv for argv, _ in seen]
+    assert all(argv[:3] == ["volume", "inspect", "--format"] for argv in argvs), argvs
+    assert [argv[-1] for argv in argvs] == [
+        "wow-tbc-1234abcd_db-data",
+        "missing_db-data",
+        "anything_db-data",
+    ]
+    assert [distro for _, distro in seen] == [None, None, None]
+
+
+def test_volume_exists_asks_the_daemon_the_install_actually_lives_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The distro must ARRIVE at the seam, not merely be accepted by the signature.
+
+    A WSL-resident install's `db-data` volume lives on that distro's daemon.
+    Asked of Docker Desktop instead, `docker volume inspect` answers "no such
+    volume" - which this function reports as False, the branch that says "safe to
+    write a new password". The wrong-daemon bug and the destructive branch are
+    the same branch, so the forward is pinned here rather than left to the
+    signature-shaped completeness guard.
+    """
+    seen = _volume_double(monkeypatch)
+    assert docker.volume_exists("missing_db-data", wsl_distro="dml-arch") is False
+    assert [distro for _, distro in seen] == ["dml-arch"], seen
+
+
+def test_volume_exists_without_a_cli_raises_the_missing_cli_help(
+    no_docker: list[list[str]],
+) -> None:
+    """No docker at all is its own error, not "the daemon refused to say".
+
+    `DockerCliMissingError` subclasses `DockerCommandError`, so the generic
+    refusal would satisfy a looser `raises(DockerCommandError)`; naming the
+    subclass is what makes this distinguish the two. The condition is produced by
+    the fixture rather than mimicked, and `no_docker == []` proves nothing was
+    spawned to find it out.
+    """
+    with pytest.raises(docker.DockerCliMissingError):
+        docker.volume_exists("x_db-data")
+    assert no_docker == []
+
+
+def test_volume_exists_forwards_its_distro_per_the_completeness_rule() -> None:
+    """The module rule, spelled out for the function that answers it."""
+    assert "volume_exists" not in _DAEMON_AGNOSTIC
+    assert "wsl_distro" in _seam_reachers()["volume_exists"]

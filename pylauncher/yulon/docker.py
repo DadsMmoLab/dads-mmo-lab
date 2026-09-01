@@ -630,6 +630,46 @@ def container_exists(container: str, *, wsl_distro: str | None = None) -> bool:
     return any(line.strip() == container for line in proc.stdout.splitlines())
 
 
+def volume_exists(name: str, *, wsl_distro: str | None = None) -> bool:
+    """Does a named volume exist on this daemon? Raises when Docker would not say.
+
+    Asked by the CMaNGOS family's `db-password` stage before it writes a NEW
+    generated password: a `db-data` volume that already exists was initialised
+    with the password `.db_password` used to hold, and a fresh secret would lock
+    the install out of its own database. So "no such volume" is a real answer
+    (write the file), "it exists" is a refusal, and a daemon that cannot be
+    asked is neither — the caller must refuse rather than guess, the same rule
+    `_refuse_foreign_containers()` applies to container names.
+
+    `_docker()` rather than `_run()` on purpose: `_run()` raises on any non-zero
+    exit, and the absent answer IS a non-zero exit, so the branch this function
+    exists for would be unreachable through it.
+
+    The distro is not optional decoration. A WSL-resident install's volume lives
+    on that distro's daemon; asked of Docker Desktop instead, `docker volume
+    inspect` answers "no such volume" — the one answer that tells the caller it
+    is safe to overwrite the password of a database that is sitting right there.
+    The wrong-daemon bug and the destructive branch are the same branch.
+
+    The substring is what tells the two failures apart, and they are otherwise
+    identical: on a live daemon a missing volume is `exit 1, Error response from
+    daemon: get <name>: no such volume`, while a CLI that cannot reach a daemon
+    is *also* exit 1, with `error during connect: ...` (Windows) or `Cannot
+    connect to the Docker daemon ...` (a unix socket). Matching on the exit code
+    would call the second one "absent" — so only the wording decides, and
+    anything unrecognised refuses.
+    """
+    proc = _docker(["volume", "inspect", "--format", "{{.Name}}", name], wsl_distro=wsl_distro)
+    if proc.returncode == 0:
+        return True
+    if _cli_missing(proc):
+        raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP)
+    said = proc.stderr.strip()
+    if "no such volume" in said.lower():
+        return False
+    raise DockerCommandError(f"docker volume inspect {name} exited {proc.returncode}: {said}")
+
+
 def start_staged(spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | None = None) -> bool:
     """Start this install's long-running services, and only those.
 
