@@ -1050,11 +1050,25 @@ class Applier:
            adoption authorises — `fetch` + `reset --hard FETCH_HEAD` — moves
            HEAD off those commits and leaves them reachable only through the
            reflog. So the fourth fact asks git the question the third one only
-           looks like: `rev-list <the ref this would reset to>..HEAD` is empty.
-           `None` — no such remote-tracking ref, or git could not be asked —
-           refuses, per `Ownership`'s three outcomes: "nothing to compare
-           against" is not "nothing to lose". `branch` is the manifest's,
-           because the manifest's is what the update will fetch.
+           looks like: `rev-list FETCH_HEAD..HEAD` is empty, after
+           `no_local_commits()` has run the update's own fetch to put a truthful
+           commit behind `FETCH_HEAD`. `None` — git could not be asked, or the
+           fetch could not reach the remote — refuses, per `Ownership`'s three
+           outcomes: "nothing to compare against" is not "nothing to lose".
+           `branch` is the manifest's, because the manifest's is what the update
+           will fetch.
+
+           **This fact costs a network round trip, and that is why it is asked
+           last.** It runs only once facts 2 and 3 have both said yes, moments
+           before the install fetches the same refs anyway; an offline machine
+           gets a refusal for an install that could not have proceeded. Its
+           first version compared against `refs/remotes/origin/<branch>` and
+           `refs/remotes/origin/HEAD`, and the second of those is never
+           refreshed by the branchless `fetch origin HEAD` this app runs — so
+           one legitimate update made every already-updated module look like the
+           user's own work and refused exactly the population the fact exists to
+           let through. `git.RunnerGit.no_local_commits()` carries the
+           measurement.
 
            This is the third time in this codebase that a question with more
            states than the answer being carried has produced a bug (see

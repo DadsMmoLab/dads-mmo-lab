@@ -900,8 +900,10 @@ was found by reading code; each is a line in a resolved compose document from a 
   had a spotless tree: all three facts passed, adoption succeeded, and the very next call was
   `git.clone()` → `fetch` + `reset --hard FETCH_HEAD`, which moved HEAD off those commits and left
   them reachable only through the reflog. *Fixed* by a fourth fact and a third read-only git seam,
-  `HistoryReader.no_local_commits()`: `rev-list <the ref this update would reset to>..HEAD` must be
-  empty, and a `None` — no such remote-tracking ref, or git could not be asked — refuses.
+  `HistoryReader.no_local_commits()`: `rev-list FETCH_HEAD..HEAD` must be empty, and a `None` — git
+  could not be asked, or the fetch could not reach the remote — refuses. (The first version of that
+  fact compared against a remote-tracking ref instead, which was wrong for every branchless
+  manifest; see the entry below.)
   **Third instance of one pattern in this codebase**, after `native.read_claim()` collapsing
   absent-vs-unreadable and `read_clone_claim()`'s note about it: *a question with more states than
   the answer being carried*. Worth stating as a review question in its own right — "how many states
@@ -921,6 +923,29 @@ was found by reading code; each is a line in a resolved compose document from a 
   of deciding which of somebody's untracked files are innocent, which is the reasoning that loses
   work. The correction is written into `Applier._may_adopt()`'s docstring, where a reader will
   actually look; a pushed commit message cannot be amended.
+
+- **`git fetch origin HEAD` moves no remote-tracking ref, and a docstring said it moved one** —
+  2026-09-01, found by verification review reproducing it end-to-end with the app's own `RunnerGit`
+  and `CloneSpec` against a `file://` remote, fixed the same day. The fourth adoption fact above
+  counted `rev-list <ref>..HEAD` against `refs/remotes/origin/<branch>`, or
+  `refs/remotes/origin/HEAD` when the manifest named none, on the stated grounds that the update's
+  fetch "also moves" that ref. Measured: `fetch origin <named-branch>` does; `fetch origin HEAD` —
+  the literal command both update paths run when `branch is None` — updates only `FETCH_HEAD`,
+  because a refspec on the command line REPLACES the remote's configured one and nothing is
+  opportunistically updated. `refs/remotes/origin/HEAD` is written once at clone time and never
+  again, and the default branch's own tracking ref is left just as stale. So one legitimate
+  app-driven update made the fact answer "1 commit ahead" for a checkout the user had never
+  touched, and **all 21 `manifests/wow-wotlk/modules/*.json` omit `source.branch`** — so the guard
+  refused adoption for the entire catalog, and specifically for the already-updated installs the
+  migration exists to rescue. It failed closed, so nothing was destroyed; it just defeated its own
+  purpose. *Fixed* by fetching inside the check and counting against `FETCH_HEAD` — the literal
+  thing `_update()` resets to — at the price of one network round trip, which is why the fact is
+  asked last and why offline means refuse.
+  **The reusable lesson is not about git.** Every `branch is None` test in the diff was a mock, and
+  the single real-git test passed a named branch: the one case that worked. The certainty lived in a
+  prose claim about what an external tool does, and a mock can only ever confirm the argv you
+  already believed in. *Review question:* when a docstring asserts what a tool writes, reads or
+  moves, which test would fail if that sentence were false — and does it use the real tool?
 
 
 ### One thing worth keeping

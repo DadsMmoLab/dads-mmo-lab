@@ -312,16 +312,15 @@ class HistoryReader(Protocol):
     def no_local_commits(self, dest: Path, branch: str | None) -> bool | None: ...
 
 
-def _reset_target_ref(branch: str | None) -> str:
-    """The remote-tracking ref an update of `branch` would end up resetting to.
+def _fetch_ref(branch: str | None) -> str:
+    """What both update paths name on the `git fetch` command line.
 
-    Both update paths here fetch `origin <branch or HEAD>` and then
-    `reset --hard FETCH_HEAD`, and with the default refspec that fetch also
-    moves `refs/remotes/origin/<branch>`. So the local ref that stands for
-    "what the update will make this checkout be" is that one, and
-    `refs/remotes/origin/HEAD` when the caller named no branch.
+    The manifest's branch, or the literal `HEAD` when it names none — which is
+    every module in the `wow-wotlk` catalog. One spelling, in one place, so the
+    question `no_local_commits()` asks cannot drift from the update it is
+    predicting.
     """
-    return f"refs/remotes/origin/{branch}" if branch else "refs/remotes/origin/HEAD"
+    return branch or "HEAD"
 
 
 def same_repo(existing: str, wanted: str) -> bool:
@@ -435,7 +434,7 @@ class RunnerGit:
         return not proc.stdout.strip()
 
     def no_local_commits(self, dest: Path, branch: str | None) -> bool | None:
-        """Is every commit on HEAD already on the ref an update would reset to? None = cannot ask.
+        """Is every commit on HEAD already on what the update would reset to? None = cannot ask.
 
         The question `is_unmodified()` cannot answer. `git status --porcelain`
         compares the working tree and the index against HEAD, so a checkout in
@@ -444,33 +443,75 @@ class RunnerGit:
         FETCH_HEAD` then moves HEAD, and those commits are only reachable
         through the reflog.
 
-        `rev-list --count <ref>..HEAD` is the whole answer: it counts the
-        commits reachable from HEAD and not from the ref, so zero means moving
-        HEAD onto that ref discards no history.
+        `rev-list --count <target>..HEAD` is the whole answer: it counts the
+        commits reachable from HEAD and not from the target, so zero means
+        moving HEAD onto it discards no history.
 
-        `None` when git could not be asked, and — deliberately — also when
-        there is no such remote-tracking ref. A checkout built by
-        `_sparse_clone()`'s `git init` + `git pull origin <branch>` has
-        `refs/remotes/origin/<branch>` but NO `refs/remotes/origin/HEAD`
-        (measured 2026-09-01), so a caller that named no branch gets `None`
-        there rather than a guess. "Nothing to compare against" is not "nothing
-        to lose", and every caller fails closed on `None`.
+        **The target is `FETCH_HEAD`, after this method does the fetch itself,
+        and NOT a remote-tracking ref.** The obvious-looking
+        `refs/remotes/origin/<branch>` — what this asked until 2026-09-01 —
+        holds only for a branch the update NAMES. Measured against real git,
+        `file://` remote, depth 1:
+
+            $ git fetch origin HEAD          # what every branchless update runs
+            * branch  HEAD -> FETCH_HEAD
+            $ git rev-parse FETCH_HEAD                    -> 02fbb2a
+            $ git rev-parse refs/remotes/origin/HEAD      -> e7a89c7   (stale)
+            $ git rev-parse refs/remotes/origin/main      -> e7a89c7   (stale)
+
+        A refspec given on the command line replaces the remote's configured
+        one, so `fetch origin HEAD` opportunistically updates NOTHING:
+        `refs/remotes/origin/HEAD` is written once at clone time and never
+        again by this code, and the default branch's own tracking ref is just
+        as stale. So after ONE legitimate app-driven update, the old question
+        answered "1 commit ahead" for a checkout the user had never touched,
+        and the guard refused adoption for every module in the catalog — all 21
+        `wow-wotlk` manifests omit `source.branch`, which is precisely the
+        population this fact exists to let through. Resolving the remote's real
+        default branch (`ls-remote --symref origin HEAD`) does not fix that: the
+        measurement above shows `origin/main` stale too, so it would still need
+        this fetch, and would then be a second network call answering a question
+        `FETCH_HEAD` has already answered.
+
+        `FETCH_HEAD` is also the *literal* thing `_update()` resets to, so the
+        comparison stops predicting the update and simply reads it.
+
+        **The cost is a network round trip inside an adoption check**, and it is
+        paid knowingly. `_may_adopt()` asks this fact last, only once the claim
+        file and the clean tree have both said yes, and the update is about to
+        fetch the same refs a moment later. Nothing is written outside `.git`
+        and no working tree is touched. When the network is down the fetch
+        fails, this returns `None`, and `_may_adopt()` refuses — the same
+        direction as every other `None` here, and an install that could not have
+        fetched anyway.
+
+        Depth is deliberately not passed, for `_update()`'s reason: `git fetch
+        --depth=1` truncates a full clone in place. Verified on a depth-1 clone
+        that the shallow boundary survives this fetch and the count is still
+        right.
+
+        `None` when git could not be asked at all — no `.git`, a fetch that
+        failed, or a `rev-list` that would not answer. "We could not check" is
+        not "there is nothing to lose", and every caller fails closed on `None`.
         """
         if not (dest / ".git").is_dir():
             return None
-        ref = _reset_target_ref(branch)
+        ref = _fetch_ref(branch)
         try:
-            # Verified separately so a MISSING ref is told apart from a
-            # `rev-list` that failed for some other reason. Both refuse, but
-            # only one of them is worth a different debug line.
-            _run_git(["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd=dest)
+            # The same argv `_update()` fetches with, minus nothing: the flags
+            # are repeated because `git -c` did not persist into a repository
+            # cloned by an older build of this launcher.
+            _run_git(
+                ["git", *_LINE_ENDING_ARGS, *_HTTP_VERSION_ARGS, "fetch", "origin", ref],
+                cwd=dest,
+            )
         except GitError as exc:
-            logger.debug(f"{dest} has no {ref} to compare HEAD against: {exc}")
+            logger.debug(f"could not fetch origin {ref} in {dest} to compare HEAD against: {exc}")
             return None
         try:
-            proc = _run_git(["git", "rev-list", "--count", f"{ref}..HEAD"], cwd=dest)
+            proc = _run_git(["git", "rev-list", "--count", "FETCH_HEAD..HEAD"], cwd=dest)
         except GitError as exc:
-            logger.debug(f"could not ask git what {dest} has that {ref} does not: {exc}")
+            logger.debug(f"could not ask git what {dest} has that the update would not: {exc}")
             return None
         return proc.stdout.strip() == "0"
 
@@ -542,7 +583,7 @@ class RunnerGit:
         The line-ending flags are repeated because `git -c` did not persist into
         this repository if it was cloned by an older build of this launcher.
         """
-        ref = spec.branch or "HEAD"
+        ref = _fetch_ref(spec.branch)
         _run_git(
             ["git", *_LINE_ENDING_ARGS, *_HTTP_VERSION_ARGS, "fetch", "origin", ref],
             cwd=spec.dest,
@@ -661,30 +702,48 @@ class ContainerGit:
         return not proc.stdout.strip()
 
     def no_local_commits(self, dest: Path, branch: str | None) -> bool | None:
-        """Is every commit on HEAD already on the ref an update would reset to? None = cannot ask.
+        """Is every commit on HEAD already on what the update would reset to? None = cannot ask.
 
-        Containerized like the other two read-only questions, and for the same
-        reason: this class exists for a machine that may have no git, so a
-        question answered on the host would put the second prerequisite back.
+        Containerized like the other two questions, and for the same reason:
+        this class exists for a machine that may have no git, so a question
+        answered on the host would put the second prerequisite back.
 
-        `RunnerGit.no_local_commits()` carries the reasoning — what the count
-        means, and why a missing remote-tracking ref is `None` rather than a
-        guess. Both refusals here are the same `None` for the same reason.
+        `RunnerGit.no_local_commits()` carries the reasoning — why the target is
+        `FETCH_HEAD` after this method's own fetch and not a remote-tracking ref
+        that a branchless `fetch origin HEAD` never refreshes, and what the
+        network round trip buys. Both implementations must answer identically:
+        a caller narrowing to `HistoryReader` never learns which one it got, and
+        this is a guard's input, so a disagreement would be a guard that means
+        something different on Windows than on Linux.
+
+        **The fetch is `writes=True` and it has to be.** It writes `FETCH_HEAD`
+        and new objects into `.git`, and — decisive — `_READ_ONLY_CONTAINER_ARGS`
+        carries `--network none`, so a reader container cannot reach a remote at
+        all. That brings the read-write mount and, on an enforcing SELinux box,
+        the recursive `:z` relabel of `dest`. Safe only because of WHERE this is
+        asked: `_may_adopt()` reaches fact 4 only after `server_dir_claim()` has
+        said this app created the server directory, so the folder relabelled is
+        one this app owns and is about to `fetch` into anyway — the very same
+        container `_update()` runs. A future caller that asked this about a
+        FOREIGN checkout would be relabelling somebody else's repository in
+        order to decide whether to leave it alone; do not add one.
+
+        The `rev-list` that follows stays `writes=False`: it answers from the
+        objects the fetch just landed, needs no network, and there is no reason
+        to hand a second unconfined container to a question that only counts.
         """
         if not (dest / ".git").is_dir():
             return None
-        ref = _reset_target_ref(branch)
+        ref = _fetch_ref(branch)
         try:
-            self._capture(
-                dest, ["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], writes=False
-            )
+            self._capture(dest, ["fetch", "origin", ref], writes=True)
         except GitError as exc:
-            logger.debug(f"{dest} has no {ref} to compare HEAD against: {exc}")
+            logger.debug(f"could not fetch origin {ref} in {dest} to compare HEAD against: {exc}")
             return None
         try:
-            proc = self._capture(dest, ["rev-list", "--count", f"{ref}..HEAD"], writes=False)
+            proc = self._capture(dest, ["rev-list", "--count", "FETCH_HEAD..HEAD"], writes=False)
         except GitError as exc:
-            logger.debug(f"could not ask git what {dest} has that {ref} does not: {exc}")
+            logger.debug(f"could not ask git what {dest} has that the update would not: {exc}")
             return None
         return proc.stdout.strip() == "0"
 
@@ -692,7 +751,8 @@ class ContainerGit:
         if (spec.dest / ".git").is_dir():
             try:
                 self._run(
-                    spec, ["fetch", *_pull_depth_args(spec.depth), "origin", spec.branch or "HEAD"]
+                    spec,
+                    ["fetch", *_pull_depth_args(spec.depth), "origin", _fetch_ref(spec.branch)],
                 )
                 self._run(spec, ["reset", "--hard", "FETCH_HEAD"])
                 return

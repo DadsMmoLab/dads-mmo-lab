@@ -1,9 +1,15 @@
 """Tests for the promoted git seam (`yulon.git`).
 
-All subprocess calls are mocked at the `yulon.runner.run` boundary, so nothing
-here clones anything. What is worth asserting is not "git was called" but the
-three decisions this module exists to hold: line endings are pinned, depth is
-the caller's choice, and probing for git must never open a GUI.
+Most subprocess calls are mocked at the `yulon.runner.run` boundary, because
+what is worth asserting about an argv decision is the argv: line endings are
+pinned, depth is the caller's choice, and probing for git must never open a GUI.
+
+The exceptions are the two `no_local_commits()` tests marked
+`skipif(not git.git_available())`, and they are not decoration. That method's
+answer depends on what `git fetch` WRITES, which no mock can establish — the
+first version of it was wrong about exactly that, and every test covering the
+case it was wrong about was a mock. Both run against local repositories only:
+`git init` and a `file://` clone of it, no network and no container.
 """
 
 from __future__ import annotations
@@ -716,15 +722,21 @@ def test_is_unmodified_tells_upstreams_own_file_from_one_somebody_edited(
 @pytest.mark.parametrize(
     "impl", [git.RunnerGit(), git.ContainerGit()], ids=["host", "containerized"]
 )
-def test_no_local_commits_counts_what_head_has_that_the_reset_target_does_not(
+def test_no_local_commits_counts_what_head_has_that_the_update_would_not(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, impl: git.HistoryReader
 ) -> None:
-    """Zero and only zero means moving HEAD onto that ref discards no history.
+    """Zero and only zero means the update's reset discards no history.
 
-    Both implementations answer the same three ways, because a caller narrowing
-    to `HistoryReader` never learns which one it got — and this is a guard's
-    input, so a disagreement between them would be a guard that means different
-    things on Windows than on Linux.
+    Both implementations fetch the same ref and count against the same target,
+    because a caller narrowing to `HistoryReader` never learns which one it got
+    — and this is a guard's input, so a disagreement between them would be a
+    guard that means different things on Windows than on Linux.
+
+    The target is `FETCH_HEAD`, not `refs/remotes/origin/...`: a branchless
+    `fetch origin HEAD` refreshes no remote-tracking ref at all, which is what
+    `test_this_apps_own_update_does_not_make_a_branchless_clone_look_like_the_users`
+    proves against real git. That is a fact about git and no mock can establish
+    it; what this test holds is that both back-ends spell the question the same.
     """
     dest = tmp_path / "core"
     (dest / ".git").mkdir(parents=True)
@@ -736,28 +748,74 @@ def test_no_local_commits_counts_what_head_has_that_the_reset_target_does_not(
         return answers.pop(0)
 
     monkeypatch.setattr(runner, "run", fake_run)
-    answers += [_completed(stdout="abc123\n"), _completed(stdout="0\n")]
+    answers += [_completed(), _completed(stdout="0\n")]
     assert impl.no_local_commits(dest, "wotlk") is True
-    assert seen_argv[-1][-3:] == ["rev-list", "--count", "refs/remotes/origin/wotlk..HEAD"]
+    # The manifest's branch is fetched — the same ref `_update()` names — and
+    # the count is taken against what that fetch actually landed.
+    assert seen_argv[-2][-3:] == ["fetch", "origin", "wotlk"]
+    assert seen_argv[-1][-3:] == ["rev-list", "--count", "FETCH_HEAD..HEAD"]
+    # No depth on that fetch: `--depth=1` truncates a full clone in place, and
+    # the shape a clone was made with is not this check's to change.
+    assert not [arg for arg in seen_argv[-2] if arg.startswith("--depth")]
 
-    answers += [_completed(stdout="abc123\n"), _completed(stdout="3\n")]
+    answers += [_completed(), _completed(stdout="3\n")]
     assert impl.no_local_commits(dest, "wotlk") is False
 
-    # No branch on the manifest: the ref the update would reset to is whatever
-    # `fetch origin HEAD` lands on, so the local stand-in is origin/HEAD.
-    answers += [_completed(stdout="abc123\n"), _completed(stdout="0\n")]
+    # No branch on the manifest — every module in the wow-wotlk catalog — is the
+    # literal `HEAD`, exactly as both update paths spell it.
+    answers += [_completed(), _completed(stdout="0\n")]
     assert impl.no_local_commits(dest, None) is True
-    assert seen_argv[-1][-1] == "refs/remotes/origin/HEAD..HEAD"
+    assert seen_argv[-2][-3:] == ["fetch", "origin", "HEAD"]
+    assert seen_argv[-1][-3:] == ["rev-list", "--count", "FETCH_HEAD..HEAD"]
 
-    # No such remote-tracking ref — a `git init` + `git pull` checkout has no
-    # origin/HEAD — is None, not True. "Nothing to compare against" is not
-    # "nothing to lose", and every caller fails closed on None.
-    answers.append(_completed(returncode=1))
+    # A fetch that cannot reach the remote — an offline machine, a repository
+    # that has gone private — is None, not True, and asks nothing further:
+    # there is no answer to count against. Every caller fails closed on None.
+    answers.append(_completed(returncode=128, stderr="Could not resolve host"))
+    before = len(seen_argv)
     assert impl.no_local_commits(dest, None) is None
+    assert len(seen_argv) == before + 1, "a failed fetch must not be followed by a count"
     # And so is a git that would not answer the count.
-    answers += [_completed(stdout="abc123\n"), _completed(returncode=128, stderr="broken")]
+    answers += [_completed(), _completed(returncode=128, stderr="broken")]
     assert impl.no_local_commits(dest, "wotlk") is None
     assert impl.no_local_commits(tmp_path / "not-a-checkout", "wotlk") is None
+
+
+def test_the_containerized_history_question_fetches_in_a_container_that_has_a_network(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`no_local_commits()` fetches, and a reader container cannot reach a remote.
+
+    `_capture(writes=False)` adds `_READ_ONLY_CONTAINER_ARGS`, which begins
+    `--network none` — so a fetch asked as a "read" fails on every machine, on
+    every module, with a docker flag as its cause and nothing in the message
+    saying so. It must go through the write container, the same one `_update()`
+    fetches with. The mount it brings is safe only because `_may_adopt()` has
+    already established that this app created the server directory.
+
+    The count that follows needs no network and stays a read, so the hardened
+    container is not given up for the whole question.
+    """
+    dest = tmp_path / "core"
+    (dest / ".git").mkdir(parents=True)
+    answers = [_completed(), _completed(stdout="0\n")]
+    seen_argv: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen_argv.append(argv)
+        return answers.pop(0)
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    impl = git.ContainerGit(selinux_enforcing=lambda: False, filesystem_type=lambda _p: "ext4")
+    assert impl.no_local_commits(dest, None) is True
+
+    fetch, count = seen_argv
+    assert fetch[-3:] == ["fetch", "origin", "HEAD"]
+    assert "none" not in fetch, "the fetch container must be able to reach the remote"
+    assert f"{dest}:/git" in fetch, "and must mount the clone read-write"
+    assert count[-3:] == ["rev-list", "--count", "FETCH_HEAD..HEAD"]
+    assert count[count.index("--network") + 1] == "none"
+    assert f"{dest}:/git:ro" in count
 
 
 @pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
@@ -797,6 +855,71 @@ def test_a_committed_change_is_invisible_to_status_and_visible_to_the_count(
     # The whole point, in two lines: the tree is spotless and the history is not.
     assert impl.is_unmodified(dest, ".") is True
     assert impl.no_local_commits(dest, "main") is False
+
+
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+def test_this_apps_own_update_does_not_make_a_branchless_clone_look_like_the_users(
+    tmp_path: Path,
+) -> None:
+    """One legitimate update must not turn fact 4 into a refusal.
+
+    Every OTHER `branch is None` test here mocks `runner.run`, and a mock cannot
+    settle this: the question is what `git fetch` WRITES. `fetch origin
+    <named-branch>` moves `refs/remotes/origin/<branch>`; `fetch origin HEAD` —
+    the literal command both update paths run when the manifest names no branch,
+    which is all 21 modules in the wow-wotlk catalog — moves only `FETCH_HEAD`.
+    `refs/remotes/origin/HEAD` is written once, at clone time, and never again.
+
+    So a checkout that has taken one update is one commit "ahead" of that ref
+    while carrying nothing of the user's, and the adoption this whole guard
+    exists to permit — for a module installed by a build older than the claim
+    file, which by definition has had time to be updated — is refused with
+    "throws away anything you have changed there" told to somebody who changed
+    nothing.
+
+    Driven through the app's own `RunnerGit` and `CloneSpec` rather than raw
+    git commands, because the defect lives in the agreement between two of this
+    module's own methods. `depth` is left at its default 1: every real module
+    clone is shallow, and `apply.py` never overrides it.
+
+    Local repositories only — `git init` and a `file://` clone of it. No
+    network, no container, nothing cloned from anywhere.
+    """
+    author = ["-c", "user.email=t@example", "-c", "user.name=t"]
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", "."], cwd=upstream, check=True)
+
+    def upstream_commit(name: str) -> None:
+        (upstream / name).write_text(f"{name}\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=upstream, check=True)
+        subprocess.run([*["git", *author], "commit", "-qm", name], cwd=upstream, check=True)
+
+    upstream_commit("a.txt")
+    # `file://`, not a bare path: git clones a local path by hardlinking and
+    # ignores --depth, so a plain path would quietly test a FULL clone.
+    spec = git.CloneSpec(url=upstream.as_uri(), dest=tmp_path / "mod-example")
+    assert spec.branch is None and spec.depth == 1
+    impl = git.RunnerGit()
+    impl.clone(spec)
+    assert impl.no_local_commits(spec.dest, None) is True
+
+    upstream_commit("b.txt")
+    impl.clone(spec)  # the existing clone, so `_update()`: fetch + reset --hard FETCH_HEAD
+    assert impl.is_unmodified(spec.dest, ".") is True
+    assert (
+        impl.no_local_commits(spec.dest, None) is True
+    ), "one app-driven update must not read as the user's own commits"
+
+    # And the fact still does its job: a real local commit is still refused.
+    (spec.dest / "mine.txt").write_text("three evenings\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=spec.dest, check=True)
+    subprocess.run([*["git", *author], "commit", "-qm", "mine"], cwd=spec.dest, check=True)
+    assert impl.is_unmodified(spec.dest, ".") is True
+    assert impl.no_local_commits(spec.dest, None) is False
+
+    # Still shallow: neither the update nor the check may deepen the clone.
+    assert (spec.dest / ".git" / "shallow").is_file()
 
 
 def test_both_git_implementations_check_out_the_same_sparse_tree(
