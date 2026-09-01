@@ -569,3 +569,20 @@ def test_with_record_leaves_the_original_alone_and_keeps_the_others(tmp_path: Pa
 def test_the_evidence_file_lives_under_the_data_dir_it_vouches_for() -> None:
     """Deleting `data/` deletes the claim; a marker elsewhere would outlive its subject."""
     assert extract.EVIDENCE_FILE == ".yulon-extract.json"
+
+
+def test_a_hand_built_evidence_defaults_to_having_identified_its_client() -> None:
+    """The default is the safe end of `client_facts_complete`, and nothing else pins it.
+
+    Every caller inside this module sets the flag explicitly — `expected_evidence`
+    from whether the `stat()` landed, `_parse` from the file — so a mutation that
+    flipped the DEFAULT survived the whole suite. The direction it would fail in is
+    the harmless one (a spurious re-run, never a wrong skip), which is exactly why
+    nothing noticed: a default nobody exercises is a default nobody is told about.
+
+    `True` is right because the flag means "the client facts are complete", and a
+    five-field construction — the shape the plan's own tests and I.5's use — is one
+    that supplied every client fact it had. A `False` default would make those
+    constructions silently unskippable forever.
+    """
+    assert extract.Evidence("p", "/c", 1, 2, ()).client_facts_complete is True
