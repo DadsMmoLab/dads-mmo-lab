@@ -5,7 +5,9 @@ Two layers of opt-in, both deliberate:
 - **Docker reachable** — every test here is skipped (not failed) when
   `docker info` cannot reach a daemon or the `docker` binary is missing. This
   is what keeps a bare `pytest` green on a developer machine with no daemon
-  running (roadmap 1.5 definition of done).
+  running (roadmap 1.5 definition of done). A run that is MEANT to prove these
+  gates sets `YULON_REQUIRE_DOCKER=1` and the same condition fails instead —
+  see `REQUIRE_DOCKER_ENV`.
 
   It is NOT what keeps this suite out of CI's fast job, and for a long time
   nothing did. `ubuntu-latest` ships a *running* Docker daemon, so this gate
@@ -29,8 +31,10 @@ Two layers of opt-in, both deliberate:
 from __future__ import annotations
 
 import os
+import secrets
 import socket
 import subprocess
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -258,11 +262,44 @@ def _project_dir(tmp_path: Path, compose_yml: str) -> Path:
     return project
 
 
+REQUIRE_DOCKER_ENV = "YULON_REQUIRE_DOCKER"
+"""Set this to anything but `0`/empty and an unreachable daemon FAILS instead of skipping.
+
+A skipped gate and a passing gate look the same in `pytest -q`: both are a
+character in a progress line and a number in a summary nobody reads twice. That
+is tolerable for a developer who knows their daemon is stopped, and not
+tolerable anywhere the point of the run is to prove the live primitives still
+work — so the two cases are made to look different on demand rather than by
+guesswork about which kind of run this is.
+
+CI already has the other half of this belt: the `integration (live Docker)` job
+in `.github/workflows/ci.yml` runs `docker info > /dev/null` as its own step
+before pytest, so a runner image that dropped Docker turns that job red rather
+than green-with-16-skips. This is the same guarantee for a laptop, a test box,
+or any run of `pytest -m integration` outside that job.
+"""
+
+
 @pytest.fixture(scope="session")
 def require_docker() -> None:
-    """Skip the requesting test when no Docker daemon is reachable."""
-    if not docker_available():
-        pytest.skip("no Docker daemon reachable (docker info failed)")
+    """Skip the requesting test when no Docker daemon is reachable.
+
+    Three outcomes, kept apart: a reachable daemon runs the gate; an
+    unreachable one skips it with a reason that says out loud that nothing was
+    proven; an unreachable one under `YULON_REQUIRE_DOCKER` fails, because the
+    caller said this run was supposed to prove something.
+    """
+    if docker_available():
+        return
+    # ASCII, deliberately: this string is printed to a console, and an em dash
+    # arrives as a replacement character on a cp1252 one.
+    reason = (
+        "no Docker daemon reachable (docker info failed) - the live gates in "
+        "tests/integration did NOT run, so this run proves nothing about them"
+    )
+    if os.environ.get(REQUIRE_DOCKER_ENV, "").strip() not in ("", "0"):
+        pytest.fail(f"{REQUIRE_DOCKER_ENV} is set, but {reason}")
+    pytest.skip(reason)
 
 
 @pytest.fixture
@@ -340,3 +377,165 @@ def staged_project(tmp_path: Path, require_docker: None) -> Iterator[Path]:
     finally:
         _compose_down(project)
         subprocess.run(["docker", "rm", "-f", IMPORT_CONTAINER], capture_output=True, check=False)
+
+
+# ------------------------------------------------ 7.3: primitives fixtures
+
+MARIADB_IMAGE = "mariadb:11"
+MARIADB_CONTAINER = f"yulon-it-{_RUN_TAG}-mariadb"
+MARIADB_ROOT_PASSWORD = secrets.token_hex(8)
+"""Per run, like the names: a fixed one would be a credential in the tree for no reason."""
+_MARIADB_READY_SECONDS = 180.0
+CRASH_LOOP_CONTAINER = f"yulon-it-{_RUN_TAG}-crash"
+BUSYBOX_IMAGE = "busybox:1.36"
+"""The stand-in image, named once: the crash loop runs it and the leak census counts it."""
+
+
+def _container_volumes(container: str) -> tuple[str, ...]:
+    """The volume names this container holds, asked BEFORE it is removed.
+
+    Only named/anonymous volumes have a `.Name`; a bind mount's is empty and
+    drops out of the split. It has to be asked first because after `docker rm`
+    there is nothing left to ask.
+    """
+    proc = subprocess.run(
+        ["docker", "inspect", container, "--format", "{{range .Mounts}}{{.Name}} {{end}}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return ()
+    return tuple(proc.stdout.split())
+
+
+def _still_there(argv: list[str]) -> bool:
+    """True if `docker inspect …` still finds the thing named."""
+    return subprocess.run(argv, capture_output=True, check=False).returncode == 0
+
+
+def _rm_f(container: str) -> tuple[str, ...]:
+    """Remove `container` AND its anonymous volumes; return whatever survived.
+
+    `-v` is not decoration. `mariadb:11` declares `VOLUME /var/lib/mysql`, so
+    every `docker run` of it creates an anonymous volume holding the whole data
+    directory, and `docker rm -f` without `--volumes` leaves that volume behind
+    — a few hundred megabytes per gate run, under a 64-hex name nobody can
+    attribute to anything. `docker ps -a` does not show it and the container
+    census cannot see it; only `docker volume ls` can, which is exactly the
+    shape of leak H.3 exists for.
+
+    Never raises: a failed test must still get its cleanup, and the removal is
+    done before anything is checked. The survivors are RETURNED rather than
+    asserted here so the caller decides how loud to be — the fixtures below
+    assert on them, which turns a leak into a teardown error naming what leaked
+    instead of something a developer finds a week later in `docker volume ls`.
+    """
+    volumes = _container_volumes(container)
+    subprocess.run(["docker", "rm", "-f", "-v", container], capture_output=True, check=False)
+    leaked = [container] if _still_there(["docker", "container", "inspect", container]) else []
+    leaked += [
+        f"volume {name}" for name in volumes if _still_there(["docker", "volume", "inspect", name])
+    ]
+    return tuple(leaked)
+
+
+@pytest.fixture
+def mariadb_container(require_docker: None) -> Iterator[str]:
+    """A throwaway mariadb:11 with a per-run root password, ready when it yields.
+
+    The image's own `healthcheck.sh --connect --innodb_initialized` is the
+    readiness question, not a fixed sleep: a first start on an empty volume runs
+    the server twice (bootstrap, then for real), and `--connect` alone passes
+    during the bootstrap. `--innodb_initialized` is the half that waits for the
+    real one — the same probe the CMaNGOS compose template's healthcheck uses.
+
+    The password reaches the container as a bare `-e MARIADB_ROOT_PASSWORD`,
+    forwarded from this process's environment, for the same reason the
+    primitives under test never spell a secret in argv (amendment A11).
+
+    A daemon that is up but cannot give us this container is a FAILURE, not a
+    skip: `require_docker` already answered the only question a skip is allowed
+    to answer.
+    """
+    _rm_f(MARIADB_CONTAINER)
+    started = subprocess.run(
+        [
+            "docker",
+            "run",
+            "-d",
+            "--name",
+            MARIADB_CONTAINER,
+            "-e",
+            "MARIADB_ROOT_PASSWORD",
+            MARIADB_IMAGE,
+        ],
+        env={**os.environ, "MARIADB_ROOT_PASSWORD": MARIADB_ROOT_PASSWORD},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if started.returncode != 0:
+        pytest.fail(f"could not start {MARIADB_IMAGE}: {started.stderr.strip()}")
+    try:
+        deadline = time.monotonic() + _MARIADB_READY_SECONDS
+        while True:
+            probe = subprocess.run(
+                [
+                    "docker",
+                    "exec",
+                    MARIADB_CONTAINER,
+                    "healthcheck.sh",
+                    "--connect",
+                    "--innodb_initialized",
+                ],
+                capture_output=True,
+                check=False,
+            )
+            if probe.returncode == 0:
+                break
+            if time.monotonic() > deadline:
+                pytest.fail(
+                    f"{MARIADB_CONTAINER} did not report ready within "
+                    f"{_MARIADB_READY_SECONDS:.0f}s"
+                )
+            time.sleep(1.0)
+        yield MARIADB_CONTAINER
+    finally:
+        leaked = _rm_f(MARIADB_CONTAINER)
+        assert not leaked, f"the mariadb gate left this behind: {', '.join(leaked)}"
+
+
+@pytest.fixture
+def crash_loop_container(require_docker: None) -> Iterator[str]:
+    """A container that exits 1 on purpose under `--restart unless-stopped`.
+
+    What a worldserver that cannot load its data looks like to `docker ps`:
+    listed, `StartedAt` refreshed on every attempt, `RestartCount` climbing.
+    """
+    _rm_f(CRASH_LOOP_CONTAINER)
+    started = subprocess.run(
+        [
+            "docker",
+            "run",
+            "-d",
+            "--restart",
+            "unless-stopped",
+            "--name",
+            CRASH_LOOP_CONTAINER,
+            BUSYBOX_IMAGE,
+            "sh",
+            "-c",
+            "exit 1",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if started.returncode != 0:
+        pytest.fail(f"could not start the crash-loop container: {started.stderr.strip()}")
+    try:
+        yield CRASH_LOOP_CONTAINER
+    finally:
+        leaked = _rm_f(CRASH_LOOP_CONTAINER)
+        assert not leaked, f"the crash-loop gate left this behind: {', '.join(leaked)}"

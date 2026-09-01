@@ -9,19 +9,24 @@ bringing the project up/down once per assertion would be slow for no gain.
 
 from __future__ import annotations
 
+import gzip
+import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
 
 from tests.integration.conftest import (
+    BUSYBOX_IMAGE,
+    MARIADB_ROOT_PASSWORD,
     THROWAWAY_PORTS,
     THROWAWAY_REALM_HOST,
     THROWAWAY_REALM_PORT,
     THROWAWAY_SPEC,
     import_runs,
 )
-from yulon import docker
+from yulon import docker, platform
 from yulon.controller import Controller, PortConflictError
 
 pytestmark = pytest.mark.integration
@@ -316,3 +321,192 @@ def test_the_bind_mount_probe_actually_works_against_a_real_daemon(
     assert docker.bind_mount_ok(chosen, git.CONTAINER_GIT_IMAGE) is True
     # `-v <missing>:/probe` would have Docker create it; the probe must not.
     assert not chosen.exists()
+
+
+# ------------------------------------------------ 7.3: the CMaNGOS primitives
+
+
+def _busybox_containers() -> set[str]:
+    """Every container, running or exited, made from the busybox image — the leak census."""
+    proc = subprocess.run(
+        ["docker", "ps", "-aq", "--filter", f"ancestor={BUSYBOX_IMAGE}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return set(proc.stdout.split())
+
+
+def test_run_container_reads_the_client_read_only_and_writes_out_as_this_user(
+    tmp_path: Path, require_docker: None
+) -> None:
+    """The extraction model, live: `/client` `:ro`, `/out` rw, cwd `/out`, `-u uid:gid`.
+
+    The relative `copy.txt` proves the workdir — drop `-w` and it lands in the
+    image's own cwd and `out/` stays empty — and the owner check proves no
+    `sudo chown` will ever be needed. The client listing is a statement about
+    THIS argv, which only reads `/client`: it would hold with the `:ro` gone
+    too, so it is not what gates the mount. The test below it is, by asking a
+    container to write there and being refused.
+
+    The container is ASKED who it is (`id -u` / `id -g`) rather than trusting
+    that a `--user` in the argv arrived. Two separate things want that question,
+    and the first version of this test conflated them into one that gated
+    neither on this machine:
+
+    * **`to_argv()` splicing `user_args` into the argv at all.** That is what
+      the `4242:4242` probe is for, and it is the same number the mutation
+      control used. It runs on EVERY platform, because it names the uid itself
+      rather than asking `platform` for one — busybox's default user is root, so
+      a probe that passes no `--user` and a `to_argv()` that drops the one it
+      was given produce the same `0 0`, and the assertion would be a fact about
+      the image rather than about this module. That is exactly what the first
+      version asserted on Docker Desktop: reran with `*self.user_args` deleted
+      from `to_argv()`, it still passed (review, 2026-09-01).
+    * **`platform.container_user_args()`'s policy**, which is what the second
+      run gates and which genuinely differs per platform: `--user uid:gid` on
+      Linux, deliberately none on Docker Desktop, where the image's own root is
+      right and the file still arrives owned by the logged-in user. On Docker
+      Desktop the `0 0` there is a statement about the policy being empty — it
+      is TRUE of a broken `to_argv()` too, and no longer has to carry that
+      weight now that the probe above does.
+
+    A host-side `st_uid` check cannot stand in for either: `os.getuid` exists
+    only on Linux, so on Docker Desktop it does not run.
+    """
+    asked = ("--user", "4242:4242")
+    probe_heard: list[str] = []
+    probe = docker.run_container(
+        docker.ContainerRun(
+            image=BUSYBOX_IMAGE, argv=("sh", "-c", "id -u; id -g"), user_args=asked
+        ),
+        sink=probe_heard.append,
+    )
+    assert probe.returncode == 0, probe.tail
+    probe_reported = [line.strip() for line in probe_heard if line.strip().isdigit()]
+    assert probe_reported[-2:] == ["4242", "4242"], (
+        f"asked for {asked[1]} and the container reported {probe_reported[-2:]} — to_argv() is "
+        f"not putting user_args in the argv: {probe_heard}"
+    )
+
+    client = tmp_path / "client"
+    client.mkdir()
+    (client / "a.txt").write_text("alpha\n", encoding="utf-8")
+    out = tmp_path / "out"
+    out.mkdir()
+    user_args = tuple(platform.container_user_args())
+    spec = docker.ContainerRun(
+        image=BUSYBOX_IMAGE,
+        argv=("sh", "-c", "cat /client/a.txt > copy.txt; id -u; id -g"),
+        mounts=(docker.Mount(client, "/client", read_only=True), docker.Mount(out, "/out")),
+        workdir="/out",
+        user_args=user_args,
+    )
+    heard: list[str] = []
+    run = docker.run_container(spec, sink=heard.append)
+    assert run.returncode == 0, run.tail
+    assert (out / "copy.txt").read_text(encoding="utf-8") == "alpha\n"
+    reported = [line.strip() for line in heard if line.strip().isdigit()]
+    if user_args:
+        assert user_args[0] == "--user", user_args
+        assert ":".join(reported[-2:]) == user_args[1], heard
+    else:
+        # Docker Desktop: the policy is to pass none, so the image's own root
+        # is the right answer. `to_argv()` is gated by the probe above, not
+        # here — nothing this branch asserts depends on it.
+        assert reported[-2:] == ["0", "0"], heard
+    getuid = getattr(os, "getuid", None)
+    if getuid is not None:
+        # Linux only: Docker Desktop's file sharing maps ownership itself.
+        assert (out / "copy.txt").stat().st_uid == getuid()
+    assert sorted(entry.name for entry in client.iterdir()) == ["a.txt"]
+
+
+def test_a_read_only_client_mount_refuses_a_write(tmp_path: Path, require_docker: None) -> None:
+    """`:ro` is enforced by the kernel, not by the tool's manners — and the tail says so."""
+    client = tmp_path / "client"
+    client.mkdir()
+    spec = docker.ContainerRun(
+        image=BUSYBOX_IMAGE,
+        argv=("sh", "-c", "touch /client/written"),
+        mounts=(docker.Mount(client, "/client", read_only=True),),
+    )
+    run = docker.run_container(spec, sink=lambda _line: None)
+    assert run.returncode != 0
+    assert "Read-only file system" in " ".join(run.tail)
+    assert not (client / "written").exists()
+
+
+def test_copy_from_image_leaves_no_container_behind_either_way(
+    tmp_path: Path, require_docker: None
+) -> None:
+    """A real create/cp/rm, then the failure path, and the census is unchanged after both.
+
+    The pull is not politeness: `--filter ancestor=<image>` needs the image to
+    exist locally, and a census taken against an image this daemon has never
+    seen answers "no containers" for every one of them, leak included.
+    """
+    subprocess.run(["docker", "pull", BUSYBOX_IMAGE], capture_output=True, check=False)
+    before = _busybox_containers()
+    dest = tmp_path / "passwd"
+    docker.copy_from_image(BUSYBOX_IMAGE, "/etc/passwd", dest)
+    assert dest.is_file()
+    assert "root:" in dest.read_text(encoding="utf-8")
+    with pytest.raises(docker.DockerCommandError):
+        docker.copy_from_image(BUSYBOX_IMAGE, "/no/such/path", tmp_path / "nope")
+    assert not (tmp_path / "nope").exists()
+    assert _busybox_containers() == before
+
+
+def test_exec_stdin_streams_a_gzipped_dump_and_sql_query_reads_it_back(
+    tmp_path: Path, mariadb_container: str
+) -> None:
+    """The SQL transport against a real client: gzip in, rows out, password never printed.
+
+    A gzip source is the load-bearing choice: if `exec_stdin()` ever handed the
+    child the stream's `fileno()`, mariadb would receive compressed bytes and
+    this would fail on the first statement.
+    """
+    dump = tmp_path / "seed.sql.gz"
+    with gzip.open(dump, "wb") as compressed:
+        compressed.write(
+            b"CREATE DATABASE yulon_it;\n"
+            b"CREATE TABLE yulon_it.t (n INT);\n"
+            b"INSERT INTO yulon_it.t VALUES (1),(2),(3);\n"
+        )
+    with gzip.open(dump, "rb") as source:
+        proc = docker.exec_stdin(
+            mariadb_container,
+            ["mariadb", "-u", "root"],
+            source,
+            env={"MYSQL_PWD": MARIADB_ROOT_PASSWORD},
+        )
+    assert proc.returncode == 0, proc.stderr
+    # Amendment A11 against a real daemon: what ran carries the variable's NAME.
+    assert MARIADB_ROOT_PASSWORD not in " ".join(proc.args)
+    assert "MYSQL_PWD" in proc.args, proc.args
+    assert f"MYSQL_PWD={MARIADB_ROOT_PASSWORD}" not in proc.args
+    count = docker.sql_query(
+        mariadb_container, "mariadb", MARIADB_ROOT_PASSWORD, "yulon_it", "SELECT COUNT(*) FROM t"
+    )
+    assert count.strip() == "3"
+    with pytest.raises(docker.DockerCommandError) as excinfo:
+        docker.sql_query(mariadb_container, "mariadb", "not-the-password", None, "SELECT 1")
+    assert "Access denied" in str(excinfo.value)
+    assert MARIADB_ROOT_PASSWORD not in str(excinfo.value)
+
+
+def test_wait_ready_gives_up_on_a_crash_loop_long_before_its_timeout(
+    crash_loop_container: str,
+) -> None:
+    """`RestartCount` growing past `restart_loop` is the answer, not the timeout.
+
+    A CMaNGOS worldserver that cannot load its maps restarts forever under
+    `unless-stopped`; waiting out ten minutes of that tells the user nothing
+    the fourth restart had not already said. Docker's restart backoff doubles
+    from 100ms, so four restarts arrive in a few seconds.
+    """
+    spec = docker.ReadySpec(world="ready", auth=None, timeout=90.0, interval=0.5, restart_loop=4)
+    started = time.monotonic()
+    assert docker.wait_ready(crash_loop_container, crash_loop_container, spec) is False
+    assert time.monotonic() - started < 45.0, "the crash loop was waited out, not detected"
