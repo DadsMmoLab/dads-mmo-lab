@@ -245,6 +245,24 @@
 - [ ] 7.1 Spine + `AzerothCoreInstaller`, Linux native — `StagedInstaller`/`Stage` extracted from `native.py`, WotLK stage names unchanged and pinned; the 7.1 catalog models (`EmulatorSource.dest`, `PasswordPlan`, `DbFacts`, `ReadyMarkers`, `NativeInstall.family/images/image_prefix/azerothcore`); `ask` forwarded to `ensure_docker`; once-only sudo password (`SudoSession`, `sudo -S`) in provisioning; `docker-buildx` on the dnf and pacman lists; SELinux facts + `{{BIND_LABEL}}` on every host bind line + relabel; `systemd-inhibit`; `install_wiring.py` (probe wiring + the CLI harness); `wait_ready(ReadySpec)`; the proven install's `docker compose config` committed as `tests/data/wotlk-compose-config.json`; wow-wotlk dispatches native on Linux
   - [ ] Gate: yulon-ubuntu clean checkpoint, **two presses** — press 1: consent dialog + sudo dialog once + re-login report; re-login; press 2: `ready`; kill mid-build, resume skips the compile; `docker compose config` matches the fixture; auth log `127.0.0.1:8085` with no `UPDATE`; account + client login from the host after the LAN step
   - [ ] Gate: packaged artifact on clean Fedora 44 (SELinux, password sudo, moby-engine + buildx) and clean Arch (pacman + buildx)
+    - **Fedora 44 progress, 2026-08-31 — the ENGINE passed; the line stays open because it asks for the packaged ARTIFACT.** Run on `yulon-fedora-gate`, a clean box cloned from `yulon-fedora`'s `clean-desktop` (the owner's own Fedora box could not be restored — it carries his TBC and Tortoise servers with containers running). Driven headlessly over ssh through a pty driver, because the harness declines every question when stdin is not a tty and hangs forever on a pty fed by a heredoc. Press 1: consent once, **sudo password asked once — the first time `SudoSession` has ever been exercised**, both other Linux boxes being passwordless; `dnf -y install moby-engine docker-compose docker-buildx` installed 29.7.2 / 5.5.0 / 0.36.1; group joined; correct re-login refusal; no state file. Press 2: build 1829/1829, client data 1140 MB in 1m58s, **`ac-db-import` exit 0 under SELinux Enforcing** — the 2026-08-25 failure does not recur and this is the first proof of it under the Python engine. Schemas 22 / 111 / 30 / 315, byte-identical to the macOS, Ubuntu and Windows records. `:z` counts 7 + 1 as predicted; `env/dist/etc`, `env/dist/logs`, `modules` and the root all `container_file_t`; `relabel_for_containers()` proven in isolation (`user_home_t` → `container_file_t`, recursive, no sudo) because a successful relabel logs nothing and `:z` on the clone mount would have covered for it either way. Compose diff PASS (57 passed). Re-press on a finished install: **7 s**, compile skipped. Ports: 3306 and 7878 on `127.0.0.1`, 3724/8085 open as clients need. `ls ~/dads-mmo-lab-install-*.log` → 0: zero bash. **The plan's compose-diff command is stale** — it names `YULON_COMPOSE_ROOT`, but E.2 changed the mechanism and BOTH `YULON_COMPOSE_CONFIG` and `YULON_COMPOSE_ROOT` are needed; with only the root set the test SKIPS silently and reads exactly like a pass.
+    - **Still owed on Fedora:** the run from the CI-built AppImage rather than the CLI harness (what this line actually asks for), and the kill-mid-build interrupt (the build finished before it could be taken; Ubuntu proved that path, Fedora only proves resume-on-complete).
+    - **Arch progress, 2026-09-01 — the ENGINE passed; the line stays open because it asks for the packaged ARTIFACT.** Run on `yulon-arch`, driven headlessly through the same pty driver Fedora needed. Every stage reached in order: `clone-core`, `clone-modules`, `generate-compose`, `build` (1829/1829), `client-data`, `start-db`, `import`, `up`, `ready`; `install of wow-wotlk finished`, driver child exit 0, state file recording all six persisted stages. Schemas **22 / 111 / 315 / 30** (auth / characters / world / playerbots) — byte-identical to the macOS, Ubuntu, Windows and Fedora records, which is now five platforms agreeing. Ports as designed: 3306 and 7878 on `127.0.0.1`, 3724 and 8085 open as clients need. `ls ~/dads-mmo-lab-install-*.log` -> 0: zero bash. Compose diff **PASS (57 passed)** against `tests/data/wotlk-compose-config.json`.
+    - **What Arch specifically proves, and nothing else could.** The pacman branch installed `docker 1:29.7.2-1`, `docker-compose 5.5.0-1` and **`docker-buildx 0.36.1-1`** — the package name this branch's `platform.py` fix exists for. Fedora's dnf branch wants `docker-buildx-plugin` after Docker's CE repo is added; the two names are not interchangeable and Arch is the only box that can show the pacman half is right. `getenforce` is absent here, so the SELinux path takes its **third** answer (could-not-ask -> `unchecked`) rather than either boolean — the case that produced the Fedora failures, exercised on a machine where it is the normal state rather than a fault.
+    - **A capture trap, recorded so the next gate does not lose an hour to it.** `docker compose -f docker-compose.yml config` does NOT load `docker-compose.override.yml` — passing `-f` at all disables the automatic override discovery. The first Arch capture was taken that way and the diff reported two real-looking differences: no `./modules` bind on the worldserver, and four missing `AC_AI_PLAYERBOT_*` / `AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES` env keys. Both live in the override file by design, and both were present all along. The correct capture is `docker compose config` run **from the server directory with no `-f`**. This is the same shape as the stale-marker and the `YULON_COMPOSE_ROOT`-only traps already recorded on this line: an incomplete capture reads exactly like a real defect, and in all three cases the artifact was believed before the machine was asked.
+    - **Windows 11 progress, 2026-09-01 — the ENGINE passed on a real Windows box.** Run on `yulon-win11-gate`, a Hyper-V guest with genuine TPM 2.0, nested virtualisation, WSL2 + VirtualMachinePlatform and Docker Desktop 29.7.2 — retail apart from Secure Boot, which nothing here touches. All nine preflight checks passed, including *sharing the folder with Docker: a container can read `C:\gate\wotlk-server`*, the check every earlier Windows attempt died on. Every stage reached in order; state file records all six. Schemas **22 / 111 / 315 / 30** — identical to macOS, Ubuntu, Fedora and Arch, so **six platforms now agree on the same four numbers**. `World Initialized In 4 Minutes 18 Seconds`, **500/500 bots logged in**, all three containers healthy, ports as designed. Compose diff **PASS (57 passed)**.
+    - **The evidence log of that successful run no longer exists, and the harness destroyed it.** `run-gate.cmd` redirects with `>`, so a second run truncates the log in place. A second run started ~2 hours later and overwrote 402 KB of a passing install with 3.8 KB ending `install failed: Docker isn't available`. The exit-code marker read `1`. **Both artefacts describe the second run's Docker probe, not the install** — which was verified from the machine instead: schemas, a populated 500-bot realm, listening ports and a state file with six completed stages. The second run failed because **Docker Desktop is per-user and its engine does not answer in a non-interactive session**; the install had been driven from an interactive one. Two fixes owed: `run-gate.cmd` must append or rotate rather than truncate — it already deletes the exit-code marker first, for exactly this class of bug, and then destroys the log — and the Windows gate must be documented as interactive-session-only.
+    - **A defect in our own test support, found only because Windows was gated.** `tests/support_compose.py::volume_from_config` relativised bind paths with `root.rstrip("/")` and `startswith(f"{base}/")` — POSIX-only. Windows `compose config` reports `C:\gate\wotlk-server\env\dist\etc`, nothing stripped, and the shape could never match the fixture: **the compose-diff gate was unrunnable on Windows**, which is why no Windows compose diff exists before tonight. Fixed by deciding from the SHAPE of the paths, never from `os.name`, so one fixture serves all three platforms and a Windows-shaped capture normalises correctly on Linux CI. The sibling-directory guard (`…-server-backup` must not be rewritten into `./-backup`) is preserved and now tested on both separator styles, plus drive-letter case and UNC. Windows paths fold case; POSIX paths deliberately do not.
+    - **A third capture trap, same family as the other two.** Windows PowerShell 5.1's `Out-File -Encoding utf8` writes a **BOM**, and `json.load` refuses it outright (`Unexpected UTF-8 BOM`). Captures must be written with `[System.IO.File]::WriteAllText(..., New-Object System.Text.UTF8Encoding($false))`. With the `-f` trap and the `YULON_COMPOSE_ROOT`-only skip, that is three ways to produce a capture that reads like a defect or a pass without being either.
+    - **Real client login — PROVEN, 2026-08-31, first time on any platform.** The gap matrix built the same evening found this step at zero everywhere and on no run sheet. Account made through `accounts.create_account()`, realm advertised through `networking.plan()`/`apply()`, and the owner logged in from his laptop on a different machine. Server-side: `auth.account` 101 GATETEST `last_login 2026-08-31 20:48:17` `online=1` `failed_logins=0`; `characters` 1001 Gatetest night elf hunter level 1 `online=1`. Two things only a live run could show — the LAN step **refused rather than blocked** when sudo wanted a password, returning all four `firewall-cmd` lines by name in `report.skipped`; and `networking.plan()` cannot see past NAT, filed in `bug-checklist.md`.
+    - **Linux console gate — PASS, 2026-08-31**, closing the row the Phase 6 matrix found reading macOS-only (the Linux evidence existed but lived in `console.py`'s docstring, never in this file). `server info` → 9 lines; `account onlinelist` → 504 lines; pid 2991 and `StartedAt` unchanged across both cycles, `RestartCount` unmoved, still running, replies distinct.
+    - **Linux port-conflict guard — PASS both halves, 2026-08-31**, proven on Windows and macOS and never gated on Linux. A stranger holding 3724 is found by name (`['yulon-port-hog']`); the install's own containers are also flagged (`['ac-authserver', 'ac-worldserver']`) — the D6 limitation its own docstring admits, now measured rather than asserted.
+  - [ ] Gate: busybox/mariadb:11 primitives live (`-u`, `:ro` refusal, `copy_from_image`, `exec_stdin` + gzip, `mariadb` client name, restart-loop detection)
+    - **PASSED on Linux, 2026-09-01** — `yulon-ubuntu`, Docker 29.1.3, cloned from `yulon-phase7` at `79ea63c`: **20 passed / 1 skipped**, `docker ps -aq` and `docker volume ls -q` byte-identical before and after. Also 16 passed / 5 skipped on Windows/Docker Desktop 29.6.2, where four gates are Linux-only.
+    - **What only Linux could prove.** `platform.container_user_args()` returns `[]` off Linux, so every `--user` assertion on Docker Desktop is a statement about busybox's default user, not about `ContainerRun` — a review demonstrated that by re-running the gate with `to_argv()`'s `*self.user_args` deleted and watching it still pass. On Linux the argv really carries `--user 1000:1000` and the container reports it back. Measured consequence: with the flag, extracted files land `uid=1000 gid=1000`; without it, `uid=0 gid=0` — a server folder full of root-owned map data on the user's own machine.
+    - **A skip can no longer read as a pass.** `YULON_REQUIRE_DOCKER=1` turns an unreachable daemon into a failure; without it the skip reason names what did not run. All three branches exercised. CI is stronger still: the `integration (live Docker)` job runs `docker info` before pytest.
+    - **`docker rm -f` was leaking a volume every run.** `mariadb:11` declares `VOLUME /var/lib/mysql`, so each gate stranded ~200 MB under a 64-hex name `docker ps -a` cannot show. Now `rm -f -v`, and the teardown asserts on survivors so a leak is an error naming the volume.
+
 - [ ] 7.2 Delete the bash lineage — six `install-*.sh`, `dml-start.sh`, `wow-manage.sh` (eight files, 19,451 lines), `installer.Installer`/`PROMPT_RULES`/`make_responder`/`bash_available`, script tests, `Install.script*` fields; the three CMaNGOS entries set `platforms: []` until their own gates; gaming mode → `catalog/installers/steam-deck/setup-gaming-mode.sh`; `contribution.md` harness paragraph rewritten; style-guide §3 rows for `catalog/installer.py` and `catalog/catalog.py`
   - [ ] Gate: full checks green; 7.1's Ubuntu gate re-run from the same checkpoint with no other change
 - [ ] 7.3 CMaNGOS data model + pure stage kinds — catalog 7.3 models (`Source.rev`, `dockerfile_dir`, `CmangosData`: `ClientSpec`, `DockerfileSpec`, `ExtractPlan`, `MmapPlan`, `ConfPatchTable`, `SqlPlan`); `families/cmangos.py`; `clientdir`/`dockerfile`/`extract`/`conf`/`sqlplan`; `docker.run_container`/`copy_from_image`/`exec_stdin`; all four entries validate; WotLK templates byte-identical; static catalog invariants test
@@ -594,16 +612,22 @@ recorded as missing and the generated file **does** supply — that gap is close
 path and remains open on the script path.
 
 **The defect it found.** `AC_AI_PLAYERBOT_MIN_RANDOM_BOTS` and `AC_AI_PLAYERBOT_MAX_RANDOM_BOTS`
-are absent from `DEFAULT_WORLD_ENV`. The proven install carries 1600 and 2000, written by the
-Linux installer script; a native install would have taken mod-playerbots' own defaults instead.
-Not a crash — a user on macOS and a user on Linux quietly getting different worlds from the same
-button, which is the class of difference this project rejected named volumes to avoid. Fixed with
-the proven install's own values — but **not in `DEFAULT_WORLD_ENV`, which is where the sentences
+are absent from `DEFAULT_WORLD_ENV`. The proven install carries 1600 and 2000 — the Linux
+installer script's numbers as they stood on 2026-08-24, this section's own date, before
+[#134](https://github.com/DadsMmoLab/dads-mmo-lab/pull/134) ("Five hundred bots, in the six places
+that decide the number") dropped every installer script AND `catalog.json`'s own
+`install.native.world_env` to 500/500. **This is a different capture from, and an older number
+than, the 2026-08-31 bash-install capture below** (`wotlk-compose-config-script.json`), which
+reads 500/500 — the population the scripts and `catalog.json` actually ship today. A native
+install would have taken mod-playerbots' own defaults instead. Not a crash — a user on macOS and a
+user on Linux quietly getting different worlds from the same button, which is the class of
+difference this project rejected named volumes to avoid. Fixed with the proven install's own
+values, 1600/2000 at the time — but **not in `DEFAULT_WORLD_ENV`, which is where the sentences
 above locate the defect**. An adversarial review pointed out that a per-game number in a module
-constant is what style-guide §3 forbids, and that one machine's 2000 bots is no default for every
-machine, so 1600/2000 live in `catalog.json`'s `install.native.world_env` and a test now forbids
-them in `DEFAULT_WORLD_ENV`. The values live in `catalog.json`'s
-`install.native.world_env`, and a test now forbids them in `DEFAULT_WORLD_ENV`.
+constant is what style-guide §3 forbids, and that one machine's bot count is no default for every
+machine, so the values moved into `catalog.json`'s `install.native.world_env` and a test now
+forbids hardcoding either key in `DEFAULT_WORLD_ENV`. What lives in `catalog.json` today is
+500/500, after #134 — not the 1600/2000 this paragraph is about.
 
 **Where the numbers come from, stated once.** They are ONE desktop's, copied so that a native
 install and a script install agree — never measured for RAM on anything. The first live gate
@@ -1221,3 +1245,105 @@ that build.
   differing service and container names since 2026-08-22, so the *code* was proven and the *catalog* was
   never checked against the installers it ships. The regression test now reads the compose services straight
   out of each installer script and refuses any catalog service that is really a container name there.
+
+### The compose diff against the proven install, re-run against a real capture (2026-08-31)
+
+7.1's task E.2 committed `pylauncher/tests/data/wotlk-compose-config.json` — `docker compose
+config` taken off the live gate's own install after it reached `ready` on a clean Ubuntu box,
+with the project `name:` and the absolute install path stripped so the fixture names no machine.
+The first run of `support_compose.compare()` and `compare_stack()` against it was not clean, and
+what the seven lines said is worth keeping.
+
+**The reference is a NATIVE install, not the script install.** Everything the 2026-08-24 section
+above records was measured against `~/wow-server-playerbots`, which upstream's compose built. The
+committed fixture is the engine's own output. That single fact settles two open questions.
+
+**The volume names no longer differ.** "Recorded, not fixed" above says `db-data`/`client-data`
+against `ac-database`/`ac-client-data`; the capture declares `client-data` and `db-data`, because
+the engine rendered them. Every comparison the vocabulary now performs — the fixture test, the
+E.3/E.4 gates, 7.2's re-run — is native render against native capture, so there is no rename to
+translate: `support_compose.DESIGN_VOLUME_NAMES` is empty, and the staleness guard that reported
+this is what said so. The record above still describes the script install and is left standing.
+The upside is that volume names are now compared exactly as written, which is stronger than
+before: a renamed or relocated store is reported by name.
+
+**`ac-client-data-init` is not on `ac-network`.** It declares no `networks:`, so compose puts it
+on the implicit `default` and materialises a second per-project bridge — visible only in the
+resolved config, never in the file. Recorded, not fixed: the service only fetches an archive into
+a named volume and talks to nothing, and changing the template would have invalidated the byte
+snapshot this task exists to compare against. `Service` now carries `networks`, so a service that
+falls off `ac-network` is reported instead of being a blind spot.
+
+**The fixture pins the runtime stack, not the build overlay.** A bare `docker compose config`
+resolves `docker-compose.yml` plus `docker-compose.override.yml` and never
+`docker-compose.build.yml`, which is deliberately not auto-loaded — so the capture has no `build:`
+at all and reported `build ... vs None` on all four built services. The comparison drops the
+overlay on the rendered side too rather than forgiving a missing `build`, so the two sides are the
+same two documents; the overlay stays owned by `test_composegen.py`, by the byte snapshot and by
+`test_shape_from_plan_merges_the_three_files`. Anyone capturing for the E.3/E.4 gate must capture
+the same way: `docker compose config --format json` in the install directory, no `-f`.
+
+**What still matched, and it is the whole point.** All five services and their container names,
+every published port and protocol, every bind and named-volume mount including client data's
+`:ro`, every `depends_on` edge with its condition, `restart`, and every environment KEY on every
+service.
+
+**Said precisely, because the first draft of this line overstated it.** The comparison reads
+environment KEYS, never values — `test_env_values_are_not_compared_which_is_its_cost` shows a bot
+population of 0 comparing equal to 500 — so what it established is that
+`AC_AI_PLAYERBOT_MIN_RANDOM_BOTS` and `_MAX_` are present on the worldserver, not that they are
+500. The 500/500 is readable in the committed fixture and is asserted, as a value, by
+`test_composegen.py` against `catalog.json`. Two different claims, and only the weaker one belongs
+to this diff.
+
+### The bash script install, captured at last — and what it proved (2026-08-31)
+
+The 2026-08-24 diff above was run against `~/wow-server-playerbots` by hand and never committed;
+the E.2 fixture that was, turned out to be a NATIVE install, which cannot exercise a single one of
+the design differences the comparison vocabulary forgives. The script install was then found still
+standing on the **Fedora** box, left over from the hunt, and captured read-only:
+`pylauncher/tests/data/wotlk-compose-config-script.json` (project `wow-server-playerbots`,
+upstream's compose file, upstream's published `acore/*:master` images).
+
+**Three differences stand, and all three are pinned in `SCRIPT_INSTALL_DIVERGENCES` rather than
+forgiven.**
+
+1. **The script install publishes MySQL on every interface.** `3306` with no host binding, where
+   the native stack pins it to `127.0.0.1`. An unauthenticated `root`/`password` MySQL reachable
+   from the LAN — the credentials are upstream's fixed pair and are in the compose file. Ours has
+   never needed the binding: the launcher's maintenance path uses `docker exec`.
+2. **The same for the SOAP admin port, `7878`** — a remote console in front of a GM account.
+3. **The native stack mounts the modules tree into `ac-db-import` and the script install does
+   not.** Deliberate: the import applies each module's own `db-auth`/`db-characters` SQL, which is
+   how the native path has the playerbots schema the script path's repair gate found missing.
+
+**Everything else matched, which is the finding that matters.** All five services and container
+names, all `depends_on` edges with their conditions, `restart`, every other mount, both
+`build.dockerfile` values and all four `target`s, and every environment key modulo the two
+recorded allowances. Upstream's `AC_CCACHE`/`CTYPE`/`CSCRIPTS`/`DATAPATH`/`USER_CONF_PATH` and the
+three empty `AC_RESTARTER_*` are present exactly as `BUILD_TIME_ENV` describes them.
+
+**The volume rename is CONFIRMED.** "Recorded, not fixed" (2026-08-24) said `db-data`/`client-data`
+against `ac-database`/`ac-client-data` on the strength of a `docker volume ls` reading. The capture
+declares those two names, so the record is now evidence. It lives in
+`support_compose.SCRIPT_INSTALL_VOLUME_NAMES` and applies to that pairing only — the native fixture
+carries no registry, and a `Stack` remembers which one reduced it so the two cannot be crossed.
+
+**`ac-client-data-init` is on `default` upstream too.** The 2026-08-31 note above recorded it as
+ours; it is inherited. Not a Yu'lon defect, and the same second bridge network appears in both.
+
+**Four things the capture shows that the comparison still cannot see**, each now with a real
+example rather than a hypothetical one: `build.args` (upstream passes `USER_ID`/`GROUP_ID`/
+`DOCKER_USER` into the image build; we pass none), `build.context` (absolute in the RAW capture —
+the absolute-path surprise that was predicted for `dockerfile`, which is relative on both — but
+relativised with the rest of the install path before the fixture was committed, so the committed
+file and the test that reads it both say `"."`), the
+healthcheck (theirs over the local socket, ours over TCP by service name), and **the SELinux
+label**: the script install's capture carries `bind: {selinux: Z}` on exactly ONE mount, the
+worldserver's modules tree, and nothing on its other SIX binds — not the six `:z` the shipped
+Fedora script actually writes on disk, which the capture's shape does not match. `Z` is
+private-to-one-container relabelling and `z` is shared, and the script's own comment already
+answers which is right for a tree two services mount (`z`) — which settles it for our engine's
+`./modules`, mounted by both `ac-worldserver` and `ac-db-import`. Nothing compares the two
+spellings, so this is read from the captures, not asserted by a test. Recorded in
+`bug-checklist.md` §17, with what is and is not actually open.

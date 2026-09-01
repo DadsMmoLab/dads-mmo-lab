@@ -16,7 +16,8 @@ import pytest
 from yulon import docker, git
 from yulon import platform as platform_module
 from yulon.catalog import composegen, preflight
-from yulon.catalog.catalog import load_catalog
+from yulon.catalog.catalog import CatalogEntry, ClientSpec, load_catalog
+from yulon.catalog.families import clientdir
 
 ENTRY = load_catalog().get("wow-wotlk")
 NATIVE = ENTRY.install.native
@@ -46,6 +47,8 @@ def facts(**overrides: object) -> preflight.Facts:
         bind_mount=True,
         port_conflicts=(),
         ports_in_use=(),
+        selinux_enforcing=False,
+        server_fs_type="ext2/ext3",
     )
     base.update(overrides)
     return preflight.Facts(**base)  # type: ignore[arg-type]
@@ -162,13 +165,66 @@ def test_a_folder_docker_cannot_see_is_refused_before_anything_is_written() -> N
     """The empty-mount trap: the clone "succeeds" and the build context is empty."""
     report = preflight.evaluate(ENTRY, SERVER_DIR, facts(bind_mount=False))
     assert verdict(report, "sharing the folder") == "refuse"
-    assert "File sharing" in report.message()
+    assert str(SERVER_DIR) in report.message()
+
+
+def test_the_file_sharing_remedy_is_only_offered_where_that_setting_exists() -> None:
+    """D4 again: "Docker Desktop's Settings → Resources" printed on Docker Engine.
+
+    The Ubuntu gate recorded that class of defect as "set Docker Desktop to 8
+    CPUs" on a box that has no Docker Desktop, and a Fedora 44 box (2026-08-30)
+    hit this one: the install stopped with "add this folder to Docker Desktop's
+    Settings → Resources → File sharing" on a machine where no such pane, and no
+    such file-sharing list, exists. Docker Engine shares the whole filesystem.
+    """
+    desktop = preflight.evaluate(
+        ENTRY, SERVER_DIR, facts(platform_id="windows", bind_mount=False)
+    ).message()
+    assert "Settings → Resources → File sharing" in desktop
+
+    engine = preflight.evaluate(ENTRY, SERVER_DIR, facts(bind_mount=False)).message()
+    assert "Docker Desktop" not in engine and "File sharing" not in engine
+    # What a Linux user can actually act on is the folder itself.
+    assert "read by the user the Docker daemon runs as" in engine
+
+
+def test_the_linux_remedy_rules_selinux_out_rather_than_offering_a_chcon() -> None:
+    """The enforcing appendix must not hand over a command that cannot work.
+
+    Two things were wrong with `chcon -Rt container_file_t {server_dir}`. The
+    folder is routinely absent at preflight time — that is why the probe mounts
+    the nearest POPULATED ancestor at all — so the pasted command answers "No
+    such file or directory". And the probe runs `--security-opt label:disable`
+    (`docker._probe_selinux_argv()`), so no host label can change what it saw:
+    the sentence said "the check itself already runs unconfined" and then
+    offered a relabel anyway.
+
+    So the appendix now says what is true — SELinux is not the cause, look at
+    the folder. Still only while enforcing: it is noise on a box without
+    SELinux, and `None` means nobody could ask.
+    """
+    enforcing = preflight.evaluate(
+        ENTRY, SERVER_DIR, facts(bind_mount=False, selinux_enforcing=True)
+    ).message()
+    assert "chcon" not in enforcing, "a command that cannot change the outcome is not a remedy"
+    assert "SELinux is enforcing here, but it is not what refused this" in enforcing
+    assert str(SERVER_DIR) in enforcing
+
+    for answer in (False, None):
+        quiet = preflight.evaluate(
+            ENTRY, SERVER_DIR, facts(bind_mount=False, selinux_enforcing=answer)
+        ).message()
+        assert "SELinux" not in quiet
 
 
 def test_a_bind_probe_that_could_not_run_is_unchecked() -> None:
     report = preflight.evaluate(ENTRY, SERVER_DIR, facts(bind_mount=None))
     assert verdict(report, "sharing the folder") == "unchecked"
     assert report.ok()
+    # The unchecked line carries the same platform-fitted advice: it named a
+    # Docker Desktop settings pane on a Linux host too.
+    said = [check for check in report.unchecked() if "sharing the folder" in check.name][0]
+    assert "Docker Desktop" not in said.remedy
 
 
 def test_a_synced_or_network_folder_is_refused_with_the_reason() -> None:
@@ -204,8 +260,16 @@ def test_no_daemon_is_a_refusal_and_everything_under_it_is_unchecked() -> None:
 
 
 def test_an_entry_with_no_native_data_is_refused_rather_than_guessed_at() -> None:
+    """TBC with its block taken away, because since G.4 every shipped entry has one.
+
+    The entry used to be its own example. It is a `model_copy` now rather than a
+    different game, so the case this refusal exists for — floors and templates
+    asked of an entry that never declared any — is still made against a real
+    catalog entry and not a hand-built stub that could drift from one.
+    """
     tbc = load_catalog().get("wow-tbc")
-    report = preflight.evaluate(tbc, SERVER_DIR, facts())
+    bare = tbc.model_copy(update={"install": tbc.install.model_copy(update={"native": None})})
+    report = preflight.evaluate(bare, SERVER_DIR, facts())
     assert not report.ok()
     assert "catalog.json" in report.message()
 
@@ -413,3 +477,380 @@ def test_cpu_vs_memory_heuristics(
         assert cpu_check.verdict == expected_verdict
     if expected_remedy_cpu is not None:
         assert expected_remedy_cpu in cpu_check.remedy
+
+
+def test_selinux_off_or_labelable_passes() -> None:
+    for enforcing, fs in ((False, "ntfs"), (True, "ext2/ext3"), (True, "xfs"), (True, None)):
+        report = preflight.evaluate(
+            ENTRY, SERVER_DIR, facts(selinux_enforcing=enforcing, server_fs_type=fs)
+        )
+        assert verdict(report, "SELinux") == "pass", (enforcing, fs)
+        assert report.ok()
+
+
+def test_selinux_enforcing_on_an_unlabelable_drive_warns_and_names_it() -> None:
+    """`:z` is omitted there, and the daemon may refuse the mount — say so before the build."""
+    report = preflight.evaluate(
+        ENTRY, SERVER_DIR, facts(selinux_enforcing=True, server_fs_type="ntfs")
+    )
+    assert verdict(report, "SELinux") == "warn"
+    assert report.ok()
+    said = [check for check in report.checks if check.name == "SELinux"][0]
+    assert "ntfs" in said.detail and ":z" in said.detail
+
+
+def test_selinux_that_could_not_be_read_on_linux_is_unchecked_and_a_pass_elsewhere() -> None:
+    linux = preflight.evaluate(ENTRY, SERVER_DIR, facts(selinux_enforcing=None))
+    assert verdict(linux, "SELinux") == "unchecked"
+    assert "not a pass" in [c for c in linux.checks if c.name == "SELinux"][0].detail
+    mac = preflight.evaluate(
+        ENTRY, SERVER_DIR, facts(platform_id="macos", selinux_enforcing=None, server_fs_type=None)
+    )
+    assert verdict(mac, "SELinux") == "pass"
+
+
+def test_gather_asks_selinux_only_on_linux_and_accepts_a_client_dir(tmp_path: Path) -> None:
+    """SELinux is asked on Linux only; `client_dir` is accepted now and read in 7.3 (A9)."""
+    asked: list[str] = []
+
+    def selinux() -> bool | None:
+        asked.append("selinux")
+        return True
+
+    def fs_type(path: Path) -> str | None:
+        asked.append(f"fs:{path}")
+        return "btrfs"
+
+    common: dict[str, object] = dict(
+        docker_ready=lambda: True,
+        vm_resources=lambda: None,
+        data_root=lambda: None,
+        disk_free=lambda _p: 100 * GIB,
+        dir_problem=lambda _p: None,
+        bind_mount_ok=lambda _p: True,
+        port_conflicts=lambda: [],
+        probe_port=lambda host, port: platform_module.PortProbe(host, port, "unknown", ""),
+        selinux=selinux,
+        fs_type=fs_type,
+    )
+    got = preflight.gather(
+        ENTRY, tmp_path, platform_id=lambda: "linux", client_dir=tmp_path / "client", **common
+    )  # type: ignore[arg-type]
+    assert got.selinux_enforcing is True and got.server_fs_type == "btrfs"
+    assert asked == ["selinux", f"fs:{tmp_path}"]
+    asked.clear()
+    got = preflight.gather(
+        ENTRY, tmp_path, platform_id=lambda: "windows", **common
+    )  # type: ignore[arg-type]
+    assert got.selinux_enforcing is None and got.server_fs_type is None
+    assert asked == []
+
+
+# -- the client folder (7.3, I.8) ---------------------------------------------
+#
+# Two facts, and both of them have three answers. `client_checks` carries
+# `clientdir.validate()`'s own verdicts through unchanged, `unchecked` rows
+# included; `client_bind` is `True`, `False` or "nobody asked", and the last of
+# those must never read as the middle one. A client Docker cannot see mounts as
+# an EMPTY directory, so the alternative to refusing here is an extractor
+# finding no archives after the image was built.
+
+
+def _client_entry() -> CatalogEntry | None:
+    """The first entry whose family block carries a `ClientSpec`; None if none does yet."""
+    for entry in load_catalog().games:
+        native = entry.install.native
+        if native is not None and native.cmangos is not None:
+            return entry
+    return None
+
+
+CLIENT_ENTRY = _client_entry()
+needs_client_entry = pytest.mark.skipif(
+    CLIENT_ENTRY is None, reason="no catalog entry has a ClientSpec yet"
+)
+
+
+def _spec_of(entry: CatalogEntry) -> ClientSpec:
+    native = entry.install.native
+    assert native is not None and native.cmangos is not None
+    return native.cmangos.client
+
+
+def _a_client(root: Path, spec: ClientSpec) -> Path:
+    """A folder built from the spec's own rules, so no game literal lands in this file."""
+    client = root / "client"
+    (client / clientdir.DATA_DIR).mkdir(parents=True)
+    if spec.required_file is not None:
+        required = client.joinpath(*spec.required_file.split("/"))
+        required.parent.mkdir(parents=True, exist_ok=True)
+        required.write_bytes(b"")
+    return client
+
+
+def _client_gather(entry: CatalogEntry, server_dir: Path, **overrides: object) -> preflight.Facts:
+    """`gather()` on a Linux box where every seam answers, minus what the test replaces."""
+    seams: dict[str, object] = dict(
+        platform_id=lambda: "linux",
+        docker_ready=lambda: True,
+        vm_resources=lambda: None,
+        data_root=lambda: None,
+        disk_free=lambda _p: 100 * GIB,
+        dir_problem=lambda _p: None,
+        bind_mount_ok=lambda _p: True,
+        port_conflicts=lambda: [],
+        probe_port=lambda host, port: platform_module.PortProbe(host, port, "unknown", ""),
+        selinux=lambda: None,
+        fs_type=lambda _p: None,
+    )
+    seams.update(overrides)
+    return preflight.gather(entry, server_dir, **seams)  # type: ignore[arg-type]
+
+
+def test_facts_carry_no_client_checks_by_default() -> None:
+    assert facts().client_checks == () and facts().client_bind is None
+
+
+def test_evaluate_appends_the_client_checks_and_a_client_refusal_blocks() -> None:
+    refusal = preflight.Check(
+        "the client folder", "refuse", "no client folder was chosen", "Pick one."
+    )
+    report = preflight.evaluate(ENTRY, SERVER_DIR, facts(client_checks=(refusal,)))
+    assert verdict(report, "the client folder") == "refuse"
+    assert not report.ok()
+    assert "no client folder was chosen" in report.message()
+
+
+def test_evaluate_carries_a_client_unchecked_through_as_unchecked() -> None:
+    """`clientdir` answers `unchecked` where it could not look, and that is not a pass.
+
+    Folding it into either neighbour is the defect this module is built against:
+    rounded up, an unreadable client reports as fine; rounded down, a machine
+    that would have installed is refused.
+    """
+    shrug = preflight.Check(clientdir.MPQ_CHECK, "unchecked", "could not be listed", "Look again.")
+    report = preflight.evaluate(ENTRY, SERVER_DIR, facts(client_checks=(shrug,)))
+    assert verdict(report, clientdir.MPQ_CHECK) == "unchecked"
+    assert report.ok()
+    assert [check.name for check in report.unchecked()] == [clientdir.MPQ_CHECK]
+
+
+@needs_client_entry
+def test_a_client_docker_cannot_see_is_refused_and_an_unprobed_one_is_unchecked() -> None:
+    assert CLIENT_ENTRY is not None
+    ok = (preflight.Check("the client folder", "pass", "fine"),)
+    refused = preflight.evaluate(
+        CLIENT_ENTRY, SERVER_DIR, facts(client_checks=ok, client_bind=False)
+    )
+    assert verdict(refused, "sharing the client with Docker") == "refuse"
+    assert not refused.ok()
+    assert "archives would be invisible" in refused.message()
+    unprobed = preflight.evaluate(
+        CLIENT_ENTRY, SERVER_DIR, facts(client_checks=ok, client_bind=None)
+    )
+    assert verdict(unprobed, "sharing the client with Docker") == "unchecked"
+    assert unprobed.ok(), "nobody asked is not a refusal"
+    shrugged = [c for c in unprobed.checks if c.name == "sharing the client with Docker"][0]
+    assert "not a pass" in shrugged.detail
+    fine = preflight.evaluate(CLIENT_ENTRY, SERVER_DIR, facts(client_checks=ok, client_bind=True))
+    assert verdict(fine, "sharing the client with Docker") == "pass"
+    # The client's probe is its own row: the server folder still has one, and
+    # neither answers for the other.
+    assert verdict(fine, "sharing the folder with Docker") == "pass"
+
+
+@needs_client_entry
+def test_the_client_bind_row_does_not_answer_for_the_server_folder_or_the_reverse() -> None:
+    """Two folders, two mounts, two rows. One `bind_mount` said both once."""
+    assert CLIENT_ENTRY is not None
+    ok = (preflight.Check("the client folder", "pass", "fine"),)
+    report = preflight.evaluate(
+        CLIENT_ENTRY, SERVER_DIR, facts(client_checks=ok, bind_mount=False, client_bind=True)
+    )
+    assert verdict(report, "sharing the folder with Docker") == "refuse"
+    assert verdict(report, "sharing the client with Docker") == "pass"
+
+
+@needs_client_entry
+def test_no_client_bind_check_when_the_client_itself_was_refused() -> None:
+    """A mount test on a folder that is not a client answers a question nobody asked.
+
+    Its `unchecked` line would read as a second thing to go and fix, next to
+    the one sentence that says what to change.
+    """
+    assert CLIENT_ENTRY is not None
+    refusal = (preflight.Check("the client folder", "refuse", "not a folder", "Pick one."),)
+    report = preflight.evaluate(
+        CLIENT_ENTRY, SERVER_DIR, facts(client_checks=refusal, client_bind=None)
+    )
+    assert [c.name for c in report.checks if "sharing the client" in c.name] == []
+    # ...and the same entry with a client that passed DOES get the row, so the
+    # assertion above is about the refusal and not about the entry.
+    passing = (preflight.Check("the client folder", "pass", "fine"),)
+    kept = preflight.evaluate(
+        CLIENT_ENTRY, SERVER_DIR, facts(client_checks=passing, client_bind=None)
+    )
+    assert [c.name for c in kept.checks if "sharing the client" in c.name] == [
+        "sharing the client with Docker"
+    ]
+
+
+def test_an_entry_with_no_client_spec_never_gets_a_client_bind_row() -> None:
+    """AzerothCore extracts nothing from a client, so the row would be a puzzle."""
+    passing = (preflight.Check("the client folder", "pass", "fine"),)
+    report = preflight.evaluate(ENTRY, SERVER_DIR, facts(client_checks=passing, client_bind=False))
+    assert all("sharing the client" not in check.name for check in report.checks)
+    assert report.ok()
+
+
+def test_gather_leaves_the_client_alone_for_an_entry_without_a_client_spec(tmp_path: Path) -> None:
+    def never(_dir: Path | None, _spec: object) -> tuple[preflight.Check, ...]:
+        raise AssertionError("validated a client for an entry that needs none")
+
+    probed: list[Path] = []
+
+    def probe(path: Path) -> bool | None:
+        probed.append(path)
+        return True
+
+    got = _client_gather(
+        ENTRY,
+        tmp_path / "server",
+        bind_mount_ok=probe,
+        client_dir=tmp_path / "client",
+        client_validate=never,
+    )
+    assert got.client_checks == () and got.client_bind is None
+    assert probed == [tmp_path / "server"]
+
+
+@needs_client_entry
+def test_gather_validates_the_client_and_bind_probes_it_only_when_docker_answered(
+    tmp_path: Path,
+) -> None:
+    assert CLIENT_ENTRY is not None
+    client = tmp_path / "client"
+    (client / clientdir.DATA_DIR).mkdir(parents=True)
+    probed: list[Path] = []
+    validated: list[Path | None] = []
+
+    # A pass and an `unchecked`, because `gather()` carries what the rules said
+    # through untouched: a row it quietly dropped or rounded would reach
+    # `evaluate()` as a machine nobody had a doubt about.
+    answers = (
+        preflight.Check("the client folder", "pass", "fine"),
+        preflight.Check(clientdir.MPQ_CHECK, "unchecked", "could not be listed", "Look again."),
+    )
+
+    def validate(client_dir: Path | None, _spec: object) -> tuple[preflight.Check, ...]:
+        validated.append(client_dir)
+        return answers
+
+    def probe(path: Path) -> bool | None:
+        probed.append(path)
+        return True
+
+    with_docker = _client_gather(
+        CLIENT_ENTRY,
+        tmp_path / "server",
+        docker_ready=lambda: True,
+        bind_mount_ok=probe,
+        client_dir=client,
+        client_validate=validate,
+    )
+    assert validated == [client]
+    assert probed == [tmp_path / "server", client]
+    assert with_docker.client_bind is True
+    assert with_docker.client_checks == answers
+    probed.clear()
+    validated.clear()
+    without = _client_gather(
+        CLIENT_ENTRY,
+        tmp_path / "server",
+        docker_ready=lambda: False,
+        bind_mount_ok=probe,
+        client_dir=client,
+        client_validate=validate,
+    )
+    assert probed == [] and without.client_bind is None
+    assert validated == [client], "the folder rules need no daemon and still run"
+    assert without.client_checks, "the folder rules need no daemon and still run"
+
+
+@needs_client_entry
+def test_a_client_the_rules_refused_is_left_unprobed_rather_than_probed_and_failed(
+    tmp_path: Path,
+) -> None:
+    """`None` because nobody asked, not `False` because a container looked and saw nothing.
+
+    A bool holds two of those three answers, and the folder rules have already
+    settled the question a mount test would be asked about — `evaluate()` drops
+    the row for exactly this case, so the 30-second container probe would buy a
+    fact that is thrown away, about a path the rules just said is not a client.
+    """
+    assert CLIENT_ENTRY is not None
+    probed: list[Path] = []
+
+    def probe(path: Path) -> bool | None:
+        probed.append(path)
+        return False
+
+    def refuse(_dir: Path | None, _spec: object) -> tuple[preflight.Check, ...]:
+        return (preflight.Check("the client folder", "refuse", "not a client", "Pick one."),)
+
+    got = _client_gather(
+        CLIENT_ENTRY,
+        tmp_path / "server",
+        bind_mount_ok=probe,
+        client_dir=tmp_path / "client",
+        client_validate=refuse,
+    )
+    assert probed == [tmp_path / "server"], "the client was not worth a container"
+    assert got.client_bind is None
+
+
+@needs_client_entry
+def test_the_default_client_validate_is_clientdir_validate_with_preflights_free_space(
+    tmp_path: Path,
+) -> None:
+    """No seam given: the real rules run, and they measure the CLIENT's own drive.
+
+    Through `gather()`'s `disk_free`, not `shutil` — the client sits on a drive
+    of its own, and binding the module default here would make this row an
+    answer about the machine the suite happens to run on.
+    """
+    assert CLIENT_ENTRY is not None
+    spec = _spec_of(CLIENT_ENTRY)
+    client = _a_client(tmp_path, spec)
+    asked: list[Path] = []
+
+    def disk_free(path: Path) -> int | None:
+        asked.append(path)
+        return 1 * GIB if path == client else 100 * GIB
+
+    got = _client_gather(CLIENT_ENTRY, tmp_path / "server", disk_free=disk_free, client_dir=client)
+    named = {check.name: check for check in got.client_checks}
+    assert client in asked
+    assert named[clientdir.CLIENT_CHECK].verdict == "pass"
+    assert named[clientdir.SPACE_CHECK].verdict == "warn"
+    assert "1 GB free" in named[clientdir.SPACE_CHECK].detail
+
+
+@needs_client_entry
+def test_an_entry_that_needs_a_client_and_was_given_none_is_refused_by_the_real_rules(
+    tmp_path: Path,
+) -> None:
+    assert CLIENT_ENTRY is not None
+    probed: list[Path] = []
+
+    def probe(path: Path) -> bool | None:
+        probed.append(path)
+        return True
+
+    got = _client_gather(CLIENT_ENTRY, tmp_path / "server", bind_mount_ok=probe, client_dir=None)
+    assert [check.verdict for check in got.client_checks] == ["refuse"]
+    assert got.client_bind is None
+    assert probed == [tmp_path / "server"]
+    report = preflight.evaluate(CLIENT_ENTRY, tmp_path / "server", got)
+    assert not report.ok()
+    assert clientdir.PICK_THE_CLIENT in report.message()

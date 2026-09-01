@@ -1415,7 +1415,9 @@ def docker_engine_commands(pm: PackageManager, *, steamos: bool) -> list[list[st
     """
     install: list[list[str]]
     if pm == "pacman":
-        install = [["pacman", "-Sy", "--noconfirm", "docker", "docker-compose"]]
+        # docker-buildx too: the Arch script that passed the gate installed it by
+        # hand, and `compose build` needs BuildKit same as every other manager here.
+        install = [["pacman", "-Sy", "--noconfirm", "docker", "docker-compose", "docker-buildx"]]
         if steamos:
             install = [["steamos-readonly", "disable"], *install, ["steamos-readonly", "enable"]]
     elif pm == "apt":
@@ -1426,10 +1428,289 @@ def docker_engine_commands(pm: PackageManager, *, steamos: bool) -> list[list[st
             ["apt-get", "install", "-y", "docker.io", "docker-compose-v2", "docker-buildx"],
         ]
     elif pm == "dnf":
-        install = [["dnf", "-y", "install", "moby-engine", "docker-compose"]]
+        # docker-buildx, and the reason is which REPO the other two packages
+        # come from, not which distro this is. `moby-engine` and
+        # `docker-compose` above are Fedora's own builds, so the BuildKit
+        # plugin beside them is Fedora's too, and Fedora names it
+        # `docker-buildx`. Measured on Fedora 44 (repos: fedora, updates),
+        # 2026-08-31:
+        #     dnf repoquery docker-buildx        -> 0.31.1, 0.36.1
+        #     dnf repoquery docker-buildx-plugin -> nothing
+        #     dnf provides */docker-buildx-plugin -> No matches found
+        # `docker-buildx-plugin` IS the right name in the other package
+        # world: Docker's own repo, where the engine is `docker-ce`. BOTH of
+        # install-wow-wotlk-fedora.sh's branches install it — Bazzite by
+        # layering it with rpm-ostree (:870) and plain Fedora with dnf (:879)
+        # — and both work because the script ADDS Docker's CE repo first.
+        # So it is not dnf-versus-rpm-ostree that decides the name; it is
+        # which repo the engine came from. This command takes `moby-engine`
+        # from Fedora's own repos and must stay in that world: against them,
+        # `dnf install docker-buildx-plugin` fails outright and takes the
+        # whole provision with it.
+        install = [["dnf", "-y", "install", "moby-engine", "docker-compose", "docker-buildx"]]
     else:
         install = [["zypper", "--non-interactive", "install", "docker", "docker-compose"]]
     return [*install, ["systemctl", "enable", "--now", "docker"]]
+
+
+# -------------------------------------------------------------------- SELinux
+# Fedora and its family run SELinux enforcing, and a bind mount without a label
+# is unreadable to the container. The WotLK bash installer's answer — `:z` on
+# every host bind, and `chcon -Rt container_file_t` on the bind roots, skipped
+# on filesystems that cannot carry a label — passed the 2026-08-25 Fedora gate.
+# These are the same facts, as functions, so composegen's `BIND_LABEL` token and
+# preflight's SELinux line read one source.
+#
+# Each probe answers yes, no, or COULD NOT ASK, and the three are kept apart on
+# purpose. The shell version of this code had "the tool was not there" (exit
+# 127) and "the answer is no" (exit 1) arriving as the same value, which is how
+# a Fedora install once ran the relabel path and relabelled nothing while its
+# test asserted the empty result and passed. `None` here means only "unknown";
+# it never means "not enforcing" and never means "this filesystem cannot hold
+# labels".
+
+SELINUX_NOLABEL_FS: frozenset[str] = frozenset(
+    {"exfat", "ntfs", "ntfs3", "fuseblk", "msdos", "vfat", "cifs", "smb2", "nfs", "nfs4", "9p"}
+)
+"""Filesystems that cannot hold an SELinux label; `:z` on them makes the daemon refuse the mount."""
+
+_SELINUX_ENFORCE_PATH = Path("/sys/fs/selinux/enforce")
+
+_GETENFORCE_ANSWERS = {"enforcing": True, "permissive": False, "disabled": False}
+"""The three words `getenforce` prints. Anything else is unknown, not a "no"."""
+
+
+def selinux_enforcing(
+    *,
+    enforce_path: Path = _SELINUX_ENFORCE_PATH,
+    run: RunCmd | None = None,
+    which: Callable[[str], str | None] | None = None,
+) -> bool | None:
+    """Is SELinux enforcing here? `None` = could not tell (or not Linux at all).
+
+    The kernel's own file first, then `getenforce`: the file exists whenever
+    SELinux is loaded, while the tool lives in the optional `libselinux-utils`,
+    so gating on the tool alone fails open on a minimal Fedora — enforcing, no
+    `getenforce`, no `:z`, and a container that cannot read its config.
+
+    A box with neither is a definite "not enforcing" rather than an unknown:
+    Ubuntu and Arch must not get an "unchecked" preflight line for a subsystem
+    they do not have. But a `getenforce` that IS there and then fails, cannot be
+    started, or says something these three words do not cover is `None` — the
+    question went unanswered, and the caller has to be able to see that.
+    """
+    if detect() != "linux":
+        return None
+    try:
+        if enforce_path.exists():
+            return enforce_path.read_text(encoding="utf-8").strip() == "1"
+    except OSError as exc:
+        logger.info(f"could not read {enforce_path}: {exc}")
+    find = which if which is not None else _which
+    if find("getenforce") is None:
+        return False
+    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv, timeout=5.0))
+    try:
+        proc = do(["getenforce"])
+    except OSError as exc:
+        logger.info(f"getenforce could not be started: {exc}")
+        return None
+    if proc.returncode != 0:
+        logger.info(f"getenforce exited {proc.returncode}; SELinux state unknown")
+        return None
+    said = proc.stdout.strip().lower()
+    if said not in _GETENFORCE_ANSWERS:
+        logger.info(f"getenforce said something unrecognised: {proc.stdout.strip()!r}")
+        return None
+    return _GETENFORCE_ANSWERS[said]
+
+
+def filesystem_type(path: Path, *, run: RunCmd | None = None) -> str | None:
+    """`stat -f -c %T` of the first existing ancestor of `path`; Linux only, `None` if unknown.
+
+    The ancestor walk is `preflight._free_bytes()`'s, for the same reason: the
+    server folder is routinely one the user has not created yet.
+
+    Never `""`. An empty answer would pass `selinux_labels_supported()` as a
+    filesystem that merely is not on the deny-list, which turns a `stat` that
+    failed into a `:z` on a mount that cannot take one.
+    """
+    if detect() != "linux":
+        return None
+    probe = path
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv, timeout=5.0))
+    try:
+        proc = do(["stat", "-f", "-c", "%T", str(probe)])
+    except OSError as exc:
+        logger.info(f"stat could not be started: {exc}")
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        logger.info(f"stat -f -c %T {probe} exited {proc.returncode} with {proc.stdout.strip()!r}")
+        return None
+    return proc.stdout.strip().lower()
+
+
+def selinux_labels_supported(fs_type: str | None) -> bool:
+    """Deny-list: an unknown filesystem is assumed to hold labels, because most do."""
+    return fs_type is None or fs_type.lower() not in SELINUX_NOLABEL_FS
+
+
+def bind_label(*, enforcing: bool | None, fs_type: str | None) -> str:
+    """The compose bind-mount suffix: `:z` under enforcing SELinux on a labelable filesystem.
+
+    Only ever `":z"` or `""` — `composegen.render()` refuses any other value,
+    and it refuses it mid-install rather than here.
+
+    Empty off SELinux so every template renders byte-identical there, which
+    `test_composegen.py`'s byte assertions and the compose-config fixture prove.
+    An `enforcing` of `None` (nobody could tell) renders nothing too: a `:z` the
+    daemon rejects breaks an install that otherwise works, while a missing one
+    on an enforcing box shows up as the permission error preflight warns about.
+    """
+    return ":z" if enforcing is True and selinux_labels_supported(fs_type) else ""
+
+
+def label_disable_args(*, enforcing: bool | None) -> list[str]:
+    """`--security-opt label:disable` for a container that must READ an unlabelled folder.
+
+    `bind_label()`'s counterpart, and deliberately its neighbour: they are the
+    two halves of one decision — how a container reaches a host directory on an
+    enforcing box — and a project that spelled them in two modules would be one
+    edit away from disagreeing with itself about SELinux.
+
+    **The difference between them is whether the container writes.** `:z` asks
+    the daemon to RECURSIVELY relabel the mount source to `container_file_t`,
+    which is exactly right for a folder this app created and is about to fill,
+    and exactly wrong for a folder it is only asking a question about — a read
+    that relabels its own subject has changed the thing the answer said not to
+    touch. `label:disable` runs that one container unconfined instead, and
+    leaves the host label as it found it. Measured on Fedora 44, Enforcing
+    (2026-08-30), on an unlabelled checkout:
+
+        $ ls -Zd /home/pk/ownco2
+        unconfined_u:object_r:user_home_t:s0 /home/pk/ownco2
+        $ docker run --rm -v /home/pk/ownco2:/git ... remote get-url origin
+        fatal: not a git repository (or any parent up to mount point /)
+        $ docker run --rm --security-opt label:disable -v ... remote get-url origin
+        https://github.com/mod-playerbots/azerothcore-wotlk.git
+        $ ls -Zd /home/pk/ownco2
+        unconfined_u:object_r:user_home_t:s0 /home/pk/ownco2
+
+    Note what the denial LOOKS like, because it is why this was missed: the
+    container cannot see `.git` at all, so git does not say "permission denied",
+    it says the directory is not a repository. Every caller then gets the answer
+    it uses for "there is nothing here".
+
+    Three answers, not two, the same as everywhere else in this section.
+    `enforcing is None` is "could not ask", and it adds nothing: turning a
+    container's confinement off is a security decision, and taking one on no
+    evidence is what `selinux_enforcing()`'s docstring exists to prevent.
+
+    What it gives up, stated plainly: one short-lived container, running a
+    pinned image digest, runs unconfined by SELinux for the length of a read.
+    Concretely its process type becomes `spc_t` rather than `container_t` — no
+    MCS separation, no `container_file_t`-only file access, the container
+    booleans stop applying — and since `container_user_args()` passes
+    `--user $(id -u):$(id -g)` on Linux, what is left is exactly the invoking
+    user's own authority. DAC, seccomp and AppArmor are untouched.
+
+    **The blast radius is the mount list, so every caller owes its own `:ro`.**
+    That sentence is here because this docstring once carried a safety argument
+    instead: pinned digest, `:ro` mount, `--entrypoint ls`, nothing that writes.
+    That argument is `docker.bind_mount_ok()`'s, where all three clauses are
+    true. `git.ContainerGit`'s read satisfied only the first — its mount string
+    had no `:ro` on it at all — so the second caller inherited a justification
+    it did not meet (adversarial review, 2026-08-31). This function knows only
+    `enforcing`: it cannot see the mount or the entrypoint, so it cannot make
+    that argument on a caller's behalf, and a new caller must make it for
+    itself. `git._READ_ONLY_CONTAINER_ARGS` is what that looks like.
+
+    The alternatives, correctly priced, because an overstated version of this
+    paragraph is what bought the trade. For `bind_mount_ok()` the alternative is
+    refusing every install on every enforcing box, and `:z` is not available
+    there — the mount is an ANCESTOR of the chosen folder, routinely `$HOME`.
+    For the git read the alternative is NOT an answer that is wrong in the
+    dangerous direction: `remote_url()` answering `None` reaches
+    `native.refuse_unowned_checkout()`, which refuses on a `.git` the HOST can
+    see. It is a loud but WRONG refusal — an enforcing user told to move aside a
+    checkout the machine could have read perfectly well. Worth this flag; not
+    data loss, and not to be described as any.
+
+    A note for whoever bumps `git.CONTAINER_GIT_IMAGE`: that digest is the code
+    that runs unconfined here.
+    """
+    return ["--security-opt", "label:disable"] if enforcing is True else []
+
+
+def relabel_for_containers(
+    path: Path,
+    *,
+    run: RunCmd | None = None,
+    which: Callable[[str], str | None] | None = None,
+) -> bool:
+    """`chcon -Rt container_file_t <path>` — label our own files so a container may read them.
+
+    No sudo, no `chown`, no `pkexec`: the server directory is the user's, so the
+    user may relabel it, and an install must never reach for privilege it was
+    not granted through the consent path.
+
+    A failure is a warning and `False`, never an error — the `:z` on the bind
+    lines is the mechanism that carries the install; this is belt and braces for
+    the files that already exist before compose runs.
+
+    The single `False` is NOT the collapsed "could not ask" the probes above
+    exist to avoid. This function reports what it DID, and "the files are not
+    labelled" is equally true whether `chcon` is missing, would not start, or
+    exited non-zero. The three still say different things in the log, because
+    they send a reader to different places.
+    """
+    find = which if which is not None else _which
+    if find("chcon") is None:
+        logger.warning(f"could not relabel {path}: chcon is not installed")
+        return False
+    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv, timeout=600.0))
+    try:
+        proc = do(["chcon", "-Rt", "container_file_t", str(path)])
+    except OSError as exc:
+        logger.warning(f"could not relabel {path}: chcon could not be started: {exc}")
+        return False
+    if proc.returncode != 0:
+        logger.warning(
+            f"could not relabel {path}: chcon exited {proc.returncode}: {proc.stderr.strip()}"
+        )
+        return False
+    return True
+
+
+def container_user_args(*, platform_id: Callable[[], PlatformId] = detect) -> list[str]:
+    """`["--user", "uid:gid"]` for `docker run` on Linux; `[]` on Docker Desktop.
+
+    The one home for this policy (phase7-decisions, Extraction): on Linux a bind
+    mount written by the image's root is owned by root on the host and the user
+    cannot delete their own install; Docker Desktop maps ownership to the
+    logged-in user, so there the image's user is right and `--user` would only
+    break images that expect to be root. `git.ContainerGit` and 7.3's
+    `docker.run_container()` both ask here rather than deciding for themselves.
+
+    A Linux without `os.getuid` cannot happen on CPython, and that is exactly
+    why it is logged rather than passed over: the empty list it produces is the
+    same empty list Docker Desktop gets for the opposite reason, so without the
+    warning the two are indistinguishable afterwards.
+
+    Note for callers: `platform_id`'s default is bound at import, so a test that
+    replaces `platform.detect` is NOT seen here. Pass the seam through
+    explicitly if you need one — `git.ContainerGit._user_args()` does.
+    """
+    if platform_id() != "linux":
+        return []
+    getuid = getattr(os, "getuid", None)
+    getgid = getattr(os, "getgid", None)
+    if getuid is None or getgid is None:
+        logger.warning("this host says it is linux but has no os.getuid; passing no --user")
+        return []
+    return ["--user", f"{getuid()}:{getgid()}"]
 
 
 # ------------------------------------------------------------------ downloads
@@ -1905,24 +2186,289 @@ def _c_locale_env() -> dict[str, str]:
     return env
 
 
+# ------------------------------------------- the sudo password, asked once (7.1)
+
+RunWithInput = Callable[[list[str], str], subprocess.CompletedProcess[str]]
+"""Run argv to completion with `text` on its stdin. The seam `SudoSession` feeds through.
+
+A separate alias from `RunCmd` rather than an optional argument on it, because
+the two carry different things: `RunCmd` runs a command, this one hands a
+command a SECRET. Keeping them apart means a fake for one cannot be handed
+the other by accident, and the argv-level tests can record them separately.
+"""
+
+SUDO_PASSWORD_QUESTION = (
+    "Installing Docker needs administrator rights. Enter your sudo password "
+    "(leave it empty to skip the steps that need it):"
+)
+"""The one sudo question. Asked at most once per provisioning run.
+
+No `path`/`folder`/`(y/n)` wording on purpose: `ui/widgets/prompt.py`'s
+`is_secret()` masks everything that is not recognisably harmless, so this text
+is echoed as dots without the widget knowing anything about sudo. That is a
+claim about another module's regex, so it is asserted rather than assumed —
+`test_the_sudo_question_is_masked_by_the_prompt_widget`.
+"""
+
+SudoOutcome = Literal["unasked", "verified", "declined", "refused", "unavailable"]
+"""Where a `SudoSession` stands. One yes, one no, and three kinds of no-answer.
+
+`verify()` has to be a `bool` (the contract says so, and every caller wants a
+yes/no), and a bool is exactly where this project has lost the third outcome
+before: `docker_group` needed six names for the same reason, because "the user
+said no", "nobody was there to ask" and "the machine could not tell us" are
+different events that a single False makes indistinguishable.
+
+- `unasked` — nothing has been probed yet. Not an answer of any kind.
+- `verified` — a password was accepted by `sudo -v`. The only yes.
+- `declined` — the person was asked and gave nothing (dismissed, or empty).
+- `refused` — they answered and `sudo` rejected every attempt. The machine's no.
+- `unavailable` — `sudo` itself could not be run, so the question was never
+  actually put to anyone. Telling this user their password was wrong sends
+  them to fix something that is not broken.
+
+Only `refused` may be reported as a bad password; only `verified` may be
+reported as working sudo. The rest are "we do not know", and 7.1's provisioning
+report is what turns that into the right sentence for the user.
+"""
+
+
+def _run_with_input(argv: list[str], text: str) -> subprocess.CompletedProcess[str]:
+    """The default `RunWithInput`: `subprocess.run` with `text` on stdin, locale pinned to C.
+
+    `runner.run()` has no stdin parameter and this is the one caller that needs
+    one, so it calls `subprocess.run` directly — the same §3 deviation
+    `apply.DockerSql._mysql()` documents. Output is captured, never streamed:
+    a package install under `sudo -S` is a fire-and-collect call whose exit
+    code is the answer. `_c_locale_env()` for the same reason `ensure_docker()`
+    uses it: sudo's own stderr is read for "password is required".
+
+    `check=False` is deliberate and load-bearing, not a default written out for
+    tidiness: `check=True` raises `CalledProcessError`, whose `repr()` renders
+    the arguments it was built with, and a raise from here travels through a
+    traceback into a log. The exit code is the answer; nothing needs to throw.
+    """
+    return subprocess.run(
+        argv, input=text, text=True, capture_output=True, env=_c_locale_env(), check=False
+    )
+
+
+class SudoSession:
+    """Asked once. `sudo -S -p ''` reads the password from stdin; every step gets it that way.
+
+    Provisioning runs each package step as its own `sudo -n <cmd>`, and sudo's
+    per-tty timestamp does not carry between them from a GUI process — so on a
+    password-sudo box (clean Fedora, Arch) every step used to fail the same way.
+    The bash path asked exactly once (`sudo -v` on one pty). This is that, without
+    the pty: on the first "a password is required" the password is asked for
+    through `ask`, checked with `sudo -S -p '' -v`, and then fed on stdin to every
+    remaining privileged step. It never touches argv (`/proc/<pid>/cmdline` is
+    world-readable), is never logged, and lives only as long as this object.
+
+    Deliberately NOT a dataclass, it spells its own `__repr__`, and it does not
+    hold the password in an attribute at all — see `_authorise()`. A
+    `@dataclass` renders every field it has, so the generated `repr()` of this
+    object would print the password into any log line, assertion or traceback
+    that happens to render it.
+
+    `asked` counts calls to `ask` and is a test seam: the promise "at most one
+    dialog per `ensure_docker()`" is asserted on it, not inferred. `outcome`
+    carries WHY there is no password, which a `bool` cannot (see `SudoOutcome`).
+    """
+
+    def __init__(self, ask: runner.Prompter, run_input: RunWithInput, *, attempts: int = 3) -> None:
+        self._ask = ask
+        self._run_input = run_input
+        self._attempts = attempts
+        self._authorised: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None
+        self.asked = 0
+        self.outcome: SudoOutcome = "unasked"
+
+    def __repr__(self) -> str:
+        """Everything about this session except the one thing that must never be shown."""
+        return f"SudoSession(asked={self.asked}, outcome={self.outcome!r})"
+
+    def _authorise(self, password: str) -> None:
+        """Keep the accepted password in a closure cell rather than in an attribute.
+
+        `__repr__` closes the repr channel; this closes every channel that walks
+        the instance dictionary instead — `vars(obj)`, `obj.__dict__`, a
+        debugger's variable pane, any generic "dump this object" helper. The
+        first version of this class stored it as `self._password`, and the
+        canary test found it in `vars(session)` on the first run (2026-08-31).
+        What is left there afterwards is a function object whose repr is a name
+        and an address.
+        """
+
+        def feed(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+            return self._run_input(self.argv(cmd), password + "\n")
+
+        self._authorised = feed
+
+    def argv(self, cmd: list[str]) -> list[str]:
+        """`["sudo", "-S", "-p", "", *cmd]`: stdin password, empty prompt, no tty."""
+        return ["sudo", "-S", "-p", "", *cmd]
+
+    def run(self, cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        """Run `cmd` under sudo, verified password on stdin (plus the newline sudo reads to).
+
+        Raises rather than returning a failed `CompletedProcess` when there is
+        no verified password: a caller that reads an exit code would record
+        "this step failed" for a session that was never able to try, which is
+        the same collapse `SudoOutcome` exists to prevent one level up. The
+        message names the outcome, never the password.
+        """
+        if self._authorised is None:
+            raise ProvisionError(f"sudo session has no verified password ({self.outcome})")
+        return self._authorised(cmd)
+
+    def verify(self) -> bool:
+        """Ask for the password (up to `attempts` times) and prove it with `sudo -v`.
+
+        True once a password has been accepted — repeat calls neither ask nor
+        run anything. False when the user dismissed the dialog or left it empty,
+        when every attempt was refused, or when `sudo` itself cannot run; that
+        answer is remembered so the next privileged step does not re-open the
+        dialog — that would ask more than once, which is the promise this class
+        exists to keep. `outcome` says which of the four it was.
+        """
+        if self.outcome != "unasked":
+            return self.outcome == "verified"
+        for attempt in range(1, self._attempts + 1):
+            self.asked += 1
+            reply = self._ask(SUDO_PASSWORD_QUESTION)
+            if not reply:
+                logger.info("sudo password: declined by the user")
+                self.outcome = "declined"
+                return False
+            try:
+                proc = self._run_input(self.argv(["-v"]), reply + "\n")
+            except OSError as exc:
+                # Safe to interpolate: the password is on stdin, so nothing sudo
+                # was called with — and therefore nothing this error names — is it.
+                logger.warning(f"sudo could not be run: {exc}")
+                self.outcome = "unavailable"
+                return False
+            if proc.returncode == 0:
+                logger.info(f"sudo password accepted (attempt {attempt})")
+                self._authorise(reply)
+                self.outcome = "verified"
+                return True
+            logger.info(f"sudo password refused (attempt {attempt} of {self._attempts})")
+        # `asked == 0` means the loop never ran (`attempts=0`): nobody was asked,
+        # so this is a could-not-ask, not the machine refusing a password.
+        self.outcome = "refused" if self.asked else "unavailable"
+        return False
+
+
+def _may_open_a_dialog(dry_run: bool, cancel: threading.Event | None) -> bool:
+    """Whether this run is allowed to put a question to the user at all.
+
+    Two runs are not. A `dry_run` exists to show a plan, and a plan that
+    interrogates the user is not one. A cancelled run is over — and asking
+    someone for their ROOT PASSWORD after they pressed Cancel is the worst
+    version of asking too late, which is the failure this whole consent path
+    was written to prevent.
+
+    One predicate rather than the same two clauses written out twice: the
+    docker-group question has refused a cancelled run since 2026-08-24, and
+    when the sudo-password question was added beside it (7.1, D.2) its guard
+    was spelled `not dry_run` alone. A cancelled run then asked no group
+    question and demanded a password anyway (review, 2026-08-31). Both
+    dialogs now consult this, so the next one added cannot drift the same way.
+    """
+    return not dry_run and not (cancel is not None and cancel.is_set())
+
+
+def _needs_password(stderr: str) -> bool:
+    """`sudo -n`'s own verdict, read in the C locale `_c_locale_env()` pins.
+
+    Sudo says "sudo: a password is required" when it would have had to prompt.
+    Read from sudo rather than guessed from the exit code, because a package
+    step can exit non-zero for a hundred reasons and only this one is worth
+    opening a dialog for.
+    """
+    return "password is required" in stderr.lower()
+
+
+def _sudo_skip_reason(outcome: SudoOutcome) -> str:
+    """Why a privileged step did not run, in the words of the outcome that stopped it.
+
+    Three answers, not two, all the way out to the report: the person gave no
+    password, `sudo` rejected the one they gave, or `sudo` could never be asked
+    at all. `_ensure_docker_linux()` files a skip under "needed a password"
+    when its text says password — so the third one deliberately does NOT,
+    because "run them in a terminal with sudo" is useless advice on a box whose
+    `sudo` is what failed to run.
+    """
+    if outcome == "declined":
+        return "needed a password and none was given"
+    if outcome == "refused":
+        return "the sudo password was refused"
+    if outcome == "unavailable":
+        return "sudo could not be run, so nothing was elevated"
+    # `verify()` has just answered False, and every False path sets one of the
+    # three above — so this is unreachable today. Spelled out rather than
+    # asserted so a sixth `SudoOutcome` degrades to the old wording instead of
+    # crashing a provisioning run.
+    return "needed a password"
+
+
 def _run_steps(
-    do: RunCmd, commands: list[list[str]], *, sudo: bool, dry_run: bool
+    do: RunCmd,
+    commands: list[list[str]],
+    *,
+    sudo: bool,
+    dry_run: bool,
+    session: SudoSession | None = None,
 ) -> tuple[list[str], list[str]]:
+    """Run `commands` in order; `done` and `skipped` carry the shown text (and why, for a skip).
+
+    With `sudo`, each step is `sudo -n <cmd>` until one answers "a password is
+    required" and a `session` is present: then the session asks once (its own
+    promise), and that step and every later one run as `sudo -S -p '' <cmd>`
+    with the password on stdin. No session keeps the old shape exactly — a skip
+    whose text is sudo's own stderr. A session that could not get a password
+    keeps the shape and replaces the text with which of the three it was.
+
+    `elevated` is per call rather than read off the session, so a caller with
+    `sudo=False` (the Windows and macOS installers) can be handed a verified
+    session and still never take the privileged branch. The gate is the
+    parameter, not the stderr: an unprivileged installer whose own error text
+    happens to mention a password must not open a sudo dialog.
+    """
     done: list[str] = []
     skipped: list[str] = []
+    elevated = False
     for cmd in commands:
         shown = " ".join(cmd)
         if dry_run:
             skipped.append(f"(dry run) {shown}")
             continue
-        argv = ["sudo", "-n", *cmd] if sudo else cmd
+        unelevated = ""
         try:
-            proc = do(argv)
+            if sudo and elevated and session is not None:
+                proc = session.run(cmd)
+            else:
+                proc = do(["sudo", "-n", *cmd] if sudo else cmd)
+                if (
+                    sudo
+                    and proc.returncode != 0
+                    and session is not None
+                    and _needs_password(proc.stderr)
+                ):
+                    if session.verify():
+                        elevated = True
+                        proc = session.run(cmd)
+                    else:
+                        unelevated = _sudo_skip_reason(session.outcome)
         except OSError as exc:
             skipped.append(f"{shown}: {exc}")
             continue
         if proc.returncode == 0:
             done.append(shown)
+        elif unelevated:
+            skipped.append(f"{shown}: {unelevated}")
         else:
             skipped.append(f"{shown}: exit {proc.returncode} {proc.stderr.strip()}")
     return done, skipped
@@ -1938,11 +2484,15 @@ def ensure_docker(
     wait_seconds: float = _DOCKER_READY_TIMEOUT_SECONDS,
     cancel: threading.Event | None = None,
     ask: runner.Prompter | None = None,
+    run_input: RunWithInput | None = None,
 ) -> ProvisionReport:
     """Make sure a Docker daemon is reachable, installing what the OS needs (README §3b).
 
-    Linux: Docker Engine through the distro package manager (under `sudo -n`; a
-    password-needing sudo is a reported skip with the commands to paste). The
+    Linux: Docker Engine through the distro package manager (under `sudo -n`;
+    when that needs a password and `ask` is given, the password is asked for
+    ONCE and fed on stdin to every remaining step — `SudoSession`; without
+    `ask` the skip is reported with the commands to paste). `run_input` is the
+    stdin-feeding seam, defaulting to `_run_with_input()`. The
     docker-group join is asked for through `ask` BEFORE anything privileged
     runs, and declined whenever there is nobody to ask; the answer is on the
     report as `docker_group`. Windows and macOS ignore `ask` — Docker Desktop
@@ -1965,7 +2515,7 @@ def ensure_docker(
         return ProvisionReport(current, done=("docker already running",), docker_ready=True)
     if current == "linux":
         return _ensure_docker_linux(
-            do, which, dry_run, _linux_user(user), wait_seconds, cancel, ask
+            do, which, dry_run, _linux_user(user), wait_seconds, cancel, ask, run_input
         )
     if current == "windows":
         return _ensure_docker_windows(do, which, download, dry_run, wait_seconds, cancel)
@@ -2039,6 +2589,7 @@ def _ensure_docker_linux(
     wait_seconds: float,
     cancel: threading.Event | None = None,
     ask: runner.Prompter | None = None,
+    run_input: RunWithInput | None = None,
 ) -> ProvisionReport:
     """Install Docker Engine, and join the docker group only if asked and told yes.
 
@@ -2051,6 +2602,11 @@ def _ensure_docker_linux(
     Declining the group is not declining Docker. The engine is installed either
     way — that is the disclosed part of "the app installs everything" — and
     what the user keeps is the choice about their own machine's security.
+
+    The sudo password is the second and last question on this path, and it is
+    asked only after the group question — the consent dialog must not be
+    preceded by a password prompt for steps the user has not yet heard about.
+    A dry run builds no session: it runs nothing, so it may ask nothing.
     """
     pm = linux_package_manager(which)
     if pm is None:
@@ -2064,14 +2620,28 @@ def _ensure_docker_linux(
 
     consent = _settle_docker_group(do, user, dry_run, cancel, ask)
 
+    # One session for the whole run, built after the consent question and only
+    # by a run that may open a dialog at all — the same gate `_settle_docker_group()`
+    # puts on the group question, not a second spelling of half of it. It is
+    # what keeps the promise of a single dialog: both `_run_steps()` calls
+    # below share it, so the `usermod` reuses the password the package steps
+    # already established rather than opening a second one.
+    session: SudoSession | None = None
+    if ask is not None and _may_open_a_dialog(dry_run, cancel):
+        session = SudoSession(ask, run_input if run_input is not None else _run_with_input)
+
     commands = docker_engine_commands(pm, steamos=is_steamos())
-    done, skipped = _run_steps(do, commands, sudo=True, dry_run=dry_run)
+    done, skipped = _run_steps(do, commands, sudo=True, dry_run=dry_run, session=session)
     joined_ok = False
     if consent == "granted":
         # The one place this argv is built. `docker_engine_commands()` no
         # longer contains it, so there is no ungated path to it at all.
         joined, refused = _run_steps(
-            do, [["usermod", "-aG", "docker", user]], sudo=True, dry_run=dry_run
+            do,
+            [["usermod", "-aG", "docker", user]],
+            sudo=True,
+            dry_run=dry_run,
+            session=session,
         )
         joined_ok = bool(joined) and not refused
         done, skipped = [*done, *joined], [*skipped, *refused]
@@ -2092,6 +2662,16 @@ def _ensure_docker_linux(
 
     manual: list[str] = []
     if outcome == "granted":
+        # `already-member` deliberately does NOT append this, though
+        # `DockerGroupOutcome` says it may. It was added here for one phase and
+        # the result was that a member read the instruction twice: once inside
+        # `installer.docker_unavailable()`'s sentence for that outcome, and once
+        # as this step appended after it — with the clause written for the user
+        # who has ALREADY logged out sitting between the two, so the message
+        # answered its own escape hatch by repeating the advice it had just
+        # ruled out (review, 2026-08-31). Nothing is lost by leaving it out: an
+        # `already-member` report is only produced when no daemon answered, and
+        # that report always reaches the sentence, which says it once.
         manual.append(DOCKER_GROUP_RELOGIN_STEP.format(user=user))
     elif outcome == "join-failed":
         manual.append(DOCKER_GROUP_JOIN_FAILED_STEP.format(user=user))
@@ -2113,9 +2693,19 @@ def _ensure_docker_linux(
             manual.insert(0, "Some steps did not run: " + "; ".join(other))
         if password:
             failed = "; ".join(s.split(":")[0] for s in password)
-            manual.insert(
-                0, f"Some steps needed a password; run them in a terminal with sudo: {failed}"
-            )
+            # The reason, not just the command list. `_run_steps()` writes three
+            # different sentences into `skipped` (`_sudo_skip_reason()`) and this
+            # line used to keep only the part BEFORE the colon — so a dismissed
+            # dialog and three wrong passwords, which the type keeps apart all
+            # the way to `SudoOutcome`, arrived at the user as the same
+            # sentence, and the one whose remedy is "type it correctly" read as
+            # the one whose remedy is "go and type it in a terminal". The
+            # distinction was carried the whole way and then dropped in the last
+            # line that renders it (merge review, 2026-08-31).
+            lead = "Some steps needed a password"
+            if session is not None and session.outcome == "refused":
+                lead = "Some steps needed a password and sudo refused the one given"
+            manual.insert(0, f"{lead}; run them in a terminal with sudo: {failed}")
     return ProvisionReport(
         "linux", tuple(done), tuple(skipped), tuple(manual), False, ready, outcome
     )
@@ -2142,9 +2732,10 @@ def _settle_docker_group(
     A cancelled run never opens a dialog. A `dry_run` never opens one either —
     it exists to show a plan, and a plan that interrogates the user is not one.
     """
-    if dry_run or (cancel is not None and cancel.is_set()):
+    if not _may_open_a_dialog(dry_run, cancel):
         # `dry_run` shows a plan, so it runs nothing at all — not even the
-        # harmless `id`. A cancelled run does not open a dialog either.
+        # harmless `id`. A cancelled run does not open a dialog either. The
+        # same predicate gates the sudo-password dialog in the caller.
         return "not-asked"
     if _docker_group_member(do, user):
         return "already-member"
@@ -2991,28 +3582,27 @@ def keep_awake(
     from the main (GUI) thread is refused rather than silently doing nothing
     useful the moment the install moves off it.
 
-    Linux: a no-op for Phase 6. The Linux path still runs the bash installer,
-    and `systemd-inhibit` waits for the 6.5 Linux gate rather than being
-    written blind here.
+    Linux: `systemd-inhibit --what=idle:sleep ... sleep infinity`, detached,
+    terminated on exit — the `caffeinate` shape. Unlike `caffeinate -w` it
+    does not die with us on its own, so the `finally` matters here. A box
+    without systemd gets the same warning as a Mac without `caffeinate`.
     """
     here = platform_id()
     if here == "macos":
-        argv = ["caffeinate", "-dims", "-w", str(os.getpid())]
-        start = spawn if spawn is not None else _spawn_detached
-        try:
-            child = start(argv)
-        except OSError as exc:
-            logger.warning(f"could not hold this Mac awake ({exc}); the build may be interrupted")
+        with _held_by(["caffeinate", "-dims", "-w", str(os.getpid())], "this Mac", spawn):
             yield
-            return
-        logger.info(f"holding this Mac awake for the build: {' '.join(argv)}")
-        try:
+        return
+    if here == "linux":
+        argv = [
+            "systemd-inhibit",
+            "--what=idle:sleep",
+            "--who=Yu'lon",
+            "--why=installing a server",
+            "sleep",
+            "infinity",
+        ]
+        with _held_by(argv, "this machine", spawn):
             yield
-        finally:
-            try:
-                child.terminate()
-            except OSError:
-                pass
         return
     if here == "windows":
         if threading.current_thread() is threading.main_thread():
@@ -3026,6 +3616,30 @@ def keep_awake(
         return
     logger.debug(f"keep_awake() is a no-op on {here}")
     yield
+
+
+@contextmanager
+def _held_by(
+    argv: list[str],
+    what: str,
+    spawn: Callable[[list[str]], subprocess.Popen[bytes]] | None,
+) -> Iterator[None]:
+    """Spawn a keep-awake helper for the block; a helper that will not start is a warning."""
+    start = spawn if spawn is not None else _spawn_detached
+    try:
+        child = start(argv)
+    except OSError as exc:
+        logger.warning(f"could not hold {what} awake ({exc}); the build may be interrupted")
+        yield
+        return
+    logger.info(f"holding {what} awake for the build: {' '.join(argv)}")
+    try:
+        yield
+    finally:
+        try:
+            child.terminate()
+        except OSError:
+            pass
 
 
 def _spawn_detached(argv: list[str]) -> subprocess.Popen[bytes]:

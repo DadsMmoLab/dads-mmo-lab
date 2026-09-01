@@ -698,3 +698,74 @@ def test_the_probe_is_asked_once_per_container(monkeypatch: pytest.MonkeyPatch) 
     for _ in range(3):
         apply_module.mysql_client("tbc-db")
     assert asked == ["tbc-db"], asked
+
+
+def test_the_sql_seam_never_renders_the_password_it_carries() -> None:
+    """A frozen dataclass reprs every field, and this one carries the DB root password.
+
+    `maintenance.DockerMysql` closed exactly this channel on 2026-08-23; its
+    `apply.DockerSql` sibling was missed, so a pytest assertion diff, a logged
+    object or a traceback frame dump in a UI error handler would each print the
+    password. Both objects are built side by side by the same three call sites
+    (`main.py`, `ControllerServices.for_wotlk`, `install_wiring.import_gate_for`),
+    which is how one of them being safe read as both of them being safe.
+    """
+    sql = DockerSql("ac-database", "hunter2")
+    assert "hunter2" not in repr(sql)
+    assert "hunter2" not in str(sql)
+    assert "hunter2" not in f"{sql}"
+    assert sql.root_password == "hunter2", "still readable where it is actually needed"
+    assert "ac-database" in repr(sql), "the repr is still useful for the fields that are not secret"
+
+
+def test_the_test_run_never_dumps_frame_locals() -> None:
+    """The one channel `field(repr=False)` cannot close, guarded where it is turned on.
+
+
+
+    A secret held in a local or a closure cell is in that frame's `f_locals`
+
+    whatever its object prints: `traceback.format_exception()` is clean, and
+
+    `TracebackException(capture_locals=True)` - which is what `--showlocals`,
+
+    `rich` and `cgitb` install - is not. Measured 2026-08-31 against a canary
+
+    in a real `.db_password` file: the frame of `install_wiring`'s `probe()`
+
+    and the frame of `ControllerServices.for_wotlk()` both render it.
+
+
+
+    This is not about the applier in particular. `platform.SudoSession` holds
+
+    the user's sudo password the same way, and `accounts.create_account()` the
+
+    account one. Nothing in the tree turns the flag on today; the risk is that
+
+    somebody adds it for one debugging session and leaves it in, and every
+
+    later CI failure in this area prints a password into a build log that
+
+    outlives the session.
+
+    """
+
+    import tomllib
+
+    pyproject = Path(apply_module.__file__).parent.parent / "pyproject.toml"
+
+    config = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+
+    pytest_options = config["tool"]["pytest"]["ini_options"]
+
+    assert pytest_options["testpaths"] == ["tests"], "read the wrong table"
+
+    addopts = pytest_options.get("addopts", "")
+
+    flags = addopts.split() if isinstance(addopts, str) else list(addopts)
+
+    assert not [f for f in flags if "showlocals" in f or f in {"-l", "--locals"}], (
+        "a frame-locals dump prints every secret this codebase holds in a local "
+        f"(the DB root password, the sudo password, a new account's password): {flags}"
+    )

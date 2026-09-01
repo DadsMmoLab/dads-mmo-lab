@@ -9,19 +9,32 @@ this project would notice until two containers fought over 3724.
 
 from __future__ import annotations
 
+import hashlib
 import re
-from pathlib import Path
+import sys
+from pathlib import Path, PurePosixPath
 
 import pytest
 
-from yulon import resources
+from yulon import platform, resources
 from yulon.catalog import composegen
-from yulon.catalog.catalog import load_catalog
+from yulon.catalog.catalog import (
+    CatalogEntry,
+    CmangosData,
+    DbFacts,
+    NativeInstall,
+    ReadyMarkers,
+    load_catalog,
+)
 
 ENTRY = load_catalog().get("wow-wotlk")
 TEMPLATES = resources.installers_dir()
 
 BOT_POPULATION = "500"
+# How many accounts those bots are spread across. A second number, decided with
+# the first and written by every installer, so it needs its own name here: the
+# 7.3 plan supplied 400 for TBC and 200 for Vanilla against the 100 that ships.
+BOT_ACCOUNTS = "100"
 """How many random playerbots an install is supposed to come up with.
 
 Owner decision, 2026-08-28, for the test runs and the default alike. It is a
@@ -450,9 +463,10 @@ def test_the_generated_stack_configures_the_bot_population(tmp_path: Path) -> No
     # Data, not code — and the structural flags stay behind in the constant.
     assert "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS" not in composegen.DEFAULT_WORLD_ENV
     assert ENTRY.install.native is not None
-    assert ENTRY.install.native.world_env["AC_AI_PLAYERBOT_MIN_RANDOM_BOTS"] == BOT_POPULATION
-    assert ENTRY.install.native.world_env["AC_AI_PLAYERBOT_MAX_RANDOM_BOTS"] == BOT_POPULATION
-    assert ENTRY.install.native.world_env["AC_AI_PLAYERBOT_MIN_RANDOM_BOTS"] == "500"
+    assert ENTRY.install.native.azerothcore is not None
+    world_env = ENTRY.install.native.azerothcore.world_env
+    assert world_env["AC_AI_PLAYERBOT_MIN_RANDOM_BOTS"] == BOT_POPULATION
+    assert world_env["AC_AI_PLAYERBOT_MAX_RANDOM_BOTS"] == BOT_POPULATION
     assert 'AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES: "1"' in plan.override
 
 
@@ -492,34 +506,53 @@ def test_every_installer_writes_the_bot_population_that_was_decided() -> None:
     # The sixth place is the native path's data, which the scan above cannot
     # see: it lives in `catalog.json`, not under `catalog/installers/`.
     assert ENTRY.install.native is not None
-    assert ENTRY.install.native.world_env["AC_AI_PLAYERBOT_MIN_RANDOM_BOTS"] == BOT_POPULATION
+    assert ENTRY.install.native.azerothcore is not None
+    min_bots = ENTRY.install.native.azerothcore.world_env["AC_AI_PLAYERBOT_MIN_RANDOM_BOTS"]
+    assert min_bots == BOT_POPULATION
+
+    # And from G.4 there are three more of it: the CMaNGOS entries write the
+    # same number as an `aiplayerbot.conf` value instead of compose
+    # environment. The plan for that task supplied 1600/2000 for TBC and
+    # 600/800 for Vanilla — the pre-2026-08-28 numbers, copied out of the
+    # scripts as they were before the decision reached them. Writing those
+    # would have re-opened this exact bug on the side of it no scan of
+    # `catalog/installers/` can see.
+    for game_id in ("wow-tbc", "wow-vanilla", "wow-tortoise"):
+        cmangos = load_catalog().get(game_id).install.native
+        assert cmangos is not None and cmangos.cmangos is not None
+        bots = cmangos.cmangos.conf.files.get("aiplayerbot.conf")
+        if bots is None:
+            continue
+        assert bots.keys["AiPlayerbot.MinRandomBots"] == BOT_POPULATION, game_id
+        assert bots.keys["AiPlayerbot.MaxRandomBots"] == BOT_POPULATION, game_id
+        # The account count is the third number the plan got wrong (400 and 200
+        # against the 100 both scripts write), and it is a separate key: an edit
+        # that broke only this one would pass every assertion above it.
+        assert bots.keys["AiPlayerbot.RandomBotAccountCount"] == BOT_ACCOUNTS, game_id
 
 
 def test_the_image_refs_match_the_services_the_build_overlay_actually_builds(
     tmp_path: Path,
 ) -> None:
-    """`BUILT_SERVICES` is a third copy of four strings, and nothing cross-checked it.
+    """`native.images` and the build overlay's `target:` lines must agree, and nothing else did.
 
     The same four names live in `build.yml.tmpl`'s `target:` lines, in
-    `base.yml.tmpl`'s `image:` refs, and in `BUILT_SERVICES`. They agree today.
-    Nothing enforced it: rename a `target:` without touching the tuple and
-    `images_built()` asks the daemon for a reference that will never exist, so
-    it answers False forever and every resume re-runs the multi-hour build —
-    permanently, silently, with a green suite. That is precisely the bug the
-    per-reference rewrite was written to fix, reintroduced through the one seam
-    nothing checked (review, 2026-08-24).
-
-    Derived from the rendered files rather than restated, so the assertion
-    cannot drift the way the tuple did.
+    `base.yml.tmpl`'s `image:` refs, and now in `catalog.json`'s `images`
+    (they were a module constant, `BUILT_SERVICES`). Rename a `target:` without
+    touching the data and `images_built()` asks the daemon for a reference that
+    will never exist, so it answers False forever and every resume re-runs the
+    multi-hour build — permanently, silently, with a green suite (review,
+    2026-08-24). Derived from the rendered files rather than restated, so the
+    assertion cannot drift the way the tuple did.
     """
     plan = render(tmp_path / "wow")
-    refs = composegen.built_image_refs(tmp_path / "wow", platform_id=lambda: "linux")
+    refs = composegen.built_image_refs(ENTRY, tmp_path / "wow", platform_id=lambda: "linux")
+    native = ENTRY.install.native
+    assert native is not None
 
     built_targets = set(re.findall(r"^\s*target:\s*(\S+)\s*$", plan.build, re.MULTILINE))
-    assert built_targets == set(composegen.BUILT_SERVICES), (
-        built_targets,
-        composegen.BUILT_SERVICES,
-    )
+    assert built_targets == set(native.images), (built_targets, native.images)
+    assert all(ref.startswith(native.image_prefix) for ref in refs)
 
     # And every reference the engine will ask the daemon about is exactly an
     # image the base file names, so a rename in either place fails here.
@@ -539,3 +572,752 @@ def test_the_image_refs_match_the_services_the_build_overlay_actually_builds(
     base_images = set(re.findall(r"^\s*image:\s*(\S+)\s*$", plan.base, re.MULTILINE))
     assert set(refs) <= base_images, (set(refs) - base_images, base_images)
     assert "${IMAGE_TAG" not in plan.base, "the interpolation wrapper came back"
+
+
+def test_the_image_prefix_is_the_entrys_not_a_constant(tmp_path: Path) -> None:
+    """Two games must not tag their builds into one namespace; the prefix is catalog data."""
+    native = ENTRY.install.native
+    assert native is not None
+    other = ENTRY.model_copy(
+        update={
+            "install": ENTRY.install.model_copy(
+                update={"native": native.model_copy(update={"image_prefix": "yulon.local/x-"})}
+            )
+        }
+    )
+    refs = composegen.built_image_refs(other, tmp_path / "wow", platform_id=lambda: "linux")
+    tag = composegen.image_tag(tmp_path / "wow", platform_id=lambda: "linux")
+    assert refs == tuple(f"yulon.local/x-{name}:{tag}" for name in native.images)
+    plan = composegen.render(
+        other, tmp_path / "wow", templates_root=TEMPLATES, platform_id=lambda: "linux"
+    )
+    assert "yulon.local/x-worldserver:" in plan.base
+    assert "yulon.local/ac-wotlk-" not in plan.base
+    assert not hasattr(composegen, "DEFAULT_IMAGE_PREFIX")
+    assert not hasattr(composegen, "BUILT_SERVICES")
+
+
+def test_built_image_refs_refuses_an_entry_with_no_native_block(tmp_path: Path) -> None:
+    """Built from WotLK with `native` stripped, not from a CMaNGOS entry: G.4 gives those
+    a native block in 7.3 and this test must not care."""
+    scriptless = ENTRY.model_copy(
+        update={"install": ENTRY.install.model_copy(update={"native": None})}
+    )
+    assert scriptless.install.native is None
+    with pytest.raises(composegen.ComposeGenError, match="install.native"):
+        composegen.built_image_refs(scriptless, tmp_path / "wow", platform_id=lambda: "linux")
+
+
+HOST_BIND = re.compile(r"^\s*-\s*\./")
+"""A HOST bind line in a compose template: a list item whose source is a `./` path.
+
+Named volumes (`db-data:`, `client-data:`) deliberately do not match. A relabel
+suffix on a named volume is a bug rather than a no-op, so the two are told apart
+by what the mount SOURCE is and not by which service they sit under.
+"""
+
+
+def test_every_host_bind_line_carries_the_label_and_no_named_volume_does(tmp_path: Path) -> None:
+    """SELinux: `:z` on every `./...:` bind, never on `client-data:`/`db-data:` (phase7-decisions).
+
+    Eight lines today - seven in the base file, one in the override - and the
+    count is asserted so a new bind line added without the token fails here
+    rather than as "Permission denied" from a container on Fedora. A uniform
+    `:z`, not the Fedora script's `:Z` on `./modules`: that mount is shared by
+    `ac-db-import` and `ac-worldserver`, and `:Z` on a shared mount locks the
+    other service out. The token may appear on nothing else - not even a
+    comment, which `fill()` would otherwise happily rewrite.
+    """
+    base_tmpl = (TEMPLATES / "wow-wotlk/native/base.yml.tmpl").read_text(encoding="utf-8")
+    override_tmpl = (TEMPLATES / "wow-wotlk/native/override.yml.tmpl").read_text(encoding="utf-8")
+    assert base_tmpl.count("{{BIND_LABEL}}") == 7
+    assert override_tmpl.count("{{BIND_LABEL}}") == 1
+    for text in (base_tmpl, override_tmpl):
+        for line in text.splitlines():
+            if HOST_BIND.match(line):
+                assert line.endswith("{{BIND_LABEL}}"), line
+            elif "{{BIND_LABEL}}" in line:
+                raise AssertionError(f"the label is on something that is not a host bind: {line}")
+
+    labelled = composegen.render(
+        ENTRY,
+        tmp_path / "wow",
+        templates_root=TEMPLATES,
+        bind_label=":z",
+        platform_id=lambda: "linux",
+    )
+    binds = [
+        line
+        for text in (labelled.base, labelled.override)
+        for line in text.splitlines()
+        if HOST_BIND.match(line)
+    ]
+    assert len(binds) == 8
+    assert all(line.endswith(":z") for line in binds), binds
+    assert "client-data:/azerothcore/env/dist/data/:ro" in labelled.base
+    assert "db-data:/var/lib/mysql\n" in labelled.base
+    assert labelled.build.count(":z") == 0
+
+
+def test_off_selinux_the_label_renders_to_nothing(tmp_path: Path) -> None:
+    """The default is the empty string, so every existing install renders byte-identically."""
+    plain = composegen.render(
+        ENTRY, tmp_path / "wow", templates_root=TEMPLATES, platform_id=lambda: "linux"
+    )
+    explicit = composegen.render(
+        ENTRY,
+        tmp_path / "wow",
+        templates_root=TEMPLATES,
+        bind_label="",
+        platform_id=lambda: "linux",
+    )
+    assert plain == explicit
+    assert ":z" not in plain.base and ":z" not in plain.override
+    assert "- ./modules:/azerothcore/modules\n" in plain.override
+    assert "{{" not in plain.base and "{{" not in plain.override
+
+
+def test_render_accepts_every_label_platform_bind_label_can_produce(tmp_path: Path) -> None:
+    """The allow-list above and `platform.bind_label()` have to be the same two strings.
+
+    A.5 is what finally wires the two together; until then the only thing
+    holding the ends in agreement is this test and its twin in
+    `test_platform.py`. A third answer out of `bind_label()` would not fail
+    there — it would fail here, as a `ComposeGenError` raised in the middle of
+    a real install, after the sources are cloned.
+    """
+    for enforcing in (True, False, None):
+        for fs_type in (None, "ext2/ext3", "xfs", "9p", "NTFS3"):
+            label = platform.bind_label(enforcing=enforcing, fs_type=fs_type)
+            plan = composegen.render(
+                ENTRY,
+                tmp_path / "wow",
+                templates_root=TEMPLATES,
+                bind_label=label,
+                platform_id=lambda: "linux",
+            )
+            assert "{{" not in plan.base, (enforcing, fs_type)
+
+
+def test_a_bind_label_that_is_not_a_mount_option_is_refused(tmp_path: Path) -> None:
+    """Anything but `:z` is refused, because the token lands unquoted inside a YAML list item."""
+    with pytest.raises(composegen.ComposeGenError, match="bind label"):
+        composegen.render(
+            ENTRY,
+            tmp_path / "wow",
+            templates_root=TEMPLATES,
+            bind_label=":z\n  - /etc:/etc",
+            platform_id=lambda: "linux",
+        )
+
+
+def test_fill_is_the_one_public_substitution_and_refuses_a_leftover_token() -> None:
+    """A6: conf values, SQL statements and ready markers all go through this one function."""
+    assert composegen.fill("a {{X}} b {{Y}}", {"X": "1", "Y": "2"}) == "a 1 b 2"
+    assert composegen.fill("no tokens", {"X": "unused"}) == "no tokens"
+    with pytest.raises(composegen.ComposeGenError, match="unfilled compose placeholder"):
+        composegen.fill("a {{X}} {{Z}}", {"X": "1"})
+    # The message NAMES the offending token, which G.3's callers depend on: a conf
+    # value, a SQL statement and a ready marker all reach this one refusal from a
+    # file the traceback never mentions, so "something is unfilled" is not enough.
+    with pytest.raises(composegen.ComposeGenError, match="NOPE"):
+        composegen.fill("{{A}} {{NOPE}}", {"A": "1"})
+    assert composegen._fill is composegen.fill, "the old private name is an alias, not a copy"
+
+
+# -- generated-password mode: the secret lives in .env and nowhere else --------
+
+
+MINIMAL_CMANGOS = {
+    "client": {},
+    "dockerfile": {},
+    "extract": {
+        "image": "server",
+        "tools": [{"name": "dbc", "argv": ["/opt/mangos/bin/tools/ad"], "produces": {"dbc": 1}}],
+    },
+    "mmaps": {"argv": ["/opt/mangos/bin/tools/MoveMapGen"]},
+    "conf": {
+        "source_dir": "/opt/mangos/etc",
+        "files": {"mangosd.conf": {"keys": {"DataDir": '"/opt/mangos/data"'}}},
+    },
+    "sql": {
+        "phases": [{"name": "base", "into": "mangos", "files": ["src/core/sql/base/mangos.sql"]}],
+        "marker_db": "mangos",
+    },
+}
+"""The smallest `cmangos` block the family-block validator accepts (G.2): B.6's
+`generated_entry()` says `family="cmangos"`, so it must carry the block the family names."""
+
+
+def generated_entry(tmp_path: Path, base: str) -> CatalogEntry:
+    """wow-tbc (a generated-password entry) with a throwaway native block and templates.
+
+    G.2's exactly-one-family-block validator makes this block need a minimal
+    `cmangos=CmangosData(...)`; G.2 adds it here (A14).
+    """
+    templates = tmp_path / "gen"
+    templates.mkdir(exist_ok=True)
+    (templates / "base.yml.tmpl").write_text(base, encoding="utf-8")
+    (templates / "override.yml.tmpl").write_text("services:\n{{ENVIRONMENT}}\n", encoding="utf-8")
+    (templates / "build.yml.tmpl").write_text("services:\n", encoding="utf-8")
+    tbc = load_catalog().get("wow-tbc")
+    native = NativeInstall(
+        family="cmangos",
+        templates="gen",
+        images=("server",),
+        image_prefix="yulon.local/cmangos-tbc-",
+        db=DbFacts(image="mariadb:11", client="mariadb", user="mangos"),
+        ready=ReadyMarkers(world="Avg Diff"),
+        cmangos=CmangosData.model_validate(MINIMAL_CMANGOS),
+    )
+    return tbc.model_copy(update={"install": tbc.install.model_copy(update={"native": native})})
+
+
+SAFE_BASE = "name: {{PROJECT_NAME}}\nroot: ${DB_ROOT_PASSWORD:?Yu'lon .env is missing}\n"
+
+
+def test_a_generated_password_reaches_env_and_never_the_compose_text(tmp_path: Path) -> None:
+    """The secret travels in `.env` (phase7-decisions "Password"), which has exactly one writer."""
+    entry = generated_entry(tmp_path, SAFE_BASE)
+    plan = composegen.render(
+        entry,
+        tmp_path / "wow",
+        templates_root=tmp_path,
+        db_password="tbc-0a1b2c3d",
+        platform_id=lambda: "linux",
+    )
+    assert plan.dotenv == {"DB_ROOT_PASSWORD": "tbc-0a1b2c3d"}
+    for text in (plan.base, plan.override, plan.build):
+        assert "tbc-0a1b2c3d" not in text
+    assert "${DB_ROOT_PASSWORD:?" in plan.base
+
+
+def test_generated_mode_without_a_password_is_an_error_not_a_blank(tmp_path: Path) -> None:
+    entry = generated_entry(tmp_path, SAFE_BASE)
+    with pytest.raises(composegen.ComposeGenError, match="generates its database password"):
+        composegen.render(
+            entry, tmp_path / "wow", templates_root=tmp_path, platform_id=lambda: "linux"
+        )
+
+
+def test_a_generated_password_template_may_not_mention_the_password_token(tmp_path: Path) -> None:
+    """`{{DB_PASSWORD}}` would bake the secret into a file git can see; refused by name."""
+    entry = generated_entry(tmp_path, "name: {{PROJECT_NAME}}\nroot: {{DB_PASSWORD}}\n")
+    with pytest.raises(composegen.ComposeGenError, match=r"DB_PASSWORD.*base\.yml\.tmpl"):
+        composegen.render(
+            entry,
+            tmp_path / "wow",
+            templates_root=tmp_path,
+            db_password="tbc-0a1b2c3d",
+            platform_id=lambda: "linux",
+        )
+
+
+def test_a_fixed_password_still_lands_in_the_base_file_and_not_in_env(tmp_path: Path) -> None:
+    """WotLK is unchanged: the fixed value is the interpolation default, `.env` stays untouched."""
+    plan = render(tmp_path / "wow")
+    assert plan.dotenv == {}
+    assert "${DB_ROOT_PASSWORD:-password}" in plan.base
+
+
+# -- A16: the committed byte snapshot ------------------------------------------
+
+LINUX_SERVER_DIR = Path("/home/pk/wow-server-playerbots")
+LINUX_INSTALL_ID = hashlib.sha256(b"/home/pk/wow-server-playerbots").hexdigest()[
+    : composegen.INSTALL_ID_LENGTH
+]
+SNAPSHOT_DIR = Path(__file__).resolve().parent / "data" / "wotlk-rendered"
+
+
+def rendered_as_on_linux() -> dict[str, str]:
+    """WotLK rendered for the yulon-ubuntu path, platform linux, no SELinux label.
+
+    `install_id()` hashes `os.path.abspath()`, and on Windows `/home/pk/…` grows
+    a drive letter, so the id is the ONE thing normalised to its Linux value —
+    on Linux itself the replace is a no-op and the comparison is literal.
+    """
+    plan = composegen.render(
+        ENTRY,
+        LINUX_SERVER_DIR,
+        templates_root=TEMPLATES,
+        bind_label="",
+        platform_id=lambda: "linux",
+    )
+    actual_id = composegen.install_id(LINUX_SERVER_DIR, platform_id=lambda: "linux")
+    return {
+        composegen.BASE_FILE: plan.base.replace(actual_id, LINUX_INSTALL_ID),
+        composegen.OVERRIDE_FILE: plan.override.replace(actual_id, LINUX_INSTALL_ID),
+        composegen.BUILD_FILE: plan.build.replace(actual_id, LINUX_INSTALL_ID),
+    }
+
+
+def test_the_wotlk_render_reproduces_the_committed_snapshot_byte_for_byte() -> None:
+    """A16: the three files under `tests/data/wotlk-rendered/` ARE what `render()` writes.
+
+    Committed in 7.1 and kept green through 7.3 (G.5/G.7), which is how "the
+    WotLK templates render byte-identical" stops being a sentence in the
+    checklist and becomes something the suite refuses to let drift. Regenerate
+    them only by the command in B.6 Step 3, and only when a WotLK template
+    change is the point of the commit.
+    """
+    texts = rendered_as_on_linux()
+    assert set(texts) == {p.name for p in SNAPSHOT_DIR.iterdir() if p.is_file()}
+    for name, text in texts.items():
+        expected = (SNAPSHOT_DIR / name).read_text(encoding="utf-8")
+        assert text == expected, name
+    if sys.platform.startswith("linux"):
+        assert (
+            composegen.install_id(LINUX_SERVER_DIR, platform_id=lambda: "linux") == LINUX_INSTALL_ID
+        )
+    assert f"name: yulon-wow-wotlk-{LINUX_INSTALL_ID}\n" in texts[composegen.BASE_FILE]
+    assert "${DB_ROOT_PASSWORD:-password}" in texts[composegen.BASE_FILE]
+    assert ":z" not in texts[composegen.BASE_FILE]
+
+
+# -- G.3: the per-entry token set ----------------------------------------------
+
+
+def test_entry_tokens_spell_the_entry_once(tmp_path: Path) -> None:
+    """`CORE_DIR` is the in-image install prefix (parent of `conf.source_dir`), never a
+    host path; `MAKE_JOBS` is the dockerfile's number; `LOGS_DB` is the first extra schema."""
+    entry = generated_entry(tmp_path, SAFE_BASE)
+    tokens = composegen.entry_tokens(entry)
+    assert tokens["CORE_DIR"] == "/opt/mangos"
+    assert tokens["MAKE_JOBS"] == "2"
+    assert tokens["DB_HOST"] == entry.containers.db
+    assert tokens["CONTAINER_PREFIX"] == "tbc-"
+    assert tokens["LOGS_DB"] == entry.databases.extra[0]
+    assert set(tokens) == {
+        "DB_IMAGE",
+        "DB_HOST",
+        "DB_USER",
+        "AUTH_DB",
+        "WORLD_DB",
+        "CHAR_DB",
+        "LOGS_DB",
+        "CONTAINER_PREFIX",
+        "CORE_DIR",
+        "CLIENT_BUILD",
+        "MAKE_JOBS",
+    }
+
+
+def test_logs_db_is_omitted_not_blanked_without_an_extra_schema(tmp_path: Path) -> None:
+    entry = generated_entry(tmp_path, SAFE_BASE)
+    no_logs = entry.model_copy(
+        update={"databases": entry.databases.model_copy(update={"extra": ()})}
+    )
+    tokens = composegen.entry_tokens(no_logs)
+    assert "LOGS_DB" not in tokens
+    with pytest.raises(composegen.ComposeGenError, match="LOGS_DB"):
+        composegen.fill("{{LOGS_DB}}", tokens)
+
+
+def test_the_family_tokens_come_from_the_entry(tmp_path: Path) -> None:
+    """DB host, user, schema names, container prefix and client build are catalog facts."""
+    templates = tmp_path / "native"
+    templates.mkdir()
+    (templates / "base.yml.tmpl").write_text(
+        "name: {{PROJECT_NAME}}\n"
+        "db: {{DB_IMAGE}} {{DB_HOST}} {{DB_USER}}\n"
+        "schemas: {{AUTH_DB}} {{WORLD_DB}} {{CHAR_DB}} {{LOGS_DB}}\n"
+        "prefix: {{CONTAINER_PREFIX}}db\n"
+        "build: {{CLIENT_BUILD}}\n",
+        encoding="utf-8",
+    )
+    (templates / "override.yml.tmpl").write_text("services: {}\n", encoding="utf-8")
+    (templates / "build.yml.tmpl").write_text("services:\n", encoding="utf-8")
+    plan = composegen.render(
+        entry_with_templates("native"),  # type: ignore[arg-type]
+        tmp_path / "wow",
+        templates_root=tmp_path,
+        platform_id=lambda: "linux",
+    )
+    native = ENTRY.install.native
+    assert native is not None
+    assert f"db: {native.db.image} {ENTRY.containers.db} {native.db.user}" in plan.base
+    assert "schemas: acore_auth acore_world acore_characters acore_playerbots" in plan.base
+    # `ac-db` is this synthetic template's own `db` behind the real prefix, NOT a
+    # container WotLK has (its three are ac-database/-authserver/-worldserver). What
+    # the prefix must rebuild for a real entry is asserted over the shipped catalog by
+    # `test_the_container_prefix_rebuilds_the_container_names_of_every_shipped_entry`.
+    assert "prefix: ac-db" in plan.base, "the common prefix of the three container names"
+    assert f"build: {ENTRY.client.build}" in plan.base
+
+
+def test_tokens_a_family_does_not_have_stay_unfilled_and_therefore_loud(tmp_path: Path) -> None:
+    """WotLK has no `cmangos` block, so `MAKE_JOBS`/`CORE_DIR` do not exist for it.
+
+    Not filled with "" — a blank `make -j` or a blank mount path is a silent literal — but
+    left for `fill()` to refuse.
+
+    The `render()` half of this alone was vacuous: before `entry_tokens()` existed,
+    `{{MAKE_JOBS}}` was already unfilled and `fill()` already refused it, so a green
+    result proved the catch-all fires and said nothing about the family guard. The
+    first two assertions are the real check — they read the dict `entry_tokens()`
+    returns for an AzerothCore entry and pin its own `if native.cmangos is not None`.
+    """
+    assert ENTRY.install.native is not None
+    assert ENTRY.install.native.cmangos is None, "WotLK is the AzerothCore entry here"
+    tokens = composegen.entry_tokens(ENTRY)
+    assert "MAKE_JOBS" not in tokens
+    assert "CORE_DIR" not in tokens
+
+    templates = tmp_path / "native"
+    templates.mkdir()
+    (templates / "base.yml.tmpl").write_text("jobs: {{MAKE_JOBS}}\n", encoding="utf-8")
+    (templates / "override.yml.tmpl").write_text("services: {}\n", encoding="utf-8")
+    (templates / "build.yml.tmpl").write_text("services:\n", encoding="utf-8")
+    with pytest.raises(composegen.ComposeGenError, match="MAKE_JOBS"):
+        composegen.render(
+            entry_with_templates("native"),  # type: ignore[arg-type]
+            tmp_path / "wow",
+            templates_root=tmp_path,
+            platform_id=lambda: "linux",
+        )
+
+
+# -- G.3: the container prefix rebuilds the names it is derived from ----------
+
+
+@pytest.mark.parametrize(
+    "entry", load_catalog().games, ids=[game.id for game in load_catalog().games]
+)
+def test_the_container_prefix_rebuilds_the_container_names_of_every_shipped_entry(
+    entry: CatalogEntry,
+) -> None:
+    """The invariant `_container_prefix()`'s docstring promises, over the real catalog.
+
+    `{{CONTAINER_PREFIX}}` exists so a shared CMaNGOS template can write
+    `container_name: {{CONTAINER_PREFIX}}db` for service `db` and get the entry's own
+    `containers.db`. Nothing downstream re-checks that: `fill()` refuses an unfilled
+    placeholder, never a filled-but-wrong one, so a catalog entry that broke the naming
+    convention would render a compose file naming a container no service owns and the
+    first report would be `docker compose up`.
+
+    Gated on `containers.services`, NOT on the presence of a native block: the block is
+    what makes the token reachable through `render()`, but today only WotLK has one and
+    only the CMaNGOS entries follow the prefix convention, so a native-gated test would
+    skip every entry that this invariant is about and pass while proving nothing.
+    `containers.services` is exactly the list of suffixes the templates put the prefix
+    in front of, so the entries that declare it are the entries the invariant covers.
+    """
+    services = entry.containers.services
+    if services is None:
+        pytest.skip(
+            f"{entry.id} does not declare containers.services, so each container is named "
+            "after its own service (AzerothCore) and there is no suffix to rebuild from"
+        )
+    prefix = composegen._container_prefix(entry)
+    assert prefix, f"{entry.id} has no shared container prefix at all"
+    rebuilt = tuple(prefix + service for service in services)
+    assert rebuilt == (entry.containers.db, entry.containers.auth, entry.containers.world), (
+        f"{entry.id}'s templates would write {rebuilt} where its containers are "
+        f"{(entry.containers.db, entry.containers.auth, entry.containers.world)}"
+    )
+
+
+def test_the_shipped_catalog_still_has_entries_the_prefix_invariant_covers() -> None:
+    """The skip above must not be able to empty the invariant out without anyone noticing."""
+    covered = [game.id for game in load_catalog().games if game.containers.services is not None]
+    assert covered, (
+        "no shipped entry declares containers.services, so the container-prefix invariant "
+        "skipped every entry and asserted nothing"
+    )
+
+
+def test_a_container_prefix_that_cannot_be_derived_is_refused_not_guessed() -> None:
+    """`os.path.commonprefix` answers a plausible wrong string; `_container_prefix()` must not.
+
+    The three shapes the reviewer produced by running it: names sharing no first
+    character (`""`), one name a literal prefix of the others (`"db"`, so
+    `{{CONTAINER_PREFIX}}db` renders `dbdb`), and an accidental character-wise prefix
+    that eats the separator (`"abc"`). None of them raise on their own.
+    """
+    tbc = load_catalog().get("wow-tbc")
+    assert tbc.containers.services == ("db", "realmd", "mangosd")
+
+    def with_containers(db: str, auth: str, world: str) -> CatalogEntry:
+        return tbc.model_copy(
+            update={
+                "containers": tbc.containers.model_copy(
+                    update={"db": db, "auth": auth, "world": world}
+                )
+            }
+        )
+
+    with pytest.raises(composegen.ComposeGenError, match="share no common prefix"):
+        composegen._container_prefix(with_containers("mysql", "authserver", "worldserver"))
+    with pytest.raises(composegen.ComposeGenError, match="rebuilds dbdb"):
+        composegen._container_prefix(with_containers("db", "dbauth", "dbworld"))
+    with pytest.raises(composegen.ComposeGenError, match="rebuilds abcdb"):
+        composegen._container_prefix(with_containers("abc-db", "abcd-realmd", "abcx-mangosd"))
+    assert composegen._container_prefix(with_containers("x-db", "x-realmd", "x-mangosd")) == "x-"
+
+
+# -- G.5: the shared CMaNGOS compose templates ---------------------------------
+
+CMANGOS_ENTRIES = [load_catalog().get(g) for g in ("wow-tbc", "wow-vanilla", "wow-tortoise")]
+
+
+def service_names(compose_text: str) -> set[str]:
+    """Keys directly under `services:` — and ONLY there.
+
+    `networks:` and `volumes:` keys sit at the same two-space indent, so a whole-file
+    regex would count `tbc-net` and `db-data` as services; the scan stops at the next
+    top-level key.
+    """
+    names: set[str] = set()
+    inside = False
+    for line in compose_text.splitlines():
+        if re.match(r"^services:\s*$", line):
+            inside = True
+            continue
+        if inside and re.match(r"^\S", line):
+            break
+        if inside:
+            match = re.match(r"^  ([A-Za-z0-9-]+):\s*$", line)
+            if match:
+                names.add(match.group(1))
+    return names
+
+
+def render_generated(entry: CatalogEntry, server_dir: Path) -> composegen.ComposePlan:
+    """A generated-password entry needs the secret handed in; it never reaches the file."""
+    return composegen.render(
+        entry,
+        server_dir,
+        templates_root=TEMPLATES,
+        db_password="tbc-0123456789abcdef",
+        bind_label=":z",
+        platform_id=lambda: "linux",
+    )
+
+
+@pytest.mark.parametrize("entry", CMANGOS_ENTRIES, ids=lambda e: e.id)
+def test_the_shared_cmangos_templates_render_for_every_family_entry(
+    tmp_path: Path, entry: CatalogEntry
+) -> None:
+    plan = render_generated(entry, tmp_path / "wow")
+    for text in (plan.base, plan.override, plan.build):
+        assert text.startswith(composegen.GENERATED_MARKER)
+        assert "{{" not in text
+    assert "ports" in keys_in(plan.base)
+    assert "ports" not in keys_in(plan.override)
+    assert "ports" not in keys_in(plan.build)
+    assert "build" not in keys_in(plan.base)
+
+
+def test_the_cmangos_services_are_named_after_their_containers(tmp_path: Path) -> None:
+    """`ContainerSpec.services` keeps its default, so `compose up -d --no-deps <db>` works."""
+    entry = load_catalog().get("wow-tbc")
+    plan = render_generated(entry, tmp_path / "wow")
+    services = service_names(plan.base)
+    assert services == {entry.containers.db, entry.containers.auth, entry.containers.world}
+    for name in services:
+        assert f"container_name: {name}" in plan.base
+
+
+def test_the_cmangos_database_is_loopback_only_with_the_mariadb_healthcheck(tmp_path: Path) -> None:
+    """Never the scripts' `3306:3306`; and the healthcheck is mariadb's own script."""
+    entry = load_catalog().get("wow-tortoise")
+    plan = render_generated(entry, tmp_path / "wow")
+    assert f'"127.0.0.1:${{DOCKER_DB_EXTERNAL_PORT:-{entry.ports.db}}}:3306"' in plan.base
+    assert '["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]' in plan.base
+    assert "image: mariadb:10.6" in plan.base
+
+
+def test_a_generated_password_never_reaches_the_compose_files(tmp_path: Path) -> None:
+    plan = render_generated(load_catalog().get("wow-tbc"), tmp_path / "wow")
+    for text in (plan.base, plan.override, plan.build):
+        assert "tbc-0123456789abcdef" not in text
+    assert "${DB_ROOT_PASSWORD:?Yu'lon .env is missing}" in plan.base
+    assert plan.dotenv == {"DB_ROOT_PASSWORD": "tbc-0123456789abcdef"}
+
+
+def test_the_cmangos_world_server_keeps_its_console_and_shutdown_grace(tmp_path: Path) -> None:
+    plan = render_generated(load_catalog().get("wow-vanilla"), tmp_path / "wow")
+    assert "stdin_open: true" in plan.base
+    assert "stop_grace_period: 5m" in plan.base
+
+
+def test_the_cmangos_build_overlay_builds_exactly_the_server_image(tmp_path: Path) -> None:
+    entry = load_catalog().get("wow-tbc")
+    plan = render_generated(entry, tmp_path / "wow")
+    assert plan.build.count("dockerfile: Dockerfile") == 1
+    assert "context: ." in plan.build
+    refs = composegen.built_image_refs(entry, tmp_path / "wow", platform_id=lambda: "linux")
+    base_images = set(re.findall(r"^\s*image:\s*(\S+)\s*$", plan.base, re.MULTILINE))
+    assert set(refs) <= base_images
+    assert len(refs) == 1 and refs[0].startswith("yulon.local/cmangos-tbc-server:native-")
+
+
+def test_the_cmangos_build_overlay_names_a_service_the_base_file_defines(tmp_path: Path) -> None:
+    """The build block's service key is the game's, not a literal.
+
+    One template serves three games whose containers are `tbc-`, `vanilla-` and
+    `tortoise-` prefixed, so the overlay can only name its service through
+    `{{CONTAINER_PREFIX}}` — and compose merges by service NAME. A build block
+    under a key the base file does not define is not an error compose reports:
+    it silently adds a fourth, image-less service, and `build_staged()` builds
+    nothing the stack then runs. The plan's own build template spelled that
+    token while `render()` filled only `BUILD_CONTEXT`, which would have raised
+    `unfilled compose placeholder` for every CMaNGOS install.
+    """
+    for entry in CMANGOS_ENTRIES:
+        plan = render_generated(entry, tmp_path / entry.id)
+        assert service_names(plan.build) <= service_names(plan.base)
+        assert service_names(plan.build) == {entry.containers.world}
+
+
+def test_the_cmangos_host_binds_carry_the_label_and_the_volume_does_not(tmp_path: Path) -> None:
+    plan = render_generated(load_catalog().get("wow-tbc"), tmp_path / "wow")
+    binds = [line for line in plan.base.splitlines() if line.strip().startswith("- ./")]
+    assert len(binds) == 3
+    assert all(line.endswith(":z") for line in binds)
+    assert "- db-data:/var/lib/mysql" in plan.base
+    assert "/var/lib/mysql:z" not in plan.base
+    assert "./etc:/opt/mangos/etc:z" in plan.base
+    assert "./data:/opt/mangos/data:z" in plan.base
+
+
+# -- G.6: the per-game Dockerfile / dockerignore pair --------------------------
+
+
+def cmangos_native(entry: CatalogEntry) -> NativeInstall:
+    """The entry's native block, proved present so the tests below can index it."""
+    native = entry.install.native
+    assert native is not None and native.cmangos is not None
+    assert native.dockerfile_dir is not None
+    return native
+
+
+def dockerfile_text(entry: CatalogEntry) -> str:
+    native = cmangos_native(entry)
+    path = TEMPLATES / str(native.dockerfile_dir) / "Dockerfile.tmpl"
+    return composegen.fill(path.read_text(encoding="utf-8"), composegen.entry_tokens(entry))
+
+
+def dockerignore_text(entry: CatalogEntry) -> str:
+    native = cmangos_native(entry)
+    path = TEMPLATES / str(native.dockerfile_dir) / "dockerignore.tmpl"
+    return path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("entry", CMANGOS_ENTRIES, ids=lambda e: e.id)
+def test_every_cmangos_entry_has_a_dockerfile_pair_that_fills_from_its_tokens(
+    entry: CatalogEntry,
+) -> None:
+    """Rendered through the one `fill()`; the marker is a `#` first line so the
+    generated-file rule (`dockerfile.write()` refuses an unmarked file) has something to read.
+
+    The pair fills from `entry_tokens(entry)` ALONE — not from the installer's
+    wider mapping — because that is all a build-time render has: the image is
+    built before any per-install secret or port is in hand. A template reaching
+    for `DB_PASSWORD` therefore raises here, not in front of a user.
+    """
+    native = cmangos_native(entry)
+    template_dir = TEMPLATES / str(native.dockerfile_dir)
+    tokens = composegen.entry_tokens(entry)
+    for name in ("Dockerfile.tmpl", "dockerignore.tmpl"):
+        text = composegen.fill((template_dir / name).read_text(encoding="utf-8"), tokens)
+        assert text.startswith(composegen.GENERATED_MARKER), name
+        assert "{{" not in text
+    dockerfile = dockerfile_text(entry)
+    assert native.cmangos is not None
+    assert f"make -j{native.cmangos.dockerfile.make_jobs}" in dockerfile
+    assert "git clone" not in dockerfile, "sources are COPY'd from the clone stage, never fetched"
+    core = entry.emulator.sources[0].dest
+    assert f"COPY {core} " in dockerfile
+    assert f"CMAKE_INSTALL_PREFIX={tokens['CORE_DIR']}" in dockerfile
+    assert tokens["CORE_DIR"].startswith("/opt/"), "the in-image prefix, never the host src dir"
+    ignore = dockerignore_text(entry)
+    assert ".git" in ignore, "the .git tree is not build context"
+
+
+@pytest.mark.parametrize("entry", CMANGOS_ENTRIES, ids=lambda e: e.id)
+def test_every_cmangos_dockerignore_admits_only_the_core_tree_it_copies(
+    entry: CatalogEntry,
+) -> None:
+    """`*` then one re-include, and the `.git` of every tree that re-include pulls in.
+
+    The build context is the server dir, which by build time also holds the
+    world-database checkout (hundreds of MB), the extracted client data and the
+    `.git` of every clone. Only the tree the Dockerfile COPYs may reach the
+    daemon, and the re-include has to name exactly that tree: a bare `!src`
+    would hand over `src/tbc-db` as well, which the SQL import streams from the
+    host and the image has no use for.
+    """
+    ignore = dockerignore_text(entry)
+    lines = [line for line in ignore.splitlines() if line and not line.startswith("#")]
+    assert lines[0] == "*"
+    core = entry.emulator.sources[0].dest
+    assert [line for line in lines if line.startswith("!")] == [f"!{core}"]
+    assert f"{core}/.git" in lines
+    for source in entry.emulator.sources[1:]:
+        nested = source.dest.startswith(f"{core}/")
+        assert nested == (f"{source.dest}/.git" in lines), source.dest
+        assert nested or source.dest not in ignore, f"{source.dest} is host-only, not context"
+
+
+def test_the_tortoise_dockerfile_keeps_every_flag_and_library_its_script_proved() -> None:
+    """The Tortoise image is transcribed from `install-tortoise-wow-wsl.sh`, which ran.
+
+    Three things in that script are load-bearing and were missing from the
+    plan's transcription of it:
+
+    * `-DBUILD_PLAYERBOTS=ON`. The entry clones `Shyalya/tortoise-wow` on branch
+      `playerbots-integration-gh` and its description sells the bots; without
+      the flag the fork compiles into a bot-less server that boots and looks
+      fine. It is also what emits `aiplayerbot.conf.dist` into `etc/`, which the
+      conf stage copies out of the image.
+    * `libboost-{thread,filesystem,system}-dev`. The script installed them in
+      the ONE image that both compiled and ran, so here they belong to both
+      stages — a runtime stage without them is a `mangosd` that cannot link.
+    * the `sql/` and `tools/mmap/` trees under `CORE_DIR`, named by this entry's
+      own `Database.AutoUpdate.Path` conf value and by `mmaps.argv`. If the
+      image does not carry them, those two settings point at nothing.
+    """
+    entry = load_catalog().get("wow-tortoise")
+    native = cmangos_native(entry)
+    assert native.cmangos is not None
+    dockerfile = dockerfile_text(entry)
+    for flag in (
+        "-DUSE_EXTRACTORS=ON",
+        "-DUSE_SCRIPTS=ON",
+        "-DUSE_STD_MALLOC=ON",
+        "-DDEBUG_SYMBOLS=OFF",
+        "-DUSE_ANTICHEAT=OFF",
+        "-DALLOW_TURTLE_ADDONS=ON",
+        "-DBUILD_PLAYERBOTS=ON",
+    ):
+        assert flag in dockerfile, flag
+    for package in ("libboost-thread-dev", "libboost-filesystem-dev", "libboost-system-dev"):
+        assert dockerfile.count(package) == 2, f"{package} is a build AND a runtime dependency"
+    core_dir = composegen.entry_tokens(entry)["CORE_DIR"]
+    autoupdate = native.cmangos.conf.files["mangosd.conf"].keys["Database.AutoUpdate.Path"]
+    assert f"{core_dir}/sql" in dockerfile and f"{core_dir}/sql" in autoupdate
+    for argument in native.cmangos.mmaps.argv:
+        if argument.startswith(f"{core_dir}/src/"):
+            assert str(PurePosixPath(argument).parent) in dockerfile, argument
+
+
+@pytest.mark.parametrize("entry", CMANGOS_ENTRIES, ids=lambda e: e.id)
+def test_the_cmangos_runtime_stage_carries_the_tools_the_extract_stage_runs(
+    entry: CatalogEntry,
+) -> None:
+    """One image serves the server AND the extractors, as in every script it replaces.
+
+    `extract.image` is `server` for all three games, so the argv in the catalog
+    are paths inside THIS image: the builder's whole install prefix has to land
+    in the runtime stage, and the cmake run has to have asked for the tools.
+    """
+    native = cmangos_native(entry)
+    assert native.cmangos is not None
+    assert native.cmangos.extract.image == "server"
+    dockerfile = dockerfile_text(entry)
+    core_dir = composegen.entry_tokens(entry)["CORE_DIR"]
+    assert f"COPY --from=builder {core_dir} {core_dir}" in dockerfile
+    assert dockerfile.count("FROM ubuntu:22.04") == 2, "a builder stage and a slim runtime"
+    for tool in native.cmangos.extract.tools:
+        assert tool.argv[0].startswith(f"{core_dir}/bin/"), tool.argv[0]

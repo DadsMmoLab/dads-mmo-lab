@@ -23,6 +23,7 @@ from yulon.catalog import installer as installer_module
 from yulon.catalog.catalog import load_catalog
 from yulon.catalog.installer import (
     PROMPT_RULES,
+    DockerNeedsReLoginError,
     DockerUnavailableError,
     Installer,
     InstallerError,
@@ -349,6 +350,77 @@ def test_installer_fails_gracefully_without_docker(tmp_path: Path) -> None:
     )
     with pytest.raises(DockerUnavailableError, match="reboot is needed"):
         rebooter.preflight(InstallOptions())
+
+
+def test_the_script_engine_also_says_what_provisioning_did(tmp_path: Path) -> None:
+    """D1's second half reached one engine of two, and this is the busier one.
+
+    `wow-tbc`, `wow-vanilla` and `wow-tortoise` have no `install.native` block,
+    so `installer_for()` hands three of the four catalog entries to this class -
+    and `provision_lines()` was wired into the native spine only. A user of any
+    of those three who had just consented to the docker-group join saw nothing
+    about it on a run that then succeeded, which is exactly the case the line
+    exists for.
+    """
+    entry = load_catalog().get("wow-wotlk")
+    script = tmp_path / entry.install.script
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/bin/bash\n", encoding="utf-8")
+    calls: list[dict[str, object]] = []
+    from yulon.platform import DOCKER_GROUP_RELOGIN_STEP, ProvisionReport
+
+    checks = iter([False, True])
+    installer = _installer(
+        entry,
+        installers_root=tmp_path,
+        docker_check=lambda: next(checks, True),
+        ensure_docker=lambda **_: ProvisionReport(
+            "linux",
+            done=("apt-get install -y docker.io", "usermod -aG docker pk"),
+            manual_steps=(DOCKER_GROUP_RELOGIN_STEP.format(user="pk"),),
+            docker_ready=True,
+            docker_group="granted",
+        ),
+        interact=_fake_interact(calls),  # type: ignore[arg-type]
+    )
+    lines = list(installer.run())
+    assert calls, "the script never ran, so this is not the successful-provision case"
+    assert any("usermod -aG docker pk" in line for line in lines), lines
+    assert any("log out and back in" in line.lower() for line in lines), lines
+    # Before the script's own output, not after it.
+    assert lines.index("hello") > max(
+        index for index, line in enumerate(lines) if "docker" in line.lower()
+    )
+
+
+def test_a_docker_group_join_that_worked_is_not_reported_as_a_failed_setup(
+    tmp_path: Path,
+) -> None:
+    """D1, on the script path: both engines build this sentence, so both had it wrong.
+
+    The decision lives in `installer.docker_unavailable()` precisely so the two
+    cannot drift; this is the second caller of it.
+    """
+    entry = load_catalog().get("wow-wotlk")
+    script = tmp_path / entry.install.script
+    script.parent.mkdir(parents=True)
+    script.write_text("", encoding="utf-8")
+    from yulon.platform import ProvisionReport
+
+    installer = _installer(
+        entry,
+        installers_root=tmp_path,
+        docker_check=lambda: False,
+        ensure_docker=lambda **_: ProvisionReport(
+            "linux",
+            done=("usermod -aG docker pk",),
+            manual_steps=(platform.DOCKER_GROUP_RELOGIN_STEP.format(user="pk"),),
+            docker_group="granted",
+        ),
+    )
+    with pytest.raises(DockerNeedsReLoginError) as caught:
+        installer.preflight(InstallOptions())
+    assert "could not be set up" not in str(caught.value)
 
 
 def test_the_prompter_reaches_provisioning_and_not_only_the_script(tmp_path: Path) -> None:

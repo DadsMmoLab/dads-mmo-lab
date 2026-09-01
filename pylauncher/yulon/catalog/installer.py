@@ -105,8 +105,105 @@ class DockerUnavailableError(InstallerError):
     """No Docker daemon is reachable and automatic provisioning is not available yet."""
 
 
+class DockerNeedsReLoginError(DockerUnavailableError):
+    """Docker WAS set up; this login session cannot see the group it was given.
+
+    A subclass rather than a sibling, because to everything that only needs to
+    stop the install these two are one event — but they are not one event to
+    the user, and they were being told the wrong one. `usermod -aG docker`
+    cannot change the supplementary groups of a process that is already
+    running, so the very run that provisions Docker correctly is the run that
+    cannot use it: the remedy is a new login, not a second attempt at
+    installing anything (live Ubuntu gate, press 1, 2026-08-30).
+    """
+
+
 class UnsupportedPlatformError(InstallerError):
     """This entry's installer does not run on this platform (roadmap 6.1)."""
+
+
+def docker_unavailable(report: platform.ProvisionReport) -> DockerUnavailableError:
+    """The refusal for a provision that ran and left no daemon THIS process can reach.
+
+    THREE outcomes wore one sentence until 7.1, and it was the wrong one for
+    the two a first-time Linux user actually meets. `docker_group == "granted"`
+    means the group join RAN and succeeded — the engine is installed and the
+    account is a member — and the only thing between the user and a working
+    install is that a process cannot acquire a supplementary group it was
+    granted after it started. Telling them Docker "could not be set up
+    automatically" is the opposite of what happened, and it is the first thing
+    this engine ever says to them (live Ubuntu gate, press 1, 2026-08-30:
+    `docker.io` 29.1.3 active, `pk` added to group 124, and the install
+    reported as failed).
+
+    `already-member` is the same event one press later and is the state a real
+    user is in most often. `_docker_group_member()` asks `id -nG <user>`, which
+    reads the group database rather than the running process, so the press
+    AFTER the join reports `already-member` with the daemon still unreachable -
+    and that branch produced "could not be set up automatically. Install
+    Docker, start it, and try again." with no manual steps at all.
+    `platform.DockerGroupOutcome`'s docstring had already put the two on the
+    same side: "only `granted` and `already-member` ... may print the
+    log-out-and-back-in line". They get different sentences, because they need
+    different next actions: `granted` knows why this session cannot see the
+    group, and `already-member` cannot tell "you have not logged out yet" from
+    "the service is down", so it names both.
+
+    Built here rather than at either call site so the script path and the
+    native spine cannot drift: both had the same sentence, so both had the
+    same defect.
+    """
+    details = " ".join(report.manual_steps) or "; ".join(report.skipped)
+    if report.docker_group == "granted":
+        return DockerNeedsReLoginError(
+            "Docker is installed and set up. It cannot be used from this session yet: your "
+            "account was added to the docker group, and a session that was already open does "
+            "not pick up a new group. "
+            + (details or "Log out and back in, then start the install again.")
+        )
+    if report.docker_group == "already-member":
+        # Two causes, and the report cannot tell them apart, so both are named,
+        # commoner first. `ensure_docker()` returns early when a daemon answers,
+        # so reaching here at all means it did not - which for a member of the
+        # group is either a session opened before the join, or a service that is
+        # down.
+        #
+        # The log-out instruction is INSIDE this sentence and `platform.py`
+        # deliberately keeps it out of `manual_steps` for this outcome, or
+        # `details` appends a second copy of it after the "if you have already
+        # done that" clause - which sends the one user that clause exists for
+        # straight back to the advice it just ruled out (review, 2026-08-31).
+        return DockerNeedsReLoginError(
+            "Docker is installed and your account is already in the docker group, but this "
+            "session still cannot reach the daemon. A session that was open before the group "
+            "was granted does not pick it up: log out and back in, then start the install "
+            "again. If you have already done that, the Docker service is not running - start "
+            "it and try again." + (f" {details}" if details else "")
+        )
+    return DockerUnavailableError(
+        "Docker isn't available and could not be set up automatically. "
+        + (details or "Install Docker, start it, and try again.")
+    )
+
+
+def provision_lines(report: platform.ProvisionReport) -> Iterator[str]:
+    """What provisioning DID, said on every path and not only the failing one.
+
+    The report was read exclusively inside the refusal, so a provision that
+    worked threw `done`, `skipped` and `manual_steps` away — and the one manual
+    step that matters most is produced by the SUCCESS case: a user who has just
+    consented to the docker-group join needs to be told to log out and back in.
+    They saw that sentence only if something else went wrong (review finding,
+    confirmed against the 2026-08-30 gate).
+
+    `skipped` is deliberately not echoed: on Linux `ensure_docker()` already
+    folds it into a `manual_steps` line that says WHY each one was skipped, and
+    printing both says everything twice.
+    """
+    if report.done:
+        yield "Docker setup did: " + "; ".join(report.done)
+    for step in report.manual_steps:
+        yield f"Still to do: {step}"
 
 
 @dataclass(frozen=True)
@@ -551,13 +648,37 @@ class Installer:
         passed through to Docker provisioning so its ready-poll can be
         interrupted (a stop mid-provision must not leave a worker sleeping).
 
-        `ask` reaches Docker provisioning for one question: whether to join the
-        docker group, which is root-equivalent. It has to arrive here rather
+        `ask` reaches Docker provisioning for two questions, in this order:
+        whether to join the docker group, which is root-equivalent, and — on
+        Linux, once a privileged step reports that it needs one — the sudo
+        password (`platform.SudoSession`, 7.1). It has to arrive here rather
         than only in `run()`, because provisioning happens HERE — before the
         script starts. That ordering is why the scripts' own consent gate could
         never fire on the machine it was written for: `ensure_docker()` had
         already joined the group, so the script found the user a member and
-        never asked (found 2026-08-24).
+        never asked (found 2026-08-24). This said "one question" until the sudo
+        password landed beside it on another branch (merge review, 2026-08-31).
+
+        The body is `_preflight_lines()` so that `run()` can SHOW what
+        provisioning did while this method keeps returning None. Same shape as
+        `native.StagedInstaller`, and for the same reason: the lines are the
+        report a user needs and they were reaching one of the two engines.
+        """
+        for _ in self._preflight_lines(options, cancel, ask):
+            pass
+
+    def _preflight_lines(
+        self,
+        options: InstallOptions,
+        cancel: threading.Event | None,
+        ask: runner.Prompter | None = None,
+    ) -> Iterator[str]:
+        """`preflight()`'s body, yielding what provisioning did as it happens.
+
+        Yielded rather than collected and returned: a refusal below stops the
+        generator, and the lines said BEFORE it are exactly the ones that
+        explain it. Collecting them into a list for `run()` to yield afterwards
+        would lose every one of them on the failing path.
         """
         here = self._platform_id()
         if not self.entry.install.supports(here):
@@ -590,17 +711,18 @@ class Installer:
                 raise InstallerError(folder_problem)
         if not self._docker_check():
             report = self._ensure_docker(cancel=cancel, ask=ask)
+            # Three of the four catalog entries have no `install.native` block,
+            # so `installer_for()` hands them to THIS engine — and the half of
+            # D1 that says what provisioning did was wired into the other one
+            # only (review, 2026-08-31).
+            yield from provision_lines(report)
             if report.reboot_required:
                 raise DockerUnavailableError(
                     "Docker's prerequisites were installed but a reboot is needed first. "
                     + " ".join(report.manual_steps)
                 )
             if not report.docker_ready and not self._docker_check():
-                details = " ".join(report.manual_steps) or "; ".join(report.skipped)
-                raise DockerUnavailableError(
-                    "Docker isn't available and could not be set up automatically. "
-                    + (details or "Install Docker, start it, and try again.")
-                )
+                raise docker_unavailable(report)
 
     def run(
         self,
@@ -611,12 +733,14 @@ class Installer:
     ) -> Iterator[str]:
         """Run the install, yielding output lines live; answers prompts itself.
 
-        `ask` is consulted for exactly one thing: `sudo` asking for a password
-        during the distro package steps. No rule in `PROMPT_RULES` can ever know
-        it, so without `ask` the script stops dead there — which is what
-        installing on Linux did (`sudo -v` at the top of the Ubuntu script,
-        guarded by `exit 1`, so it failed seconds in with "Could not cache sudo
-        credentials. Aborting.").
+        Once the script itself is running, `ask` is consulted for exactly one
+        thing: `sudo` asking for a password during the distro package steps. No
+        rule in `PROMPT_RULES` can ever know it, so without `ask` the script
+        stops dead there — which is what installing on Linux did (`sudo -v` at
+        the top of the Ubuntu script, guarded by `exit 1`, so it failed seconds
+        in with "Could not cache sudo credentials. Aborting."). Before that,
+        `preflight()` is handed the same `ask` and Docker provisioning may put
+        its own two questions to it; see that method.
 
         Two things make that work, and both are needed:
 
@@ -633,7 +757,7 @@ class Installer:
         Setting `cancel` interrupts the script (see `runner.interact()`).
         """
         opts = options or InstallOptions()
-        self.preflight(opts, cancel=cancel, ask=ask)
+        yield from self._preflight_lines(opts, cancel, ask)
         logger.info(f"installing {self.entry.id} via {self.script}")
         tail: deque[str] = deque(maxlen=_ERROR_TAIL_LINES)
 
@@ -692,9 +816,9 @@ class Installer:
 class InstallEngine(Protocol):
     """What a catalog view can drive, whichever engine it got.
 
-    Both `Installer` (the bash script) and `native.NativeInstaller` satisfy it,
-    which is the whole reason `catalog_view.py`, `log_panel.py` and the job
-    runner needed no changes for roadmap 6.2.
+    Both `Installer` (the bash script) and every `native.StagedInstaller`
+    family satisfy it, which is the whole reason `catalog_view.py`,
+    `log_panel.py` and the job runner needed no changes for roadmap 6.2.
     """
 
     def preflight(
@@ -724,20 +848,39 @@ def installer_for(
 ) -> InstallEngine:
     """The engine that installs `entry` on THIS platform. The only place that decides.
 
-    Three rules, in order, all of them reading `catalog.json` rather than
-    asking what OS this is (style-guide §3):
+    Script versus family, read from `catalog.json` rather than from what OS
+    this is (style-guide §3, amendment A1): an entry with an `install.native`
+    block is installed by its family engine on every platform it supports; an
+    entry without one still runs its bash script, until 7.2 deletes that path
+    (`Install.uses_script()`/`is_native()` are untouched here and go in 7.2).
+    The platform refusal is unchanged from roadmap 6.1 and lives in each
+    engine's `preflight()`, so an unsupported click is refused by whoever
+    calls it.
 
-    1. the platform is not in `install.platforms` — refused by whoever calls
-       `preflight()`, unchanged from roadmap 6.1. A `Installer` is returned so
-       that refusal comes from the one place that words it;
-    2. the platform is in `install.script_platforms` — today's script path,
-       byte for byte what Linux already runs;
-    3. otherwise — the native engine.
+    There is a third state, because the DATA for a game arrives before the
+    engine that reads it: 7.3 writes the three CMaNGOS games' `native` blocks
+    in its first group and registers the family that consumes them four groups
+    later. An entry read on the block alone is therefore, for the length of
+    that gap, taken away from the bash script that installs it today and handed
+    an "install family this app does not have" refusal instead — a working path
+    traded for a dead end, so that code nobody has written yet can not run. So
+    the question here is whether THIS BUILD HAS the family
+    (`families.is_registered()`), not whether the entry names one, and an entry
+    whose family is missing goes back to its script. It says so in the log, in
+    a line naming the family and the script: a fallback nobody can see is how a
+    misspelled family becomes a week of wondering why the new engine never
+    runs. When there is no script left to fall back to, `family_for()` raises
+    the sentence it already raises, unchanged — an entry with neither an engine
+    nor a script IS the app bug that sentence describes.
+
+    That middle branch is a bridge with a demolition date on it. 7.2 deletes
+    the script path, which is the thing it falls back to, so it goes out with
+    the same commit and this returns to deciding on one fact again.
 
     `import_probe`/`reset_unfinished` are per-game seams the CALLER supplies
-    (the app wires `controller_wow_wotlk.repair`), because `catalog/` must not
-    import a controller package. They are ignored on the script path, which
-    runs its import through the script.
+    (`install_wiring.py`), because `catalog/` must not import a controller
+    package. They are ignored on the script path, which runs its import
+    through the script.
 
     Imported inside the function on purpose: `native.py` imports this module
     for `InstallOptions` and the error types, so naming it at module scope
@@ -745,118 +888,21 @@ def installer_for(
     exceptions and a dataclass — buys nothing but an import.
     """
     from yulon.catalog import native
+    from yulon.catalog.families import family_for, is_registered
 
-    here = platform_id()
-    if entry.install.is_native(here):
-        return native.NativeInstaller(
-            entry,
-            installers_root=installers_root,
-            import_probe=import_probe,
-            reset_unfinished=reset_unfinished,
-            seams=native.Seams(platform_id=platform_id),
+    block = entry.install.native
+    if block is None:
+        return Installer(entry, installers_root=installers_root, platform_id=platform_id)
+    if not is_registered(block.family) and entry.install.script:
+        logger.info(
+            f"{entry.id} names install family {block.family!r}, which has no engine in this "
+            f"build; installing it with {entry.install.script} instead"
         )
-    return Installer(entry, installers_root=installers_root, platform_id=platform_id)
-
-
-def _terminal_prompter(prompt: str) -> str:
-    """Answer the prompts `run()` forwards, from the terminal.
-
-    The CLI passed no `ask` at all, and `runner.interact()` writes nothing for
-    a missing answer, so on any box where sudo wants a password the CLI parked
-    at the prompt forever: no timeout, no error, a process that never exits.
-    Reproduced on yulon-arch (2026-08-28), which is not passwordless.
-
-    Never returns None. Off a terminal there is nothing to type, and an empty
-    answer is the failure path that ENDS: sudo refuses it, retries, gives up,
-    and the script's own guard exits non-zero with "Could not cache sudo
-    credentials"; a y/n rule reads it as "no". A failure the user can read beats
-    a hang they cannot.
-    """
-    import getpass
-    import sys
-
-    # Only sudo's own prompt is hidden. `ask` is consulted for EVERY ASK_THE_USER
-    # rule, and the other two are consent questions - "Add '$USER' to the docker
-    # group (grants root-equivalent access)?" and "Install Docker via rpm-ostree
-    # and reboot now?" - which a person must be able to see themselves answering.
-    # `script_env()` builds sudo's prompt with a random marker, so the two are
-    # told apart exactly rather than guessed (review, 2026-08-28).
-    if not sys.stdin.isatty():
-        sys.stderr.write(f"no terminal to answer {prompt.strip()!r}; declining\n")
-        return ""
-    if SUDO_PROMPT_PREFIX in prompt:
-        return getpass.getpass(prompt + " ")
-    return input(prompt + " ")
-
-
-def _main(argv: list[str] | None = None) -> int:
-    """CLI entry point: `python -m yulon.catalog.installer <game-id> [options]`.
-
-    The roadmap 3.2 test harness — streams the script's output to stdout and
-    exits non-zero with the user-readable error on failure. Phase 4's
-    `catalog_view.py` calls `Installer.run()` the same way.
-    """
-    import argparse
-    import sys
-
-    from yulon.catalog.catalog import load_catalog
-
-    parser = argparse.ArgumentParser(prog="yulon.catalog.installer")
-    parser.add_argument("game", help="catalog id, e.g. wow-wotlk")
-    parser.add_argument("--server-dir", type=Path, default=None)
-    parser.add_argument("--client-dir", type=Path, default=None)
-    parser.add_argument("--reinstall", action="store_true")
-    parser.add_argument("--installers-root", type=Path, default=DEFAULT_INSTALLERS_ROOT)
-    args = parser.parse_args(argv)
-    try:
-        entry = load_catalog().get(args.game)
-    except KeyError:
-        sys.stderr.write(f"unknown game {args.game!r}\n")
-        return 2
-    # `installer_for()`, not `Installer(...)`: the CLI used to construct the
-    # script engine directly, so it could never exercise `NativeInstaller` on
-    # any platform, and "I ran the install through the CLI" proved less than it
-    # sounded like it did. It now dispatches exactly as the Install button does.
-    #
-    # The import seams are wired the same way `main.py`'s `make_installer()`
-    # wires them for the GUI - without this, a native install of an entry with
-    # an `import_service` (WoW WotLK) refuses at preflight with "this installer
-    # was built without a way to check it", on every platform, before a single
-    # container is created. Local imports for the same reason `native.py`
-    # imports `installer` inside its own function: `catalog/` must not import a
-    # controller package at module scope.
-    import_probe = None
-    reset_unfinished = None
-    spec = entry.container_spec()
-    if spec.import_service:
-        from yulon.apply import DockerSql
-        from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
-        from yulon.controller_wow_wotlk import modules as wotlk_modules
-        from yulon.controller_wow_wotlk import repair as wotlk_repair
-
-        password = entry.install.db_root_password or wotlk_modules.DEFAULT_DB_ROOT_PASSWORD
-        sql = DockerSql(spec.db, password, schemas=entry.schema_map())
-        mysql = wotlk_maintenance.DockerMysql(spec.db, password)
-        import_probe = lambda: wotlk_repair.import_state(sql, mysql)  # noqa: E731
-        reset_unfinished = lambda: wotlk_repair.reset_unfinished(sql, mysql)  # noqa: E731
-    installer = installer_for(
+        return Installer(entry, installers_root=installers_root, platform_id=platform_id)
+    return family_for(entry)(
         entry,
-        installers_root=args.installers_root,
+        installers_root=installers_root,
         import_probe=import_probe,
         reset_unfinished=reset_unfinished,
+        seams=native.Seams(platform_id=platform_id),
     )
-    options = InstallOptions(
-        server_dir=args.server_dir, client_dir=args.client_dir, reinstall=args.reinstall
-    )
-    try:
-        for line in installer.run(options, ask=_terminal_prompter):
-            sys.stdout.write(line + "\n")
-            sys.stdout.flush()
-    except InstallerError as exc:
-        sys.stderr.write(f"install failed: {exc}\n")
-        return 1
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(_main())

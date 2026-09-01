@@ -17,6 +17,10 @@ from yulon import resources
 from yulon.apply import Applier, ApplyReport, DbcCopier, DockerSql, SqlRunner
 from yulon.controller_wow_wotlk import docker_ctl
 from yulon.git import Git
+
+# Explicit re-export (the `as` form is what mypy's --no-implicit-reexport asks for):
+# the value lives in `install_wiring` since 7.1, and this name stays so no importer moves twice.
+from yulon.install_wiring import DEFAULT_DB_ROOT_PASSWORD as DEFAULT_DB_ROOT_PASSWORD
 from yulon.manifest import Manifest, ManifestType
 from yulon.manifest_store import (
     HttpGet,
@@ -36,9 +40,6 @@ BUNDLED_MANIFESTS_DIR = resources.manifests_dir()
 MANIFEST_BASE_URL = (
     "https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/pylauncher/manifests"
 )
-
-# acore-docker default; matches dml-start.sh's DOCKER_DB_ROOT_PASSWORD default.
-DEFAULT_DB_ROOT_PASSWORD = "password"
 
 
 def load_module(manifest_path: Path) -> Manifest:

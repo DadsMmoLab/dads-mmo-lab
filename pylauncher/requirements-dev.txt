@@ -5,3 +5,8 @@ pytest>=8.3
 mypy>=1.11
 black>=24.8
 ruff>=0.6
+
+# Test-only. `tests/support_compose.py` parses the compose files the engine renders so they can
+# be compared, field by field, with `docker compose config` from a real install. The app never
+# reads YAML (compose does), so this stays out of requirements.txt and out of the bundle.
+pyyaml>=6.0

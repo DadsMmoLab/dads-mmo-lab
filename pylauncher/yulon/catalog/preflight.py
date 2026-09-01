@@ -30,7 +30,7 @@ from typing import Literal
 
 from yulon import docker, git, platform
 from yulon.catalog import composegen
-from yulon.catalog.catalog import CatalogEntry
+from yulon.catalog.catalog import CatalogEntry, ClientSpec
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -66,6 +66,16 @@ class Check:
         return f"{said} {self.remedy}".rstrip()
 
 
+ClientValidate = Callable[[Path | None, ClientSpec], tuple[Check, ...]]
+"""The client-folder seam: `clientdir.validate` with preflight's free-space reader bound in.
+
+Declared here rather than beside `Verdict` so it can name `Check` without a
+forward reference. `Path | None` is the first argument on purpose: "no folder
+was chosen" is one of the rules, not a case for the caller to special-case
+before asking.
+"""
+
+
 @dataclass(frozen=True)
 class Facts:
     """What could be established about this machine. `None` means "not established".
@@ -85,6 +95,17 @@ class Facts:
     bind_mount: bool | None = None
     port_conflicts: tuple[str, ...] = ()
     ports_in_use: tuple[int, ...] = ()
+    selinux_enforcing: bool | None = None
+    server_fs_type: str | None = None
+    client_checks: tuple[Check, ...] = ()
+    client_bind: bool | None = None
+    """Could a container read the CLIENT folder? `None` is "nobody asked".
+
+    Kept apart from `bind_mount`, which is the server folder's answer: they are
+    routinely two different drives, and Docker Desktop shares them one tree at
+    a time. `None` here is no daemon, or a folder the rules already refused —
+    never a probe that ran and came back empty-handed, which is `False`.
+    """
 
 
 @dataclass(frozen=True)
@@ -121,6 +142,8 @@ def gather(
     entry: CatalogEntry,
     server_dir: Path,
     *,
+    client_dir: Path | None = None,
+    client_validate: ClientValidate | None = None,
     platform_id: Callable[[], str] = platform.detect,
     docker_ready: Callable[[], bool] = platform.docker_ready,
     vm_resources: Callable[[], platform.VmResources | None] = platform.vm_resources,
@@ -130,6 +153,8 @@ def gather(
     bind_mount_ok: Callable[[Path], bool | None] | None = None,
     port_conflicts: Callable[[], list[str]] | None = None,
     probe_port: Callable[[str, int], platform.PortProbe] = platform.probe_tcp,
+    selinux: Callable[[], bool | None] = platform.selinux_enforcing,
+    fs_type: Callable[[Path], str | None] = platform.filesystem_type,
 ) -> Facts:
     """Ask the machine everything `evaluate()` needs, refusing to invent an answer.
 
@@ -142,6 +167,15 @@ def gather(
     including the volume comparison. Reading the real platform inside one of
     them is how this suite once went red on every Python 3.12+ Linux box while
     CI stayed green.
+
+    SELinux and the server folder's filesystem are asked only on Linux, where
+    they exist.
+
+    `client_dir` arrived from the spine in 7.1 (A9) and is read here from 7.3
+    on: entries whose family block carries a `ClientSpec` get the folder rules
+    of `families/clientdir.py` plus a bind probe of their own. Entries without
+    one — AzerothCore extracts nothing from a client — are not asked anything
+    about a client, and `client_validate` is not called for them at all.
     """
     here = platform_id()
     ready = docker_ready()
@@ -164,6 +198,42 @@ def gather(
         # would have started that `rust-prior-art.md` §4 warns about.
         if probe_port("127.0.0.1", port).status == "open":
             listening.append(port)
+    # SELinux is a Linux fact. Off Linux the questions are not asked, so the
+    # check below can tell "not applicable" from "could not read it".
+    enforcing = selinux() if here == "linux" else None
+    server_fs = fs_type(server_dir) if here == "linux" else None
+    # The server folder is probed here rather than inside the `Facts(...)` call
+    # below, so that the two bind probes run in the order they are reported.
+    # Left inline it would be the client that goes first: the client block sits
+    # above a `return` whose arguments are evaluated after it.
+    #
+    # An earlier draft of this comment also claimed the order mattered because
+    # `_preflight_lines()` wraps its `DockerCommandError` handler around the
+    # first Docker call. A review checked, and it does not: `bind_mount_ok()`
+    # and `images_built()` both go through `_docker()`, which hands back a
+    # `CompletedProcess` and never raises that error. The only call here that
+    # can is `port_conflicts()`, and it runs last either way. The hoist is right
+    # for the order it produces; it was never right for that reason.
+    bind = probe(server_dir) if ready else None
+    spec = _client_spec(entry)
+    client_checks: tuple[Check, ...] = ()
+    client_bind: bool | None = None
+    if spec is not None:
+        # The folder rules need no daemon and run regardless; the bind probe is
+        # a question to Docker and is asked only when Docker answered, like the
+        # server folder's. It is also skipped once the rules have refused the
+        # folder: `evaluate()` drops the row in that case, so the probe would
+        # spend up to 30 s on a container to produce a fact nobody reads — and
+        # asking the filesystem a second time here is how the two answers get
+        # to disagree. No ancestor walk is needed for the client: it is
+        # populated by definition, so `bind_mount_ok()` probes it directly.
+        validate = (
+            client_validate if client_validate is not None else _default_client_validate(free)
+        )
+        client_checks = validate(client_dir, spec)
+        refused = any(check.verdict == "refuse" for check in client_checks)
+        if ready and client_dir is not None and not refused:
+            client_bind = probe(client_dir)
     return Facts(
         platform_id=here,
         docker_ready=ready,
@@ -173,14 +243,45 @@ def gather(
         server_dir_free=dir_free,
         same_volume=_same_volume(root, server_dir, here),
         dir_problem=dir_problem(server_dir),
-        bind_mount=probe(server_dir) if ready else None,
+        bind_mount=bind,
         port_conflicts=tuple(conflicts()) if ready else (),
         ports_in_use=tuple(listening),
+        selinux_enforcing=enforcing,
+        server_fs_type=server_fs,
+        client_checks=client_checks,
+        client_bind=client_bind,
     )
 
 
 def _default_bind_probe(server_dir: Path) -> bool | None:
     return docker.bind_mount_ok(server_dir, PROBE_IMAGE)
+
+
+def _client_spec(entry: CatalogEntry) -> ClientSpec | None:
+    """The entry's client rules, if its family block has any; AzerothCore's has none.
+
+    The one place that decides whether this install reads a client at all, so
+    `gather()` and `evaluate()` cannot come to different conclusions about it.
+    """
+    native = entry.install.native
+    if native is None or native.cmangos is None:
+        return None
+    return native.cmangos.client
+
+
+def _default_client_validate(free: Callable[[Path], int | None]) -> ClientValidate:
+    """`clientdir.validate` with this module's free-space reader bound in.
+
+    Imported inside the function rather than at the top because `families/`
+    imports this module for `Check`, and a module-level import back would be a
+    cycle. The seam exists so `gather()`'s tests never touch a real client
+    folder — and `free` is `gather()`'s own `disk_free` seam, not `shutil`, so
+    the client's drive is measured through the same injection as every other
+    number this function reports.
+    """
+    from yulon.catalog.families import clientdir
+
+    return lambda client_dir, spec: clientdir.validate(client_dir, spec, free_bytes=free)
 
 
 def _default_conflicts(
@@ -286,7 +387,20 @@ def evaluate(entry: CatalogEntry, server_dir: Path, facts: Facts) -> Report:
     )
     checks.append(_folder_check(facts, server_dir))
     checks.append(_bind_check(facts, server_dir))
+    checks.append(_selinux_check(facts))
     checks.append(_port_check(facts))
+    # The client's rows come last: they are about a second folder, and the ones
+    # above are about the machine. `clientdir`'s verdicts are carried through
+    # unchanged — its `unchecked` rows stay `unchecked`, the way every
+    # measurement this module could not take does.
+    checks.extend(facts.client_checks)
+    if _client_spec(entry) is not None and not any(
+        check.verdict == "refuse" for check in facts.client_checks
+    ):
+        # Only when the folder itself survived: a mount test on something that
+        # is not a client answers a question nobody asked, and its `unchecked`
+        # line would read as a second problem beside the one that matters.
+        checks.append(_client_bind_check(facts))
     return Report(tuple(checks))
 
 
@@ -471,13 +585,19 @@ def _bind_check(facts: Facts, server_dir: Path) -> Check:
     does — see `docker.bind_mount_ok()`, which compares the container's listing
     against the host's rather than trusting an exit code, since `ls` on an empty
     directory exits 0 and the chosen folder is empty at preflight time.
+
+    The remedy is written for the engine the user actually has — see
+    `_bind_remedy()`. Sending a Fedora user to "Settings → Resources → File
+    sharing" is the D4 defect the Ubuntu gate recorded ("set Docker Desktop to
+    8 CPUs" on a box running Docker Engine): unactionable advice reads as the
+    app being confused about the machine it is standing on.
     """
     if facts.bind_mount is None:
         return Check(
             "sharing the folder with Docker",
             "unchecked",
             "the folder could not be tested inside a container — that is not a pass",
-            "If the install fails immediately, check Docker Desktop's file sharing settings.",
+            f"If the install fails immediately, {_bind_remedy(facts, server_dir)}",
         )
     if facts.bind_mount:
         return Check("sharing the folder with Docker", "pass", f"a container can read {server_dir}")
@@ -485,8 +605,141 @@ def _bind_check(facts: Facts, server_dir: Path) -> Check:
         "sharing the folder with Docker",
         "refuse",
         f"a container could not see {server_dir}, so the server files would be invisible to it",
-        "Add this folder (or its parent) to Docker Desktop's Settings → Resources → File "
-        "sharing, or pick a folder under your home directory, then try again.",
+        _sentence(_bind_remedy(facts, server_dir)),
+    )
+
+
+def _client_bind_check(facts: Facts) -> Check:
+    """The client folder's twin of `_bind_check`: refused before a two-hour build, not after it.
+
+    A client outside Docker Desktop's file-sharing list mounts as an EMPTY
+    directory, and the first thing that would report it is an extractor finding
+    no archives — after the image was built. The client is routinely on a
+    second drive the server folder's own probe says nothing about.
+
+    Three answers, and the middle one is the point: `None` is "nobody ran the
+    probe" (no daemon, or the folder rules already refused), `False` is "a
+    container looked and could not see it". A bool holds two of the three, and
+    folding `None` into `False` refuses a machine that would have installed.
+    """
+    if facts.client_bind is None:
+        return Check(
+            "sharing the client with Docker",
+            "unchecked",
+            "the client folder could not be tested inside a container — that is not a pass",
+            "If extraction finds no archives, check Docker Desktop's file sharing settings.",
+        )
+    if facts.client_bind:
+        return Check(
+            "sharing the client with Docker", "pass", "a container can read the client folder"
+        )
+    return Check(
+        "sharing the client with Docker",
+        "refuse",
+        "a container could not see the client folder, so its archives would be invisible to it",
+        "Add the client folder (or its parent) to Docker Desktop's Settings → Resources → File "
+        "sharing, then try again.",
+    )
+
+
+def _sentence(remedy: str) -> str:
+    """The remedy as its own sentence. NOT `str.capitalize()`, which lowercases the rest.
+
+    `"...Docker Desktop's Settings → Resources → File sharing...".capitalize()`
+    is `"...docker desktop's settings..."`, and the same call would turn
+    `SELinux` and `chcon` into `selinux` and `chcon` in a command the user is
+    meant to paste.
+    """
+    return remedy[:1].upper() + remedy[1:]
+
+
+def _bind_remedy(facts: Facts, server_dir: Path) -> str:
+    """What to actually do about a folder a container cannot see, per platform.
+
+    Docker Desktop is the whole story on Windows and macOS: it shares only the
+    directories its file-sharing list names, and a folder outside them is the
+    one thing this check exists to catch.
+
+    Docker Engine on Linux has no such list and no such settings pane, so that
+    sentence is unactionable there — and after the probe stopped being defeated
+    by SELinux confinement (`docker._probe_selinux_argv()`), a Linux failure
+    here is no longer SELinux either. What is left is the folder: a directory on
+    the way down that the daemon's user cannot traverse, or a mount (autofs, a
+    fuse home, a network share) the daemon cannot follow.
+
+    So while SELinux is enforcing the appendix RULES IT OUT rather than handing
+    over a command. It used to say "run `chcon -Rt container_file_t
+    {server_dir}`", and that was wrong twice over. The path usually does not
+    exist yet — the probe walks up to the nearest *populated* ancestor precisely
+    because the chosen folder is routinely absent or empty at preflight time, so
+    the pasted command answers `chcon: cannot access ...: No such file or
+    directory`. And it could not have changed the outcome anyway: the probe
+    container runs `--security-opt label:disable`, so relabelling the host
+    directory cannot alter what it saw. The sentence diagnosed correctly and
+    then offered a remedy for a different diagnosis. A user on an enforcing box
+    needs to be told to stop looking there, and where to look instead.
+
+    `is True`, not truthiness, for the reason the whole diff spells the three
+    answers out: `None` is "nobody could ask". It happens to read the same here
+    — `None` is falsy — and it stops reading the same the moment this becomes
+    "say something when we could not tell".
+    """
+    if facts.platform_id != "linux":
+        return (
+            "add this folder (or its parent) to Docker Desktop's Settings → Resources → File "
+            "sharing, or pick a folder under your home directory, then try again."
+        )
+    label = (
+        " SELinux is enforcing here, but it is not what refused this: the check runs unconfined "
+        "and the install labels its own folder, so it is the folder itself to look at."
+        if facts.selinux_enforcing is True
+        else ""
+    )
+    return (
+        f"check that {server_dir} and every folder above it can be read by the user the Docker "
+        "daemon runs as, and that it is not on a mount the daemon cannot follow (a network "
+        f"share, or an automounted home).{label}"
+    )
+
+
+def _selinux_check(facts: Facts) -> Check:
+    """Will the containers be allowed to read the server folder under SELinux?
+
+    `composegen` puts `:z` on every host bind when SELinux is enforcing and the
+    filesystem can carry a label. On a drive that cannot (`SELINUX_NOLABEL_FS`
+    — NTFS, exFAT, network shares) the label is omitted, and the daemon may
+    then refuse to create the containers at all. That is a warning, not a
+    refusal: the WotLK bash installer shipped with exactly this behaviour and
+    its Fedora gate passed, and a hard refusal here would refuse a machine
+    whose daemon might well have coped.
+
+    Three answers, not two. `selinux_enforcing is None` means the question went
+    unanswered — a broken or absent `getenforce` on a box that IS enforcing —
+    and it is reported as `unchecked`, never folded into "not enforcing". The
+    shell lineage collapsed those two and relabelled nothing on an enforcing
+    Fedora while its test asserted the empty result and passed.
+    """
+    if facts.platform_id != "linux":
+        return Check("SELinux", "pass", "not a Linux host, so it does not apply")
+    if facts.selinux_enforcing is None:
+        return Check(
+            "SELinux",
+            "unchecked",
+            "whether SELinux is enforcing could not be read — that is not a pass",
+            "If the containers cannot read the server folder, run "
+            "`chcon -Rt container_file_t <server folder>` and try again.",
+        )
+    if not facts.selinux_enforcing:
+        return Check("SELinux", "pass", "not enforcing")
+    if platform.selinux_labels_supported(facts.server_fs_type):
+        return Check("SELinux", "pass", "enforcing; the server folder can carry container labels")
+    return Check(
+        "SELinux",
+        "warn",
+        f"enforcing, and the server folder is on {facts.server_fs_type}, which cannot hold "
+        "SELinux labels, so the `:z` bind option is omitted; the daemon may refuse to create "
+        "containers on this drive",
+        "If the server fails to start, pick a folder on the system drive (ext4, xfs or btrfs).",
     )
 
 

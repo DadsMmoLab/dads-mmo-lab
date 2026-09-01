@@ -18,6 +18,6 @@ services:
       # during the Rust launcher's migration. It sits here, beside the env the
       # settings surface already owns, so the round-trip through that writer is
       # exercised by the thing that uses it.
-      - ./modules:/azerothcore/modules
+      - ./modules:/azerothcore/modules{{BIND_LABEL}}
     environment:
 {{ENVIRONMENT}}

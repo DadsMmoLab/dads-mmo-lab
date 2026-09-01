@@ -36,10 +36,10 @@ import hashlib
 import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from yulon import platform
-from yulon.catalog.catalog import CatalogEntry
+from yulon.catalog.catalog import CatalogEntry, NativeInstall
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -72,18 +72,6 @@ the state file's own `install_id` check catches the pathological case at
 install time rather than letting it run.
 """
 
-DEFAULT_IMAGE_PREFIX = "yulon.local/ac-wotlk-"
-"""Where images this machine BUILDS are named.
-
-Deliberately not upstream's `acore/`: a build tags whatever the base file's
-`image:` says, so reusing an upstream ref would clobber a pulled image and let
-a later `docker compose pull` silently replace this playerbots build with
-upstream's vanilla worldserver. The first component contains a dot, so Docker
-reads it as a registry HOST and can never resolve it to somebody else's Docker
-Hub repo — a stale-image mistake then fails loudly at pull time instead of
-booting a plausible-looking wrong server.
-"""
-
 # Runtime env the generated override starts with. Two keys, both load-bearing:
 # without the first the one-shot never creates the playerbots schema, and
 # without the second the bots never log in.
@@ -93,7 +81,7 @@ booting a plausible-looking wrong server.
 # stay out. They did not stay out — the compose diff against the proven install
 # (2026-08-24) found that a native install would otherwise take mod-playerbots'
 # defaults and hand the same user a different world from the same button, and
-# they now ship in `catalog.json`'s `install.native.world_env`. Corrected after
+# they now ship in `catalog.json`'s `install.native.azerothcore.world_env`. Corrected after
 # a sweep found this text still arguing the opposite of what the code does.
 #
 # The argument was not wrong, only outranked, and the part still worth keeping
@@ -114,10 +102,10 @@ DEFAULT_WORLD_ENV: Mapping[str, str] = {
 }
 """Settings that are structural rather than tunable: without them the stack is wrong, not merely
 different. Anything a person might reasonably want a different value for belongs in
-`catalog.json`'s `install.native.world_env` instead — the playerbot population started here and
-was moved there after an adversarial review pointed out that a per-game number in a module
-constant is exactly what style-guide §3 forbids, and that one machine's bot population is not a
-default for every machine.
+`catalog.json`'s `install.native.azerothcore.world_env` instead — the playerbot population
+started here and was moved there after an adversarial review pointed out that a per-game number
+in a module constant is exactly what style-guide §3 forbids, and that one machine's bot
+population is not a default for every machine.
 
 The environment differences the compose diff turned up and this deliberately does NOT carry —
 `AC_CCACHE`, `CTYPE`, `CSCRIPTS`, `DATAPATH`, `USER_CONF_PATH` and the three empty
@@ -188,22 +176,8 @@ def project_name(
     return f"yulon-{_slug(game_id)}-{install_id(server_dir, platform_id=platform_id)}"
 
 
-BUILT_SERVICES: tuple[str, ...] = (
-    "worldserver",
-    "authserver",
-    "db-import",
-    "client-data",
-)
-"""The image suffixes the build overlay produces, in the base file's spelling.
-
-Kept beside the prefix and the tag because the three together are the only
-description of what a finished build leaves behind, and `docker.images_built()`
-now has to ask about them by name — see `built_image_refs()`.
-"""
-
-
 def built_image_refs(
-    server_dir: Path, *, platform_id: Callable[[], str] = platform.detect
+    entry: CatalogEntry, server_dir: Path, *, platform_id: Callable[[], str] = platform.detect
 ) -> tuple[str, ...]:
     """The image references this install's build produces, fully qualified.
 
@@ -219,9 +193,23 @@ def built_image_refs(
     in, so the old question answered "not built" for every finished build and a
     resume re-ran the compile. Cheap in BuildKit cache terms and still wrong:
     the engine would have reported hours of work it did not need to do.
+
+    The prefix and the service keys are the entry's (`install.native.images`,
+    `.image_prefix`) since 7.1, so two games cannot tag into one namespace.
     """
+    native = _native_of(entry)
     tag = image_tag(server_dir, platform_id=platform_id)
-    return tuple(f"{DEFAULT_IMAGE_PREFIX}{name}:{tag}" for name in BUILT_SERVICES)
+    return tuple(f"{native.image_prefix}{name}:{tag}" for name in native.images)
+
+
+def _native_of(entry: CatalogEntry) -> NativeInstall:
+    """The entry's native block, or the one refusal every native-only function shares."""
+    if entry.install.native is None:
+        raise ComposeGenError(
+            f"{entry.name} does not say how to install natively (no `install.native` in "
+            "catalog.json), so no compose files were generated."
+        )
+    return entry.install.native
 
 
 def image_tag(server_dir: Path, *, platform_id: Callable[[], str] = platform.detect) -> str:
@@ -244,19 +232,13 @@ def _slug(text: str) -> str:
 class ComposePlan:
     """The three files' text plus the `.env` keys this install needs on top of them.
 
-    `dotenv` is **always empty as this module is called today**, and saying so
-    is the point: `render()` has no caller that passes a per-install password,
-    so every value it writes is the catalog's fixed one, which the base file's
-    interpolation default has to carry anyway. A docstring here once promised
-    that a non-default password "lands in `.env` rather than being baked into
-    the file"; nothing implemented that, and a caller trusting it would have
-    written a generated secret into `docker-compose.yml` in seven places
-    (review, 2026-08-23).
-
-    The field stays because the `.env` merge is real machinery
-    (`write_dotenv()`) that `write_plan()` applies when this is non-empty — it
-    is the seam a per-install password would arrive through, not a claim that
-    one already does.
+    `dotenv` is empty for a fixed-password game (WotLK): the catalog's value is
+    the base file's interpolation default and needs no `.env`. For a
+    generated-password game it carries exactly `DB_ROOT_PASSWORD`, which
+    `write_plan()` merges into `.env` through `write_dotenv()` — the one writer
+    of that file — so the secret is never in a compose file git can see. A
+    docstring here once promised the second behaviour while nothing implemented
+    it (review, 2026-08-23); it has had a caller since 7.1.
     """
 
     base: str
@@ -296,65 +278,134 @@ def render(
     templates_root: Path,
     world_env: Mapping[str, str] | None = None,
     db_password: str | None = None,
+    bind_label: str = "",
     platform_id: Callable[[], str] = platform.detect,
 ) -> ComposePlan:
     """Render this entry's three compose files for an install in `server_dir`.
 
-    `db_password` overrides the catalog's fixed password (for a game that
-    generates one per install). **Whatever it is, it is rendered into
-    `docker-compose.yml`** — as the `${DB_ROOT_PASSWORD:-…}` interpolation
-    default, in seven places. The returned plan's `dotenv` is empty; see
-    `ComposePlan.dotenv` for why that is stated rather than fixed.
+    `db_password` is the per-install value for a game whose plan is `generated`
+    (the spine resolves it before stage 1); it may also override a fixed one. A
+    fixed value is rendered into `docker-compose.yml` as the
+    `${DB_ROOT_PASSWORD:-…}` default; a generated one goes only into the plan's
+    `dotenv`, and a template that names `{{DB_PASSWORD}}` in that mode is
+    refused.
+
+    `bind_label` is appended to every `./…:` host bind in the templates:
+    `":z"` when SELinux enforces and the filesystem can carry labels
+    (`platform.bind_label()` decides; the spine passes it), otherwise empty, so
+    off SELinux the rendered files are byte-identical to before 7.1. Never on a
+    named volume — the templates put the token only on bind lines, and
+    `test_composegen.py` counts them.
 
     Raises:
         ComposeGenError: the entry has no `install.native` block, a template is
-            missing, a placeholder was left unfilled, or a value cannot be
-            safely spliced into YAML.
+            missing, a placeholder was left unfilled, a value cannot be safely
+            spliced into YAML, the entry generates its password and none was
+            given, or a template names `{{DB_PASSWORD}}` in generated mode.
     """
-    native = entry.install.native
-    if native is None:
-        raise ComposeGenError(
-            f"{entry.name} does not say how to install natively (no `install.native` in "
-            "catalog.json), so no compose files were generated."
-        )
+    native = _native_of(entry)
     templates = templates_root / native.templates
-    password = db_password if db_password is not None else (entry.install.db_root_password or "")
-    if not password:
+    plan = entry.install.password
+    if db_password is not None:
+        password = db_password
+    elif plan.mode == "fixed" and plan.value:
+        password = plan.value
+    else:
         raise ComposeGenError(
-            f"{entry.name} has no database root password to write into its compose files."
+            f"{entry.name} generates its database password per install, and none was given "
+            "to render its compose files with."
         )
     _refuse_unsafe(password, "the database root password")
+    generated = plan.mode == "generated"
+    template_names = ("base.yml.tmpl", "override.yml.tmpl", "build.yml.tmpl")
+    texts = {name: _read_template(templates / name) for name in template_names}
+    if generated:
+        for name, text in texts.items():
+            if "{{DB_PASSWORD}}" in text:
+                raise ComposeGenError(
+                    f"{{{{DB_PASSWORD}}}} appears in {templates / name}, but {entry.name} "
+                    "generates its password per install; spell it "
+                    "${DB_ROOT_PASSWORD:?Yu'lon .env is missing} so the secret stays in .env."
+                )
+    # An allow-list of two, because this value is spliced into a YAML list item
+    # with no quoting at all: a newline in it writes whatever follows as another
+    # mount, and the templates are the one place a stray mount would not be
+    # noticed until a container had it.
+    if bind_label not in ("", ":z"):
+        raise ComposeGenError(
+            f"the bind label {bind_label!r} is not a mount option this engine writes; "
+            "only ':z' or nothing is spliced after a host bind."
+        )
     tag = image_tag(server_dir, platform_id=platform_id)
     project = project_name(entry.id, server_dir, platform_id=platform_id)
     # The entry's own settings layered over the structural defaults, and an
     # explicit `world_env` overriding both — that is the seam a settings
     # surface arrives through.
-    env = dict(world_env) if world_env is not None else {**DEFAULT_WORLD_ENV, **native.world_env}
-    base = _fill(
-        _read_template(templates / "base.yml.tmpl"),
+    #
+    # The `else {}` used to be a hole. An entry that said `family: "azerothcore"`
+    # and omitted the `azerothcore` block validated, rendered here without
+    # complaint, and handed the user mod-playerbots' OWN bot population instead
+    # of the one that was decided — the same-button-different-world divergence
+    # the 2026-08-24 `docker compose config` diff was run to catch, arriving
+    # through a missing block rather than a missing key, and covered by nothing
+    # because every test asserts against the shipped catalogue, which has the
+    # block. `NativeInstall._exactly_the_family_block` (contract A14, added with
+    # the CMaNGOS models) now closes it: no entry can reach this line saying
+    # `azerothcore` without the block, so the branch is the honest default for
+    # the `cmangos` family — which carries no `world_env`, because a CMaNGOS
+    # server is configured through its `.conf` files and not through container
+    # environment.
+    entry_env = native.azerothcore.world_env if native.azerothcore is not None else {}
+    env = dict(world_env) if world_env is not None else {**DEFAULT_WORLD_ENV, **entry_env}
+    base = fill(
+        texts["base.yml.tmpl"],
         {
             "PROJECT_NAME": project,
             "DB_PORT": str(entry.ports.db or 3306),
             "AUTH_PORT": str(entry.ports.auth),
             "WORLD_PORT": str(entry.ports.world),
             "SOAP_PORT": str(native.soap_port),
-            "DB_PASSWORD": password,
-            "IMAGE_PREFIX": DEFAULT_IMAGE_PREFIX,
+            # Absent entirely in generated mode, so a template that names the
+            # token fails `fill()`'s unfilled-placeholder check rather than
+            # quietly rendering an empty password — belt to the refusal's
+            # braces, which already caught it by name above.
+            **({} if generated else {"DB_PASSWORD": password}),
+            "IMAGE_PREFIX": native.image_prefix,
             "IMAGE_TAG": tag,
             "CONTAINER_USER": container_user(platform_id),
+            "BIND_LABEL": bind_label,
+            # The catalog facts (contract A6), last so the install-identity keys
+            # above stay the authority on any name the two sets ever share. A
+            # token no template uses costs nothing — `fill()` minds unfilled
+            # placeholders, not unused values — so the WotLK files render byte
+            # for byte as before (A16), and `MAKE_JOBS`/`CORE_DIR` are simply
+            # absent for a non-`cmangos` entry rather than blank.
+            **entry_tokens(entry),
         },
     )
-    override = _fill(
-        _read_template(templates / "override.yml.tmpl"), {"ENVIRONMENT": _env_block(env)}
+    override = fill(
+        texts["override.yml.tmpl"],
+        {"ENVIRONMENT": _env_block(env), "BIND_LABEL": bind_label},
     )
-    build = _fill(
-        _read_template(templates / "build.yml.tmpl"),
-        # `.` and not the absolute path: the server dir IS the checkout, and
-        # compose resolves a relative context against the file's own directory,
-        # so a moved folder keeps building.
-        {"BUILD_CONTEXT": "."},
+    build = fill(
+        texts["build.yml.tmpl"],
+        {
+            # `.` and not the absolute path: the server dir IS the checkout, and
+            # compose resolves a relative context against the file's own
+            # directory, so a moved folder keeps building.
+            "BUILD_CONTEXT": ".",
+            # The catalog facts here too, for `CONTAINER_PREFIX`. A build block
+            # is merged into the base file BY SERVICE NAME, and the shared
+            # CMaNGOS overlay is one template for three games whose services
+            # are `tbc-`, `vanilla-` and `tortoise-` prefixed, so it can only
+            # spell its service key as a token. WotLK's overlay names its four
+            # services in full and uses none of these — unused tokens cost
+            # nothing (`fill()` minds unfilled placeholders, not unused
+            # values), so its render stays byte-identical (A16).
+            **entry_tokens(entry),
+        },
     )
-    return ComposePlan(base, override, build, {})
+    return ComposePlan(base, override, build, {"DB_ROOT_PASSWORD": password} if generated else {})
 
 
 def _read_template(path: Path) -> str:
@@ -364,20 +415,122 @@ def _read_template(path: Path) -> str:
         raise ComposeGenError(f"the compose template {path} could not be read: {exc}") from exc
 
 
-def _fill(template: str, values: Mapping[str, str]) -> str:
+def fill(text: str, tokens: Mapping[str, str]) -> str:
     """`{{TOKEN}}` substitution where an unresolved token is an ERROR.
 
-    A template edit that adds a placeholder nobody fills would otherwise ship a
-    compose file containing a literal `{{...}}`, which compose accepts happily
-    as a string and which fails somewhere else entirely.
+    The ONE substitution for everything this engine renders — compose
+    templates, a CMaNGOS Dockerfile, `.conf` values, SQL statements and the
+    ready markers all come through here (contract A6), so a token spelled once
+    in `catalog.json` means the same thing in every file. A template edit that
+    adds a placeholder nobody fills would otherwise ship a compose file
+    containing a literal `{{...}}`, which compose accepts happily as a string
+    and which fails somewhere else entirely. Unused tokens are fine; unfilled
+    ones are not.
     """
-    out = template
-    for key, value in values.items():
+    out = text
+    for key, value in tokens.items():
         out = out.replace("{{" + key + "}}", value)
     start = out.find("{{")
     if start >= 0:
         raise ComposeGenError(f"unfilled compose placeholder near: {out[start:start + 40]!r}")
     return out
+
+
+_fill = fill
+"""The pre-7.1 private name, kept so nothing that imported it moves twice."""
+
+
+def _container_prefix(entry: CatalogEntry) -> str:
+    """The part the three container names share: `ac-` for WotLK, `tbc-` for TBC.
+
+    The shared CMaNGOS templates name services `{{CONTAINER_PREFIX}}db`,
+    `..realmd`, `..mangosd` so they equal the entry's container names — the
+    AzerothCore convention `docker.start_database()` relies on. Derived rather
+    than declared, so the catalog cannot say two different things.
+
+    Deriving it is right; deriving it with `os.path.commonprefix` and TRUSTING
+    the answer was not. That function is character-wise, not separator- or
+    token-aware, and it never raises: three names sharing no first character
+    answer `""`, `db`/`dbauth`/`dbworld` answer `"db"` (so
+    `{{CONTAINER_PREFIX}}db` renders `dbdb`), and `abc-db`/`abcd-realmd`/
+    `abcx-mangosd` answer `"abc"`, with the separator eaten. Every one of those
+    is a filled-but-wrong token, and `fill()` has no opinion about those — it
+    refuses an UNFILLED placeholder — so the first thing to report it would be
+    `docker compose up` naming a container no service owns. In a module whose
+    whole design is that a bad value is loud, the answer is checked here:
+
+    * an empty prefix is refused outright. It cannot be right for any entry.
+    * an entry that declares `containers.services` — every CMaNGOS game does,
+      because its services (`db`/`realmd`/`mangosd`) differ from its containers
+      — must have the prefix rebuild all three container names from those
+      service names exactly. That is literally the `{{CONTAINER_PREFIX}}<service>`
+      the templates write, checked against the catalog instead of assumed.
+
+    An entry that leaves `services` out names each container after its service
+    (AzerothCore: service `ac-database` IS container `ac-database`), so there is
+    no suffix to rebuild from and its templates spell the names out in full;
+    only the empty check applies to it.
+    `test_the_container_prefix_rebuilds_the_container_names_of_every_shipped_entry`
+    runs the same invariant over every entry in the shipped catalog.
+    """
+    names = (entry.containers.db, entry.containers.auth, entry.containers.world)
+    prefix = os.path.commonprefix(list(names))
+    if not prefix:
+        raise ComposeGenError(
+            f"the container names of {entry.id} ({', '.join(names)}) share no common prefix, "
+            "so the container-prefix token would render the bare service names and the stack "
+            "would name containers that no service owns. Give the three containers one shared "
+            "prefix, as in <game>-db, <game>-realmd and <game>-mangosd."
+        )
+    services = entry.containers.services
+    if services is not None:
+        rebuilt = tuple(prefix + service for service in services)
+        if rebuilt != names:
+            raise ComposeGenError(
+                f"the container prefix {prefix!r} of {entry.id} rebuilds "
+                f"{', '.join(rebuilt)} from its service names {', '.join(services)}, but its "
+                f"containers are {', '.join(names)}. A template that writes the prefix in front "
+                "of a service name would name a container that does not exist. Name every "
+                "container after its service with one shared prefix in front of it."
+            )
+    return prefix
+
+
+def entry_tokens(entry: CatalogEntry) -> dict[str, str]:
+    """The per-game tokens every template, conf value and SQL statement may use.
+
+    Facts the entry already states, spelled once: `DB_HOST` is the DB container
+    (the conf files reach it by that name, not the scripts' bare `db`), the
+    schema names are `databases.*`, and `LOGS_DB` is the first `extra` schema
+    — omitted, not blanked, when there is none, so a template that wants it
+    fails in `fill()` instead of writing `;;` into a conf. `MAKE_JOBS` and
+    `CORE_DIR` exist only for a `cmangos` block: `CORE_DIR` is the core's
+    in-image install prefix, derived as the parent of `conf.source_dir`
+    (`/opt/mangos/etc` → `/opt/mangos`), which is where the binaries, the
+    `etc/` bind and the `data/` bind all hang. `CmangosInstaller._tokens()`
+    adds the per-install ones (`DB_PASSWORD`, `REALM_HOST`, ports, project,
+    image prefix and tag) on top of this mapping (contract A6).
+
+    Raises:
+        ComposeGenError: the entry has no `install.native` block.
+    """
+    native = _native_of(entry)
+    tokens = {
+        "DB_IMAGE": native.db.image,
+        "DB_HOST": entry.containers.db,
+        "DB_USER": native.db.user,
+        "AUTH_DB": entry.databases.auth,
+        "WORLD_DB": entry.databases.world,
+        "CHAR_DB": entry.databases.characters,
+        "CONTAINER_PREFIX": _container_prefix(entry),
+        "CLIENT_BUILD": str(entry.client.build),
+    }
+    if entry.databases.extra:
+        tokens["LOGS_DB"] = entry.databases.extra[0]
+    if native.cmangos is not None:
+        tokens["MAKE_JOBS"] = str(native.cmangos.dockerfile.make_jobs)
+        tokens["CORE_DIR"] = str(PurePosixPath(native.cmangos.conf.source_dir).parent)
+    return tokens
 
 
 def _env_block(env: Mapping[str, str]) -> str:
@@ -484,11 +637,8 @@ def write_plan(
 def merge_dotenv(existing: str, additions: Mapping[str, str]) -> str:
     """`.env` text with `additions` applied: existing assignments replaced, new ones appended.
 
-    No non-test caller reaches this today — `render()` returns an empty
-    `dotenv`, so `write_plan()`'s branch never fires. It is written and tested
-    ahead of the first caller that needs it (a per-install database password,
-    or the settings surface writing a port binding), not because something
-    already merges an `.env`.
+    Reached through `write_plan()` for a generated-password game since 7.1; a
+    fixed-password plan never fills `dotenv`, so WotLK never comes here.
 
     A merge and not a rewrite, because this file is shared. Compose interpolates
     the compose files from it, a later SOAP setup writes its own port binding

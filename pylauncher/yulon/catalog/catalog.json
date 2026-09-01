@@ -12,11 +12,13 @@
           {
             "repo": "mod-playerbots/azerothcore-wotlk",
             "branch": "Playerbot",
-            "depth": null
+            "depth": null,
+            "dest": "."
           },
           {
             "repo": "mod-playerbots/mod-playerbots",
-            "branch": "master"
+            "branch": "master",
+            "dest": "modules/mod-playerbots"
           }
         ]
       },
@@ -26,21 +28,40 @@
           "macos",
           "windows"
         ],
-        "script_platforms": [
-          "linux"
-        ],
         "script": "wow-wotlk/install-wow-wotlk.sh",
         "script_variants": {
           "apt": "wow-wotlk/install-wow-wotlk-ubuntu.sh",
           "dnf": "wow-wotlk/install-wow-wotlk-fedora.sh"
         },
         "default_server_dir": "wow-server-playerbots",
-        "db_root_password": "password",
+        "password": {
+          "mode": "fixed",
+          "value": "password"
+        },
         "native": {
+          "family": "azerothcore",
           "templates": "wow-wotlk/native",
-          "world_env": {
-            "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS": "500",
-            "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS": "500"
+          "images": [
+            "worldserver",
+            "authserver",
+            "db-import",
+            "client-data"
+          ],
+          "image_prefix": "yulon.local/ac-wotlk-",
+          "db": {
+            "image": "mysql:8.4",
+            "client": "mysql",
+            "user": "root"
+          },
+          "ready": {
+            "world": "ready...",
+            "auth": "{{REALM_HOST}}:{{WORLD_PORT}}"
+          },
+          "azerothcore": {
+            "world_env": {
+              "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS": "500",
+              "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS": "500"
+            }
           }
         }
       },
@@ -84,13 +105,16 @@
         "name": "CMaNGOS mangos-tbc + cmangos/playerbots + tbc-db",
         "sources": [
           {
-            "repo": "cmangos/mangos-tbc"
+            "repo": "cmangos/mangos-tbc",
+            "dest": "src/mangos-tbc"
           },
           {
-            "repo": "cmangos/playerbots"
+            "repo": "cmangos/playerbots",
+            "dest": "src/mangos-tbc/src/modules/Bots"
           },
           {
-            "repo": "cmangos/tbc-db"
+            "repo": "cmangos/tbc-db",
+            "dest": "src/tbc-db"
           }
         ]
       },
@@ -101,7 +125,289 @@
         "script": "wow-tbc/install-wow-tbc.sh",
         "default_server_dir": "wow-tbc-server",
         "requires_client_dir": true,
-        "db_root_password_file": ".db_password"
+        "password": {
+          "mode": "generated",
+          "file": ".db_password",
+          "prefix": "tbc-"
+        },
+        "native": {
+          "family": "cmangos",
+          "templates": "shared/cmangos",
+          "dockerfile_dir": "wow-tbc/native",
+          "image_prefix": "yulon.local/cmangos-tbc-",
+          "images": [
+            "server"
+          ],
+          "min_ram_gb": 6,
+          "warn_ram_gb": 8,
+          "min_data_root_gb": 20,
+          "warn_data_root_gb": 30,
+          "min_server_dir_gb": 20,
+          "warn_server_dir_gb": 30,
+          "db": {
+            "image": "mariadb:11",
+            "client": "mariadb",
+            "user": "mangos",
+            "charset": "utf8mb4"
+          },
+          "ready": {
+            "world": "Avg Diff:",
+            "auth": null,
+            "fatal": null,
+            "regex": false,
+            "timeout_s": 600,
+            "restart_loop": 4
+          },
+          "cmangos": {
+            "client": {
+              "required_file": "Data/expansion.MPQ",
+              "min_mpq": 6,
+              "mpq_depth": "recursive",
+              "locale_mpq_required": true,
+              "near_client_warn_gb": 8
+            },
+            "dockerfile": {
+              "make_jobs": 2
+            },
+            "extract": {
+              "image": "server",
+              "ulimit_stack_unlimited": false,
+              "tools": [
+                {
+                  "name": "dbc and maps",
+                  "argv": [
+                    "/opt/mangos/bin/tools/ad",
+                    "-i",
+                    "/client",
+                    "-o",
+                    "/out"
+                  ],
+                  "produces": {
+                    "dbc": 100,
+                    "maps": 100
+                  }
+                },
+                {
+                  "name": "vmap extract",
+                  "argv": [
+                    "/opt/mangos/bin/tools/vmap_extractor",
+                    "-d",
+                    "/client/Data"
+                  ],
+                  "produces": {
+                    "Buildings": 100
+                  }
+                },
+                {
+                  "name": "vmap assemble",
+                  "argv": [
+                    "/opt/mangos/bin/tools/vmap_assembler",
+                    "Buildings",
+                    "vmaps"
+                  ],
+                  "produces": {
+                    "vmaps": 100
+                  }
+                }
+              ]
+            },
+            "mmaps": {
+              "argv": [
+                "/opt/mangos/bin/tools/MoveMapGen",
+                "--silent",
+                "--threads",
+                "2"
+              ],
+              "min_files": 500,
+              "required": true
+            },
+            "conf": {
+              "source_dir": "/opt/mangos/etc",
+              "files": {
+                "mangosd.conf": {
+                  "keys": {
+                    "LoginDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{AUTH_DB}}\"",
+                    "WorldDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{WORLD_DB}}\"",
+                    "CharacterDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{CHAR_DB}}\"",
+                    "LogsDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{LOGS_DB}}\"",
+                    "DataDir": "\"/opt/mangos/data\"",
+                    "WorldServerPort": "{{WORLD_PORT}}"
+                  }
+                },
+                "realmd.conf": {
+                  "keys": {
+                    "LoginDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{AUTH_DB}}\""
+                  }
+                },
+                "aiplayerbot.conf": {
+                  "keys": {
+                    "AiPlayerbot.MinRandomBots": "500",
+                    "AiPlayerbot.MaxRandomBots": "500",
+                    "AiPlayerbot.RandomBotAccountCount": "100"
+                  }
+                },
+                "ahbot.conf": {
+                  "keys": {
+                    "AuctionHouseBot.Chance.Sell": "75",
+                    "AuctionHouseBot.Loot.Creature.Normal": "90, 100, 30, 40",
+                    "AuctionHouseBot.Loot.Creature.Rare": "0, 30, 1, 2",
+                    "AuctionHouseBot.Loot.Creature.Elite": "80, 90, 4, 6",
+                    "AuctionHouseBot.Loot.Creature.RareElite": "0, 15, 1, 2",
+                    "AuctionHouseBot.Loot.Creature.WorldBoss": "-10, 2, 1, 1",
+                    "AuctionHouseBot.Loot.Disenchant": "40, 50, 2, 3",
+                    "AuctionHouseBot.Loot.Fishing": "12, 18, 100, 150",
+                    "AuctionHouseBot.Loot.Gameobject": "50, 60, 30, 45",
+                    "AuctionHouseBot.Loot.Skinning": "12, 18, 200, 250",
+                    "AuctionHouseBot.Items.Profession": "250, 300, 0, 50"
+                  }
+                }
+              }
+            },
+            "sql": {
+              "create": [
+                "mangos",
+                "realmd",
+                "characters",
+                "logs"
+              ],
+              "phases": [
+                {
+                  "name": "realmd base",
+                  "into": "realmd",
+                  "files": [
+                    "src/mangos-tbc/sql/base/realmd.sql"
+                  ],
+                  "on_error": "fail"
+                },
+                {
+                  "name": "characters base",
+                  "into": "characters",
+                  "files": [
+                    "src/mangos-tbc/sql/base/characters.sql"
+                  ],
+                  "on_error": "fail"
+                },
+                {
+                  "name": "logs base",
+                  "into": "logs",
+                  "files": [
+                    "src/mangos-tbc/sql/base/logs.sql"
+                  ],
+                  "on_error": "fail"
+                },
+                {
+                  "name": "world content",
+                  "into": "mangos",
+                  "files": [
+                    "src/tbc-db/Full_DB/TBCDB_*.sql.gz"
+                  ],
+                  "gzip": true,
+                  "on_error": "fail"
+                },
+                {
+                  "name": "content updates",
+                  "into": "mangos",
+                  "files": [
+                    "src/tbc-db/Updates/*.sql"
+                  ],
+                  "sort": "natural",
+                  "on_error": "warn"
+                },
+                {
+                  "name": "ACID",
+                  "into": "mangos",
+                  "files": [
+                    "src/tbc-db/ACID/*.sql"
+                  ],
+                  "on_error": "warn"
+                },
+                {
+                  "name": "dbc data",
+                  "into": "mangos",
+                  "files": [
+                    "src/mangos-tbc/sql/base/dbc/original_data/*.sql",
+                    "src/mangos-tbc/sql/base/dbc/cmangos_fixes/*.sql"
+                  ],
+                  "on_error": "warn"
+                },
+                {
+                  "name": "core updates",
+                  "into_each": {
+                    "mangos": "src/mangos-tbc/sql/updates/mangos/*.sql",
+                    "realmd": "src/mangos-tbc/sql/updates/realmd/*.sql",
+                    "characters": "src/mangos-tbc/sql/updates/characters/*.sql",
+                    "logs": "src/mangos-tbc/sql/updates/logs/*.sql"
+                  },
+                  "sort": "natural",
+                  "on_error": "warn"
+                },
+                {
+                  "name": "spell_template hotfix",
+                  "into": "mangos",
+                  "statements": [
+                    "ALTER TABLE spell_template ADD COLUMN IF NOT EXISTS EffectBonusCoefficient1 FLOAT NOT NULL DEFAULT '0' AFTER RequiredAuraVision, ADD COLUMN IF NOT EXISTS EffectBonusCoefficient2 FLOAT NOT NULL DEFAULT '0' AFTER EffectBonusCoefficient1, ADD COLUMN IF NOT EXISTS EffectBonusCoefficient3 FLOAT NOT NULL DEFAULT '0' AFTER EffectBonusCoefficient2, ADD COLUMN IF NOT EXISTS EffectBonusCoefficientFromAP1 FLOAT NOT NULL DEFAULT '0' AFTER EffectBonusCoefficient3, ADD COLUMN IF NOT EXISTS EffectBonusCoefficientFromAP2 FLOAT NOT NULL DEFAULT '0' AFTER EffectBonusCoefficientFromAP1, ADD COLUMN IF NOT EXISTS EffectBonusCoefficientFromAP3 FLOAT NOT NULL DEFAULT '0' AFTER EffectBonusCoefficientFromAP2"
+                  ],
+                  "on_error": "warn"
+                },
+                {
+                  "name": "playerbots characters",
+                  "into": "characters",
+                  "files": [
+                    "src/mangos-tbc/src/modules/Bots/sql/characters/*.sql"
+                  ],
+                  "on_error": "warn"
+                },
+                {
+                  "name": "playerbots world",
+                  "into": "mangos",
+                  "files": [
+                    "src/mangos-tbc/src/modules/Bots/sql/world/*.sql",
+                    "src/mangos-tbc/src/modules/Bots/sql/world/tbc/*.sql"
+                  ],
+                  "on_error": "warn"
+                },
+                {
+                  "name": "expansion unlock",
+                  "into": "realmd",
+                  "statements": [
+                    "ALTER TABLE account MODIFY COLUMN expansion TINYINT(3) UNSIGNED NOT NULL DEFAULT 1",
+                    "UPDATE account SET expansion = 1"
+                  ],
+                  "on_error": "fail"
+                }
+              ],
+              "verify": [
+                {
+                  "db": "mangos",
+                  "query": "SELECT COUNT(*) FROM item_template",
+                  "min": 10000
+                },
+                {
+                  "db": "mangos",
+                  "query": "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='mangos' AND table_name LIKE 'ai_playerbot%'",
+                  "min": 10
+                }
+              ],
+              "player_data": [
+                {
+                  "db": "characters",
+                  "table": "characters"
+                },
+                {
+                  "db": "realmd",
+                  "table": "account",
+                  "exclude_usernames": [
+                    "ADMINISTRATOR",
+                    "GAMEMASTER",
+                    "MODERATOR",
+                    "PLAYER"
+                  ]
+                }
+              ],
+              "marker_db": "mangos"
+            }
+          }
+        }
       },
       "containers": {
         "db": "tbc-db",
@@ -151,13 +457,16 @@
         "name": "CMaNGOS mangos-classic + cmangos/playerbots + classic-db",
         "sources": [
           {
-            "repo": "cmangos/mangos-classic"
+            "repo": "cmangos/mangos-classic",
+            "dest": "src/mangos-classic"
           },
           {
-            "repo": "cmangos/playerbots"
+            "repo": "cmangos/playerbots",
+            "dest": "src/mangos-classic/src/modules/Bots"
           },
           {
-            "repo": "cmangos/classic-db"
+            "repo": "cmangos/classic-db",
+            "dest": "src/classic-db"
           }
         ]
       },
@@ -168,7 +477,282 @@
         "script": "wow-vanilla/install-wow-vanilla.sh",
         "default_server_dir": "wow-vanilla-server",
         "requires_client_dir": true,
-        "db_root_password_file": ".db_password"
+        "password": {
+          "mode": "generated",
+          "file": ".db_password",
+          "prefix": "vanilla-"
+        },
+        "native": {
+          "family": "cmangos",
+          "templates": "shared/cmangos",
+          "dockerfile_dir": "wow-vanilla/native",
+          "image_prefix": "yulon.local/cmangos-vanilla-",
+          "images": [
+            "server"
+          ],
+          "min_ram_gb": 6,
+          "warn_ram_gb": 8,
+          "min_data_root_gb": 20,
+          "warn_data_root_gb": 30,
+          "min_server_dir_gb": 20,
+          "warn_server_dir_gb": 30,
+          "db": {
+            "image": "mariadb:11",
+            "client": "mariadb",
+            "user": "mangos",
+            "charset": "utf8mb4"
+          },
+          "ready": {
+            "world": "Avg Diff:",
+            "auth": null,
+            "fatal": null,
+            "regex": false,
+            "timeout_s": 600,
+            "restart_loop": 4
+          },
+          "cmangos": {
+            "client": {
+              "required_file": "Data/dbc.MPQ",
+              "min_mpq": 5,
+              "mpq_depth": 1,
+              "locale_mpq_required": false,
+              "near_client_warn_gb": 8
+            },
+            "dockerfile": {
+              "make_jobs": 2
+            },
+            "extract": {
+              "image": "server",
+              "ulimit_stack_unlimited": true,
+              "tools": [
+                {
+                  "name": "dbc and maps",
+                  "argv": [
+                    "/opt/mangos/bin/tools/ad",
+                    "-i",
+                    "/client",
+                    "-o",
+                    "/out"
+                  ],
+                  "produces": {
+                    "dbc": 100,
+                    "maps": 100
+                  }
+                },
+                {
+                  "name": "vmap extract",
+                  "argv": [
+                    "/opt/mangos/bin/tools/vmap_extractor",
+                    "-d",
+                    "/client/Data"
+                  ],
+                  "produces": {
+                    "Buildings": 100
+                  }
+                },
+                {
+                  "name": "vmap assemble",
+                  "argv": [
+                    "/opt/mangos/bin/tools/vmap_assembler",
+                    "Buildings",
+                    "vmaps"
+                  ],
+                  "produces": {
+                    "vmaps": 100
+                  }
+                }
+              ],
+              "retry": {
+                "when_log_matches": "Segmentation fault|core dumped",
+                "tools": [
+                  "vmap extract",
+                  "vmap assemble"
+                ]
+              }
+            },
+            "mmaps": {
+              "argv": [
+                "/opt/mangos/bin/tools/MoveMapGen",
+                "--silent",
+                "--threads",
+                "2"
+              ],
+              "min_files": 500,
+              "required": true
+            },
+            "conf": {
+              "source_dir": "/opt/mangos/etc",
+              "files": {
+                "mangosd.conf": {
+                  "keys": {
+                    "LoginDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{AUTH_DB}}\"",
+                    "WorldDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{WORLD_DB}}\"",
+                    "CharacterDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{CHAR_DB}}\"",
+                    "LogsDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{LOGS_DB}}\"",
+                    "DataDir": "\"/opt/mangos/data\"",
+                    "WorldServerPort": "{{WORLD_PORT}}"
+                  }
+                },
+                "realmd.conf": {
+                  "keys": {
+                    "LoginDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{AUTH_DB}}\""
+                  }
+                },
+                "aiplayerbot.conf": {
+                  "match_commented": true,
+                  "keys": {
+                    "AiPlayerbot.MinRandomBots": "500",
+                    "AiPlayerbot.MaxRandomBots": "500",
+                    "AiPlayerbot.RandomBotAccountCount": "100",
+                    "AiPlayerbot.SyncLevelWithPlayers": "1",
+                    "AiPlayerbot.SyncLevelMaxAbove": "5",
+                    "AiPlayerbot.SyncLevelNoPlayer": "1"
+                  }
+                },
+                "ahbot.conf": {
+                  "keys": {
+                    "AuctionHouseBot.Chance.Sell": "75",
+                    "AuctionHouseBot.Loot.Creature.Normal": "90, 100, 30, 40",
+                    "AuctionHouseBot.Loot.Creature.Rare": "0, 30, 1, 2",
+                    "AuctionHouseBot.Loot.Creature.Elite": "80, 90, 4, 6",
+                    "AuctionHouseBot.Loot.Creature.RareElite": "0, 15, 1, 2",
+                    "AuctionHouseBot.Loot.Creature.WorldBoss": "-10, 2, 1, 1",
+                    "AuctionHouseBot.Loot.Disenchant": "40, 50, 2, 3",
+                    "AuctionHouseBot.Loot.Fishing": "12, 18, 100, 150",
+                    "AuctionHouseBot.Loot.Gameobject": "50, 60, 30, 45",
+                    "AuctionHouseBot.Loot.Skinning": "12, 18, 200, 250",
+                    "AuctionHouseBot.Items.Profession": "250, 300, 0, 50"
+                  }
+                }
+              }
+            },
+            "sql": {
+              "create": [
+                "mangos",
+                "realmd",
+                "characters",
+                "logs"
+              ],
+              "phases": [
+                {
+                  "name": "realmd base",
+                  "into": "realmd",
+                  "files": [
+                    "src/mangos-classic/sql/base/realmd.sql"
+                  ],
+                  "on_error": "fail"
+                },
+                {
+                  "name": "characters base",
+                  "into": "characters",
+                  "files": [
+                    "src/mangos-classic/sql/base/characters.sql"
+                  ],
+                  "on_error": "fail"
+                },
+                {
+                  "name": "logs base",
+                  "into": "logs",
+                  "files": [
+                    "src/mangos-classic/sql/base/logs.sql"
+                  ],
+                  "on_error": "fail"
+                },
+                {
+                  "name": "world content",
+                  "into": "mangos",
+                  "files": [
+                    "src/classic-db/Full_DB/ClassicDB_*.sql.gz"
+                  ],
+                  "gzip": true,
+                  "on_error": "fail"
+                },
+                {
+                  "name": "content updates",
+                  "into": "mangos",
+                  "files": [
+                    "src/classic-db/Updates/*.sql"
+                  ],
+                  "sort": "natural",
+                  "on_error": "warn"
+                },
+                {
+                  "name": "ACID",
+                  "into": "mangos",
+                  "files": [
+                    "src/classic-db/ACID/acid_classic.sql"
+                  ],
+                  "on_error": "warn"
+                },
+                {
+                  "name": "core updates",
+                  "into_each": {
+                    "mangos": "src/mangos-classic/sql/updates/mangos/*.sql",
+                    "realmd": "src/mangos-classic/sql/updates/realmd/*.sql",
+                    "characters": "src/mangos-classic/sql/updates/characters/*.sql",
+                    "logs": "src/mangos-classic/sql/updates/logs/*.sql"
+                  },
+                  "sort": "natural",
+                  "on_error": "warn"
+                },
+                {
+                  "name": "spell_template hotfix",
+                  "into": "mangos",
+                  "statements": [
+                    "ALTER TABLE spell_template ADD COLUMN IF NOT EXISTS EffectBonusCoefficient1 FLOAT NOT NULL DEFAULT '0' AFTER RequiredAuraVision, ADD COLUMN IF NOT EXISTS EffectBonusCoefficient2 FLOAT NOT NULL DEFAULT '0' AFTER EffectBonusCoefficient1, ADD COLUMN IF NOT EXISTS EffectBonusCoefficient3 FLOAT NOT NULL DEFAULT '0' AFTER EffectBonusCoefficient2, ADD COLUMN IF NOT EXISTS EffectBonusCoefficientFromAP1 FLOAT NOT NULL DEFAULT '0' AFTER EffectBonusCoefficient3, ADD COLUMN IF NOT EXISTS EffectBonusCoefficientFromAP2 FLOAT NOT NULL DEFAULT '0' AFTER EffectBonusCoefficientFromAP1, ADD COLUMN IF NOT EXISTS EffectBonusCoefficientFromAP3 FLOAT NOT NULL DEFAULT '0' AFTER EffectBonusCoefficientFromAP2"
+                  ],
+                  "on_error": "warn"
+                },
+                {
+                  "name": "playerbots characters",
+                  "into": "characters",
+                  "files": [
+                    "src/mangos-classic/src/modules/Bots/sql/characters/*.sql"
+                  ],
+                  "on_error": "warn"
+                },
+                {
+                  "name": "playerbots world",
+                  "into": "mangos",
+                  "files": [
+                    "src/mangos-classic/src/modules/Bots/sql/world/*.sql",
+                    "src/mangos-classic/src/modules/Bots/sql/world/classic/*.sql"
+                  ],
+                  "on_error": "warn"
+                }
+              ],
+              "verify": [
+                {
+                  "db": "mangos",
+                  "query": "SELECT COUNT(*) FROM item_template",
+                  "min": 17000
+                },
+                {
+                  "db": "mangos",
+                  "query": "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='mangos' AND table_name LIKE 'ai_playerbot%'",
+                  "min": 10
+                }
+              ],
+              "player_data": [
+                {
+                  "db": "characters",
+                  "table": "characters"
+                },
+                {
+                  "db": "realmd",
+                  "table": "account",
+                  "exclude_usernames": [
+                    "ADMINISTRATOR",
+                    "GAMEMASTER",
+                    "MODERATOR",
+                    "PLAYER"
+                  ]
+                }
+              ],
+              "marker_db": "mangos"
+            }
+          }
+        }
       },
       "containers": {
         "db": "vanilla-db",
@@ -219,7 +803,8 @@
         "sources": [
           {
             "repo": "Shyalya/tortoise-wow",
-            "branch": "playerbots-integration-gh"
+            "branch": "playerbots-integration-gh",
+            "dest": "src/tortoise-wow"
           }
         ]
       },
@@ -229,8 +814,207 @@
         ],
         "script": "wow-tortoise/install-tortoise-wow-wsl.sh",
         "default_server_dir": "tortoise-wow-server",
-        "db_root_password_file": ".db_password",
-        "requires_client_dir": true
+        "requires_client_dir": true,
+        "password": {
+          "mode": "generated",
+          "file": ".db_password",
+          "prefix": "tortoise-"
+        },
+        "native": {
+          "family": "cmangos",
+          "templates": "shared/cmangos",
+          "dockerfile_dir": "wow-tortoise/native",
+          "image_prefix": "yulon.local/cmangos-tortoise-",
+          "images": [
+            "server"
+          ],
+          "min_ram_gb": 6,
+          "warn_ram_gb": 8,
+          "min_data_root_gb": 20,
+          "warn_data_root_gb": 30,
+          "min_server_dir_gb": 20,
+          "warn_server_dir_gb": 30,
+          "db": {
+            "image": "mariadb:10.6",
+            "client": "mariadb",
+            "user": "mangos",
+            "charset": "utf8mb4"
+          },
+          "ready": {
+            "world": "World initialized|MaNGOS.*started up successfully|Ready to login",
+            "auth": null,
+            "fatal": "Correct \\*.map files not found|Could not open|Database .* not found",
+            "regex": true,
+            "timeout_s": 600,
+            "restart_loop": 4
+          },
+          "cmangos": {
+            "client": {
+              "required_file": null,
+              "min_mpq": 5,
+              "mpq_depth": 2,
+              "locale_mpq_required": false,
+              "near_client_warn_gb": 8
+            },
+            "dockerfile": {
+              "make_jobs": 2
+            },
+            "extract": {
+              "image": "server",
+              "ulimit_stack_unlimited": false,
+              "tools": [
+                {
+                  "name": "maps and dbc",
+                  "argv": [
+                    "/opt/tortoise/bin/mapextractor",
+                    "-i",
+                    "/client",
+                    "-o",
+                    "/out",
+                    "-e",
+                    "3"
+                  ],
+                  "produces": {
+                    "dbc": 100,
+                    "maps": 100
+                  }
+                },
+                {
+                  "name": "vmap extract",
+                  "argv": [
+                    "/opt/tortoise/bin/vmapextractor",
+                    "-d",
+                    "/client/Data/"
+                  ],
+                  "produces": {
+                    "Buildings": 100
+                  }
+                },
+                {
+                  "name": "vmap assemble",
+                  "argv": [
+                    "/opt/tortoise/bin/vmap_assembler",
+                    "/out/Buildings",
+                    "/out/vmaps"
+                  ],
+                  "produces": {
+                    "vmaps": 100
+                  }
+                }
+              ]
+            },
+            "mmaps": {
+              "argv": [
+                "/opt/tortoise/bin/MoveMapGen",
+                "--silent",
+                "--doNotFilterDeepWater",
+                "--offMeshInput",
+                "/opt/tortoise/src/tools/mmap/offmesh.txt",
+                "--settingsInput",
+                "/opt/tortoise/src/tools/mmap/mmapSettings.txt"
+              ],
+              "min_files": 500,
+              "required": false
+            },
+            "conf": {
+              "source_dir": "/opt/tortoise/etc",
+              "files": {
+                "mangosd.conf": {
+                  "keys": {
+                    "LoginDatabase.Info": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{AUTH_DB}}\"",
+                    "WorldDatabase.Info": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{WORLD_DB}}\"",
+                    "CharacterDatabase.Info": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{CHAR_DB}}\"",
+                    "LogsDatabase.Info": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{LOGS_DB}}\"",
+                    "Database.AutoUpdate.Path": "\"/opt/tortoise/sql/\"",
+                    "DataDir": "\"/opt/tortoise/data\"",
+                    "WorldServerPort": "{{WORLD_PORT}}",
+                    "GameType": "0",
+                    "GM.LoginState": "0",
+                    "GM.StartLevel": "1",
+                    "AutoHonorRestart": "0",
+                    "AutoRestart.MaxServerUptime": "0"
+                  }
+                },
+                "realmd.conf": {
+                  "keys": {
+                    "LoginDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{AUTH_DB}}\"",
+                    "ForcePinAccountRank": "10"
+                  }
+                }
+              }
+            },
+            "sql": {
+              "create": [],
+              "phases": [
+                {
+                  "name": "schemas",
+                  "files": [
+                    "src/tortoise-wow/sql/create_databases.sql"
+                  ],
+                  "on_error": "fail"
+                },
+                {
+                  "name": "app user and grants",
+                  "statements": [
+                    "CREATE USER IF NOT EXISTS '{{DB_USER}}'@'%' IDENTIFIED BY '{{DB_PASSWORD}}'",
+                    "GRANT ALL ON `{{WORLD_DB}}`.* TO '{{DB_USER}}'@'%'",
+                    "GRANT ALL ON `{{CHAR_DB}}`.* TO '{{DB_USER}}'@'%'",
+                    "GRANT ALL ON `{{AUTH_DB}}`.* TO '{{DB_USER}}'@'%'",
+                    "GRANT ALL ON `{{LOGS_DB}}`.* TO '{{DB_USER}}'@'%'",
+                    "FLUSH PRIVILEGES"
+                  ],
+                  "on_error": "fail"
+                },
+                {
+                  "name": "world base",
+                  "into": "tw_world",
+                  "files": [
+                    "src/tortoise-wow/sql/base/*.sql"
+                  ],
+                  "sort": "name",
+                  "on_error": "fail"
+                },
+                {
+                  "name": "realm row",
+                  "into": "tw_logon",
+                  "statements": [
+                    "REPLACE INTO realmlist (id,name,address,port,icon,realmflags,timezone,allowedSecurityLevel,population,realmbuilds) VALUES (1, 'Tortoise WoW', '{{REALM_HOST}}', {{WORLD_PORT}}, 0,0,0,0,0, '{{CLIENT_BUILD}}')"
+                  ],
+                  "on_error": "fail"
+                }
+              ],
+              "verify": [
+                {
+                  "db": "tw_world",
+                  "query": "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='tw_world'",
+                  "min": 150
+                },
+                {
+                  "db": "tw_logon",
+                  "query": "SELECT COUNT(*) FROM realmlist",
+                  "min": 1
+                }
+              ],
+              "player_data": [
+                {
+                  "db": "tw_char",
+                  "table": "characters"
+                },
+                {
+                  "db": "tw_logon",
+                  "table": "account",
+                  "exclude_usernames": [
+                    "ADMINISTRATOR",
+                    "GAMEMASTER",
+                    "MODERATOR",
+                    "PLAYER"
+                  ]
+                }
+              ],
+              "marker_db": "tw_world"
+            }
+          }
+        }
       },
       "containers": {
         "db": "tortoise-db",

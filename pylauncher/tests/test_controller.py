@@ -181,9 +181,9 @@ def test_wait_helpers_are_bound_to_the_spec(monkeypatch: pytest.MonkeyPatch) -> 
         return True
 
     def fake_wait_ready(
-        spec: docker.ContainerSpec, realm_host: str, realm_port: int, **kwargs: float
+        spec: docker.ContainerSpec, ready: docker.ReadySpec, **kwargs: object
     ) -> bool:
-        seen["ready"] = (spec, realm_host, realm_port, kwargs)
+        seen["ready"] = (spec, ready, kwargs)
         return False
 
     monkeypatch.setattr(docker, "wait_db_healthy_for", fake_wait_db_healthy)
@@ -193,7 +193,11 @@ def test_wait_helpers_are_bound_to_the_spec(monkeypatch: pytest.MonkeyPatch) -> 
     assert ctl.wait_db_healthy(timeout=1.0, interval=0.5) is True
     assert ctl.wait_ready("127.0.0.1", 8085, timeout=2.0) is False
     assert seen["db"] == (SPEC, {"wsl_distro": None, "timeout": 1.0, "interval": 0.5})
-    assert seen["ready"] == (SPEC, "127.0.0.1", 8085, {"wsl_distro": None, "timeout": 2.0})
+    assert seen["ready"] == (
+        SPEC,
+        docker.azerothcore_ready("127.0.0.1", 8085, timeout=2.0),
+        {"wsl_distro": None},
+    )
 
 
 def test_wait_helpers_forward_the_distro_a_wsl_install_lives_in(
@@ -214,9 +218,11 @@ def test_wait_helpers_forward_the_distro_a_wsl_install_lives_in(
         return True
 
     def fake_wait_ready(
-        spec: docker.ContainerSpec, realm_host: str, realm_port: int, **kwargs: object
+        spec: docker.ContainerSpec, ready: docker.ReadySpec, **kwargs: object
     ) -> bool:
         seen["ready"] = kwargs
+        # The timeout rides in the ReadySpec now, so assert it still arrives.
+        seen["ready_timeout"] = ready.timeout
         return True
 
     monkeypatch.setattr(docker, "wait_db_healthy_for", fake_wait_db_healthy)
@@ -226,7 +232,8 @@ def test_wait_helpers_forward_the_distro_a_wsl_install_lives_in(
     ctl.wait_db_healthy(timeout=1.0)
     ctl.wait_ready("127.0.0.1", 8085, timeout=1.0)
     assert seen["db"] == {"wsl_distro": "dml-arch", "timeout": 1.0}
-    assert seen["ready"] == {"wsl_distro": "dml-arch", "timeout": 1.0}
+    assert seen["ready"] == {"wsl_distro": "dml-arch"}
+    assert seen["ready_timeout"] == 1.0
 
 
 def test_wotlk_controller_inherits_everything_with_its_own_spec(

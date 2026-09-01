@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -270,10 +271,46 @@ def test_server_dir_problem_names_the_folders_that_break_a_build(
         assert problem is not None and expected in problem
 
 
-def test_keep_awake_is_a_no_op_on_linux() -> None:
-    """The Linux path still runs the bash installer; `systemd-inhibit` waits for its gate."""
-    with platform.keep_awake(platform_id=lambda: "linux"):
-        pass
+INHIBIT_ARGV = [
+    "systemd-inhibit",
+    "--what=idle:sleep",
+    "--who=Yu'lon",
+    "--why=installing a server",
+    "sleep",
+    "infinity",
+]
+
+
+def test_keep_awake_on_linux_holds_a_systemd_inhibit_and_lets_it_go() -> None:
+    """The `caffeinate` shape on Linux: a detached inhibitor, terminated on the way out."""
+    spawned: list[list[str]] = []
+    stopped: list[str] = []
+
+    class FakeChild:
+        def terminate(self) -> None:
+            stopped.append("terminated")
+
+    with platform.keep_awake(
+        platform_id=lambda: "linux",
+        spawn=lambda argv: (spawned.append(argv), FakeChild())[1],  # type: ignore[arg-type,return-value]
+    ):
+        assert spawned == [INHIBIT_ARGV]
+        assert stopped == []
+    assert stopped == ["terminated"]
+
+
+def test_keep_awake_on_linux_survives_a_missing_systemd_inhibit(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No systemd (or no binary) is a warning, and the install still runs."""
+
+    def refuse(_argv: list[str]) -> object:
+        raise OSError("no such file")
+
+    with caplog.at_level("WARNING"):
+        with platform.keep_awake(platform_id=lambda: "linux", spawn=refuse):  # type: ignore[arg-type]
+            pass
+    assert "may be interrupted" in caplog.text
 
 
 def test_keep_awake_on_macos_spawns_a_caffeinate_that_dies_with_us() -> None:
@@ -665,3 +702,319 @@ def test_an_ordinary_unc_path_keeps_the_network_wording() -> None:
     assert problem is not None
     assert "network path" in problem
     assert "WSL" not in problem
+
+
+# ------------------------------------------------------------------- SELinux
+# Every probe below has THREE outcomes, and these tests are shaped around
+# telling them apart: yes, no, and could-not-ask. The bash lineage of these
+# functions shipped a bug for exactly that reason — a helper the test harness
+# had not lifted exited 127, the caller read 127 as "this filesystem cannot
+# hold labels", and the Fedora install went unlabelled while the test asserted
+# an empty list and passed. So a fake `run` that RAISES (the command is not
+# there) must not answer the same as one that returns non-zero, and neither may
+# answer the same as a clean "no".
+
+
+def _done(stdout: str = "", returncode: int = 0) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess([], returncode, stdout, "")
+
+
+def _never(argv: list[str]) -> subprocess.CompletedProcess[str]:
+    """A runner that must not be reached; the kernel's own file answered already."""
+    raise AssertionError(argv)
+
+
+def _no_tools(name: str) -> str | None:
+    return None
+
+
+def _has_getenforce(name: str) -> str | None:
+    return "/usr/sbin/getenforce" if name == "getenforce" else None
+
+
+def test_selinux_enforcing_reads_selinuxfs_first(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`/sys/fs/selinux/enforce` is the kernel's own answer; `getenforce` is the fallback."""
+    monkeypatch.setattr(platform.sys, "platform", "linux")
+    enforce = tmp_path / "enforce"
+    enforce.write_text("1", encoding="utf-8")
+    assert platform.selinux_enforcing(enforce_path=enforce, run=_never, which=_no_tools) is True
+    enforce.write_text("0\n", encoding="utf-8")
+    assert platform.selinux_enforcing(enforce_path=enforce, run=_never, which=_no_tools) is False
+
+
+def test_selinux_enforcing_falls_back_to_getenforce_then_to_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No selinuxfs: ask the tool when it is there, and read its absence as a definite no."""
+    monkeypatch.setattr(platform.sys, "platform", "linux")
+    missing = tmp_path / "no-selinuxfs"
+    calls: list[list[str]] = []
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return _done("Enforcing\n")
+
+    assert platform.selinux_enforcing(enforce_path=missing, run=run, which=_has_getenforce) is True
+    assert calls == [["getenforce"]]
+
+    def permissive(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        return _done("Permissive\n")
+
+    def disabled(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        return _done("Disabled\n")
+
+    for said in (permissive, disabled):
+        got = platform.selinux_enforcing(enforce_path=missing, run=said, which=_has_getenforce)
+        assert got is False, said.__name__
+    # No selinuxfs and no getenforce: SELinux is not on this box — that is a
+    # "no", not a shrug. Ubuntu and Arch must not get an "unchecked" preflight
+    # line for a subsystem they do not have.
+    assert platform.selinux_enforcing(enforce_path=missing, run=run, which=_no_tools) is False
+
+
+def test_selinux_enforcing_separates_a_no_from_a_tool_it_could_not_ask(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A broken, unstartable or babbling `getenforce` is `None`, never `False`.
+
+    `False` means "SELinux is not enforcing here", and the install acts on it:
+    no `:z`, no relabel, a green preflight line. A non-zero exit, an `OSError`
+    or an answer this code does not recognise says nothing of the sort, and
+    letting any of those spell "no" is the exact bug the shell version shipped.
+    """
+    monkeypatch.setattr(platform.sys, "platform", "linux")
+    missing = tmp_path / "no-selinuxfs"
+
+    def broken(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        return _done("", 1)
+
+    def not_there(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError(2, "No such file or directory", "getenforce")
+
+    def babbling(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        return _done("getenforce: SELinux is disabled on this system\n")
+
+    for run in (broken, not_there, babbling):
+        got = platform.selinux_enforcing(enforce_path=missing, run=run, which=_has_getenforce)
+        assert got is None, run.__name__
+
+
+def test_selinux_enforcing_falls_through_an_unreadable_selinuxfs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A path that exists but will not read is not an answer either; ask the tool."""
+    monkeypatch.setattr(platform.sys, "platform", "linux")
+    unreadable = tmp_path / "enforce-dir"
+    unreadable.mkdir()
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        return _done("Enforcing\n")
+
+    got = platform.selinux_enforcing(enforce_path=unreadable, run=run, which=_has_getenforce)
+    assert got is True
+
+
+def test_selinux_enforcing_is_none_off_linux(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows and macOS have no SELinux to be enforcing or not, and no probe runs."""
+    monkeypatch.setattr(platform.sys, "platform", "win32")
+    assert platform.selinux_enforcing(run=_never, which=_has_getenforce) is None
+
+
+def test_filesystem_type_asks_stat_for_the_first_existing_ancestor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The server dir rarely exists at preflight; its parent's filesystem is the answer."""
+    monkeypatch.setattr(platform.sys, "platform", "linux")
+    calls: list[list[str]] = []
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return _done("ext2/ext3\n")
+
+    assert platform.filesystem_type(tmp_path / "wow" / "deeper", run=run) == "ext2/ext3"
+    assert calls == [["stat", "-f", "-c", "%T", str(tmp_path)]]
+    monkeypatch.setattr(platform.sys, "platform", "darwin")
+    assert platform.filesystem_type(tmp_path, run=run) is None
+
+
+def test_filesystem_type_is_none_whenever_stat_did_not_answer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Non-zero, unstartable, or nothing on stdout: unknown, and never an empty type.
+
+    `""` would sail through `selinux_labels_supported()` as a filesystem merely
+    not on the deny-list — the same "a failure reads as a yes" shape that cost
+    the shell relabel six hours of CI.
+    """
+    monkeypatch.setattr(platform.sys, "platform", "linux")
+
+    def broken(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        return _done("", 1)
+
+    def not_there(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError(2, "No such file or directory", "stat")
+
+    def silent(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        return _done("  \n")
+
+    for run in (broken, not_there, silent):
+        assert platform.filesystem_type(tmp_path, run=run) is None, run.__name__
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="needs GNU coreutils stat")
+def test_filesystem_type_reads_the_real_stat_on_linux(tmp_path: Path) -> None:
+    """The argv is only right if a real `stat` accepts it, and no fake can prove that."""
+    got = platform.filesystem_type(tmp_path / "not-created-yet")
+    assert got is not None
+    assert got == got.strip().lower()
+    assert " " not in got
+
+
+@pytest.mark.parametrize(
+    ("fs_type", "supported"),
+    [
+        (None, True),
+        ("ext2/ext3", True),
+        ("btrfs", True),
+        ("xfs", True),
+        ("ntfs", False),
+        ("NTFS3", False),
+        ("fuseblk", False),
+        ("exfat", False),
+        ("nfs4", False),
+        ("9p", False),
+    ],
+)
+def test_selinux_labels_supported_is_a_deny_list(fs_type: str | None, supported: bool) -> None:
+    """Unknown means labels work (the common case); only the listed ones cannot carry them."""
+    assert platform.selinux_labels_supported(fs_type) is supported
+
+
+def test_the_deny_list_is_the_one_the_fedora_gate_passed_with() -> None:
+    """The shipped installers' `case` arm, verbatim; a name dropped here silently arms `:z`."""
+    assert platform.SELINUX_NOLABEL_FS == frozenset(
+        {"exfat", "ntfs", "ntfs3", "fuseblk", "msdos", "vfat", "cifs", "smb2", "nfs", "nfs4", "9p"}
+    )
+
+
+def test_bind_label_is_z_only_when_enforcing_on_a_labelable_filesystem() -> None:
+    assert platform.bind_label(enforcing=True, fs_type="ext2/ext3") == ":z"
+    assert platform.bind_label(enforcing=True, fs_type=None) == ":z"
+    assert platform.bind_label(enforcing=True, fs_type="ntfs") == ""
+    assert platform.bind_label(enforcing=False, fs_type="ext2/ext3") == ""
+    assert platform.bind_label(enforcing=None, fs_type="ext2/ext3") == ""
+
+
+def test_bind_label_answers_only_the_two_strings_composegen_will_splice() -> None:
+    """`render()` refuses anything else, and that refusal lands mid-install, not here.
+
+    Nothing wires the two together until A.5, so this and its twin in
+    `test_composegen.py` are the whole of the agreement between them.
+    """
+    fs_types: list[str | None] = [None, "", "ext2/ext3", "xfs", "9p", "NTFS3", "tmpfs"]
+    answers = {
+        platform.bind_label(enforcing=enforcing, fs_type=fs_type)
+        for enforcing in (True, False, None)
+        for fs_type in fs_types
+    }
+    assert answers <= {"", ":z"}, answers
+
+
+# ------------------------------------------------- relabelling and --user args
+# `relabel_for_containers()` reports what it DID, not what it learned, so its
+# single `False` is not the collapsed "could not ask" the probes above refuse:
+# a missing `chcon`, a `chcon` that would not start and a `chcon` that exited
+# non-zero all leave the same fact behind — the files are unlabelled — and each
+# one says so in the log. `:z` on the bind lines is what carries the install.
+
+
+def test_relabel_for_containers_runs_chcon_without_sudo(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The Fedora script's `selinux_label_for_containers`, ported.
+
+    Recursive, our own files, no sudo.
+    """
+    calls: list[list[str]] = []
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return _done()
+
+    def which(name: str) -> str | None:
+        return "/usr/bin/chcon" if name == "chcon" else None
+
+    assert platform.relabel_for_containers(tmp_path, run=run, which=which) is True
+    assert calls == [["chcon", "-Rt", "container_file_t", str(tmp_path)]]
+    with caplog.at_level("WARNING"):
+        assert (
+            platform.relabel_for_containers(tmp_path, run=lambda a: _done("", 1), which=which)
+            is False
+        )
+        assert platform.relabel_for_containers(tmp_path, run=run, which=_no_tools) is False
+
+        def refuse(argv: list[str]) -> subprocess.CompletedProcess[str]:
+            raise OSError("no such file")
+
+        assert platform.relabel_for_containers(tmp_path, run=refuse, which=which) is False
+    assert caplog.text.count("could not relabel") == 3
+    # The three failures are three different sentences, because "chcon is not
+    # installed" and "chcon exit 1" send the reader to different places.
+    assert len(set(caplog.text.splitlines())) == 3
+
+
+def test_relabel_for_containers_asks_for_no_privilege_at_all(tmp_path: Path) -> None:
+    """Privilege transparency is asserted on the ARGV, not on the sentence describing it.
+
+    The server directory is the user's own, so labelling it needs nothing but
+    the user. A `sudo`, a `pkexec` or a `chown` sneaking in here would be a
+    silent privilege ask in the middle of an install — the one thing this
+    project never does without the explicit consent path.
+    """
+    calls: list[list[str]] = []
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return _done()
+
+    platform.relabel_for_containers(tmp_path, run=run, which=lambda name: f"/usr/bin/{name}")
+    assert calls, "nothing was run at all, so this proves nothing"
+    forbidden = {"sudo", "pkexec", "doas", "su", "chown", "chmod", "setfacl", "usermod"}
+    for argv in calls:
+        assert not forbidden & set(argv), argv
+
+
+def test_container_user_args_is_uid_gid_on_linux_and_nothing_elsewhere(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One home for the `docker run` uid:gid policy.
+
+    Linux only; Docker Desktop runs as the image's user.
+    """
+    monkeypatch.setattr(platform.os, "getuid", lambda: 1000, raising=False)
+    monkeypatch.setattr(platform.os, "getgid", lambda: 1000, raising=False)
+    assert platform.container_user_args(platform_id=lambda: "linux") == ["--user", "1000:1000"]
+    assert platform.container_user_args(platform_id=lambda: "macos") == []
+    assert platform.container_user_args(platform_id=lambda: "windows") == []
+
+
+def test_container_user_args_leaves_evidence_when_it_cannot_ask_for_a_uid(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A Linux with no `os.getuid` is a contradiction, and silence would hide it.
+
+    The empty list is the only safe answer — a `--user` cannot be spelled
+    without the numbers — but it is the same empty list Docker Desktop gets for
+    a completely different reason, so the log is what tells the two apart.
+    """
+    monkeypatch.delattr(platform.os, "getuid", raising=False)
+    monkeypatch.delattr(platform.os, "getgid", raising=False)
+    with caplog.at_level("WARNING"):
+        assert platform.container_user_args(platform_id=lambda: "linux") == []
+    assert "getuid" in caplog.text
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        assert platform.container_user_args(platform_id=lambda: "windows") == []
+    assert caplog.text == "", "Docker Desktop having no getuid is normal, not a warning"

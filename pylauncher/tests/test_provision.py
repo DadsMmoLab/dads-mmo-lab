@@ -8,17 +8,22 @@ silent), and the early exit when a daemon already answers.
 
 from __future__ import annotations
 
+import logging
+import operator
 import os
+import pprint
 import subprocess
 import sys
 import threading
 import time
+import traceback
 from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
 from yulon import platform
+from yulon.catalog import installer
 
 # The directory the current Docker Desktop installs itself into, and the
 # `docker.exe` inside it. Real strings from a real machine (Windows 11 Pro
@@ -117,19 +122,40 @@ def test_already_running_docker_short_circuits(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_linux_engine_plan_per_package_manager() -> None:
+    """Every list that will run `compose build` carries BuildKit — under each distro's own name.
+
+    The apt list has since the Ubuntu gate (`docker.io` ships no plugin); the
+    dnf and pacman lists must too, or gate 7.1 there is the first build
+    without it.
+
+    All three name the plugin `docker-buildx`, and this test pins that
+    agreement rather than an exception to it. The dnf list said
+    `docker-buildx-plugin` until 2026-08-31, when the Fedora box was asked:
+    `dnf repoquery docker-buildx-plugin` returns nothing on Fedora 44 and
+    `docker-buildx` returns 0.31.1 and 0.36.1, so the shipped command could
+    not have installed anything — `dnf install` fails on an unknown package
+    and takes the whole provisioning step with it.
+    `docker-buildx-plugin` is real in Docker's own repo, beside `docker-ce`,
+    which is what the Bazzite branch of install-wow-wotlk-fedora.sh layers
+    through rpm-ostree. It is the wrong name beside `moby-engine`, and that
+    is what the dnf branch installs.
+    """
     assert platform.docker_engine_commands("pacman", steamos=True) == [
         ["steamos-readonly", "disable"],
-        ["pacman", "-Sy", "--noconfirm", "docker", "docker-compose"],
+        ["pacman", "-Sy", "--noconfirm", "docker", "docker-compose", "docker-buildx"],
         ["steamos-readonly", "enable"],
         ["systemctl", "enable", "--now", "docker"],
     ]
     apt = platform.docker_engine_commands("apt", steamos=False)
     assert apt[0] == ["apt-get", "update"] and "docker.io" in apt[1]
     assert "docker-buildx" in apt[1]  # compose build needs BuildKit; docker.io lacks it
-    assert platform.docker_engine_commands("dnf", steamos=False)[0][:3] == [
+    assert platform.docker_engine_commands("dnf", steamos=False)[0] == [
         "dnf",
         "-y",
         "install",
+        "moby-engine",
+        "docker-compose",
+        "docker-buildx",
     ]
     # The group join is not in any plan, on purpose: the argv exists only
     # inside the consent branch, so there is no ungated construction site.
@@ -141,6 +167,43 @@ def test_linux_engine_plan_per_package_manager() -> None:
         lambda n: "/usr/bin/apt-get" if n == "apt-get" else None
     ) == ("apt")
     assert platform.linux_package_manager(lambda n: None) is None
+
+
+def test_the_dnf_list_never_mixes_two_package_worlds() -> None:
+    """A Docker-repo package beside `moby-engine` is a package that does not exist.
+
+    Fedora's repos carry `moby-engine`, `docker-compose` and `docker-buildx`.
+    Docker's own repo carries `docker-ce`, `docker-compose-plugin` and
+    `docker-buildx-plugin`. Either set installs — the bash script uses the
+    second and adds Docker's repo first — but a name taken from one and
+    pasted beside the other resolves to nothing, and `dnf install` fails
+    outright rather than skipping it, which is how the shipped command
+    aborted every Fedora provision until 2026-08-31. This command adds no
+    repo, so Fedora's is the only world available to it.
+
+    The equality above pins today's exact list. This names the rule instead,
+    so it keeps holding when a fourth package joins, and says which world a
+    wrong name came from rather than only that it is wrong. It is deliberately
+    a membership test and not a suffix test: `docker-ce` carries no `-plugin`
+    and is the clearest way to get this wrong.
+    """
+    dnf = platform.docker_engine_commands("dnf", steamos=False)[0]
+    packages = set(dnf[dnf.index("install") + 1 :])
+    assert "moby-engine" in packages, dnf
+    docker_repo = {
+        "docker-ce",
+        "docker-ce-cli",
+        "docker-ce-rootless-extras",
+        "docker-buildx-plugin",
+        "docker-compose-plugin",
+        "containerd.io",
+    }
+    mixed = sorted(packages & docker_repo)
+    assert not mixed, (
+        f"{mixed} come from Docker's own repo, which this command never adds; "
+        f"it installs moby-engine from Fedora's, so every package beside it "
+        f"must be Fedora's too: {sorted(packages)}"
+    )
 
 
 def test_linux_runs_under_sudo_n_and_reports_password_needs(
@@ -1068,7 +1131,9 @@ def test_linux_never_joins_the_docker_group_without_consent(
     """
     _linux(monkeypatch, steamos=steamos)
     run = _Run()
-    report = platform.ensure_docker(run=run, which=_which(tool), user="pk", wait_seconds=0.0)
+    report = platform.ensure_docker(
+        run=run, which=_which(tool), user="pk", wait_seconds=0.0, run_input=_never_feeds
+    )
 
     assert not _joins_the_docker_group(run.calls), run.calls
     assert report.docker_group == "not-asked"
@@ -1079,6 +1144,8 @@ def test_linux_never_joins_the_docker_group_without_consent(
     text = [" ".join(argv) for argv in run.calls]
     assert not [c for c in text if "sudoers" in c or "NOPASSWD" in c], text
     assert not [c for c in text if "chmod" in c and "docker.sock" in c], text
+    # With nobody to ask there is no sudo session either: `_never_feeds` above
+    # raises if a single password-carrying step is attempted.
 
 
 def test_linux_asks_before_it_escalates_and_joins_only_on_yes(
@@ -1168,6 +1235,30 @@ def test_linux_does_not_ask_a_user_who_is_already_a_member(
         run=near, which=_which("apt-get"), user="pk", wait_seconds=0.0, ask=decline
     )
     assert len(asked) == 1
+
+
+def test_the_message_a_member_reads_says_the_one_thing_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Composed from a REAL report, which is the only way this defect is visible.
+
+    This file imports `catalog.installer` for one reason: the sentence a user
+    reads is built from `manual_steps`, and both tests written when
+    `already-member` was added constructed `ProvisionReport` BY HAND with that
+    tuple empty. A hand-built report cannot show a duplication that only exists
+    once provisioning fills the tuple in — so "log out and back in" shipped
+    twice, once inside the sentence and once appended after it, with the clause
+    written for the user who has ALREADY logged out sitting between the two
+    (review, 2026-08-31).
+    """
+    _linux(monkeypatch)
+    run = _WithGroups("pk sudo docker")
+    report = platform.ensure_docker(run=run, which=_which("apt-get"), user="pk", wait_seconds=0.0)
+    assert report.docker_group == "already-member" and not report.docker_ready
+    message = str(installer.docker_unavailable(report))
+    assert message.lower().count("log out and back in") == 1, message
+    # The last thing said is the branch for the user the first half does not fit.
+    assert message.rstrip().endswith("start it and try again."), message
 
 
 def test_linux_never_opens_a_dialog_for_a_plan_or_a_cancelled_run(
@@ -1355,7 +1446,12 @@ def test_a_yes_whose_join_failed_is_not_reported_as_a_join(
     _linux(monkeypatch)
     run = _Refuses("usermod")
     report = platform.ensure_docker(
-        run=run, which=_which("apt-get"), user="pk", wait_seconds=0.0, ask=lambda _q: "y"
+        run=run,
+        which=_which("apt-get"),
+        user="pk",
+        wait_seconds=0.0,
+        ask=_answers(group="y", password=None),  # yes to the group, dismisses the sudo dialog
+        run_input=_never_feeds,
     )
 
     assert report.docker_group == "join-failed"  # the yes is in the name; the join is not
@@ -1379,7 +1475,12 @@ def test_declining_does_not_promise_an_engine_that_was_never_installed(
     _linux(monkeypatch)
     run = _Refuses("apt-get")
     report = platform.ensure_docker(
-        run=run, which=_which("apt-get"), user="pk", wait_seconds=0.0, ask=lambda _q: "n"
+        run=run,
+        which=_which("apt-get"),
+        user="pk",
+        wait_seconds=0.0,
+        ask=_answers(group="n", password=None),
+        run_input=_never_feeds,
     )
 
     assert report.docker_group == "declined"
@@ -1503,3 +1604,655 @@ def test_provisioning_bounds_the_probe_and_not_the_install(
     steps = [bound for argv, bound in seen if argv[:1] == ["sudo"]]
     assert probes and all(isinstance(b, float) for b in probes), f"unbounded probe: {probes}"
     assert steps and all(b is None for b in steps), f"the install steps were bounded: {steps}"
+
+
+# ------------------------------------------------ the sudo password, asked once (7.1)
+
+
+class _FeedRecorder:
+    """A `RunWithInput` that accepts exactly one password and records every feed.
+
+    Records `(argv, stdin_text)` so a test can assert the shape of every fed
+    step BY FIELD — argv parsed, not grepped — and that the password reached the
+    child only on stdin, never as an argv element.
+    """
+
+    def __init__(self, accept: str = "hunter2") -> None:
+        self.calls: list[tuple[list[str], str]] = []
+        self.accept = accept
+
+    def __call__(self, argv: list[str], text: str) -> subprocess.CompletedProcess[str]:
+        self.calls.append((argv, text))
+        if text == self.accept + "\n":
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return subprocess.CompletedProcess(argv, 1, "", "Sorry, try again.")
+
+
+def _never_feeds(argv: list[str], text: str) -> subprocess.CompletedProcess[str]:
+    raise AssertionError(f"a password was fed to {argv} when nobody could have asked for one")
+
+
+def _counting_ask(reply: str | None) -> tuple[list[str], Callable[[str], str | None]]:
+    asked: list[str] = []
+
+    def ask(question: str) -> str | None:
+        asked.append(question)
+        return reply
+
+    return asked, ask
+
+
+def test_sudo_session_argv_is_sudo_s_with_an_empty_prompt() -> None:
+    """`sudo -S -p ''` reads the password from stdin and prints no prompt; every fed step has it."""
+    session = platform.SudoSession(lambda _q: "hunter2", _FeedRecorder())
+    assert session.argv(["apt-get", "update"]) == ["sudo", "-S", "-p", "", "apt-get", "update"]
+
+
+def test_sudo_session_asks_once_and_feeds_every_later_step() -> None:
+    asked, ask = _counting_ask("hunter2")
+    feed = _FeedRecorder("hunter2")
+    session = platform.SudoSession(ask, feed)
+
+    assert session.verify() is True
+    assert session.verify() is True  # a second verify costs nothing and asks nobody
+    assert session.asked == 1 and len(asked) == 1
+    assert feed.calls == [(["sudo", "-S", "-p", "", "-v"], "hunter2\n")]
+
+    proc = session.run(["usermod", "-aG", "docker", "pk"])
+    assert proc.returncode == 0
+    assert feed.calls[-1] == (
+        ["sudo", "-S", "-p", "", "usermod", "-aG", "docker", "pk"],
+        "hunter2\n",
+    )
+    # The password travels on stdin only. Not one argv element carries it.
+    assert not [argv for argv, _text in feed.calls if "hunter2" in argv], feed.calls
+
+
+def test_a_wrong_sudo_password_is_re_asked_three_times_then_declined() -> None:
+    asked, ask = _counting_ask("wrong")
+    feed = _FeedRecorder("hunter2")
+    session = platform.SudoSession(ask, feed)
+
+    assert session.verify() is False
+    assert session.asked == 3 and len(asked) == 3
+    assert [argv for argv, _text in feed.calls] == [["sudo", "-S", "-p", "", "-v"]] * 3
+    # A decline is remembered: the next step must not open the dialog again.
+    assert session.verify() is False
+    assert session.asked == 3
+
+
+@pytest.mark.parametrize("reply", [None, ""])
+def test_a_dismissed_or_empty_password_declines_without_running_sudo(reply: str | None) -> None:
+    asked, ask = _counting_ask(reply)
+    feed = _FeedRecorder()
+    session = platform.SudoSession(ask, feed)
+    assert session.verify() is False
+    assert session.asked == 1
+    assert feed.calls == []
+
+
+def test_sudo_session_refuses_to_run_a_step_before_it_verified() -> None:
+    session = platform.SudoSession(lambda _q: "hunter2", _FeedRecorder())
+    with pytest.raises(platform.ProvisionError):
+        session.run(["apt-get", "update"])
+
+
+def test_a_missing_sudo_binary_reads_as_a_decline() -> None:
+    """No `sudo` on the box: the session says no, and provisioning reports the skip as today."""
+
+    def no_sudo(argv: list[str], text: str) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError("sudo")
+
+    session = platform.SudoSession(lambda _q: "hunter2", no_sudo)
+    assert session.verify() is False
+    assert session.asked == 1
+
+
+def test_the_four_ways_of_not_having_a_password_are_four_different_answers() -> None:
+    """`verify()` is a bool, so the two "could not ask" cases must be legible elsewhere.
+
+    Four events and `False` for three of them: the user dismissed the dialog,
+    the machine refused every password they typed, and `sudo` could not be run
+    at all. Only the middle one is the machine saying no; the other two are
+    nobody having answered, and a report that calls them all "wrong password"
+    sends the user to fix something that is not broken. `outcome` keeps them
+    apart, and a session nobody has asked yet is a fifth state that is not any
+    kind of no.
+    """
+    fresh = platform.SudoSession(lambda _q: "hunter2", _FeedRecorder())
+    assert fresh.outcome == "unasked"
+
+    good = platform.SudoSession(lambda _q: "hunter2", _FeedRecorder("hunter2"))
+    good.verify()
+    assert good.outcome == "verified"
+
+    dismissed = platform.SudoSession(lambda _q: None, _FeedRecorder())
+    dismissed.verify()
+    assert dismissed.outcome == "declined"
+
+    wrong = platform.SudoSession(lambda _q: "nope", _FeedRecorder("hunter2"))
+    wrong.verify()
+    assert wrong.outcome == "refused"
+
+    def no_sudo(argv: list[str], text: str) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError(2, "No such file or directory", "sudo")
+
+    missing = platform.SudoSession(lambda _q: "hunter2", no_sudo)
+    missing.verify()
+    assert missing.outcome == "unavailable"
+
+    outcomes = {s.outcome for s in (fresh, good, dismissed, wrong, missing)}
+    assert len(outcomes) == 5, outcomes
+
+
+def test_an_unaskable_session_is_never_recorded_as_a_wrong_password() -> None:
+    """`attempts=0` is nobody being asked, not everybody being refused."""
+    session = platform.SudoSession(lambda _q: "hunter2", _never_feeds, attempts=0)
+    assert session.verify() is False
+    assert session.asked == 0
+    assert session.outcome == "unavailable"
+
+
+def test_the_sudo_password_never_reaches_a_log_an_exception_a_repr_or_a_traceback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`/proc/<pid>/cmdline` is world-readable and logs get pasted into issues.
+
+    The four channels a secret escapes through in this codebase's experience:
+    argv, a log line, the text of something raised, and `repr()` — a plain
+    `@dataclass` renders every field, which is why `SudoSession` is not one and
+    spells its own `__repr__` anyway. A full traceback is checked too: that is
+    what a crash handler prints, and it renders the exception chain, not just
+    the message.
+    """
+    canary = "Hunter2!Canary"
+    feed = _FeedRecorder(canary)
+    everything: list[str] = []
+
+    with caplog.at_level(logging.DEBUG):
+        session = platform.SudoSession(lambda _q: canary, feed)
+        assert session.verify() is True
+        proc = session.run(["apt-get", "update"])
+        stale = platform.SudoSession(lambda _q: None, feed)
+        stale.verify()
+        try:
+            stale.run(["apt-get", "update"])
+        except platform.ProvisionError as exc:
+            everything += [str(exc), repr(exc), "".join(traceback.format_exception(exc))]
+        else:  # pragma: no cover - run() must refuse an unverified session
+            raise AssertionError("an unverified session ran a step")
+
+    everything += [record.getMessage() for record in caplog.records]
+    everything += [repr(session), str(session), repr(stale), repr(proc), str(proc)]
+    everything += [repr(vars(session)), repr(session.__dict__)]
+    everything += [" ".join(argv) for argv, _text in feed.calls]
+    for text in everything:
+        assert canary not in text, text
+    # …and the one place it IS allowed: stdin, with the newline sudo reads to.
+    assert [text for _argv, text in feed.calls] == [canary + "\n", canary + "\n"]
+
+
+def test_the_sudo_question_is_masked_by_the_prompt_widget() -> None:
+    """The wording is what makes the dialog echo dots — assert that, do not assume it."""
+    from yulon.ui.widgets import prompt
+
+    assert prompt.is_secret(platform.SUDO_PASSWORD_QUESTION) is True
+    assert "sudo password" in platform.SUDO_PASSWORD_QUESTION
+
+
+def test_the_default_run_with_input_feeds_stdin_and_pins_the_locale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_run_with_input()` is the real seam: stdin, captured output, C locale, no `check`."""
+    seen: dict[str, object] = {}
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen["argv"] = argv
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(platform.subprocess, "run", fake_run)
+    proc = platform._run_with_input(["sudo", "-S", "-p", "", "-v"], "hunter2\n")
+
+    assert proc.returncode == 0
+    assert seen["argv"] == ["sudo", "-S", "-p", "", "-v"]
+    assert seen["input"] == "hunter2\n"
+    assert seen["text"] is True and seen["capture_output"] is True and seen["check"] is False
+    env = seen["env"]
+    assert isinstance(env, dict) and env["LC_ALL"] == "C" and env["LANGUAGE"] == ""
+    assert "hunter2" not in seen["argv"], seen["argv"]
+
+
+# ------------------------------------ the session, threaded through provisioning (7.1, D.2)
+
+
+def _answers(group: str | None, password: str | None) -> Callable[[str], str | None]:
+    """A prompter that tells the group question and the sudo question apart by identity."""
+
+    def ask(question: str) -> str | None:
+        if question == platform.SUDO_PASSWORD_QUESTION:
+            return password
+        return group
+
+    return ask
+
+
+class _CannotRunSudo:
+    """A `RunWithInput` for a box with no `sudo` binary: the exec itself fails.
+
+    Third outcome, not second. `FileNotFoundError` is an `OSError`, which is
+    what `SudoSession.verify()` reads as `unavailable` — nobody was ever able
+    to answer, so nothing here may be reported as a wrong password.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv: list[str], text: str) -> subprocess.CompletedProcess[str]:
+        self.calls.append(argv)
+        raise FileNotFoundError(2, "No such file or directory", "sudo")
+
+
+def test_the_sudo_password_is_asked_once_for_the_whole_provisioning_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One dialog, then every remaining privileged step — usermod included — is fed the password.
+
+    The clean Fedora/Arch gates depend on this: `docker_engine_commands()`
+    yields three or four steps plus the `usermod`, and `sudo -n` fails on every
+    one of them from a GUI process on a password-sudo box.
+    """
+    _linux(monkeypatch)
+    sudo_questions: list[str] = []
+
+    def ask(question: str) -> str:
+        if question == platform.SUDO_PASSWORD_QUESTION:
+            sudo_questions.append(question)
+            return "hunter2"
+        return "y"
+
+    run = _Refuses("sudo -n")  # every `sudo -n` step: "a password is required"
+    feed = _FeedRecorder("hunter2")
+    report = platform.ensure_docker(
+        run=run, which=_which("apt-get"), user="pk", wait_seconds=0.0, ask=ask, run_input=feed
+    )
+
+    assert len(sudo_questions) == 1
+    fed = [argv for argv, _text in feed.calls]
+    assert fed[0] == ["sudo", "-S", "-p", "", "-v"]
+    assert all(argv[:4] == ["sudo", "-S", "-p", ""] for argv in fed), fed
+    assert all(text == "hunter2\n" for _argv, text in feed.calls)
+    assert ["sudo", "-S", "-p", "", "apt-get", "update"] in fed
+    assert ["sudo", "-S", "-p", "", "usermod", "-aG", "docker", "pk"] in fed
+    # The `sudo -n` seam saw the usermod at most as the refused first try; the
+    # one that ran went through the session above.
+    assert all(argv[:2] == ["sudo", "-n"] for argv in _joins_the_docker_group(run.calls))
+    # ...and once elevated, no later step in the same call is offered to `sudo
+    # -n` again. Two probes only: the package step that opened the dialog, and
+    # the `usermod`, which is a second `_run_steps()` call and starts over.
+    assert [argv for argv in run.calls if argv[:2] == ["sudo", "-n"]] == [
+        ["sudo", "-n", "apt-get", "update"],
+        ["sudo", "-n", "usermod", "-aG", "docker", "pk"],
+    ], run.calls
+    # The password is nowhere in any argv, on either seam.
+    for argv in [*run.calls, *fed]:
+        assert "hunter2" not in argv, argv
+        joined = " ".join(argv)
+        assert "sudoers" not in joined and "NOPASSWD" not in joined, argv
+        assert not ("chmod" in joined and "docker.sock" in joined), argv
+    assert report.docker_group == "granted"
+    assert "apt-get update" in report.done
+    assert not [m for m in report.manual_steps if "needed a password" in m], report.manual_steps
+
+
+def test_a_wrong_sudo_password_three_times_is_reported_as_a_password_skip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three refusals end the session; the steps are skipped with the paste-in advice, as before."""
+    _linux(monkeypatch)
+    sudo_questions: list[str] = []
+
+    def ask(question: str) -> str:
+        if question == platform.SUDO_PASSWORD_QUESTION:
+            sudo_questions.append(question)
+            return "wrong"
+        return "y"
+
+    run = _Refuses("sudo -n")
+    feed = _FeedRecorder("hunter2")
+    report = platform.ensure_docker(
+        run=run, which=_which("apt-get"), user="pk", wait_seconds=0.0, ask=ask, run_input=feed
+    )
+
+    assert len(sudo_questions) == 3  # not one per step: the decline is remembered
+    assert [argv for argv, _text in feed.calls] == [["sudo", "-S", "-p", "", "-v"]] * 3
+    assert report.docker_group == "join-failed"
+    assert any("needed a password" in m for m in report.manual_steps)
+    assert not [argv for argv in run.calls if "wrong" in argv]
+
+
+def test_without_a_prompter_nothing_is_ever_fed_a_password(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No `ask`, no session: the `sudo -n` path is byte-identical to before 7.1."""
+    _linux(monkeypatch)
+    run = _Refuses("sudo -n")
+    report = platform.ensure_docker(
+        run=run, which=_which("apt-get"), user="pk", wait_seconds=0.0, run_input=_never_feeds
+    )
+    assert report.docker_group == "not-asked"
+    assert any("needed a password" in m for m in report.manual_steps)
+    assert all(argv[:2] == ["sudo", "-n"] for argv in run.calls if argv[0] == "sudo")
+
+
+def test_a_dry_run_never_builds_a_sudo_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A plan runs nothing, so it holds no secret and opens no dialog.
+
+    Asserted on the CONSTRUCTION, not only on `ask` going uncalled: a session
+    that is built and merely never verified passes the weaker check, and the
+    point of the guard is that a dry run never has an object holding a password
+    in the first place. (Dropping `and not dry_run` was a surviving mutant
+    until this spy went in.)
+    """
+    _linux(monkeypatch)
+    built: list[tuple[object, ...]] = []
+
+    def never(_question: str) -> str:
+        raise AssertionError("a dry run asked for a sudo password")
+
+    def spy(*args: object, **kwargs: object) -> platform.SudoSession:
+        built.append(args)
+        raise AssertionError("a dry run built a sudo session")
+
+    monkeypatch.setattr(platform, "SudoSession", spy)
+    plan = platform.ensure_docker(
+        run=_Run(),
+        which=_which("apt-get"),
+        user="pk",
+        dry_run=True,
+        ask=never,
+        run_input=_never_feeds,
+    )
+    assert built == []
+    assert plan.docker_group == "not-asked"
+    assert all(s.startswith("(dry run) ") for s in plan.skipped), plan.skipped
+
+
+def test_the_three_ways_of_not_getting_a_password_are_three_different_skips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Declined, refused and could-not-ask reach the report as three different sentences.
+
+    `SudoOutcome` exists because a `bool` cannot carry the third one, and the
+    whole point is lost if the wiring flattens it again on the way out. The
+    report is where a support log reads it, so this asserts on the report — the
+    same reason `docker_group` is a six-name field and not a flag.
+    """
+    _linux(monkeypatch)
+
+    def steps_of(report: platform.ProvisionReport) -> list[str]:
+        return [s for s in report.skipped if s.startswith("apt-get update")]
+
+    declined = platform.ensure_docker(
+        run=_Refuses("sudo -n"),
+        which=_which("apt-get"),
+        user="pk",
+        wait_seconds=0.0,
+        ask=_answers(group="n", password=None),  # the dialog was dismissed
+        run_input=_FeedRecorder("hunter2"),
+    )
+    refused = platform.ensure_docker(
+        run=_Refuses("sudo -n"),
+        which=_which("apt-get"),
+        user="pk",
+        wait_seconds=0.0,
+        ask=_answers(group="n", password="wrong"),  # sudo said no
+        run_input=_FeedRecorder("hunter2"),
+    )
+    unavailable = platform.ensure_docker(
+        run=_Refuses("sudo -n"),
+        which=_which("apt-get"),
+        user="pk",
+        wait_seconds=0.0,
+        ask=_answers(group="n", password="hunter2"),  # nobody could be asked: no sudo
+        run_input=_CannotRunSudo(),
+    )
+
+    assert steps_of(declined) == ["apt-get update: needed a password and none was given"]
+    assert steps_of(refused) == ["apt-get update: the sudo password was refused"]
+    assert steps_of(unavailable) == [
+        "apt-get update: sudo could not be run, so nothing was elevated"
+    ]
+    assert len({steps_of(declined)[0], steps_of(refused)[0], steps_of(unavailable)[0]}) == 3
+
+    # ...and the advice follows the cause. "Run them in a terminal with sudo"
+    # is the answer to a password question; it is the wrong answer for a box
+    # that has no `sudo` at all, so that one is not filed under passwords.
+    assert any("needed a password" in m for m in declined.manual_steps)
+    assert any("needed a password" in m for m in refused.manual_steps)
+    assert not [m for m in unavailable.manual_steps if "needed a password" in m]
+    assert any("Some steps did not run" in m for m in unavailable.manual_steps)
+
+    # Three sentences in `manual_steps` as well, not just in `skipped`. That is
+    # the half a user actually reads — `_preflight_lines()` puts the manual
+    # steps in the failure dialog and falls back to the skip lines only when
+    # there are none — and it kept the command names while dropping the reason,
+    # so a dismissed dialog and three wrong passwords read identically here
+    # while `skipped` above happily proved they were different (2026-08-31).
+    def advice(report: platform.ProvisionReport) -> str:
+        return next(m for m in report.manual_steps if m.startswith("Some steps"))
+
+    assert len({advice(declined), advice(refused), advice(unavailable)}) == 3
+    assert advice(refused) != advice(declined)
+
+
+def test_a_box_whose_sudo_needs_no_password_never_opens_the_dialog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`sudo -n` works (root, or a NOPASSWD sudoers rule): the session stays `unasked`."""
+    _linux(monkeypatch)
+    run = _Run()  # every `sudo -n` step answers 0
+    report = platform.ensure_docker(
+        run=run,
+        which=_which("apt-get"),
+        user="pk",
+        wait_seconds=0.0,
+        ask=_answers(group="y", password=None),
+        run_input=_never_feeds,  # raises if a single password-carrying step is attempted
+    )
+    assert report.docker_group == "granted"
+    assert all(argv[:2] == ["sudo", "-n"] for argv in run.calls if argv[0] == "sudo")
+
+
+def test_a_non_sudo_step_never_reaches_the_session() -> None:
+    """The Windows/macOS callers pass `sudo=False`; a failing step there must not ask.
+
+    Their installers fail with all sorts of stderr, and one of them saying
+    "password" must not open a sudo dialog on a machine that has no sudo. The
+    gate is `sudo`, not the text — `_Refuses` below answers the sudo wording to
+    a plain, unprivileged argv on purpose.
+    """
+
+    def never(_question: str) -> str:
+        raise AssertionError("an unprivileged step asked for a sudo password")
+
+    run = _Refuses("installer")
+    session = platform.SudoSession(never, _never_feeds)
+    done, skipped = platform._run_steps(
+        run, [["installer", "/quiet"]], sudo=False, dry_run=False, session=session
+    )
+
+    assert done == []
+    assert skipped == ["installer /quiet: exit 1 sudo: a password is required"]
+    assert run.calls == [["installer", "/quiet"]]  # no `sudo` prefix anywhere
+    assert session.asked == 0 and session.outcome == "unasked"
+
+
+def test_provisioning_leaks_the_password_into_no_channel_at_all(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The whole `ensure_docker()` run, swept: report, logs, argv, repr, vars, traceback.
+
+    D.1 swept the session; this sweeps the layer that now holds one. The
+    channels are the ones that have actually leaked a secret in this repo
+    before — `vars()` is where D.1's first implementation was caught — plus the
+    ones a crash takes: an exception's `.args` and a formatted traceback.
+    """
+    canary = "Zq7!D2Canary#2026"
+    _linux(monkeypatch)
+    run = _Refuses("sudo -n")
+    feed = _FeedRecorder(canary)
+    with caplog.at_level(logging.DEBUG):
+        report = platform.ensure_docker(
+            run=run,
+            which=_which("apt-get"),
+            user="pk",
+            wait_seconds=0.0,
+            ask=_answers(group="y", password=canary),
+            run_input=feed,
+        )
+
+    rendered = [
+        repr(report),
+        str(report),
+        f"{report}",
+        # Old-style formatting, spelled through `operator` because `ruff`'s
+        # UP031 bans the literal `"%s" % x`. It is the same channel: `%s`/`%r`
+        # is how every `logging` call in this package renders its arguments.
+        operator.mod("%s", report),
+        operator.mod("%r", report),
+        pprint.pformat(report),
+        *(" ".join(argv) for argv in run.calls),
+        *(" ".join(argv) for argv, _text in feed.calls),
+        *(repr(argv) for argv, _text in feed.calls),
+        *(record.getMessage() for record in caplog.records),
+        *(logging.Formatter("%(levelname)s %(message)s").format(r) for r in caplog.records),
+        *report.done,
+        *report.skipped,
+        *report.manual_steps,
+    ]
+    try:
+        raise platform.ProvisionError(f"provisioning failed: {report.skipped}")
+    except platform.ProvisionError as exc:
+        rendered += [str(exc), repr(exc), repr(exc.args), "".join(traceback.format_exception(exc))]
+
+    for text in rendered:
+        assert canary not in text, text
+    # ...and the one place it IS allowed: stdin, on every fed step.
+    assert feed.calls and all(text == canary + "\n" for _argv, text in feed.calls)
+
+
+# ------------------------------------------- fix round 1: the two dialogs nobody may open
+
+
+def test_a_cancelled_run_never_asks_for_a_sudo_password_either(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pressing Cancel must not be answered with a demand for the root password.
+
+    `_settle_docker_group()` has always refused to open the group dialog on a
+    cancelled run. The sudo-password guard was written as `not dry_run` alone
+    and so kept only half of that promise: a cancelled run asked no group
+    question and then asked for a password anyway, and answered it would have
+    run every package step elevated (review, 2026-08-31). Before 7.1 a
+    cancelled run asked nothing at all, and that is the behaviour being
+    restored — asking too late is the one kind of consent this file exists to
+    prevent.
+    """
+    _linux(monkeypatch)
+    cancel = threading.Event()
+    cancel.set()
+    asked: list[str] = []
+
+    def ask(question: str) -> str:
+        asked.append(question)
+        return "y"
+
+    def spy(*args: object, **kwargs: object) -> platform.SudoSession:
+        raise AssertionError("a cancelled run built a sudo session")
+
+    monkeypatch.setattr(platform, "SudoSession", spy)
+    report = platform.ensure_docker(
+        run=_Refuses("sudo -n"),  # every step answers "a password is required"
+        which=_which("apt-get"),
+        user="pk",
+        wait_seconds=0.0,
+        cancel=cancel,
+        ask=ask,
+        run_input=_never_feeds,
+    )
+
+    assert asked == []  # neither question: not the group one, not the password one
+    assert report.docker_group == "not-asked"
+
+
+@pytest.mark.parametrize(
+    ("stderr", "is_a_password_problem"),
+    [
+        ("sudo: a password is required", True),
+        ("sudo: A password is required", True),  # capitalised: `.lower()` earns its keep
+        ("sudo: pk is not in the sudoers file.  This incident will be reported.", False),
+        ("sudo: systemctl: command not found", False),
+        ("E: Could not get lock /var/lib/dpkg/lock-frontend", False),
+        ("", False),
+    ],
+)
+def test_only_sudos_own_password_wording_counts_as_needing_a_password(
+    stderr: str, is_a_password_problem: bool
+) -> None:
+    """The distinction the escalation branch turns on, pinned by field.
+
+    A privileged step exits non-zero for a hundred reasons and exactly one of
+    them is worth a dialog. Everything else — not in sudoers, no such command,
+    a held dpkg lock — is a question no password can answer.
+    """
+    assert platform._needs_password(stderr) is is_a_password_problem
+
+
+def test_a_sudo_n_failure_that_is_not_about_a_password_never_opens_the_dialog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Not in sudoers: the steps fail, and the user is not asked for a password that cannot work.
+
+    Driven through `ensure_docker()` with a session present, because the branch
+    is what has to hold — `_needs_password()` being right on its own proves
+    nothing if the caller does not consult it. Dropping the call from the
+    condition left the whole file green until this test existed.
+    """
+    _linux(monkeypatch)
+    built: list[platform.SudoSession] = []
+    real_session = platform.SudoSession
+
+    def spy(*args: object, **kwargs: object) -> platform.SudoSession:
+        session = real_session(*args, **kwargs)  # type: ignore[arg-type]
+        built.append(session)
+        return session
+
+    monkeypatch.setattr(platform, "SudoSession", spy)
+    sudo_questions: list[str] = []
+
+    def ask(question: str) -> str:
+        if question == platform.SUDO_PASSWORD_QUESTION:
+            sudo_questions.append(question)
+            return "hunter2"
+        return "y"
+
+    run = _Refuses(
+        "sudo -n", stderr="sudo: pk is not in the sudoers file.  This incident will be reported."
+    )
+    report = platform.ensure_docker(
+        run=run,
+        which=_which("apt-get"),
+        user="pk",
+        wait_seconds=0.0,
+        ask=ask,
+        run_input=_never_feeds,  # raises if a single password-carrying step is attempted
+    )
+
+    assert sudo_questions == []
+    assert len(built) == 1  # the session was built, and never used
+    assert built[0].asked == 0 and built[0].outcome == "unasked"
+    # The step is reported by sudo's own words, not translated into a password.
+    assert any("not in the sudoers file" in s for s in report.skipped), report.skipped
+    assert not [m for m in report.manual_steps if "needed a password" in m], report.manual_steps
+    assert any("Some steps did not run" in m for m in report.manual_steps), report.manual_steps

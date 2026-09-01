@@ -737,6 +737,296 @@ directions on the same day; both are kept.
 
 ---
 
+### 17. Found by diffing two real `docker compose config` captures — 2026-08-31
+
+Both captures are committed under `pylauncher/tests/data/`: the engine's own install on Ubuntu
+after it reached `ready`, and a bash-installer server still standing on Fedora. Neither of these
+was found by reading code; each is a line in a resolved compose document from a box that ran.
+
+- [ ] **`ac-client-data-init` runs on compose's implicit `default` network, not `ac-network`.**
+  `catalog/installers/wow-wotlk/docker-compose.yml.tmpl` — the service declares no `networks:`, so
+  compose materialises a SECOND per-project bridge for it and every install ends up with two
+  networks where the file names one. Harmless today: it fetches an archive into a named volume and
+  talks to no other service. **Inherited, not introduced** — the bash script install does exactly
+  the same thing, which is why nobody had noticed.
+  *Recorded, not fixed, and the fix carries an obligation:* adding `networks: [ac-network]` changes
+  what `docker compose config` resolves, so the committed native fixture
+  (`tests/data/wotlk-compose-config.json`) and the byte snapshot under `tests/data/wotlk-rendered/`
+  must BOTH be re-captured in the same commit, and the re-capture has to come off a real install —
+  a hand-edited fixture is not a capture. `test_the_synthesised_default_declaration_is_modelled_and_not_erased`
+  is what will go red first.
+
+- [ ] **The captured shape of the SELinux label is not what the shipped Fedora script writes, and
+  the z-vs-Z question it looked like it was raising is already answered in that same script.**
+  `install-wow-wotlk-fedora.sh`'s override literally writes `:z` on SIX binds (worldserver,
+  authserver and db-import's `env/dist/etc` and `env/dist/logs`, L1758-1759/1770-1771/1777-1778)
+  and `:Z` on ONE (the worldserver's `./modules`, L1740) — but the captured fixture
+  (`wotlk-compose-config-script.json`) shows `bind: {selinux: Z}` on that one modules mount and
+  **no `selinux` field at all** on the other six, not `:z`. That exact shape — six labels
+  stripped, one untouched — is precisely what `selinux_drop_z_from_override()` (L416-425) leaves
+  behind: its `sed` matches only `/azerothcore/env/dist/*:z` and never touches `./modules:...:Z`.
+  It runs when SELinux is enforcing on a filesystem that cannot hold labels; the Fedora VM
+  (`yulon-fedora`) this capture came from is confirmed enforcing (§3 and §9 above), but the same
+  VM's `stat -f -c %T ~` is recorded elsewhere as `xfs`/`btrfs`
+  (`pyplan/phase7-plans/7.1-spine-azerothcore-linux.md`, the E.4 Fedora gate setup step), which
+  `selinux_labels_supported()` treats as label-capable — so the drop path is not obviously why
+  this particular box produced this shape, and this list cannot pin the mechanism down further
+  from a capture and a script reading alone.
+  **What IS settled, in the script's own words:** the override's comment
+  (`install-wow-wotlk-fedora.sh` L1752-1757) already answers the "which label is correct for a
+  shared tree" question — "`z`, not `Z`: three services share these mounts, and `Z` would give
+  each container a private MCS category pair, so whichever relabelled last would lock the others
+  out. The `./modules:...:Z` above is the opposite case — a single mounting service." In our own
+  stack `./modules` is mounted by TWO services (`ac-worldserver` and `ac-db-import` — pinned
+  divergence 2 above), so by that same reasoning `z` is the correct label for it, and
+  `platform.bind_label()` labelling it `z` on every bind is already right. There is no open design
+  question here.
+  *What is still open:* confirm on the Fedora 7.1 E.4 live gate that a two-service `z`-labelled
+  modules mount actually behaves (both containers get and keep access) — a one-line observation on
+  a gate that runs anyway, not a reproduction owed to this list. The comparison vocabulary still
+  reads neither spelling (`volume_from_config()` ignores `bind.selinux`, `_mount_mode()` drops
+  `z`/`Z`), so nothing here is asserted by a test.
+
+- [ ] **The script install publishes MySQL and the SOAP admin console on every interface, not
+  loopback.** `catalog/installers/wow-wotlk/install-wow-wotlk{,-ubuntu,-fedora}.sh` write an
+  override that never touches `ports:`, so all three inherit upstream's bare `3306:3306` and
+  `7878:7878` — an unauthenticated `root`/`password` MySQL (the pair is upstream's own compose
+  file, not ours) and an unauthenticated SOAP console (a remote shell in front of a GM account),
+  both reachable from the LAN rather than only the host that runs them. The native engine's own
+  install binds both to `127.0.0.1` — `native/base.yml.tmpl:62` for MySQL, `:264` for SOAP, each
+  with a comment — because nothing in the launcher's maintenance path needs either port
+  TCP-reachable: `apply.py`, `maintenance.py` and `accounts.py` all go over `docker exec`. Same
+  capture as the two items above: `pylauncher/tests/data/wotlk-compose-config-script.json` shows
+  `ac-database` and `ac-worldserver` publishing both ports with no `host_ip`, and
+  `SCRIPT_INSTALL_DIVERGENCES` in `tests/test_compose_fixture.py` pins the difference so it cannot
+  silently disappear from a future re-capture.
+  *Recorded, not fixed:* whether the right fix is an override patch or simply deletion is the
+  owner's call, not this list's — 7.2 (`pyplan/phase7-plans/7.2-retire-bash.md`) deletes all three
+  scripts outright, so the fix may turn out to be "the file is gone" rather than a patch to it.
+  Until then, these three scripts are what a user running `install-wow-wotlk*.sh` today actually
+  gets.
+
+- **`linux_package_manager()` cannot tell an immutable Fedora from an ordinary one** — 2026-08-31,
+  found while fixing the buildx package name, not fixed here. It picks a package manager by which
+  binary is on `PATH`, and `dnf` is on `PATH` on Bazzite and Silverblue too. There, `/usr` is an
+  atomic ostree deployment: `dnf -y install moby-engine ...` is the wrong command whatever packages
+  it names, because those systems layer with `rpm-ostree install` and take a reboot to activate it.
+  `install-wow-wotlk-fedora.sh` has both branches and chooses between them; the Python engine has
+  only the dnf one.
+  *Recorded, not fixed:* the shape of the fix (a third `pm` value, or a flag on the dnf branch) is a
+  design decision, and no immutable box exists to gate it on — the 7.1 Fedora gate box is ordinary
+  Fedora 44. Naming it here so the next person to touch `docker_engine_commands()` knows the gap is
+  known rather than overlooked.
+
+- **`networking.plan()` cannot see past NAT, and the realm it advertises is unreachable** —
+  2026-08-31, found while proving a real client login for the first time on any platform.
+  `plan()` takes `lan_ip` from `platform.detect_lan_ip()`, which reports the address of the
+  machine the engine runs on. Install into a VM on Hyper-V's Default Switch, VirtualBox NAT,
+  or WSL, and that address is `172.x` — routable from the host and from nowhere else. The
+  LAN step then writes it into `realmlist.address` and reports success, so the install is
+  "finished" and every client outside the box sees an empty or unreachable realm list, with
+  nothing anywhere naming the cause.
+  Measured: the Fedora gate VM detected `172.30.61.209`; a client on the LAN could only
+  connect once the address was overridden by hand to a reachable one and the host forwarded
+  3724/8085 inward. A user has no such lever — `lan_ip` is a keyword argument, not a field
+  in the Networking tab.
+  *Recorded, not fixed:* the shape is a design decision. Detecting "the address a client
+  would reach me on" is not something the box can answer alone; the honest options are to
+  ask the user, to probe from outside, or to refuse to claim success when the detected
+  address is in a NAT range (`10/8`, `172.16/12`, `192.168/16` behind another NAT, or a
+  known hypervisor range) and say so. The last is cheap and would have turned tonight's
+  silent wrong answer into a question.
+  Related observation, not a defect: behind a port forward `account.last_ip` records the
+  forwarder for every client, so per-IP account caps, ban-by-IP and geolocation all see one
+  address for the whole world.
+
+- **The CLI harness dies on Windows the moment its output is redirected** — 2026-09-01, found by
+  the 6.3 clean-box gate on `yulon-win11-gate`, after every preflight check had passed:
+
+      File "yulon\install_wiring.py", line 209, in main
+        sys.stdout.write(line + "
+")
+      File "Lib\encodings\cp1252.py", line 19, in encode
+      UnicodeEncodeError: 'charmap' codec can't encode character '→'
+
+  The engine writes `→` in its own progress lines (it is in the provisioning JSON too). A Windows
+  console is UTF-8, but a REDIRECTED stdout takes the locale encoding — cp1252 here — which has no
+  `→`, so the process dies with exit 1 having done nothing wrong. It reached `--- clone-core` only
+  after `PYTHONUTF8=1` was forced in the harness wrapper.
+  This is not merely a gate artifact: `phase7-decisions.md:982` names this harness as the way to
+  drive an install, and any user piping it to a log file hits the same crash. The GUI does not,
+  because Qt does its own encoding.
+  *Recorded, not fixed:* the fix is one of — reconfigure `sys.stdout` to UTF-8 with
+  `errors="replace"` at entry, set `PYTHONUTF8` for the child, or stop emitting characters the
+  stream cannot be guaranteed to encode. The first is smallest and keeps the arrows.
+
+- **Docker cannot pull from a non-interactive Windows session** — same gate, same night. Docker's
+  Windows credential helper needs an interactive logon, so under ssh or a scheduled task every pull
+  fails with `error getting credentials - A specified logon session does not exist`. It cost the
+  bind-mount probe its image and then killed `clone-core` outright.
+  Environmental rather than a product defect, but it belongs here because it will meet anyone
+  automating Windows: the fix is stub `docker-credential-wincred.bat`/`-desktop.bat` on PATH that
+  answer `get` with `credentials not found in native keychain` **on stdout** (stderr leaves docker's
+  `out:` empty and it errors anyway) plus `DOCKER_CONFIG` pointing at a config with `credsStore` empty.
+  Worth noting what the engine got RIGHT: it did not blame the folder. It reported "that failure was
+  the probe's own pull rather than an answer about the folder" and carried on — the three-outcome
+  discipline behaving correctly against a real-world failure it had never seen.
+
+- **`--provision` never asks for a sudo password, so the packaged artifact cannot provision any
+  password-sudo Linux box** — 2026-09-01, found on clean Arch during the 7.1 gate. The shipped
+  `.tar.gz`'s headless entry point runs `ensure_docker()`, finds `sudo -n` refused, and SKIPS:
+
+      skipped: pacman -Sy --noconfirm docker docker-compose docker-buildx: exit 1 sudo: a password is required
+      skipped: systemctl enable --now docker: exit 1 sudo: a password is required
+      docker_group: "not-asked"   ok: false   docker_ready: false
+
+  Running it under a real pty changed nothing — no question is ever asked on that path, so there was
+  nothing for a driver to answer. The GUI gets a dialog and the CLI install harness prompts through
+  `_terminal_prompter`; `--provision` alone has neither.
+  Most Linux desktops have password sudo, so for them the artifact's headless provisioning can only
+  ever hand back a list of commands to paste. That may be the intended contract for a non-interactive
+  flag — but it is nowhere stated, and the 7.1 gate line asks for the PACKAGED ARTIFACT to install a
+  server, which on those machines it cannot do unaided.
+  *Recorded, not fixed:* the choice is between teaching `--provision` to prompt on a tty (it would
+  then not be non-interactive), giving it an explicit `--sudo-askpass`/stdin contract, or stating
+  plainly that provisioning on password-sudo Linux is a GUI-only path. Worth noting the behaviour
+  itself is otherwise exemplary: it refused rather than blocked, named both commands verbatim, and
+  declined the docker-group join because there was nobody to ask.
+
+- **A commit pin added to a source that is already installed is never applied — no resume and no
+  repair will ever move that checkout to it** — 2026-09-01, found by reviewing the commit-pin work
+  (task G.1). Traced through the code and its tests, not reproduced on a box.
+  `StagedInstaller.already_cloned()` (`pylauncher/yulon/catalog/native.py:1061`) answers True when
+  the stage is recorded done AND the checkout's `origin` matches the source URL. Its three callers —
+  `AzerothCoreInstaller._clone_core` (`catalog/families/azerothcore.py:112`), `._clone_modules`
+  (`:164`) and `StagedInstaller.stage_clone_sources` (`native.py:1132`) — then yield
+  "already … leaving it exactly as it is" and skip `_clone()` entirely, so the seam is never
+  entered and `git.py`'s `_pin()` never runs. Give a source a `rev` in `catalog.json` after that
+  source has been cloned and recorded, and every later run reports success while leaving the
+  checkout on whatever commit it already had. That is precisely the case `CloneSpec.rev`'s own
+  docstring anticipates — "a pin for cores whose upstream moves under a gate — Tortoise is pinned
+  the day 7.6 passes" — and the day that pin lands is the day it silently does nothing on every
+  machine that already installed Tortoise. The module and content half is NOT affected:
+  `Applier.install()` (`pylauncher/yulon/apply.py:441`) has no such gate and re-clones and re-pins
+  unconditionally on every apply.
+  *Recorded, not fixed, and deliberately so:* the gate is 7.1's **"a resume must not be able to
+  change what is being built"** invariant, written into `already_cloned()`'s docstring after the
+  live Ubuntu gate (2026-08-30) lost its source tree to a fetch+reset on resume. A pin is arguably
+  the one change to a source a resume SHOULD adopt, which makes this a collision between two
+  correct rules rather than an oversight — so the fix (record the applied rev in the state file and
+  re-pin when the catalog's differs, or exempt pinned sources from the gate) is a call for whoever
+  owns 7.6 and its Tortoise pin, not a patch to make in passing.
+
+- **The extractor cannot read the game client at all on enforcing SELinux, and `Mount` has no way to
+  say so** — 2026-09-01, raised as a question by task H.1, **measured on `yulon-fedora-gate`**
+  (Fedora 44, SELinux Enforcing, Docker 29.7.2) rather than argued. `docker.Mount` emits no SELinux
+  label, and the plan's Group I builds `Mount(client_dir, CLIENT_MOUNT, read_only=True)` and
+  `Mount(data_dir, OUT_MOUNT)` with none. Five cases, busybox, one minute:
+
+  | case | mount | context | result |
+  |---|---|---|---|
+  | A. fresh dir, default label | none | `user_tmp_t` | **DENIED** |
+  | B. parent relabelled first, `data/` created after | none | `container_file_t` | ALLOWED |
+  | C. the relabel did not happen | none | `user_tmp_t` | **DENIED** |
+  | D. same dir | `:z` | `container_file_t` | ALLOWED |
+  | E. the user's client dir | `:ro` | `user_tmp_t` | **DENIED** |
+
+  **B settles the argument about `data/` in the reviewer's favour, and against my own first reading.**
+  `stage_generate_compose` relabels the whole server directory before extract runs, `data/` is created
+  under it afterwards, and it inherits `container_file_t` - so the write succeeds without `:z`. C
+  shows the exposure is real but narrow: that `chcon` is explicitly non-fatal, the compose-managed
+  binds self-heal at `up` through `{{BIND_LABEL}}`, and the extractor's ephemeral mount has no second
+  chance.
+
+  **E is the blocker, and nobody predicted it.** The game client is the user's own directory. It lives
+  OUTSIDE the server dir, so no `chcon` ever reaches it, and `:z`/`:Z` must never be used on it -
+  they recursively rewrite the labels of the user's client, which is exactly why `bind_mount_ok()`'s
+  probe bans them. So on any enforcing Fedora the extractor cannot read a single MPQ. Not a loss of
+  redundancy: a certain failure, on the one distribution most likely to hit it.
+
+  **The fix already exists in this codebase, for exactly this reason.** `--security-opt
+  label:disable` - what `platform.label_disable_args()` returns and what `git.py`'s read path already
+  uses for a repository it must not relabel. Measured: it read the client, and the client's context
+  was byte-identical before and after (`user_tmp_t` both times). It also let the data dir be written.
+
+  **This corrects the API shape recorded when H.1 landed.** A per-mount `label: str = ""` on `Mount`
+  is the wrong seam: `label:disable` is a **container-level** `--security-opt`, not a mount suffix.
+  The extractor's container holds both mounts - the client it must not touch and the data dir it must
+  write - and one container-wide flag serves both. So the field belongs on `ContainerRun`, not on
+  `Mount`, and Group I should ask `platform.label_disable_args(enforcing=selinux_enforcing())` for it,
+  which already keeps the three-outcome answer (enforcing / not / could-not-ask).
+  *Recorded, not fixed:* H.1 deliberately shipped no uncalled field, and Group I is where the caller
+  arrives. It must not land without this.
+
+- **`composegen.write_plan()` skips a CRLF file forever, and accuses the user when a read flickers** —
+  2026-09-01, found while writing I.3's own version of the same "may we overwrite this" question, and
+  **confirmed by running the real `write_plan()`**, not a reconstruction. Two defects, both in merged,
+  shipping code (`yulon/catalog/composegen.py`, `is_ours()` and `write_plan()`):
+
+  1. **The unchanged-file skip uses `read_text()`, which translates `
+` to `
+`.** So a
+     byte-for-byte CRLF copy of our own compose file compares EQUAL, the write is skipped, and the
+     CRLF stays on disk permanently — the skip preserving the exact thing it should repair. Measured:
+     with a CRLF copy present, `write_plan()` returned `()` and left it. I.3's `_look()` avoids this
+     by opening with `newline=""`.
+  2. **Each file is read twice — once by `is_ours()`, once for the equality check.** A transient
+     failure on the FIRST read makes `is_ours()` swallow the `OSError` and answer `False`, producing
+     *"was not written by Yu'lon"* — an accusation against a file we did write. A failure on the
+     SECOND read is not caught at all and escapes as a raw `PermissionError`. Both measured with a
+     stateful `Path.open`.
+
+  **Severity: real, currently low-probability.** `write_plan`'s targets are pure engine output with no
+  shipped starting content, so the CRLF skip needs a `git` round-trip of a generated file or an editor
+  with the wrong default. The double-read bites on any transient read during a resume, which is an
+  installer-robustness gap rather than a rare one.
+
+  *Recorded, not fixed, and the reason matters.* I.3 deferred it saying a change there would risk the
+  A16 byte snapshot. **That justification does not hold** — the reviewer checked, and `render()`
+  (which A16 exercises) and `is_ours()`/`write_plan()` are disjoint with no shared helpers. The honest
+  reason to defer is scope: `write_plan` is load-bearing, has two other callers, and has its own test
+  suite with no CRLF or double-read coverage yet. Fixing it is its own task, and it should consolidate
+  with `dockerfile._look()` rather than grow a second three-way answer beside it — the same question
+  currently gets an honest three-way answer for a Dockerfile and a two-way one for a compose file.
+
+- **`conf.CONF_MODE = 0o600` is only safe while the CMaNGOS image runs as root** — 2026-09-01, raised
+  during J.1's review, correct today, filed because the day it stops being correct nobody will look
+  here. The patched `.conf` files are written by the HOST user; the server that reads them runs
+  inside the container. Checked: `catalog/installers/shared/cmangos/{base,build,override}.yml.tmpl`
+  carry no `user:` key and `wow-*/native/Dockerfile.tmpl` carries no `USER` directive, so the runtime
+  image runs `mangosd`/`realmd` as root — and root bypasses POSIX permission checks, so a
+  host-owned `0600` file is readable anyway.
+  **The trap:** a future hardening pass adding a non-root `USER` to those Dockerfiles is an ordinary,
+  well-intentioned change. It would silently make every conf file unreadable to the server, and the
+  symptom is "the server will not boot" with nothing pointing at a permissions constant three modules
+  away. `0o600` is also the first file-permission constant in this codebase (grepped `yulon/` — no
+  other `chmod`/`0o6..`), so there is no convention to remind anyone.
+  *Recorded, not fixed:* J.1 only defines the constant; `materialise()` (J.2) is what will `chmod`.
+  The right moment to decide is J.2's review — either widen the mode, or make the Dockerfile's user
+  and the conf mode answer to one place instead of two.
+
+- **`Path("/etc/x").is_absolute()` is FALSE on Windows, so a path-escape check built on it admits
+  the one pattern it exists to refuse — and the test that would catch it passes on Linux CI** —
+  2026-09-01, found while writing `sqlplan._matches`, measured on this laptop, and filed here rather
+  than in that module because it is a trap for **any** escape check in this codebase.
+
+  Two measurements, both on Windows Python:
+  - `Path("/etc/x").is_absolute()` -> **False**. A rooted POSIX pattern is not "absolute" to a
+    `WindowsPath`, so a guard reading `if Path(pattern).is_absolute(): refuse` waves it through.
+  - `Path("C:/srv") / "/etc/x"` -> **`C:\etc\x`**. The join then discards the server directory and
+    escapes to the drive root — which is exactly what the guard existed to prevent.
+
+  So the check admits the pattern **and** the join escapes, on the same platform, and the two halves
+  only line up there. On Linux the guard works and any test of it passes, which is why CI is no help:
+  the platform that needs the check is the one where it silently is not there.
+
+  *The fix is to test the pattern's own spelling rather than ask `Path` what it thinks* — a leading
+  `/` or `\`, a drive letter, and `..` segments, refused as text. Anyone adding a new escape check
+  should do the same, and should write at least one test whose expectation is stated in terms of the
+  pattern string rather than a `Path` predicate.
+  *Found independently by two sessions working J.3 in parallel.*
+
+
 ### One thing worth keeping
 
 Three of these have an obvious fix that is **wrong**, and two of them arm a worse bug:

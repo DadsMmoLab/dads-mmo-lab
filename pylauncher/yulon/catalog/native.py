@@ -1,12 +1,14 @@
-"""The native install engine: install a server without a shell script (roadmap 6.2).
+"""The install spine: named, resumable stages, game-free (roadmap 6.2 → 7.1).
 
-One typed engine for every platform whose install is not a bash script — macOS
-today, native Windows next (6.3) — driving Docker Desktop, which 5.1 already
-provisions. It has the SAME contract as `installer.Installer`
-(`run(options, *, cancel, ask) -> Iterator[str]`), so the catalog view, the log
-panel and the job runner need no changes and Linux takes no new code path at
-all: `installer.installer_for()` picks between the two from `catalog.json`
-data.
+One typed engine for every server on every platform. `StagedInstaller` owns
+what is true of every install — the state file and its hint semantics, the
+directory/ownership guard, preflight and Docker provisioning, the
+refuse-not-delete clone safety, the compose marker rules, streaming, cancel
+copy, keep-awake — and a FAMILY (`families/azerothcore.py`, `families/cmangos.py`)
+composes its stages into an ordered tuple. `installer.installer_for()` picks
+the family from `catalog.json`'s `install.native.family`. The contract is the
+same as `installer.Installer`'s (`run(options, *, cancel, ask) -> Iterator[str]`),
+so the catalog view, the log panel and the job runner need no changes.
 
 **Staged and resumable.** The stages are recorded by NAME in
 `.yulon-install.json`, so reordering them can never re-interpret an existing
@@ -14,36 +16,38 @@ install. The rules below each cost the earlier Rust launcher an evening
 (`pyplan/rust-prior-art.md` §1), and they are the reason this file is more
 careful than its length suggests:
 
-* `preflight` and `guard` are NEVER recorded complete — a guard a resume skips
-  is not a guard. `start-db`, `up` and `ready` are not recorded either: a resume
-  must always end by actually starting and verifying the server, and it must
-  bring the database back up before the import stage can ask it anything.
-* **The state file is a hint.** Every stage re-checks disk evidence before
-  skipping: the clone stages ask git for the remote, the build asks compose for
-  images, compose generation reads its own marker. An `is_done` short-circuit
-  once let a state file dropped into a directory make the generator rewrite a
-  real server's compose file and orphan its character volumes.
+* preflight and the guard are not stages: the spine runs them itself, so a
+  family can neither forget nor record them — a guard a resume skips is not a
+  guard. A `Stage` with `recorded=False` (`start-db`, `up`, `ready`) is run by
+  every resume: an install must end by actually starting and verifying the
+  server, and the database must be back up before the import can ask it
+  anything.
+* **The state file is a hint, and disk evidence answers in both directions.**
+  Every stage re-checks disk evidence before skipping: the clone stages ask git
+  for the remote, the build asks the daemon for images, compose generation
+  reads its own marker. An `is_done` short-circuit once let a state file
+  dropped into a directory make the generator rewrite a real server's compose
+  file and orphan its character volumes. The converse is just as load-bearing
+  and was missing until 7.1: a stage that is recorded AND corroborated must be
+  a genuine no-op, because "re-run it to be sure" is destructive for a clone —
+  see `StagedInstaller.already_cloned()`.
 * `install_id` is a hash of the ABSOLUTE server directory, so a COPIED install
-  directory is refused rather than adopted.
+  directory is refused rather than adopted; `family` is recorded too, so a
+  catalog edit that moves a game between families is a refusal, never a
+  reinterpretation.
 * A failure mid-stage records nothing, so the stage re-runs.
+* A stage's cancel note is said by the spine, right after `--- <name>`, and
+  by nothing else.
 
-**Nothing on this path may prompt.** `ask` is accepted to match the contract
-and never used: a step that turns out to need an answer is a design failure to
-fix rather than a dialog to add.
+**Nothing on this path prompts for its own decisions.** Exactly two questions
+pass THROUGH it, both inside Docker provisioning before stage 1 and both via
+the forwarded `ask`: the docker-group consent and, on Linux, the sudo password.
+A stage that turns out to need an answer is a design failure to fix rather
+than a dialog to add.
 
-That is now structural rather than a claim about data. This engine calls
-`ensure_docker()` itself, and on Linux that call CAN escalate — so "there is no
-`sudo` here" was only true because `catalog.json` happens not to dispatch any
-entry natively on Linux, which is one JSON key away from being false. Passing
-no `ask` down makes the consent seam decline by default, so a future Linux
-native entry fails honestly ("nobody to ask") instead of joining the docker
-group behind the user's back.
-
-**Verified where, exactly.** Everything here is unit-tested against seams and
-NONE of it has been run against a real daemon by this project — there is no Mac
-on it. Docstrings say which claims are inherited from the Rust launcher's
-incidents, which are measured on yulon-ubuntu (Linux), and which are merely
-written.
+**Verified where, exactly.** Everything here is unit-tested against seams;
+docstrings say which claims are inherited from the Rust launcher's incidents,
+which are measured on yulon-ubuntu (Linux), and which are merely written.
 """
 
 from __future__ import annotations
@@ -51,21 +55,27 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import threading
 import time
 from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
+from enum import Enum
 from pathlib import Path
+from secrets import token_hex
+from typing import ClassVar, Protocol
 
 from yulon import docker, git, platform, resources, runner
 from yulon.catalog import composegen, preflight
-from yulon.catalog.catalog import CatalogEntry
+from yulon.catalog.catalog import CatalogEntry, EmulatorSource, NativeInstall, ReadyMarkers
 from yulon.catalog.installer import (
     DockerUnavailableError,
     InstallerError,
     InstallOptions,
     UnsupportedPlatformError,
+    docker_unavailable,
+    provision_lines,
     unsupported_platform_message,
 )
 from yulon.log import get_logger
@@ -75,33 +85,18 @@ logger = get_logger(__name__)
 STATE_FILE = ".yulon-install.json"
 STATE_VERSION = 1
 
-STAGE_ORDER: tuple[str, ...] = (
-    "preflight",
-    "guard",
-    "clone-core",
-    "clone-modules",
-    "generate-compose",
-    "build",
-    "client-data",
-    "start-db",
-    "import",
-    "up",
-    "ready",
-)
-
-NEVER_RECORDED = frozenset({"preflight", "guard", "start-db", "up", "ready"})
-"""Stages whose completion is never written down. See the module docstring.
-
-`start-db` is here because it is a precondition rather than progress: the
-import stage after it needs a live database both to probe and to write to, and
-a resume that skipped it would fail the same way a first install without it
-did. It costs seconds against an already-running container.
-"""
-
 OPENING_NOTE = (
-    "You can stop this at any time. Nothing is written outside the folder below, and starting the "
-    "install again continues from the last step that finished — only the step that was interrupted "
-    "runs again."
+    "You can stop this at any time. What an install writes outside the folder below is named "
+    "here rather than denied: the images this build produces and the volumes holding the "
+    "database and the server data, which live in Docker's own storage — that is why the checks "
+    "below look at the space on Docker's disk too; Docker itself, when no daemon answers yet "
+    "(on Linux: system packages, a service, and the group you are asked about first); and this "
+    "app's own settings and log, in its config folder. Starting the install again continues "
+    "from where it stopped: source this app has finished cloning is never fetched, reset or "
+    "moved, and the build is not run a second time once Docker confirms its images are there. "
+    "Everything cheap runs again on every attempt — the compose files this app writes are put "
+    "back the way the catalog says, the server-data download resumes and re-checks itself, and "
+    "the database and server are started and waited for."
 )
 """What a Stop costs, said before it is pressed, and true of every stage.
 
@@ -109,6 +104,42 @@ The sentence this replaced was about the build (see `BUILD_CANCEL_NOTE`) and
 was said as the second line of every install and appended to every
 cancellation, so a user who stopped during the clone or the download was told
 Docker was finishing a build step (review, 2026-08-23).
+
+**This sentence has been rewritten until every clause names something a stage
+is responsible for keeping, because each version claimed more than the engine
+does.** It said "only the step that was interrupted runs again" while the live
+Ubuntu gate (2026-08-30) printed `Already finished: clone-core, clone-modules,
+generate-compose` and ran all three, each doing `git fetch` + `git reset --hard
+FETCH_HEAD` over the user's source. It said the source was "left exactly as it
+is on disk", which is false of `docker-compose.yml` — a TRACKED file of the
+emulator checkout, carrying this engine's marker after the first install, so
+`composegen.write_plan()` puts it back whenever it differs. It said only the
+last steps run every time, while `start-db` sits mid-list with `recorded=False`
+and `client-data` consults no state at all. And it opened with "nothing is
+written outside the folder below", three lines above `Docker setup did:
+apt-get update; apt-get install -y docker.io; systemctl enable --now docker;
+usermod -aG docker pk` — a reassurance printed directly above the actions
+contradicting it, which is the exact shape of the sentence removed from the
+clone stage (review, 2026-08-31).
+
+So each clause is now a claim something is responsible for keeping:
+
+* *what goes outside this folder* — the base template's two NAMED volumes
+  (`db-data`, `client-data`) plus the built images, which is why
+  `preflight.evaluate()` has a check about Docker's data root and not only
+  about this drive; `platform.ensure_docker()` for the second item, whose own
+  `done` steps are printed a few lines below this one; and `config_dir()` for
+  the third;
+* *finished cloning is never fetched, reset or moved* — `already_cloned()`, and
+  `refuse_unowned_checkout()` for the checkout that was never this app's;
+* *the build is not run a second time once Docker confirms its images* —
+  `stage_build()`, where an unknown answer rebuilds rather than skips;
+* *the compose files this app writes are put back* — said, not hidden, because
+  `write_plan()` really does overwrite an edit to a file it wrote;
+* *the download resumes and re-checks itself* — the generated entrypoint's
+  `curl --continue-at -` plus its data-version comparison;
+* *the database and server are started and waited for* — the three
+  `recorded=False` stages, which is why a resume always ends with a live server.
 """
 
 BUILD_CANCEL_NOTE = (
@@ -142,14 +173,20 @@ IMPORT_CANCEL_NOTE = (
 
 Re-running the importer over a schema that already exists reports success in 28
 seconds and leaves `acore_world` permanently unimportable (yulon-ubuntu,
-2026-08-23). The `partial` branch of `_import()` is what makes this sentence
+2026-08-23). The `partial` branch of `stage_import()` is what makes this sentence
 true; without it the honest copy would be the opposite.
 """
 
-# What the auth server prints once it is serving the realm. A fresh install's
-# realmlist row is 127.0.0.1 and the world port, which is what `wait_ready()`
-# looks for in the auth log; the Networking tab is what changes it afterwards.
-_READY_REALM_HOST = "127.0.0.1"
+INSTALL_REALM_HOST = "127.0.0.1"
+"""The realm address every fresh install advertises, and what the `ready` stage expects.
+
+A fresh install's realmlist row is the loopback address and the world port —
+AzerothCore's default row, and the row the CMaNGOS plan writes — so the auth
+log's own line is what the catalog's `ready.auth` marker names through
+`{{REALM_HOST}}:{{WORLD_PORT}}`. Public: `families/cmangos.py` fills its
+templates and SQL from the same constant (A3). The Networking tab is what
+changes it afterwards; the engine never does.
+"""
 
 
 @dataclass(frozen=True)
@@ -160,35 +197,124 @@ class InstallState:
     `install_id` is what makes it a claim: it is derived from the absolute path
     of the directory holding it, so a state file copied into another directory
     describes an install that is not there.
+
+    `family` (7.1) is the second claim: a folder installed as one emulator
+    family is never reinterpreted as another by a catalog edit — the guard
+    refuses instead. Empty in files written before 7.1, which the guard reads
+    as the entry's current family; `version` stays 1 because the key is
+    additive.
     """
 
     game_id: str
     install_id: str
+    family: str = ""
     completed: tuple[str, ...] = ()
     last_error: str = ""
     updated_unix: int = 0
     version: int = STATE_VERSION
 
-    def with_stage(self, stage: str) -> InstallState:
-        """This state plus `stage`, in stage order, with nothing recorded twice."""
-        if stage in NEVER_RECORDED or stage in self.completed:
+    def with_stage(self, stage: str, order: Sequence[str]) -> InstallState:
+        """This state plus `stage`, in `order`, with nothing recorded twice.
+
+        `order` is the ENTRY's stage tuple rather than a module constant
+        because 7.1 has two families with two tuples. A name outside it is
+        dropped — the same rule `read_state()` applies on the way in — so the
+        file can never carry a name nobody can interpret.
+        """
+        if stage in self.completed:
             return self
         done = set(self.completed) | {stage}
-        return replace(self, completed=tuple(s for s in STAGE_ORDER if s in done), last_error="")
+        return replace(self, completed=tuple(s for s in order if s in done), last_error="")
 
     def has(self, stage: str) -> bool:
         """Did a previous run finish `stage`? Never a reason to skip on its own."""
         return stage in self.completed
 
 
-def read_state(server_dir: Path) -> InstallState | None:
-    """The state file in `server_dir`, or None if there is none this engine wrote.
+class Ownership(Enum):
+    """Whose folder is this? Three answers, because a bool has nowhere to put the third.
 
-    An unreadable or malformed file answers None: it is a hint, and a hint that
-    cannot be parsed is simply no hint. It is never deleted here — a file this
-    engine cannot read may be somebody else's, and `guard` is what decides
-    whether the directory can be used at all.
+    `UNCLAIMED` — no state file. Nobody has claimed the folder; whatever else
+    is in it is judged by the guards that look at the disk.
+
+    `OWNED` — a state file that PARSED and that names this install: the same
+    `install_id` (the hash of this absolute path), the same `game_id`, and a
+    `family` that does not contradict this one.
+
+    `UNKNOWN` — a state file is there and could not be turned into any of that:
+    truncated by a crash mid-write, damaged by hand, written by a version this
+    one cannot read, or an unrelated file that happens to sit at the reserved
+    name. This is the case where the engine knows LEAST, and it must never be
+    the case where it acts most freely. It fails closed everywhere it is
+    reached; see `StagedInstaller.claimed_this_folder()` for what that bought.
     """
+
+    UNCLAIMED = "unclaimed"
+    OWNED = "owned"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class Claim:
+    """`read_claim()`'s answer: the ownership, plus the state when there is one.
+
+    `state` is non-None exactly when `ownership is Ownership.OWNED`. It is the
+    parsed record; `UNKNOWN` carries none, which is the point of it.
+    """
+
+    ownership: Ownership
+    state: InstallState | None = None
+
+
+def read_claim(server_dir: Path, *, valid: Sequence[str]) -> Claim:
+    """The ONE place a folder is turned into an ownership answer.
+
+    This function exists because two of them disagreed, on exactly one input,
+    in the direction that loses work. `read_state()` answered `None` for a
+    state file that would not parse and `claimed_this_folder()` answered
+    `(server_dir / STATE_FILE).is_file()` — presence — so a corrupt file made
+    the guard treat the folder as FRESH while the clone stage treated it as
+    OURS, and `git fetch` + `git reset --hard` ran over the user's own
+    checkout. Repro (adversarial review, 2026-08-31): clone a repo to
+    `~/mywork`, edit a file, truncate `.yulon-install.json` to zero bytes,
+    install into `~/mywork`; the edit is gone. Commit `60d53374` hid this on
+    enforcing SELinux boxes — the container could not read `.git`, so an
+    earlier guard raised first — and `5c6c655c`, which made those reads work
+    again, uncovered it.
+
+    So: presence is never ownership, and a corrupt file is never allowed to
+    make this engine MORE confident than a missing one. Everything that asks
+    "is this folder mine?" asks here.
+
+    The file is never deleted or rewritten here — one that cannot be read may
+    be somebody else's, and the caller is what decides whether the directory
+    can be used at all.
+
+    `valid` is the entry's stage tuple: a name outside it is dropped rather
+    than kept, so a stage that no longer exists can never become a skip.
+    """
+    if not (server_dir / STATE_FILE).is_file():
+        return Claim(Ownership.UNCLAIMED)
+    parsed = _parse_state(server_dir, valid=valid)
+    if parsed is None:
+        return Claim(Ownership.UNKNOWN)
+    return Claim(Ownership.OWNED, parsed)
+
+
+def read_state(server_dir: Path, *, valid: Sequence[str]) -> InstallState | None:
+    """The state file in `server_dir`, or None if there is none this engine can read.
+
+    The HINT, and only the hint: an unreadable or malformed file answers None
+    because a hint that cannot be parsed is simply no hint. That is the right
+    answer for "which stages may I skip?" and the wrong one for "is this folder
+    mine?", which is `read_claim()`'s question and never this one's. The two
+    used to share this single answer, and see `read_claim()` for what that cost.
+    """
+    return read_claim(server_dir, valid=valid).state
+
+
+def _parse_state(server_dir: Path, *, valid: Sequence[str]) -> InstallState | None:
+    """The state file's contents, or None if it will not open, parse, or say whose it is."""
     path = server_dir / STATE_FILE
     try:
         with path.open(encoding="utf-8") as fh:
@@ -205,16 +331,23 @@ def read_state(server_dir: Path) -> InstallState | None:
         return None
     completed = parsed.get("completed")
     stages = (
-        tuple(stage for stage in completed if isinstance(stage, str) and stage in STAGE_ORDER)
+        tuple(stage for stage in completed if isinstance(stage, str) and stage in valid)
         if isinstance(completed, list)
         else ()
     )
+    # A missing or non-string `family` reads as "" — the one value that means
+    # "this file does not say". It is never a family name, so it can never
+    # match the wrong one; the guard treats it as the entry's own family, which
+    # is safe because every state file written before 7.1 was written by the
+    # only family that existed then.
+    family = parsed.get("family")
     error = parsed.get("last_error")
     updated = parsed.get("updated_unix")
     version = parsed.get("version")
     return InstallState(
         game_id=game_id,
         install_id=install_id,
+        family=family if isinstance(family, str) else "",
         completed=stages,
         last_error=error if isinstance(error, str) else "",
         updated_unix=updated if isinstance(updated, int) else 0,
@@ -227,11 +360,18 @@ def write_state(server_dir: Path, state: InstallState) -> None:
 
     A truncated state file is worse than none: `read_state()` would answer None
     and the resume would redo a two-hour build it had already finished.
+
+    The directory is created if it is not there. It always was under the 6.2
+    stage order, where `clone-core` made it before anything was recorded; a
+    family whose first recorded stage writes nothing to disk (7.3's
+    `db-password`) would otherwise have its record silently dropped and redo
+    that stage on every resume.
     """
     path = server_dir / STATE_FILE
     payload = {
         "version": state.version,
         "game_id": state.game_id,
+        "family": state.family,
         "install_id": state.install_id,
         "completed": list(state.completed),
         "last_error": state.last_error,
@@ -239,11 +379,98 @@ def write_state(server_dir: Path, state: InstallState) -> None:
     }
     tmp = path.with_name(path.name + ".new")
     try:
+        server_dir.mkdir(parents=True, exist_ok=True)
         tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="\n")
         os.replace(tmp, path)  # atomic on POSIX and on Windows
     except OSError as exc:
         tmp.unlink(missing_ok=True)
         logger.warning(f"could not record install progress in {path}: {exc}")
+
+
+@dataclass(frozen=True)
+class Secrets:
+    """What a stage may need that must never be printed: the database password.
+
+    A holder rather than a bare `str` so a `StageContext` can be logged or
+    land in a traceback without the value going with it — `repr()` masks it
+    on purpose, and there is no `__str__` that gives it back.
+    """
+
+    db_password: str
+
+    def __repr__(self) -> str:
+        return "Secrets(db_password=***)"
+
+
+@dataclass(frozen=True)
+class StageContext:
+    """Everything a stage body is handed. Frozen: a stage reads, the spine decides.
+
+    `secrets` is resolved by the spine BEFORE the first stage (see
+    `StagedInstaller.resolve_secrets()`), so a frozen context can carry it and
+    no stage has to know where the password came from.
+    """
+
+    server_dir: Path
+    client_dir: Path | None
+    state: InstallState
+    cancel: threading.Event | None
+    secrets: Secrets
+
+
+@dataclass(frozen=True)
+class Stage:
+    """One named, resumable step: data plus a bound callable, not a name in an if-chain.
+
+    `name` is what `.yulon-install.json` records, so renaming one reinterprets
+    every state file in the wild — the AzerothCore names are pinned by a test
+    for that reason. `recorded=False` is the old `NEVER_RECORDED`: a resume
+    must always run it again. `cancel_note` is what a Stop costs HERE and only
+    here; the SPINE says it right after `--- <name>`, and no stage body yields
+    its own, so no family can say the build's sentence over the download.
+    """
+
+    name: str
+    run: Callable[[StageContext], Iterator[str]]
+    recorded: bool = True
+    cancel_note: str = ""
+
+
+class ImportGate(Protocol):
+    """What the import stage asks of a database: its state, and a way to clear a half-written one.
+
+    Family-neutral: AzerothCore answers through the injected `acore_*` probe
+    pair (`CallableGate`), CMaNGOS through its own marker table (7.3). The
+    stage's five-branch table is the same for both.
+    """
+
+    def probe(self) -> docker.ImportState: ...
+
+    def reset(self) -> tuple[str, ...]: ...
+
+
+@dataclass(frozen=True)
+class CallableGate:
+    """An `ImportGate` from the two callables the app already injects for AzerothCore.
+
+    `reset_fn` may be None — an engine built without a reset seam — and then
+    `reset()` is the refusal the old `_import()` made inline: a half-written
+    database with no way to clear it is a stop, not a guess.
+    """
+
+    probe_fn: docker.ImportProbe
+    reset_fn: docker.ResetUnfinished | None
+
+    def probe(self) -> docker.ImportState:
+        return self.probe_fn()
+
+    def reset(self) -> tuple[str, ...]:
+        if self.reset_fn is None:
+            raise InstallerError(
+                "This install's databases were left half-written and this installer has no way "
+                "to clear them, so nothing was run."
+            )
+        return self.reset_fn()
 
 
 def _git_file_unmodified(dest: Path, relative_path: str) -> bool | None:
@@ -282,19 +509,34 @@ class Seams:
     start_db: Callable[[docker.ContainerSpec, Path], None] = docker.start_database
     start: Callable[[docker.ContainerSpec, Path], bool] = docker.start_staged
     wait_db_healthy: Callable[[docker.ContainerSpec], bool] = docker.wait_db_healthy_for
-    wait_ready: Callable[[docker.ContainerSpec, str, int], bool] = docker.wait_ready_for
+    wait_ready: Callable[[docker.ContainerSpec, docker.ReadySpec], bool] = docker.wait_ready_for
+    # `selinux_enforcing` answers True, False or None, and `None` is "could not
+    # ask" — never "no". The type says so here so that a caller collapsing the
+    # two is a type error, and not a Fedora install that renders no `:z`,
+    # relabels nothing, and looks exactly like a working one until the
+    # worldserver cannot read the config it was just handed.
+    relabel: Callable[[Path], bool] = platform.relabel_for_containers
+    selinux_enforcing: Callable[[], bool | None] = platform.selinux_enforcing
+    fs_type: Callable[[Path], str | None] = platform.filesystem_type
     keep_awake: Callable[[], AbstractContextManager[None]] = platform.keep_awake
 
 
-class NativeInstaller:
-    """Install one catalog entry natively: clone, generate compose, build, import, start.
+class StagedInstaller:
+    """Abstract spine: everything an install needs that is not about one emulator.
+
+    Subclasses implement `stages()` and nothing else is required of them. The
+    spine runs preflight, the guard and keep-awake itself, then each stage in
+    the family's order, recording the ones the family says to record.
 
     Constructed by `installer.installer_for()`, which is the only thing that
-    decides between this and the script path. `import_probe`/`reset_unfinished`
-    are supplied by the CALLER (the app wires `controller_wow_wotlk.repair`),
-    because they are per-game facts and `catalog/` must not import a controller
-    package — the same shape `controller_view.py` already uses.
+    decides between families. `import_probe`/`reset_unfinished` are supplied
+    by the CALLER (the app wires `controller_wow_wotlk.repair`), because they
+    are per-game facts and `catalog/` must not import a controller package —
+    the same shape `controller_view.py` already uses.
     """
+
+    family: ClassVar[str]
+    """The `install.native.family` this class installs; asserted against the entry in preflight."""
 
     def __init__(
         self,
@@ -312,6 +554,34 @@ class NativeInstaller:
         self._probe = import_probe
         self._reset = reset_unfinished
         self._seams = seams if seams is not None else Seams()
+        self._check_stage_tuple()
+
+    # -- the family's contract -------------------------------------------
+
+    def stages(self) -> tuple[Stage, ...]:
+        """The ordered stages, each bound to a body. Names unique; never `preflight`/`guard`."""
+        raise NotImplementedError(f"{type(self).__name__} must define its stages")
+
+    def stage_names(self) -> tuple[str, ...]:
+        """The names `stages()` records, in order — what `read_state()` validates against."""
+        return tuple(stage.name for stage in self.stages())
+
+    def _check_stage_tuple(self) -> None:
+        """Refuse a broken family at construction, not after a two-hour build.
+
+        A `ValueError`, not an `InstallerError`: this is a bug in a family
+        class, never something a user did (A8). A repeated name would let one
+        stage's record skip another; `preflight` and `guard` are the spine's
+        own and must never be recordable.
+        """
+        names = self.stage_names()
+        if len(set(names)) != len(names):
+            raise ValueError(f"{type(self).__name__} lists a stage twice: {names}")
+        reserved = [name for name in ("preflight", "guard") if name in names]
+        if reserved:
+            raise ValueError(
+                f"{type(self).__name__} may not name a stage {reserved[0]!r}: the spine owns it"
+            )
 
     # -- the contract ----------------------------------------------------
 
@@ -335,11 +605,11 @@ class NativeInstaller:
         the machine facts are gathered, because every number below it is
         fabricated without a daemon.
 
-        `ask` is accepted for that interchangeability and deliberately NOT
-        forwarded — see the module docstring on why declining by default is the
-        native path's rule rather than a consequence of today's catalog data.
+        `ask` is forwarded to Docker provisioning — the docker-group consent
+        and the Linux sudo password — and to nothing else; see the module
+        docstring.
         """
-        for _ in self._preflight_lines(options, cancel):
+        for _ in self._preflight_lines(options, cancel, ask):
             pass
 
     def run(
@@ -351,7 +621,7 @@ class NativeInstaller:
     ) -> Iterator[str]:
         """Run the install, yielding output live. Resumes whatever a previous run finished.
 
-        `ask` is accepted and never used — see the module docstring.
+        `ask` reaches provisioning only; no stage may prompt.
 
         Raises:
             InstallerError: any refusal, any stage that failed, or a cancel.
@@ -361,24 +631,32 @@ class NativeInstaller:
         server_dir = self.server_dir(opts)
         yield f"Installing {self.entry.name} into {server_dir}"
         yield OPENING_NOTE
-        yield from self._preflight_lines(opts, cancel)
+        yield from self._preflight_lines(opts, cancel, ask)
         self._check_cancel(cancel)
 
         state = self._guard(server_dir)
         yield f"Using {server_dir} ({'resuming' if state.completed else 'a fresh install'})"
         if state.completed:
             yield f"Already finished: {', '.join(state.completed)}"
+        ctx = StageContext(
+            server_dir=server_dir,
+            client_dir=opts.client_dir,
+            state=state,
+            cancel=cancel,
+            secrets=self.resolve_secrets(server_dir),
+        )
 
         try:
             with self._held_awake() as note:
                 if note:
                     yield note
-                for stage in STAGE_ORDER:
-                    if stage in ("preflight", "guard"):
-                        continue
+                for stage in self.stages():
                     self._check_cancel(cancel)
-                    yield f"--- {stage}"
-                    state = yield from self._run_stage(stage, state, server_dir, cancel)
+                    yield f"--- {stage.name}"
+                    if stage.cancel_note:
+                        # The spine says it, once, here (A4); no body yields its own.
+                        yield stage.cancel_note
+                    state = yield from self._run_one(stage, replace(ctx, state=state))
         except InstallerError as exc:
             # Recorded only into a state file that already exists. Creating one
             # to hold an error would make the state file itself the content
@@ -393,10 +671,70 @@ class NativeInstaller:
         logger.info(f"install of {self.entry.id} finished")
         yield f"{self.entry.name} is installed and running in {server_dir}"
 
+    def _run_one(self, stage: Stage, ctx: StageContext) -> Generator[str, None, InstallState]:
+        """Run one stage and, if the family says so, write it down."""
+        yield from stage.run(ctx)
+        if not stage.recorded:
+            return ctx.state
+        recorded = ctx.state.with_stage(stage.name, self.stage_names())
+        write_state(ctx.server_dir, recorded)
+        return recorded
+
+    def resolve_secrets(self, server_dir: Path) -> Secrets:
+        """The database password this install uses, decided before stage 1.
+
+        `fixed` is the catalog value (WotLK's `password` — a contract with
+        backup, console and every guide). `generated` reads the file a previous
+        run persisted (written with a trailing newline, read with `.strip()`),
+        else mints `<prefix><16 hex>`; persisting it is the family's
+        `db-password` stage (7.3), not this method's job, so a preflight
+        refusal after this point leaves no secret on disk.
+
+        A file that is already there is taken AS WRITTEN. `prefix` decorates a
+        value this app mints; it is not a shape an existing password has to
+        have, and a shipped bash installer minted the same passwords without
+        the dash `catalog.json` now carries.
+        """
+        plan = self.entry.install.password
+        if plan.mode == "fixed":
+            if plan.value is None:
+                raise InstallerError(
+                    f"{self.entry.name}'s catalog entry says its database password is fixed "
+                    "but gives no value. That is a bug in the app."
+                )
+            return Secrets(plan.value)
+        if plan.file is None:
+            raise InstallerError(
+                f"{self.entry.name}'s catalog entry says its database password is generated "
+                "but names no file to keep it in. That is a bug in the app."
+            )
+        path = server_dir / plan.file
+        try:
+            return Secrets(path.read_text(encoding="utf-8").strip())
+        except FileNotFoundError:
+            return Secrets(f"{plan.prefix}{token_hex(8)}")
+        except OSError as exc:
+            raise InstallerError(
+                f"{path} exists but could not be read ({exc}), so this install cannot know its "
+                "own database password. Nothing was started."
+            ) from exc
+
+    def _native(self) -> NativeInstall:
+        """The entry's `install.native` block; preflight has already refused its absence."""
+        native = self.entry.install.native
+        if native is None:
+            raise InstallerError(
+                f"{self.entry.name} has no `install.native` section, so nothing was started."
+            )
+        return native
+
     # -- preflight -------------------------------------------------------
 
     def _preflight_lines(
-        self, options: InstallOptions, cancel: threading.Event | None
+        self,
+        options: InstallOptions,
+        cancel: threading.Event | None,
+        ask: runner.Prompter | None = None,
     ) -> Iterator[str]:
         here = self._seams.platform_id()
         if not self.entry.install.supports(here):
@@ -405,6 +743,12 @@ class NativeInstaller:
             raise InstallerError(
                 f"{self.entry.name} is not set up for a native install on {here} — its "
                 "catalog entry has no `install.native` section. Nothing was started."
+            )
+        if self.entry.install.native.family != self.family:
+            raise InstallerError(
+                f"{self.entry.name} is catalogued as a `{self.entry.install.native.family}` "
+                f"install but was handed to the `{self.family}` engine. That is a bug in the "
+                "app, not something to fix on this machine."
             )
         if self.entry.containers.db_import and self._probe is None:
             # An installer that cannot ask what state the databases are in
@@ -429,18 +773,24 @@ class NativeInstaller:
                 "Docker Desktop and waiting for its engine, up to a few minutes with no "
                 "output. You can stop at any time."
             )
-            report = self._seams.ensure_docker(cancel=cancel)
+            # `ask` reaches provisioning and nothing else: the docker-group
+            # consent and the Linux sudo password are asked there, before any
+            # privileged step, and declined when there is nobody to ask.
+            report = self._seams.ensure_docker(cancel=cancel, ask=ask)
+            # Said whatever happens next, including when nothing goes wrong.
+            # Provisioning's own report was read only inside the refusals below,
+            # so a run that installed Docker and joined the docker group told
+            # the user neither — and the log-out-and-back-in step it produces is
+            # the one thing standing between them and a server. See
+            # `installer.provision_lines()`.
+            yield from provision_lines(report)
             if report.reboot_required:
                 raise DockerUnavailableError(
                     "Docker's prerequisites were installed but a reboot is needed first. "
                     + " ".join(report.manual_steps)
                 )
             if not report.docker_ready and not self._seams.docker_ready():
-                details = " ".join(report.manual_steps) or "; ".join(report.skipped)
-                raise DockerUnavailableError(
-                    "Docker isn't available and could not be set up automatically. "
-                    + (details or "Install Docker, start it, and try again.")
-                )
+                raise docker_unavailable(report)
         try:
             # The engine's own seams are handed down rather than letting
             # preflight fall back to its real defaults: without this an engine
@@ -450,6 +800,7 @@ class NativeInstaller:
             facts = self._seams.gather(
                 self.entry,
                 server_dir,
+                client_dir=options.client_dir,
                 platform_id=self._seams.platform_id,
                 docker_ready=self._seams.docker_ready,
             )
@@ -477,10 +828,34 @@ class NativeInstaller:
         Distinct from preflight, which is about the machine. This is about this
         one folder and this one install: it must be empty, or ours by
         `install_id`, and no container wearing this entry's names may belong to
-        a different compose project.
+        a different compose project. It must also be ours by `family`: a
+        catalog edit that moves a game between families is a refusal here,
+        never a reinterpretation.
+
+        A state file that will not parse is refused rather than ignored, and
+        that refusal is the whole of `Ownership.UNKNOWN`. Treating it as absent
+        made this the FRESH-install path while `claimed_this_folder()` was
+        simultaneously calling the folder ours — the two ownership answers
+        disagreeing on exactly the input where the engine knows least, with
+        `git reset --hard` at the end of it (`read_claim()`). Refusing costs a
+        user with a damaged file one sentence and one deletion; the other
+        direction cost them their work.
         """
         install_id = composegen.install_id(server_dir, platform_id=self._seams.platform_id)
-        existing = read_state(server_dir) if server_dir.is_dir() else None
+        claim = (
+            read_claim(server_dir, valid=self.stage_names())
+            if server_dir.is_dir()
+            else Claim(Ownership.UNCLAIMED)
+        )
+        if claim.ownership is Ownership.UNKNOWN:
+            raise InstallerError(
+                f"{server_dir} holds a {STATE_FILE} this app cannot read, so it cannot tell "
+                "whether this folder is one of its own installs or somebody else's work. "
+                "Nothing was written. If that file is left over from an install that was "
+                "interrupted, delete it and try again; if you did not expect it to be there, "
+                "install into another folder instead."
+            )
+        existing = claim.state
         if existing is not None and existing.install_id != install_id:
             raise InstallerError(
                 f"{server_dir} holds an install record made for a different folder, so this "
@@ -492,12 +867,21 @@ class NativeInstaller:
                 f"{server_dir} already holds an install of {existing.game_id}. Pick another "
                 "folder."
             )
+        if existing is not None and existing.family and existing.family != self.family:
+            raise InstallerError(
+                f"{server_dir} was installed as `{existing.family}`, but the catalog now says "
+                f"{self.entry.name} is `{self.family}`. A folder is never reinterpreted: pick "
+                "another folder, or remove that install first."
+            )
+        if existing is not None and not existing.family:
+            # Written before 7.1: ours, and the next write says which family.
+            existing = replace(existing, family=self.family)
         if existing is None and server_dir.is_dir() and not (server_dir / ".git").is_dir():
             # A directory that is a git checkout is deliberately NOT judged
-            # here: `clone-core` can ask whose it is, and "this is a checkout of
-            # somebody else's fork" is a far better sentence than "this folder
-            # is not empty". Everything else is refused before a byte is
-            # written.
+            # here: the family's clone stage can ask whose it is, and "this is
+            # a checkout of somebody else's fork" is a far better sentence than
+            # "this folder is not empty". Everything else is refused before a
+            # byte is written.
             leftovers = [item.name for item in server_dir.iterdir() if item.name != STATE_FILE]
             if leftovers:
                 raise InstallerError(
@@ -506,7 +890,9 @@ class NativeInstaller:
                     "folder, or remove that one yourself if you no longer want it."
                 )
         self._refuse_foreign_containers(server_dir, install_id)
-        return existing or InstallState(game_id=self.entry.id, install_id=install_id)
+        return existing or InstallState(
+            game_id=self.entry.id, install_id=install_id, family=self.family
+        )
 
     def _refuse_foreign_containers(self, server_dir: Path, install_id: str) -> None:
         """Refuse when a container wearing our names belongs to somebody else's project.
@@ -559,132 +945,197 @@ class NativeInstaller:
                 "containers from its own tab first, then try again."
             )
 
-    # -- stages ----------------------------------------------------------
+    # -- stage bodies a family binds into `Stage.run` --------------------
 
-    def _run_stage(
-        self,
-        stage: str,
-        state: InstallState,
-        server_dir: Path,
-        cancel: threading.Event | None,
-    ) -> Generator[str, None, InstallState]:
-        if stage == "clone-core":
-            yield from self._clone_core(state, server_dir)
-        elif stage == "clone-modules":
-            yield from self._clone_modules(server_dir)
-        elif stage == "generate-compose":
-            yield from self._generate_compose(server_dir)
-        elif stage == "build":
-            yield from self._build(state, server_dir, cancel)
-        elif stage == "client-data":
-            yield from self._client_data(server_dir, cancel)
-        elif stage == "start-db":
-            yield from self._start_db(server_dir)
-        elif stage == "import":
-            yield from self._import(server_dir, cancel)
-        elif stage == "up":
-            yield from self._up(server_dir)
-        elif stage == "ready":
-            yield from self._ready(server_dir)
-        else:  # pragma: no cover - STAGE_ORDER and this dispatch are one list
-            raise InstallerError(f"unknown install stage {stage!r}")
-        if stage in NEVER_RECORDED:
-            return state
-        recorded = state.with_stage(stage)
-        write_state(server_dir, recorded)
-        return recorded
+    def claimed_this_folder(self, ctx: StageContext) -> Ownership:
+        """Has a previous run of THIS install already written its record here?
 
-    def _clone_core(self, state: InstallState, server_dir: Path) -> Iterator[str]:
-        """Clone (or update) the emulator itself INTO the server dir — it is the checkout.
+        Answered by `read_claim()`, which is the same function `_guard()` asks,
+        because the previous two answers to this question disagreed. This one
+        used to be `(ctx.server_dir / STATE_FILE).is_file()` — PRESENCE — on the
+        premise that `_guard()` had already proved that any state file still
+        here belongs to this install. The premise held only for a file
+        `_guard()` could parse: every check there is written `if existing is not
+        None and …`, and `read_state()` answered `None` for a file it could not
+        read. So a corrupt state file passed `_guard()` as "fresh folder" and
+        passed this as "ours", and `refuse_unowned_checkout()` stood down over a
+        user's own checkout. `read_claim()`'s docstring has the repro.
 
-        Disk evidence beats the state file: a `.git` whose `origin` is this
-        entry's source is an existing clone and gets fetch+reset through the
-        seam's own update path; a `.git` pointing somewhere else is refused BY
-        NAME and never deleted, because a directory holding somebody's fork is
-        not this installer's to remove.
+        Three answers, and only `OWNED` is ownership. `UNKNOWN` is a state file
+        that is there and unreadable, and it must never be worth more than
+        `UNCLAIMED`, which is no file at all: it is the input the engine knows
+        least about. `_guard()` refuses `UNKNOWN` before a stage runs, so
+        reaching it here means the file was damaged or replaced DURING the
+        install — which is exactly why this re-reads the folder rather than
+        trusting a decision taken minutes ago.
+
+        `ctx.state` cannot answer it either: `_guard()` hands every run a state
+        object whether or not a file was read, so a fresh install and a resumed
+        one are indistinguishable from the object alone. What `ctx.state` is
+        good for is the identity `_guard()` already validated, which is what the
+        re-read is checked against here.
+
+        (`_record_error()` still asks `is_file()`, and correctly: its question is
+        "is there a file to update?", never "is this folder mine?".)
         """
-        source = self.entry.emulator.sources[0]
-        has_git = (server_dir / ".git").is_dir()
-        existing = self._remote_of(server_dir)
-        if has_git and existing is None:
-            # A checkout whose origin cannot be read is not an empty directory
-            # and not ours either. Refused rather than cloned over, because the
-            # clone seam DELETES a destination it does not recognise.
-            raise InstallerError(
-                f"{server_dir} contains a git checkout, but git would not say what it is a "
-                "checkout of, so nothing was changed. Pick an empty folder."
-            )
-        if existing is not None and not _same_repo(existing, source.url):
-            raise InstallerError(
-                f"{server_dir} is already a git checkout of {existing}, not of {source.url}. "
-                "Nothing was changed. Install into an empty folder instead."
-            )
-        if not has_git and server_dir.is_dir():
-            # Doubled with `_guard()` on purpose, and for the reason
-            # `repair.reset_unfinished()` doubles its own check: the clone seam
-            # deletes a non-git destination before cloning, and the guard that
-            # protects a user's files should still be there after somebody
-            # reorders the stages.
-            leftovers = [item.name for item in server_dir.iterdir() if item.name != STATE_FILE]
-            if leftovers:
-                raise InstallerError(
-                    f"{server_dir} has files in it but is not a checkout of {source.url}, so it "
-                    "was left alone. Pick an empty folder."
-                )
-        yield f"Cloning {source.repo} into {server_dir} (this is a large repository)"
-        if state.has("clone-core") and existing is not None:
-            yield "It is already cloned; updating it instead."
-        self._clone(
-            git.CloneSpec(
-                url=source.url,
-                dest=server_dir,
-                branch=source.branch,
-                sparse_path=source.sparse_path,
-                # Data, not a constant: the core repo says `null` in
-                # catalog.json because its CMake reads the revision out of git
-                # history and a shallow clone hands the build the wrong answer.
-                depth=source.depth,
-            )
-        )
-        yield f"{source.repo} is in place."
+        claim = read_claim(ctx.server_dir, valid=self.stage_names())
+        found = claim.state
+        if found is None:
+            return claim.ownership
+        if found.install_id != ctx.state.install_id or found.game_id != ctx.state.game_id:
+            return Ownership.UNKNOWN
+        if found.family and found.family != ctx.state.family:
+            return Ownership.UNKNOWN
+        return Ownership.OWNED
 
-    def _clone_modules(self, server_dir: Path) -> Iterator[str]:
-        """Clone every other source under `modules/`, which is what the build mounts.
+    def refuse_unowned_checkout(
+        self, ctx: StageContext, dest: Path, url: str, remote: str | None
+    ) -> None:
+        """Refuse a checkout of the RIGHT repository that this install never made.
 
-        Guarded exactly like `_clone_core()`, and for a reason this loop once
-        did not have: the clone seam `shutil.rmtree`s a destination it does not
-        recognise, and `_remote_of()` answers `None` for a directory with no
-        `.git`. A `modules/mod-playerbots` a user had put there by hand — a
-        tarball, a copied tree, a checkout without its `.git` — fell straight
-        through the only check here and was deleted (review, 2026-08-23). One
-        engine that refuses to touch what it does not own must do it at every
-        level, not just the top one.
+        The one path in this engine that could still destroy a user's work, and
+        it was reached by a first press rather than a resume. `_guard()`
+        deliberately exempts a directory that is a git checkout from the
+        not-empty refusal, so that a clone stage can say whose repository it is
+        instead of "this folder is not empty" — but the clone stages only ever
+        refused a checkout of a DIFFERENT repository. Point a first install at
+        your own checkout of the same repo and every guard passed: no record, so
+        `already_cloned()` is False, so the seam's update path ran, which is
+        `git fetch` + `git reset --hard FETCH_HEAD`. Driven end to end (review,
+        2026-08-31): `// my patch` became `// upstream`.
+
+        Ownership is `claimed_this_folder()`, and only `Ownership.OWNED` is it.
+        INSIDE a folder this install owns, an unrecorded checkout is this
+        install's own unfinished work and fetch+reset is the right repair — that
+        is how a `modules/` clone that died half way is healed. Outside one, it
+        is somebody's repository and this app did not put it there, so it is
+        named and left alone. `UNKNOWN` — a state file that is there and will
+        not parse — is not ownership and gets its own sentence, because "there
+        is no record here" would be a lie about a folder that has one.
+
+        **`remote is None` is handled HERE, not at three call sites.** It used
+        to `return` — safe only because
+        `if has_git and existing is None: raise` was copy-pasted into
+        `families/azerothcore.py` twice and `stage_clone_sources()` once, so
+        the one method whose job is this could not do it alone (review,
+        2026-08-31). Every one of those copies had the same `dest` this method
+        is handed. `None` there does NOT mean "no checkout": it also means no
+        docker CLI, a daemon that would not answer, a failed image pull, and —
+        until `5c6c655c` — an SELinux denial on every enforcing box. A `.git`
+        on disk is the host's own evidence that the container's `None` is a
+        misdiagnosis, and stopping is the only safe reading of it.
+
+        The cost is stated in the message rather than worked around: a FIRST
+        clone that died before its stage was recorded also lands here, and the
+        remedy is to delete the half-finished folder. Losing a download is not
+        the same order of harm as losing work, and no evidence available at this
+        point tells the two apart — a partly-cloned tree and a checkout a user
+        made both answer `git remote get-url origin` with this exact URL.
         """
-        sources = self.entry.emulator.sources[1:]
-        if not sources:
-            yield "This server has no extra modules to clone."
-            return
-        for source in sources:
-            name = source.repo.rstrip("/").split("/")[-1]
-            dest = server_dir / "modules" / name
-            has_git = (dest / ".git").is_dir()
-            existing = self._remote_of(dest)
-            if has_git and existing is None:
+        if remote is None:
+            if (dest / ".git").is_dir():
                 raise InstallerError(
                     f"{dest} contains a git checkout, but git would not say what it is a "
                     "checkout of, so nothing was changed. Move that folder aside and try again."
                 )
+            return
+        claim = self.claimed_this_folder(ctx)
+        if claim is Ownership.OWNED:
+            return
+        if claim is Ownership.UNKNOWN:
+            raise InstallerError(
+                f"{dest} is a git checkout of {url}, and the {STATE_FILE} beside it cannot be "
+                "read, so this app cannot tell whether the checkout is its own unfinished work "
+                "or yours. Continuing would run `git fetch` and `git reset --hard` over it, so "
+                "nothing was touched. Delete that file if it is left over from an interrupted "
+                "install, or install into an empty folder instead."
+            )
+        raise InstallerError(
+            f"{dest} is already a git checkout of {url}, and there is no record here of an "
+            "install this app made. Continuing would run `git fetch` and `git reset --hard` "
+            "over it, which throws away anything you have changed, so nothing was touched. "
+            "Install into an empty folder instead — and if this folder is a half-finished "
+            "download from an earlier attempt, delete it first."
+        )
+
+    def already_cloned(self, ctx: StageContext, stage: str, remote: str | None) -> bool:
+        """Is this clone BOTH written down and corroborated by a checkout on disk?
+
+        The two halves are the whole rule, and neither is sufficient alone.
+
+        `InstallState.has()` is documented as "never a reason to skip on its
+        own" because a state file can lie — a fresh empty folder once
+        skip-compiled against another install's images — so the record is only
+        ever a hint, and `remote` (what `git remote get-url origin` says at the
+        destination, already checked against the source's URL by the caller) is
+        the disk evidence that can contradict it.
+
+        The other direction is what this method was missing until 7.1, and it
+        cost the live Ubuntu gate (2026-08-30) its source tree: a clone that is
+        recorded AND present was being handed to the seam anyway, where an
+        existing `.git` means `git fetch` + `git reset --hard FETCH_HEAD`. That
+        is destructive twice over. It discards any edit a user made to the
+        server source, unrecoverably and with no warning; and it moves the
+        checkout to whatever upstream has published since — so a user who stops
+        a compile and starts it again does not resume the build they
+        interrupted, they start a different one. A resume must not be able to
+        change what is being built.
+
+        `remote is None` with a record is the repair case and still clones: the
+        checkout was deleted, or was never a checkout. A checkout with NO record
+        is the other repair case — a run interrupted part-way through a clone —
+        and fetch+reset is exactly right there, because a half-materialised
+        working tree is not something to build against.
+        """
+        return ctx.state.has(stage) and remote is not None
+
+    def stage_clone_sources(
+        self, ctx: StageContext, sources: Sequence[EmulatorSource], *, recorded_as: str
+    ) -> Iterator[str]:
+        """Clone every source at its `dest`, refusing what is not ours and touching what is done.
+
+        `recorded_as` is the name the FAMILY binds this body to in its `Stage`
+        tuple; the body cannot know it, and without it the record could not be
+        consulted at all — which is how the AzerothCore stages came to fetch and
+        reset on every resume. See `already_cloned()`.
+
+        Disk evidence beats the state file in both directions: a `.git` whose
+        `origin` is this source and a record of this stage is a finished clone
+        and is left exactly as it is; the same `.git` with no record gets
+        fetch+reset through the seam's own update path; a `.git` pointing
+        somewhere else is refused BY NAME and never deleted, because a directory
+        holding somebody's fork is not this installer's to remove. A directory
+        with files and no `.git` is refused too: the clone seam `shutil.rmtree`s
+        a destination it does not recognise, and a tree a user unpacked by hand
+        must not fall through (review, 2026-08-23). `dest == "."` is the server
+        dir itself, where the state file is the one leftover that does not count.
+        """
+        if not sources:
+            yield "This server has nothing to clone."
+            return
+        for source in sources:
+            dest = ctx.server_dir / source.dest
+            has_git = (dest / ".git").is_dir()
+            existing = self._remote_of(dest)
             if existing is not None and not _same_repo(existing, source.url):
                 raise InstallerError(
                     f"{dest} is a checkout of {existing}, not of {source.url}. Nothing was "
                     "changed."
                 )
-            if not has_git and dest.is_dir() and any(dest.iterdir()):
-                raise InstallerError(
-                    f"{dest} has files in it but is not a checkout of {source.url}, so it was "
-                    "left alone. Move that folder aside and try again."
-                )
-            yield f"Cloning {source.repo} into modules/{name}"
+            if not has_git and dest.is_dir():
+                leftovers = [item.name for item in dest.iterdir() if item.name != STATE_FILE]
+                if leftovers:
+                    raise InstallerError(
+                        f"{dest} has files in it but is not a checkout of {source.url}, so it "
+                        "was left alone. Move that folder aside and try again."
+                    )
+            if self.already_cloned(ctx, recorded_as, existing):
+                yield f"{source.repo} is already in {source.dest}; leaving it exactly as it is."
+                continue
+            self.refuse_unowned_checkout(ctx, dest, source.url, existing)
+            yield f"Cloning {source.repo} into {source.dest}"
+            if existing is not None:
+                yield "A previous run of this install left it part-way through; finishing it off."
             self._clone(
                 git.CloneSpec(
                     url=source.url,
@@ -692,11 +1143,12 @@ class NativeInstaller:
                     branch=source.branch,
                     sparse_path=source.sparse_path,
                     depth=source.depth,
+                    rev=source.rev,
                 )
             )
-        yield "Modules are in place."
+        yield "Sources are in place."
 
-    def _generate_compose(self, server_dir: Path) -> Iterator[str]:
+    def stage_generate_compose(self, ctx: StageContext) -> Iterator[str]:
         """Write the three compose files, and refuse to overwrite ones we did not write.
 
         With one recognised exception, which every install needs. The server dir
@@ -716,21 +1168,43 @@ class NativeInstaller:
         asked answers `None` — all three keep the refusal. The override and
         build files get no exception at all: upstream ships neither, so an
         unmarked one there is somebody's own settings.
+
+        Under enforcing SELinux the bind lines get `:z` through
+        `{{BIND_LABEL}}` and the folder is relabelled once (`relabel` seam);
+        the 2026-08-25 Fedora gate proved the bash, gate 7.1 on Fedora proves
+        this port.
         """
+        # `:z` on every host bind line when SELinux enforces and the drive can
+        # carry labels; empty otherwise, so the rendered files are byte-identical
+        # off SELinux (the committed compose-config fixture is the proof). A
+        # uniform `:z`, not `:Z`: `./modules` is shared by the import and the
+        # worldserver, and `:Z` locks the other service out.
+        #
+        # THREE ANSWERS GO IN, not two. `selinux_enforcing()` returns None for
+        # "could not ask" and it is passed through as None — `bind_label()` is
+        # the one place allowed to decide what an unknown means (it renders
+        # nothing, and preflight says "unchecked" so the user sees that the
+        # question went unanswered). Collapsing it here to a bool would make
+        # the two indistinguishable everywhere downstream.
+        label = platform.bind_label(
+            enforcing=self._seams.selinux_enforcing(), fs_type=self._seams.fs_type(ctx.server_dir)
+        )
         plan = composegen.render(
             self.entry,
-            server_dir,
+            ctx.server_dir,
             templates_root=self.installers_root,
+            db_password=ctx.secrets.db_password,
+            bind_label=label,
             platform_id=self._seams.platform_id,
         )
-        replaceable = self._replaceable_compose(server_dir)
+        replaceable = self._replaceable_compose(ctx.server_dir)
         if replaceable:
             yield (
                 f"Replacing the {composegen.BASE_FILE} that came with the repository; it is "
                 "unchanged from what git has, so `git checkout` brings it back."
             )
         try:
-            written = composegen.write_plan(plan, server_dir, replaceable=replaceable)
+            written = composegen.write_plan(plan, ctx.server_dir, replaceable=replaceable)
         except composegen.ComposeGenError as exc:
             raise InstallerError(str(exc)) from exc
         except OSError as exc:
@@ -739,19 +1213,24 @@ class NativeInstaller:
             yield "The compose files are already exactly what this install needs."
         for path in written:
             yield f"Wrote {path.name}"
+        if label and not self._seams.relabel(ctx.server_dir):
+            # A Python port of the Fedora script's `selinux_label_for_containers`
+            # (`chcon -Rt container_file_t`, no sudo). Failure is said, not
+            # fatal: the `:z` mount option relabels at `up` on most setups.
+            #
+            # Run here, and only here, on purpose. Both clone stages are done by
+            # now, so everything the host has written exists; everything created
+            # after this — the build's output, the client data — is written by a
+            # container into a volume or into a bind that `:z` relabels when it
+            # is mounted. A later Fedora permission error is therefore evidence
+            # for a SECOND relabel somewhere, not for a longer timeout on this
+            # one.
+            yield (
+                f"{ctx.server_dir} could not be relabelled for containers (chcon); if the "
+                "server refuses to start under SELinux, run `chcon -Rt container_file_t` on it."
+            )
 
-    def _replaceable_compose(self, server_dir: Path) -> tuple[str, ...]:
-        """`docker-compose.yml`, when git proves it is the one the clone wrote. See above."""
-        path = server_dir / composegen.BASE_FILE
-        if not path.exists() or composegen.is_ours(path):
-            return ()
-        if self._seams.file_unmodified(server_dir, composegen.BASE_FILE):
-            return (composegen.BASE_FILE,)
-        return ()
-
-    def _build(
-        self, state: InstallState, server_dir: Path, cancel: threading.Event | None
-    ) -> Iterator[str]:
+    def stage_build(self, ctx: StageContext) -> Iterator[str]:
         """Compile the server. Hours, and the one stage whose output is worth watching.
 
         The state file alone never skips this: the daemon is asked whether this
@@ -765,59 +1244,40 @@ class NativeInstaller:
         the built-but-not-yet-up window this runs in it returned nothing and
         every resume re-ran the compile (measured 2026-08-24; see
         `docker.images_built()`).
+
+        The `BUILD_CANCEL_NOTE` this stage used to yield is gone from the body:
+        the spine says a stage's cancel note right after `--- <name>` (A4).
         """
         built = self._seams.images_built(
-            composegen.built_image_refs(server_dir, platform_id=self._seams.platform_id)
-        )
-        if state.has("build") and built:
-            yield "The server is already built; skipping the compile."
-            return
-        if state.has("build") and built is None:
-            yield "Docker would not say whether this install is built, so it is being rebuilt."
-        yield "Building the server. This takes hours on a first install; the output below is live."
-        yield BUILD_CANCEL_NOTE
-        run = yield from self._pump(
-            lambda sink: self._seams.build(
-                server_dir, composegen.COMPOSE_FILES, sink=sink, cancel=cancel
+            composegen.built_image_refs(
+                self.entry, ctx.server_dir, platform_id=self._seams.platform_id
             )
         )
-        self._check_run(run, "the build", cancel, BUILD_CANCEL_NOTE)
+        if ctx.state.has("build") and built:
+            yield "The server is already built; skipping the compile."
+            return
+        if ctx.state.has("build") and built is None:
+            yield "Docker would not say whether this install is built, so it is being rebuilt."
+        yield "Building the server. This takes hours on a first install; the output below is live."
+        run = yield from self._pump(
+            lambda sink: self._seams.build(
+                ctx.server_dir, composegen.COMPOSE_FILES, sink=sink, cancel=ctx.cancel
+            )
+        )
+        self._check_run(run, "the build", ctx.cancel, BUILD_CANCEL_NOTE)
         yield "The build finished."
 
-    def _client_data(self, server_dir: Path, cancel: threading.Event | None) -> Iterator[str]:
-        """Fetch the server-side map/DBC data into its volume.
-
-        Run every time rather than skipped on the state file, and that IS the
-        disk-evidence rule rather than an exception to it: the evidence lives
-        inside a Docker volume, and the generated entrypoint asks it directly —
-        it compares the installed `data-version` with upstream's own and exits 0
-        in seconds when they match. Re-running is the check.
-
-        This is server data (maps, vmaps, DBC), not a game client: the app
-        never ships or fetches the latter (README §3a).
-        """
-        service = self.entry.containers.client_data
-        if not service:
-            yield "This server has no separate client-data step."
-            return
-        yield f"Fetching server data ({service}). The download resumes if it is interrupted."
-        run = yield from self._pump(
-            lambda sink: self._seams.one_shot(service, server_dir, sink=sink, cancel=cancel)
-        )
-        self._check_run(run, "the server-data download", cancel, DOWNLOAD_CANCEL_NOTE)
-        yield "Server data is in place."
-
-    def _start_db(self, server_dir: Path) -> Iterator[str]:
+    def stage_start_db(self, ctx: StageContext) -> Iterator[str]:
         """Bring the database up alone, before the import stage asks it anything.
 
         Not an optimisation and not tidiness — without it the install cannot
-        finish. `_import()` probes first, and the real probe is a `docker exec
-        <db container> mysql …`; with no such container it raises and the probe
-        answers `unreadable`, which `_import()` turns into a hard refusal. So
-        the fresh install died at the import stage AFTER the multi-hour build,
-        every time, and every resume died in the same place (review,
-        2026-08-23). Running the one-shot anyway would not have helped:
-        `run_one_shot()` passes `--no-deps`, which prunes exactly the
+        finish. `stage_import()` probes first, and the real probe is a `docker
+        exec <db container> mysql …`; with no such container it raises and the
+        probe answers `unreadable`, which `stage_import()` turns into a hard
+        refusal. So the fresh install died at the import stage AFTER the
+        multi-hour build, every time, and every resume died in the same place
+        (review, 2026-08-23). Running the one-shot anyway would not have
+        helped: `run_one_shot()` passes `--no-deps`, which prunes exactly the
         `depends_on: <db>: condition: service_healthy` edge the generated base
         file declares on the import service.
 
@@ -829,20 +1289,23 @@ class NativeInstaller:
 
         Never recorded: it is a precondition, not progress, and it returns
         immediately when the container is already up.
+
+        Unconditional (A7): every family's import needs the database up, and
+        CMaNGOS has no `db_import` service at all. The AzerothCore family keeps
+        its no-service short-circuit in its own wrapper.
         """
-        if not self.entry.containers.db_import:
-            yield "This server has no database step, so nothing needs the database yet."
-            return
         yield "Starting the database, which the import writes into."
         try:
-            self._seams.start_db(self.entry.container_spec(), server_dir)
+            self._seams.start_db(self.entry.container_spec(), ctx.server_dir)
         except docker.DockerCommandError as exc:
             raise InstallerError(
                 f"The database could not be started, so nothing was imported: {exc}"
             ) from exc
         yield "The database is up."
 
-    def _import(self, server_dir: Path, cancel: threading.Event | None) -> Iterator[str]:
+    def stage_import(
+        self, ctx: StageContext, gate: ImportGate, service: str | None
+    ) -> Iterator[str]:
         """Populate the databases, using the same probe/reset machinery as the repair button.
 
         Four answers, four different things to do — the branch table is
@@ -864,13 +1327,14 @@ class NativeInstaller:
         `unreadable` means what it says here only because `start-db` ran first:
         the probe reaches the databases through `docker exec` on the database
         container, so without one running it answers `unreadable` for a machine
-        with nothing wrong with it. See `_start_db()`.
+        with nothing wrong with it. See `stage_start_db()`.
+
+        The five-branch table ALWAYS runs first (A7). With `service` given the
+        compose one-shot and `verify_import` follow, as before; with `service`
+        None this returns after the table and the family applies the SQL
+        itself, re-probes and writes its own marker (7.3).
         """
-        service = self.entry.containers.db_import
-        if not service or self._probe is None:
-            yield "This server has no separate database import step."
-            return
-        before = self._probe()
+        before = gate.probe()
         yield f"The databases read as {before.state}: {before.detail}"
         if before.state == "imported" or (before.state == "populated" and before.complete):
             yield "They are already imported; leaving them alone."
@@ -887,32 +1351,29 @@ class NativeInstaller:
                 "folder for a new install."
             )
         if before.state == "partial":
-            if self._reset is None:
-                raise InstallerError(
-                    f"This install's databases were left half-written ({before.detail}) and "
-                    "this installer has no way to clear them, so nothing was run."
-                )
             yield f"Clearing the half-written databases first ({before.detail})."
-            dropped = self._reset()
+            dropped = gate.reset()
             if not dropped:
                 raise InstallerError(
                     "The databases read as unfinished, but nothing was found to clear, so the "
                     "import was not run. Nothing was changed."
                 )
             yield f"Cleared {', '.join(dropped)}."
+        if service is None:
+            return
         yield f"Importing the databases ({service}). This takes several minutes."
         run = yield from self._pump(
-            lambda sink: self._seams.one_shot(service, server_dir, sink=sink, cancel=cancel)
+            lambda sink: self._seams.one_shot(service, ctx.server_dir, sink=sink, cancel=ctx.cancel)
         )
         if run.returncode == docker.CANCELLED_RETURNCODE:
             raise InstallerError(_cancelled_message("the database import", IMPORT_CANCEL_NOTE))
         try:
-            after = self._seams.verify_import(self._probe, service, server_dir, run)
+            after = self._seams.verify_import(gate.probe, service, ctx.server_dir, run)
         except docker.DockerCommandError as exc:
             raise InstallerError(str(exc)) from exc
         yield f"The databases now read as {after.state}."
 
-    def _up(self, server_dir: Path) -> Iterator[str]:
+    def stage_up(self, ctx: StageContext) -> Iterator[str]:
         """Start the three long-running services, and only those.
 
         Never recorded: a resume has to end with the server actually running,
@@ -922,11 +1383,11 @@ class NativeInstaller:
         """
         yield "Starting the server."
         try:
-            self._seams.start(self.entry.container_spec(), server_dir)
+            self._seams.start(self.entry.container_spec(), ctx.server_dir)
         except docker.DockerCommandError as exc:
             raise InstallerError(f"The server would not start: {exc}") from exc
 
-    def _ready(self, server_dir: Path) -> Iterator[str]:
+    def stage_ready(self, ctx: StageContext) -> Iterator[str]:
         """Wait until the database is healthy and both servers have said they are up.
 
         Nothing new: `wait_db_healthy_for()` polls the container's health
@@ -934,24 +1395,101 @@ class NativeInstaller:
         `StartedAt` and reads `logs --since` that timestamp rather than `--tail`
         — the marker prints once and scrolls out of any tail window on a busy
         playerbots boot, which this project and the Rust launcher hit
-        independently on the same day.
+        independently on the same day. What it waits FOR is catalog data now
+        (`install.native.ready`), filled through the same `fill()` as the
+        compose templates so a typo is an error and not a 600-second timeout.
+
+        The give-up sentence names both logs and the crash loop on purpose.
+        `wait_ready()` has four ways to answer False — the timeout, a `fatal`
+        line, a crash loop under `restart: unless-stopped`, and a missing
+        docker CLI — and it tells the caller only `False`. The world log is
+        where three of them show; a crash loop shows as a container that keeps
+        coming back, which `docker compose ps` says and a log tail does not.
+
+        Two known gaps in that wait, recorded rather than fixed in 7.1 because
+        `docker.wait_ready()` is not this task's to re-home: the crash-loop
+        latch counts the WORLD container's restarts only, so an auth container
+        in a crash loop sits out the whole timeout, and `spec.fatal` is
+        searched in the world log only, so a fatal line an auth server prints
+        is not seen. Both are conservative — they make the wait slower to give
+        up, never quicker to call a dead server ready — which is why they are
+        an entry in the checklist and not a blocker here.
         """
         spec = self.entry.container_spec()
         yield "Waiting for the database."
         if not self._seams.wait_db_healthy(spec):
             raise InstallerError(
                 f"The database never reported healthy. `docker compose logs "
-                f"{spec.service_for(spec.db)}` in {server_dir} will say why."
+                f"{spec.service_for(spec.db)}` in {ctx.server_dir} will say why."
             )
         yield "Waiting for the world server to finish loading (this can take many minutes)."
-        if not self._seams.wait_ready(spec, _READY_REALM_HOST, self.entry.ports.world):
+        if not self._seams.wait_ready(spec, self._ready_spec(self._native().ready)):
             raise InstallerError(
                 f"The server started but never reported ready. `docker compose logs "
-                f"{spec.service_for(spec.world)}` in {server_dir} has what it printed."
+                f"{spec.service_for(spec.world)}` in {ctx.server_dir} has what it printed, and "
+                f"`docker compose ps` says whether it is restarting over and over — a server "
+                f"that keeps crashing on boot never reaches the line this waits for."
             )
         yield "The server is up."
 
+    def _ready_spec(self, markers: ReadyMarkers) -> docker.ReadySpec:
+        """`ReadyMarkers` with `{{REALM_HOST}}`/`{{WORLD_PORT}}` filled, then made a regex.
+
+        `wait_ready()` searches the log with `re.search`, so a literal marker
+        (`regex: false`, the default) is `re.escape`d after filling — otherwise
+        the `.` in `127.0.0.1` is a wildcard, the very thing
+        `docker.azerothcore_ready()` escapes (A5). Tortoise's alternations set
+        `regex: true` and are handed over as written.
+
+        Every pattern is COMPILED here, where `catalog.json` can still be named
+        as the thing to fix. `wait_ready()` calls `re.search` inside its poll
+        loop, so a `regex: true` marker with an unbalanced group would raise
+        `re.error` in the middle of the last stage of an install — after the
+        clone, the build and the import — and read as a crash rather than as a
+        typo in a data file (A.2 review finding).
+        """
+        tokens = {"REALM_HOST": INSTALL_REALM_HOST, "WORLD_PORT": str(self.entry.ports.world)}
+
+        def marker(text: str) -> str:
+            filled = composegen.fill(text, tokens)
+            pattern = filled if markers.regex else re.escape(filled)
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise InstallerError(
+                    f"{self.entry.name}'s ready marker {text!r} is not a usable pattern "
+                    f"({exc}). Fix `install.native.ready` in catalog.json; nothing was started."
+                ) from exc
+            return pattern
+
+        try:
+            world = marker(markers.world)
+            auth = marker(markers.auth) if markers.auth is not None else None
+            fatal = marker(markers.fatal) if markers.fatal is not None else None
+        except composegen.ComposeGenError as exc:
+            raise InstallerError(f"{self.entry.name}'s ready markers are broken: {exc}") from exc
+        # The catalogue's `timeout_s` wins over `docker.ReadySpec`'s own 480s
+        # default, which covers only a spec written in Python. Data beats a
+        # constant wherever there is data, and this is the only place the two
+        # numbers meet.
+        return docker.ReadySpec(
+            world=world,
+            auth=auth,
+            fatal=fatal,
+            timeout=float(markers.timeout_s),
+            restart_loop=markers.restart_loop,
+        )
+
     # -- plumbing --------------------------------------------------------
+
+    def _replaceable_compose(self, server_dir: Path) -> tuple[str, ...]:
+        """`docker-compose.yml`, when git proves it is the one the clone wrote. See above."""
+        path = server_dir / composegen.BASE_FILE
+        if not path.exists() or composegen.is_ours(path):
+            return ()
+        if self._seams.file_unmodified(server_dir, composegen.BASE_FILE):
+            return (composegen.BASE_FILE,)
+        return ()
 
     def _clone(self, spec: git.CloneSpec) -> None:
         try:

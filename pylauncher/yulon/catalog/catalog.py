@@ -10,11 +10,12 @@ table (README §13), database names, what client the user must supply
 
 from __future__ import annotations
 
+import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from yulon.docker import ContainerSpec
 from yulon.manifest import Db, Source
@@ -32,15 +33,431 @@ class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+class EmulatorSource(Source):
+    """One repository the installer clones, and where it lands under the server dir.
+
+    `dest` replaced an index rule ("sources[0] is the core, the rest go under
+    `modules/`") that only AzerothCore's layout satisfied: CMaNGOS's playerbots
+    checkout nests INSIDE the core at `src/mangos-tbc/src/modules/Bots`, which
+    no index can say. Relative to the server dir, POSIX-spelled; `"."` means the
+    server dir IS the checkout, as it is for AzerothCore.
+    """
+
+    dest: str = Field(
+        min_length=1,
+        description="Clone target relative to the server dir; '.' means the server dir itself.",
+    )
+
+    @field_validator("dest")
+    @classmethod
+    def _dest_stays_inside_the_server_dir(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if "\\" in value or path.is_absolute() or ".." in path.parts:
+            raise ValueError(
+                f"dest must be a relative POSIX path inside the server dir, got {value!r}"
+            )
+        return value
+
+
 class Emulator(_Strict):
     """The open-source emulator: a display name and the repos the installer clones."""
 
     name: str = Field(min_length=1)
-    sources: tuple[Source, ...] = Field(min_length=1)
+    sources: tuple[EmulatorSource, ...] = Field(min_length=1)
+
+
+class PasswordPlan(_Strict):
+    """How this game's database root password comes to exist (phase7-decisions "Password").
+
+    `fixed` is WotLK's `"password"` — a contract with backup, the console and
+    every archived guide, spliced into the base compose file as the
+    `${DB_ROOT_PASSWORD:-…}` default. `generated` is the CMaNGOS entries':
+    resolved by the install spine before stage 1 as `prefix + token_hex(8)`,
+    persisted at `file` under the server dir, and reaching compose only
+    through `.env`, never the compose text. One model rather than two optional
+    strings because the old pair (`db_root_password`,
+    `db_root_password_file`) let an entry say both or neither, and nothing
+    refused either.
+    """
+
+    mode: Literal["fixed", "generated"]
+    value: str | None = Field(default=None, description="The password itself; required when fixed.")
+    file: str | None = Field(
+        default=None,
+        description=(
+            "File under the server dir holding the generated value, e.g. `.db_password`; "
+            "required when generated."
+        ),
+    )
+    prefix: str = Field(
+        default="",
+        description=(
+            "Prefix on a generated value (`tbc-`), so a password seen in a log or a `docker "
+            "exec` says which server it belongs to. `resolve_secrets()` mints "
+            '`f"{prefix}{secrets.token_hex(8)}"` — the dash is part of the prefix.'
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _the_mode_has_its_field_and_only_its_field(self) -> PasswordPlan:
+        """Each mode needs its own field and refuses the other's.
+
+        The "and only its own" half is the load-bearing one, and it was missing
+        until B.6: `{"mode": "generated", "value": "x"}` validated, while
+        `composegen.render()` reads `.value` to decide what to splice into the
+        compose TEXT. An entry could therefore promise a per-install secret that
+        never leaves `.env` and hand a real password to a file git can see —
+        the leak B.6's `{{DB_PASSWORD}}` refusal exists to stop, arriving
+        through the model instead of the template. The mirror clause is cheaper
+        but the same shape: a `file` on a fixed plan is two sources of truth for
+        one password with nothing saying which wins.
+        """
+        if self.mode == "generated" and self.value is not None:
+            raise ValueError(
+                "a generated password plan must not carry a `value`: the secret is minted per "
+                "install and lives in `file` and `.env`, never in the catalog or a compose file"
+            )
+        if self.mode == "fixed" and self.file is not None:
+            raise ValueError(
+                "a fixed password plan must not name a `file`: `value` is the password, and a "
+                "second source of truth for it is a bug waiting for a mismatch"
+            )
+        if self.mode == "fixed" and not self.value:
+            raise ValueError("a fixed password plan needs a non-empty `value`")
+        if self.mode == "generated" and not self.file:
+            raise ValueError("a generated password plan needs `file`")
+        return self
+
+
+class DbFacts(_Strict):
+    """The database the emulator runs on: image, client binary, app user, charset.
+
+    Data because it differs per core (WotLK's `mysql:8.4` and `root`, the CMaNGOS
+    entries' MariaDB and a `mangos` user) and because `apply.py`/`maintenance.py`
+    spell the client binary today as a literal `mysql` — 7.9 reads it from here.
+    """
+
+    image: str = Field(min_length=1)
+    client: Literal["mysql", "mariadb"]
+    user: str = Field(min_length=1)
+    charset: str = "utf8mb4"
+
+
+class ReadyMarkers(_Strict):
+    """What "the server is up" looks like in this game's logs, matched over this run's log.
+
+    `world` is required: it is the line the `ready` stage waits for. `auth` is
+    optional (None: do not wait on the auth log at all), `fatal` short-circuits
+    the wait to failure. All three take the `{{TOKEN}}` grammar plus
+    `REALM_HOST`, filled by the spine through `composegen.fill()`. They are
+    LITERAL strings unless `regex` is true: the spine `re.escape`s the filled
+    text before building `docker.ReadySpec`, so `127.0.0.1` matches only
+    itself. Tortoise's alternations set `regex: true` (7.3). These are the
+    literals `docker.py` ("ready...") and `native._READY_REALM_HOST` used to
+    carry.
+    """
+
+    world: str = Field(min_length=1)
+    auth: str | None = None
+    fatal: str | None = None
+    timeout_s: int = Field(default=600, gt=0)
+    restart_loop: int = Field(
+        default=4,
+        ge=1,
+        description="RestartCount growth that means a crash loop rather than a slow start.",
+    )
+    regex: bool = Field(
+        default=False,
+        description=(
+            "True: `world`/`auth`/`fatal` are regular expressions as written. False: they are "
+            "literal text the spine escapes before matching."
+        ),
+    )
+
+
+class AzerothCoreData(_Strict):
+    """The AzerothCore family's own install data — only the worldserver env block (A2)."""
+
+    world_env: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Per-game runtime settings for the worldserver, merged over composegen's structural "
+            "defaults. Data rather than Python because these are facts about ONE game that a "
+            "person may reasonably want different: the playerbot population lives here, not in a "
+            "module constant (style-guide §3, and an adversarial review that caught it there). "
+            "PROVENANCE: WotLK carried 1600/2000, copied from the ONE proven yulon-ubuntu "
+            "install where the Linux installer script wrote them, after a `docker compose "
+            "config` diff on 2026-08-24 found a native install would otherwise differ from a "
+            "script install. Never measured on another machine and never measured at all for "
+            "RAM. Lowered to 500/500 by owner decision on 2026-08-28, and the same number went "
+            "into the three WotLK scripts, TBC and Vanilla so the script and native paths still "
+            "agree — the point of the 2026-08-24 diff, and the thing that went wrong when the "
+            "decision sat on one branch while every installer shipped 1600/2000. Still owed an "
+            "RSS reading by the first gate."
+        ),
+    )
+
+
+MpqDepth = int | Literal["recursive"]
+"""How deep under `Data/` the MPQ count looks: a `find -maxdepth` value, or everywhere.
+
+TBC's script searched with no depth limit, Vanilla's with `-maxdepth 1`, Tortoise's with
+`-maxdepth 2` — three scripts, three numbers, so it is data (roadmap 7.3)."""
+
+
+class ClientSpec(_Strict):
+    """What the user's client folder must look like before an install may read it.
+
+    Refusals and warnings only — `families/clientdir.py` turns these into preflight
+    checks, never into a "Continue anyway?" prompt, because the engine cannot ask.
+    """
+
+    required_file: str | None = Field(
+        default=None,
+        description=(
+            "A file that proves the expansion, relative to the client dir (`Data/expansion.MPQ` "
+            "for TBC, `Data/dbc.MPQ` for Vanilla). None disables this one rule — Tortoise's "
+            "7272 client has no single defining file — while `Data/` and the MPQ count still apply."
+        ),
+    )
+    min_mpq: int = Field(default=5, ge=1, description="Fewer MPQs than this is a WARNING.")
+    mpq_depth: MpqDepth = "recursive"
+    locale_mpq_required: bool = Field(
+        default=False,
+        description=(
+            "TBC keeps its DBC data in `Data/<locale>/*.MPQ`; none at depth 2 is a warning."
+        ),
+    )
+    near_client_warn_gb: float = Field(
+        default=8.0,
+        gt=0,
+        description=(
+            "Warn when the client's volume has less free space than this (extraction scratch)."
+        ),
+    )
+
+    @field_validator("mpq_depth")
+    @classmethod
+    def _depth_is_positive(cls, value: MpqDepth) -> MpqDepth:
+        if isinstance(value, int) and value < 1:
+            raise ValueError("mpq_depth must be >= 1 or 'recursive'")
+        return value
+
+
+class DockerfileSpec(_Strict):
+    """Tokens the per-game `Dockerfile.tmpl` takes from data."""
+
+    make_jobs: int = Field(
+        default=2,
+        ge=1,
+        description=(
+            "`make -j`. 2 is the scripts' number, chosen for a 16 GB Steam Deck: 2 GB per "
+            "compiler job was measured on AzerothCore, and an OOM-killed gcc presents as "
+            "'dies at the same % every retry'."
+        ),
+    )
+
+
+class ExtractTool(_Strict):
+    """One extractor run: its argv inside the image and what it must leave under `data/`."""
+
+    name: str = Field(min_length=1)
+    argv: tuple[str, ...] = Field(min_length=1)
+    produces: dict[str, int] = Field(
+        min_length=1,
+        description="Directory under `data/` → minimum file count that means the tool finished.",
+    )
+
+    @field_validator("produces")
+    @classmethod
+    def _counts_are_positive(cls, value: dict[str, int]) -> dict[str, int]:
+        for directory, count in value.items():
+            if count < 1:
+                raise ValueError(f"produces[{directory!r}] must be >= 1")
+        return value
+
+
+class RetrySpec(_Strict):
+    """Re-run named tools once when their log matches (Vanilla's vmap extractor segfaults)."""
+
+    when_log_matches: str = Field(min_length=1)
+    tools: tuple[str, ...] = Field(min_length=1)
+
+
+class ExtractPlan(_Strict):
+    """The extraction stage as data: which image's tools, in which order, with what evidence."""
+
+    image: str = Field(min_length=1, description="One of `NativeInstall.images`.")
+    tools: tuple[ExtractTool, ...] = Field(min_length=1)
+    ulimit_stack_unlimited: bool = Field(
+        default=False, description="`--ulimit stack=-1`; Vanilla's vmap tools need it."
+    )
+    retry: RetrySpec | None = None
+    stage_client: bool = Field(
+        default=False,
+        description=(
+            "Fallback if a tool insists on writing beside the client: lay a symlink farm "
+            "(`cp -rs /client /work`) on a tmpfs and run there. Still no writes into the client."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _retry_names_real_tools(self) -> ExtractPlan:
+        if self.retry is not None:
+            known = {tool.name for tool in self.tools}
+            unknown = sorted(set(self.retry.tools) - known)
+            if unknown:
+                raise ValueError(f"retry names tools that do not exist: {unknown}")
+        return self
+
+
+class MmapPlan(_Strict):
+    """The movement-map generator: its argv, and whether a shortfall refuses or warns."""
+
+    argv: tuple[str, ...] = Field(min_length=1)
+    min_files: int = Field(default=500, ge=1)
+    required: bool = Field(
+        default=True,
+        description=(
+            "False (Tortoise) turns a shortfall into a warning: bots need mmaps, a solo realm "
+            "does not."
+        ),
+    )
+
+
+class ConfPatch(_Strict):
+    """One conf file's `Key = value` table; values take the `{{TOKEN}}` grammar."""
+
+    keys: dict[str, str] = Field(min_length=1)
+    match_commented: bool = Field(
+        default=False,
+        description=(
+            "Also rewrite a `# Key = ...` line. The Vanilla `AiPlayerbot.SyncLevel*` seds relied "
+            "on this; everywhere else a commented key is left alone and the value is appended."
+        ),
+    )
+
+
+class ConfPatchTable(_Strict):
+    """Where the `.conf.dist` files come from inside the image, and how each is patched."""
+
+    source_dir: str = Field(
+        min_length=1, description="Absolute in-image dir of the `.conf.dist` files."
+    )
+    files: dict[str, ConfPatch] = Field(min_length=1)
+
+    @field_validator("source_dir")
+    @classmethod
+    def _absolute(cls, value: str) -> str:
+        if not value.startswith("/"):
+            raise ValueError(f"source_dir must be an absolute in-image path, got {value!r}")
+        return value
+
+
+class SqlPhase(_Strict):
+    """One ordered step of the import: files (globs, relative to the server dir) or statements.
+
+    Exactly one of `files`/`statements`; at most one of `into`/`into_each` (neither is a
+    schema-less run, e.g. Tortoise's own `create_databases.sql`). `into_each` maps a schema
+    to ITS glob, so `files` has no meaning beside it and `statements` cannot be split per db.
+    Statements take the `{{TOKEN}}` grammar and are filled by `sqlplan.expand()` (A10).
+    """
+
+    name: str = Field(min_length=1)
+    into: str | None = None
+    into_each: dict[str, str] | None = None
+    files: tuple[str, ...] = ()
+    statements: tuple[str, ...] = ()
+    gzip: bool = False
+    sort: Literal["natural", "name"] = "natural"
+    on_error: Literal["fail", "warn"] = Field(
+        default="fail",
+        description=(
+            "`warn` logs every failing file by name and continues — the scripts' "
+            "`2>/dev/null`, made visible."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _one_source_one_target(self) -> SqlPhase:
+        if self.into is not None and self.into_each is not None:
+            raise ValueError(f"phase {self.name!r}: `into` and `into_each` are alternatives")
+        if self.into_each is not None:
+            if self.statements:
+                raise ValueError(f"phase {self.name!r}: `into_each` takes globs, not `statements`")
+            if self.files:
+                raise ValueError(
+                    f"phase {self.name!r}: `into_each` carries its own globs; drop `files`"
+                )
+            if not self.into_each:
+                raise ValueError(f"phase {self.name!r}: `into_each` is empty")
+            return self
+        if bool(self.files) == bool(self.statements):
+            raise ValueError(f"phase {self.name!r}: exactly one of `files` or `statements`")
+        return self
+
+
+class VerifyRule(_Strict):
+    """A COUNT query that must reach `min` before the import marker may be written."""
+
+    db: str = Field(min_length=1)
+    query: str = Field(min_length=1)
+    min: int = Field(ge=0)
+
+
+class PlayerData(_Strict):
+    """A table whose rows mean 'somebody's server' — the import probe refuses, never drops."""
+
+    db: str = Field(min_length=1)
+    table: str = Field(min_length=1)
+    exclude_usernames: tuple[str, ...] = Field(
+        default=(),
+        description="Seeded accounts (ADMINISTRATOR, GAMEMASTER...) that do not count as players.",
+    )
+
+
+class SqlPlan(_Strict):
+    """The whole import: schemas to create, ordered phases, verify rules, the marker's home."""
+
+    create: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Schemas phase 0 creates with the app user and grants; empty when upstream's SQL "
+            "does it."
+        ),
+    )
+    phases: tuple[SqlPhase, ...] = Field(min_length=1)
+    verify: tuple[VerifyRule, ...] = ()
+    player_data: tuple[PlayerData, ...] = ()
+    marker_db: str = Field(
+        min_length=1, description="Where `yulon_install` (the marker table) lives."
+    )
+
+    def plan_hash(self) -> str:
+        """16 hex of sha256 over the canonical JSON of this plan.
+
+        Recorded in the marker row. Canonical (sorted keys, no whitespace, JSON mode) so a
+        reordered `catalog.json` is the same plan and an edited glob is a new one; and a
+        DIFFERENT hash in a marker still reads `imported` — a finished import from an older
+        plan is never `partial` (phase7-decisions, "Probe").
+        """
+        canonical = json.dumps(self.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+class CmangosData(_Strict):
+    """Everything the CMaNGOS family needs that differs per game (roadmap 7.3)."""
+
+    client: ClientSpec
+    dockerfile: DockerfileSpec
+    extract: ExtractPlan
+    mmaps: MmapPlan
+    conf: ConfPatchTable
+    sql: SqlPlan
 
 
 class NativeInstall(_Strict):
-    """What the native install engine needs that is a fact about THIS game (roadmap 6.2).
+    """What the native install engine needs that is a fact about THIS game (roadmap 6.2, 7.1).
 
     Floors are here rather than in `preflight.py` because a different game
     compiles at a different cost: AzerothCore's numbers are not a rule about
@@ -56,6 +473,43 @@ class NativeInstall(_Strict):
             "Directory of this game's compose templates, relative to catalog/installers/."
         ),
     )
+    family: Literal["azerothcore", "cmangos"] = Field(
+        description="Which family engine installs this game; must equal the engine's `family`."
+    )
+    images: tuple[str, ...] = Field(
+        min_length=1,
+        description=(
+            "The image suffixes the build overlay produces, in the base file's spelling. The "
+            "prefix, the tag and these together are the only description of what a finished "
+            "build leaves behind, and `docker.images_built()` asks about them by name — see "
+            "`composegen.built_image_refs()`."
+        ),
+    )
+    image_prefix: str = Field(
+        min_length=1,
+        description=(
+            "Where images this machine BUILDS are named. Deliberately not upstream's `acore/`: "
+            "a build tags whatever the base file's `image:` says, so reusing an upstream ref "
+            "would clobber a pulled image and let a later `docker compose pull` silently "
+            "replace this playerbots build with upstream's vanilla worldserver. The first "
+            "component contains a dot, so Docker reads it as a registry HOST and can never "
+            "resolve it to somebody else's Docker Hub repo — a stale-image mistake then fails "
+            "loudly at pull time instead of booting a plausible-looking wrong server."
+        ),
+    )
+    dockerfile_dir: str | None = Field(
+        default=None,
+        description=(
+            "Directory of a Dockerfile.tmpl/dockerignore.tmpl pair, relative to "
+            "catalog/installers/ (CMaNGOS, 7.3). None: the checkout ships its own Dockerfile."
+        ),
+    )
+    db: DbFacts
+    ready: ReadyMarkers
+    azerothcore: AzerothCoreData | None = Field(
+        default=None, description="Present exactly when `family` is azerothcore (7.3 validates)."
+    )
+    cmangos: CmangosData | None = None
     soap_port: int = Field(default=7878, gt=0, lt=65536)
     min_ram_gb: float = Field(
         default=6.0,
@@ -79,31 +533,6 @@ class NativeInstall(_Strict):
         description="The checkout is 2.4 GB but the clone PEAKS near 3.7 GB.",
     )
     warn_server_dir_gb: float = Field(default=15.0, gt=0)
-    world_env: dict[str, str] = Field(
-        default_factory=dict,
-        description=(
-            "Per-game runtime settings for the worldserver, merged over composegen's structural "
-            "defaults. Data rather than Python because these are facts about ONE game that a "
-            "person may reasonably want different: the playerbot population lives here, not in a "
-            "module constant (style-guide §3, and an adversarial review that caught it there). "
-            "PROVENANCE: WotLK carried 1600/2000, copied from the ONE proven yulon-ubuntu "
-            "install where the Linux installer script wrote them, after a `docker compose "
-            "config` diff on 2026-08-24 found a native install would otherwise differ from a "
-            "script install. Never measured on another machine and never measured at all for "
-            "RAM. Lowered to 500/500 by owner decision on 2026-08-28, and the same number went "
-            "into the three WotLK scripts, TBC and Vanilla so the script and native paths still "
-            "agree — the point of the 2026-08-24 diff, and the thing that went wrong when the "
-            "decision sat on one branch while every installer shipped 1600/2000. Still owed an "
-            "RSS reading by the first gate."
-            "PROVENANCE: WotLK carried 1600/2000, copied from the ONE proven yulon-ubuntu install, "
-            "where the Linux installer script wrote them, after a `docker compose config` diff "
-            "on 2026-08-24 found a native install would otherwise differ from a script install. "
-            "Never measured on another machine and never measured at all for RAM. Lowered to "
-            "500/500 on 2026-08-28 by owner decision, and the same number was written into the "
-            "three WotLK scripts, TBC and Vanilla so the script and native paths still agree — "
-            "the point of the 2026-08-24 diff. Still owed an RSS reading by the first gate."
-        ),
-    )
 
     def floors_gb(self, *, same_volume: bool) -> tuple[float, float]:
         """(refuse, warn) free-space floors when both needs land on one volume.
@@ -117,6 +546,29 @@ class NativeInstall(_Strict):
             self.min_data_root_gb + self.min_server_dir_gb,
             self.warn_data_root_gb + self.warn_server_dir_gb,
         )
+
+    @model_validator(mode="after")
+    def _exactly_the_family_block(self) -> NativeInstall:
+        """`family` names exactly the typed block that is present — no more, no fewer.
+
+        A `cmangos` block on an `azerothcore` entry is a typo that would otherwise be data
+        nobody reads; a missing block is an engine that starts and fails at stage two.
+        Also pins `extract.image` to a built image, so the extractors run from something
+        the build overlay produces.
+        """
+        blocks = {"azerothcore": self.azerothcore, "cmangos": self.cmangos}
+        present = sorted(name for name, block in blocks.items() if block is not None)
+        if present != [self.family]:
+            raise ValueError(
+                f"family is {self.family!r} but the blocks present are {present}; "
+                f"exactly the `{self.family}` block must be present"
+            )
+        if self.cmangos is not None and self.cmangos.extract.image not in self.images:
+            raise ValueError(
+                f"cmangos.extract.image {self.cmangos.extract.image!r} is not one of images "
+                f"{list(self.images)}"
+            )
+        return self
 
 
 class Install(_Strict):
@@ -135,11 +587,8 @@ class Install(_Strict):
         description="Path to the install-*.sh, relative to catalog/installers/",
     )
     default_server_dir: str = Field(min_length=1, description="Default dir name under $HOME")
-    db_root_password: str | None = Field(
-        default=None, description="Fixed root password the installer uses, if any."
-    )
-    db_root_password_file: str | None = Field(
-        default=None, description="File under the server dir holding a generated password."
+    password: PasswordPlan = Field(
+        description="Where the database root password comes from: fixed, or generated per install."
     )
     requires_client_dir: bool = Field(
         default=False,
@@ -151,7 +600,7 @@ class Install(_Strict):
 
         Not every game has a fixed one: the TBC and Vanilla installers GENERATE
         a password (`tbc$(openssl rand -hex 8)`) and write it to a file under the
-        server dir, which is what `db_root_password_file` names. That field was
+        server dir, which is what a `generated` plan's `file` names. That fact was
         declared here and read NOWHERE, so every caller fell back to the shared
         default and authenticated as root with the literal string "password".
         Start and Stop need no database, which is why it would have surfaced
@@ -162,11 +611,14 @@ class Install(_Strict):
         password is not knowable from here, and a caller should decide what to
         do about that rather than be handed a guess.
         """
-        if self.db_root_password:
-            return self.db_root_password
-        if self.db_root_password_file:
+        if self.password.mode == "fixed":
+            return self.password.value
+        # `PasswordPlan` refuses a generated plan with no `file`, so the fallthrough
+        # below is unreachable through the catalog - but `file` is still typed
+        # optional, and guessing a filename here would be worse than saying "unknown".
+        if self.password.file:
             try:
-                text = (server_dir / self.db_root_password_file).read_text(encoding="utf-8")
+                text = (server_dir / self.password.file).read_text(encoding="utf-8")
             except (OSError, ValueError):
                 # ValueError covers UnicodeDecodeError, which is what a file
                 # written in another encoding raises - it is not an OSError, so

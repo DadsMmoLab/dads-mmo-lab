@@ -83,7 +83,8 @@ Three honest gaps:
 All of the below on Linux; none of it yet on Windows or macOS.
 
 - **Installing a server** — Ubuntu 24.04 VM, 2026-08-21. Worth being exact: the install itself
-  was driven by the CLI harness (`python -m yulon.catalog.installer wow-wotlk --server-dir …`),
+  was driven by the CLI harness (then `python -m yulon.catalog.installer wow-wotlk --server-dir …`,
+  today `python -m yulon.install_wiring wow-wotlk --server-dir …`),
   which built AzerothCore with playerbots from source and ended with all three containers up. The
   Catalog's Install button reaches the same `Installer`, but the button has not itself been the
   thing pressed on a fresh machine.
