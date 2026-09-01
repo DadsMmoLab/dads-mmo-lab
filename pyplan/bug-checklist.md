@@ -1353,6 +1353,46 @@ Unreachable for cmangos today (it is not in `FAMILIES` until K.8). Recorded now 
 precisely the mechanism that would hide a `stages()`/`STAGE_NAMES` mismatch** — the thing K.2's
 inertness argument depends on being visible. **Note it in K.8's brief.**
 
+### 24. The false 0600 guarantee K.3 removed is still live in `conf.py` — 2026-09-01, OPEN
+
+**Measured twice, on PKGAME-LAPTOP, Windows 10.0.26200, CPython 3.13.14, 2026-09-01.** On Windows the
+POSIX mode is a **no-op** and the ACL is purely inherited:
+
+- `os.open(p, O_WRONLY|O_CREAT|O_TRUNC, 0o600)`, `open()` + `os.chmod(0o600)`, and a plain `open()`
+  **all** give `st_mode & 0o777 == 0o666`, with **byte-identical `icacls` output**.
+- Under a folder first granted `*S-1-5-32-545:(OI)(CI)(RX)`, the "0600" file carried
+  `BUILTIN\Brukere:(I)(RX)` — readable by every local user — and a following `os.chmod(0o600)`
+  changed **neither the mode nor the ACL**.
+
+K.3 removed its own *"never world-readable for even an instant"* claim on that evidence. **But
+`conf.py`'s `_write` still asserts "the conf is never readable by anyone else even for an instant (the
+database password is in it)"** — the same false guarantee, one module away, over a file that really
+does contain the password (`LoginDatabaseInfo = "host;port;user;password;schema"`). A guarantee that is
+written down stops the next reader checking, which is why this is worse than silence.
+
+**And `conf.py` is strictly weaker than K.3 on POSIX too:** it writes with `open()` and chmods
+**after**, so the temp file holds the password at the umask default until the chmod lands. K.3's
+`os.open`-with-mode has no such window. (Read, not measured — flagged as read.)
+
+Deferring the Windows **fix** is right — a real DACL means pywin32 or an `icacls` subprocess on every
+path that touches the file, and that is an app-wide posture decision. **Correcting the false sentence
+is not deferrable.**
+
+### 25. The bash lineage still deletes a volume silently — 2026-09-01, unreachable today
+
+`install-wow-vanilla.sh:2043` runs `docker volume rm "${db_volume}"` with no confirmation — **the exact
+destructive answer the Python design rejects**, and the reason `db-password` refuses rather than
+wiping.
+
+Unreachable while `cmangos` is registered: `installer.py:896` falls back to a script only for an
+**unregistered** family. So the guard is **registration**, not a check — the sixth standing rule's
+shape (a guard held by its position rather than by the thing it protects). 7.2 deletes this lineage;
+until then, note that de-registering the family for any reason re-arms it.
+
+Enumerated at argv level across `yulon/` and `main.py`: the **only** volume argv in the Python app is
+`docker.py:679` `["volume","inspect",...]`, which is read-only. No `volume rm`, no `volume prune`, no
+`down -v`, no `--volumes`. `remove_staged` is `["compose","down","-t",…,"--remove-orphans"]`.
+
 ### One thing worth keeping
 
 Three of these have an obvious fix that is **wrong**, and two of them arm a worse bug:
