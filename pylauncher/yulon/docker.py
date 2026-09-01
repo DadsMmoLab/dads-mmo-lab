@@ -16,6 +16,7 @@ logic, generalized and given explicit, overridable timeouts.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -3267,3 +3268,82 @@ def _pump(source: BinaryIO, sink: IO[bytes], container: str) -> None:
             sink.close()  # without EOF a client that read everything waits forever
         except OSError as exc:
             logger.debug(f"stdin of docker exec {container} would not close: {exc}")
+
+
+def sql_query(
+    container: str,
+    client: str,
+    password: str,
+    schema: str | None,
+    statement: str,
+    *,
+    wsl_distro: str | None = None,
+) -> str:
+    """One statement as root, batch mode, through `exec_stdin()`; the client's stdout.
+
+    `--batch --skip-column-names` gives tab-separated rows and nothing else, so
+    a caller counting rows or reading one value never parses a table border.
+    Both `mysql` and `mariadb` accept the long spellings, which is the point of
+    taking the client's name as data (`DbFacts.client`): this module does not
+    know which one the image ships.
+
+    The statement travels on stdin exactly as a dump file does, and the password
+    in `MYSQL_PWD` through the environment - neither is ever in argv. The error
+    raised carries the client's stderr, which names the user and the reason and
+    never the password.
+
+    Root, because the import streams as root and the probe reads the same
+    schemas it wrote (phase 7 "one secret"); the app user in `DbFacts.user` is
+    what the emulator connects as, not what the installer asks with.
+
+    `wsl_distro` is forwarded, not defaulted away. A container living inside a
+    distro is `No such container` to Docker Desktop, and this is a PROBE: its
+    answer decides whether an install runs. Asked of the wrong daemon it reads
+    as "nothing is imported" for a database that is fully populated, and the
+    stage would re-import over a working server. `exec_stdin()` also carries
+    the secret across the boundary (`WSLENV`), which is the other half of the
+    same rule, so all this has to do is hand the distro over.
+
+    The three answers a caller has to tell apart stay apart, and the types are
+    how:
+
+    * **no rows** - exit 0 with nothing on stdout, returned as `""`. That is a
+      verdict, not a failure: the database was asked and said no.
+    * **the query failed** - `DockerCommandError` carrying the client's own
+      words (`ERROR 1064 ... syntax`, `ERROR 1045 ... Access denied`) or
+      docker's (`container ... is not running`), untouched.
+    * **the database could not be asked** - `DockerCliMissingError` from
+      `exec_stdin()`, passed through. It is a subclass of the above, so a
+      caller wanting them apart must catch it FIRST.
+
+    Stdout is returned VERBATIM, and the trailing newline matters. Under
+    `--skip-column-names` a single row holding the empty string prints one
+    empty line and no rows print nothing; stripping the result would flatten
+    both to `""` and a caller counting `splitlines()` would see zero rows where
+    there is one. Trimming is the caller's decision because only the caller
+    knows whether it asked for a value or for a count.
+
+    Raises:
+        DockerCommandError: the client exited non-zero - no such schema, access
+            denied, a syntax error, or the container is not running.
+        DockerCliMissingError: there was no docker CLI to ask with. Nothing
+            reached a database, so this is never a verdict about one.
+    """
+    argv = [client, "-u", "root", "--batch", "--skip-column-names"]
+    if schema is not None:
+        argv.append(schema)
+    with io.BytesIO(statement.encode("utf-8")) as source:
+        proc = exec_stdin(
+            container, argv, source, env={"MYSQL_PWD": password}, wsl_distro=wsl_distro
+        )
+    if proc.returncode != 0:
+        # `stderr` is where both the client and the daemon put their reason, in
+        # every failure measured against mariadb:11 (2026-09-01): the syntax
+        # error, the unknown database, the access denial, `No such container`
+        # and `container ... is not running`. The fallbacks are for the one
+        # shape that says nothing there - a client killed by a signal exits 137
+        # with BOTH pipes empty, and "exited 137: " trailing off into a colon
+        # names nothing the reader can act on.
+        said = proc.stderr.strip() or proc.stdout.strip() or "no output"
+        raise DockerCommandError(f"{client} in {container} exited {proc.returncode}: {said}")
+    return proc.stdout
