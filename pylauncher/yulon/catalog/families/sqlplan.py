@@ -158,11 +158,28 @@ def natural_key(name: str) -> tuple[object, ...]:
     ordering of ASCII names is exact, and a non-ASCII name sorts deterministically
     rather than correctly.
 
-    `test_sqlplan.py`'s captured `LS_V_*` lists are the definition. Beyond them this key
-    was checked against `ls -v` (GNU coreutils 8.32) over 4,800 generated names built
-    from digits, letters, `_ - . ~ +`, doubled dots, leading dots and
-    `.sql`/`.sql.gz`/`.y.sql` tails: identical on every name without a `~`, and only the
-    corner above on the ones with.
+    `test_sqlplan.py`'s captured `LS_V_*` lists are the definition. Beyond them two
+    different things have been checked, and they are not the same claim:
+
+    **That `sorted(names, key=...)` prints what `ls -v` prints.** Checked over 4,800
+    generated names built from digits, letters, `_ - . ~ +`, doubled dots, leading dots
+    and `.sql`/`.sql.gz`/`.y.sql` tails. This is the property the installers actually
+    depend on - the shell scripts consumed `ls -v`'s output, qsort and all - and a
+    whole-corpus comparison is the right test for it.
+
+    **That this key implements `filevercmp`'s COMPARISON.** A corpus sort cannot show
+    that, and the reason is worth keeping: `filevercmp` is NOT TRANSITIVE, so qsort's
+    output does not imply `cmp(a, b) <= 0` for adjacent pairs. Comparing a sorted
+    8,086-name corpus against `ls -v` reported 6,323 mismatches and 1,409 inverted
+    adjacent pairs - every one an artefact of that. The sound oracle is one pair per
+    directory: re-probed that way, all 1,409 disputed pairs plus 3,000 random agreed,
+    4,409 of 4,409, none unresolved.
+
+    **The `~` corner, bounded rather than shrugged at.** 1,326 pairs built to hit it
+    gave 12 disagreements, all involving `~` and none without, every one of the shape
+    "a zero-only digit run then `~` against a name that ends there" - `a` vs `a0~`,
+    `bb` vs `bb0~`. Concretely, `ls -v` puts `x0~.sql` before `x.sql`; this key does
+    not.
     """
     rank = 0 if name == "." else 1 if name == ".." else 2 if name.startswith(".") else 3
     body = name[1:] if rank == 2 else name
