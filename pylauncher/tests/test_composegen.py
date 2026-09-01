@@ -18,7 +18,14 @@ import pytest
 
 from yulon import platform, resources
 from yulon.catalog import composegen
-from yulon.catalog.catalog import CatalogEntry, DbFacts, NativeInstall, ReadyMarkers, load_catalog
+from yulon.catalog.catalog import (
+    CatalogEntry,
+    CmangosData,
+    DbFacts,
+    NativeInstall,
+    ReadyMarkers,
+    load_catalog,
+)
 
 ENTRY = load_catalog().get("wow-wotlk")
 TEMPLATES = resources.installers_dir()
@@ -692,6 +699,27 @@ def test_fill_is_the_one_public_substitution_and_refuses_a_leftover_token() -> N
 # -- generated-password mode: the secret lives in .env and nowhere else --------
 
 
+MINIMAL_CMANGOS = {
+    "client": {},
+    "dockerfile": {},
+    "extract": {
+        "image": "server",
+        "tools": [{"name": "dbc", "argv": ["/opt/mangos/bin/tools/ad"], "produces": {"dbc": 1}}],
+    },
+    "mmaps": {"argv": ["/opt/mangos/bin/tools/MoveMapGen"]},
+    "conf": {
+        "source_dir": "/opt/mangos/etc",
+        "files": {"mangosd.conf": {"keys": {"DataDir": '"/opt/mangos/data"'}}},
+    },
+    "sql": {
+        "phases": [{"name": "base", "into": "mangos", "files": ["src/core/sql/base/mangos.sql"]}],
+        "marker_db": "mangos",
+    },
+}
+"""The smallest `cmangos` block the family-block validator accepts (G.2): B.6's
+`generated_entry()` says `family="cmangos"`, so it must carry the block the family names."""
+
+
 def generated_entry(tmp_path: Path, base: str) -> CatalogEntry:
     """wow-tbc (a generated-password entry) with a throwaway native block and templates.
 
@@ -711,6 +739,7 @@ def generated_entry(tmp_path: Path, base: str) -> CatalogEntry:
         image_prefix="yulon.local/cmangos-tbc-",
         db=DbFacts(image="mariadb:11", client="mariadb", user="mangos"),
         ready=ReadyMarkers(world="Avg Diff"),
+        cmangos=CmangosData.model_validate(MINIMAL_CMANGOS),
     )
     return tbc.model_copy(update={"install": tbc.install.model_copy(update={"native": native})})
 
