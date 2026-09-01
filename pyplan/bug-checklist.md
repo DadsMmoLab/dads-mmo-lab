@@ -1513,8 +1513,14 @@ On Linux Yu'lon ships as an **AppImage** (`.github/workflows/release.yml`, "Pack
 ships `catalog/installers/` as a **tree** (`build/pylauncher.spec:29-31`), so the file lands at
 `usr/bin/catalog/installers/steam-deck/` within the bundle. An AppImage self-mounts under
 `/tmp/.mount_<name>XXXXXX/` with a fresh random suffix per launch and unmounts on exit — so the path
-the user Browses to exists only while that particular run is live. The documented flow therefore works
-**once**: on the second launch the shortcut points into a mount that is gone.
+the user Browses to exists only while that particular run is live.
+
+**Sharpened 2026-09-02 by the review of the F.5 branch; my first wording was too generous.** I wrote that
+the flow "works once, and on the second launch the shortcut points into a mount that is gone". The mount
+exists only while **that Yu'lon process is running**, so the shortcut is dead the moment the user closes
+Yu'lon — including within the first session, and including the very first time they press play in gaming
+mode, since gaming mode is exactly the situation where Yu'lon is not also running. The remedy and the
+severity are unchanged; the failure is earlier and more certain than "the second launch".
 
 **Verified here, 2026-09-01:** the AppImage is the Linux release artifact; a plain tarball is built
 beside it (the workflow says why: "an AppImage cannot run without FUSE"); the script ships inside the
