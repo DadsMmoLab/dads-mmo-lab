@@ -388,13 +388,18 @@ def test_prompter_stops_waiting_when_the_job_is_cancelled(
 
 
 def test_installer_run_forwards_the_prompter_the_marker_and_the_terminal(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """All three have to reach `runner.interact`, and the marker has to match SUDO_PROMPT.
 
     Forwarding `ask` alone is what the first version did, and it delivered
     nothing: without the marker the seam never fires, and without the terminal
     sudo's prompt never arrives to fire it.
+
+    The script is a stub under `tmp_path` because `run()` checks `is_file()`
+    before it dispatches. It read the shipped tree until 7.2 deleted the bash
+    installers; nothing here ever cared what the file contained, only that the
+    kwargs reached `interact`.
     """
     from yulon.catalog import installer as installer_module
 
@@ -405,7 +410,9 @@ def test_installer_run_forwards_the_prompter_the_marker_and_the_terminal(
         yield "done"
 
     entry = _first_installable_entry()
-    inst = installer_module.Installer(entry, interact=fake_interact)
+    inst = installer_module.Installer(entry, interact=fake_interact, installers_root=tmp_path)
+    inst.script.parent.mkdir(parents=True, exist_ok=True)
+    inst.script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     monkeypatch.setattr(inst, "preflight", lambda *a, **k: None)
 
     def ask(_prompt: str) -> str:
