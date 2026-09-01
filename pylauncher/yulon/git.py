@@ -277,6 +277,20 @@ class RemoteReader(Protocol):
     def remote_url(self, dest: Path) -> str | None: ...
 
 
+@runtime_checkable
+class TreeReader(Protocol):
+    """ "Is this path exactly what HEAD committed?" — the second read-only question.
+
+    Its own Protocol rather than a method on `RemoteReader`, for the reason that
+    one is not on `Git`: a fake satisfies a Protocol by having the methods, so
+    adding this to `RemoteReader` would silently stop every existing fake from
+    narrowing and send the question to the host CLI instead. Both concrete
+    implementations here have both methods, so a real `Git` narrows to both.
+    """
+
+    def is_unmodified(self, dest: Path, relative_path: str) -> bool | None: ...
+
+
 def same_repo(existing: str, wanted: str) -> bool:
     """Do two clone URLs name the same repository?
 

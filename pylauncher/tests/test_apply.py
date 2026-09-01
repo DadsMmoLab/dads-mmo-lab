@@ -17,6 +17,7 @@ import pytest
 
 from yulon import apply as apply_module
 from yulon.apply import Applier, ApplyError, DockerSql, _set_conf_key
+from yulon.catalog import composegen, native
 from yulon.git import CloneSpec, RunnerGit
 from yulon.manifest import parse_manifest
 from yulon.ownership import Ownership
@@ -27,9 +28,21 @@ LUA = "env/dist/etc/modules/lua_scripts"
 class _FakeGit:
     """Writes `files` (relative path → text) into the clone dir instead of cloning."""
 
-    def __init__(self, files: dict[str, str]) -> None:
+    def __init__(self, files: dict[str, str], *, unmodified: bool | None = None) -> None:
         self.files = files
         self.calls: list[CloneSpec] = []
+        self.unmodified = unmodified
+        self.asked_about: list[str] = []
+
+    def is_unmodified(self, dest: Path, relative_path: str) -> bool | None:
+        """The `TreeReader` half of a real `Git`, so no test reaches the host's.
+
+        `None` by default — "git could not be asked" — because that is what a
+        real `RunnerGit` answers for these fakes' `.git` directories, and every
+        guard that consults it must fail closed on it.
+        """
+        self.asked_about.append(relative_path)
+        return self.unmodified
 
     def clone(self, spec: CloneSpec) -> None:
         self.calls.append(spec)
@@ -1003,3 +1016,307 @@ def test_configure_never_rewrites_a_line_in_a_checkout_this_app_did_not_clone(
         applier.configure(m)
 
     assert (clone / "src" / "mine.cpp").read_bytes() == before
+
+
+# ------------------------------------------------- the remedy is part of the guard
+#
+# A refusal that names the wrong remedy causes the harm it was raised to
+# prevent. `remove()` is the case: moving the clone aside makes `clone.exists()`
+# false, so the remove-time SQL and `_undeploy()` are skipped or fail, and the
+# module stays in the database with no route back through the app.
+
+
+def _relocated_claim(clone: Path, *, item_id: str = "mod-ah-bot") -> None:
+    """This app's own claim for `item_id`, naming the folder it USED to be in.
+
+    Exactly what a user who renames or moves their server folder is left with:
+    `install_id()` hashes the absolute path, so every claim under it stops
+    matching at once, while the records themselves are untouched and correct.
+    Written by the real writer at another path and moved, rather than typed out
+    here, so it is byte-for-byte what a relocated install is actually holding.
+    """
+    old = clone.parent / ".where-it-used-to-be"
+    old.mkdir(parents=True, exist_ok=True)
+    apply_module.write_clone_claim(old, item_id=item_id, url=OWNED_URL)
+    (old / apply_module.CLAIM_FILE).replace(clone / apply_module.CLAIM_FILE)
+    old.rmdir()
+
+
+def test_a_remove_refusal_never_tells_the_user_to_sidestep_the_database_cleanup(
+    tmp_path: Path,
+) -> None:
+    """Move the folder aside and `remove()` skips the SQL and the undeploy.
+
+    So a `remove()` refusal must never end there: it points back at removing,
+    and says that hiding the folder is not an uninstall. The other two callers
+    must not carry that sentence, and must not tell a user to `install` when
+    they pressed Remove.
+    """
+    _user_module(tmp_path)
+    applier = Applier(tmp_path, git=_FakeGit({}), sql=_FakeSql(), remote_url=_Origins())
+    m = parse_manifest(OWNED_ITEM)
+
+    with pytest.raises(ApplyError) as removing:
+        applier.remove(m)
+    with pytest.raises(ApplyError) as installing:
+        applier.install(m)
+
+    refusal = str(removing.value)
+    assert "remove mod-ah-bot again" in refusal
+    assert "install mod-ah-bot again" not in refusal
+    assert "not by itself an uninstall" in refusal
+    assert "install mod-ah-bot again" in str(installing.value)
+    assert "not by itself an uninstall" not in str(installing.value)
+
+
+def test_a_moved_install_can_still_be_uninstalled_through_the_app(tmp_path: Path) -> None:
+    """The lockout `install_id()`'s path hash creates, and the one exit from it.
+
+    Rename the server folder and EVERY claim under it reads `UNKNOWN` at once —
+    the records are this app's own and still correct, only the folder they name
+    has moved. `install()` stays refused there, because accepting would authorise
+    `git reset --hard` inside what may be a COPY somebody is keeping. `remove()`
+    accepts, because refusing it leaves the module's rows in the database with
+    no way to reach them: the destruction being asked for is the item the user
+    just asked to destroy.
+    """
+    clone, before = _user_module(tmp_path, checkout_of="ours, from its old path")
+    _relocated_claim(clone)
+    sql = _FakeSql()
+    m = parse_manifest(
+        {**OWNED_ITEM, "sql": [{"db": "world", "statement": "DELETE FROM x", "when": "remove"}]}
+    )
+    applier = Applier(tmp_path, git=_FakeGit({}), sql=sql, remote_url=_Origins(OWNED_URL))
+
+    with pytest.raises(ApplyError) as err:
+        applier.install(m)
+    assert "moved, renamed or copied" in str(err.value)
+    assert (clone / "src" / "mine.cpp").read_bytes() == before
+
+    applier.remove(m)
+    assert not clone.exists()
+    assert sql.statements == [("world", "DELETE FROM x")]
+
+
+def test_the_relocation_licence_reads_which_item_the_claim_names(tmp_path: Path) -> None:
+    """The weaker proof `remove()` takes is still a proof, and this is its edge.
+
+    A claim naming ANOTHER item at this path is not this app's record of the
+    module being removed — it is a folder whose history this app cannot account
+    for, which is the definition of `UNKNOWN`. Removing on it would delete a
+    checkout and run one module's remove-time SQL because a different module's
+    record happened to be lying in the folder.
+    """
+    clone, before = _user_module(tmp_path, checkout_of="ours, for something else")
+    _relocated_claim(clone, item_id="another-module")
+    sql = _FakeSql()
+    m = parse_manifest(
+        {**OWNED_ITEM, "sql": [{"db": "world", "statement": "DELETE FROM x", "when": "remove"}]}
+    )
+    applier = Applier(tmp_path, git=_FakeGit({}), sql=sql, remote_url=_Origins(OWNED_URL))
+
+    with pytest.raises(ApplyError, match=apply_module.CLAIM_FILE):
+        applier.remove(m)
+
+    assert (clone / "src" / "mine.cpp").read_bytes() == before
+    assert sql.statements == [] and sql.files == []
+
+
+def test_a_sourceless_manifest_still_asks_whose_folder_it_is_rewriting(tmp_path: Path) -> None:
+    """`install()`'s guard used to sit inside `if manifest.source is not None`.
+
+    A `mod` is the one type the schema lets go without a source, so it never
+    clones — and so everything at its clone path was put there by somebody else,
+    by definition. An install-time `in_clone` patch then rewrote a line inside a
+    folder nothing had asked about: the same hole `configure()` was given a
+    guard for, in the one place where the folder is guaranteed not to be ours.
+    """
+    m = parse_manifest(
+        {
+            "id": "hand-made-sql",
+            "name": "Hand-made SQL",
+            "type": "mod",
+            "game": "wow-wotlk",
+            "patches": [
+                {
+                    "file": "src/mine.sql",
+                    "find": "my patch",
+                    "replace": "ours now",
+                    "when": "install",
+                    "in_clone": True,
+                }
+            ],
+        }
+    )
+    applier = Applier(tmp_path, git=_FakeGit({}), remote_url=_Origins())
+    clone = applier.clone_dir(m)
+    (clone / "src").mkdir(parents=True)
+    mine = clone / "src" / "mine.sql"
+    mine.write_text("-- my patch, three evenings\n", encoding="utf-8")
+    before = mine.read_bytes()
+
+    with pytest.raises(ApplyError, match="was not put there by this app"):
+        applier.install(m)
+
+    assert mine.read_bytes() == before
+
+
+# --------------------------------------------------------------- adoption
+#
+# Every module installed by a build older than the claim file has no claim, so
+# the first Install after the guard landed refused all of them. Adoption closes
+# that without weakening the guard, on three independent facts — and a test for
+# each of them failing on its own.
+
+
+def _installed_by_this_app(server_dir: Path) -> None:
+    """The install engine's record at the SERVER dir: this app created this folder.
+
+    Written by the real writer, not by hand, so the evidence the guard leans on
+    is the evidence the installer actually produces.
+    """
+    native.write_state(
+        server_dir,
+        native.InstallState(
+            game_id="wow-wotlk",
+            install_id=composegen.install_id(server_dir),
+            family="azerothcore",
+        ),
+    )
+
+
+def _existing_module(server_dir: Path) -> Path:
+    """A `modules/mod-ah-bot` from an older build: a real checkout, and no claim."""
+    clone = server_dir / "modules" / "mod-ah-bot"
+    (clone / ".git").mkdir(parents=True)
+    (clone / "README.md").write_text("upstream\n", encoding="utf-8")
+    return clone
+
+
+def test_a_module_from_an_older_build_is_adopted_when_all_three_facts_agree(
+    tmp_path: Path,
+) -> None:
+    """The migration: matching origin, a server dir this app installed, a clean tree."""
+    clone = _existing_module(tmp_path)
+    _installed_by_this_app(tmp_path)
+    git = _FakeGit({"README.md": "upstream\n"}, unmodified=True)
+    applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
+    m = parse_manifest(OWNED_ITEM)
+
+    applier.install(m)
+
+    assert len(git.calls) == 1 and git.calls[0].dest == clone
+    # and it is this app's own from here on, so the next press asks git nothing
+    assert apply_module.read_clone_claim(clone, item_id="mod-ah-bot") is Ownership.OWNED
+
+
+def test_a_stranger_s_checkout_in_a_folder_this_app_installed_is_not_adopted(
+    tmp_path: Path,
+) -> None:
+    """Fact 1 alone fails: same server dir, clean tree, a DIFFERENT repository."""
+    clone, before = _user_module(tmp_path, checkout_of="someone else's")
+    _installed_by_this_app(tmp_path)
+    git = _FakeGit({}, unmodified=True)
+    applier = Applier(tmp_path, git=git, remote_url=_Origins("https://github.com/them/mod-ah-bot"))
+
+    with pytest.raises(ApplyError, match="them/mod-ah-bot"):
+        applier.install(parse_manifest(OWNED_ITEM))
+
+    assert git.calls == []
+    assert (clone / "src" / "mine.cpp").read_bytes() == before
+
+
+def test_a_hand_installed_module_in_someone_else_s_server_dir_is_not_adopted(
+    tmp_path: Path,
+) -> None:
+    """Fact 2 alone fails, and it is the fact that does the work.
+
+    Right repository, clean tree, no `.yulon-install.json` at the server dir —
+    an AzerothCore tree this app never installed, with a module the user cloned
+    themselves. Nothing inside the module folder can prove otherwise, which is
+    exactly why the evidence is kept outside it.
+    """
+    clone, before = _user_module(tmp_path, checkout_of="the same repo, by hand")
+    git = _FakeGit({}, unmodified=True)
+    applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
+
+    with pytest.raises(ApplyError, match="no record"):
+        applier.install(parse_manifest(OWNED_ITEM))
+
+    assert git.calls == []
+    assert (clone / "src" / "mine.cpp").read_bytes() == before
+
+
+@pytest.mark.parametrize("answer", [False, None], ids=["edited", "git-could-not-say"])
+def test_a_checkout_with_local_work_in_it_is_not_adopted(
+    tmp_path: Path, answer: bool | None
+) -> None:
+    """Fact 3 alone fails. `None` is "could not ask", and refuses like a "no".
+
+    `git fetch` + `git reset --hard FETCH_HEAD` destroys precisely what
+    `git status` reports, so an empty answer is the proof that adopting costs
+    nothing — and no answer at all is not that proof.
+    """
+    clone, before = _user_module(tmp_path, checkout_of="the same repo, edited")
+    _installed_by_this_app(tmp_path)
+    git = _FakeGit({}, unmodified=answer)
+    applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
+
+    with pytest.raises(ApplyError, match="no record"):
+        applier.install(parse_manifest(OWNED_ITEM))
+
+    assert git.calls == []
+    assert (clone / "src" / "mine.cpp").read_bytes() == before
+
+
+def test_a_copied_server_folder_does_not_adopt_the_clones_in_the_copy(tmp_path: Path) -> None:
+    """Fact 2 has to be about THIS folder, not about any folder this app installed.
+
+    Copy a server directory and the copy carries a `.yulon-install.json` that is
+    perfectly readable and describes the ORIGINAL's path — the same
+    transplantation the per-clone claim refuses. Presence of the file is not the
+    evidence; the path it names is.
+    """
+    clone, before = _user_module(tmp_path, checkout_of="copied along with the server dir")
+    native.write_state(
+        tmp_path,
+        native.InstallState(
+            game_id="wow-wotlk",
+            install_id=composegen.install_id(tmp_path / "somewhere-else"),
+            family="azerothcore",
+        ),
+    )
+    git = _FakeGit({}, unmodified=True)
+    applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
+
+    with pytest.raises(ApplyError, match="no record"):
+        applier.install(parse_manifest(OWNED_ITEM))
+
+    assert git.calls == []
+    assert (clone / "src" / "mine.cpp").read_bytes() == before
+
+
+def test_a_repository_that_tracks_the_claim_file_s_name_does_not_lock_the_module_out(
+    tmp_path: Path,
+) -> None:
+    """`reset --hard` restores THEIR file over this app's claim, forever.
+
+    If an upstream module ever commits a `.yulon-clone.json` of its own, every
+    update after the first restores it, the claim reads `UNKNOWN`, and install,
+    configure and remove all refuse from then on — over a file the user cannot
+    delete without dirtying their checkout. Git separates the two with
+    certainty: a claim this app wrote is never committed to a module's
+    repository, so a file at that name which `status` reports as unchanged from
+    HEAD is the repository's content and not a claim at all.
+    """
+    clone = _existing_module(tmp_path)
+    (clone / apply_module.CLAIM_FILE).write_text('{"upstream": "ours"}\n', encoding="utf-8")
+    _installed_by_this_app(tmp_path)
+    git = _FakeGit({"README.md": "upstream\n"}, unmodified=True)
+    applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
+
+    assert apply_module.read_clone_claim(clone, item_id="mod-ah-bot") is Ownership.UNKNOWN
+    applier.install(parse_manifest(OWNED_ITEM))
+
+    assert len(git.calls) == 1
+    assert apply_module.CLAIM_FILE in git.asked_about  # asked about that file by name

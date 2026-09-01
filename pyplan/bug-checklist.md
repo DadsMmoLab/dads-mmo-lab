@@ -872,6 +872,25 @@ was found by reading code; each is a line in a resolved compose document from a 
   the probe's own pull rather than an answer about the folder" and carried on — the three-outcome
   discipline behaving correctly against a real-world failure it had never seen.
 
+- **A catalog URL change is never followed for a module that is already installed** — 2026-09-01,
+  found by review while the module-clone ownership guard was being added, and pre-existing to it.
+  `Applier.install()` over an existing clone reaches `git.clone()`, which takes the
+  `(spec.dest / ".git").is_dir()` branch and runs `fetch origin <ref>` + `reset --hard FETCH_HEAD`.
+  `origin` there is the URL STORED in that checkout when it was created; `manifest.source.url` is
+  only ever passed to the INITIAL clone. So editing an item's `source.repo` in the catalog — a fork
+  replacing an abandoned upstream, a repository that moved host — changes nothing for anybody who
+  already has the module: every later Install keeps pulling the old repository, reports success,
+  and asks for a rebuild.
+  *Recorded, not fixed:* the update path is not the ownership guard's subject, and the fix belongs
+  with whoever owns `git.py`'s update semantics — compare `remote_url(dest)` with
+  `manifest.source.url` before the fetch, then `remote set-url` or re-clone. It is written down now
+  because the guard made it HARDER to notice: `Ownership.OWNED` returns from
+  `Applier._require_own_clone()` before `remote_url()` is ever called, and deliberately so (a
+  per-clone claim is its own corroboration, and asking would cost a container round-trip per update
+  plus a class of false refusals on a machine whose git cannot answer). The one code path that read
+  a clone's actual `origin` therefore no longer runs for the clones this app owns — which are the
+  only clones this can happen to.
+
 
 ### One thing worth keeping
 
