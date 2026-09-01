@@ -10,13 +10,16 @@ that every `docker run` it asks for is shaped the way the design says (client
 The import gate is meant to be swapped for a `CallableGate` over
 `Recorder.probe/reset`: `MarkerGate`'s five branches are `test_sqlplan.py`'s to
 prove, and this file is to prove the family's reaction to each answer. That is
-not wired yet and cannot be — K.6 is what binds the `import` stage and names
+not wired yet and cannot be — K.7 is what binds the `import` stage and names
 the method resolving the gate, and no such method exists in `yulon/` on this
-branch. `engine()` already attaches the pair as `_test_gate`, and the `gated`
+branch. (Written as K.6 until 2026-09-01. K.6 is the `conf` stage; the plan's
+K.7 section is the one listing `_import` and `_gate`. An off-by-one task number
+here would have told K.7's author that the wiring was somebody else's, done.)
+`engine()` already attaches the pair as `_test_gate`, and the `gated`
 fixture patches `CmangosInstaller._gate` with `raising=False`, which today adds
 an attribute nothing calls;
 `test_the_import_gate_seam_has_not_landed_so_the_gated_fixture_is_inert` is
-what says so out loud, and it goes red the day K.6 lands so the fixture is
+what says so out loud, and it goes red the day K.7 lands so the fixture is
 re-pointed at the real method rather than staying quietly inert.
 """
 
@@ -209,38 +212,39 @@ def test_stages_are_unique_and_a_subset_of_the_pinned_names_in_order() -> None:
 
 
 def test_the_unbound_half_of_the_pinned_tuple_is_inert_until_its_stages_land() -> None:
-    """K.6-K.7 bind the last two names; nothing in the app reads the tuple before then.
+    """K.7 binds the last name; nothing in the app reads the tuple before then.
 
     `stage_names()` — not `STAGE_NAMES` — is what the spine validates a resume
     against (`_guard`, `_ownership`, `with_stage`), and it is derived from
     `stages()`. So a name with no `Stage` behind it cannot be recorded, cannot
     be read back out of a state file, and cannot reorder one: a state file
-    naming `conf` today has that name DROPPED on the way in, which is the same
-    rule an unknown name has always had. The engine is also not in `FAMILIES`
-    yet, so no user reaches it at all.
+    naming `import` today has that name DROPPED on the way in, which is the
+    same rule an unknown name has always had. The engine is also not in
+    `FAMILIES` yet, so no user reaches it at all.
 
-    The smuggled name is `conf` because K.5 bound `extract`, which is what this
-    test used to smuggle. That substitution is the whole maintenance burden of
-    this test, and it is deliberate: the assertion is about the names that are
-    still unbound, so it has to be re-pointed as each one lands, and the day
-    the tuple is whole (K.8) this test goes away with it.
+    The smuggled name is `import` because K.6 bound `conf`, which is what this
+    test smuggled before that; K.5 bound `extract`, which it smuggled before
+    that. That substitution is the whole maintenance burden of this test, and
+    it is deliberate: the assertion is about the names that are still unbound,
+    so it has to be re-pointed as each one lands, and the day the tuple is
+    whole (K.8) this test goes away with it.
     """
     from yulon.catalog.families import FAMILIES
 
     assert "cmangos" not in FAMILIES
     bound = engine(Recorder()).stage_names()
     assert set(bound) < set(CmangosInstaller.STAGE_NAMES)
-    assert "conf" not in bound, "K.6 landed: smuggle a name that is still unbound, or drop this"
-    smuggled = native.InstallState(game_id=ENTRY.id, install_id="x").with_stage("conf", bound)
+    assert "import" not in bound, "K.7 landed: smuggle a name still unbound, or drop this"
+    smuggled = native.InstallState(game_id=ENTRY.id, install_id="x").with_stage("import", bound)
     assert smuggled.completed == ()
 
 
 def test_the_import_gate_seam_has_not_landed_so_the_gated_fixture_is_inert() -> None:
-    """Red on the day K.6 lands, deliberately: the `gated` fixture must be re-pointed then.
+    """Red on the day K.7 lands, deliberately: the `gated` fixture must be re-pointed then.
 
     `gated` patches `CmangosInstaller._gate` with `raising=False`, and no
     `_gate` exists anywhere in `yulon/`. The hazard is not the missing method,
-    which is only K.6 not having happened; it is a RENAME. If K.6 calls the
+    which is only K.7 not having happened; it is a RENAME. If K.7 calls the
     gate resolver anything else, `monkeypatch.setattr` goes on quietly adding
     an unused attribute, the fixture silently stops overriding anything, and
     every end-to-end test here starts driving the real `MarkerGate` at a
@@ -250,8 +254,14 @@ def test_the_import_gate_seam_has_not_landed_so_the_gated_fixture_is_inert() -> 
     So the assertion is on what makes the inertness HARMLESS rather than on
     the name: while no `import` stage is bound, no body asks for a gate and
     nothing reads the attribute either way. The day a stage named `import`
-    appears, this fails, and K.6 has to point `gated` at whatever it really
+    appears, this fails, and K.7 has to point `gated` at whatever it really
     called the method — with `raising=True`, which by then it can afford.
+
+    K.6 bound `conf` and left this green on purpose: it binds no `import`
+    stage and adds no `_gate`, so the inertness is still harmless and the
+    fixture still has nothing to be re-pointed at. The task number in this
+    docstring was K.6 until then, which is the wrong one — see the module
+    docstring.
 
     The name is asked about too, but through `GATE_METHOD_AT_IMPORT`: `gated`
     is autouse and puts `_gate` on the class, so a `hasattr` in here would
@@ -259,7 +269,7 @@ def test_the_import_gate_seam_has_not_landed_so_the_gated_fixture_is_inert() -> 
     """
     assert (
         "import" not in engine(Recorder()).stage_names()
-    ), "K.6 bound the import stage: point `gated` at the real gate method, with raising=True"
+    ), "K.7 bound the import stage: point `gated` at the real gate method, with raising=True"
     assert (
         not GATE_METHOD_AT_IMPORT
     ), "`_gate` exists now, so `gated` can and must patch it with raising=True"
@@ -764,7 +774,7 @@ def test_the_seams_carry_every_new_double_through_to_the_engine() -> None:
 
 
 def test_the_bound_stages_run_in_order_and_record_the_recorded_ones(tmp_path: Path) -> None:
-    """End to end over the stages bound so far; K.6-K.7 insert the rest between them.
+    """End to end over the stages bound so far; K.7 inserts `import` between them.
 
     Also drives `lay_sql`/`on_clone`, so the SQL fixtures the later tasks import
     are proved to land under the source that owns them — and it is the only
@@ -784,6 +794,7 @@ def test_the_bound_stages_run_in_order_and_record_the_recorded_ones(tmp_path: Pa
         "--- build",
         "--- extract",
         "--- mmaps",
+        "--- conf",
         "--- start-db",
         "--- up",
         "--- ready",
@@ -797,6 +808,7 @@ def test_the_bound_stages_run_in_order_and_record_the_recorded_ones(tmp_path: Pa
         "build",
         "extract",
         "mmaps",
+        "conf",
     )
     # The pair really landed, from the whole install rather than from a direct
     # call to the body, and the password is in neither: `_tokens()` hands the
@@ -1832,3 +1844,200 @@ def test_the_relabel_that_lets_mmaps_run_confined_happens_before_the_first_extra
     assert names.index("generate-compose") < names.index("extract") < names.index("mmaps")
     pinned = CmangosInstaller.STAGE_NAMES
     assert pinned.index("generate-compose") < pinned.index("extract") < pinned.index("mmaps")
+
+
+# -- conf ---------------------------------------------------------------------
+
+
+def test_conf_copies_dist_files_out_of_the_server_image_once_and_patches_them(
+    tmp_path: Path,
+) -> None:
+    """One round trip to the image, then every key in the table set from `_tokens()`.
+
+    Both streams are asserted against the catalog's OWN table rather than a
+    list spelled here, so a file added to `conf.files` has to show up in each
+    of them; a stage that copied one file and forgot another says so by name
+    instead of by a count.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    eng = engine(rec)
+    said = list(eng._conf(context(server_dir)))
+    assert CMANGOS is not None
+    image_ref = eng._image_ref(context(server_dir), CMANGOS.extract.image)
+    # Exactly one copy, of the built server image: "once" is the assertion, and
+    # `all(...)` over an empty list would have been true of a stage that copied
+    # nothing at all.
+    assert [image for image, _src, _dest in rec.copied] == [image_ref]
+    assert all(src.startswith(CMANGOS.conf.source_dir) for _image, src, _dest in rec.copied)
+    assert [line for line in said if line.startswith("Copied")] == [
+        f"Copied {name} out of the server image." for name in CMANGOS.conf.files
+    ]
+    assert [line for line in said if line.startswith("Patched")] == [
+        f"Patched {name}." for name in CMANGOS.conf.files
+    ]
+    etc = server_dir / "etc"
+    mangosd = (etc / "mangosd.conf").read_text(encoding="utf-8")
+    assert f'LoginDatabaseInfo = "{ENTRY.containers.db};3306;' in mangosd
+    assert DB_PASSWORD in mangosd
+    assert f"WorldServerPort = {ENTRY.ports.world}" in mangosd, "the per-install tokens too"
+    assert "{{" not in mangosd
+    assert "Other = 1" in mangosd, "keys the table does not name are left alone"
+    # The password is in the FILE because the emulator reads files. It is in no
+    # line this stage yields, and in no conf whose table never asks for it.
+    assert not [line for line in said if DB_PASSWORD in line]
+    assert DB_PASSWORD not in (etc / "ahbot.conf").read_text(encoding="utf-8")
+
+
+def test_conf_second_run_never_recopies_and_keeps_the_users_own_edit(tmp_path: Path) -> None:
+    """Copy-once is decided by the files on disk, and the copy double is not idempotent.
+
+    A second `copy_from_image` would append to `rec.copied` AND overwrite the
+    appended line, so neither half can cover for the other: the double answers
+    differently the second time in both records.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    eng = engine(rec)
+    list(eng._conf(context(server_dir)))
+    copies = len(rec.copied)
+    assert copies, "nothing was copied the first time, so a second run proves nothing"
+    mangosd = server_dir / "etc" / "mangosd.conf"
+    with mangosd.open("a", encoding="utf-8") as fh:
+        fh.write("Rate.XP.Kill = 3\n")
+    again = list(eng._conf(context(server_dir, completed=["conf"])))
+    assert len(rec.copied) == copies, "an existing file is patched in place, never re-copied"
+    assert "Rate.XP.Kill = 3" in mangosd.read_text(encoding="utf-8")
+    assert not [line for line in again if line.startswith(("Copied", "Patched"))]
+    assert any("already" in line for line in again), "every patched key read back equal"
+
+
+def test_conf_asks_the_files_and_not_the_record_whether_to_copy(tmp_path: Path) -> None:
+    """A state file saying `conf` is finished does not stop the first copy.
+
+    The stage is recorded, but the record is not what skips it — the same rule
+    `write-dockerfile` is written against. `materialise()` looks at `etc/`, so
+    a state file that outlived the files it describes cannot leave an install
+    with no confs at all.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    list(engine(rec)._conf(context(server_dir, completed=["conf"])))
+    assert rec.copied
+    assert (server_dir / "etc" / "mangosd.conf").is_file()
+
+
+def test_conf_wraps_a_docker_failure_in_the_install_sentence(tmp_path: Path) -> None:
+    """Docker's own words kept, inside a sentence saying which step they belong to."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+
+    def broken(image: str, src: str, dest: Path) -> None:
+        raise docker.DockerCommandError("docker create exited 125: no such image")
+
+    with pytest.raises(InstallerError, match="no such image") as caught:
+        list(engine(Recorder(), copy_from_image=broken)._conf(context(server_dir)))
+    assert "could not be copied out of the server image" in str(caught.value)
+
+
+def test_conf_passes_the_modules_own_refusal_through_and_leaves_no_half_built_etc(
+    tmp_path: Path,
+) -> None:
+    """One `.dist` missing from the image: the module's sentence, not a second one round it.
+
+    `InstallerError` subclasses `RuntimeError`, so an `except` broadened round
+    `materialise()` would catch this refusal and wrap it inside "the
+    configuration files could not be copied…", reading as a broken machine for
+    what is the catalog and the image disagreeing.
+
+    The empty `etc/` is `materialise()`'s all-or-nothing rule seen from the
+    family, and it is the half that would be invisible later: a file that
+    exists is never re-copied, so a partial copy would be sailed straight past
+    by the next resume.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    del rec.conf_dist["ahbot.conf.dist"]
+    with pytest.raises(InstallerError) as caught:
+        list(engine(rec)._conf(context(server_dir)))
+    message = str(caught.value)
+    assert message.startswith("the built image ")
+    assert "ahbot.conf.dist" in message
+    assert "could not be copied out of the server image" not in message
+    assert not list((server_dir / "etc").glob("*.conf"))
+
+
+def test_conf_says_which_file_could_not_be_patched_and_does_not_say_it_twice(
+    tmp_path: Path,
+) -> None:
+    """A conf that cannot be READ keeps `apply_table()`'s own sentence, naming the path.
+
+    The one rule this fixture breaks is that `etc/mangosd.conf` is a directory
+    rather than a file — it EXISTS, so `materialise()` leaves it alone (a file
+    that is there is never re-copied), and `_read()` is what trips. That is the
+    only way to reach the re-raise arm without editing the catalog, and without
+    it the arm has no test: an `InstallerError` falling through to the broad
+    clause below it would be wrapped in "could not be patched", which names the
+    directory instead of the file and says the failure twice.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    eng = engine(rec)
+    list(eng._conf(context(server_dir)))
+    mangosd = server_dir / "etc" / "mangosd.conf"
+    mangosd.unlink()
+    mangosd.mkdir()
+    copies = len(rec.copied)
+    with pytest.raises(InstallerError) as caught:
+        list(eng._conf(context(server_dir)))
+    message = str(caught.value)
+    assert message.startswith(f"{mangosd} could not be read")
+    assert "could not be patched" not in message, "the module's sentence was wrapped in a second"
+    assert len(rec.copied) == copies, "a file that exists is not re-copied, directory or not"
+
+
+def test_the_conf_this_stage_leaves_behind_carries_the_mode_the_module_asks_for(
+    tmp_path: Path,
+) -> None:
+    """Owner-only on POSIX through both writers; a measured no-op on Windows (§24).
+
+    `conf.CONF_MODE` and the two writers are `test_conf.py`'s to prove. What is
+    asked here is the composition: that the file this STAGE leaves behind went
+    through `materialise()` and `apply_table()` rather than being written
+    beside them. `mangosd.conf` is copied and then patched on a first run, so
+    it has been through both.
+
+    Measured on PKGAME-LAPTOP, Windows 11 26200, CPython 3.13.14, 2026-09-01:
+    a file created by `write_text`, moved with `shutil.move` and chmodded
+    (`materialise`'s shape) and one written, chmodded and `os.replace`d
+    (`_write`'s shape) both read back `st_mode & 0o777 == 0o666`. The mode does
+    nothing there and the ACL is whatever the parent folder grants — that is
+    `pyplan/bug-checklist.md` §24, open, and not fixed by this task. The
+    assertion records what was measured rather than what the mode was for.
+    """
+    from yulon.catalog.families import conf as conf_kind
+
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    list(engine(Recorder())._conf(context(server_dir)))
+    mode = (server_dir / "etc" / "mangosd.conf").stat().st_mode & 0o777
+    if os.name == "nt":
+        assert mode == 0o666, "Windows started honouring the mode: re-read bug-checklist §24"
+    else:
+        assert mode == conf_kind.CONF_MODE
+
+
+def test_conf_is_recorded_and_sits_between_mmaps_and_start_db() -> None:
+    """Order and bookkeeping, because each is one keyword in `stages()`."""
+    stages = engine(Recorder()).stages()
+    names = [stage.name for stage in stages]
+    at = names.index("mmaps")
+    assert names[at + 1 : at + 3] == ["conf", "start-db"]
+    conf_stage = next(stage for stage in stages if stage.name == "conf")
+    assert conf_stage.recorded
+    assert conf_stage.cancel_note == "", "a copy and a patch are seconds; a Stop costs nothing"
