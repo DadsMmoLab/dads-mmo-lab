@@ -9,19 +9,24 @@ bringing the project up/down once per assertion would be slow for no gain.
 
 from __future__ import annotations
 
+import gzip
+import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
 
 from tests.integration.conftest import (
+    BUSYBOX_IMAGE,
+    MARIADB_ROOT_PASSWORD,
     THROWAWAY_PORTS,
     THROWAWAY_REALM_HOST,
     THROWAWAY_REALM_PORT,
     THROWAWAY_SPEC,
     import_runs,
 )
-from yulon import docker
+from yulon import docker, platform
 from yulon.controller import Controller, PortConflictError
 
 pytestmark = pytest.mark.integration
@@ -316,3 +321,155 @@ def test_the_bind_mount_probe_actually_works_against_a_real_daemon(
     assert docker.bind_mount_ok(chosen, git.CONTAINER_GIT_IMAGE) is True
     # `-v <missing>:/probe` would have Docker create it; the probe must not.
     assert not chosen.exists()
+
+
+# ------------------------------------------------ 7.3: the CMaNGOS primitives
+
+
+def _busybox_containers() -> set[str]:
+    """Every container, running or exited, made from the busybox image — the leak census."""
+    proc = subprocess.run(
+        ["docker", "ps", "-aq", "--filter", f"ancestor={BUSYBOX_IMAGE}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return set(proc.stdout.split())
+
+
+def test_run_container_reads_the_client_read_only_and_writes_out_as_this_user(
+    tmp_path: Path, require_docker: None
+) -> None:
+    """The extraction model, live: `/client` `:ro`, `/out` rw, cwd `/out`, `-u uid:gid`.
+
+    The relative `copy.txt` proves the workdir; the owner check proves no
+    `sudo chown` will ever be needed; the client listing proves nothing was
+    written where the user's files live.
+
+    The container is ASKED who it is (`id -u` / `id -g`) rather than trusting
+    that a `--user` in the argv arrived, and both platforms' answers are
+    asserted. A host-side `st_uid` check alone exists only where `os.getuid`
+    does, so on Docker Desktop the whole user half of `ContainerRun` would be
+    gated by nothing at all — and the two platforms want opposite answers:
+    `platform.container_user_args()` passes `--user uid:gid` on Linux and
+    deliberately passes none on Docker Desktop, where the image's own root is
+    right and the file still arrives owned by the logged-in user.
+    """
+    client = tmp_path / "client"
+    client.mkdir()
+    (client / "a.txt").write_text("alpha\n", encoding="utf-8")
+    out = tmp_path / "out"
+    out.mkdir()
+    user_args = tuple(platform.container_user_args())
+    spec = docker.ContainerRun(
+        image=BUSYBOX_IMAGE,
+        argv=("sh", "-c", "cat /client/a.txt > copy.txt; id -u; id -g"),
+        mounts=(docker.Mount(client, "/client", read_only=True), docker.Mount(out, "/out")),
+        workdir="/out",
+        user_args=user_args,
+    )
+    heard: list[str] = []
+    run = docker.run_container(spec, sink=heard.append)
+    assert run.returncode == 0, run.tail
+    assert (out / "copy.txt").read_text(encoding="utf-8") == "alpha\n"
+    reported = [line.strip() for line in heard if line.strip().isdigit()]
+    if user_args:
+        assert user_args[0] == "--user", user_args
+        assert ":".join(reported[-2:]) == user_args[1], heard
+    else:
+        assert reported[-2:] == ["0", "0"], heard
+    getuid = getattr(os, "getuid", None)
+    if getuid is not None:
+        # Linux only: Docker Desktop's file sharing maps ownership itself.
+        assert (out / "copy.txt").stat().st_uid == getuid()
+    assert sorted(entry.name for entry in client.iterdir()) == ["a.txt"]
+
+
+def test_a_read_only_client_mount_refuses_a_write(tmp_path: Path, require_docker: None) -> None:
+    """`:ro` is enforced by the kernel, not by the tool's manners — and the tail says so."""
+    client = tmp_path / "client"
+    client.mkdir()
+    spec = docker.ContainerRun(
+        image=BUSYBOX_IMAGE,
+        argv=("sh", "-c", "touch /client/written"),
+        mounts=(docker.Mount(client, "/client", read_only=True),),
+    )
+    run = docker.run_container(spec, sink=lambda _line: None)
+    assert run.returncode != 0
+    assert "Read-only file system" in " ".join(run.tail)
+    assert not (client / "written").exists()
+
+
+def test_copy_from_image_leaves_no_container_behind_either_way(
+    tmp_path: Path, require_docker: None
+) -> None:
+    """A real create/cp/rm, then the failure path, and the census is unchanged after both.
+
+    The pull is not politeness: `--filter ancestor=<image>` needs the image to
+    exist locally, and a census taken against an image this daemon has never
+    seen answers "no containers" for every one of them, leak included.
+    """
+    subprocess.run(["docker", "pull", BUSYBOX_IMAGE], capture_output=True, check=False)
+    before = _busybox_containers()
+    dest = tmp_path / "passwd"
+    docker.copy_from_image(BUSYBOX_IMAGE, "/etc/passwd", dest)
+    assert dest.is_file()
+    assert "root:" in dest.read_text(encoding="utf-8")
+    with pytest.raises(docker.DockerCommandError):
+        docker.copy_from_image(BUSYBOX_IMAGE, "/no/such/path", tmp_path / "nope")
+    assert not (tmp_path / "nope").exists()
+    assert _busybox_containers() == before
+
+
+def test_exec_stdin_streams_a_gzipped_dump_and_sql_query_reads_it_back(
+    tmp_path: Path, mariadb_container: str
+) -> None:
+    """The SQL transport against a real client: gzip in, rows out, password never printed.
+
+    A gzip source is the load-bearing choice: if `exec_stdin()` ever handed the
+    child the stream's `fileno()`, mariadb would receive compressed bytes and
+    this would fail on the first statement.
+    """
+    dump = tmp_path / "seed.sql.gz"
+    with gzip.open(dump, "wb") as compressed:
+        compressed.write(
+            b"CREATE DATABASE yulon_it;\n"
+            b"CREATE TABLE yulon_it.t (n INT);\n"
+            b"INSERT INTO yulon_it.t VALUES (1),(2),(3);\n"
+        )
+    with gzip.open(dump, "rb") as source:
+        proc = docker.exec_stdin(
+            mariadb_container,
+            ["mariadb", "-u", "root"],
+            source,
+            env={"MYSQL_PWD": MARIADB_ROOT_PASSWORD},
+        )
+    assert proc.returncode == 0, proc.stderr
+    # Amendment A11 against a real daemon: what ran carries the variable's NAME.
+    assert MARIADB_ROOT_PASSWORD not in " ".join(proc.args)
+    assert "MYSQL_PWD" in proc.args, proc.args
+    assert f"MYSQL_PWD={MARIADB_ROOT_PASSWORD}" not in proc.args
+    count = docker.sql_query(
+        mariadb_container, "mariadb", MARIADB_ROOT_PASSWORD, "yulon_it", "SELECT COUNT(*) FROM t"
+    )
+    assert count.strip() == "3"
+    with pytest.raises(docker.DockerCommandError) as excinfo:
+        docker.sql_query(mariadb_container, "mariadb", "not-the-password", None, "SELECT 1")
+    assert "Access denied" in str(excinfo.value)
+    assert MARIADB_ROOT_PASSWORD not in str(excinfo.value)
+
+
+def test_wait_ready_gives_up_on_a_crash_loop_long_before_its_timeout(
+    crash_loop_container: str,
+) -> None:
+    """`RestartCount` growing past `restart_loop` is the answer, not the timeout.
+
+    A CMaNGOS worldserver that cannot load its maps restarts forever under
+    `unless-stopped`; waiting out ten minutes of that tells the user nothing
+    the fourth restart had not already said. Docker's restart backoff doubles
+    from 100ms, so four restarts arrive in a few seconds.
+    """
+    spec = docker.ReadySpec(world="ready", auth=None, timeout=90.0, interval=0.5, restart_loop=4)
+    started = time.monotonic()
+    assert docker.wait_ready(crash_loop_container, crash_loop_container, spec) is False
+    assert time.monotonic() - started < 45.0, "the crash loop was waited out, not detected"
