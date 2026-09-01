@@ -1053,3 +1053,129 @@ def test_a_container_prefix_that_cannot_be_derived_is_refused_not_guessed() -> N
     with pytest.raises(composegen.ComposeGenError, match="rebuilds abcdb"):
         composegen._container_prefix(with_containers("abc-db", "abcd-realmd", "abcx-mangosd"))
     assert composegen._container_prefix(with_containers("x-db", "x-realmd", "x-mangosd")) == "x-"
+
+
+# -- G.5: the shared CMaNGOS compose templates ---------------------------------
+
+CMANGOS_ENTRIES = [load_catalog().get(g) for g in ("wow-tbc", "wow-vanilla", "wow-tortoise")]
+
+
+def service_names(compose_text: str) -> set[str]:
+    """Keys directly under `services:` — and ONLY there.
+
+    `networks:` and `volumes:` keys sit at the same two-space indent, so a whole-file
+    regex would count `tbc-net` and `db-data` as services; the scan stops at the next
+    top-level key.
+    """
+    names: set[str] = set()
+    inside = False
+    for line in compose_text.splitlines():
+        if re.match(r"^services:\s*$", line):
+            inside = True
+            continue
+        if inside and re.match(r"^\S", line):
+            break
+        if inside:
+            match = re.match(r"^  ([A-Za-z0-9-]+):\s*$", line)
+            if match:
+                names.add(match.group(1))
+    return names
+
+
+def render_generated(entry: CatalogEntry, server_dir: Path) -> composegen.ComposePlan:
+    """A generated-password entry needs the secret handed in; it never reaches the file."""
+    return composegen.render(
+        entry,
+        server_dir,
+        templates_root=TEMPLATES,
+        db_password="tbc-0123456789abcdef",
+        bind_label=":z",
+        platform_id=lambda: "linux",
+    )
+
+
+@pytest.mark.parametrize("entry", CMANGOS_ENTRIES, ids=lambda e: e.id)
+def test_the_shared_cmangos_templates_render_for_every_family_entry(
+    tmp_path: Path, entry: CatalogEntry
+) -> None:
+    plan = render_generated(entry, tmp_path / "wow")
+    for text in (plan.base, plan.override, plan.build):
+        assert text.startswith(composegen.GENERATED_MARKER)
+        assert "{{" not in text
+    assert "ports" in keys_in(plan.base)
+    assert "ports" not in keys_in(plan.override)
+    assert "ports" not in keys_in(plan.build)
+    assert "build" not in keys_in(plan.base)
+
+
+def test_the_cmangos_services_are_named_after_their_containers(tmp_path: Path) -> None:
+    """`ContainerSpec.services` keeps its default, so `compose up -d --no-deps <db>` works."""
+    entry = load_catalog().get("wow-tbc")
+    plan = render_generated(entry, tmp_path / "wow")
+    services = service_names(plan.base)
+    assert services == {entry.containers.db, entry.containers.auth, entry.containers.world}
+    for name in services:
+        assert f"container_name: {name}" in plan.base
+
+
+def test_the_cmangos_database_is_loopback_only_with_the_mariadb_healthcheck(tmp_path: Path) -> None:
+    """Never the scripts' `3306:3306`; and the healthcheck is mariadb's own script."""
+    entry = load_catalog().get("wow-tortoise")
+    plan = render_generated(entry, tmp_path / "wow")
+    assert f'"127.0.0.1:${{DOCKER_DB_EXTERNAL_PORT:-{entry.ports.db}}}:3306"' in plan.base
+    assert '["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]' in plan.base
+    assert "image: mariadb:10.6" in plan.base
+
+
+def test_a_generated_password_never_reaches_the_compose_files(tmp_path: Path) -> None:
+    plan = render_generated(load_catalog().get("wow-tbc"), tmp_path / "wow")
+    for text in (plan.base, plan.override, plan.build):
+        assert "tbc-0123456789abcdef" not in text
+    assert "${DB_ROOT_PASSWORD:?Yu'lon .env is missing}" in plan.base
+    assert plan.dotenv == {"DB_ROOT_PASSWORD": "tbc-0123456789abcdef"}
+
+
+def test_the_cmangos_world_server_keeps_its_console_and_shutdown_grace(tmp_path: Path) -> None:
+    plan = render_generated(load_catalog().get("wow-vanilla"), tmp_path / "wow")
+    assert "stdin_open: true" in plan.base
+    assert "stop_grace_period: 5m" in plan.base
+
+
+def test_the_cmangos_build_overlay_builds_exactly_the_server_image(tmp_path: Path) -> None:
+    entry = load_catalog().get("wow-tbc")
+    plan = render_generated(entry, tmp_path / "wow")
+    assert plan.build.count("dockerfile: Dockerfile") == 1
+    assert "context: ." in plan.build
+    refs = composegen.built_image_refs(entry, tmp_path / "wow", platform_id=lambda: "linux")
+    base_images = set(re.findall(r"^\s*image:\s*(\S+)\s*$", plan.base, re.MULTILINE))
+    assert set(refs) <= base_images
+    assert len(refs) == 1 and refs[0].startswith("yulon.local/cmangos-tbc-server:native-")
+
+
+def test_the_cmangos_build_overlay_names_a_service_the_base_file_defines(tmp_path: Path) -> None:
+    """The build block's service key is the game's, not a literal.
+
+    One template serves three games whose containers are `tbc-`, `vanilla-` and
+    `tortoise-` prefixed, so the overlay can only name its service through
+    `{{CONTAINER_PREFIX}}` — and compose merges by service NAME. A build block
+    under a key the base file does not define is not an error compose reports:
+    it silently adds a fourth, image-less service, and `build_staged()` builds
+    nothing the stack then runs. The plan's own build template spelled that
+    token while `render()` filled only `BUILD_CONTEXT`, which would have raised
+    `unfilled compose placeholder` for every CMaNGOS install.
+    """
+    for entry in CMANGOS_ENTRIES:
+        plan = render_generated(entry, tmp_path / entry.id)
+        assert service_names(plan.build) <= service_names(plan.base)
+        assert service_names(plan.build) == {entry.containers.world}
+
+
+def test_the_cmangos_host_binds_carry_the_label_and_the_volume_does_not(tmp_path: Path) -> None:
+    plan = render_generated(load_catalog().get("wow-tbc"), tmp_path / "wow")
+    binds = [line for line in plan.base.splitlines() if line.strip().startswith("- ./")]
+    assert len(binds) == 3
+    assert all(line.endswith(":z") for line in binds)
+    assert "- db-data:/var/lib/mysql" in plan.base
+    assert "/var/lib/mysql:z" not in plan.base
+    assert "./etc:/opt/mangos/etc:z" in plan.base
+    assert "./data:/opt/mangos/data:z" in plan.base
