@@ -5147,6 +5147,54 @@ _DAEMON_WILL_NOT_TALK = (
 )
 """Verbatim from a live CLI pointed at a dead daemon, on the OS the launcher ships to."""
 
+# The two wordings below are why the absent branch matches "no such VOLUME" and
+# not the shorter "no such". Both are unanswerable states whose stderr carries
+# the shorter phrase, and both were captured from a live CLI rather than
+# imagined - the elided socket path and hostname are filled in here, the rest is
+# as it was printed:
+#
+#   Linux, daemon stopped (the commonest unanswerable state there is):
+#     failed to connect to the docker API at unix://...: connect: no such file
+#     or directory
+#   Windows, DOCKER_HOST naming a host that does not resolve:
+#     failed to connect to the docker API at tcp://...: lookup ...: no such host
+#
+# Neither says "Cannot connect to the Docker daemon": that is an older Docker's
+# unix-socket wording, and the current one opens identically for tcp and unix,
+# so the prefix does not identify the platform either.
+
+_DAEMON_STOPPED_ON_LINUX = (
+    "failed to connect to the docker API at unix:///var/run/docker.sock: "
+    "connect: no such file or directory"
+)
+"""A stopped Linux daemon. Carries "no such"; a looser phrase reads it as "absent"."""
+
+_DAEMON_HOST_DOES_NOT_RESOLVE = (
+    "failed to connect to the docker API at tcp://not-a-daemon.invalid:2375: "
+    "lookup not-a-daemon.invalid: no such host"
+)
+"""A DOCKER_HOST that does not resolve. Also carries "no such"; also not an answer."""
+
+_WSL_GONE_STDOUT = (
+    "T\x00h\x00e\x00r\x00e\x00 \x00i\x00s\x00 \x00n\x00o\x00 \x00"
+    "d\x00i\x00s\x00t\x00r\x00i\x00b\x00u\x00t\x00i\x00o\x00n\x00"
+    " \x00w\x00i\x00t\x00h\x00 \x00t\x00h\x00e\x00 \x00s\x00u\x00"
+    "p\x00p\x00l\x00i\x00e\x00d\x00 \x00n\x00a\x00m\x00e\x00.\x00"
+    "\n\x00\n\x00E\x00r\x00r\x00o\x00r\x00 \x00c\x00o\x00d\x00e\x00"
+    ":\x00 \x00W\x00s\x00l\x00/\x00S\x00e\x00r\x00v\x00i\x00c\x00"
+    "e\x00/\x00W\x00S\x00L\x00_\x00E\x00_\x00D\x00I\x00S\x00T\x00"
+    "R\x00O\x00_\x00N\x00O\x00T\x00_\x00F\x00O\x00U\x00N\x00D\x00"
+    "\n\x00\n\x00"
+)
+"""wsl.exe's complaint about a deleted distro, as `runner.run()` hands it over.
+
+UTF-16LE decoded as UTF-8, so every ASCII character trails a NUL - and written
+to STDOUT with stderr empty, which is why the seam that quotes stderr printed
+`exited 4294967295: ` and stopped. Same capture as `tests/test_wsl.py`
+(2026-08-26); duplicated rather than imported because a fixture that two suites
+share is a fixture either of them can quietly reshape.
+"""
+
 
 def _volume_proc(
     returncode: int, stdout: str = "", stderr: str = ""
@@ -5209,6 +5257,107 @@ def test_volume_exists_tells_absent_from_unanswerable(monkeypatch: pytest.Monkey
     assert [distro for _, distro in seen] == [None, None, None]
 
 
+@pytest.mark.parametrize(
+    ("what", "said"),
+    [
+        ("a stopped Linux daemon", _DAEMON_STOPPED_ON_LINUX),
+        ("a DOCKER_HOST that does not resolve", _DAEMON_HOST_DOES_NOT_RESOLVE),
+    ],
+)
+def test_volume_exists_refuses_a_no_such_that_is_not_a_volume(
+    what: str, said: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "no such volume" is the answer; "no such ANYTHING ELSE" is not (7.3 db-password).
+
+    The existing unanswerable fixture is refused for two reasons at once - it
+    exits 1 AND it carries none of the phrase - so widening the match from "no
+    such volume" to "no such" leaves it green. These two inputs violate exactly
+    one rule: they are non-zero, they are not the missing-CLI sentinel, they are
+    not wsl.exe's missing-distro code, and the ONLY thing standing between them
+    and the destructive `return False` is the three words after "no such". Both
+    are states a Linux user hits by having the daemon off.
+
+    Asserted as a RAISE, not as `is False`: refusing is the whole contract, and
+    an assertion on the return value would pass for a function that had already
+    told the CMaNGOS installer it may overwrite a live database's password.
+    """
+    assert "no such" in said.lower(), f"{what} no longer exercises the boundary at all"
+    assert "no such volume" not in said.lower(), f"{what} is a genuine absent answer"
+    monkeypatch.setattr(docker, "_docker", lambda *a, _s=said, **k: _volume_proc(1, stderr=_s))
+    with pytest.raises(docker.DockerCommandError, match="no such"):
+        docker.volume_exists("anything_db-data")
+
+
+def test_volume_exists_explains_a_deleted_distro_rather_than_a_bare_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fourth seam. `_run()` translates this; `volume_exists` did not.
+
+    `volume_exists` reads its own exit codes instead of going through `_run()`,
+    because the absent answer IS a non-zero exit - so it also inherited none of
+    `_run()`'s translation. Measured against a WSL distro that no longer exists,
+    the two seams disagreed on the same input:
+
+        volume_exists(...)  'docker volume inspect yulon-x_db-data exited 4294967295: '
+        _run(...)           'The WSL distro ... no longer exists - it was deleted...'
+
+    That empty-after-the-colon message is the exact regression
+    `wsl.missing_distro_problem` was written to end: wsl.exe complains on STDOUT
+    in UTF-16, and this seam quotes stderr.
+    """
+    from yulon import wsl
+
+    monkeypatch.setattr(
+        docker,
+        "_docker",
+        lambda *a, **k: _volume_proc(4294967295, stdout=_WSL_GONE_STDOUT, stderr=""),
+    )
+    monkeypatch.setattr(wsl, "distro_states", lambda: (wsl.Distro("other-distro", True),))
+    # ^ never reached with this stdout - the error code settles it - but patched
+    # so a regression that starts polling wsl.exe here cannot do it for real.
+
+    with pytest.raises(docker.DockerCommandError) as raised:
+        docker.volume_exists("yulon-x_db-data", wsl_distro="dml-arch")
+
+    said = str(raised.value)
+    assert "dml-arch" in said and "no longer exists" in said, said
+    assert "4294967295" not in said, "the raw exit code is still what the user reads"
+
+
+def test_every_seam_that_asks_about_a_missing_distro_is_named_where_it_is_answered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`missing_distro_problem`'s docstring said "three of those seams". There were four.
+
+    The count went stale the moment `volume_exists` grew the same need, and a
+    number written down in another module is exactly the kind of fact that
+    cannot notice. So the docstring names its callers instead of counting them,
+    and this derives that list from `docker.py` itself.
+
+    What this pins is documentation against code, not "a new seam must ask" -
+    that second property cannot be spelled as an AST rule here without firing on
+    the forty-odd raise sites that reach `_run()` and therefore already ask.
+    """
+    from yulon import wsl
+
+    tree = ast.parse(Path(docker.__file__).read_text(encoding="utf-8"))
+    seams = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and any(
+            isinstance(call.func, ast.Attribute) and call.func.attr == "missing_distro_problem"
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call)
+        )
+    }
+    assert seams == {"_run", "follow_logs", "run_attached", "volume_exists"}, seams
+
+    doc = wsl.missing_distro_problem.__doc__ or ""
+    unnamed = sorted(name for name in seams if f"`{name}()`" not in doc)
+    assert not unnamed, f"{unnamed} ask this and are not named in its docstring"
+
+
 def test_volume_exists_asks_the_daemon_the_install_actually_lives_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5236,10 +5385,20 @@ def test_volume_exists_without_a_cli_raises_the_missing_cli_help(
     subclass is what makes this distinguish the two. The condition is produced by
     the fixture rather than mimicked, and `no_docker == []` proves nothing was
     spawned to find it out.
+
+    The last assertion is why the ORDER of the two checks inside `volume_exists`
+    is not pinned by a test: swapping them is an equivalent mutation while the
+    sentinel's help text carries no "no such volume", so no input can tell the
+    two orders apart. Should that ever stop being true, this line goes red -
+    and at that moment the ordering becomes load-bearing, because a missing CLI
+    would otherwise be reported as an absent volume.
     """
+    from yulon import platform
+
     with pytest.raises(docker.DockerCliMissingError):
         docker.volume_exists("x_db-data")
     assert no_docker == []
+    assert "no such volume" not in platform.DOCKER_CLI_MISSING_HELP.lower()
 
 
 def test_volume_exists_forwards_its_distro_per_the_completeness_rule() -> None:

@@ -150,14 +150,22 @@ def missing_distro_problem(distro: str | None, returncode: int, output: str = ""
     has already lost the bytes.
 
     **Why the translation lives here and not at the seam that raises.** There
-    are three of those seams, all in `docker.py` - `_run()` for buffered calls,
-    `follow_logs()` and `run_attached()` for the streamed ones - and a missing
-    distro fails at all three. Putting the knowledge of wsl.exe's exit codes and
+    are several of those seams, all in `docker.py`: `_run()` for buffered calls,
+    `follow_logs()` and `run_attached()` for the streamed ones, and
+    `volume_exists()`, which reads its own exit codes rather than going through
+    `_run()` because the answer it wants IS a non-zero exit. A missing distro
+    fails at every one. Putting the knowledge of wsl.exe's exit codes and
     UTF-16 output in each of them would spread this module's traps across the
     file that already carries the most review history. Every one of those seams
     already holds a `wsl_distro`, an exit code and the captured output, so this
     signature is what each needs to ask in one line, with no new parameter
     threaded anywhere.
+
+    The list is *named*, not counted. It said "three" until `volume_exists()`
+    became the fourth, and a bare number in another module's docstring has
+    nothing that can notice; the names do, because
+    `test_every_seam_that_asks_about_a_missing_distro_is_named_where_it_is_answered`
+    reads the callers out of `docker.py`'s AST and requires each to appear here.
 
     `distro` is `str | None` for the same reason: the seams hold exactly that,
     and a plain Windows docker failure has no distro to blame, so it is None

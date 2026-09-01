@@ -654,10 +654,27 @@ def volume_exists(name: str, *, wsl_distro: str | None = None) -> bool:
     The substring is what tells the two failures apart, and they are otherwise
     identical: on a live daemon a missing volume is `exit 1, Error response from
     daemon: get <name>: no such volume`, while a CLI that cannot reach a daemon
-    is *also* exit 1, with `error during connect: ...` (Windows) or `Cannot
-    connect to the Docker daemon ...` (a unix socket). Matching on the exit code
-    would call the second one "absent" — so only the wording decides, and
-    anything unrecognised refuses.
+    is *also* exit 1. Matching on the exit code would call the second one
+    "absent" — so only the wording decides, and anything unrecognised refuses.
+
+    Three unreachable wordings, all observed rather than remembered:
+
+    - Windows, a `DOCKER_HOST` nothing is listening on:
+      `error during connect: ... connectex: No connection could be made ...`
+    - Linux, the daemon stopped — the commonest of the three:
+      `failed to connect to the docker API at unix://...: connect: no such file
+      or directory`
+    - a `DOCKER_HOST` whose name does not resolve:
+      `failed to connect to the docker API at tcp://...: lookup ...: no such host`
+
+    Older Docker said `Cannot connect to the Docker daemon at unix://...` for
+    the second; current Docker opens tcp and unix failures identically, so the
+    prefix names neither the platform nor the transport.
+
+    **Which is why the match is `no such volume` and not `no such`.** Two of the
+    three above carry the shorter phrase, and shortening it — the obvious "be
+    robust to wording changes" edit — turns a stopped Linux daemon into "safe to
+    write a new password over a database you can still see".
     """
     proc = _docker(["volume", "inspect", "--format", "{{.Name}}", name], wsl_distro=wsl_distro)
     if proc.returncode == 0:
@@ -665,8 +682,20 @@ def volume_exists(name: str, *, wsl_distro: str | None = None) -> bool:
     if _cli_missing(proc):
         raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP)
     said = proc.stderr.strip()
+    # `.lower()` is tolerance, not a captured requirement: every wording seen has
+    # been lowercase. It is kept because dropping it can only turn an answer into
+    # a refusal, and left untested because the only input that would exercise it
+    # is one no daemon has printed (see `test_volume_exists_refuses_a_no_such...`).
     if "no such volume" in said.lower():
         return False
+    # Same question `_run()` asks one line before its own raise, and for the same
+    # reason: a deleted distro makes wsl.exe complain on STDOUT and exit
+    # 0xFFFFFFFF, so this message was `docker volume inspect x_db-data exited
+    # 4294967295: ` — nothing after the colon. `volume_exists` reads its own exit
+    # codes rather than going through `_run()`, so it inherited none of that.
+    problem = wsl.missing_distro_problem(wsl_distro, proc.returncode, proc.stdout)
+    if problem is not None:
+        raise DockerCommandError(problem)
     raise DockerCommandError(f"docker volume inspect {name} exited {proc.returncode}: {said}")
 
 
