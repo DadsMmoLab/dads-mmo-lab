@@ -9,8 +9,13 @@ real AzerothCore compose project gets exercised.
 from __future__ import annotations
 
 import ast
+import gzip
+import io
 import re
 import subprocess
+import threading
+import time
+import zlib
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
@@ -4332,3 +4337,517 @@ def test_a_cli_that_disappears_mid_copy_is_still_could_not_ask(
     assert calls == [["docker", "create", "--entrypoint", "true", "yulon.local/x:t"]]
     assert "0123456789ab" in caplog.text
     assert docker.platform.DOCKER_CLI_MISSING_HELP not in caplog.text
+
+
+# --------------------------------------------- 7.3: docker exec with a stdin
+
+
+class _Stdin(io.BytesIO):
+    """A pipe end that remembers what was written to it before it was closed."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.written = b""
+
+    def close(self) -> None:
+        self.written = self.getvalue()
+        super().close()
+
+
+class _BrokenStdin(_Stdin):
+    """The pipe end of a client that has already exited: every write is EPIPE."""
+
+    def write(self, data: object) -> int:
+        raise BrokenPipeError(32, "Broken pipe")
+
+
+class _UnreadableSource(io.BytesIO):
+    """A `.sql.gz` that turns out not to be one, discovered mid-stream.
+
+    `gzip.BadGzipFile` is an `OSError`, which is exactly why this is here: the
+    obvious single `except OSError` around the copy - the shape that is right
+    for the WRITE side - swallows a corrupt or truncated dump as "the client
+    closed the pipe early".
+    """
+
+    def read(self, size: int | None = -1) -> bytes:
+        raise gzip.BadGzipFile("Not a gzipped file (b'IN')")
+
+
+_DUMP_LINES = b"INSERT INTO `creature_template` VALUES (1,'a');\n" * 120_000
+"""A few megabytes of plausible dump, so a corrupt stream fails only PART WAY IN.
+
+Bigger than `_STDIN_CHUNK_BYTES`, so every fixture below writes real chunks to
+the client before the read side gives out - which is the whole danger: what
+already arrived is valid SQL and the client is happy with it.
+"""
+
+
+def _gzip_dump(damage: Callable[[bytes], bytes]) -> gzip.GzipFile:
+    """A REAL `.sql.gz` reader over a real gzip stream that `damage` has spoiled.
+
+    Not a double that raises a chosen exception. The gap this covers survived
+    a test whose source raised `gzip.BadGzipFile` on demand, because what that
+    test got wrong was WHICH exception a spoiled dump actually raises - so the
+    corruption has to be real and the exception has to come out of `gzip`.
+    """
+    return gzip.GzipFile(fileobj=io.BytesIO(damage(gzip.compress(_DUMP_LINES))))
+
+
+def _truncated(blob: bytes) -> bytes:
+    """A download that stopped early - the failure a flaky connection produces."""
+    return blob[: -len(blob) // 8]
+
+
+def _bit_flipped(blob: bytes) -> bytes:
+    """One byte of the deflate stream mangled on the way to disk."""
+    spoiled = bytearray(blob)
+    spoiled[20] ^= 0xFF
+    return bytes(spoiled)
+
+
+class _InterruptedSource(io.BytesIO):
+    """Ctrl+C landing mid-pump: a `BaseException`, so no `except Exception` sees it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reads = 0
+
+    def read(self, size: int | None = -1) -> bytes:
+        self.reads += 1
+        if self.reads > 1:
+            raise KeyboardInterrupt
+        return b"INSERT INTO t VALUES (1);\n"
+
+
+class _SlowPipe(io.BytesIO):
+    """A child pipe that takes a moment to answer.
+
+    Without this a reader thread over a `BytesIO` has already finished before
+    anyone could ask, and `is_alive()` reads False whether or not the code
+    joined - the assertion would pass against the bug it exists to catch.
+    Answering slowly means a reader that was never joined is still alive at
+    the moment the exception arrives.
+    """
+
+    def read(self, size: int | None = -1) -> bytes:
+        time.sleep(0.3)
+        return super().read(size)
+
+
+class _RecordingThread(threading.Thread):
+    """Every reader `exec_stdin()` starts, kept where a test can question it."""
+
+    started: list[_RecordingThread] = []
+
+    def start(self) -> None:
+        _RecordingThread.started.append(self)
+        super().start()
+
+
+class _FakePopen:
+    """The one `subprocess.Popen` `exec_stdin()` makes, recorded field by field."""
+
+    instances: list[_FakePopen] = []
+    stdin_factory: Callable[[], _Stdin] = _Stdin
+    pipe_factory: Callable[[bytes], io.BytesIO] = io.BytesIO
+    next_returncode = 0
+    next_stdout = b"3\n"
+    next_stderr = b""
+
+    def __init__(
+        self,
+        command: list[str],
+        *,
+        stdin: int,
+        stdout: int,
+        stderr: int,
+        env: dict[str, str] | None,
+        creationflags: int,
+    ) -> None:
+        self.command = command
+        self.env = env
+        self.stdin = _FakePopen.stdin_factory()
+        self.stdout = _FakePopen.pipe_factory(_FakePopen.next_stdout)
+        self.stderr = _FakePopen.pipe_factory(_FakePopen.next_stderr)
+        self.returncode = _FakePopen.next_returncode
+        self.waited = False
+        _FakePopen.instances.append(self)
+
+    def wait(self) -> int:
+        self.waited = True
+        return self.returncode
+
+
+def _spawn_double(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stdin_factory: Callable[[], _Stdin] = _Stdin,
+    returncode: int = 0,
+    stdout: bytes = b"3\n",
+    stderr: bytes = b"",
+    slow_readers: bool = False,
+) -> None:
+    _FakePopen.instances.clear()
+    if slow_readers:
+        # Both halves of the reaping guarantee, made observable: readers that
+        # answer slowly are still alive if nobody joined them, and every thread
+        # `exec_stdin()` starts is recorded where the test can reach it.
+        _RecordingThread.started.clear()
+        monkeypatch.setattr(_FakePopen, "pipe_factory", staticmethod(_SlowPipe))
+        monkeypatch.setattr(docker.threading, "Thread", _RecordingThread)
+    monkeypatch.setattr(_FakePopen, "stdin_factory", staticmethod(stdin_factory))
+    monkeypatch.setattr(_FakePopen, "next_returncode", returncode)
+    monkeypatch.setattr(_FakePopen, "next_stdout", stdout)
+    monkeypatch.setattr(_FakePopen, "next_stderr", stderr)
+    monkeypatch.setattr(docker.subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
+
+
+def test_exec_stdin_keeps_the_secret_out_of_argv_and_pumps_the_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`-e MYSQL_PWD` with no value: the child copies it from OUR environment.
+
+    `ps`, Task Manager and `/proc/<pid>/cmdline` can read an argv; they cannot
+    read another process's environment. The same rule `apply.mysql_env()` and
+    `maintenance.py` keep, asserted here for the new transport.
+    """
+    _spawn_double(monkeypatch)
+    source = io.BytesIO(b"SELECT 1;\n")  # no usable fileno(): the pump is the only way in
+    proc = docker.exec_stdin(
+        "tbc-database", ["mariadb", "-u", "root"], source, env={"MYSQL_PWD": "hunter2"}
+    )
+    spawned = _FakePopen.instances[-1]
+    assert spawned.command == [
+        "docker",
+        "exec",
+        "-i",
+        "-e",
+        "MYSQL_PWD",
+        "tbc-database",
+        "mariadb",
+        "-u",
+        "root",
+    ]
+    assert all("hunter2" not in item for item in spawned.command)
+    assert all("hunter2" not in item for item in proc.args)
+    assert spawned.env is not None and spawned.env["MYSQL_PWD"] == "hunter2"
+    assert spawned.stdin.written == b"SELECT 1;\n"
+    assert spawned.stdin.closed, "without EOF the client waits forever"
+    assert proc.returncode == 0
+    assert proc.stdout == "3\n"
+
+
+def test_the_secret_reaches_no_log_line(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An argv is not the only place a password leaks from.
+
+    This module logs every command it runs at DEBUG, and a log file is
+    something a user attaches to a bug report. The value is never in the argv,
+    so the only way into a line is somebody logging the environment - which is
+    what this pins shut, for the one function that is handed a secret.
+    """
+    _spawn_double(monkeypatch)
+    caplog.set_level(0)
+    docker.exec_stdin("db", ["mariadb"], io.BytesIO(b"SELECT 1;\n"), env={"MYSQL_PWD": "hunter2"})
+    lines = [record.getMessage() for record in caplog.records]
+    assert lines, "nothing was logged at all, so this proves nothing"
+    assert all("hunter2" not in line for line in lines), lines
+    assert any("MYSQL_PWD" in line for line in lines), "the NAME is worth logging; the value is not"
+
+
+def test_exec_stdin_does_not_hand_the_child_a_gzip_streams_descriptor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`gzip.open(...).fileno()` is the COMPRESSED file's descriptor.
+
+    `subprocess` turns a file object into a child's stdin by calling
+    `fileno()`, so handing a gzip stream straight to `Popen(stdin=...)` feeds
+    the client gzip bytes and the "decompressed by Python on the way in" the
+    SQL plan promises silently never happens. The pump is what makes any
+    `BinaryIO` mean what it says.
+    """
+    _spawn_double(monkeypatch)
+    path = tmp_path / "dump.sql.gz"
+    with gzip.open(path, "wb") as compressed:
+        compressed.write(b"INSERT INTO t VALUES (1);\n")
+    with gzip.open(path, "rb") as source:
+        docker.exec_stdin("db", ["mariadb"], source, env={})
+    assert _FakePopen.instances[-1].stdin.written == b"INSERT INTO t VALUES (1);\n"
+    assert _FakePopen.instances[-1].command == ["docker", "exec", "-i", "db", "mariadb"]
+
+
+def test_exec_stdin_without_a_docker_cli_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same sentence `_run()` and `follow_logs()` give a host with no Docker."""
+    monkeypatch.setattr(docker.platform, "docker_program", lambda: None)
+    with pytest.raises(docker.DockerCliMissingError):
+        docker.exec_stdin("db", ["mariadb"], io.BytesIO(b""), env={})
+
+
+def test_a_cli_that_disappears_between_resolving_and_spawning_is_still_could_not_ask(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`docker_program()` caches a hit; a Docker Desktop update can move it after.
+
+    Without this the user hears `[WinError 2]` instead of the one instruction
+    they can act on - the road `_docker()` and `DockerSql._mysql()` already
+    close.
+    """
+    monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
+
+    def gone(*args: object, **kwargs: object) -> None:
+        raise OSError(2, "No such file or directory")
+
+    monkeypatch.setattr(docker.subprocess, "Popen", gone)
+    with pytest.raises(docker.DockerCliMissingError):
+        docker.exec_stdin("db", ["mariadb"], io.BytesIO(b""), env={})
+
+
+def test_a_wsl_resident_database_is_asked_of_that_distros_docker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A container name means nothing to the daemon that does not hold it.
+
+    The Windows-local daemon answers `Error: No such container: tbc-database`
+    for a server running perfectly well inside a distro. `DockerSql._argv()`
+    and `DockerMysql._exec()`, the two `docker exec -e MYSQL_PWD` call sites
+    that came before this one, both take the distro; so does this one.
+    """
+    _spawn_double(monkeypatch)
+    monkeypatch.setattr(docker.platform, "_which", lambda name, path=None: "wsl.exe")
+    docker.exec_stdin(
+        "tbc-database",
+        ["mariadb"],
+        io.BytesIO(b"SELECT 1;\n"),
+        env={"MYSQL_PWD": "hunter2"},
+        wsl_distro="dml-arch",
+    )
+    assert _FakePopen.instances[-1].command == [
+        "wsl.exe",
+        "-d",
+        "dml-arch",
+        "--",
+        "docker",
+        "exec",
+        "-i",
+        "-e",
+        "MYSQL_PWD",
+        "tbc-database",
+        "mariadb",
+    ]
+
+
+def test_a_secret_crossing_into_a_distro_is_named_in_wslenv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Set here, the variable arrives inside the distro EMPTY unless WSLENV says so.
+
+    Measured 2026-08-26 and written down in `platform.wsl_env()`. The failure
+    is silent in the worst way: the argv is right, the container is right, and
+    mysql reports an authentication failure against a healthy database. So the
+    crossing is asserted rather than remembered - `apply.py` needed a live run
+    to find that its own unit test called `mysql_env()` directly and so never
+    saw it.
+    """
+    _spawn_double(monkeypatch)
+    monkeypatch.setattr(docker.platform, "_which", lambda name, path=None: "wsl.exe")
+    monkeypatch.delenv("WSLENV", raising=False)
+    docker.exec_stdin(
+        "db", ["mariadb"], io.BytesIO(b""), env={"MYSQL_PWD": "hunter2"}, wsl_distro="dml-arch"
+    )
+    env = _FakePopen.instances[-1].env
+    assert env is not None
+    assert env["MYSQL_PWD"] == "hunter2"
+    assert "MYSQL_PWD" in env["WSLENV"].split(":")
+
+
+def test_a_local_exec_adds_no_wslenv_and_keeps_this_process_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The local road is `os.environ` plus the names asked for, and nothing else."""
+    _spawn_double(monkeypatch)
+    monkeypatch.delenv("WSLENV", raising=False)
+    monkeypatch.setenv("YULON_MARKER", "kept")
+    docker.exec_stdin("db", ["mariadb"], io.BytesIO(b""), env={"MYSQL_PWD": "hunter2"})
+    env = _FakePopen.instances[-1].env
+    assert env is not None
+    assert env["YULON_MARKER"] == "kept", "the child lost the environment it should inherit"
+    assert "WSLENV" not in env
+
+
+def test_a_command_that_failed_inside_the_container_is_a_result_not_an_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`sqlplan.apply()` decides per phase whether a failing file stops the stage.
+
+    Only it knows which, so this returns the verdict instead of raising it -
+    and keeps both halves of the evidence, the status AND the words.
+    """
+    _spawn_double(
+        monkeypatch, returncode=1, stdout=b"", stderr=b"ERROR 1064 (42000) at line 3: syntax\n"
+    )
+    proc = docker.exec_stdin("db", ["mariadb"], io.BytesIO(b"OOPS;\n"), env={})
+    assert proc.returncode == 1
+    assert "ERROR 1064" in proc.stderr
+
+
+def test_a_container_that_is_not_running_keeps_dockers_own_words(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Four states, and a caller that cannot tell them apart says the wrong thing.
+
+    "the SQL was wrong", "the container is not running", "the daemon never
+    answered" and "there is no docker CLI" are four different sentences to a
+    user. The last is the only one raised here; the other three arrive as a
+    non-zero result whose stderr is docker's own, untouched, so whoever
+    reports them still can.
+    """
+    _spawn_double(
+        monkeypatch,
+        returncode=1,
+        stderr=b"Error response from daemon: Container tbc-database is not running\n",
+    )
+    proc = docker.exec_stdin("tbc-database", ["mariadb"], io.BytesIO(b""), env={})
+    assert proc.returncode == 1
+    assert "is not running" in proc.stderr
+    assert docker.platform.DOCKER_CLI_MISSING_HELP not in proc.stderr
+
+
+def test_a_client_that_exits_before_reading_everything_is_not_itself_the_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """EPIPE while writing means the client already gave up; its status says why.
+
+    Raising the broken pipe would replace `ERROR 1045: Access denied` with
+    `[Errno 32] Broken pipe`, which names nothing the user can fix.
+    """
+    _spawn_double(
+        monkeypatch,
+        stdin_factory=_BrokenStdin,
+        returncode=1,
+        stderr=b"ERROR 1045 (28000): Access denied for user 'root'\n",
+    )
+    proc = docker.exec_stdin("db", ["mariadb"], io.BytesIO(b"SELECT 1;\n"), env={})
+    assert proc.returncode == 1
+    assert "Access denied" in proc.stderr
+    assert _FakePopen.instances[-1].stdin.closed
+
+
+def test_a_source_that_cannot_be_read_is_never_reported_as_a_finished_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A corrupt `.sql.gz` must not look like a dump that applied cleanly.
+
+    Half a dump is still valid SQL, so the client exits 0 and every check
+    downstream agrees the import worked. `gzip.BadGzipFile` is an `OSError`,
+    so one `except OSError` around the copy swallows it into a debug line.
+    The two sides are kept apart: a read failure is raised, and the child is
+    still reaped so nothing is left running behind it.
+    """
+    _spawn_double(monkeypatch)
+    with pytest.raises(docker.SourceUnreadableError) as caught:
+        docker.exec_stdin("db", ["mariadb"], _UnreadableSource(), env={})
+    assert isinstance(caught.value.__cause__, gzip.BadGzipFile)
+    spawned = _FakePopen.instances[-1]
+    assert spawned.waited, "the child was left unreaped"
+    assert spawned.stdin.closed, "the client would wait forever on a pipe nobody closed"
+
+
+def _assert_reaped(source: object) -> None:
+    """The guarantee itself: no child running, no reader thread still going.
+
+    Asserted instead of the exception type on purpose. Which exception a
+    spoiled dump raises is what the first version of this got wrong; what the
+    caller actually needs is that whichever one it was, nothing was left
+    behind - so that is what every case below checks.
+    """
+    spawned = _FakePopen.instances[-1]
+    assert spawned.waited, f"{source} left a live docker exec behind"
+    assert spawned.stdin.closed, "the client would wait forever on a pipe nobody closed"
+    assert _RecordingThread.started, "no reader threads were recorded; the double missed them"
+    alive = [reader for reader in _RecordingThread.started if reader.is_alive()]
+    assert not alive, f"{len(alive)} reader thread(s) still running when the error propagated"
+
+
+def test_a_truncated_dump_leaves_no_child_or_reader_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The likeliest corruption of all, and the one `except OSError` cannot see.
+
+    A download cut short by a flaky connection raises `EOFError` out of the
+    gzip reader - measured at twelve different cut points, from one byte off
+    the end to mid-file, every one of them `EOFError`. `EOFError` is NOT an
+    `OSError`, so the clause written for `gzip.BadGzipFile` never runs and the
+    exception leaves before the child is waited for.
+    """
+    _spawn_double(monkeypatch, slow_readers=True)
+    with pytest.raises(docker.SourceUnreadableError) as caught:
+        docker.exec_stdin("db", ["mariadb"], _gzip_dump(_truncated), env={})
+    assert isinstance(caught.value.__cause__, EOFError)
+    assert _FakePopen.instances[-1].stdin.written, "no data flowed; the fixture proves nothing"
+    _assert_reaped("a truncated dump")
+
+
+def test_a_bit_flipped_dump_leaves_no_child_or_reader_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The second escape: mangled deflate bytes raise `zlib.error`, also not an `OSError`.
+
+    Two known exception families that are not `OSError` is the argument
+    against listing them. `source` is a `BinaryIO`, so what it raises is the
+    CALLER'S choice - the third family arrives with the third caller, and any
+    fix that names types would miss it too.
+    """
+    _spawn_double(monkeypatch, slow_readers=True)
+    with pytest.raises(docker.SourceUnreadableError) as caught:
+        docker.exec_stdin("db", ["mariadb"], _gzip_dump(_bit_flipped), env={})
+    assert isinstance(caught.value.__cause__, zlib.error)
+    _assert_reaped("a bit-flipped dump")
+
+
+def test_ctrl_c_mid_pump_leaves_no_child_or_reader_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stop pressed while a multi-gigabyte dump is streaming leaks the same way.
+
+    `KeyboardInterrupt` is a `BaseException`, so it escapes `except OSError`
+    and `except Exception` alike - which is why the reaping is a `finally` and
+    not a wider list of clauses. It is re-raised UNCHANGED: wrapping Ctrl+C in
+    an error about the dump would tell the user their file is broken when they
+    are the one who stopped it.
+    """
+    _spawn_double(monkeypatch, slow_readers=True)
+    with pytest.raises(KeyboardInterrupt):
+        docker.exec_stdin("db", ["mariadb"], _InterruptedSource(), env={})
+    _assert_reaped("an interrupted pump")
+
+
+def test_an_unreadable_source_is_one_type_a_caller_can_catch() -> None:
+    """What Group J has to catch, pinned where a change to it fails a test.
+
+    The apply stages are planned around `except (RuntimeError, OSError)`.
+    Re-raising whatever the reader felt like would move the type problem up a
+    level - an `EOFError` reaching a stage becomes a raw traceback instead of
+    a reported failure - so the read side is normalised to ONE type here.
+    Being a `RuntimeError` is what makes the planned clause enough.
+    """
+    assert issubclass(docker.SourceUnreadableError, RuntimeError)
+    # Not a DockerCommandError: docker did nothing wrong, and a stage that
+    # reads these apart says "the container refused" for a bad download.
+    assert not issubclass(docker.SourceUnreadableError, docker.DockerCommandError)
+
+
+def test_exec_stdin_can_say_which_daemon_so_it_needs_no_allowlist_entry() -> None:
+    """The completeness test's rule, spelled out for the function that answers it.
+
+    `run_container` and `copy_from_image` are in `_DAEMON_AGNOSTIC` because a
+    HOST PATH cannot cross the boundary and there is nothing here that could
+    translate it. `exec_stdin` addresses a container by NAME and pumps its
+    bytes through a pipe, so nothing it sends has to be translated - and the
+    allowlist is for functions that CANNOT forward a distro, not for functions
+    whose callers happen not to hold one yet.
+    """
+    assert "exec_stdin" not in _DAEMON_AGNOSTIC
+    assert "wsl_distro" in _seam_reachers()["exec_stdin"]

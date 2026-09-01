@@ -27,7 +27,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import IO, BinaryIO, Literal
 
 from yulon import platform, runner, wsl
 from yulon.log import get_logger
@@ -61,6 +61,32 @@ class DockerCliMissingError(DockerCommandError):
     no `COMPOSE_PROJECT_NAME` pinned — blaming the install for the absence of
     Docker — and `wait_ready()` polled out its full 480s without a word above
     DEBUG.
+    """
+
+
+class SourceUnreadableError(RuntimeError):
+    """Raised when the stream `exec_stdin()` was pumping stopped being readable.
+
+    Deliberately NOT a `DockerCommandError`: docker did as it was told, the
+    container is fine, and a caller that reads the two apart would otherwise
+    tell a user with a half-downloaded file that their container refused the
+    import. What broke is the file on this side.
+
+    It exists because the alternative is no type at all. `source` is a
+    `BinaryIO`, so what it raises belongs to whoever opened it: a truncated
+    `.sql.gz` — a download over a flaky connection, the commonest corruption
+    there is — raises `EOFError`, mangled deflate bytes raise `zlib.error`, a
+    file that is not gzip at all raises `gzip.BadGzipFile`, and only the last
+    of those three is an `OSError`. Letting each one through as it came would
+    hand every caller the same open-ended set to catch that this module just
+    stopped trying to enumerate; the apply stages catch
+    `(RuntimeError, OSError)`, and being a `RuntimeError` is what makes that
+    clause enough. The original is kept as `__cause__`, so nothing about which
+    corruption it was is lost — it just stops being the caller's problem to
+    predict.
+
+    `BaseException` is not wrapped. A `KeyboardInterrupt` mid-pump is the user
+    stopping the import, not a broken dump, and it travels on unchanged.
     """
 
 
@@ -3041,3 +3067,203 @@ def copy_from_image(image: str, src: str, dest: Path) -> None:
                 logger.warning(
                     f"could not remove {container[:12]} after the copy: {removal.stderr.strip()}"
                 )
+
+
+_STDIN_CHUNK_BYTES = 1 << 20
+"""How much of `source` is read per write. A dump is measured in gigabytes."""
+
+
+def exec_stdin(
+    container: str,
+    argv: Sequence[str],
+    source: BinaryIO,
+    *,
+    env: Mapping[str, str],
+    wsl_distro: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """`docker exec -i <container> <argv…>` with `source` streamed to its stdin.
+
+    The SQL transport (phase 7): each dump file is streamed from the host
+    checkout into the database client inside the container, so no helper
+    container, no shared compose network and no shell pipeline is involved.
+
+    Every name in `env` is forwarded as a bare `-e NAME`. The value is placed
+    in THIS process's environment for the child, and `docker exec` copies it
+    from there into the container. That is the rule `apply.mysql_env()` and
+    `maintenance.DockerMysql._exec()` already keep for `MYSQL_PWD`, and the
+    reason is unchanged: an argv is world-readable (`ps`,
+    `/proc/<pid>/cmdline`, Task Manager); an environment is not. Tests assert
+    the value is in no argv element, that the `args` of the returned result
+    carry none either, and that no line this function logs contains it.
+
+    `wsl_distro` is the second half of that rule and not decoration. A
+    container name means nothing to the daemon that does not hold it: asked of
+    Docker Desktop, a server running inside a distro answers `No such
+    container`. And a variable set here does NOT reach a process inside a
+    distro unless `WSLENV` names it — measured, it arrives EMPTY, and mysql
+    then reports an authentication failure against a perfectly healthy
+    database. `platform.wsl_env()` is what carries it across, so the crossing
+    is got right here rather than remembered at each call site. Both existing
+    `docker exec -e MYSQL_PWD` call sites (`apply.DockerSql._argv()`,
+    `maintenance.DockerMysql._exec()`) take a distro; this one is the third,
+    and the completeness test in `tests/test_docker.py` is why it must.
+
+    `source` is PUMPED through a pipe rather than handed to the child as its
+    file descriptor, and that is not an optimisation. `subprocess` turns a file
+    object into `stdin` by calling `fileno()`, and a `gzip.open()` handle
+    answers with the descriptor of the COMPRESSED file underneath it — the
+    client would receive gzip bytes, and the "decompressed by Python on the way
+    in" this exists for would silently not happen. Copying from `source`
+    ourselves is what makes any `BinaryIO` — a gzip stream, a `BytesIO`, a
+    plain file — mean what it says. The copy runs on this thread while two
+    readers drain the child's stdout and stderr, so a client that prints a lot
+    cannot stall on a full pipe while we are still writing to it.
+
+    `subprocess.run` is not used, for the reason `maintenance.DockerMysql`'s
+    docstring records: `runner.run()` has no stdin, and `communicate()` closes
+    the stdin it is handed, which is the pipe the pump is writing to.
+
+    The two ends of the pump fail for opposite reasons and are NOT one
+    `except OSError`:
+
+    * writing raises `BrokenPipeError` (EINVAL on Windows) when the client has
+      already exited — a syntax error early in a dump, a wrong password. Its
+      exit status and stderr say why, so the broken pipe is not the error and
+      replacing `ERROR 1045: Access denied` with `[Errno 32] Broken pipe`
+      would name nothing the user can fix.
+    * reading raises when the SOURCE is unreadable. Swallowed the same way, a
+      corrupt or truncated dump feeds the client half a file — still valid
+      SQL, so it exits 0 and every check downstream agrees the import worked.
+      That one is raised, as `SourceUnreadableError`.
+
+    Which is a matter of one `finally`, not of a longer `except`. The first
+    version of this caught `OSError` on the read side because `gzip.BadGzipFile`
+    is one — and a TRUNCATED `.sql.gz`, the failure a flaky download actually
+    produces, raises `EOFError` instead, while mangled deflate bytes raise
+    `zlib.error`. Neither is an `OSError`; both left this function before the
+    child was waited for and before the readers were joined, leaking a live
+    `docker exec` and two threads per failed import. Widening the clause to
+    those two would have been wrong again at the third, because `source` is a
+    `BinaryIO` and what it raises is the caller's choice, not this module's —
+    a `KeyboardInterrupt` mid-pump is not even an `Exception`. So the child is
+    reaped and the readers joined on EVERY way out, which needs to know
+    nothing about types, and the read failure is normalised on its way past
+    (see `SourceUnreadableError`) so a caller does not inherit the same
+    open-ended set to catch.
+
+    Returns:
+        A text `CompletedProcess`. NOT raised on non-zero exit: `sqlplan.apply()`
+        decides per phase whether a failing file stops the stage or is reported
+        and passed over, and only it knows which. The three non-zero states a
+        caller has to tell apart — the SQL was wrong, the container is not
+        running, the daemon never answered — stay apart, because docker's own
+        stderr is returned untouched.
+
+    Raises:
+        DockerCliMissingError: there is no docker CLI to run (nor `wsl.exe` for
+            a distro), or the one resolved earlier has since been uninstalled
+            (the `OSError` road). "Could not ask", never "it answered no".
+        SourceUnreadableError: `source` could not be read — truncated, corrupt,
+            or anything else it chose to raise, kept as `__cause__`.
+
+    Guaranteed on the way out whatever was raised, this included and a
+    `KeyboardInterrupt` too: the child's stdin is closed, the child has been
+    waited for, and both reader threads have been joined. Nothing is left
+    running behind a failure. This promise is about the exit, not about a type
+    — the earlier wording named `OSError`, and the exceptions it did not name
+    were exactly the ones that leaked.
+    """
+    prefix = platform.docker_prefix(wsl_distro)
+    if prefix is None:
+        raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP)
+    forwarded: list[str] = []
+    for name in env:
+        forwarded += ["-e", name]
+    command = [*prefix, "exec", "-i", *forwarded, container, *argv]
+    # The NAMES of the forwarded variables, never their values: this is the one
+    # function in the module that is handed a secret, and a log file is
+    # something users attach to bug reports.
+    logger.debug(f"exec_stdin(): {' '.join(command)}")
+    child = platform.wsl_env(dict(env)) if wsl_distro is not None else {**os.environ, **env}
+    try:
+        proc = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=runner.child_env(child),
+            creationflags=runner.creationflags(),
+        )
+    except OSError as exc:
+        logger.warning(f"{prefix[0]} could not be started: {exc}")
+        raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP) from exc
+    # All three are pipes because all three were asked for as pipes; the
+    # asserts are type narrowing, not a check.
+    assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+    captured: dict[str, bytes] = {}
+
+    def _drain(name: str, pipe: IO[bytes]) -> None:
+        captured[name] = pipe.read()
+
+    readers = (
+        threading.Thread(target=_drain, args=("stdout", proc.stdout), daemon=True),
+        threading.Thread(target=_drain, args=("stderr", proc.stderr), daemon=True),
+    )
+    for reader in readers:
+        reader.start()
+    try:
+        _pump(source, proc.stdin, container)
+    finally:
+        # Unconditional, and a `finally` rather than a list of clauses,
+        # because the pump can end in a way this module does not get to
+        # choose: `source` is the caller's object and a Ctrl+C is nobody's.
+        # `_pump` has closed the child's stdin by now on every one of those
+        # roads, so the client sees EOF and this wait is not the one that
+        # hangs.
+        returncode = proc.wait()
+        for reader in readers:
+            reader.join()
+    return subprocess.CompletedProcess(
+        list(command),
+        returncode,
+        captured.get("stdout", b"").decode("utf-8", errors="replace"),
+        captured.get("stderr", b"").decode("utf-8", errors="replace"),
+    )
+
+
+def _pump(source: BinaryIO, sink: IO[bytes], container: str) -> None:
+    """Copy `source` into `sink` and close it, telling the two failures apart.
+
+    The `except` sits around the WRITE alone, which is the only side whose
+    failures this function can name. Its own docstring used to promise the
+    read side was an `OSError`; it is whatever `source` decides, so nothing is
+    caught around the read but the wrap that gives it one type — see
+    `SourceUnreadableError`. `BaseException` passes through untouched.
+
+    `sink` is closed on every way out, including that one. Without the EOF a
+    client that has read everything it was sent waits forever, and the
+    `proc.wait()` that follows would wait with it.
+
+    Raises:
+        SourceUnreadableError: `source` could not be read, whatever it raised.
+    """
+    try:
+        while True:
+            try:
+                chunk = source.read(_STDIN_CHUNK_BYTES)
+            except Exception as exc:
+                raise SourceUnreadableError(
+                    f"the dump being streamed into {container} could not be read: {exc}"
+                ) from exc
+            if not chunk:
+                break
+            try:
+                sink.write(chunk)
+            except OSError as exc:
+                logger.debug(f"stdin of docker exec {container} closed early: {exc}")
+                break
+    finally:
+        try:
+            sink.close()  # without EOF a client that read everything waits forever
+        except OSError as exc:
+            logger.debug(f"stdin of docker exec {container} would not close: {exc}")
