@@ -1232,10 +1232,23 @@ Verified today: none of the six shipped `Dockerfile.tmpl`/`dockerignore.tmpl` na
 K.2 added `test_no_dockerfile_template_names_the_secret_this_one_mapping_carries`, mutation-verified
 by adding `ENV DB_PASSWORD={{DB_PASSWORD}}` to `wow-tbc/native/Dockerfile.tmpl`.
 
+**A Dockerfile is worse than compose for a second reason, and it changes the REMEDIATION rather than
+the exposure.** A secret rendered into a compose file is in **a file the user owns**: delete it and it
+is gone. A secret in an image layer is **content-addressed and cached** — deleting the Dockerfile does
+nothing, the layer persists, `docker history` prints it, and undoing it means finding and deleting
+every image built from that layer. Compose is "delete a file and rotate"; the Dockerfile is "you now
+have an artefact you must hunt". These are not one rule applied to a second file type at the same
+severity.
+
 **A test over today's templates is not the same guard as a by-name refusal**, which is what compose
-has. **Decide before K.4 lands:** give `dockerfile.render()` the same refusal, or split `_tokens()` so
-the Dockerfile mapping cannot carry the secret at all. Recorded as undecided rather than settled with
-a docstring.
+has.
+
+**RECOMMENDATION: split `_tokens()`, do not refuse by name.** A by-name refusal is a guard someone
+must remember to add at **every render site**, and K.4 is only the third consumer of `_tokens()`;
+there will be a fourth, and the fourth is where it gets missed. This is the same argument that put
+§19's redaction at the boundary instead of the call sites — **a mapping that structurally cannot carry
+the secret needs nobody to remember anything.** (Reasoning from `dads-mmo-lab-58`.) Decide before K.4
+lands; recorded as undecided rather than settled with a docstring.
 
 ### 21. `_stream()`/`_pump()` leak a running worker when the generator is abandoned — 2026-09-01, OPEN, inherited
 
@@ -1254,8 +1267,16 @@ abandonment *without* a cancel is not prevented by anything.
 
 Not fixed: a `join()` in a `finally` would block the abandoner for the remaining hours of the run,
 which is worse. Options not yet weighed: setting the cancel event in the `finally`, a bounded join, or
-a weak reference. **No note anywhere says `_pump`'s hole was ever considered**, which is why this is
-recorded rather than assumed intentional.
+a weak reference.
+
+**The test that closes it is cheap and should be written whatever the fix is:** abandon the generator
+**without** setting the cancel event, and assert no live worker remains. That converts the mitigation
+from "`LogPanel.stop()` happens to set cancel first" into something a **reorder fails** — the sixth
+standing rule's second exit.
+
+**No note anywhere says `_pump`'s hole was ever considered**, which is why this is recorded as
+**unweighed rather than intentional**. "Inherited and shipped since 7.1" is not evidence it was
+decided, and writing it down this way is what stops the next reader treating silence as approval.
 
 ### One thing worth keeping
 
