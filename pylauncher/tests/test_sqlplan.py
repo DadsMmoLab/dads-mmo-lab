@@ -26,6 +26,7 @@ from __future__ import annotations
 import gzip
 import inspect
 import logging
+import re
 import subprocess
 import threading
 from collections.abc import Mapping, Sequence
@@ -36,7 +37,7 @@ import pytest
 
 from yulon import docker
 from yulon.catalog import native
-from yulon.catalog.catalog import CatalogEntry, SqlPhase, SqlPlan, load_catalog
+from yulon.catalog.catalog import CatalogEntry, SqlPhase, SqlPlan, VerifyRule, load_catalog
 from yulon.catalog.families import sqlplan
 from yulon.catalog.installer import InstallerError
 
@@ -1356,6 +1357,177 @@ def test_apply_never_lets_the_password_out_of_the_environment(
     assert secret not in " ".join(ex.calls[0][1])
 
 
+# -- the client quoting the secret back ---------------------------------------
+#
+# The test above is about what THIS module writes; these are about what the
+# CLIENT says, which is the half that leaked. Its `_Exec` answers `CREATE USER`
+# with "ERROR 1396 (HY000): Operation CREATE USER failed", a sentence with no
+# password in it, so it passed with no redaction anywhere in `apply()`. A real
+# client quotes the line it could not parse, and the line is `IDENTIFIED BY
+# '<password>'`.
+
+TORTOISE_SECRET = "tortoise-0a1b2c3d4e5f6a7b"
+
+
+class _Echoing:
+    """A client that quotes back the statement it could not parse, as mysql/mariadb do.
+
+    `ERROR 1064 (42000) at line 1: ... near '<the offending text>'` is the shape
+    of a real parse error, and this builds it from the bytes it was actually
+    given rather than from a canned string - so the test cannot pass by the
+    fixture having forgotten to include the secret.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(
+        self,
+        container: str,
+        argv: Sequence[str],
+        source: BinaryIO,
+        *,
+        env: Mapping[str, str],
+        wsl_distro: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        self.calls += 1
+        text = source.read().decode()
+        near = text.splitlines()[0].split("IDENTIFIED BY ")[-1]
+        return subprocess.CompletedProcess(
+            list(argv), 1, "", f'ERROR 1064 (42000) at line 1: syntax error near "{near}"\n'
+        )
+
+
+def _tortoise_create_user_run(*, on_error: str) -> sqlplan.PhaseRun:
+    """The SHIPPED `CREATE USER ... IDENTIFIED BY '{{DB_PASSWORD}}'`, through the real `expand()`.
+
+    Built from `catalog.json` rather than written here, because the premise this
+    guards is a claim ABOUT the catalog: that no plan `apply()` runs carries the
+    secret. `wow-tortoise`'s `sql.create` is `()`, so `create_schemas()` - where
+    the redaction originally landed - returns at its first line for the one
+    shipped game whose plan does create the app user.
+    """
+    entry: CatalogEntry = load_catalog().get("wow-tortoise")
+    native_install = entry.install.native
+    assert native_install is not None and native_install.cmangos is not None
+    plan = native_install.cmangos.sql
+    assert plan.create == (), "the premise: phase 0 does not run for this game"
+    phase = next(p for p in plan.phases if "CREATE USER" in " ".join(p.statements))
+    phase = phase.model_copy(update={"on_error": on_error})
+    databases = entry.databases
+    assert databases is not None
+    schemas = {
+        name: name
+        for name in (databases.auth, databases.characters, databases.world, *databases.extra)
+    }
+    tokens = {
+        **_shipped_tokens(),
+        "DB_USER": native_install.db.user,
+        "DB_PASSWORD": TORTOISE_SECRET,
+        "AUTH_DB": databases.auth,
+        "WORLD_DB": databases.world,
+        "CHAR_DB": databases.characters,
+        "LOGS_DB": databases.extra[0],
+    }
+    only = SqlPlan(create=plan.create, phases=(phase,), marker_db=plan.marker_db)
+    runs = sqlplan.expand(only, Path("."), schemas, tokens)
+    assert TORTOISE_SECRET in (runs[0].statement or ""), "expand() really filled the token"
+    return runs[0]
+
+
+def test_apply_redacts_the_secret_a_client_quotes_back_from_the_shipped_tortoise_phase(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The `fail` road: an `InstallerError` the installer shows, and the install log.
+
+    Before the redaction moved into `apply()` this produced, verbatim:
+
+        The import stopped: statement 1 failed while loading into the server
+        (ERROR 1064 (42000) at line 1: syntax error near
+        "'tortoise-0a1b2c3d4e5f6a7b'"). Nothing after it was applied.
+
+    and `sink()` was given the same line. Both are things a user pastes into a
+    bug report, and `sink()` is the one they paste even when the install worked.
+    """
+    run = _tortoise_create_user_run(on_error="fail")
+    assert run.phase.on_error == "fail"
+    ex = _Echoing()
+    sunk: list[str] = []
+    with caplog.at_level(logging.DEBUG, logger=sqlplan.logger.name):
+        with pytest.raises(InstallerError) as excinfo:
+            _run_apply((run,), ex, sink=sunk.append, password=TORTOISE_SECRET)
+    assert ex.calls == 1
+    assert sunk and "ERROR 1064" in sunk[0], "the client's words still reach the install log"
+    assert "ERROR 1064" in str(excinfo.value), "and still reach the user"
+    assert TORTOISE_SECRET not in str(excinfo.value)
+    assert TORTOISE_SECRET not in " ".join(sunk)
+    assert TORTOISE_SECRET not in caplog.text
+
+
+def test_apply_redacts_the_secret_on_the_warn_road_too(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`on_error: warn` writes the client's reason to two more places and raises nothing.
+
+    The yielded line is the install log the user watches; the `WARNING` record
+    is what a support log carries. A redaction on the raising road only would
+    leave the secret in both of these, on the road that does not even stop.
+    """
+    run = _tortoise_create_user_run(on_error="warn")
+    ex = _Echoing()
+    sunk: list[str] = []
+    with caplog.at_level(logging.WARNING, logger=sqlplan.logger.name):
+        lines = _run_apply((run,), ex, sink=sunk.append, password=TORTOISE_SECRET)
+    assert "ERROR 1064" in caplog.text and "ERROR 1064" in " ".join(lines)
+    assert TORTOISE_SECRET not in " ".join(lines)
+    assert TORTOISE_SECRET not in " ".join(sunk)
+    assert TORTOISE_SECRET not in caplog.text
+
+
+def test_apply_redacts_the_secret_when_the_daemon_itself_refuses(tmp_path: Path) -> None:
+    """The `except` clauses are a second entrance for text this module did not write.
+
+    `ExecStdin` is a Protocol, so what a `DockerCommandError` carries is not
+    this module's to promise - and `_run_sql()` has redacted its own since J.5.
+    """
+    ex = _Refusing(docker.DockerCommandError(f"exec failed: MYSQL_PWD={TORTOISE_SECRET}"))
+    run = _file_run(tmp_path, "z1.sql", "SELECT 1;\n", phase=WARN)
+    with pytest.raises(InstallerError) as excinfo:
+        _run_apply((run,), ex, password=TORTOISE_SECRET)
+    assert TORTOISE_SECRET not in str(excinfo.value)
+    assert "exec failed" in str(excinfo.value)
+
+
+def test_apply_redacts_the_secret_out_of_an_unreadable_dumps_reason(tmp_path: Path) -> None:
+    """Same entrance, the other clause: `_read_failure()` quotes an exception's own words."""
+    ex = _Refusing(OSError(f"cannot open dump for {TORTOISE_SECRET}"))
+    run = _file_run(tmp_path, "z1.sql", "SELECT 1;\n", phase=WARN)
+    with pytest.raises(InstallerError) as excinfo:
+        _run_apply((run,), ex, password=TORTOISE_SECRET)
+    assert TORTOISE_SECRET not in str(excinfo.value)
+    assert "could not be read" in str(excinfo.value)
+
+
+def test_redact_removes_every_occurrence_not_only_the_first() -> None:
+    """`create_schemas()` writes the secret on two consecutive lines, and a client
+    that echoes a two-line context quotes both.
+
+    `str.replace` with no count already does this; nothing here asserted it, so
+    `replace(password, "***", 1)` was a mutation the whole suite survived. The
+    code was right by the default rather than by anybody's decision.
+    """
+    secret = "hunter2"
+    said = (
+        f"ERROR 1064 (42000) at line 5: near \"IDENTIFIED BY '{secret}'\" "
+        f"and again at line 6: near \"IDENTIFIED BY '{secret}'\""
+    )
+    assert said.count(secret) == 2, "the fixture has to contain it twice for this to mean anything"
+    cleaned = sqlplan._redact(said, secret)
+    assert secret not in cleaned
+    assert cleaned.count("***") == 2
+    assert "ERROR 1064" in cleaned
+
+
 def test_apply_closes_each_dump_before_it_opens_the_next(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1469,3 +1641,478 @@ def test_apply_yields_the_file_it_is_about_to_run_before_it_runs_it(tmp_path: Pa
     assert seen == [], "the line arrives before the minutes of work it describes"
     assert list(gen) == []
     assert seen == ["exec"]
+
+
+# -- J.5: create_schemas(), verify() and write_marker() -----------------------
+#
+# Three functions that all talk to the same database as `apply()` does, and the
+# first thing every one of them has to get right is WHICH database. A container
+# name means nothing to a daemon that does not hold it, so a distro accepted
+# and dropped here sends phase 0, the verify probe and the marker to Docker
+# Desktop while `apply()` streams the import into WSL. The probe is the one
+# that bites: asked of the wrong daemon it reads "nothing imported" for a fully
+# populated database and the import stage runs again over a working server. So
+# every fake below RECORDS `wsl_distro` and every test asserts it ARRIVED - a
+# signature check would pass on a function that takes it and forgets it.
+#
+# The second thing is that a query has three answers, not two. `sql_query()`
+# returns stdout verbatim: no rows is `""` and one row holding the empty string
+# is `"\n"`. `.strip()` collapses those two into each other, and
+# `int(x) if x else 0` collapses "could not be asked" into "the count is zero"
+# - which for a `min: 0` rule (the model allows one) would PASS an unanswerable
+# query and let the marker be written over an empty database.
+
+PLAN = SqlPlan(
+    create=("mangos", "realmd", "characters", "logs"),
+    phases=(SqlPhase(name="realmd base", into="realmd", files=("realmd.sql",)),),
+    verify=(VerifyRule(db="mangos", query="SELECT COUNT(*) FROM item_template", min=10000),),
+    marker_db="mangos",
+)
+
+ITEM_COUNT = "SELECT COUNT(*) FROM item_template"
+
+
+class _Query:
+    """`docker.sql_query` as a table of answers, recording everything it was asked.
+
+    `answers` maps a statement to the client's stdout VERBATIM - the trailing
+    newline included, because that is the only thing telling one empty row from
+    no rows at all. `error` is raised instead, for the daemon that cannot be
+    reached.
+
+    `wsl_distro` goes into `distros` rather than being swallowed, for the reason
+    `_Exec` records it: a fake that accepted the value and forgot it would
+    reproduce, one layer up, exactly the bug the parameter exists to prevent.
+    """
+
+    def __init__(
+        self, answers: Mapping[str, str] | None = None, *, error: Exception | None = None
+    ) -> None:
+        self.answers = dict(answers or {})
+        self.error = error
+        self.asked: list[tuple[str, str, str, str | None, str]] = []
+        self.distros: list[str | None] = []
+
+    def __call__(
+        self,
+        container: str,
+        client: str,
+        password: str,
+        schema: str | None,
+        statement: str,
+        *,
+        wsl_distro: str | None = None,
+    ) -> str:
+        self.asked.append((container, client, password, schema, statement))
+        self.distros.append(wsl_distro)
+        if self.error is not None:
+            raise self.error
+        return self.answers[statement]
+
+
+def _verify(
+    plan: SqlPlan, query: sqlplan.SqlQuery, *, wsl_distro: str | None = None
+) -> tuple[str, ...]:
+    """`verify()` with the arguments every test would otherwise repeat."""
+    return sqlplan.verify(
+        plan,
+        container="c",
+        client="mysql",
+        password="pw",
+        sql_query=query,
+        wsl_distro=wsl_distro,
+    )
+
+
+def _create(
+    exec_stdin: sqlplan.ExecStdin,
+    *,
+    plan: SqlPlan = PLAN,
+    container: str = "c",
+    client: str = "mysql",
+    password: str = "pw",
+    schemas: Mapping[str, str] | None = None,
+    user: str = "mangos",
+    charset: str = "utf8mb4",
+    wsl_distro: str | None = None,
+) -> None:
+    """`create_schemas()` with this suite's defaults; every argument overridable."""
+    sqlplan.create_schemas(
+        plan,
+        container=container,
+        client=client,
+        password=password,
+        schemas=SCHEMAS if schemas is None else schemas,
+        user=user,
+        charset=charset,
+        exec_stdin=exec_stdin,
+        wsl_distro=wsl_distro,
+    )
+
+
+def test_create_schemas_writes_databases_user_grants_and_flush_over_stdin() -> None:
+    ex = _Exec()
+    _create(ex, container="tbc-db", client="mariadb", password="pw-1")
+    container, argv, data, env = ex.calls[0]
+    assert (container, argv, env) == ("tbc-db", ("mariadb", "-u", "root"), {"MYSQL_PWD": "pw-1"})
+    text = data.decode()
+    assert text.splitlines() == [
+        "CREATE DATABASE IF NOT EXISTS `mangos` CHARACTER SET utf8mb4;",
+        "CREATE DATABASE IF NOT EXISTS `realmd` CHARACTER SET utf8mb4;",
+        "CREATE DATABASE IF NOT EXISTS `characters` CHARACTER SET utf8mb4;",
+        "CREATE DATABASE IF NOT EXISTS `logs` CHARACTER SET utf8mb4;",
+        "CREATE USER IF NOT EXISTS 'mangos'@'%' IDENTIFIED BY 'pw-1';",
+        "ALTER USER 'mangos'@'%' IDENTIFIED BY 'pw-1';",
+        "GRANT ALL PRIVILEGES ON `mangos`.* TO 'mangos'@'%';",
+        "GRANT ALL PRIVILEGES ON `realmd`.* TO 'mangos'@'%';",
+        "GRANT ALL PRIVILEGES ON `characters`.* TO 'mangos'@'%';",
+        "GRANT ALL PRIVILEGES ON `logs`.* TO 'mangos'@'%';",
+        "FLUSH PRIVILEGES;",
+    ]
+
+
+def test_create_schemas_execs_against_the_daemon_that_holds_the_container() -> None:
+    """Phase 0 must land on the same daemon `apply()` streams the import into.
+
+    Created on Docker Desktop while the import goes into a WSL distro, the
+    databases exist in neither place the user will look.
+    """
+    ex = _Exec()
+    _create(ex, wsl_distro="Ubuntu-24.04")
+    assert ex.distros == ["Ubuntu-24.04"]
+
+
+def test_create_schemas_is_skipped_for_an_empty_create_list() -> None:
+    ex = _Exec()
+    plan = SqlPlan(create=(), phases=PLAN.phases, marker_db="tw_world")
+    _create(ex, plan=plan, schemas={"tw_world": "tw_world"}, user="root")
+    assert ex.calls == []
+
+
+def test_create_schemas_refuses_a_password_that_cannot_be_quoted() -> None:
+    ex = _Exec()
+    with pytest.raises(InstallerError, match="password"):
+        _create(ex, password="a'b")
+    assert ex.calls == [], "nothing may be sent before the refusal"
+
+
+def test_create_schemas_refuses_a_user_name_that_cannot_be_quoted() -> None:
+    ex = _Exec()
+    with pytest.raises(InstallerError, match="user name"):
+        _create(ex, user="a\\b")
+    assert ex.calls == []
+
+
+# No quote in either payload, deliberately. The obvious splice
+# (`a<newline>GRANT ... TO 'x'@'%'`) also carries a `'`, so the quote rule
+# refuses it and the test passes with the line-break rule deleted - an
+# assertion a NEIGHBOURING rule satisfies. These two are refused by the line
+# break or by nothing.
+@pytest.mark.parametrize("splice", ["a\nGRANT ALL PRIVILEGES ON *.* TO mangos; -- ", "a\rb"])
+def test_create_schemas_refuses_a_secret_carrying_a_line_break(splice: str) -> None:
+    """A quote is not the only way out of `'...'`; this script is JOINED LINES.
+
+    The client reads a script line by line and ends a statement at `;`. A
+    newline inside the password therefore does not have to escape the quotes to
+    add statements - it closes the line it is on and writes the next one
+    itself, and `IDENTIFIED BY 'a<newline>GRANT ...'` is a grant this installer
+    never intended. `\\r` does the same on a client that treats it as a line
+    end, and is invisible in a pasted password either way.
+    """
+    ex = _Exec()
+    with pytest.raises(InstallerError, match="password"):
+        _create(ex, password=splice)
+    with pytest.raises(InstallerError, match="user name"):
+        _create(ex, user=splice)
+    assert ex.calls == []
+
+
+def test_create_schemas_refuses_a_charset_that_is_not_a_plain_identifier() -> None:
+    """`CHARACTER SET x` is an UNQUOTED splice, so it has no quotes to escape at all.
+
+    `charset` is `DbFacts.charset`, a free-text catalog field with no pattern
+    on it, and it lands in the one place in this script where there is nothing
+    around the value.
+    """
+    ex = _Exec()
+    with pytest.raises(InstallerError, match="charset"):
+        _create(ex, charset="utf8mb4; DROP DATABASE mangos")
+    assert ex.calls == []
+
+
+def test_create_schemas_refuses_a_charset_that_is_merely_more_than_one_word() -> None:
+    """The rule is an identifier FULLMATCH, and only a payload without `;` says so.
+
+    The case above is refused by any rule that dislikes `;` - so it passed with
+    `_IDENTIFIER` widened to `[A-Za-z0-9_ ]+`, which is an assertion a
+    NEIGHBOURING rule satisfies rather than a test of this one.
+    `utf8mb4 COLLATE utf8mb4_unicode_ci` has no punctuation to object to and is
+    what a catalog author would plausibly write, having read a `CREATE DATABASE`
+    example; it is still a second SQL clause spliced in with nothing around it,
+    and `CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci` is not what
+    `DbFacts.charset` promises. Whatever the rule becomes, it has to be one that
+    refuses a space.
+    """
+    ex = _Exec()
+    with pytest.raises(InstallerError, match="charset"):
+        _create(ex, charset="utf8mb4 COLLATE utf8mb4_unicode_ci")
+    assert ex.calls == []
+
+
+def test_create_schemas_judges_the_plans_schema_names_before_the_empty_create_shortcut() -> None:
+    """A plan `expand()` refuses may not be one `create_schemas()` quietly accepts.
+
+    Nothing is created when `create` is empty, so returning early looks free -
+    but it made the two functions disagree about whether the SAME plan is
+    valid, and they agreed only because the family happens to call `expand()`
+    first. Empty `create` is not a hypothetical corner: it is `wow-tortoise`.
+    The refusal is `_check_plan_schemas()`'s own words, the way the non-empty
+    case already is.
+    """
+    plan = SqlPlan(create=(), phases=PLAN.phases, marker_db="nowhere")
+    ex = _Exec()
+    with pytest.raises(InstallerError) as fromcreate:
+        _create(ex, plan=plan)
+    with pytest.raises(InstallerError) as fromexpand:
+        sqlplan.expand(plan, Path("."), SCHEMAS, TOKENS)
+    assert str(fromcreate.value) == str(fromexpand.value)
+    assert "nowhere" in str(fromcreate.value)
+    assert ex.calls == []
+
+
+def test_create_schemas_refuses_an_unknown_database_in_the_plans_own_words() -> None:
+    """One refusal, not two: `_check_plan_schemas()` already owns this sentence.
+
+    A second wording for the same catalog error is a sentence that drifts from
+    the first one the day either is edited, so this asserts the two are the
+    SAME string rather than merely that both complain.
+    """
+    plan = SqlPlan(create=("mangos", "nowhere"), phases=PLAN.phases, marker_db="mangos")
+    with pytest.raises(InstallerError) as fromcreate:
+        _create(_Exec(), plan=plan)
+    with pytest.raises(InstallerError) as fromexpand:
+        sqlplan.expand(plan, Path("."), SCHEMAS, TOKENS)
+    assert str(fromcreate.value) == str(fromexpand.value)
+    assert "nowhere" in str(fromcreate.value)
+
+
+def test_create_schemas_raises_when_the_client_fails() -> None:
+    ex = _Exec(failing={"CREATE DATABASE": "ERROR 1045 (28000): Access denied\n"})
+    with pytest.raises(InstallerError, match="Access denied"):
+        _create(ex)
+
+
+def test_create_schemas_never_quotes_the_password_back_in_its_failure() -> None:
+    """The one SQL script in this app that CONTAINS the secret is also the one a
+    client can quote back.
+
+    `ERROR 1064 ... near ''s3cret'@'%''` is what a client says about the line
+    it could not parse, and that line is `IDENTIFIED BY '<password>'`. The
+    message becomes an `InstallerError`, which the installer shows and the user
+    pastes into a bug report.
+    """
+    ex = _Exec(
+        failing={"IDENTIFIED BY": "ERROR 1064 (42000) at line 5: syntax error near ''s3cret''\n"}
+    )
+    with pytest.raises(InstallerError) as excinfo:
+        _create(ex, password="s3cret")
+    assert "s3cret" not in str(excinfo.value)
+    assert "ERROR 1064" in str(excinfo.value), "the client's reason still has to survive"
+
+
+def test_create_schemas_says_the_import_stopped_when_no_daemon_can_be_reached() -> None:
+    """No docker CLI is not a SQL failure, and it must not surface as a raw
+    `RuntimeError` out of a stage whose every other error is an `InstallerError`."""
+    refusing = _Refusing(docker.DockerCliMissingError("docker is not installed"))
+    with pytest.raises(InstallerError) as excinfo:
+        _create(refusing)
+    assert "docker is not installed" in str(excinfo.value)
+
+
+def test_verify_returns_nothing_when_every_rule_passes() -> None:
+    ok = _Query({ITEM_COUNT: "12345\n"})
+    assert _verify(PLAN, ok) == ()
+    assert ok.asked == [("c", "mysql", "pw", "mangos", ITEM_COUNT)], "rule.db is the schema"
+
+
+def test_verify_asks_the_daemon_that_holds_the_container() -> None:
+    """The probe decides whether the import runs. Asked of Docker Desktop about a
+    container living in a distro, it reads as an empty database and a populated
+    server is imported over."""
+    ok = _Query({ITEM_COUNT: "12345\n"})
+    assert _verify(PLAN, ok, wsl_distro="Ubuntu-24.04") == ()
+    assert ok.distros == ["Ubuntu-24.04"]
+
+
+def test_verify_names_a_failing_rule_with_its_count_and_minimum() -> None:
+    (failed,) = _verify(PLAN, _Query({ITEM_COUNT: "17\n"}))
+    assert re.search(r"mangos.*item_template.*17.*10000", failed)
+
+
+def test_verify_calls_a_non_numeric_answer_not_a_count() -> None:
+    (failed,) = _verify(PLAN, _Query({ITEM_COUNT: "not a number\n"}))
+    assert "item_template" in failed and "not a count" in failed
+
+
+def test_verify_does_not_read_an_unanswerable_query_as_a_count_of_zero() -> None:
+    """Yes, no and could-not-ask are three answers, and `min: 0` is constructible.
+
+    `int(answer) if answer else 0` turns the third into the second, and `0 >= 0`
+    then PASSES - so a rule nothing could answer would let `write_marker()`
+    record a finished import over an empty database. A COUNT query always
+    returns exactly one row, so no rows at all is never a count of zero.
+    """
+    plan = SqlPlan(
+        create=PLAN.create,
+        phases=PLAN.phases,
+        verify=(VerifyRule(db="mangos", query=ITEM_COUNT, min=0),),
+        marker_db="mangos",
+    )
+    (failed,) = _verify(plan, _Query({ITEM_COUNT: ""}))
+    assert "item_template" in failed and "no rows" in failed
+
+
+def test_verify_tells_one_empty_row_from_no_rows_at_all() -> None:
+    """`.strip()` destroys the only thing that separates them.
+
+    Under `--skip-column-names` one row holding the empty string prints `"\\n"`
+    and no rows print `""`; stripped, both are `""`. Both are failures, but not
+    the SAME failure, and the sentence the user reads is the difference between
+    "it answered a blank" and "it answered nothing at all".
+    """
+    (empty_row,) = _verify(PLAN, _Query({ITEM_COUNT: "\n"}))
+    (no_rows,) = _verify(PLAN, _Query({ITEM_COUNT: ""}))
+    assert empty_row != no_rows
+    assert "no rows" in no_rows and "no rows" not in empty_row
+
+
+def test_verify_refuses_more_than_one_row_as_a_count() -> None:
+    """Two rows back is not a count either - and `splitlines()[0]` reads the first
+    of them as if it were."""
+    (failed,) = _verify(PLAN, _Query({ITEM_COUNT: "12345\n99\n"}))
+    assert "2 rows" in failed and "not a count" in failed
+
+
+def test_verify_treats_an_unanswerable_query_as_a_failing_rule_and_does_not_raise() -> None:
+    down = _Query(
+        error=docker.DockerCommandError("ERROR 1146: Table 'mangos.item_template' doesn't exist")
+    )
+    (failed,) = _verify(PLAN, down)
+    assert "item_template" in failed and "doesn't exist" in failed
+
+
+def test_verify_redacts_the_secret_out_of_an_unanswerable_rule() -> None:
+    """`SqlQuery` is a Protocol too, and this sentence is shown and pasted like the rest.
+
+    Nothing in a verify rule's SQL carries the password, so this is the lowest
+    risk of the four sites - but it is a string this module did not compose,
+    and the rule is that every one of those is redacted where it enters, so
+    that "does this particular one carry it?" is not a judgement anybody has to
+    re-make.
+    """
+    down = _Query(error=docker.DockerCommandError(f"Access denied (using {TORTOISE_SECRET})"))
+    (failed,) = sqlplan.verify(
+        PLAN, container="c", client="mysql", password=TORTOISE_SECRET, sql_query=down
+    )
+    assert TORTOISE_SECRET not in failed
+    assert "Access denied" in failed
+
+
+def test_verify_reports_every_failing_rule_in_order_and_stays_quiet_about_the_rest() -> None:
+    """One sentence per FAILING rule, and the passing ones contribute nothing - an
+    install that fails one of three checks must not read as three failures."""
+    plan = SqlPlan(
+        create=PLAN.create,
+        phases=PLAN.phases,
+        verify=(
+            VerifyRule(db="mangos", query="SELECT COUNT(*) FROM a", min=10),
+            VerifyRule(db="realmd", query="SELECT COUNT(*) FROM b", min=10),
+            VerifyRule(db="characters", query="SELECT COUNT(*) FROM c", min=10),
+        ),
+        marker_db="mangos",
+    )
+    query = _Query(
+        {
+            "SELECT COUNT(*) FROM a": "3\n",
+            "SELECT COUNT(*) FROM b": "500\n",
+            "SELECT COUNT(*) FROM c": "0\n",
+        }
+    )
+    failed = _verify(plan, query)
+    assert len(failed) == 2
+    assert "FROM a" in failed[0] and "FROM c" in failed[1]
+    assert [schema for (_, _, _, schema, _) in query.asked] == ["mangos", "realmd", "characters"]
+
+
+def test_verify_over_a_plan_with_no_rules_asks_nothing_and_passes() -> None:
+    plan = SqlPlan(create=PLAN.create, phases=PLAN.phases, marker_db="mangos")
+    query = _Query()
+    assert _verify(plan, query) == ()
+    assert query.asked == []
+
+
+def test_write_marker_creates_the_table_and_records_the_plan_hash() -> None:
+    ex = _Exec()
+    sqlplan.write_marker(PLAN, container="tbc-db", client="mariadb", password="pw", exec_stdin=ex)
+    container, argv, data, env = ex.calls[0]
+    assert (container, argv, env) == (
+        "tbc-db",
+        ("mariadb", "-u", "root", "mangos"),
+        {"MYSQL_PWD": "pw"},
+    )
+    lines = data.decode().splitlines()
+    assert lines[0] == (
+        "CREATE TABLE IF NOT EXISTS `mangos`.`yulon_install` "
+        "(plan_hash CHAR(16) NOT NULL, finished_unix BIGINT NOT NULL);"
+    )
+    assert re.fullmatch(
+        rf"INSERT INTO `mangos`\.`yulon_install` \(plan_hash, finished_unix\) VALUES "
+        rf"\('{PLAN.plan_hash()}', \d+\);",
+        lines[1],
+    )
+
+
+def test_write_marker_writes_to_the_daemon_that_holds_the_container() -> None:
+    """A marker written to the wrong daemon is a probe that reads `partial` forever."""
+    ex = _Exec()
+    sqlplan.write_marker(
+        PLAN,
+        container="c",
+        client="mysql",
+        password="pw",
+        exec_stdin=ex,
+        wsl_distro="Ubuntu-24.04",
+    )
+    assert ex.distros == ["Ubuntu-24.04"]
+
+
+def test_write_marker_raises_when_the_client_fails() -> None:
+    ex = _Exec(failing={"CREATE TABLE": "ERROR 1142 (42000): CREATE command denied\n"})
+    with pytest.raises(InstallerError, match="CREATE command denied"):
+        sqlplan.write_marker(PLAN, container="c", client="mysql", password="pw", exec_stdin=ex)
+
+
+def test_write_marker_says_the_import_stopped_when_no_daemon_can_be_reached() -> None:
+    refusing = _Refusing(docker.DockerCommandError("No such container: c"))
+    with pytest.raises(InstallerError, match="No such container"):
+        sqlplan.write_marker(
+            PLAN, container="c", client="mysql", password="pw", exec_stdin=refusing
+        )
+
+
+def test_marker_hash_is_stable_across_equal_plans_and_changes_with_the_plan() -> None:
+    again = SqlPlan(
+        create=("mangos", "realmd", "characters", "logs"),
+        phases=(SqlPhase(name="realmd base", into="realmd", files=("realmd.sql",)),),
+        verify=(VerifyRule(db="mangos", query=ITEM_COUNT, min=10000),),
+        marker_db="mangos",
+    )
+    assert PLAN.plan_hash() == again.plan_hash()
+    assert re.fullmatch(r"[0-9a-f]{16}", PLAN.plan_hash())
+    changed = SqlPlan(
+        create=PLAN.create,
+        phases=(SqlPhase(name="realmd base", into="realmd", files=("other.sql",)),),
+        verify=PLAN.verify,
+        marker_db="mangos",
+    )
+    assert changed.plan_hash() != PLAN.plan_hash()
