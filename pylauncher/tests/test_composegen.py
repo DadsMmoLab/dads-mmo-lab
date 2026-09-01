@@ -1087,6 +1087,7 @@ def test_every_service_the_catalog_selects_is_defined_in_the_rendered_compose_fi
     """
     catalog = load_catalog()
     examined = 0
+    checked = 0
     # Collected, not asserted inside the loop: an `assert` on the first bad entry
     # stops the sweep, and the three CMaNGOS entries were wrong together — a run
     # that named only TBC would have been read as one entry's typo.
@@ -1108,6 +1109,20 @@ def test_every_service_the_catalog_selects_is_defined_in_the_rendered_compose_fi
             selected.append(spec.import_service)
         if entry.containers.client_data:
             selected.append(entry.containers.client_data)
+        # Assert the entry SELECTED something before checking what it selected.
+        # Without this the sweep is vacuous in the one direction that matters:
+        # the reviewer mutated `ContainerSpec.compose_services()` to
+        # `return self.services` -- empty for every shipped entry now that none
+        # declares one -- and `selected`, `missing` and `problems` were all empty
+        # while this test passed. The entry count below could not see it, because
+        # four entries really had been rendered. This is the standing rule landing
+        # on the test that inherited three deleted tests' weight: assert the value
+        # ARRIVES, never that the loop ran.
+        assert selected, (
+            f"{entry.id} selected no compose services at all, so this entry "
+            "compared nothing; `ContainerSpec.compose_services()` is answering empty"
+        )
+        checked += len(selected)
         missing = [name for name in selected if name not in defined]
         if missing:
             problems.append(
@@ -1122,9 +1137,20 @@ def test_every_service_the_catalog_selects_is_defined_in_the_rendered_compose_fi
     # A sweep that renders nothing passes just as quietly as one that renders four
     # correct files. Every shipped entry has a native block today, so the count is
     # the entry count and not merely "more than none".
-    assert examined == len(catalog.games) == 4, (
+    #
+    # Deliberately NOT `== 4`. A hard-coded number here rots on the fifth game
+    # while catching nothing extra: a broken fifth entry is reported by the
+    # `assert not problems` above, which fires first -- verified by mutation,
+    # 2026-09-02, by narrowing the sweep to one entry AND breaking that entry, and
+    # watching the failure come from `not problems` rather than from this line.
+    assert examined == len(catalog.games) > 0, (
         f"the cross-check examined {examined} of {len(catalog.games)} shipped entries; "
         "an entry without a native block renders nothing and is silently uncovered"
+    )
+    assert checked >= 3 * examined, (
+        f"only {checked} service names were compared across {examined} entries; "
+        "each shipped entry names at least a db, an auth and a world container, so "
+        "a lower number means something answered with an empty selection"
     )
 
 
