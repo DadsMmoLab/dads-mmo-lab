@@ -2846,9 +2846,15 @@ class ContainerRun:
         Every option precedes the image on purpose: docker stops reading its
         own options at the image name, so anything after it belongs to the
         tool — which is why `argv` is copied verbatim at the end. Same shape as
-        the two argvs this module and `git.py` already spell by hand
-        (`bind_mount_ok()`'s probe and `ContainerGit._run_argv()`): `run`,
-        `--rm`, our options, `-v`, `-w`, the user args, the image, then theirs.
+        the two argvs this module and `git.py` already spell by hand —
+        `bind_mount_ok()`'s probe, and the one built inline in
+        `ContainerGit._capture()` — which is `run`, `--rm`, options, `-v`, `-w`,
+        image, then theirs.
+
+        The user args sit right after `--rm` here rather than just before the
+        image as `git.py` places them. Docker reads its own options in any order
+        up to the image name, so the position carries no meaning; the test
+        audits by flag rather than by index for the same reason.
 
         Raises:
             ValueError: a mount's host path is not absolute. Docker refuses a
