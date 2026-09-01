@@ -1026,6 +1026,41 @@ was found by reading code; each is a line in a resolved compose document from a 
   pattern string rather than a `Path` predicate.
   *Found independently by two sessions working J.3 in parallel.*
 
+- **`docker cp` of a directory containing a symlink FAILS on Windows, measured — so the conf stage's
+  whole-directory copy is one upstream symlink away from breaking every Windows install** —
+  2026-09-01, J.2. H.3 hit this on busybox's `/etc` (`mtab -> /proc/mounts`) and judged it
+  speculative for CMaNGOS. J.2 is the first caller to copy a conf directory for real, so it was
+  measured rather than assumed — with a busybox stand-in rather than a 40-minute CMaNGOS build:
+
+  ```
+  docker cp <c>:/opt/mangos/etc <dest>  exited 1: symlink \proc\mounts <dest>\mtab:
+      A required privilege is not held by the client.
+  ```
+
+  Docker Engine 29.6.2, Windows 11, ordinary (non-elevated, non-developer-mode) user. `docker cp`
+  extracts a tar and recreates each entry, and creating a symlink on Windows needs a privilege a
+  normal account does not have. **One symlink anywhere in the directory fails the whole copy** — the
+  conf files beside it are not extracted either.
+
+  *Not a live defect today, and this time the check was done rather than inferred.* Upstream's own
+  install rules say so: `cmangos/mangos-tbc`'s `src/mangosd/CMakeLists.txt` and
+  `src/realmd/CMakeLists.txt` install every conf with plain
+  `install(FILES ... DESTINATION ${CONF_DIR})`, and the only `install(DIRECTORY ...)` in them is
+  `warden_modules`, which goes to `BIN_DIR`, not `CONF_DIR`. Nothing symlinks into
+  `/opt/mangos/etc` at present.
+
+  **What would break it, and what it would look like.** Any upstream change that ships a conf as a
+  symlink — or the Tortoise fork's playerbots branch doing so, whose CMake nobody has read — turns
+  every Windows install into a failed conf stage whose message names a *privilege*, which reads like
+  a broken Docker installation rather than "this image ships a symlink". If it happens, the fix is a
+  per-file `docker cp` of each missing `.dist`, which is three docker calls times the table and was
+  rejected on cost, not on correctness.
+
+  *Recorded, not fixed.* `conf.materialise()` does behave correctly when it happens — the failed copy
+  leaves the staging directory removed and `etc/` empty, so a resume after enabling developer mode
+  works, and that is covered by a test — but nothing turns the message into the sentence a user
+  could act on.
+
 
 ### One thing worth keeping
 
