@@ -1536,6 +1536,52 @@ shortcut itself. Choosing is owner work.
 the bundle first, and why. That is a warning, not a fix — a user who does not read the header still
 hits it, and per §1 nothing outside `pyplan/` points a user at the header at all.
 
+### 29. The Dockerfile refusal covers declared FIELD NAMES, not secrets — 2026-09-02, OPEN, residual
+
+Found by the independent review of `fix/dockerfile-refuses-any-secret-not-one-name` (merged at
+`092bad91`), and **not a regression** — the merged change is strictly better than what preceded it.
+It is the part the change does not reach.
+
+`dockerfile.SECRET_TOKENS` is `frozenset(f.name.upper() for f in fields(native.Secrets))`. That moved
+the coupling from *one hard-coded name* to *the declaration*, which was the point. But the mapping
+handed to `render()` is still built by hand, and **nothing asserts that every secret-bearing key in it
+corresponds to a `Secrets` field.** Proved on the VM against the real module, as a probe rather than by
+reading:
+
+```
+render() with an undeclared secret key -> type _Rendered | secret in text: True
+write() accepted it: ['Dockerfile', '.dockerignore']
+Dockerfile on disk contains the secret: True
+```
+
+The key was `SOAP_PASSWORD`; `native.Secrets` has no `soap_password` field; the value went into the
+build context and `write()` had no objection.
+
+**The dangerous direction is the one the docstring does not mention.** `secret_tokens()`'s docstring
+states the relationship as fact — "`_tokens()` spells each of its fields as the upper-cased token of
+the same name ... so reading the dataclass IS reading the declaration". True today **by convention
+only**. A secret that enters the mapping from somewhere other than `Secrets` — a `token_hex` generated
+inline, a value read from a file, anything not a declared field — is invisible to this refusal.
+
+**What the capability split changes, and what it does not.** `feat/7.3-token-sets-by-capability` gives
+`_public_tokens(server_dir)` no `StageContext` at all, so `ctx.secrets` is not in lexical scope where
+the build-context mapping is built. That closes the case above at the source, and it is the right level
+— the fix is structural rather than a guard someone must remember. **It does not close the general
+case**: a secret MINTED inside `_public_tokens` rather than passed into it is still unreachable by a
+by-name refusal, because it was never a field of anything.
+
+**This is the "defects live between the parts" shape.** The relationship between what `_tokens()` puts
+in the mapping and what `Secrets` declares has no owner, so nothing checks it. A cheap enumerating
+guard exists and is the recommendation: for each `f in dataclasses.fields(native.Secrets)`, assert that
+every key in the mapping whose VALUE equals `getattr(ctx.secrets, f.name)` is spelled `f.name.upper()`.
+That checks the relationship by enumeration instead of restating a list, and it catches a
+correctly-valued secret filed under a wrong name — which is exactly the case the by-name refusal is
+blind to.
+
+**Also fix the docstring either way:** it should stop asserting the link as though something enforced
+it. A sentence that describes a convention in the voice of a guarantee is how the next reader concludes
+the case is covered.
+
 ### One thing worth keeping
 
 Three of these have an obvious fix that is **wrong**, and two of them arm a worse bug:
