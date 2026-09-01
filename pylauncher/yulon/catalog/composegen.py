@@ -435,11 +435,54 @@ def _container_prefix(entry: CatalogEntry) -> str:
     The shared CMaNGOS templates name services `{{CONTAINER_PREFIX}}db`,
     `..realmd`, `..mangosd` so they equal the entry's container names — the
     AzerothCore convention `docker.start_database()` relies on. Derived rather
-    than declared, so the catalog cannot say two different things; the
-    invariants test asserts the rendered names against `containers.*`.
+    than declared, so the catalog cannot say two different things.
+
+    Deriving it is right; deriving it with `os.path.commonprefix` and TRUSTING
+    the answer was not. That function is character-wise, not separator- or
+    token-aware, and it never raises: three names sharing no first character
+    answer `""`, `db`/`dbauth`/`dbworld` answer `"db"` (so
+    `{{CONTAINER_PREFIX}}db` renders `dbdb`), and `abc-db`/`abcd-realmd`/
+    `abcx-mangosd` answer `"abc"`, with the separator eaten. Every one of those
+    is a filled-but-wrong token, and `fill()` has no opinion about those — it
+    refuses an UNFILLED placeholder — so the first thing to report it would be
+    `docker compose up` naming a container no service owns. In a module whose
+    whole design is that a bad value is loud, the answer is checked here:
+
+    * an empty prefix is refused outright. It cannot be right for any entry.
+    * an entry that declares `containers.services` — every CMaNGOS game does,
+      because its services (`db`/`realmd`/`mangosd`) differ from its containers
+      — must have the prefix rebuild all three container names from those
+      service names exactly. That is literally the `{{CONTAINER_PREFIX}}<service>`
+      the templates write, checked against the catalog instead of assumed.
+
+    An entry that leaves `services` out names each container after its service
+    (AzerothCore: service `ac-database` IS container `ac-database`), so there is
+    no suffix to rebuild from and its templates spell the names out in full;
+    only the empty check applies to it.
+    `test_the_container_prefix_rebuilds_the_container_names_of_every_shipped_entry`
+    runs the same invariant over every entry in the shipped catalog.
     """
-    names = [entry.containers.db, entry.containers.auth, entry.containers.world]
-    return os.path.commonprefix(names)
+    names = (entry.containers.db, entry.containers.auth, entry.containers.world)
+    prefix = os.path.commonprefix(list(names))
+    if not prefix:
+        raise ComposeGenError(
+            f"the container names of {entry.id} ({', '.join(names)}) share no common prefix, "
+            "so the container-prefix token would render the bare service names and the stack "
+            "would name containers that no service owns. Give the three containers one shared "
+            "prefix, as in <game>-db, <game>-realmd and <game>-mangosd."
+        )
+    services = entry.containers.services
+    if services is not None:
+        rebuilt = tuple(prefix + service for service in services)
+        if rebuilt != names:
+            raise ComposeGenError(
+                f"the container prefix {prefix!r} of {entry.id} rebuilds "
+                f"{', '.join(rebuilt)} from its service names {', '.join(services)}, but its "
+                f"containers are {', '.join(names)}. A template that writes the prefix in front "
+                "of a service name would name a container that does not exist. Name every "
+                "container after its service with one shared prefix in front of it."
+            )
+    return prefix
 
 
 def entry_tokens(entry: CatalogEntry) -> dict[str, str]:
