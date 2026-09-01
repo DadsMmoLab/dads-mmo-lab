@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 import threading
 import time
@@ -16,8 +17,10 @@ from tests.conftest import process_events
 from yulon import runner, wsl
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.installer import Installer, InstallOptions
+from yulon.controller_wow_wotlk import modules as wotlk_modules
+from yulon.git import CloneSpec, RunnerGit
 from yulon.ui import catalog_view
-from yulon.ui.catalog_view import CatalogView
+from yulon.ui.catalog_view import CatalogView, Identification
 from yulon.ui.widgets.log_panel import LogPanel
 
 
@@ -861,15 +864,21 @@ def test_adopting_accepts_a_project_whose_containers_match(
     assert len(got) == 1
 
 
-def test_adopting_allows_a_compose_file_it_cannot_read(
+def test_adopting_continues_when_there_is_no_compose_file_to_read(
     qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An unreadable file is not evidence of the wrong game.
+    """A folder with no compose file in it is not evidence of the wrong game.
 
     The folder lives inside a distro and is reached over a UNC path; that read
     can fail for reasons that have nothing to do with which game it is. Refusing
     on "I could not check" would block the migration this feature exists to
     provide, so the check only fires on a file it actually read.
+
+    Renamed 2026-09-02 from `test_adopting_allows_a_compose_file_it_cannot_read`:
+    `tmp_path / "gone"` does not exist, so `compose_file()` answers None and this
+    never reached the `OSError` arm it was named for. The read that raises is
+    covered by
+    `test_identify_is_unverified_when_the_compose_file_is_there_but_unreadable`.
     """
     unreadable = wsl.FoundServer(
         distro="dml-arch",
@@ -890,6 +899,297 @@ def test_adopting_allows_a_compose_file_it_cannot_read(
     view.adopted.connect(lambda *a: got.append(a))
     assert view.adopt_from_wsl(CATALOG.get("wow-wotlk")) is True
     assert len(got) == 1
+
+
+# ------------------------------------- three answers, and what each one costs
+#
+# `_looks_like()` answered "is this folder this game?" with a bool, so "I could
+# not check" left the function spelled exactly like "yes, it is". `_identify()`
+# widened that to three members. The tests below hold both halves of the
+# widening down: that each member is PRODUCED by the folder that deserves it,
+# and that each member gets its own CONSEQUENCE at the call site.
+
+
+def _folder(tmp_path: Path, name: str, compose: str | None) -> Path:
+    """A real directory, with a `docker-compose.yml` in it only when `compose` is given."""
+    folder = tmp_path / name
+    folder.mkdir()
+    if compose is not None:
+        (folder / "docker-compose.yml").write_text(compose, encoding="utf-8")
+    return folder
+
+
+def _server_in(folder: Path, project: str = "some-server") -> wsl.FoundServer:
+    return wsl.FoundServer(distro="dml-arch", project=project, running=True, server_dir=folder)
+
+
+def _compose_naming(container: str) -> str:
+    return f"services:\n  db:\n    container_name: {container}\n"
+
+
+def test_identify_produces_every_answer_it_declares(qapp: object, tmp_path: Path) -> None:
+    """One folder per member, and no member left without a folder that reaches it.
+
+    Enumerated over `Identification` rather than written out as three asserts:
+    a fourth member added later fails here until something produces it, which is
+    the whole point of having named the third one.
+
+    Each fixture differs from the next in exactly one thing. `ours` and `theirs`
+    are both readable compose files and differ ONLY in the container name, so
+    `DIFFERENT` cannot be passing because the file was missing; `silent` is a
+    directory that exists and simply holds no compose file, so `UNVERIFIED`
+    cannot be passing because the name failed to match.
+    """
+    entry = CATALOG.get("wow-wotlk")
+    spec = entry.container_spec()
+    folders = {
+        Identification.MATCHES: _folder(tmp_path, "ours", _compose_naming(spec.db)),
+        Identification.DIFFERENT: _folder(tmp_path, "theirs", _compose_naming("mangos-db")),
+        Identification.UNVERIFIED: _folder(tmp_path, "silent", None),
+    }
+    assert set(folders) == set(Identification), "an Identification member no fixture reaches"
+    assert {want: catalog_view._identify(entry, folder) for want, folder in folders.items()} == {
+        want: want for want in folders
+    }
+
+
+def test_identify_is_unverified_when_the_compose_file_is_there_but_unreadable(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The `OSError` arm, told apart from the missing-file arm by the file's contents.
+
+    The compose file here names ANOTHER game's container, so a read that quietly
+    succeeded would answer `DIFFERENT` and a read that was skipped would answer
+    `MATCHES`. Only the arm under test can answer `UNVERIFIED`, which is what
+    makes the fixture worth anything.
+    """
+    entry = CATALOG.get("wow-wotlk")
+    folder = _folder(tmp_path, "unreadable", _compose_naming("mangos-db"))
+    denied = folder / "docker-compose.yml"
+    real_read_text = Path.read_text
+
+    def deny(self: Path, *args: object, **kwargs: object) -> str:
+        if self == denied:
+            raise PermissionError(13, "Permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", deny)
+    # The file IS found - so this is the read failing, not the file missing.
+    assert catalog_view.compose_file(folder) == denied
+    assert catalog_view._identify(entry, folder) is Identification.UNVERIFIED
+
+
+def _adopt_with_identification(
+    answer: Identification,
+    *,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[bool, list[tuple[object, ...]], list[tuple[str, str]]]:
+    """Drive `adopt_from_wsl()` with `_identify()` pinned to `answer`.
+
+    Returns what the view answered, what it emitted, and every warning dialog
+    it raised as (title, text). Pinning the identification is deliberate: the
+    branch is the subject here, and what produces each member is the subject of
+    the two tests above.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    dialogs: list[tuple[str, str]] = []
+
+    def record_warning(*args: object, **kwargs: object) -> object:
+        dialogs.append((str(args[1]), str(args[2])))
+        return QMessageBox.StandardButton.Ok
+
+    monkeypatch.setattr(QMessageBox, "warning", record_warning)
+    folder = _folder(tmp_path, f"server-{answer.value}", _compose_naming("whatever"))
+    server = _server_in(folder)
+    monkeypatch.setattr(wsl, "find_servers", lambda include=(): (server,))
+    monkeypatch.setattr(catalog_view, "_identify", lambda entry, server_dir: answer)
+
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        LogPanel(),
+        home=tmp_path,
+        pick_wsl_server=lambda _f: server,
+    )
+    emitted: list[tuple[object, ...]] = []
+    view.adopted.connect(lambda *a: emitted.append(a))
+    answered = view.adopt_from_wsl(CATALOG.get("wow-wotlk"))
+    return answered, emitted, dialogs
+
+
+def test_each_identification_gets_its_own_answer_at_the_call_site(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse / proceed silently / proceed and say so - one outcome per member.
+
+    The bool version had two outcomes for three questions, so this asserts the
+    third is not quietly spelled like either of the others: `MATCHES` must show
+    NO dialog (a warning on the happy path teaches people to click through
+    them), and `UNVERIFIED` must both emit and warn.
+
+    Enumerated for the same reason as the production test: a fourth member
+    lands here with no outcome recorded and fails.
+    """
+    outcomes: dict[Identification, tuple[bool, int, tuple[str, ...]]] = {}
+    for answer in Identification:
+        with monkeypatch.context() as patch:
+            answered, emitted, dialogs = _adopt_with_identification(
+                answer, tmp_path=tmp_path, monkeypatch=patch
+            )
+        outcomes[answer] = (answered, len(emitted), tuple(title for title, _ in dialogs))
+
+    assert outcomes == {
+        Identification.MATCHES: (True, 1, ()),
+        Identification.DIFFERENT: (False, 0, ("That is a different server",)),
+        Identification.UNVERIFIED: (True, 1, ("Adopted without checking",)),
+    }
+    assert set(outcomes) == set(Identification), "an Identification member with no outcome"
+
+
+def test_an_unverified_adoption_names_the_folder_in_the_dialog_it_shows(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The dialog has to identify WHICH folder, or it cannot be acted on.
+
+    "Yu'lon could not check" with no path in it is not something a user can do
+    anything about; the three facts they need to recognise the folder are the
+    path, the project and the distro.
+    """
+    _, _, dialogs = _adopt_with_identification(
+        Identification.UNVERIFIED, tmp_path=tmp_path, monkeypatch=monkeypatch
+    )
+    assert len(dialogs) == 1
+    text = dialogs[0][1]
+    folder = tmp_path / f"server-{Identification.UNVERIFIED.value}"
+    for fact in (str(folder), "some-server", "dml-arch", "WoW WotLK"):
+        assert fact in text, f"the dialog never names {fact!r}"
+
+
+def test_an_unverified_adoption_is_recorded_in_the_log_as_a_warning(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A dialog is gone the moment it is dismissed; the log is what is left afterwards.
+
+    WARNING and not INFO: the adopt path already logs an INFO line for every
+    adoption, so an unverified one recorded at INFO would be indistinguishable
+    from a checked one in the file a support question arrives with.
+    """
+    folder = tmp_path / f"server-{Identification.UNVERIFIED.value}"
+    with caplog.at_level(logging.WARNING, logger="yulon.ui.catalog_view"):
+        _adopt_with_identification(
+            Identification.UNVERIFIED, tmp_path=tmp_path, monkeypatch=monkeypatch
+        )
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "UNVERIFIED" in message
+    assert "wow-wotlk" in message
+    assert str(folder) in message
+
+
+class _StopAfterClone(Exception):
+    """Ends `Applier.install()` at the clone, before steps this test is not about.
+
+    Not a `GitError`: `install()` catches those and re-raises them as
+    `ApplyError`, which would hide where the run actually stopped.
+    """
+
+
+class _RealCloneThenStop:
+    """The real `RunnerGit.clone()`, then stop. Satisfies `yulon.git.Git` (one method)."""
+
+    def __init__(self) -> None:
+        self.specs: list[CloneSpec] = []
+
+    def clone(self, spec: CloneSpec) -> None:
+        self.specs.append(spec)
+        RunnerGit().clone(spec)
+        raise _StopAfterClone(str(spec.dest))
+
+
+def test_an_unverified_adoption_reaches_the_applier_with_no_ownership_check(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing between "adopted without evidence" and deleting files in that folder.
+
+    This is the cost the `UNVERIFIED` dialog is paid for, asserted end to end
+    rather than described: a folder nothing identified is adopted, the entry it
+    was adopted under carries `has_manifests`, so `controller_view` builds an
+    `Applier` rooted at that folder, and the first thing `RunnerGit.clone()`
+    does at a destination that exists and is not a git checkout is
+    `shutil.rmtree()` - before it contacts a remote, so a clone that was never
+    going to succeed still deletes.
+
+    Checked at the level of the code on 2026-09-02, on branch
+    `fix/adoption-guard-fails-open` at fda035d: `yulon/git.py` `RunnerGit.clone`
+    rmtrees `spec.dest` when `(spec.dest / ".git").is_dir()` is False and
+    `spec.dest.exists()` is True; `yulon/apply.py` `Applier.clone_dir` returns
+    `server_dir / CLONE_DIRS[type] / id`; `catalog.json` gives `wow-wotlk`
+    `"has_manifests": true` and it is the only entry that has it;
+    `yulon/ui/controller_view.py` passes that same `server_dir` to
+    `wotlk_modules.applier()`.
+
+    The ONLY double here is `yulon.runner.run`, the subprocess seam - so the
+    deletion, the paths and the ordering are all the shipping code's. The seam
+    records whether the file was still there at the moment git was first asked
+    to do anything, which is what "before it fetches anything" means.
+    """
+    entry = CATALOG.get("wow-wotlk")
+
+    # 1. Adopted although nothing identified it.
+    folder = _folder(tmp_path, "someones-folder", None)
+    assert catalog_view._identify(entry, folder) is Identification.UNVERIFIED
+    server = _server_in(folder, project="wow-server-playerbots")
+    monkeypatch.setattr(wsl, "find_servers", lambda include=(): (server,))
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        LogPanel(),
+        home=tmp_path,
+        pick_wsl_server=lambda _f: server,
+    )
+    emitted: list[tuple[object, ...]] = []
+    view.adopted.connect(lambda *a: emitted.append(a))
+    assert view.adopt_from_wsl(entry) is True
+    adopted_dir = Path(str(emitted[0][1]))
+
+    # 2. That folder, and nothing else, is what the tab's applier is rooted at.
+    assert entry.has_manifests is True, "the tab builds no Applier without this"
+    git = _RealCloneThenStop()
+    applier = wotlk_modules.applier(adopted_dir, git=git)
+    assert applier.server_dir == adopted_dir
+
+    manifest = next(m for m in wotlk_modules.store().load_all("module") if m.source is not None)
+    clone = applier.clone_dir(manifest)
+    assert clone.is_relative_to(adopted_dir), "the deletion below would be outside the folder"
+
+    # 3. Something already living where the clone is about to go.
+    clone.mkdir(parents=True)
+    victim = clone / "please-keep-this.txt"
+    victim.write_text("a file the user had in that folder", encoding="utf-8")
+
+    still_there_when_git_ran: list[bool] = []
+
+    def fake_run(
+        argv: list[str], cwd: Path | None = None, env: object = None, **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        still_there_when_git_ran.append(victim.exists())
+        return _completed()
+
+    monkeypatch.setattr(runner, "run", fake_run)
+
+    with pytest.raises(_StopAfterClone):
+        applier.install(manifest)
+
+    # 4. Gone, and gone before git was asked for anything - so no failure of the
+    #    clone itself could have saved it.
+    assert git.specs and git.specs[0].dest == clone
+    assert still_there_when_git_ran, "git was never invoked; the assertion below would be empty"
+    assert still_there_when_git_ran[0] is False
+    assert not victim.exists()
+    assert not clone.exists()
 
 
 def _catalog_in_the_default_window(
