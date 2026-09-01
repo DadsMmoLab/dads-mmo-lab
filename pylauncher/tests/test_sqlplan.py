@@ -37,7 +37,14 @@ import pytest
 
 from yulon import docker
 from yulon.catalog import native
-from yulon.catalog.catalog import CatalogEntry, SqlPhase, SqlPlan, VerifyRule, load_catalog
+from yulon.catalog.catalog import (
+    CatalogEntry,
+    PlayerData,
+    SqlPhase,
+    SqlPlan,
+    VerifyRule,
+    load_catalog,
+)
 from yulon.catalog.families import sqlplan
 from yulon.catalog.installer import InstallerError
 
@@ -2116,3 +2123,615 @@ def test_marker_hash_is_stable_across_equal_plans_and_changes_with_the_plan() ->
         marker_db="mangos",
     )
     assert changed.plan_hash() != PLAN.plan_hash()
+
+
+# -- J.6: MarkerGate, the five-branch probe and the partial-only reset --------
+#
+# The branches ARE the product here, and they are not symmetric: `partial` is
+# the only one that DELETES, so every question this gate cannot answer has to
+# land somewhere else. "The marker table is missing" and "the database could
+# not be asked" look identical from the outside - both are a query that did not
+# produce a hash - and reading the second as the first drops a stranger's
+# realmd. So every count below is `unreadable` unless it is exactly one row
+# holding an integer, and the ""/"\n" pair `SqlQuery` warns about decides
+# `imported` against `partial` outright: no rows means no marker was ever
+# written, one row holding the empty string means one was.
+
+GATE_SECRET = "cmangos-1a2b3c4d5e6f7a8b"
+
+GATE_PLAN = SqlPlan(
+    create=("mangos", "realmd", "characters", "logs"),
+    phases=PLAN.phases,
+    verify=PLAN.verify,
+    player_data=(
+        PlayerData(db="characters", table="characters"),
+        PlayerData(
+            db="realmd",
+            table="account",
+            exclude_usernames=("ADMINISTRATOR", "GAMEMASTER", "MODERATOR", "PLAYER"),
+        ),
+    ),
+    marker_db="mangos",
+)
+
+ALL = ("mangos", "realmd", "characters", "logs")
+
+
+class _Server:
+    """`docker.sql_query` + `docker.exec_stdin` over one fake server's state.
+
+    Answers are shaped like `--batch --skip-column-names` output, which is what
+    makes the corner sayable at all: `rows` is the full count of a table and
+    `seeded` how many of those carry an excluded username, so a
+    `WHERE username NOT IN (...)` query answers the difference.
+
+    `raw` overrides the answer for any statement it is a substring of, and it
+    is returned VERBATIM - `""` for no rows, `"\\n"` for one row holding the
+    empty string. Nothing else in this fake can say those two apart, and they
+    are the difference between `imported` and the branch that drops databases.
+
+    `down` is raised instead of answering, from the `down_from`'th query
+    onwards (1 by default); `down_after_drop` arms it once the DROP has run.
+    Both exist because an idempotent fake cannot tell a re-read from a
+    remembered answer, and `reset()` re-reads on purpose.
+
+    `undroppable` names schemas whose DROP is accepted and does nothing, which
+    is the only way to reach the check after the drop.
+
+    `wsl_distro` is recorded rather than swallowed, for `_Exec`'s reason: a
+    fake that accepted the value and forgot it would reproduce, one layer up,
+    exactly the bug the parameter exists to prevent.
+    """
+
+    def __init__(
+        self,
+        databases: Sequence[str] = (),
+        tables: Mapping[str, Sequence[str]] | None = None,
+        marker_hash: str | None = None,
+        rows: Mapping[tuple[str, str], int] | None = None,
+        seeded: Mapping[tuple[str, str], int] | None = None,
+        raw: Mapping[str, str] | None = None,
+        down: str = "",
+        down_from: int = 1,
+        down_after_drop: bool = False,
+        undroppable: Sequence[str] = (),
+    ) -> None:
+        self.databases = list(databases)
+        self.tables = {name: set(names) for name, names in (tables or {}).items()}
+        if marker_hash is not None:
+            self.tables.setdefault("mangos", set()).add("yulon_install")
+        self.marker_hash = marker_hash
+        self.rows = dict(rows or {})
+        self.seeded = dict(seeded or {})
+        self.raw = dict(raw or {})
+        self.down = down
+        self.down_from = down_from
+        self.down_after_drop = down_after_drop
+        self.undroppable = set(undroppable)
+        self.asked: list[tuple[str | None, str]] = []
+        self.dropped: list[str] = []
+        self.distros: list[str | None] = []
+        self.execs: list[tuple[str, tuple[str, ...], bytes, dict[str, str], str | None]] = []
+
+    def query(
+        self,
+        container: str,
+        client: str,
+        password: str,
+        schema: str | None,
+        statement: str,
+        *,
+        wsl_distro: str | None = None,
+    ) -> str:
+        self.asked.append((schema, statement))
+        self.distros.append(wsl_distro)
+        if self.down and len(self.asked) >= self.down_from:
+            raise docker.DockerCommandError(self.down)
+        for key, answer in self.raw.items():
+            if key in statement:
+                return answer
+        if statement == "SHOW DATABASES":
+            return "\n".join(["information_schema", "mysql", *self.databases]) + "\n"
+        exists = re.search(r"table_schema='([^']+)' AND table_name='([^']+)'", statement)
+        if exists:
+            return "1\n" if exists.group(2) in self.tables.get(exists.group(1), set()) else "0\n"
+        if statement.startswith("SELECT plan_hash"):
+            return f"{self.marker_hash}\n" if self.marker_hash else ""
+        count = re.search(r"SELECT COUNT\(\*\) FROM `([^`]+)`\.`([^`]+)`", statement)
+        if count:
+            key = (count.group(1), count.group(2))
+            total = self.rows.get(key, 0)
+            return f"{total - self.seeded.get(key, 0) if 'NOT IN' in statement else total}\n"
+        raise AssertionError(f"unexpected query: {statement}")
+
+    def exec_stdin(
+        self,
+        container: str,
+        argv: Sequence[str],
+        source: BinaryIO,
+        *,
+        env: Mapping[str, str],
+        wsl_distro: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        text = source.read()
+        self.execs.append((container, tuple(argv), text, dict(env), wsl_distro))
+        for name in re.findall(r"DROP DATABASE IF EXISTS `([^`]+)`", text.decode()):
+            self.dropped.append(name)
+            if name not in self.undroppable:
+                self.databases = [db for db in self.databases if db != name]
+        if self.down_after_drop:
+            self.down = self.down or "No such container: tbc-db"
+            self.down_from = len(self.asked) + 1
+        return subprocess.CompletedProcess(list(argv), 0, "", "")
+
+
+def _gate(
+    server: _Server,
+    *,
+    plan: SqlPlan = GATE_PLAN,
+    schemas: Mapping[str, str] | None = None,
+    password: str = "pw",
+    wsl_distro: str | None = None,
+) -> sqlplan.MarkerGate:
+    """`MarkerGate` over one fake server, with the arguments every test repeats."""
+    return sqlplan.MarkerGate(
+        plan,
+        container="tbc-db",
+        client="mariadb",
+        password=password,
+        schemas=SCHEMAS if schemas is None else schemas,
+        sql_query=server.query,
+        exec_stdin=server.exec_stdin,
+        wsl_distro=wsl_distro,
+    )
+
+
+def test_probe_absent_when_no_plan_schema_exists() -> None:
+    server = _Server(databases=["playerbots_other"])
+    state = _gate(server).probe()
+    assert state.state == "absent"
+    assert "mangos" in state.detail
+    assert server.dropped == []
+
+
+def test_probe_imported_when_the_marker_row_exists() -> None:
+    server = _Server(databases=ALL, marker_hash=GATE_PLAN.plan_hash())
+    state = _gate(server).probe()
+    assert state.state == "imported"
+    assert f"mangos.{sqlplan.MARKER_TABLE}" in state.detail
+
+
+def test_probe_settles_on_the_marker_before_counting_any_player_table() -> None:
+    """A marker is proof and a count is not: `populated` short-circuits on one
+    row, so asking it first would report a finished import as somebody's server
+    the moment a module seeded an account."""
+    server = _Server(
+        databases=ALL,
+        tables={"characters": ["characters"]},
+        marker_hash=GATE_PLAN.plan_hash(),
+        rows={("characters", "characters"): 40},
+    )
+    assert _gate(server).probe().state == "imported"
+    assert not any("COUNT(*) FROM `characters`" in statement for _, statement in server.asked)
+
+
+def test_probe_hash_mismatch_is_still_imported_never_partial(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An app upgrade changes the plan hash. Reading that as `partial` would
+    `DROP realmd` on a server that has accounts on it."""
+    server = _Server(databases=ALL, marker_hash="0123456789abcdef")
+    with caplog.at_level(logging.INFO, logger=sqlplan.logger.name):
+        state = _gate(server).probe()
+    assert state.state == "imported"
+    assert "older" in state.detail and "0123456789abcdef" in state.detail
+    assert GATE_PLAN.plan_hash() in state.detail
+    assert "older" in caplog.text
+    assert server.dropped == []
+
+
+def test_probe_reads_the_newest_marker_row() -> None:
+    """A re-import appends a row; the plan that finished last is the current one."""
+    server = _Server(databases=ALL, marker_hash=GATE_PLAN.plan_hash())
+    _gate(server).probe()
+    lookup = [q for _, q in server.asked if q.startswith("SELECT plan_hash")]
+    assert lookup == [
+        "SELECT plan_hash FROM `mangos`.`yulon_install` ORDER BY finished_unix DESC LIMIT 1"
+    ]
+
+
+def test_probe_reads_one_empty_marker_row_as_imported_and_no_rows_as_no_marker() -> None:
+    """The `""`/`"\\n"` pair, deciding the one branch that deletes.
+
+    `sql_query()` returns stdout verbatim: no rows print `""`, one row holding
+    the empty string prints `"\\n"`. A reflexive `.strip()` collapses them, and
+    the collapse is not symmetric - it turns a finished import into `partial`,
+    which is the branch `reset()` drops databases from.
+    """
+    one_empty_row = _Server(databases=ALL, marker_hash="", raw={"SELECT plan_hash": "\n"})
+    assert _gate(one_empty_row).probe().state == "imported"
+    no_rows = _Server(databases=ALL, marker_hash="", raw={"SELECT plan_hash": ""})
+    assert _gate(no_rows).probe().state == "partial"
+
+
+def test_probe_populated_on_characters() -> None:
+    server = _Server(
+        databases=ALL,
+        tables={"characters": ["characters"], "realmd": ["account"]},
+        rows={("characters", "characters"): 3},
+    )
+    state = _gate(server).probe()
+    assert state.state == "populated"
+    assert "3 rows in characters.characters" in state.detail
+
+
+def test_probe_counts_accounts_without_the_seeded_usernames() -> None:
+    """Four seeded accounts are what a fresh realmd dump ships, not a person's server."""
+    server = _Server(
+        databases=ALL,
+        tables={"characters": ["characters"], "realmd": ["account"]},
+        rows={("realmd", "account"): 4},
+        seeded={("realmd", "account"): 4},
+    )
+    assert _gate(server).probe().state == "partial"
+    where = [q for _, q in server.asked if "`realmd`.`account`" in q]
+    assert where and (
+        "WHERE username NOT IN ('ADMINISTRATOR', 'GAMEMASTER', 'MODERATOR', 'PLAYER')" in where[0]
+    )
+
+
+def test_probe_populated_on_one_account_beyond_the_seeded_usernames() -> None:
+    server = _Server(
+        databases=ALL,
+        tables={"characters": ["characters"], "realmd": ["account"]},
+        rows={("realmd", "account"): 5},
+        seeded={("realmd", "account"): 4},
+    )
+    state = _gate(server).probe()
+    assert state.state == "populated" and "1 rows in realmd.account" in state.detail
+
+
+def test_probe_reports_every_populated_table_not_only_the_first() -> None:
+    server = _Server(
+        databases=ALL,
+        tables={"characters": ["characters"], "realmd": ["account"]},
+        rows={("characters", "characters"): 3, ("realmd", "account"): 9},
+        seeded={("realmd", "account"): 4},
+    )
+    state = _gate(server).probe()
+    assert state.detail == "3 rows in characters.characters, 5 rows in realmd.account"
+
+
+def test_probe_partial_when_schemas_exist_without_marker_or_players() -> None:
+    server = _Server(databases=["mangos", "realmd"], tables={"realmd": ["account"]})
+    state = _gate(server).probe()
+    assert state.state == "partial"
+    assert "mangos, realmd" in state.detail and "no import marker" in state.detail
+
+
+def test_probe_is_partial_when_the_marker_schema_is_there_without_the_marker_table() -> None:
+    """The half-written state the reset exists for: `create_schemas()` ran, the
+    dumps did not, so `mangos` is there and `mangos.yulon_install` is not."""
+    server = _Server(databases=ALL)
+    assert _gate(server).probe().state == "partial"
+
+
+def test_probe_does_not_look_up_a_marker_in_a_table_that_is_not_there() -> None:
+    """Asking anyway would make a client error ("no such table") the evidence
+    for `partial`, which is the evidence that drops databases."""
+    server = _Server(databases=ALL)
+    _gate(server).probe()
+    assert not any(q.startswith("SELECT plan_hash") for _, q in server.asked)
+
+
+def test_probe_asks_nothing_at_all_about_a_schema_that_is_not_there() -> None:
+    """Not merely "does not count it": does not ask `information_schema` about it
+    either. Dropping the `present` guard and leaning on a table in a
+    non-existent schema counting 0 left the narrower assertion green."""
+    server = _Server(databases=["mangos"])
+    assert _gate(server).probe().state == "partial"
+    assert not any("characters" in q for _, q in server.asked if q != "SHOW DATABASES")
+
+
+def test_probe_skips_a_player_table_that_has_not_been_created_yet() -> None:
+    server = _Server(databases=ALL)
+    assert _gate(server).probe().state == "partial"
+    assert not any("COUNT(*) FROM `characters`.`characters`" in q for _, q in server.asked)
+
+
+def test_probe_unreadable_names_the_volume_and_the_remove_action() -> None:
+    server = _Server(down="ERROR 1045 (28000): Access denied for user 'root'@'localhost'")
+    state = _gate(server).probe()
+    assert state.state == "unreadable"
+    assert "Access denied" in state.detail
+    assert "different password" in state.detail and "Remove" in state.detail
+
+
+def test_probe_is_unreadable_when_a_count_comes_back_with_no_rows() -> None:
+    """A `COUNT(*)` always answers with one row, so nothing back is not zero -
+    and reading it as zero would call a database nobody could ask `partial`."""
+    server = _Server(
+        databases=ALL, tables={"characters": ["characters"]}, raw={"`characters`.`characters`": ""}
+    )
+    state = _gate(server).probe()
+    assert state.state == "unreadable" and "no rows" in state.detail
+
+
+def test_probe_is_unreadable_when_a_count_comes_back_with_two_rows() -> None:
+    server = _Server(
+        databases=ALL,
+        tables={"characters": ["characters"]},
+        raw={"`characters`.`characters`": "1\n2\n"},
+    )
+    state = _gate(server).probe()
+    assert state.state == "unreadable" and "2 rows" in state.detail
+
+
+def test_probe_is_unreadable_when_a_count_is_not_a_number() -> None:
+    server = _Server(
+        databases=ALL,
+        tables={"characters": ["characters"]},
+        raw={"`characters`.`characters`": "ERROR at line 1\n"},
+    )
+    state = _gate(server).probe()
+    assert state.state == "unreadable" and "not a count" in state.detail
+
+
+def test_probe_is_unreadable_when_the_table_question_cannot_be_answered() -> None:
+    """`information_schema` answering something that is not a count is not the
+    same as the table being absent, and only one of the two leads to a drop."""
+    server = _Server(databases=ALL, raw={"information_schema.tables": "\n"})
+    state = _gate(server).probe()
+    assert state.state == "unreadable" and "not a count" in state.detail
+
+
+def test_probe_is_unreadable_when_the_marker_lookup_answers_more_than_one_row() -> None:
+    server = _Server(databases=ALL, marker_hash="", raw={"SELECT plan_hash": "a\nb\n"})
+    state = _gate(server).probe()
+    assert state.state == "unreadable" and "LIMIT 1" in state.detail
+
+
+def test_probe_calls_only_imported_complete() -> None:
+    """`stage_import()` skips on `imported` OR on `populated` that is complete;
+    a populated database this gate has not finished must still be refused."""
+    imported = _gate(_Server(databases=ALL, marker_hash=GATE_PLAN.plan_hash())).probe()
+    populated = _gate(
+        _Server(
+            databases=ALL,
+            tables={"characters": ["characters"]},
+            rows={("characters", "characters"): 2},
+        )
+    ).probe()
+    partial = _gate(_Server(databases=["mangos"])).probe()
+    absent = _gate(_Server()).probe()
+    assert imported.complete is True
+    assert (populated.complete, partial.complete, absent.complete) == (False, False, False)
+
+
+def test_probe_asks_the_daemon_that_holds_the_container() -> None:
+    """Asked of the wrong daemon this reads `absent` for a full database and
+    the import runs again over a working server."""
+    server = _Server(databases=ALL, marker_hash=GATE_PLAN.plan_hash())
+    _gate(server, wsl_distro="Ubuntu-22.04").probe()
+    assert server.distros and set(server.distros) == {"Ubuntu-22.04"}
+
+
+def test_probe_names_no_distro_when_the_install_is_local() -> None:
+    server = _Server(databases=ALL, marker_hash=GATE_PLAN.plan_hash())
+    _gate(server).probe()
+    assert server.distros and set(server.distros) == {None}
+
+
+def test_probe_redacts_the_secret_the_client_quotes_back() -> None:
+    """`stage_import()` yields `probe().detail` straight into the install log."""
+    quoted = f"ERROR 1064 (42000) at line 1: near \"IDENTIFIED BY '{GATE_SECRET}'\""
+    state = _gate(_Server(down=quoted), password=GATE_SECRET).probe()
+    assert state.state == "unreadable"
+    assert GATE_SECRET not in state.detail and "***" in state.detail
+
+
+def test_probe_redacts_the_secret_out_of_a_marker_row_it_reports(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The one path where the client's STDOUT reaches the user without passing
+    through an exception, and so the only one that isolates `_query()`.
+
+    An older plan's hash goes into `detail` - which `stage_import()` yields into
+    the install log verbatim - and into a log record. Mutating `_query()` to
+    return the client's answer unredacted left every other redaction test here
+    green, because their text reaches the user through `probe()`'s `except`
+    clause, which redacts a second time.
+    """
+    server = _Server(databases=ALL, marker_hash=f"old {GATE_SECRET}")
+    with caplog.at_level(logging.INFO, logger=sqlplan.logger.name):
+        state = _gate(server, password=GATE_SECRET).probe()
+    assert state.state == "imported"
+    assert GATE_SECRET not in state.detail and "***" in state.detail
+    assert GATE_SECRET not in caplog.text
+
+
+def test_probe_redacts_the_secret_out_of_a_row_it_could_not_read() -> None:
+    """The other half: what the client printed on stdout, quoted back by the
+    branch that refuses to read it as a count. Redacted twice over here - at
+    `_query()` and again at `probe()`'s `except` - so removing either alone
+    leaves this green; the tests either side of it isolate one entrance each."""
+    server = _Server(
+        databases=ALL,
+        tables={"characters": ["characters"]},
+        raw={"`characters`.`characters`": f"nope {GATE_SECRET}\n"},
+    )
+    state = _gate(server, password=GATE_SECRET).probe()
+    assert state.state == "unreadable"
+    assert GATE_SECRET not in state.detail and "***" in state.detail
+
+
+def test_reset_drops_exactly_the_present_plan_schemas_from_partial() -> None:
+    server = _Server(
+        databases=["mangos", "realmd", "somebody_else"], tables={"realmd": ["account"]}
+    )
+    assert _gate(server).reset() == ("mangos", "realmd")
+    assert server.dropped == ["mangos", "realmd"]
+    assert server.databases == ["somebody_else"]
+
+
+def test_reset_drops_through_one_script_over_stdin_with_the_secret_in_the_environment() -> None:
+    server = _Server(databases=["mangos", "realmd"], tables={"realmd": ["account"]})
+    _gate(server, password=GATE_SECRET).reset()
+    assert len(server.execs) == 1
+    container, argv, text, env, _distro = server.execs[0]
+    assert container == "tbc-db"
+    assert argv == ("mariadb", "-u", "root")
+    assert env == {"MYSQL_PWD": GATE_SECRET}
+    assert GATE_SECRET not in " ".join(argv)
+    assert text.decode().splitlines() == [
+        "DROP DATABASE IF EXISTS `mangos`;",
+        "DROP DATABASE IF EXISTS `realmd`;",
+    ]
+
+
+def test_reset_execs_against_the_daemon_that_holds_the_container() -> None:
+    """A DROP on the wrong daemon reports success and clears nothing."""
+    server = _Server(databases=["mangos"])
+    _gate(server, wsl_distro="Ubuntu-22.04").reset()
+    assert [distro for *_rest, distro in server.execs] == ["Ubuntu-22.04"]
+
+
+def test_reset_never_names_a_database_the_plan_does_not_own() -> None:
+    server = _Server(databases=["mangos", "acore_world", "somebody_else"])
+    _gate(server).reset()
+    text = server.execs[0][2].decode()
+    assert "acore_world" not in text and "somebody_else" not in text
+
+
+def test_reset_refuses_populated_and_drops_nothing() -> None:
+    server = _Server(
+        databases=ALL,
+        tables={"characters": ["characters"]},
+        rows={("characters", "characters"): 1},
+    )
+    with pytest.raises(InstallerError, match="player data"):
+        _gate(server).reset()
+    assert server.dropped == [] and server.execs == []
+
+
+def test_reset_refuses_imported_and_drops_nothing() -> None:
+    server = _Server(databases=ALL, marker_hash=GATE_PLAN.plan_hash())
+    with pytest.raises(InstallerError, match="already imported"):
+        _gate(server).reset()
+    assert server.dropped == [] and server.execs == []
+
+
+def test_reset_refuses_unreadable_and_drops_nothing() -> None:
+    server = _Server(databases=ALL, down="no route to host")
+    with pytest.raises(InstallerError, match="could not be asked"):
+        _gate(server).reset()
+    assert server.dropped == [] and server.execs == []
+
+
+def test_reset_from_absent_drops_nothing() -> None:
+    server = _Server()
+    assert _gate(server).reset() == ()
+    assert server.dropped == [] and server.execs == []
+
+
+def test_reset_refuses_when_a_schema_survived_the_drop() -> None:
+    """The client exited 0 and `realmd` is still there; saying it was cleared
+    would send the import straight back into the state it was called to clear."""
+    server = _Server(
+        databases=["mangos", "realmd"], tables={"realmd": ["account"]}, undroppable=["realmd"]
+    )
+    with pytest.raises(InstallerError, match="realmd could not be dropped"):
+        _gate(server).reset()
+
+
+def test_reset_refuses_when_the_databases_go_unreadable_after_the_probe() -> None:
+    """`reset()` re-reads rather than trusting the probe, so the re-read has its
+    own way of failing - and a bare `DockerCommandError` out of a stage whose
+    every other error is an `InstallerError` is not it."""
+    reference = _Server(databases=["mangos", "realmd"], tables={"realmd": ["account"]})
+    assert _gate(reference).probe().state == "partial"
+    server = _Server(
+        databases=["mangos", "realmd"],
+        tables={"realmd": ["account"]},
+        down="No such container: tbc-db",
+        down_from=len(reference.asked) + 1,
+    )
+    with pytest.raises(InstallerError, match="nothing was dropped"):
+        _gate(server).reset()
+    assert server.dropped == [] and server.execs == []
+
+
+def test_reset_refuses_when_the_databases_cannot_be_listed_after_the_drop() -> None:
+    server = _Server(
+        databases=["mangos", "realmd"], tables={"realmd": ["account"]}, down_after_drop=True
+    )
+    with pytest.raises(InstallerError, match="the import was not re-run"):
+        _gate(server).reset()
+    assert server.dropped == ["mangos", "realmd"]
+
+
+def test_reset_logs_every_database_it_drops(caplog: pytest.LogCaptureFixture) -> None:
+    server = _Server(databases=["mangos", "realmd"], tables={"realmd": ["account"]})
+    with caplog.at_level(logging.WARNING, logger=sqlplan.logger.name):
+        _gate(server).reset()
+    assert "dropping mangos" in caplog.text and "dropping realmd" in caplog.text
+
+
+def test_reset_redacts_the_secret_out_of_a_listing_it_could_not_make() -> None:
+    quoted = f"ERROR 1045 (28000): near \"IDENTIFIED BY '{GATE_SECRET}'\""
+    reference = _Server(databases=["mangos"])
+    assert _gate(reference).probe().state == "partial"
+    server = _Server(databases=["mangos"], down=quoted, down_from=len(reference.asked) + 1)
+    with pytest.raises(InstallerError) as caught:
+        _gate(server, password=GATE_SECRET).reset()
+    assert GATE_SECRET not in str(caught.value) and "***" in str(caught.value)
+
+
+def test_a_gate_over_a_plan_naming_a_database_the_game_does_not_have_is_refused() -> None:
+    """Refused when the gate is BUILT, in `expand()`'s words: `probe()` may not
+    raise, so a catalog typo that surfaced there would reach the import stage
+    as neither a state nor an `InstallerError`."""
+    server = _Server(databases=ALL)
+    plan = SqlPlan(phases=PLAN.phases, marker_db="acore_world")
+    with pytest.raises(InstallerError, match="acore_world"):
+        _gate(server, plan=plan)
+    assert server.asked == []
+
+
+def test_a_gate_over_a_phase_naming_a_database_the_game_does_not_have_is_refused() -> None:
+    server = _Server(databases=ALL)
+    plan = SqlPlan(
+        phases=(SqlPhase(name="world", into="acore_world", files=("x.sql",)),), marker_db="mangos"
+    )
+    with pytest.raises(InstallerError, match="acore_world"):
+        _gate(server, plan=plan)
+    assert server.asked == []
+
+
+def test_a_seeded_username_that_cannot_be_quoted_is_refused_before_any_query() -> None:
+    """The names go into `WHERE username NOT IN ('...')`, which has no escaping.
+
+    Refused at construction rather than in `_player_rows()`, where the raise
+    would have to travel out of `probe()` - and `probe()` may not raise.
+    """
+    server = _Server(databases=ALL)
+    plan = SqlPlan(
+        phases=PLAN.phases,
+        player_data=(
+            PlayerData(db="realmd", table="account", exclude_usernames=("a') OR 1=1 --",)),
+        ),
+        marker_db="mangos",
+    )
+    with pytest.raises(InstallerError, match="cannot be written into SQL safely"):
+        _gate(server, plan=plan)
+    assert server.asked == []
+
+
+def test_the_gate_answers_the_import_gate_protocol() -> None:
+    """`native.ImportGate` is structural and not `runtime_checkable`; mypy checks
+    the family's `gate()` return, and mypy never sees `tests/`."""
+    for name in ("probe", "reset"):
+        declared = inspect.signature(getattr(native.ImportGate, name))
+        actual = inspect.signature(getattr(sqlplan.MarkerGate, name))
+        assert list(actual.parameters) == list(declared.parameters), name
+        assert actual.return_annotation == declared.return_annotation, name
