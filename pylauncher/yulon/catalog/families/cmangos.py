@@ -42,6 +42,7 @@ from typing import ClassVar, cast
 from yulon import docker, platform
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CmangosData, NativeInstall
+from yulon.catalog.families import dockerfile
 from yulon.catalog.installer import InstallerError
 from yulon.catalog.native import (
     BUILD_CANCEL_NOTE,
@@ -111,6 +112,7 @@ class CmangosInstaller(StagedInstaller):
         return (
             Stage("clone-sources", self._clone_sources),
             Stage("db-password", self._db_password, recorded=False),
+            Stage("write-dockerfile", self._write_dockerfile),
             Stage("generate-compose", self.stage_generate_compose),
             Stage("build", self.stage_build, cancel_note=BUILD_CANCEL_NOTE),
             Stage("start-db", self.stage_start_db, recorded=False),
@@ -216,6 +218,89 @@ class CmangosInstaller(StagedInstaller):
             self.entry.id, server_dir, platform_id=self._seams.platform_id
         )
         return f"{project}_{DB_DATA_VOLUME}"
+
+    def _write_dockerfile(self, ctx: StageContext) -> Iterator[str]:
+        """Render `Dockerfile` + `.dockerignore` from the entry's template dir, marker rule applied.
+
+        Marked and identical → nothing written, so the mtime does not move and a
+        later `compose build` sees no change; marked and different → rewritten;
+        unmarked → refused by `dockerfile.write()`, because a Dockerfile this
+        engine did not write is somebody's own build. `.git` is excluded by the
+        template so the ~1 GB build context is the tree and not its history
+        (7.4a records the transfer time).
+
+        **The record is not what skips this stage.** `dockerfile.write()`
+        compares the TEXT it is about to write with the text on disk; `ctx.state`
+        is not read here at all, and a resume that has `write-dockerfile` in
+        `completed` reaches this body exactly like a first run.
+
+        **Why `_tokens(ctx)` goes over WHOLE, secret included** — decided at K.4,
+        2026-09-01, against `bug-checklist.md` §20's recommendation, which was
+        recorded before the fix it argues about existed. §20's case against a
+        by-name refusal was that it is *a guard someone must remember at every
+        render site*. That is not where the refusal landed: `dockerfile.render()`
+        refuses `{{DB_PASSWORD}}` by name and drops the key from the mapping it
+        fills with, INSIDE the renderer, so the next caller of `render()`
+        inherits both without doing anything and §20's own test — if the
+        protection has to be remembered at the next site, it is at the wrong
+        level — is met. Taking the key out here would add a third copy of one
+        rule at a call site, which is the level §19 and §20 both argue against,
+        and it is the copy a later site forgets.
+
+        What that does NOT close, and this stage cannot: a future stage writing
+        into the build context WITHOUT going through `dockerfile.render()` still
+        gets the password in its mapping by default. Splitting `_tokens()` is
+        where that would be answered — a change to contract A6, not to this
+        stage — and narrowing at this one call site would do nothing for it.
+        """
+        native_block = self._native()
+        if native_block.dockerfile_dir is None:
+            raise InstallerError(
+                f"{self.entry.name} names no `dockerfile_dir`, so there is nothing to build "
+                "from. That is a catalog error in the app, not something to fix on this machine."
+            )
+        template_dir = self.installers_root / native_block.dockerfile_dir
+        try:
+            text, ignore = dockerfile.render(template_dir, self._tokens(ctx))
+            written = dockerfile.write(ctx.server_dir, text, ignore)
+        except dockerfile.DockerfileError as exc:
+            # Already the sentence a user reads — `stage_generate_compose` passes
+            # `ComposeGenError` through the same way. A class name in front of
+            # "that file was not written by Yu'lon" would be noise, not evidence.
+            raise InstallerError(str(exc)) from exc
+        except InstallerError:
+            # MUST stay ahead of the broad clause whatever else changes:
+            # `InstallerError` subclasses `RuntimeError` (`installer.py:100`), so
+            # the clause below would otherwise catch a refusal and rewrap its
+            # sentence inside a second one. Nothing in the `try` raises one as
+            # this stands — `_native()` has already succeeded above, so the copy
+            # of that check inside `_tokens()` cannot fire — which is precisely
+            # why the ordering has to be written down rather than remembered.
+            raise
+        except (RuntimeError, OSError) as exc:
+            # Defence in depth: `dockerfile.py` wraps every `OSError` it can raise
+            # today, and `run()` catches `InstallerError` and nothing else, so an
+            # escape from here is a traceback in the user's face instead of a
+            # dialog. The class is NAMED because this arm by definition cannot
+            # know what it caught, and a bare `OSError`'s own words say which
+            # file and which errno but never which kind of failure — the same
+            # reading `sqlplan._read_failure()` took of a read that went wrong.
+            raise InstallerError(
+                f"the Dockerfile for {self.entry.name} could not be written "
+                f"({type(exc).__name__}: {exc})."
+            ) from exc
+        # A line per file, rather than the one collapsed "nothing changed" line
+        # `stage_generate_compose` yields over its three compose files. With two
+        # files the collapsed sentence has to either name one file while being
+        # about both, or go silent about the file that did not move when the
+        # other one did — and that mixed case is a real one here, because the
+        # `.dockerignore` changes far less often than the Dockerfile.
+        done = {path.name for path in written}
+        for name in (dockerfile.DOCKERFILE, dockerfile.DOCKERIGNORE):
+            if name in done:
+                yield f"Wrote {name}"
+            else:
+                yield f"{name} is already exactly what this install needs."
 
     # -- what only the engine knows ---------------------------------------
 
