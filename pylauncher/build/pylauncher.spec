@@ -18,11 +18,15 @@ ROOT = os.path.abspath(os.path.join(HERE, ".."))        # pylauncher/
 
 block_cipher = None
 
-# The install scripts the Phase 3a installer drives (catalog.json install.script
-# paths) plus the helpers they source/install. Since roadmap 6.0 they live in
-# one data-only directory, so the whole tree ships as-is — `archive/guides/`
-# stays out of the bundle entirely (it holds guides, MPQs and DBCs we must not
-# ship, README §3a).
+# `catalog/installers/` is data the app reads at runtime, and it ships as a TREE
+# rather than as a list of files: the families' compose templates
+# (`<game>/native/` and `shared/<family>/`) and the Steam Deck gaming-mode
+# script (`steam-deck/setup-gaming-mode.sh`, added in 7.2 as the shell file the
+# app still carries). Shipping the tree is why 7.3 could add `shared/cmangos/`
+# and the per-game `native/Dockerfile.tmpl` without touching this file, and why
+# 7.2's deletions need no edit here either — a per-file list would have gone
+# stale at both. `archive/guides/` stays out of the bundle entirely (it holds
+# guides, MPQs and DBCs we must not ship, README §3a).
 datas = [
     (os.path.join(ROOT, "manifests"), "manifests"),
     (os.path.join(ROOT, "catalog", "installers"), os.path.join("catalog", "installers")),

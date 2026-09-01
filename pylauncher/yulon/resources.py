@@ -6,9 +6,10 @@ lists as data under its runtime root (`sys._MEIPASS`) with the SAME relative
 names, so both layouts are answered by the functions here and nobody else has
 to know about `_MEIPASS` (style-guide §4: one source of truth for a path).
 
-Install scripts moved out of `archive/guides/<game>/` in roadmap 6.0: that
-directory is for humans (guides, HOWTOs), `catalog/installers/` is data the
-app executes.
+`catalog/installers/` holds what the app reads at install time: the families'
+compose templates and, since 7.2, the Steam Deck gaming-mode script. It was
+split out of `archive/guides/<game>/` in roadmap 6.0 because that directory is
+for humans (guides, HOWTOs) and this one is data.
 """
 
 from __future__ import annotations
@@ -35,5 +36,5 @@ def manifests_dir() -> Path:
 
 
 def installers_dir() -> Path:
-    """`<bundle_root>/catalog/installers` — where `catalog.json`'s scripts resolve from."""
+    """`<bundle_root>/catalog/installers` — where `install.native.templates` resolves from."""
     return bundle_root() / "catalog" / "installers"
