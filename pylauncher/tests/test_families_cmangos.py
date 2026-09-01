@@ -703,10 +703,12 @@ def test_the_seams_carry_every_new_double_through_to_the_engine() -> None:
 
 
 def test_the_bound_stages_run_in_order_and_record_the_recorded_ones(tmp_path: Path) -> None:
-    """End to end over the stages bound so far; K.4-K.7 insert the rest between them.
+    """End to end over the stages bound so far; K.5-K.7 insert the rest between them.
 
     Also drives `lay_sql`/`on_clone`, so the SQL fixtures the later tasks import
-    are proved to land under the source that owns them.
+    are proved to land under the source that owns them — and it is the only
+    test here that reaches `_write_dockerfile` through `run()` rather than by
+    calling the body, so the `Stage` really is wired to the method.
     """
     rec = Recorder()
     server_dir = tmp_path / "srv"
@@ -715,6 +717,7 @@ def test_the_bound_stages_run_in_order_and_record_the_recorded_ones(tmp_path: Pa
     assert [line for line in said if line.startswith("--- ")] == [
         "--- clone-sources",
         "--- db-password",
+        "--- write-dockerfile",
         "--- generate-compose",
         "--- build",
         "--- start-db",
@@ -723,7 +726,14 @@ def test_the_bound_stages_run_in_order_and_record_the_recorded_ones(tmp_path: Pa
     ]
     state = native.read_state(server_dir, valid=engine(rec).stage_names())
     assert state is not None
-    assert state.completed == ("clone-sources", "generate-compose", "build")
+    assert state.completed == ("clone-sources", "write-dockerfile", "generate-compose", "build")
+    # The pair really landed, from the whole install rather than from a direct
+    # call to the body, and the password is in neither: `_tokens()` hands the
+    # secret over and `dockerfile.render()` is what keeps it out of the context.
+    for name in ("Dockerfile", ".dockerignore"):
+        built = (server_dir / name).read_text(encoding="utf-8")
+        assert built.startswith(composegen.GENERATED_MARKER)
+        assert DB_PASSWORD not in built
     # `db-password` ran — the file is there — and is deliberately NOT in the
     # record. The FILE is the evidence a secret exists; a state file that
     # claimed one would survive the file being deleted, and the next run would
@@ -1040,3 +1050,249 @@ def test_db_password_is_a_stage_that_is_never_recorded_and_follows_clone_sources
     assert names.index("db-password") == names.index("clone-sources") + 1
     stage = next(s for s in stages if s.name == "db-password")
     assert stage.recorded is False
+
+
+# -- write-dockerfile -------------------------------------------------------
+
+
+def rooted(root: Path, rec: Recorder, entry: CatalogEntry | None = None) -> CmangosInstaller:
+    """An engine reading its templates from `root` instead of the shipped installers tree.
+
+    `engine()` pins `resources.installers_dir()`, which is what most of this
+    file wants; the write-dockerfile tests that plant a template need the other
+    root, and one that is writable.
+    """
+    return CmangosInstaller(
+        entry if entry is not None else ENTRY,
+        installers_root=root,
+        seams=rec.seams(platform_id=lambda: "linux"),
+    )
+
+
+def plant_templates(root: Path, body: str, ignore: str = "*\n") -> Path:
+    """Lay a marked `Dockerfile.tmpl`/`dockerignore.tmpl` pair where `wow-tbc`'s block points."""
+    assert ENTRY.install.native is not None
+    folder = root / str(ENTRY.install.native.dockerfile_dir)
+    folder.mkdir(parents=True)
+    marker = f"{composegen.GENERATED_MARKER} - do not hand-edit.\n"
+    (folder / "Dockerfile.tmpl").write_text(marker + body, encoding="utf-8", newline="\n")
+    (folder / "dockerignore.tmpl").write_text(marker + ignore, encoding="utf-8", newline="\n")
+    return folder
+
+
+def test_write_dockerfile_renders_the_marked_pair_from_the_entry_template(tmp_path: Path) -> None:
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    said = list(engine(Recorder())._write_dockerfile(context(server_dir)))
+    built = (server_dir / "Dockerfile").read_text(encoding="utf-8")
+    ignore = (server_dir / ".dockerignore").read_text(encoding="utf-8")
+    assert built.startswith(composegen.GENERATED_MARKER)
+    assert ignore.startswith(composegen.GENERATED_MARKER)
+    assert "{{" not in built and "{{" not in ignore
+    assert CMANGOS is not None
+    assert f"-j{CMANGOS.dockerfile.make_jobs}" in built
+    assert f"CMAKE_INSTALL_PREFIX={PurePosixPath(CMANGOS.conf.source_dir).parent}" in built
+    assert ".git" in ignore
+    assert said == ["Wrote Dockerfile", "Wrote .dockerignore"]
+
+
+def test_write_dockerfile_hands_the_renderer_the_whole_mapping_and_no_file_carries_the_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The K.4 decision, asserted as behaviour rather than defended in a docstring.
+
+    Contract A6 is one mapping for the Dockerfile, the conf tables, the SQL and
+    verify alike, and it carries `DB_PASSWORD` because the conf tables need it.
+    The stage hands that mapping over WHOLE, and what keeps the password out of
+    the build context is `dockerfile.render()` — which refuses a template
+    naming the token and drops the key before it fills anything. So this test
+    asserts both halves at once: what goes in still has the secret, and what
+    lands on disk does not.
+
+    Narrowing the mapping HERE was the alternative, and it was rejected: it
+    would put a third copy of the same rule at a call site, which is the level
+    the rule keeps being got wrong at. See `_write_dockerfile`'s docstring.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    seen: list[dict[str, str]] = []
+    real = dockerfile.render
+
+    def spy(template_dir: Path, tokens: dict[str, str]) -> tuple[str, str]:
+        seen.append(dict(tokens))
+        return real(template_dir, tokens)
+
+    monkeypatch.setattr(dockerfile, "render", spy)
+    eng = engine(Recorder())
+    ctx = context(server_dir)
+    list(eng._write_dockerfile(ctx))
+    assert seen == [eng._tokens(ctx)], "the whole mapping, not a copy with keys taken out"
+    assert seen[0]["DB_PASSWORD"] == DB_PASSWORD
+    for name in ("Dockerfile", ".dockerignore"):
+        assert DB_PASSWORD not in (server_dir / name).read_text(encoding="utf-8")
+
+
+def test_write_dockerfile_reports_a_template_that_names_the_secret_without_quoting_it(
+    tmp_path: Path,
+) -> None:
+    """A planted template spelling `{{DB_PASSWORD}}` reaches the user as one sentence.
+
+    The reviewer's bypass (`shared/cmangos/`) proved a location guard is not the
+    protection; this is the same template through THIS stage, so the refusal is
+    shown to survive the trip out to `run()`'s `InstallerError` — and to arrive
+    without the password in it, since that string is what a failure dialog
+    invites the user to paste into a bug report.
+    """
+    root = tmp_path / "installers"
+    plant_templates(root, "FROM debian:12\nENV DB_PASSWORD={{DB_PASSWORD}}\n")
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    with pytest.raises(InstallerError) as refusal:
+        list(rooted(root, Recorder())._write_dockerfile(context(server_dir)))
+    said = str(refusal.value)
+    assert "DB_PASSWORD" in said and "docker history" in said
+    assert DB_PASSWORD not in said
+    assert list(server_dir.iterdir()) == [], "nothing written on a refusal"
+
+
+def test_write_dockerfile_skips_an_identical_rerun_that_no_state_file_recorded(
+    tmp_path: Path,
+) -> None:
+    """The skip comes from the CONTENT on disk, not from the record — proved by withholding it.
+
+    `dockerfile.write()` compares the text it is about to write with the text
+    already there and returns only the paths it actually wrote; this stage
+    consults `ctx.state` for nothing at all. So the re-run is given a context
+    with an EMPTY `completed`, and it still skips: a test that passed
+    `completed=["write-dockerfile"]` here would read as evidence of a
+    state-driven skip that does not exist.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    eng = engine(Recorder())
+    list(eng._write_dockerfile(context(server_dir)))
+    before = {
+        name: (server_dir / name).stat().st_mtime_ns for name in ("Dockerfile", ".dockerignore")
+    }
+    ctx = context(server_dir)
+    assert ctx.state.completed == ()
+    again = list(eng._write_dockerfile(ctx))
+    assert {
+        name: (server_dir / name).stat().st_mtime_ns for name in ("Dockerfile", ".dockerignore")
+    } == before
+    assert again == [
+        "Dockerfile is already exactly what this install needs.",
+        ".dockerignore is already exactly what this install needs.",
+    ]
+
+
+def test_write_dockerfile_says_what_happened_to_both_files_when_only_one_changed(
+    tmp_path: Path,
+) -> None:
+    """Four combinations, two files: no line may be true of the pair while naming one.
+
+    The stage speaks about each file by name every time, rather than collapsing
+    "nothing changed" into one sentence the way `stage_generate_compose` does
+    over three compose files. With two files the collapsed line is either a
+    claim about the Dockerfile that is really about both, or silence about the
+    file that did not move — and this test is the case that shows the
+    difference: the `.dockerignore` is untouched here, and a reader who was
+    told only "Wrote Dockerfile" would have no way to know that.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    eng = engine(Recorder())
+    list(eng._write_dockerfile(context(server_dir)))
+    marker = (server_dir / "Dockerfile").read_text(encoding="utf-8").splitlines()[0]
+    (server_dir / "Dockerfile").write_text(f"{marker}\nFROM scratch\n", encoding="utf-8")
+    ignore_before = (server_dir / ".dockerignore").stat().st_mtime_ns
+    said = list(eng._write_dockerfile(context(server_dir)))
+    assert said == [
+        "Wrote Dockerfile",
+        ".dockerignore is already exactly what this install needs.",
+    ]
+    assert (server_dir / ".dockerignore").stat().st_mtime_ns == ignore_before
+
+
+def test_write_dockerfile_refuses_a_file_it_did_not_write_and_leaves_it_exactly_as_it_was(
+    tmp_path: Path,
+) -> None:
+    """One rule broken: the file in the way carries no generated-file marker."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    (server_dir / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    with pytest.raises(InstallerError, match="Dockerfile") as refusal:
+        list(engine(Recorder())._write_dockerfile(context(server_dir)))
+    assert "not written by Yu'lon" in str(refusal.value)
+    assert (server_dir / "Dockerfile").read_text(encoding="utf-8") == "FROM scratch\n"
+    assert not (server_dir / ".dockerignore").exists(), "the pair is judged before either is laid"
+
+
+def test_write_dockerfile_calls_an_entry_with_no_dockerfile_dir_a_catalog_error(
+    tmp_path: Path,
+) -> None:
+    """`dockerfile_dir` is an unvalidated `str | None`; `wow-wotlk` really ships `None`."""
+    assert ENTRY.install.native is not None
+    blank = ENTRY.model_copy(
+        update={
+            "install": ENTRY.install.model_copy(
+                update={"native": ENTRY.install.native.model_copy(update={"dockerfile_dir": None})}
+            )
+        }
+    )
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    with pytest.raises(InstallerError, match="dockerfile_dir") as refusal:
+        list(rooted(tmp_path, Recorder(), blank)._write_dockerfile(context(server_dir)))
+    assert "catalog error in the app" in str(refusal.value)
+    assert list(server_dir.iterdir()) == []
+
+
+def test_write_dockerfile_passes_the_modules_sentence_through_and_names_the_class_of_anything_else(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two arms, two conventions, both deliberate.
+
+    `DockerfileError` already carries the sentence a user reads, so it is
+    passed through unchanged — `stage_generate_compose` treats
+    `ComposeGenError` the same way. The broad arm is the one that cannot know
+    what it caught, and there `str(exc)` alone is what J.4 rejected next door
+    (`sqlplan._read_failure`): a bare `OSError` says `[Errno 13] ...` with no
+    word for WHICH failure it was, so the class is named and the sentence says
+    what was being attempted. The arm is defence in depth — `dockerfile.py`
+    wraps every `OSError` it can raise today — and it exists because `run()`
+    catches `InstallerError` and nothing else, so an escape is a traceback in
+    the user's face rather than a dialog.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    eng = engine(Recorder())
+
+    def refuse(*args: object, **kwargs: object) -> tuple[Path, ...]:
+        raise dockerfile.DockerfileError("that file is not ours to replace")
+
+    monkeypatch.setattr(dockerfile, "write", refuse)
+    with pytest.raises(InstallerError) as passed_through:
+        list(eng._write_dockerfile(context(server_dir)))
+    assert str(passed_through.value) == "that file is not ours to replace"
+
+    def blow_up(*args: object, **kwargs: object) -> tuple[Path, ...]:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(dockerfile, "write", blow_up)
+    with pytest.raises(InstallerError) as wrapped:
+        list(eng._write_dockerfile(context(server_dir)))
+    assert "OSError" in str(wrapped.value)
+    assert "No space left on device" in str(wrapped.value)
+    assert ENTRY.name in str(wrapped.value)
+
+
+def test_write_dockerfile_is_recorded_and_sits_between_db_password_and_generate_compose() -> None:
+    """Recorded, though the record is not what skips it: the pinned order is the contract."""
+    stages = engine(Recorder()).stages()
+    names = [stage.name for stage in stages]
+    assert names.index("db-password") + 1 == names.index("write-dockerfile")
+    assert names.index("write-dockerfile") + 1 == names.index("generate-compose")
+    stage = next(s for s in stages if s.name == "write-dockerfile")
+    assert stage.recorded is True
+    assert stage.cancel_note == "", "only `build` costs anything to stop (A4)"
