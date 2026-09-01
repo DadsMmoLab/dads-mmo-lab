@@ -693,7 +693,12 @@ def test_fill_is_the_one_public_substitution_and_refuses_a_leftover_token() -> N
     assert composegen.fill("no tokens", {"X": "unused"}) == "no tokens"
     with pytest.raises(composegen.ComposeGenError, match="unfilled compose placeholder"):
         composegen.fill("a {{X}} {{Z}}", {"X": "1"})
-    assert composegen._fill is composegen.fill
+    # The message NAMES the offending token, which G.3's callers depend on: a conf
+    # value, a SQL statement and a ready marker all reach this one refusal from a
+    # file the traceback never mentions, so "something is unfilled" is not enough.
+    with pytest.raises(composegen.ComposeGenError, match="NOPE"):
+        composegen.fill("{{A}} {{NOPE}}", {"A": "1"})
+    assert composegen._fill is composegen.fill, "the old private name is an alias, not a copy"
 
 
 # -- generated-password mode: the secret lives in .env and nowhere else --------
@@ -843,3 +848,184 @@ def test_the_wotlk_render_reproduces_the_committed_snapshot_byte_for_byte() -> N
     assert f"name: yulon-wow-wotlk-{LINUX_INSTALL_ID}\n" in texts[composegen.BASE_FILE]
     assert "${DB_ROOT_PASSWORD:-password}" in texts[composegen.BASE_FILE]
     assert ":z" not in texts[composegen.BASE_FILE]
+
+
+# -- G.3: the per-entry token set ----------------------------------------------
+
+
+def test_entry_tokens_spell_the_entry_once(tmp_path: Path) -> None:
+    """`CORE_DIR` is the in-image install prefix (parent of `conf.source_dir`), never a
+    host path; `MAKE_JOBS` is the dockerfile's number; `LOGS_DB` is the first extra schema."""
+    entry = generated_entry(tmp_path, SAFE_BASE)
+    tokens = composegen.entry_tokens(entry)
+    assert tokens["CORE_DIR"] == "/opt/mangos"
+    assert tokens["MAKE_JOBS"] == "2"
+    assert tokens["DB_HOST"] == entry.containers.db
+    assert tokens["CONTAINER_PREFIX"] == "tbc-"
+    assert tokens["LOGS_DB"] == entry.databases.extra[0]
+    assert set(tokens) == {
+        "DB_IMAGE",
+        "DB_HOST",
+        "DB_USER",
+        "AUTH_DB",
+        "WORLD_DB",
+        "CHAR_DB",
+        "LOGS_DB",
+        "CONTAINER_PREFIX",
+        "CORE_DIR",
+        "CLIENT_BUILD",
+        "MAKE_JOBS",
+    }
+
+
+def test_logs_db_is_omitted_not_blanked_without_an_extra_schema(tmp_path: Path) -> None:
+    entry = generated_entry(tmp_path, SAFE_BASE)
+    no_logs = entry.model_copy(
+        update={"databases": entry.databases.model_copy(update={"extra": ()})}
+    )
+    tokens = composegen.entry_tokens(no_logs)
+    assert "LOGS_DB" not in tokens
+    with pytest.raises(composegen.ComposeGenError, match="LOGS_DB"):
+        composegen.fill("{{LOGS_DB}}", tokens)
+
+
+def test_the_family_tokens_come_from_the_entry(tmp_path: Path) -> None:
+    """DB host, user, schema names, container prefix and client build are catalog facts."""
+    templates = tmp_path / "native"
+    templates.mkdir()
+    (templates / "base.yml.tmpl").write_text(
+        "name: {{PROJECT_NAME}}\n"
+        "db: {{DB_IMAGE}} {{DB_HOST}} {{DB_USER}}\n"
+        "schemas: {{AUTH_DB}} {{WORLD_DB}} {{CHAR_DB}} {{LOGS_DB}}\n"
+        "prefix: {{CONTAINER_PREFIX}}db\n"
+        "build: {{CLIENT_BUILD}}\n",
+        encoding="utf-8",
+    )
+    (templates / "override.yml.tmpl").write_text("services: {}\n", encoding="utf-8")
+    (templates / "build.yml.tmpl").write_text("services:\n", encoding="utf-8")
+    plan = composegen.render(
+        entry_with_templates("native"),  # type: ignore[arg-type]
+        tmp_path / "wow",
+        templates_root=tmp_path,
+        platform_id=lambda: "linux",
+    )
+    native = ENTRY.install.native
+    assert native is not None
+    assert f"db: {native.db.image} {ENTRY.containers.db} {native.db.user}" in plan.base
+    assert "schemas: acore_auth acore_world acore_characters acore_playerbots" in plan.base
+    # `ac-db` is this synthetic template's own `db` behind the real prefix, NOT a
+    # container WotLK has (its three are ac-database/-authserver/-worldserver). What
+    # the prefix must rebuild for a real entry is asserted over the shipped catalog by
+    # `test_the_container_prefix_rebuilds_the_container_names_of_every_shipped_entry`.
+    assert "prefix: ac-db" in plan.base, "the common prefix of the three container names"
+    assert f"build: {ENTRY.client.build}" in plan.base
+
+
+def test_tokens_a_family_does_not_have_stay_unfilled_and_therefore_loud(tmp_path: Path) -> None:
+    """WotLK has no `cmangos` block, so `MAKE_JOBS`/`CORE_DIR` do not exist for it.
+
+    Not filled with "" — a blank `make -j` or a blank mount path is a silent literal — but
+    left for `fill()` to refuse.
+
+    The `render()` half of this alone was vacuous: before `entry_tokens()` existed,
+    `{{MAKE_JOBS}}` was already unfilled and `fill()` already refused it, so a green
+    result proved the catch-all fires and said nothing about the family guard. The
+    first two assertions are the real check — they read the dict `entry_tokens()`
+    returns for an AzerothCore entry and pin its own `if native.cmangos is not None`.
+    """
+    assert ENTRY.install.native is not None
+    assert ENTRY.install.native.cmangos is None, "WotLK is the AzerothCore entry here"
+    tokens = composegen.entry_tokens(ENTRY)
+    assert "MAKE_JOBS" not in tokens
+    assert "CORE_DIR" not in tokens
+
+    templates = tmp_path / "native"
+    templates.mkdir()
+    (templates / "base.yml.tmpl").write_text("jobs: {{MAKE_JOBS}}\n", encoding="utf-8")
+    (templates / "override.yml.tmpl").write_text("services: {}\n", encoding="utf-8")
+    (templates / "build.yml.tmpl").write_text("services:\n", encoding="utf-8")
+    with pytest.raises(composegen.ComposeGenError, match="MAKE_JOBS"):
+        composegen.render(
+            entry_with_templates("native"),  # type: ignore[arg-type]
+            tmp_path / "wow",
+            templates_root=tmp_path,
+            platform_id=lambda: "linux",
+        )
+
+
+# -- G.3: the container prefix rebuilds the names it is derived from ----------
+
+
+@pytest.mark.parametrize(
+    "entry", load_catalog().games, ids=[game.id for game in load_catalog().games]
+)
+def test_the_container_prefix_rebuilds_the_container_names_of_every_shipped_entry(
+    entry: CatalogEntry,
+) -> None:
+    """The invariant `_container_prefix()`'s docstring promises, over the real catalog.
+
+    `{{CONTAINER_PREFIX}}` exists so a shared CMaNGOS template can write
+    `container_name: {{CONTAINER_PREFIX}}db` for service `db` and get the entry's own
+    `containers.db`. Nothing downstream re-checks that: `fill()` refuses an unfilled
+    placeholder, never a filled-but-wrong one, so a catalog entry that broke the naming
+    convention would render a compose file naming a container no service owns and the
+    first report would be `docker compose up`.
+
+    Gated on `containers.services`, NOT on the presence of a native block: the block is
+    what makes the token reachable through `render()`, but today only WotLK has one and
+    only the CMaNGOS entries follow the prefix convention, so a native-gated test would
+    skip every entry that this invariant is about and pass while proving nothing.
+    `containers.services` is exactly the list of suffixes the templates put the prefix
+    in front of, so the entries that declare it are the entries the invariant covers.
+    """
+    services = entry.containers.services
+    if services is None:
+        pytest.skip(
+            f"{entry.id} does not declare containers.services, so each container is named "
+            "after its own service (AzerothCore) and there is no suffix to rebuild from"
+        )
+    prefix = composegen._container_prefix(entry)
+    assert prefix, f"{entry.id} has no shared container prefix at all"
+    rebuilt = tuple(prefix + service for service in services)
+    assert rebuilt == (entry.containers.db, entry.containers.auth, entry.containers.world), (
+        f"{entry.id}'s templates would write {rebuilt} where its containers are "
+        f"{(entry.containers.db, entry.containers.auth, entry.containers.world)}"
+    )
+
+
+def test_the_shipped_catalog_still_has_entries_the_prefix_invariant_covers() -> None:
+    """The skip above must not be able to empty the invariant out without anyone noticing."""
+    covered = [game.id for game in load_catalog().games if game.containers.services is not None]
+    assert covered, (
+        "no shipped entry declares containers.services, so the container-prefix invariant "
+        "skipped every entry and asserted nothing"
+    )
+
+
+def test_a_container_prefix_that_cannot_be_derived_is_refused_not_guessed() -> None:
+    """`os.path.commonprefix` answers a plausible wrong string; `_container_prefix()` must not.
+
+    The three shapes the reviewer produced by running it: names sharing no first
+    character (`""`), one name a literal prefix of the others (`"db"`, so
+    `{{CONTAINER_PREFIX}}db` renders `dbdb`), and an accidental character-wise prefix
+    that eats the separator (`"abc"`). None of them raise on their own.
+    """
+    tbc = load_catalog().get("wow-tbc")
+    assert tbc.containers.services == ("db", "realmd", "mangosd")
+
+    def with_containers(db: str, auth: str, world: str) -> CatalogEntry:
+        return tbc.model_copy(
+            update={
+                "containers": tbc.containers.model_copy(
+                    update={"db": db, "auth": auth, "world": world}
+                )
+            }
+        )
+
+    with pytest.raises(composegen.ComposeGenError, match="share no common prefix"):
+        composegen._container_prefix(with_containers("mysql", "authserver", "worldserver"))
+    with pytest.raises(composegen.ComposeGenError, match="rebuilds dbdb"):
+        composegen._container_prefix(with_containers("db", "dbauth", "dbworld"))
+    with pytest.raises(composegen.ComposeGenError, match="rebuilds abcdb"):
+        composegen._container_prefix(with_containers("abc-db", "abcd-realmd", "abcx-mangosd"))
+    assert composegen._container_prefix(with_containers("x-db", "x-realmd", "x-mangosd")) == "x-"
