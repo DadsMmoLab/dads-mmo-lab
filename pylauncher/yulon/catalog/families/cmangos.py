@@ -32,9 +32,11 @@ the tuple is whole. K.8 pins the equality.
 
 from __future__ import annotations
 
+import os
 import queue
 import threading
 from collections.abc import Callable, Iterator
+from pathlib import Path
 from typing import ClassVar, cast
 
 from yulon import docker, platform
@@ -66,6 +68,24 @@ about exactly that name. `test_families_cmangos.py` reads all three constants
 back out of that template so the two cannot drift apart silently.
 """
 
+SECRET_FILE_MODE = 0o600
+"""The mode `db-password` creates `.db_password` with: the password itself is in it.
+
+**Deliberately not `conf.CONF_MODE`, which is the same number for a different
+reason.** That constant's docstring says it is only correct while the images run
+as root, because the conf files it governs are written by the host user and read
+by the emulator INSIDE the container; the day a `USER` lands in a Dockerfile that
+number has to change or the server cannot read its own config. Nothing reads
+`.db_password` from a container — it is a host-only file that the family reads
+back in `resolve_secrets()` and spells into `.env` — so a widening made for the
+container's sake must not reach this file. Sharing one constant would make that
+widening silent and invisible; two constants naming each other is the cheaper
+half of that trade.
+
+What the number actually buys is not the same on every platform this app ships
+to — see `_write_secret`, which measured it.
+"""
+
 
 class CmangosInstaller(StagedInstaller):
     """Install a CMaNGOS server: clone, Dockerfile, build, extract, conf, SQL plan, start."""
@@ -90,6 +110,7 @@ class CmangosInstaller(StagedInstaller):
         """The family's stage tuple, in `STAGE_NAMES` order."""
         return (
             Stage("clone-sources", self._clone_sources),
+            Stage("db-password", self._db_password, recorded=False),
             Stage("generate-compose", self.stage_generate_compose),
             Stage("build", self.stage_build, cancel_note=BUILD_CANCEL_NOTE),
             Stage("start-db", self.stage_start_db, recorded=False),
@@ -110,6 +131,91 @@ class CmangosInstaller(StagedInstaller):
         yield from self.stage_clone_sources(
             ctx, self.entry.emulator.sources, recorded_as="clone-sources"
         )
+
+    def _db_password(self, ctx: StageContext) -> Iterator[str]:
+        """Persist the generated secret, or refuse to replace one the database already has.
+
+        The spine resolved `ctx.secrets` before the stages ran — reading the
+        file when it exists, minting `prefix + token_hex(8)` otherwise — so
+        this stage's job is narrow: the evidence is the FILE (never recorded in
+        the state file), and a missing file next to an existing `db-data`
+        volume is a refusal. That volume was initialised with the password the
+        file held; writing a new one would leave every later stage unable to
+        log in, and the scripts' answer to that (wipe the volume silently) is
+        exactly what the design rejects.
+
+        Three outcomes, kept apart by `docker.volume_exists()`, which raises
+        rather than guessing: the volume exists (refuse), no such volume (safe
+        to write), Docker would not say (refuse). Collapsing the third into the
+        second is the destructive edit, and it is the one that looks like
+        robustness.
+
+        The refusal names `docker volume rm` rather than a button. Checked
+        2026-09-01: the Server tab's only removal action is "Stop and remove
+        containers…", `docker.remove_staged()` passes no `-v` on purpose, and
+        its own armed warning tells the user the volume is kept — so nothing in
+        this app deletes a named volume, and sending the user there would send
+        them round a loop that ends at this same message.
+        """
+        plan = self.entry.install.password
+        if plan.mode != "generated":
+            yield "This server uses a fixed database password; nothing to write."
+            return
+        if plan.file is None:
+            # `PasswordPlan`'s validator refuses this shape and `resolve_secrets()`
+            # refuses it again before stage 1; this keeps the type honest, and says
+            # which defect it is rather than reporting a broken catalog as a design
+            # choice the user should go looking for.
+            raise InstallerError(
+                f"{self.entry.name}'s catalog entry says its database password is generated "
+                "but names no file to keep it in. That is a catalog error in the app, not "
+                "something to fix on this machine."
+            )
+        path = ctx.server_dir / plan.file
+        if path.is_file():
+            yield f"The database password is already in {plan.file}; keeping it."
+            return
+        volume = self._db_volume(ctx.server_dir)
+        try:
+            exists = self._seams.volume_exists(volume)
+        except docker.DockerCommandError as exc:
+            # `DockerCliMissingError` subclasses this and lands here too, on
+            # purpose: preflight already refused a machine with no Docker, the
+            # outcome is identical (nothing is written), and `exc` carries that
+            # error's own install-Docker help verbatim, which is the actionable
+            # half. This module raises no such error of its own — deliberately
+            # not spelling the constant, because `test_platform.py`'s
+            # `test_the_missing_cli_help_names_every_module_that_raises_it`
+            # finds raisers by searching module TEXT for the name, so a mention
+            # here would be read as a raise.
+            raise InstallerError(
+                f"Docker would not say whether the database volume {volume} exists ({exc}), so "
+                "this install cannot prove a new password is safe to write. Nothing was written."
+            ) from exc
+        if exists:
+            raise InstallerError(
+                f"{path} is gone, but this install's database volume {volume} still exists and "
+                "was created with the password that file held. A new password would lock this "
+                f"install out of its own database, so nothing was written. Put {plan.file} back "
+                "if you have a copy of it. If it is lost, that database cannot be opened again: "
+                f"`docker volume rm {volume}` deletes it, and every character in it, so this "
+                "install can start over. Removing the containers does not delete it."
+            )
+        try:
+            _write_secret(path, ctx.secrets.db_password)
+        except OSError as exc:
+            raise InstallerError(f"{path} could not be written: {exc}") from exc
+        yield (
+            f"Wrote this install's database password to {plan.file}. Back that file up: the "
+            f"database in {volume} cannot be opened without it."
+        )
+
+    def _db_volume(self, server_dir: Path) -> str:
+        """`<compose project>_<volume key>` — what `docker volume ls` shows for this install."""
+        project = composegen.project_name(
+            self.entry.id, server_dir, platform_id=self._seams.platform_id
+        )
+        return f"{project}_{DB_DATA_VOLUME}"
 
     # -- what only the engine knows ---------------------------------------
 
@@ -266,3 +372,37 @@ class CmangosInstaller(StagedInstaller):
             if isinstance(exc, InstallerError):
                 raise exc
             raise InstallerError(f"the step could not be run: {exc}") from exc
+
+
+def _write_secret(path: Path, value: str) -> None:
+    """Write the password, asking for `SECRET_FILE_MODE` at creation. One trailing newline.
+
+    The newline is a contract: `resolve_secrets()` reads this file back with
+    `.strip()` (A8), and a file the user opened in Notepad and saved gets one
+    whether we write it or not.
+
+    **What the mode buys, measured rather than assumed** (PKGAME-LAPTOP,
+    Windows 11 26200, CPython 3.13.14, 2026-09-01): on POSIX the mode is
+    applied by `open(2)` itself, so the file is owner-only from its first byte
+    and never has a window at 0644. On Windows it does nothing at all — the
+    file lands at `st_mode 0o666`, byte-identical to a plain `open(path, "w")`,
+    and `icacls` shows only the ACEs inherited from the parent folder; under a
+    folder granting `BUILTIN\\Users:(RX)` the secret is readable by every local
+    account. A following `os.chmod(path, 0o600)` changes neither, so no
+    rearrangement of these two calls buys anything there.
+
+    So this is a POSIX guarantee and a Windows no-op, and the sentence the
+    stage yields does not promise otherwise.
+    `test_the_secret_file_is_owner_only_on_posix_and_only_inherits_the_folder_acl_on_windows`
+    pins both halves; the Windows half goes red if that ever changes.
+
+    **Open: Windows ACLs.** Making this owner-only on Windows means an explicit
+    DACL (`pywin32`, or `icacls /inheritance:r /grant:r`) on a file the user may
+    move, copy or restore from a backup — a new dependency or a new subprocess,
+    on every path that touches the file. Not attempted here; it is a decision
+    about the app's Windows security posture, not about this stage, and
+    `conf.py` writes the same password into `*.conf` under the same limitation.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, SECRET_FILE_MODE)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(value + "\n")
