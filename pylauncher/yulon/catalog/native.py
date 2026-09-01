@@ -61,7 +61,6 @@ import time
 from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
-from enum import Enum
 from pathlib import Path
 from secrets import token_hex
 from typing import ClassVar, Protocol
@@ -79,6 +78,7 @@ from yulon.catalog.installer import (
     unsupported_platform_message,
 )
 from yulon.log import get_logger
+from yulon.ownership import Ownership as Ownership
 
 logger = get_logger(__name__)
 
@@ -231,27 +231,10 @@ class InstallState:
         return stage in self.completed
 
 
-class Ownership(Enum):
-    """Whose folder is this? Three answers, because a bool has nowhere to put the third.
-
-    `UNCLAIMED` — no state file. Nobody has claimed the folder; whatever else
-    is in it is judged by the guards that look at the disk.
-
-    `OWNED` — a state file that PARSED and that names this install: the same
-    `install_id` (the hash of this absolute path), the same `game_id`, and a
-    `family` that does not contradict this one.
-
-    `UNKNOWN` — a state file is there and could not be turned into any of that:
-    truncated by a crash mid-write, damaged by hand, written by a version this
-    one cannot read, or an unrelated file that happens to sit at the reserved
-    name. This is the case where the engine knows LEAST, and it must never be
-    the case where it acts most freely. It fails closed everywhere it is
-    reached; see `StagedInstaller.claimed_this_folder()` for what that bought.
-    """
-
-    UNCLAIMED = "unclaimed"
-    OWNED = "owned"
-    UNKNOWN = "unknown"
+# `Ownership` is defined in `yulon.ownership` and re-exported here, unchanged,
+# because `apply.py` needs the same three answers for a `modules/<id>` clone and
+# must not import this engine to get them. Every existing `native.Ownership`
+# reference still resolves; only the definition moved.
 
 
 @dataclass(frozen=True)
@@ -1117,7 +1100,7 @@ class StagedInstaller:
             dest = ctx.server_dir / source.dest
             has_git = (dest / ".git").is_dir()
             existing = self._remote_of(dest)
-            if existing is not None and not _same_repo(existing, source.url):
+            if existing is not None and not git.same_repo(existing, source.url):
                 raise InstallerError(
                     f"{dest} is a checkout of {existing}, not of {source.url}. Nothing was "
                     "changed."
@@ -1608,27 +1591,6 @@ def _cancelled_message(what: str, note: str = "") -> str:
     beyond `OPENING_NOTE`, which the user was already told.
     """
     return f"{what} was stopped. {note}".rstrip()
-
-
-def _same_repo(existing: str, wanted: str) -> bool:
-    """Do two clone URLs name the same repository?
-
-    Compared loosely on purpose: `https://github.com/x/y.git`,
-    `https://github.com/x/y` and `git@github.com:x/y.git` are one repository,
-    and refusing an install because git wrote the URL back with a `.git` on it
-    would be a refusal about punctuation.
-    """
-    return _repo_key(existing) == _repo_key(wanted)
-
-
-def _repo_key(url: str) -> str:
-    text = url.strip().rstrip("/")
-    if text.endswith(".git"):
-        text = text[: -len(".git")]
-    for prefix in ("https://", "http://", "ssh://", "git@"):
-        if text.startswith(prefix):
-            text = text[len(prefix) :]
-    return text.replace(":", "/").lower()
 
 
 def _git_remote_url(dest: Path) -> str | None:

@@ -18,19 +18,22 @@ that is the controller's call (call down / signal up, §5).
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Literal, Protocol
 
 from yulon import platform, runner
-from yulon.git import CloneSpec, Git, GitError, RunnerGit
+from yulon.catalog import composegen
+from yulon.git import CloneSpec, Git, GitError, RemoteReader, RunnerGit, same_repo
 from yulon.log import get_logger
 from yulon.manifest import Db, Deploy, Manifest, ManifestType, Patch, SqlStep, When
+from yulon.ownership import Ownership
 
 logger = get_logger(__name__)
 
@@ -64,6 +67,84 @@ _CONF_KEY_WRITE_SUFFIXES = (".conf",)
 
 class ApplyError(RuntimeError):
     """A step failed in a way that must stop the run (missing template value, git failure, ...)."""
+
+
+CLAIM_FILE = ".yulon-clone.json"
+"""What this app writes INSIDE a clone it made, so it can recognise it later.
+
+The evidence half of `Ownership`. It is written after a clone succeeds and read
+before the next one starts, and it is the only thing that separates "this app's
+own `modules/mod-x`" from "a `modules/mod-x` the user put there by hand" — the
+convention every AzerothCore user follows, at a path this app picks from a
+catalog id it did not ask the user about.
+
+Inside the clone rather than beside it for three reasons: `modules/` is scanned
+by AzerothCore's CMake and a sibling of the module directories would be a new
+kind of entry there; `git reset --hard` does not remove untracked files, so the
+claim survives the very update path it authorises; and `remove()` deleting the
+clone deletes the claim with it, with no second place to forget about. It joins
+`include.sh` as the second file this engine writes into a clone.
+"""
+
+CLAIM_VERSION = 1
+"""Bumped only for a change this version could not read. A reader that does not
+recognise the version answers `UNKNOWN`, which refuses — never `UNCLAIMED`,
+which would let a newer app's clone be treated as a stranger's."""
+
+
+def read_clone_claim(clone: Path, *, item_id: str) -> Ownership:
+    """Did THIS app clone THIS item into THIS folder? The three-answer version.
+
+    Deliberately a copy of `catalog.native.read_claim()`'s SHAPE and none of its
+    contents, because the two claims prove different things. There, one record
+    covers a whole server install and the clone stages corroborate it against
+    `git remote get-url origin`, since the record says nothing about any
+    particular sub-checkout. Here the record is per-clone: it is inside the very
+    directory in question and names the item whose catalog id chose the path, so
+    it is the corroboration rather than something needing it.
+
+    `UNKNOWN` for a file that will not open, will not parse, is not an object,
+    carries a version this code does not know, or names another folder or
+    another item. All of those are "there is something here and this app cannot
+    read it as its own", and the native engine paid for treating that as absent:
+    a corrupt state file made it MORE confident than a missing one, and
+    `git reset --hard` ran over a user's checkout. Not repeated here.
+
+    The identity is `composegen.install_id()` over the clone's own path — the
+    same normalisation (absolute, forward slashes, case-folded on Windows) the
+    install engine uses on a server dir — so a COPIED server folder carries
+    claims that describe directories somewhere else, and answers `UNKNOWN`
+    rather than authorising a reset inside the copy.
+    """
+    path = clone / CLAIM_FILE
+    if not path.is_file():
+        return Ownership.UNCLAIMED
+    try:
+        with path.open(encoding="utf-8") as fh:
+            parsed = json.load(fh)
+    except (OSError, ValueError) as exc:
+        logger.warning(f"{path} could not be read, so this folder is not treated as ours: {exc}")
+        return Ownership.UNKNOWN
+    if not isinstance(parsed, dict) or parsed.get("version") != CLAIM_VERSION:
+        return Ownership.UNKNOWN
+    if parsed.get("item_id") != item_id or parsed.get("clone_id") != composegen.install_id(clone):
+        return Ownership.UNKNOWN
+    return Ownership.OWNED
+
+
+def write_clone_claim(clone: Path, *, item_id: str, url: str) -> None:
+    """Record that this app put `item_id`'s clone here. Raises `OSError` if it cannot.
+
+    `url` is written for a human reading the file; it is never what ownership is
+    decided on, because a URL is what everybody with the same catalog entry has.
+    """
+    payload = {
+        "version": CLAIM_VERSION,
+        "item_id": item_id,
+        "clone_id": composegen.install_id(clone),
+        "url": url,
+    }
+    (clone / CLAIM_FILE).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
 _CLIENT_NAMES: dict[str, tuple[str, ...]] = {
@@ -425,12 +506,28 @@ class Applier:
         sql: SqlRunner | None = None,
         client_dir: Path | None = None,
         dbc: DbcCopier | None = None,
+        remote_url: Callable[[Path], str | None] | None = None,
     ) -> None:
         self.server_dir = server_dir
         self.git: Git = git if git is not None else RunnerGit()
         self.sql = sql
         self.client_dir = client_dir
         self.dbc = dbc
+        # Whose checkout is already at the clone path? Asked through the SAME
+        # git the clones go through whenever that git can answer (`RunnerGit`
+        # and the containerized one both can), because a machine with no host
+        # git must not get a `None` here — `None` is a refusal, and a refusal
+        # for the wrong reason is still a wrong answer. A `Git` that only
+        # clones falls back to the host CLI, which is what a fake wants.
+        self.remote_url: Callable[[Path], str | None] = (
+            remote_url
+            if remote_url is not None
+            else (
+                self.git.remote_url
+                if isinstance(self.git, RemoteReader)
+                else RunnerGit().remote_url
+            )
+        )
 
     # -- public ------------------------------------------------------------
 
@@ -444,6 +541,7 @@ class Applier:
         log = _Log()
         clone = self.clone_dir(manifest)
         if manifest.source is not None:
+            self._require_own_clone(manifest, clone)
             try:
                 self.git.clone(
                     CloneSpec(
@@ -456,6 +554,17 @@ class Applier:
             except GitError as exc:  # one failure vocabulary for the whole applier
                 raise ApplyError(str(exc)) from exc
             log.done.append(f"clone {manifest.source.url} → {_rel(self.server_dir, clone)}")
+            try:
+                write_clone_claim(clone, item_id=manifest.id, url=manifest.source.url)
+            except OSError as exc:
+                # Never fatal — the clone is on disk and the rest of the install
+                # is what the user asked for — but never silent either: without
+                # the claim the NEXT install of this item is refused, and the
+                # report is the only place that can say so in advance.
+                log.skipped.append(
+                    f"{CLAIM_FILE}: could not be written ({exc}), so this app will not "
+                    f"recognise {_rel(self.server_dir, clone)} as its own next time"
+                )
             if manifest.type == "module":
                 # CMake's CollectSourceFiles() silently skips a module without include.sh.
                 include = clone / "include.sh"
@@ -475,6 +584,15 @@ class Applier:
         vals = self._values(manifest, values)
         log = _Log()
         clone = self.clone_dir(manifest)
+        if clone.exists() and any(p.in_clone and p.when == "configure" for p in manifest.patches):
+            # The third writer through `clone_dir()`, and the smallest: an
+            # `in_clone` patch edits a file INSIDE the checkout. It cannot
+            # delete anything, but it is still this app rewriting a line in a
+            # file it did not put there, so it asks the same question. Gated on
+            # the manifest actually having such a patch: a refusal about a
+            # folder this run would never touch would be a refusal about
+            # nothing.
+            self._require_own_clone(manifest, clone)
         self._patches(manifest, clone, vals, "configure", log)
         self._sql(manifest, clone, vals, "configure", log)
         self._conf(manifest, clone, vals, log)
@@ -485,6 +603,13 @@ class Applier:
         vals = self._values(manifest, values)
         log = _Log()
         clone = self.clone_dir(manifest)
+        if clone.exists():
+            # Before the SQL, not next to the `rmtree` below: a refusal must
+            # leave the install exactly as it was, and remove-time SQL is not
+            # undoable. The same guard as `install()`, because the exposure is
+            # the same one and worse — that `rmtree` needs no git seam to
+            # destroy a directory whose only crime is matching a catalog id.
+            self._require_own_clone(manifest, clone)
         self._patches(manifest, clone, vals, "remove", log)
         self._sql(manifest, clone, vals, "remove", log)
         for step in manifest.deploy:
@@ -493,6 +618,96 @@ class Applier:
             shutil.rmtree(clone)
             log.done.append(f"rm -r {_rel(self.server_dir, clone)}")
         return self._report("remove", manifest, log)
+
+    # -- the guard ---------------------------------------------------------
+
+    def _require_own_clone(self, manifest: Manifest, clone: Path) -> None:
+        """Refuse `modules/<id>` unless this app can show the folder is its own.
+
+        Both destructive paths go through here, and neither had anything before
+        (three reviewers, 2026-08-31). `install()` handed the path straight to
+        the clone seam, which `shutil.rmtree`s a destination that is not a git
+        checkout and runs `git fetch` + `git reset --hard FETCH_HEAD` on one
+        that is, without ever comparing its origin; `remove()` deleted it
+        outright. The path is not obscure: it is `modules/<id>` under the
+        server dir, which is exactly where an AzerothCore user installs a
+        module by hand, and the id comes from a catalog this app chose. The
+        shipped Modules tab binds "Install selected" to `install()` directly,
+        so one press over a hand-made `modules/mod-x` was enough.
+
+        The order is the order of the evidence, cheapest and most certain
+        first, and nothing is written before all of it is in:
+
+        0. Nothing at the path: the ordinary first install, and the only case
+           with nothing to lose. Allowed without asking git anything.
+        1. Not a directory — a FILE at the clone path is somebody's,
+           and neither `rmtree` nor a clone may decide what it was.
+        2. A directory with no `.git`: hand-installed content, or a tarball
+           unpacked there. Refused if it holds anything, allowed if it is an
+           empty folder somebody made — there is nothing there to lose.
+        3. A checkout this app's own claim vouches for: allowed, and this is
+           the ONLY way through. `read_clone_claim()` says why the claim is
+           enough on its own here, where `catalog.native` needs its record
+           corroborated by `origin`.
+        4. Everything else is a checkout this app did not make. `origin` is
+           asked only to say WHICH refusal — a different repository, this
+           repository, or a git that would not answer — because every branch
+           of it refuses. That is the divergence from
+           `native.refuse_unowned_checkout()`, which can be reached with the
+           question already answered by its caller.
+
+        `UNKNOWN` is refused with its own sentence, per `Ownership`: a damaged
+        claim means this app knows LESS than an absent one, so it must not act
+        more freely.
+        """
+        if not clone.exists():
+            return
+        if not clone.is_dir():
+            raise ApplyError(
+                f"{_rel(self.server_dir, clone)} is a file, not this app's clone of "
+                f"{manifest.id}. Nothing was changed. Move it aside and try again."
+            )
+        url = manifest.source.url if manifest.source is not None else ""
+        if not (clone / ".git").is_dir():
+            leftovers = sorted(item.name for item in clone.iterdir())
+            if leftovers:
+                raise ApplyError(
+                    f"{_rel(self.server_dir, clone)} already has files in it and was not put "
+                    f"there by this app ({', '.join(leftovers[:5])}). Nothing was changed. "
+                    f"Move that folder aside — or delete it yourself if you no longer want it — "
+                    f"and install {manifest.id} again into an empty one."
+                )
+            return
+        owned = read_clone_claim(clone, item_id=manifest.id)
+        if owned is Ownership.OWNED:
+            return
+        if owned is Ownership.UNKNOWN:
+            raise ApplyError(
+                f"{_rel(self.server_dir, clone)} holds a {CLAIM_FILE} this app cannot read as "
+                f"its own, so it cannot tell whether that checkout is its own {manifest.id} or "
+                f"your work. Nothing was changed. Delete that file if it is left over from an "
+                f"install that was interrupted, or move the folder aside and install again."
+            )
+        remote = self.remote_url(clone)
+        if remote is None:
+            raise ApplyError(
+                f"{_rel(self.server_dir, clone)} is a git checkout, but git would not say what "
+                f"it is a checkout of, so nothing was changed. Move that folder aside and "
+                f"install {manifest.id} again."
+            )
+        if url and not same_repo(remote, url):
+            raise ApplyError(
+                f"{_rel(self.server_dir, clone)} is a checkout of {remote}, not of {url}. "
+                f"Nothing was changed. Move that folder aside and install {manifest.id} again."
+            )
+        raise ApplyError(
+            f"{_rel(self.server_dir, clone)} is already a git checkout and there is no record "
+            f"here of one this app made. Continuing would run `git fetch` and `git reset "
+            f"--hard` over it, which throws away anything you have changed there, so nothing "
+            f"was touched. Move that folder aside — a module clone holds nothing but the "
+            f"module, so re-cloning it costs only the download — and install {manifest.id} "
+            f"again."
+        )
 
     # -- steps -------------------------------------------------------------
 

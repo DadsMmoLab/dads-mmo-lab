@@ -35,7 +35,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from yulon import platform, runner
 from yulon.log import get_logger
@@ -256,11 +256,50 @@ class Git(Protocol):
     def clone(self, spec: CloneSpec) -> None: ...
 
 
-# `remote_url()` is deliberately NOT on that Protocol. `apply.py` — the only
-# other user of this seam — never asks the question, and widening a Protocol
+# `remote_url()` is still deliberately NOT on that Protocol: widening `Git`
 # breaks every fake that implements it for a capability the fake's caller does
-# not use. The install engine asks for the concrete implementation's method
-# through its own seam instead (roadmap 6.2).
+# not use. `apply.py` DID start asking the question — a clone into
+# `modules/<id>` has to know whose repository is already sitting there — so the
+# question got its own one-method Protocol below rather than a wider `Git`.
+
+
+@runtime_checkable
+class RemoteReader(Protocol):
+    """ "What is this checkout a checkout of?" — the seam the ownership guards ask.
+
+    Both concrete implementations here satisfy it, so a caller handed a real
+    `Git` can narrow to it with `isinstance()` and get the SAME transport its
+    clones use (host git, or the containerized one on a machine with no git).
+    A fake that only clones does not satisfy it, which is the point: the caller
+    then falls back to a default it names itself instead of crashing.
+    """
+
+    def remote_url(self, dest: Path) -> str | None: ...
+
+
+def same_repo(existing: str, wanted: str) -> bool:
+    """Do two clone URLs name the same repository?
+
+    Compared loosely on purpose: `https://github.com/x/y.git`,
+    `https://github.com/x/y` and `git@github.com:x/y.git` are one repository,
+    and refusing an install because git wrote the URL back with a `.git` on it
+    would be a refusal about punctuation.
+
+    Lives here rather than in either engine because both of them refuse on the
+    answer: `catalog/native.py` for a server source, `apply.py` for a module
+    clone (roadmap 2.3).
+    """
+    return _repo_key(existing) == _repo_key(wanted)
+
+
+def _repo_key(url: str) -> str:
+    text = url.strip().rstrip("/")
+    if text.endswith(".git"):
+        text = text[: -len(".git")]
+    for prefix in ("https://", "http://", "ssh://", "git@"):
+        if text.startswith(prefix):
+            text = text[len(prefix) :]
+    return text.replace(":", "/").lower()
 
 
 def _depth_args(depth: int | None) -> list[str]:
