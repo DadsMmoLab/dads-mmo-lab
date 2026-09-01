@@ -1117,6 +1117,62 @@ Done here as **#143**, and the branch is green verified by SHA (run `33538836096
 `headSha == 18cbacdd`) — by SHA because `gh pr checks` will happily show a green run that predates
 the current head.
 
+### 19. The database password reaches the install log and a user-facing error — 2026-09-01, OPEN
+
+**Reproduced end to end, in already-merged code.** Not found by a test; found by a reviewer asking
+where a docstring's authority came from.
+
+`catalog.json`'s **Tortoise** entry (~line 958) ships an SQL phase whose statements include
+`CREATE USER IF NOT EXISTS '{{DB_USER}}'@'%' IDENTIFIED BY '{{DB_PASSWORD}}'`. Those are streamed by
+`sqlplan.apply()`. When the client rejects such a line it quotes the offending text back, so the
+secret arrives in `proc.stderr` — and `apply()` puts that text in three places, none redacted:
+
+- `sink(line)` — **the install log**, which is the file people paste into bug reports;
+- the user-facing `InstallerError` on an `on_error: fail` phase;
+- `logger.warning` on an `on_error: warn` phase.
+
+Observed:
+
+```
+The import stopped: statement 1 failed while loading into the server
+(ERROR 1064 (42000) at line 1: syntax error near "'tortoise-0a1b2c3d4e5f6a7b'").
+```
+
+**Why the guard that exists does not catch it.** Task J.5 added `_redact()` to `create_schemas()`, on
+the stated premise that this is "the only SQL in the app that contains the secret." It is not — and
+**Tortoise's `sql.create` is `()`** (pinned at `tests/test_catalog.py:719`), so `create_schemas()`
+returns at its first line for the one shipped game whose plan actually creates the app user. The
+redaction sits on the path that game never takes, while the path it does take is unguarded.
+
+**The claim is the worst part.** `sqlplan.py`'s module docstring now asserts the secret appears in one
+place and "is never logged". A redaction that advertises coverage it does not deliver is worse than
+none, because it stops the next reader looking. Same family as §18 and as the run's standing rule
+about a confident reason with nothing behind it.
+
+*Fix in flight* on `feat/7.3-j5-sqlplan-verify`: redact where client output enters the module rather
+than at each call site, because **K.7 will add a fourth site** and sprinkling is how the next one gets
+missed. Update this entry to FIXED with the mutation evidence when it lands.
+
+**Two mutations that survived the implementer's own "17 killed" table**, found by re-running it:
+
+1. `_redact` weakened to `replace(password, "***", 1)` — nothing distinguished all-occurrences from
+   first-occurrence. The code was right by `str.replace`'s default, not by any test.
+2. The charset guard `_IDENTIFIER` widened from `[A-Za-z0-9_]+` to `[A-Za-z0-9_ ]+` — the only test
+   used `"utf8mb4; DROP DATABASE mangos"`, which **any** rule refusing `;` also refuses. The test
+   pinned "semicolons are refused", never "the rule is an identifier fullmatch".
+
+**Open design note, deliberately not fixed here.** That charset rule's right home is a `pattern=` on
+the pydantic `DbFacts.charset` field (`catalog.py:143`, currently `charset: str = "utf8mb4"` with no
+pattern and no catalog-conformance test), so a bad entry fails when the catalog **loads** rather than
+as a runtime `InstallerError` part-way through an install. Refusing no real value today — all three
+`catalog.json` charsets and the default are `utf8mb4` — but `"utf8mb4 COLLATE utf8mb4_unicode_ci"` is
+a natural spelling for a future catalog author and would be refused mid-install.
+
+**Also known, harmless only by ordering:** `create_schemas()` returns on `if not plan.create` *before*
+validating its schemas, so a plan with an empty `create` and a bogus `marker_db` is refused by
+`expand()` and silently accepted here. The two call sites are not equivalent — and **Tortoise is
+exactly the empty-`create` case**, so the asymmetry sits on a live path.
+
 ### One thing worth keeping
 
 Three of these have an obvious fix that is **wrong**, and two of them arm a worse bug:
