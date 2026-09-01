@@ -989,6 +989,22 @@ was found by reading code; each is a line in a resolved compose document from a 
   with `dockerfile._look()` rather than grow a second three-way answer beside it — the same question
   currently gets an honest three-way answer for a Dockerfile and a two-way one for a compose file.
 
+- **`conf.CONF_MODE = 0o600` is only safe while the CMaNGOS image runs as root** — 2026-09-01, raised
+  during J.1's review, correct today, filed because the day it stops being correct nobody will look
+  here. The patched `.conf` files are written by the HOST user; the server that reads them runs
+  inside the container. Checked: `catalog/installers/shared/cmangos/{base,build,override}.yml.tmpl`
+  carry no `user:` key and `wow-*/native/Dockerfile.tmpl` carries no `USER` directive, so the runtime
+  image runs `mangosd`/`realmd` as root — and root bypasses POSIX permission checks, so a
+  host-owned `0600` file is readable anyway.
+  **The trap:** a future hardening pass adding a non-root `USER` to those Dockerfiles is an ordinary,
+  well-intentioned change. It would silently make every conf file unreadable to the server, and the
+  symptom is "the server will not boot" with nothing pointing at a permissions constant three modules
+  away. `0o600` is also the first file-permission constant in this codebase (grepped `yulon/` — no
+  other `chmod`/`0o6..`), so there is no convention to remind anyone.
+  *Recorded, not fixed:* J.1 only defines the constant; `materialise()` (J.2) is what will `chmod`.
+  The right moment to decide is J.2's review — either widen the mode, or make the Dockerfile's user
+  and the conf mode answer to one place instead of two.
+
 
 ### One thing worth keeping
 
