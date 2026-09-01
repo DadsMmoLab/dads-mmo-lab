@@ -58,9 +58,20 @@ anywhere. So:
    thousands of dump files and still be stale by the time the stream starts. `apply()`
    opens each file at the moment it streams it and names the one that failed by `rel`.
 
-The password travels in the exec environment (`MYSQL_PWD`), never in argv; the one place
-it must appear in SQL text — `CREATE USER ... IDENTIFIED BY` — goes over stdin and is
-never logged.
+The password travels in the exec environment (`MYSQL_PWD`), never in argv. It must appear
+in SQL text once, in `CREATE USER ... IDENTIFIED BY`, and that statement is written in TWO
+places rather than one: `create_schemas()` builds it for a plan with a `create` list, and a
+catalog phase writes it as a literal statement whose `{{DB_PASSWORD}}` `expand()` fills —
+which is what the shipped Tortoise plan does, its `sql.create` being empty. Both go over
+stdin, and neither is logged: the run is named in the install log by `rel` (`statement 1`),
+never by its SQL.
+
+**What the CLIENT says about that statement is the other half, and it was the leak.** A
+client quotes back the line it could not parse, password and all, and that sentence became
+an `InstallerError` and an install-log line verbatim. So every string this module did not
+itself compose goes through `_redact` at the point it enters — `apply()`'s two `except`
+clauses and its client stderr, `verify()`'s unanswerable rule, `_run_sql()`'s two failures
+— and the several things done with each are done to the redacted value.
 """
 
 from __future__ import annotations
@@ -531,6 +542,16 @@ def apply(
     the client's last stderr line — the one that says which line of which statement — and
     `warn` yields a warning naming the file and moves on.
 
+    **Nothing the client says leaves here with the password in it.** A phase's literal
+    statements are filled from the catalog's `{{TOKEN}}`s, and the shipped Tortoise plan
+    fills `CREATE USER ... IDENTIFIED BY '{{DB_PASSWORD}}'` — so the secret is in the SQL
+    THIS function streams, not only in `create_schemas()`'s script, and a client quotes
+    back the line it could not parse. Every string that arrives from outside this module
+    is passed through `_redact` once, where it arrives: the two `except` clauses, and the
+    client's stderr at the moment it is split. The four things done with that stderr —
+    the install log, the `fail` message, the log record, the `warn` line — read the
+    redacted local rather than `proc`, so they inherit it.
+
     `cancel` is checked before each run and never mid-file: a half-applied file is exactly
     the `partial` state `MarkerGate.reset()` exists to clear, and the cancel note says so.
 
@@ -572,14 +593,19 @@ def apply(
         except docker.DockerCommandError as exc:
             raise InstallerError(
                 f"The import stopped: {run.rel} could not be sent to the database "
-                f"({exc}). Nothing after it was applied."
+                f"({_redact(str(exc), password)}). Nothing after it was applied."
             ) from exc
         except (RuntimeError, OSError) as exc:
             raise InstallerError(
-                f"The import stopped: {run.rel} could not be read ({_read_failure(exc)}). "
+                f"The import stopped: {run.rel} could not be read "
+                f"({_redact(_read_failure(exc), password)}). "
                 "The download may be incomplete; nothing after it was applied."
             ) from exc
-        stderr = (proc.stderr or "").splitlines()
+        # THE ENTRANCE. Everything below reads `stderr`, never `proc.stderr`: the
+        # install log line, the `fail` message, the log record and the `warn` line
+        # are four uses of ONE redacted value, so a fifth inherits the redaction
+        # instead of having to remember it. See `_redact_lines`.
+        stderr = _redact_lines((proc.stderr or "").splitlines(), password)
         for line in stderr:
             sink(line)
         if proc.returncode == 0:
@@ -685,9 +711,19 @@ def create_schemas(
     error. One secret: the app user gets the same password the root account
     has, exactly as the scripts did with one `DB_PASSWORD` — the emulator
     connects as `user`, the import streams as root. The password appears in
-    this SQL text, unavoidably (`IDENTIFIED BY`), and only here: it goes over
-    stdin, this text is never logged, and `_run_sql()` takes it back out of
-    whatever the client says about it.
+    this SQL text unavoidably (`IDENTIFIED BY`), though NOT only here — a
+    catalog phase can write the same statement as a `{{DB_PASSWORD}}` literal
+    for `apply()` to stream, which is what the shipped Tortoise plan does and
+    why the redaction is at both. It goes over stdin, this text is never
+    logged, and `_run_sql()` takes it back out of whatever the client says.
+
+    **The plan's schema names are judged before the empty-`create` shortcut**,
+    not after. Otherwise this function silently accepts a plan `expand()`
+    refuses — a bogus `marker_db` with no `create` list — and the two agree
+    only because of the order the family happens to call them in. Empty
+    `create` is not a corner: it is Tortoise. The value checks below stay after
+    it, because they are about a splice that does not happen when there is no
+    script to splice into.
 
     Three values are spliced in, and each is checked for the splice it lands in.
     `password` and `user` go inside `'...'`, which has no escaping — see
@@ -701,9 +737,9 @@ def create_schemas(
     has to reach the same daemon `apply()` streams into, or the databases exist
     in neither place the user will look.
     """
+    _check_plan_schemas(plan, schemas)
     if not plan.create:
         return
-    _check_plan_schemas(plan, schemas)
     _refuse_unquotable(password, "the database password")
     _refuse_unquotable(user, "the database user name")
     if not _IDENTIFIER.fullmatch(charset):
@@ -778,7 +814,9 @@ def verify(
                 container, client, password, rule.db, rule.query, wsl_distro=wsl_distro
             )
         except docker.DockerCommandError as exc:
-            failed.append(f"{rule.db}: `{rule.query}` could not be answered ({exc})")
+            failed.append(
+                f"{rule.db}: `{rule.query}` could not be answered ({_redact(str(exc), password)})"
+            )
             continue
         rows = answer.splitlines()
         if not rows:
@@ -884,16 +922,37 @@ def _run_sql(
 
 
 def _redact(said: str, password: str) -> str:
-    """Take the password back out of whatever the client said about it.
+    """Take the password back out of whatever the client said about it. EVERY time it says it.
 
-    `create_schemas()` builds the one script in this app that CONTAINS the
-    secret, and a client quotes back the line it could not parse:
-    `ERROR 1064 (42000) at line 5: ... near ''hunter2'@'%''`. That sentence
-    becomes an `InstallerError`, which the installer shows and the user pastes
-    into a bug report. Redacting a short password may also blank an innocent
-    word elsewhere in the line; that is the harmless direction of the mistake.
+    Two scripts in this app contain the secret, not one: `create_schemas()`
+    builds `IDENTIFIED BY '<password>'` for the plans that have a `create`
+    list, and a catalog phase's literal statements are `{{TOKEN}}`-filled, so
+    the shipped Tortoise plan writes the same statement through `apply()`
+    instead (its `sql.create` is empty and `create_schemas()` returns at its
+    first line). A client quotes back the line it could not parse —
+    `ERROR 1064 (42000) at line 1: ... near ''hunter2'@'%''` — and that
+    sentence becomes an `InstallerError` and an install-log line, which is what
+    a user pastes into a bug report.
+
+    ALL occurrences, which is `str.replace`'s default and is the point rather
+    than an accident: `IDENTIFIED BY '<pw>'` and an `ALTER USER` on the next
+    line put the secret in one message twice, and a client that echoes a
+    two-line context quotes both. Leaving the second is leaving the password.
+
+    Redacting a short password may also blank an innocent word elsewhere in the
+    line; that is the harmless direction of the mistake.
     """
     return said.replace(password, "***") if password else said
+
+
+def _redact_lines(said: Sequence[str], password: str) -> list[str]:
+    """`_redact` over the client's whole stderr, at the one point it enters `apply()`.
+
+    A list rather than a generator because `apply()` reads it twice — once into
+    the install log, once for `_last_line()` — and a redaction that could be
+    consumed by the first reader is one the failure message would not get.
+    """
+    return [_redact(line, password) for line in said]
 
 
 def _refuse_unquotable(value: str, what: str) -> None:

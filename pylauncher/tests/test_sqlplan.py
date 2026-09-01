@@ -1357,6 +1357,177 @@ def test_apply_never_lets_the_password_out_of_the_environment(
     assert secret not in " ".join(ex.calls[0][1])
 
 
+# -- the client quoting the secret back ---------------------------------------
+#
+# The test above is about what THIS module writes; these are about what the
+# CLIENT says, which is the half that leaked. Its `_Exec` answers `CREATE USER`
+# with "ERROR 1396 (HY000): Operation CREATE USER failed", a sentence with no
+# password in it, so it passed with no redaction anywhere in `apply()`. A real
+# client quotes the line it could not parse, and the line is `IDENTIFIED BY
+# '<password>'`.
+
+TORTOISE_SECRET = "tortoise-0a1b2c3d4e5f6a7b"
+
+
+class _Echoing:
+    """A client that quotes back the statement it could not parse, as mysql/mariadb do.
+
+    `ERROR 1064 (42000) at line 1: ... near '<the offending text>'` is the shape
+    of a real parse error, and this builds it from the bytes it was actually
+    given rather than from a canned string - so the test cannot pass by the
+    fixture having forgotten to include the secret.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(
+        self,
+        container: str,
+        argv: Sequence[str],
+        source: BinaryIO,
+        *,
+        env: Mapping[str, str],
+        wsl_distro: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        self.calls += 1
+        text = source.read().decode()
+        near = text.splitlines()[0].split("IDENTIFIED BY ")[-1]
+        return subprocess.CompletedProcess(
+            list(argv), 1, "", f'ERROR 1064 (42000) at line 1: syntax error near "{near}"\n'
+        )
+
+
+def _tortoise_create_user_run(*, on_error: str) -> sqlplan.PhaseRun:
+    """The SHIPPED `CREATE USER ... IDENTIFIED BY '{{DB_PASSWORD}}'`, through the real `expand()`.
+
+    Built from `catalog.json` rather than written here, because the premise this
+    guards is a claim ABOUT the catalog: that no plan `apply()` runs carries the
+    secret. `wow-tortoise`'s `sql.create` is `()`, so `create_schemas()` - where
+    the redaction originally landed - returns at its first line for the one
+    shipped game whose plan does create the app user.
+    """
+    entry: CatalogEntry = load_catalog().get("wow-tortoise")
+    native_install = entry.install.native
+    assert native_install is not None and native_install.cmangos is not None
+    plan = native_install.cmangos.sql
+    assert plan.create == (), "the premise: phase 0 does not run for this game"
+    phase = next(p for p in plan.phases if "CREATE USER" in " ".join(p.statements))
+    phase = phase.model_copy(update={"on_error": on_error})
+    databases = entry.databases
+    assert databases is not None
+    schemas = {
+        name: name
+        for name in (databases.auth, databases.characters, databases.world, *databases.extra)
+    }
+    tokens = {
+        **_shipped_tokens(),
+        "DB_USER": native_install.db.user,
+        "DB_PASSWORD": TORTOISE_SECRET,
+        "AUTH_DB": databases.auth,
+        "WORLD_DB": databases.world,
+        "CHAR_DB": databases.characters,
+        "LOGS_DB": databases.extra[0],
+    }
+    only = SqlPlan(create=plan.create, phases=(phase,), marker_db=plan.marker_db)
+    runs = sqlplan.expand(only, Path("."), schemas, tokens)
+    assert TORTOISE_SECRET in (runs[0].statement or ""), "expand() really filled the token"
+    return runs[0]
+
+
+def test_apply_redacts_the_secret_a_client_quotes_back_from_the_shipped_tortoise_phase(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The `fail` road: an `InstallerError` the installer shows, and the install log.
+
+    Before the redaction moved into `apply()` this produced, verbatim:
+
+        The import stopped: statement 1 failed while loading into the server
+        (ERROR 1064 (42000) at line 1: syntax error near
+        "'tortoise-0a1b2c3d4e5f6a7b'"). Nothing after it was applied.
+
+    and `sink()` was given the same line. Both are things a user pastes into a
+    bug report, and `sink()` is the one they paste even when the install worked.
+    """
+    run = _tortoise_create_user_run(on_error="fail")
+    assert run.phase.on_error == "fail"
+    ex = _Echoing()
+    sunk: list[str] = []
+    with caplog.at_level(logging.DEBUG, logger=sqlplan.logger.name):
+        with pytest.raises(InstallerError) as excinfo:
+            _run_apply((run,), ex, sink=sunk.append, password=TORTOISE_SECRET)
+    assert ex.calls == 1
+    assert sunk and "ERROR 1064" in sunk[0], "the client's words still reach the install log"
+    assert "ERROR 1064" in str(excinfo.value), "and still reach the user"
+    assert TORTOISE_SECRET not in str(excinfo.value)
+    assert TORTOISE_SECRET not in " ".join(sunk)
+    assert TORTOISE_SECRET not in caplog.text
+
+
+def test_apply_redacts_the_secret_on_the_warn_road_too(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`on_error: warn` writes the client's reason to two more places and raises nothing.
+
+    The yielded line is the install log the user watches; the `WARNING` record
+    is what a support log carries. A redaction on the raising road only would
+    leave the secret in both of these, on the road that does not even stop.
+    """
+    run = _tortoise_create_user_run(on_error="warn")
+    ex = _Echoing()
+    sunk: list[str] = []
+    with caplog.at_level(logging.WARNING, logger=sqlplan.logger.name):
+        lines = _run_apply((run,), ex, sink=sunk.append, password=TORTOISE_SECRET)
+    assert "ERROR 1064" in caplog.text and "ERROR 1064" in " ".join(lines)
+    assert TORTOISE_SECRET not in " ".join(lines)
+    assert TORTOISE_SECRET not in " ".join(sunk)
+    assert TORTOISE_SECRET not in caplog.text
+
+
+def test_apply_redacts_the_secret_when_the_daemon_itself_refuses(tmp_path: Path) -> None:
+    """The `except` clauses are a second entrance for text this module did not write.
+
+    `ExecStdin` is a Protocol, so what a `DockerCommandError` carries is not
+    this module's to promise - and `_run_sql()` has redacted its own since J.5.
+    """
+    ex = _Refusing(docker.DockerCommandError(f"exec failed: MYSQL_PWD={TORTOISE_SECRET}"))
+    run = _file_run(tmp_path, "z1.sql", "SELECT 1;\n", phase=WARN)
+    with pytest.raises(InstallerError) as excinfo:
+        _run_apply((run,), ex, password=TORTOISE_SECRET)
+    assert TORTOISE_SECRET not in str(excinfo.value)
+    assert "exec failed" in str(excinfo.value)
+
+
+def test_apply_redacts_the_secret_out_of_an_unreadable_dumps_reason(tmp_path: Path) -> None:
+    """Same entrance, the other clause: `_read_failure()` quotes an exception's own words."""
+    ex = _Refusing(OSError(f"cannot open dump for {TORTOISE_SECRET}"))
+    run = _file_run(tmp_path, "z1.sql", "SELECT 1;\n", phase=WARN)
+    with pytest.raises(InstallerError) as excinfo:
+        _run_apply((run,), ex, password=TORTOISE_SECRET)
+    assert TORTOISE_SECRET not in str(excinfo.value)
+    assert "could not be read" in str(excinfo.value)
+
+
+def test_redact_removes_every_occurrence_not_only_the_first() -> None:
+    """`create_schemas()` writes the secret on two consecutive lines, and a client
+    that echoes a two-line context quotes both.
+
+    `str.replace` with no count already does this; nothing here asserted it, so
+    `replace(password, "***", 1)` was a mutation the whole suite survived. The
+    code was right by the default rather than by anybody's decision.
+    """
+    secret = "hunter2"
+    said = (
+        f"ERROR 1064 (42000) at line 5: near \"IDENTIFIED BY '{secret}'\" "
+        f"and again at line 6: near \"IDENTIFIED BY '{secret}'\""
+    )
+    assert said.count(secret) == 2, "the fixture has to contain it twice for this to mean anything"
+    cleaned = sqlplan._redact(said, secret)
+    assert secret not in cleaned
+    assert cleaned.count("***") == 2
+    assert "ERROR 1064" in cleaned
+
+
 def test_apply_closes_each_dump_before_it_opens_the_next(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1669,6 +1840,46 @@ def test_create_schemas_refuses_a_charset_that_is_not_a_plain_identifier() -> No
     assert ex.calls == []
 
 
+def test_create_schemas_refuses_a_charset_that_is_merely_more_than_one_word() -> None:
+    """The rule is an identifier FULLMATCH, and only a payload without `;` says so.
+
+    The case above is refused by any rule that dislikes `;` - so it passed with
+    `_IDENTIFIER` widened to `[A-Za-z0-9_ ]+`, which is an assertion a
+    NEIGHBOURING rule satisfies rather than a test of this one.
+    `utf8mb4 COLLATE utf8mb4_unicode_ci` has no punctuation to object to and is
+    what a catalog author would plausibly write, having read a `CREATE DATABASE`
+    example; it is still a second SQL clause spliced in with nothing around it,
+    and `CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci` is not what
+    `DbFacts.charset` promises. Whatever the rule becomes, it has to be one that
+    refuses a space.
+    """
+    ex = _Exec()
+    with pytest.raises(InstallerError, match="charset"):
+        _create(ex, charset="utf8mb4 COLLATE utf8mb4_unicode_ci")
+    assert ex.calls == []
+
+
+def test_create_schemas_judges_the_plans_schema_names_before_the_empty_create_shortcut() -> None:
+    """A plan `expand()` refuses may not be one `create_schemas()` quietly accepts.
+
+    Nothing is created when `create` is empty, so returning early looks free -
+    but it made the two functions disagree about whether the SAME plan is
+    valid, and they agreed only because the family happens to call `expand()`
+    first. Empty `create` is not a hypothetical corner: it is `wow-tortoise`.
+    The refusal is `_check_plan_schemas()`'s own words, the way the non-empty
+    case already is.
+    """
+    plan = SqlPlan(create=(), phases=PLAN.phases, marker_db="nowhere")
+    ex = _Exec()
+    with pytest.raises(InstallerError) as fromcreate:
+        _create(ex, plan=plan)
+    with pytest.raises(InstallerError) as fromexpand:
+        sqlplan.expand(plan, Path("."), SCHEMAS, TOKENS)
+    assert str(fromcreate.value) == str(fromexpand.value)
+    assert "nowhere" in str(fromcreate.value)
+    assert ex.calls == []
+
+
 def test_create_schemas_refuses_an_unknown_database_in_the_plans_own_words() -> None:
     """One refusal, not two: `_check_plan_schemas()` already owns this sentence.
 
@@ -1788,6 +1999,23 @@ def test_verify_treats_an_unanswerable_query_as_a_failing_rule_and_does_not_rais
     )
     (failed,) = _verify(PLAN, down)
     assert "item_template" in failed and "doesn't exist" in failed
+
+
+def test_verify_redacts_the_secret_out_of_an_unanswerable_rule() -> None:
+    """`SqlQuery` is a Protocol too, and this sentence is shown and pasted like the rest.
+
+    Nothing in a verify rule's SQL carries the password, so this is the lowest
+    risk of the four sites - but it is a string this module did not compose,
+    and the rule is that every one of those is redacted where it enters, so
+    that "does this particular one carry it?" is not a judgement anybody has to
+    re-make.
+    """
+    down = _Query(error=docker.DockerCommandError(f"Access denied (using {TORTOISE_SECRET})"))
+    (failed,) = sqlplan.verify(
+        PLAN, container="c", client="mysql", password=TORTOISE_SECRET, sql_query=down
+    )
+    assert TORTOISE_SECRET not in failed
+    assert "Access denied" in failed
 
 
 def test_verify_reports_every_failing_rule_in_order_and_stays_quiet_about_the_rest() -> None:
