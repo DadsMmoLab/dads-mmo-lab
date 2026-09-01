@@ -136,6 +136,12 @@ class _Rendered(str):
     to `write()` — and so that every string operation on it (`.replace`, slicing, `+`,
     `.strip`) yields a plain `str`. Text edited after it was rendered is not the text
     `render()` checked, and `write()` treats it as unrendered, which is the intent.
+
+    Measured 2026-09-01, the exceptions to "every operation drops the subclass":
+    `copy.copy`, `copy.deepcopy` and a `pickle` round trip all PRESERVE `_Rendered`, since
+    a `str` subclass reconstructs through `cls.__new__`. Not a hole, since the text is
+    unchanged and `render()` already judged it, but a reader applying the blanket rule to
+    those three would be wrong.
     """
 
     __slots__ = ()
@@ -234,6 +240,13 @@ def write(server_dir: Path, dockerfile: str, dockerignore: str) -> tuple[Path, .
 
     The provenance check is what a caller reusing this writer while bypassing `render()`
     runs into. It is not a defence against code that deliberately builds a `_Rendered`.
+
+    It is also RUNTIME ONLY, deliberately: `render()` is annotated `-> tuple[str, str]`, so
+    `_Rendered` never enters the typed surface and no caller is invited to construct one.
+    The cost is that a bypass type checks clean. Measured 2026-09-01: `reveal_type` on
+    `render()`'s first element says `str`, and both `write(d, text.replace("a", "b"), ig)`
+    and a hand written marked literal pass mypy and fail only at install time. A green
+    mypy is not evidence this path is safe.
 
     Raises:
         DockerfileError: the text has no marker, the text did not come from `render()`, a

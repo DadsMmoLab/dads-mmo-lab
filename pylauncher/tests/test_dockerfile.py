@@ -219,7 +219,7 @@ def test_the_refused_tokens_are_derived_from_the_secret_declarations_fields() ->
     shows the shipped constant is that function applied to the real declaration: written
     out as a literal instead, it survives untouched while `native.Secrets` grows a second
     field, and that combination is exactly the mutation that found the one-name version
-    (added `soap_password` to `Secrets`; all 1960 tests still passed).
+    (added `soap_password` to `Secrets`; the whole suite stayed green).
     """
     assert dockerfile.secret_tokens(_TwoSecrets) == {"DB_PASSWORD", "SOAP_PASSWORD"}
     assert dockerfile.SECRET_TOKENS == dockerfile.secret_tokens(native.Secrets)
@@ -233,8 +233,14 @@ def test_every_token_the_secret_declaration_produces_is_refused_in_a_template(
     """One case per field of `native.Secrets`, generated from the declaration itself.
 
     A secret added there brings its own case here with nothing to remember, which is what
-    deriving the set buys. Today that is `DB_PASSWORD` alone; the test below is what shows
-    the machinery carries a second one.
+    deriving the set buys. The parametrize list IS the current answer, so this docstring
+    does not restate it; the test below is what shows the machinery carries a second one.
+
+    NOT the guard against an empty `SECRET_TOKENS`. Measured 2026-09-01 by mutating
+    `secret_tokens()` to `return frozenset()`: pytest's default for an empty parameter set
+    is SKIP, so this test silently vanishes rather than failing. What caught that mutant
+    was the sibling assertion `"DB_PASSWORD" in dockerfile.SECRET_TOKENS` in the test
+    above. A parametrized test cannot guard the non-emptiness of its own parameters.
     """
     folder = templates(tmp_path)
     (folder / "Dockerfile.tmpl").write_text(
@@ -306,11 +312,24 @@ def test_a_spaced_placeholder_is_refused_as_unfilled_and_not_by_the_secret_rule(
 ) -> None:
     """`{{ DB_PASSWORD }}` is refused too — by `fill()`, and the message has to say so.
 
-    The belt is what does it: every refused key is dropped before filling, so nothing
-    replaces the spaced spelling, a `{{` survives, and `composegen.fill()` raises. The
-    by-name refusal never sees it, since it looks for the exact `{{DB_PASSWORD}}`. Pinned
-    here because a change to the belt would turn this near-miss into a rendered password
-    silently — the assertion is on WHICH rule fired, not merely that one did.
+    `composegen.fill()` substitutes by literal `out.replace("{{" + key + "}}", value)`,
+    so the spaced spelling is never matched at all, with or without the key in the
+    mapping. A `{{` therefore survives and `fill()` raises "not a closed placeholder". The
+    by-name refusal never sees it either, for the same reason: it looks for the exact
+    `{{DB_PASSWORD}}`.
+
+    WITHDRAWN, from the docstring this replaces: "the belt is what does it ... a change to
+    the belt would turn this near-miss into a rendered password silently". Both sentences
+    were false, and were disproved by mutation on 2026-09-01: with the belt removed
+    (`safe = dict(tokens)`) this test PASSED, while
+    `test_render_never_hands_the_secret_to_the_substitution` and
+    `test_render_drops_every_refused_token_from_the_mapping_it_fills_with` failed. Those
+    two guard the belt; this one never did. A test's stated reason for existing is not
+    checked by running it, which is how a false one got past review here.
+
+    What it does pin, and the reason to keep it: WHICH rule fired, "unfilled" and "not a
+    closed", and NOT "docker history". A near-miss reported as a secret violation would
+    send the next reader to the wrong guard.
     """
     folder = templates(tmp_path)
     (folder / "Dockerfile.tmpl").write_text(
