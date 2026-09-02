@@ -227,10 +227,15 @@ def test_installer_for_refuses_an_entry_with_no_native_block(
     """
     from yulon.catalog import families
 
+    class FamilyForWasReached(Exception):
+        """Named so a kill here reads as what it is, rather than as a stray TypeError."""
+
+    def _record(entry: object) -> None:
+        reached.append(entry)
+        raise FamilyForWasReached(entry)
+
     reached: list[object] = []
-    monkeypatch.setattr(
-        families, "family_for", lambda entry: reached.append(entry)  # type: ignore[arg-type]
-    )
+    monkeypatch.setattr(families, "family_for", _record)
 
     no_native = TBC.model_copy(update={"install": TBC.install.model_copy(update={"native": None})})
     assert no_native.install.native is None
