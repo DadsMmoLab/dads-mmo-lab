@@ -1769,6 +1769,34 @@ Recording it here rather than deciding it — the trade is "an unexercised path 
 2026-09-01 record filed under 7.1. That run predates `test_sqlplan_live.py` entirely — 21 test functions
 then, 23 now — so it could not have executed two of the six things the gate line names.
 
+### 33. The suite has load-sensitive tests, and a flake let a merge go through on red — 2026-09-02, OPEN
+
+**What happened, recorded because the process failure is the more useful half.** The verification run
+before merging `fix/gate-7.2-7.3-code` reported **`1 failed, 2003 passed, 3 skipped`**. The merge went
+through anyway, because the check and the merge were chained in one command and the result arrived
+*after* the action. Three re-runs immediately afterwards gave **2004 passed / 3 skipped**, so the tree was
+fine — but that is luck, not process. **Never chain a verification with the action it gates.**
+
+**The flake itself is real and has at least two known candidates**, both load-sensitive rather than
+order-sensitive:
+
+- `test_steam_deck_script.py::test_without_a_terminal_the_client_wait_sleeps_instead_of_reading_stdin` —
+  seen by a gate reviewer hitting its own **60 s subprocess timeout under 15-way parallel load**; 14/14
+  green when re-run serially. A wall-clock timeout inside a parallel suite is a flake generator by
+  construction: the bound is on the child, the contention is on the box.
+- `test_log_panel.py::test_a_runner_dropped_before_its_thread_runs_does_not_leave_the_worker_dead` —
+  documented in `run-tests-vm.sh`'s own header. It fails under plain `-n auto` and passes under
+  `--dist loadfile`, which is why the helper uses that distribution. Thread-timing split across workers.
+
+**Why it matters more than an occasional red run.** A suite that fails once in several runs teaches its
+readers to re-run rather than to look — and the cost is not the wasted minute, it is that a *real* single
+failure becomes indistinguishable from noise. Every merge decision tonight rested on a count.
+
+**Not fixed.** The honest fixes are per-test: give the steam-deck test a bound proportional to load or
+mark it `serial`, and treat any wall-clock assertion in a parallel suite as suspect. The identity of the
+failure in the run above was not captured — the grep that read it kept only the totals — which is itself
+the lesson: **capture the failing test id, not the count.**
+
 ### One thing worth keeping
 
 Three of these have an obvious fix that is **wrong**, and two of them arm a worse bug:
