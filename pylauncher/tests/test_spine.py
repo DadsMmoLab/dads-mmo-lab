@@ -23,10 +23,15 @@ import pytest
 from tests.support_native import ENTRY, IMPORTED, PARTIAL, TBC, Recorder, install
 from yulon import docker, platform, resources
 from yulon.catalog import composegen, native, preflight
-from yulon.catalog.catalog import CatalogEntry, ReadyMarkers
+from yulon.catalog.catalog import CatalogEntry, ReadyMarkers, load_catalog
 from yulon.catalog.families import FAMILIES, family_for
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
-from yulon.catalog.installer import DockerUnavailableError, InstallerError, InstallOptions
+from yulon.catalog.installer import (
+    DockerUnavailableError,
+    InstallerError,
+    InstallOptions,
+    installer_for,
+)
 
 ORDER = ("clone-sources", "build", "import", "up")
 CANARY = "hunter2-a2-canary"
@@ -441,16 +446,58 @@ def _say(ctx: native.StageContext) -> Iterator[str]:
 def test_families_maps_each_id_to_its_class_and_an_unknown_one_is_a_sentence() -> None:
     assert FAMILIES["azerothcore"] is AzerothCoreInstaller
     assert family_for(ENTRY) is AzerothCoreInstaller
-    # TBC used to stand in for "no native block at all". Since G.4 it stands in
-    # for the other refusal: the block is there and names `cmangos`, whose class
-    # K.8 registers. `installer_for()` never reaches this for TBC — an
-    # unregistered family goes back to the script — but `family_for()` is public
-    # and still owes a sentence rather than a `KeyError`.
+    # TBC stood in for this refusal from G.4 until K.8, when `cmangos` was
+    # registered and TBC became a family this build DOES have. The refusal is
+    # about a family id with no class behind it, so the stand-in is now an entry
+    # carrying one. `model_copy` does not re-validate, which is the only way past
+    # `Literal["azerothcore", "cmangos"]` — and the reason no catalog file can
+    # produce this state, which is why the branch is defence and not a code path
+    # a user reaches.
+    assert TBC.install.native is not None
+    stranger = TBC.model_copy(
+        update={
+            "install": TBC.install.model_copy(
+                update={"native": TBC.install.native.model_copy(update={"family": "nosuchlineage"})}
+            )
+        }
+    )
     with pytest.raises(InstallerError, match="install family this app does not have"):
-        family_for(TBC)
+        family_for(stranger)
     bare = TBC.model_copy(update={"install": TBC.install.model_copy(update={"native": None})})
     with pytest.raises(InstallerError, match="install.native"):
         family_for(bare)
+
+
+def test_every_shipped_native_entry_reaches_the_class_its_family_id_names() -> None:
+    """Catalog, registry and engine joined to each other, instead of each to a literal.
+
+    Three facts have to agree before an Install press reaches an engine at all:
+    the entry's `install.native.family`, the class `FAMILIES` maps that id to,
+    and that class's own `family` attribute — which the spine asserts against
+    the entry before it writes anything (see
+    `test_a_family_must_agree_with_the_entry_about_its_family`). Nothing joined
+    them. On 2026-09-02 K.8 added one line to `FAMILIES` and five tests went
+    red, and every one of them had written one side of that join down by hand.
+
+    Enumerated over `load_catalog().games`, not over a list of ids: an entry
+    added to `catalog.json` whose family has no engine is exactly the
+    disagreement this exists for, and a hand-kept list is the one thing
+    guaranteed not to notice it.
+
+    Through `installer_for()` rather than `family_for()`, so what is proved is
+    dispatch and not a dictionary lookup: the fallback branch hands an entry
+    whose family is unregistered back to `Installer`, which is not a
+    `StagedInstaller` and has no `family` at all.
+    """
+    entries = [entry for entry in load_catalog().games if entry.install.native is not None]
+    assert entries, "the shipped catalog has no native entry left to check"
+    for entry in entries:
+        block = entry.install.native
+        assert block is not None
+        engine = installer_for(entry, platform_id=lambda: "linux")
+        assert isinstance(engine, native.StagedInstaller), f"{entry.id} fell back to the script"
+        assert engine.family == block.family, entry.id
+        assert engine.entry is entry, entry.id
 
 
 def test_a_family_must_agree_with_the_entry_about_its_family(tmp_path: Path) -> None:

@@ -44,9 +44,9 @@ from tests.support_native import ABSENT, IMPORTED, PARTIAL, POPULATED_HALF, Reco
 from yulon import docker, platform, resources
 from yulon.catalog import composegen, native
 from yulon.catalog.catalog import CatalogEntry, PasswordPlan, SqlPhase, SqlPlan, load_catalog
-from yulon.catalog.families import cmangos, dockerfile, extract, sqlplan
+from yulon.catalog.families import cmangos, dockerfile, extract, family_for, sqlplan
 from yulon.catalog.families.cmangos import CmangosInstaller
-from yulon.catalog.installer import InstallerError, InstallOptions
+from yulon.catalog.installer import InstallerError, InstallOptions, installer_for
 
 DB_PASSWORD = "tbc-0123456789abcdef"
 
@@ -227,6 +227,101 @@ def test_stages_are_unique_and_a_subset_of_the_pinned_names_in_order() -> None:
     assert "preflight" not in names and "guard" not in names
     pinned = [n for n in CmangosInstaller.STAGE_NAMES if n in names]
     assert names == pinned
+
+
+def test_stage_names_is_the_pinned_tuple_now_that_every_stage_is_bound() -> None:
+    """The equality K.2 deferred, K.7 could only check by hand, and K.8 owes.
+
+    `STAGE_NAMES` is the class's DECLARATION of its order. `stage_names()` is
+    what the spine actually validates a resume against, and it is derived from
+    `stages()`. The two were allowed to disagree while the tuple was being
+    built, because nothing in the app read `STAGE_NAMES` and this class was not
+    in `FAMILIES`; K.8 changed the second half, so the agreement is held here
+    instead of in a module docstring. The test above is the weaker
+    subset-in-order form that let the gap exist — it still earns its place,
+    because uniqueness and the reserved names are not this assertion's business.
+
+    Read off the ENGINE and never off a state file. `read_state()` drops stage
+    names the running binary does not know, silently (bug checklist §23), so a
+    `completed` tuple can be made to agree with almost anything and would
+    satisfy an equality written against it while the two declarations were in
+    fact apart — which is precisely the mismatch this exists to catch.
+    """
+    assert engine(Recorder()).stage_names() == CmangosInstaller.STAGE_NAMES
+
+
+# -- the registered family ----------------------------------------------------
+
+
+def cmangos_entries() -> list[CatalogEntry]:
+    """Every shipped entry whose `install.native` names this family.
+
+    Derived from `catalog.json`, not listed, so a fourth CMaNGOS game is
+    dispatch-tested by adding the entry and nothing else. WHICH games declare
+    the family is `test_catalog.py`'s question
+    (`test_the_cmangos_entries_carry_a_full_family_block`, parametrized over the
+    three ids); what is asserted here is that every entry which declares it
+    gets an engine. The emptiness guard lives here so that no caller can pass
+    over an empty list and call it a result.
+    """
+    entries = [
+        entry
+        for entry in load_catalog().games
+        if entry.install.native is not None and entry.install.native.family == "cmangos"
+    ]
+    assert entries, "no shipped catalog entry names the cmangos family"
+    return entries
+
+
+def test_every_cmangos_entry_dispatches_to_an_engine_that_runs_this_familys_stages() -> None:
+    """The registration proved where it matters: on the entries, through the dispatcher.
+
+    `"cmangos" in FAMILIES` is a declaration, and three guards in this project
+    have passed while the bug they named was live. What the tasks downstream of
+    K.8 need is that pressing Install on one of these games yields an engine of
+    THIS class which knows THIS family's stages — so the registry lookup
+    (`family_for`), the dispatcher that a button reaches (`installer_for`) and
+    the object that comes back are crossed here, once for each shipped entry
+    rather than once for `wow-tbc` with the other two assumed.
+
+    `eng.stage_names()` and not `CmangosInstaller.STAGE_NAMES`: the second is a
+    class attribute every instance shares, so reading it back off the result
+    would say nothing about the object dispatch actually returned. The first is
+    derived from that instance's own `stages()`, which the constructor has
+    already run through `_check_stage_tuple()` — so a family whose stage tuple
+    is broken for a game other than TBC is refused here, and not two hours into
+    that game's build.
+    """
+    for entry in cmangos_entries():
+        assert family_for(entry) is CmangosInstaller, entry.id
+        eng = installer_for(entry, platform_id=lambda: "linux")
+        assert isinstance(eng, CmangosInstaller), entry.id
+        assert eng.stage_names() == CmangosInstaller.STAGE_NAMES, entry.id
+
+
+def test_the_install_button_is_offered_for_every_cmangos_entry_on_linux() -> None:
+    """`Install.supports()` is the gate the tile asks before the engine is ever built.
+
+    An engine nothing can reach is not a shipped feature. `catalog_view.py` asks
+    this one call twice — once to grey the tile and say which platform the
+    installer needs, once in `start_install()` to refuse before the folder
+    prompts — so a False here is an install that cannot be started however well
+    the family dispatches. Measured 2026-09-02: all three CMaNGOS entries answer
+    True for `linux`, which is the platform their `platforms` list carries and
+    the only one this family's containers are built for.
+
+    One-sided on purpose, and the mutation run says what that costs. A `supports()`
+    rewritten to `return True` SURVIVES this test — an always-open gate does not
+    break the claim made here — and was killed by
+    `test_installer.py::test_installer_refuses_a_platform_its_script_cannot_run`
+    and two in `test_families_azerothcore.py`, which own the other half. Folding
+    the closure in here would put two rules in one fixture for coverage that
+    already exists three times over. What this test is not vacuous about was
+    measured the same way: moving `wow-tortoise` to `platforms: ["macos"]` failed
+    it by name, so it really does read each shipped entry rather than TBC alone.
+    """
+    for entry in cmangos_entries():
+        assert entry.install.supports("linux") is True, entry.id
 
 
 def test_the_module_constants_are_the_shared_template_s_own_spellings() -> None:
