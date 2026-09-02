@@ -1015,8 +1015,15 @@ def test_the_family_tokens_come_from_the_entry(tmp_path: Path) -> None:
     assert "schemas: acore_auth acore_world acore_characters acore_playerbots" in plan.base
     # `ac-db` is this synthetic template's own `db` behind the real prefix, NOT a
     # container WotLK has (its three are ac-database/-authserver/-worldserver). What
-    # the prefix must rebuild for a real entry is asserted over the shipped catalog by
-    # `test_the_container_prefix_rebuilds_the_container_names_of_every_shipped_entry`.
+    # the prefix must produce for a real entry is cross-checked over the shipped catalog
+    # by `test_every_service_the_catalog_selects_is_defined_in_the_rendered_compose_file`,
+    # which compares the names an entry SELECTS against the service keys its rendered base
+    # DEFINES — for the three CMaNGOS entries those keys are `{{CONTAINER_PREFIX}}<service>`,
+    # so a wrong prefix is what makes the two sides fail to meet. It is not the check this
+    # comment cited until 2026-09-02, which was
+    # `test_the_container_prefix_rebuilds_the_container_names_of_every_shipped_entry`:
+    # that one rebuilt names from `containers.services` instead of reading what was
+    # written, and was replaced for exactly that reason (bug-checklist §26, §30).
     assert "prefix: ac-db" in plan.base, "the common prefix of the three container names"
     assert f"build: {ENTRY.client.build}" in plan.base
 
