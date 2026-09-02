@@ -265,6 +265,12 @@ class Ownership(Enum):
     name. This is the case where the engine knows LEAST, and it must never be
     the case where it acts most freely. It fails closed everywhere it is
     reached; see `StagedInstaller.claimed_this_folder()` for what that bought.
+
+    The version case listed above had NO producer until 2026-09-02: nothing
+    compared the file's `version` to `STATE_VERSION`, so a newer record parsed
+    as `OWNED` and was resumed and rewritten. `read_claim()` produces it now,
+    and it is the one `UNKNOWN` that carries a `reason`, because the generic
+    refusal tells the user to delete the file.
     """
 
     UNCLAIMED = "unclaimed"
@@ -282,6 +288,14 @@ class Claim:
 
     ownership: Ownership
     state: InstallState | None = None
+    reason: str = ""
+    """Why this is `UNKNOWN`, when the generic sentence would be wrong or harmful.
+
+    Empty for every other answer, and for the ordinary damaged file. It is
+    here for the one `UNKNOWN` that is not damage: a record written by a
+    NEWER build, which is intact, is somebody's working install, and must
+    not be met with the generic refusal's advice to delete the file.
+    """
 
 
 def read_claim(server_dir: Path, *, valid: Sequence[str]) -> Claim:
@@ -316,6 +330,32 @@ def read_claim(server_dir: Path, *, valid: Sequence[str]) -> Claim:
     parsed = _parse_state(server_dir, valid=valid)
     if parsed is None:
         return Claim(Ownership.UNKNOWN)
+    if parsed.version > STATE_VERSION:
+        # `>` and not `>=`: a file AT this version is every install anyone
+        # has. Measured 2026-09-02 on a v2 file resumed by this v1 build:
+        # it parsed as OWNED, the install resumed, and `write_state()`
+        # rebuilt the payload from the keys this build knows -- losing
+        # `client_dir` and `secrets_rotated_unix` while writing `version: 2`
+        # back unchanged, so the file went on claiming to be a v2 record
+        # after it had stopped being one and the newer build could not tell.
+        # Additive keys are what `STATE_VERSION`'s docstring names as the
+        # evolution path, and they were exactly what was destroyed. Refusing
+        # here means the file is never opened for writing at all.
+        logger.warning(
+            f"{server_dir / STATE_FILE} says version {parsed.version}; this build "
+            f"understands {STATE_VERSION}. Refusing rather than rewriting it."
+        )
+        return Claim(
+            Ownership.UNKNOWN,
+            reason=(
+                f"{server_dir} holds an install record written by a newer version of "
+                f"Yu'lon (the record says version {parsed.version}; this one "
+                f"understands {STATE_VERSION}). It was left exactly as it is and "
+                "nothing was written, because rewriting it here would throw away "
+                "whatever the newer version put in it. Update Yu'lon, or install "
+                "into another folder."
+            ),
+        )
     return Claim(Ownership.OWNED, parsed)
 
 
@@ -1015,12 +1055,21 @@ class StagedInstaller:
             else Claim(Ownership.UNCLAIMED)
         )
         if claim.ownership is Ownership.UNKNOWN:
+            # The generic sentence is for DAMAGE, and its advice is to delete
+            # the file. `Claim.reason` is how the one `UNKNOWN` that is not
+            # damage -- an intact record from a newer build -- says something
+            # else, because deleting that one destroys a working install's
+            # progress.
             raise InstallerError(
-                f"{server_dir} holds a {STATE_FILE} this app cannot read, so it cannot tell "
-                "whether this folder is one of its own installs or somebody else's work. "
-                "Nothing was written. If that file is left over from an install that was "
-                "interrupted, delete it and try again; if you did not expect it to be there, "
-                "install into another folder instead."
+                claim.reason
+                or (
+                    f"{server_dir} holds a {STATE_FILE} this app cannot read, so it "
+                    "cannot tell whether this folder is one of its own installs or "
+                    "somebody else's work. Nothing was written. If that file is left "
+                    "over from an install that was interrupted, delete it and try "
+                    "again; if you did not expect it to be there, install into another "
+                    "folder instead."
+                )
             )
         existing = claim.state
         if existing is not None and existing.install_id != install_id:

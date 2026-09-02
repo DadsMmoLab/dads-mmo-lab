@@ -278,6 +278,101 @@ def test_ownership_is_three_answers_and_a_file_nobody_can_read_is_never_the_midd
         assert native.read_state(broken, valid=ORDER) is None, damage
 
 
+def _a_newer_builds_state_file(server_dir: Path) -> dict[str, object]:
+    """What a Yu'lon one version ahead of this one would have written here.
+
+    Additive keys and an additive stage name, because `STATE_VERSION`'s own
+    docstring names additive keys as the evolution path - and they are exactly
+    what a rewrite from this build destroyed.
+    """
+    return {
+        "version": native.STATE_VERSION + 1,
+        "game_id": ENTRY.id,
+        "family": AzerothCoreInstaller.family,
+        "install_id": composegen.install_id(server_dir, platform_id=lambda: "macos"),
+        "completed": ["clone-core", "rotate-secrets"],
+        "last_error": "",
+        "updated_unix": 1756000000,
+        "client_dir": "/home/somebody/wow-client",
+        "secrets_rotated_unix": 1756800000,
+    }
+
+
+def test_a_state_file_from_a_newer_build_is_the_unknown_ownership_nothing_produced(
+    tmp_path: Path,
+) -> None:
+    """`Ownership.UNKNOWN` names "written by a version this one cannot read" as one of its cases.
+
+    Until 2026-09-02 no code path produced it: `_parse_state()` read `version`
+    and never compared it to anything, so a file from a newer build parsed as
+    `OWNED` and was resumed. This is that case's producer.
+
+    Its neighbour is the version this build DOES understand, and the boundary
+    is `>` rather than `>=`: a file at `STATE_VERSION` must still be `OWNED`,
+    which is every install anyone has today.
+    """
+    newer = tmp_path / "newer"
+    newer.mkdir()
+    (newer / native.STATE_FILE).write_text(
+        json.dumps(_a_newer_builds_state_file(newer)), encoding="utf-8"
+    )
+    claim = native.read_claim(newer, valid=AzerothCoreInstaller.STAGE_NAMES)
+    assert claim.ownership is native.Ownership.UNKNOWN
+    assert claim.state is None
+    assert native.read_state(newer, valid=AzerothCoreInstaller.STAGE_NAMES) is None
+
+    current = tmp_path / "current"
+    current.mkdir()
+    at_this_version = _a_newer_builds_state_file(current) | {"version": native.STATE_VERSION}
+    (current / native.STATE_FILE).write_text(json.dumps(at_this_version), encoding="utf-8")
+    same = native.read_claim(current, valid=AzerothCoreInstaller.STAGE_NAMES)
+    assert same.ownership is native.Ownership.OWNED, "the boundary is `>`, not `>=`"
+
+
+def test_a_newer_builds_state_file_is_refused_and_left_byte_for_byte(tmp_path: Path) -> None:
+    """A record this build cannot interpret is not rewritten, and says so in its own words.
+
+    Measured on `f6ed1b9a` with a v2 file resumed by this v1 build:
+
+        keys lost            : ['client_dir', 'secrets_rotated_unix']
+        version still claims : 2
+        unknown stage kept   : True
+
+    `write_state()` rebuilds the payload from a fixed set of keys, so a key it
+    does not know is dropped - and it wrote `version` back UNCHANGED, which made
+    the loss undetectable to the newer build afterwards: the file still claimed
+    to be a v2 record while no longer being one. Section 23 preserved unknown
+    stage NAMES and left the keys open; this closes it by not rewriting the file
+    at all.
+
+    The neighbour is the generic unreadable-file refusal, which tells the user
+    to DELETE the file - the worst possible advice about a working newer
+    install. It is pinned out by name, not merely hoped past.
+    """
+    server_dir = tmp_path / "wow"
+    server_dir.mkdir()
+    path = server_dir / native.STATE_FILE
+    path.write_bytes(
+        (json.dumps(_a_newer_builds_state_file(server_dir), indent=2) + "\n").encode("utf-8")
+    )
+    before = path.read_bytes()
+    rec = Recorder(images=False)
+    with pytest.raises(InstallerError, match="newer version of Yu'lon") as caught:
+        install(rec, server_dir)
+    said = str(caught.value)
+    assert path.read_bytes() == before, "the newer build's record was rewritten"
+    assert rec.calls == [], "the machine was measured before the record was read"
+    assert "delete it and try again" not in said, (
+        "that is the generic unreadable-file refusal, and deleting a newer "
+        "install's record is exactly what must not be advised here"
+    )
+    kept = json.loads(path.read_text(encoding="utf-8"))
+    assert kept["client_dir"] == "/home/somebody/wow-client"
+    assert kept["secrets_rotated_unix"] == 1756800000
+    assert kept["version"] == native.STATE_VERSION + 1
+    assert "rotate-secrets" in kept["completed"]
+
+
 def test_with_stage_orders_by_the_entry_tuple_and_never_records_twice() -> None:
     fresh = native.InstallState(game_id="wow-tbc", install_id="abc", family="cmangos")
     once = fresh.with_stage("import", ORDER).with_stage("clone-sources", ORDER)
