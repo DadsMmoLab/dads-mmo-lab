@@ -265,6 +265,12 @@ class Ownership(Enum):
     name. This is the case where the engine knows LEAST, and it must never be
     the case where it acts most freely. It fails closed everywhere it is
     reached; see `StagedInstaller.claimed_this_folder()` for what that bought.
+
+    The version case listed above had NO producer until 2026-09-02: nothing
+    compared the file's `version` to `STATE_VERSION`, so a newer record parsed
+    as `OWNED` and was resumed and rewritten. `read_claim()` produces it now,
+    and it is the one `UNKNOWN` that carries a `reason`, because the generic
+    refusal tells the user to delete the file.
     """
 
     UNCLAIMED = "unclaimed"
@@ -282,6 +288,14 @@ class Claim:
 
     ownership: Ownership
     state: InstallState | None = None
+    reason: str = ""
+    """Why this is `UNKNOWN`, when the generic sentence would be wrong or harmful.
+
+    Empty for every other answer, and for the ordinary damaged file. It is
+    here for the one `UNKNOWN` that is not damage: a record written by a
+    NEWER build, which is intact, is somebody's working install, and must
+    not be met with the generic refusal's advice to delete the file.
+    """
 
 
 def read_claim(server_dir: Path, *, valid: Sequence[str]) -> Claim:
@@ -316,6 +330,32 @@ def read_claim(server_dir: Path, *, valid: Sequence[str]) -> Claim:
     parsed = _parse_state(server_dir, valid=valid)
     if parsed is None:
         return Claim(Ownership.UNKNOWN)
+    if parsed.version > STATE_VERSION:
+        # `>` and not `>=`: a file AT this version is every install anyone
+        # has. Measured 2026-09-02 on a v2 file resumed by this v1 build:
+        # it parsed as OWNED, the install resumed, and `write_state()`
+        # rebuilt the payload from the keys this build knows -- losing
+        # `client_dir` and `secrets_rotated_unix` while writing `version: 2`
+        # back unchanged, so the file went on claiming to be a v2 record
+        # after it had stopped being one and the newer build could not tell.
+        # Additive keys are what `STATE_VERSION`'s docstring names as the
+        # evolution path, and they were exactly what was destroyed. Refusing
+        # here means the file is never opened for writing at all.
+        logger.warning(
+            f"{server_dir / STATE_FILE} says version {parsed.version}; this build "
+            f"understands {STATE_VERSION}. Refusing rather than rewriting it."
+        )
+        return Claim(
+            Ownership.UNKNOWN,
+            reason=(
+                f"{server_dir} holds an install record written by a newer version of "
+                f"Yu'lon (the record says version {parsed.version}; this one "
+                f"understands {STATE_VERSION}). It was left exactly as it is and "
+                "nothing was written, because rewriting it here would throw away "
+                "whatever the newer version put in it. Update Yu'lon, or install "
+                "into another folder."
+            ),
+        )
     return Claim(Ownership.OWNED, parsed)
 
 
@@ -878,6 +918,18 @@ class StagedInstaller:
             raise InstallerError(
                 f"{folder_problem} Pick a different folder and try again. Nothing was written."
             )
+        # ...and the rest of the folder's own rules with it, for the same reason
+        # and one more: each says some version of `Nothing was written`, and after
+        # provisioning that sentence is false of the machine. The state file, the
+        # ownership checks and the emptiness check are filesystem reads that no
+        # daemon can help with, so a user whose folder was never usable is now
+        # told so before being asked for a root password. The answer is thrown
+        # away here: `_guard()` asks again for the state it returns.
+        #
+        # `_refuse_foreign_containers()` deliberately does NOT move up. It asks
+        # which compose project owns a container wearing this entry's names, and
+        # there is no answer to that without a daemon.
+        self._claim_folder(server_dir)
         yield "Checking Docker."
         if not self._seams.docker_ready():
             # Provisioning prints nothing of its own and can be a Docker
@@ -942,12 +994,50 @@ class StagedInstaller:
     def _guard(self, server_dir: Path) -> InstallState:
         """Claim the directory, or refuse it. Never recorded, so a resume re-runs it.
 
+        TWO halves, and the split is about WHEN each may be answered rather
+        than about what each asks. `_claim_folder()` is pure filesystem and is
+        called from `_preflight_lines()` before anything is provisioned;
+        `_refuse_foreign_containers()` needs a daemon to answer which compose
+        project owns a container, so it can only run here, after one exists.
+
+        Both are still called from here, and that is not belt and braces: this
+        is the call `run()` takes its `InstallState` from, and re-reading a
+        state file that may have changed between preflight and the run is the
+        honest answer rather than a cached one. Every rule below is a read.
+        """
+        state = self._claim_folder(server_dir)
+        self._refuse_foreign_containers(server_dir, state.install_id)
+        return state
+
+    def _claim_folder(self, server_dir: Path) -> InstallState:
+        """The half of the guard that is pure filesystem, and so needs no daemon.
+
+        Called from `_preflight_lines()` BEFORE provisioning, and again from
+        `_guard()`. Until 2026-09-02 every rule here ran only in the second
+        place, which is after `ensure_docker()` -- a sudo password, the
+        docker-group consent and a package install -- and after `gather()`'s
+        docker ps, port scan and image-pulling bind-mount probe. Recorded seam
+        order on a real run:
+
+            dir_problem -> None | 'Checking Docker.' | docker_ready -> False
+            ensure_docker
+            preflight.gather
+            REFUSED: ...server is not empty and was not created by this app.
+                     Nothing was written.
+
+        `Nothing was written` was untrue of the machine by the time it was
+        said. `7cb3bf17` hoisted the one sibling rule that lives in
+        `platform.server_dir_problem()` and left these below it.
+
+        Nothing here writes, deletes or asks anything outside this directory,
+        which is what makes running it twice free and running it early safe.
+
         Distinct from preflight, which is about the machine. This is about this
         one folder and this one install: it must be empty, or ours by
-        `install_id`, and no container wearing this entry's names may belong to
-        a different compose project. It must also be ours by `family`: a
-        catalog edit that moves a game between families is a refusal here,
-        never a reinterpretation.
+        `install_id`. It must also be ours by `family`: a catalog edit that
+        moves a game between families is a refusal here, never a
+        reinterpretation. The container rule this paragraph used to name as
+        well is `_guard()`'s other half, and it is the reason there are two.
 
         A state file that will not parse is refused rather than ignored, and
         that refusal is the whole of `Ownership.UNKNOWN`. Treating it as absent
@@ -965,12 +1055,21 @@ class StagedInstaller:
             else Claim(Ownership.UNCLAIMED)
         )
         if claim.ownership is Ownership.UNKNOWN:
+            # The generic sentence is for DAMAGE, and its advice is to delete
+            # the file. `Claim.reason` is how the one `UNKNOWN` that is not
+            # damage -- an intact record from a newer build -- says something
+            # else, because deleting that one destroys a working install's
+            # progress.
             raise InstallerError(
-                f"{server_dir} holds a {STATE_FILE} this app cannot read, so it cannot tell "
-                "whether this folder is one of its own installs or somebody else's work. "
-                "Nothing was written. If that file is left over from an install that was "
-                "interrupted, delete it and try again; if you did not expect it to be there, "
-                "install into another folder instead."
+                claim.reason
+                or (
+                    f"{server_dir} holds a {STATE_FILE} this app cannot read, so it "
+                    "cannot tell whether this folder is one of its own installs or "
+                    "somebody else's work. Nothing was written. If that file is left "
+                    "over from an install that was interrupted, delete it and try "
+                    "again; if you did not expect it to be there, install into another "
+                    "folder instead."
+                )
             )
         existing = claim.state
         if existing is not None and existing.install_id != install_id:
@@ -1006,7 +1105,6 @@ class StagedInstaller:
                     f"({', '.join(sorted(leftovers)[:5])}). Nothing was written. Pick an empty "
                     "folder, or remove that one yourself if you no longer want it."
                 )
-        self._refuse_foreign_containers(server_dir, install_id)
         return existing or InstallState(
             game_id=self.entry.id, install_id=install_id, family=self.family
         )
@@ -1306,14 +1404,30 @@ class StagedInstaller:
         label = platform.bind_label(
             enforcing=self._seams.selinux_enforcing(), fs_type=self._seams.fs_type(ctx.server_dir)
         )
-        plan = composegen.render(
-            self.entry,
-            ctx.server_dir,
-            templates_root=self.installers_root,
-            db_password=ctx.secrets.db_password,
-            bind_label=label,
-            platform_id=self._seams.platform_id,
-        )
+        # `render()` INSIDE a `try`, not beside one. It was called bare until
+        # 2026-09-02, and `ComposeGenError` is not an `InstallerError` - both
+        # subclass `RuntimeError` independently, so neither `except` clause can
+        # see the other's refusal and `run()`'s caught nothing here. Measured
+        # through the real `install_wiring.main()` on `wow-wotlk` and on
+        # `wow-tbc`: an unfilled placeholder in a compose template printed a
+        # traceback where the harness's own docstring promises the sentence
+        # written for a person, and `_record_error` never ran, so the state file
+        # kept `"last_error": ""` where every other stage failure records its
+        # own. Every refusal reachable from `render()` escaped that way; the one
+        # exception was `write_plan()`'s, below, which was already translated.
+        # This body is bound by EVERY family (`azerothcore.py`'s stage tuple and
+        # `cmangos.py`'s both name this method), so it was never one game's bug.
+        try:
+            plan = composegen.render(
+                self.entry,
+                ctx.server_dir,
+                templates_root=self.installers_root,
+                db_password=ctx.secrets.db_password,
+                bind_label=label,
+                platform_id=self._seams.platform_id,
+            )
+        except composegen.ComposeGenError as exc:
+            raise InstallerError(str(exc)) from exc
         replaceable = self._replaceable_compose(ctx.server_dir)
         if replaceable:
             yield (

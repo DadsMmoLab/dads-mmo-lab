@@ -442,10 +442,13 @@ def test_a_state_file_nobody_can_read_never_authorises_a_reset_of_a_users_checko
         list(engine(rec, clone=hard_reset).run(InstallOptions(server_dir=server_dir)))
     assert reset == [], reset
     assert rec.clones == [], rec.clones
-    # Nothing ran at all beyond the machine check that precedes the guard — no
-    # clone, no build, no container. A flag set to the right value would not be
-    # evidence of that; an empty call log is.
-    assert rec.calls == ["gather"], rec.calls
+    # Nothing ran at all - no machine check, no clone, no build, no container.
+    # A flag set to the right value would not be evidence of that; an empty call
+    # log is. It read `["gather"]` until 2026-09-02, which recorded the defect as
+    # if it were the contract: the machine was measured, and Docker provisioned
+    # first, before this folder was judged - and the refusal then says `Nothing
+    # was written` about a machine that had just had packages installed on it.
+    assert rec.calls == [], rec.calls
     assert edited.read_text(encoding="utf-8") == "// my patch\n"
     assert not (server_dir / "docker-compose.yml").exists()
 

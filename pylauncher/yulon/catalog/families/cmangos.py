@@ -375,22 +375,29 @@ class CmangosInstaller(StagedInstaller):
             text, ignore = dockerfile.render(template_dir, self._public_tokens(ctx.server_dir))
             written = dockerfile.write(ctx.server_dir, text, ignore)
         except dockerfile.DockerfileError as exc:
-            # Already the sentence a user reads; a class name in front of "that
-            # file was not written by Yu'lon" would be noise, not evidence.
-            # BOTH calls inside this `try` are covered — `render()` and
-            # `write()` each raise `DockerfileError`, and each is translated
-            # here.
+            # Already the sentence a user reads. A class name in front of
+            # "that file was not written by Yu'lon" would be noise, not evidence.
             #
-            # Do NOT read that as a description of the spine. Measured by AST
-            # on 2026-09-02 at `f6ed1b9a`: eight functions in `composegen.py`
-            # raise `ComposeGenError`; `render()` reaches seven of them; and
-            # `native.stage_generate_compose` called `composegen.render(...)`
-            # OUTSIDE its `try`, translating only `write_plan` — the one of the
-            # eight that `render()` cannot reach. This comment used to say
-            # `stage_generate_compose` "passes `ComposeGenError` through the
-            # same way", and that sentence is why nobody looked. Bringing
-            # `render()` inside the spine's `try` is the code half of the same
-            # finding, fixed separately.
+            # BOTH calls inside this `try` are covered - `render()` and `write()`
+            # each raise `DockerfileError`, and each is translated here.
+            #
+            # This comment used to add that `stage_generate_compose` passed
+            # `ComposeGenError` through the same way. It did not, and it
+            # described an ASYMMETRY as if it were symmetry. Measured by AST on
+            # 2026-09-02: eight functions in `composegen.py` raise
+            # `ComposeGenError`, `render()` reaches seven of them, and the spine
+            # translated only `write_plan` - the one of the eight `render()`
+            # cannot reach. Measured through `install_wiring.main()` the same
+            # day: a traceback instead of a sentence, and no `last_error`
+            # recorded, on the install path of EVERY shipped game, because
+            # `generate-compose` is the spine's own body and every family binds
+            # it. That sentence is why nobody looked.
+            #
+            # The spine wraps `render()` now, so the TRANSLATION matches. The
+            # COVERAGE still does not: the broad `(RuntimeError, OSError)` arm
+            # below has no counterpart there, and `stage_build`'s
+            # `built_image_refs()` call is bare - unreachable today behind
+            # preflight's own check, but bare.
             raise InstallerError(str(exc)) from exc
         except InstallerError:
             # MUST stay ahead of the broad clause whatever else changes:
