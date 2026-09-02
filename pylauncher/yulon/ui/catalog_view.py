@@ -708,10 +708,21 @@ class CatalogView(QWidget):
         Asks the MACHINE whether a restart would help, rather than remembering
         that a join happened. `docker_group_reexec()` returns an argv only when
         the group is in the database and not in this process — which is the
-        condition, stated exactly, and it is right on the four paths a flag gets
-        wrong: the user declined, the join failed, the group was revoked, or
-        Docker was never the problem in the first place. On every other failure
-        this returns False and the plain warning is shown, unchanged.
+        condition, stated exactly, and it is right on the three paths a flag
+        gets wrong: the user declined, the join failed, or the group was
+        revoked. Each of those leaves the group out of the database, so the
+        predicate is false and no restart is offered.
+
+        It does NOT carry a fourth path. The caller runs this on EVERY failed
+        install and `docker_group_reexec()` asks nothing about what the failure
+        was, so a user who is in the database group but not in this process is
+        offered a restart for a download that 404'd or a disk that filled up
+        just as readily as for a docker-socket denial. A separate fix made the
+        predicate return None under root, which removed the instance that was
+        permanently true for every `sudo yulon` install; the general case is
+        still live, and the cost of it is one dialog offering a restart that
+        will not help. Whenever the predicate says None this returns False and
+        the plain warning is shown, unchanged.
 
         Returns True when it has spoken to the user, so the caller does not also
         show its own dialog: the question below already carries `message` in

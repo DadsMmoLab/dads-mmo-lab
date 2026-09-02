@@ -761,7 +761,11 @@ class ContainerGit:
         asked: `_adoption_refusal()` reaches fact 4 only after
         `server_dir_claim()` has said this app created the server directory, so
         the folder relabelled is one this app owns and is about to `fetch` into
-        anyway — the very same container `_update()` runs. A future caller that
+        anyway — through the very same writer container `clone()`'s
+        existing-checkout branch uses (`_run()` → `_capture(..., writes=True)`).
+        This line named `_update()` until 2026-09-02, which is `RunnerGit`'s
+        method and runs HOST git: no container, and not this class's update path
+        at all. A future caller that
         asked this about a FOREIGN checkout would be relabelling somebody else's
         repository in order to decide whether to leave it alone; do not add one.
 

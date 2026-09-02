@@ -38,10 +38,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY src/tortoise-wow /src
 
-# **git in this image also CLONES, and over HTTP/2 that clone fails.** CMake's
-# `FetchContent_MakeAvailable(zlib)` in `dep/src/CMakeLists.txt` clones
-# https://github.com/madler/zlib.git at CONFIGURE time, so this build reaches
-# the network from inside the container before a single file is compiled.
+# **A clone made from inside an `ubuntu:22.04` image over HTTP/2 fails**, and
+# this line is here because of it — but the diagnosis was made on the OTHER two
+# entries, not on this one. In `cmangos/mangos-tbc` and `cmangos/mangos-classic`
+# CMake's `FetchContent_MakeAvailable(zlib)` in `dep/src/CMakeLists.txt` clones
+# https://github.com/madler/zlib.git at CONFIGURE time, so THOSE builds reach
+# the network from inside the container before a single file is compiled. That
+# is the TBC/Vanilla reason and it does not apply here: checked 2026-09-02 on
+# `Shyalya/tortoise-wow` branch `playerbots-integration-gh`, its
+# `dep/src/CMakeLists.txt` is the old MaNGOS file with no FetchContent in it at
+# all — the whole zlib handling is `if(WIN32) add_subdirectory(zlib) endif()`
+# over a zlib vendored at `dep/src/zlib`, and the one `FetchContent` anywhere in
+# that tree (tracy, in the root `CMakeLists.txt`) sits behind `USE_TRACY`, which
+# defaults OFF and is not passed to the cmake step below. The line stays anyway:
+# it costs nothing, it covers whatever git this build or a later branch of this
+# fork does run, and three templates that say the same thing are worth more than
+# one that has to be remembered as the exception.
 #
 # Measured on `yulon-ubuntu` 2026-09-02, on the first WoW Vanilla install: the
 # clone died three times with `fatal: could not read Username for

@@ -1129,8 +1129,11 @@ def run_mmaps(
     # The wipe above removes `mmaps/` and nothing here put it back, so this
     # stage reached MoveMapGen with the same missing folder that stopped the
     # assembler one stage earlier -- see `make_out_dirs()`. Found by reading
-    # rather than by running: the extract failure blocks this stage, so no run
-    # has reached it yet on any CMaNGOS entry.
+    # rather than by running, and the "no run has reached this stage yet" that
+    # was written alongside it was already wrong: the commit that added this
+    # line was the commit that fixed the extract failure. A WoW TBC install has
+    # since run MoveMapGen through to completion here -- 72 maps, 2819 mmap
+    # files (m910q, 2026-09-02).
     try:
         make_out_dirs([MMAPS_DIR], data_dir)
     except InstallerError as exc:

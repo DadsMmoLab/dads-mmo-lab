@@ -786,13 +786,17 @@ class StagedInstaller:
     def _clear_error(self, server_dir: Path, state: InstallState) -> None:
         """Drop a previous run's failure sentence once this run has finished.
 
-        `record()` clears `last_error`, and that was the ONLY thing that did --
-        which meant it cleared nothing on the run where it matters most. It
-        returns `self` untouched when the stage is already in `completed`, and
-        the last four CMaNGOS stages (`db-password`, `start-db`, `up`, `ready`)
-        are `recorded=False` and never reach it at all. So a resume that
-        finishes every remaining stage records nothing new, clears nothing, and
-        leaves the old sentence sitting in a state file it has just rewritten.
+        `InstallState.with_stage()` clears `last_error`, and that was the ONLY
+        thing that did -- which meant it cleared nothing on the run where it
+        matters most. It returns `self` untouched when the stage is already in
+        `completed`, and an unrecorded stage never reaches it at all.
+        `recorded=False`, not a stage's POSITION, is the property that decides
+        the second half: CMaNGOS's four unrecorded stages are `db-password`
+        (2nd of 12), `start-db`, `up` and `ready`, while its last four are
+        `start-db`, `import`, `up` and `ready` -- and `import` is recorded. So a
+        resume that finishes every remaining stage records nothing new, clears
+        nothing, and leaves the old sentence sitting in a state file it has just
+        rewritten.
 
         Seen on m910q 2026-09-02: WoW TBC finished -- three containers up, "WoW
         TBC is installed and running" printed -- with

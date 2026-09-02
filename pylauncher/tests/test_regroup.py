@@ -429,8 +429,21 @@ def test_saying_yes_restarts_under_the_docker_group(
 # exist: 2034 tests could not see it.
 
 
-@pytest.mark.parametrize("outcome", ["granted", "already-member"])
-def test_the_restart_is_offered_before_the_logout(outcome: str) -> None:
+@pytest.mark.parametrize(
+    ("outcome", "manual_steps"),
+    [
+        pytest.param(
+            "granted",
+            (platform.DOCKER_GROUP_RELOGIN_STEP.format(user="pk"),),
+            id="granted-as-ensure_docker-returns-it",
+        ),
+        pytest.param("granted", (), id="granted-with-no-manual-steps"),
+        pytest.param("already-member", (), id="already-member"),
+    ],
+)
+def test_the_restart_is_offered_before_the_logout(
+    outcome: platform.DockerGroupOutcome, manual_steps: tuple[str, ...]
+) -> None:
     """Both refusals name restarting FIRST and a logout only as the fallback.
 
     Order is the assertion, not presence. Both remedies are named on purpose --
@@ -438,10 +451,25 @@ def test_the_restart_is_offered_before_the_logout(outcome: str) -> None:
     needs the old one -- so a test that only checked "restart is mentioned"
     would pass against a sentence that buries it after the logout, which is the
     sentence this replaced.
+
+    The shape of the report is parametrised too, because for `granted` it used
+    to be a report `ensure_docker()` cannot return: `manual_steps=()`, which
+    sends `docker_unavailable()` down the `details or ...` fallback -- a
+    sentence no user reads, since `_ensure_docker_linux()` appends
+    `DOCKER_GROUP_RELOGIN_STEP` for that outcome unconditionally. The first case
+    is the production shape and pins the ordering on the sentence that actually
+    ships; the second keeps the fallback covered, because the fallback is kept
+    on purpose (see the comment on that branch). `already-member` carries no
+    steps in production either -- `platform.py` deliberately leaves the relogin
+    step out of that outcome so the advice is not printed twice -- so its
+    ordering rests on the branch's own inline sentence (verified against
+    `platform.py`, 2026-09-02).
     """
     from yulon.catalog.installer import docker_unavailable
 
-    report = platform.ProvisionReport(platform="linux", docker_group=outcome)  # type: ignore[arg-type]
+    report = platform.ProvisionReport(
+        platform="linux", manual_steps=manual_steps, docker_group=outcome
+    )
     message = str(docker_unavailable(report)).lower()
 
     assert "restart yu'lon" in message, message

@@ -493,8 +493,15 @@ def _regain_docker_group() -> None:
     user still sitting in the session the join happened in; that one has to ask,
     because it throws away a running application.
 
-    Costs one `os.getgroups()` call on every normal start, which is what
-    `docker_group_reexec()` spends before returning None.
+    Not one `os.getgroups()` call. Off Linux `docker_group_reexec()` returns
+    None on a `sys.platform` check and spends nothing else. On Linux, before it
+    can return None, it spends an env read, a `geteuid()`, a
+    `shutil.which("sg")` PATH scan, `os.getgroups()`, and one `grp.getgrgid()`
+    per gid -- and for a user who is NOT in the docker group, which is every
+    Linux user who has not provisioned Docker, also a `pwd.getpwuid()` and a
+    SUBPROCESS (`id -nG <user>`, 5s timeout). All of it runs as the first
+    statement of `main()`, before QApplication exists, so a host where that
+    subprocess is slow delays the window with nothing on screen yet to say why.
     """
     platform.restart_under_docker_group()
 

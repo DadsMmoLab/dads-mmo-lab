@@ -653,11 +653,21 @@ def test_write_names_the_file_it_could_not_lay_down(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("entry", CMANGOS_ENTRIES, ids=lambda e: e.id)
 def test_every_cmangos_build_forces_http_1_1_before_cmake_runs(entry: CatalogEntry) -> None:
-    """The build CLONES from GitHub, and over HTTP/2 that clone fails.
+    """A build that CLONES from GitHub over HTTP/2 fails, so all three forbid HTTP/2.
 
-    CMake's `FetchContent_MakeAvailable(zlib)` clones madler/zlib at CONFIGURE
-    time, so the build reaches the network before compiling anything. Measured
-    on `yulon-ubuntu` 2026-09-02, first WoW Vanilla install: three failed
+    The clone is real for TWO of the three: `wow-tbc` and `wow-vanilla` build
+    `cmangos/mangos-tbc` and `cmangos/mangos-classic`, whose
+    `dep/src/CMakeLists.txt` runs `FetchContent_MakeAvailable(zlib)` and so
+    clones madler/zlib at CONFIGURE time, before compiling anything. It is NOT
+    true of `wow-tortoise`: that entry builds `Shyalya/tortoise-wow` branch
+    `playerbots-integration-gh`, whose `dep/src/CMakeLists.txt` is an old MaNGOS
+    file with no FetchContent at all -- its whole zlib handling is `if(WIN32)
+    add_subdirectory(zlib) endif()` over a vendored tree. Tortoise is asserted
+    here anyway and on purpose: the line costs nothing, it covers whatever git
+    that build does run, and three templates that agree beat two that agree plus
+    one exception nobody remembers.
+
+    Measured on `yulon-ubuntu` 2026-09-02, first WoW Vanilla install: three failed
     clones, `could not read Username for 'https://github.com'` / `expected
     flush after ref listing`, cmake dead at `Build step for zlib failed: 2`.
     `git ls-remote` from `alpine/git` on that same box worked, from

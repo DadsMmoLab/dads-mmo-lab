@@ -2222,11 +2222,11 @@ def test_a_reset_that_fails_reaches_the_cli_as_a_sentence_and_is_recorded(
 def test_a_finished_install_drops_the_previous_runs_failure(tmp_path: Path) -> None:
     """A success must not leave the last failure's sentence in the state file.
 
-    `record()` clears `last_error`, and until 2026-09-02 that was the only thing
-    that did -- so it cleared nothing on the run where it matters most. It
-    returns `self` untouched when the stage is already in `completed`, and an
-    unrecorded stage never reaches it, so a RESUME that finishes every remaining
-    stage records nothing new and clears nothing.
+    `InstallState.with_stage()` clears `last_error`, and until 2026-09-02 that
+    was the only thing that did -- so it cleared nothing on the run where it
+    matters most. It returns `self` untouched when the stage is already in
+    `completed`, and an unrecorded stage never reaches it, so a RESUME that
+    finishes every remaining stage records nothing new and clears nothing.
 
     Seen on m910q the same day: WoW TBC printed "WoW TBC is installed and
     running", three containers up, and `.yulon-install.json` still said
@@ -2236,10 +2236,10 @@ def test_a_finished_install_drops_the_previous_runs_failure(tmp_path: Path) -> N
     likely to believe it.
 
     Shaped as that resume rather than as a fresh install: the recorded stage is
-    ALREADY done before this run starts, so `record()`'s early return is taken
-    and the only remaining stage is unrecorded. A test that drove a first run
-    would pass against the broken code, because there `record()` clears the
-    field on the way past.
+    ALREADY done before this run starts, so `with_stage()`'s early return is
+    taken and the only remaining stage is unrecorded. A test that drove a first
+    run would pass against the broken code, because there `with_stage()` clears
+    the field on the way past.
     """
     rec = Recorder()
     family = _family(

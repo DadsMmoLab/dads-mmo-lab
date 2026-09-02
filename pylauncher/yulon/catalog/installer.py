@@ -147,6 +147,27 @@ def docker_unavailable(report: platform.ProvisionReport) -> DockerUnavailableErr
     """
     details = " ".join(report.manual_steps) or "; ".join(report.skipped)
     if report.docker_group == "granted":
+        # The remedy this branch reads out is `platform.DOCKER_GROUP_RELOGIN_STEP`,
+        # arriving through `details`. The fallback under it never rendered for a
+        # user: `_ensure_docker_linux()` is the only producer of `granted`, and
+        # it appends that step to `manual_steps` for the outcome unconditionally,
+        # so `details` was non-empty on every report that ever reached here
+        # (checked against `platform.py`, 2026-09-02).
+        #
+        # Kept anyway, and deliberately NOT folded into the static sentence
+        # above. This function words a `ProvisionReport` and cannot see who
+        # built one — `manual_steps` defaults to `()` — so without the fallback
+        # a hand-built or future report would tell the user their session cannot
+        # see the group and then name nothing to do about it. Writing the remedy
+        # inline instead, the way the `already-member` branch below does, would
+        # print it TWICE for the report production actually sends: that is the
+        # duplication the 2026-08-31 review found on that other branch, and the
+        # reason `platform.py` keeps the step out of `already-member`'s steps.
+        #
+        # So the sentence under test is the one production produces:
+        # `test_regroup.py::test_the_restart_is_offered_before_the_logout`
+        # asserts the ordering against a report CARRYING that step, and keeps a
+        # second case for the empty-steps fallback rather than only that one.
         return DockerNeedsReLoginError(
             "Docker is installed and set up. It cannot be used from this session yet: your "
             "account was added to the docker group, and a session that was already open does "
