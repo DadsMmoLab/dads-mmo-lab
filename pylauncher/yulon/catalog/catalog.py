@@ -2,9 +2,9 @@
 
 One entry per installable server. Everything an installer, a controller or
 the networking helpers need to know about a game — emulator sources, the
-install script to wrap (Phase 3a), container names, the auth/world/db port
-table (README §13), database names, what client the user must supply
-(README §3a) — is data here, not Python (style-guide §3). Acronyms only
+`native` block its family engine reads (Phase 6/7), container names, the
+auth/world/db port table (README §13), database names, what client the user
+must supply (README §3a) — is data here, not Python (style-guide §3). Acronyms only
 (§6): `id`s are `wow-wotlk`, `wow-tbc`, `wow-vanilla`, `wow-tortoise`.
 """
 
@@ -25,8 +25,6 @@ CATALOG_FILE = Path(__file__).resolve().with_name("catalog.json")
 
 Slug = Annotated[str, Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")]
 Status = Literal["stable", "beta", "wip"]
-# Keys of `Install.script_variants` — the same names `platform.linux_package_manager()` returns.
-PackageManager = Literal["apt", "dnf", "pacman", "zypper"]
 
 
 class _Strict(BaseModel):
@@ -572,27 +570,28 @@ class NativeInstall(_Strict):
 
 
 class Install(_Strict):
-    """How this game is installed: by driving its bash script, or natively.
+    """How this game is installed: through the family engine its `native` block names.
 
-    Two lists rather than one, because "where can this be installed" and "where
-    is the *script* the mechanism" stopped being the same question in roadmap
-    6.2. `platforms` still drives the 6.1 refusal; `script_platforms` says where
-    the bash script runs, and anything in `platforms` but not in
-    `script_platforms` runs `catalog/native.py`'s engine instead. See
-    `installer.installer_for()`, which is the one place that decides.
+    One list, not two. Until 7.2 there were two mechanisms — a bash script per
+    platform and per package manager, and the engine — so `platforms` said
+    where the entry could be installed at all while `script_platforms` said
+    which of those the script owned. 7.2 deleted the scripts, and with a single
+    mechanism left the second question has no content: `platforms` drives the
+    6.1 refusal and the tile's disabled button, and `native.family` picks the
+    engine. See `installer.installer_for()`, which is the one place that
+    decides, and `pyplan/phase7-decisions.md`.
     """
 
-    script: str = Field(
-        min_length=1,
-        description="Path to the install-*.sh, relative to catalog/installers/",
-    )
     default_server_dir: str = Field(min_length=1, description="Default dir name under $HOME")
     password: PasswordPlan = Field(
         description="Where the database root password comes from: fixed, or generated per install."
     )
     requires_client_dir: bool = Field(
         default=False,
-        description="The script asks for the user's client folder and loops until given one.",
+        description=(
+            "The user's own client folder is required before the install can start (README "
+            "§3a); the view asks for it and the engine's preflight refuses without it."
+        ),
     )
 
     def db_password(self, server_dir: Path) -> str | None:
@@ -632,75 +631,26 @@ class Install(_Strict):
         default=("linux",),
         min_length=1,
         description=(
-            "Which platforms this entry's install script can actually run on. Data, not a Python "
-            "conditional (roadmap 6.1): every v1 installer is a Linux-only bash script today, so "
-            "off-Linux clicks must be refused with an honest message instead of streaming a "
-            "script that exits 1. 6.2/6.3 add macOS/Windows variants and widen this list."
-        ),
-    )
-    script_platforms: tuple[PlatformId, ...] | None = Field(
-        default=None,
-        min_length=1,
-        description=(
-            "Where the bash SCRIPT is the install mechanism. Absent means 'wherever this entry "
-            "is installable at all', so every entry written before roadmap 6.2 keeps meaning "
-            "exactly what it said. An entry listing macOS in `platforms` and only Linux here is "
-            "saying: install macOS with the native engine."
+            "Which platforms this entry can be installed on. Data, not a Python conditional "
+            "(roadmap 6.1): an off-list click is refused with an honest message rather than "
+            "starting an install that cannot finish, and the tile disables its button from the "
+            "same list. `min_length=1` because an entry installable nowhere would ship a dead "
+            "button; every shipped entry has an engine (7.3), so that state is now a mistake "
+            "and not a configuration."
         ),
     )
     native: NativeInstall | None = Field(
         default=None,
         description=(
-            "Floors and templates for the native engine. Required for any platform this entry "
-            "dispatches natively; the engine refuses to run without it rather than inventing a "
-            "template directory."
-        ),
-    )
-    script_variants: dict[PackageManager, str] = Field(
-        default_factory=dict,
-        description=(
-            "Per-package-manager overrides of `script` (keys: apt, dnf, pacman, zypper) for "
-            "distros the default script does not cover, same base directory; `script` "
-            "itself is the pacman/SteamOS one."
+            "Floors, templates and the family for the engine that installs this entry. "
+            "`installer_for()` refuses to build an engine without it rather than inventing a "
+            "family, so any entry with a non-empty `platforms` needs one."
         ),
     )
 
     def supports(self, platform_id: str) -> bool:
         """True if this entry can be installed on `platform_id` (`platform.detect()`) at all."""
         return platform_id in self.platforms
-
-    def scripted_platforms(self) -> tuple[PlatformId, ...]:
-        """Where the bash script is the mechanism — `platforms` when nothing narrower is said.
-
-        A method rather than a validator that fills the field in, so the JSON
-        keeps saying what its author wrote: an entry with no `script_platforms`
-        is one that has never been asked the question, and reading `None` back
-        out of it is how a future migration can tell those apart from an entry
-        that answered "the script runs everywhere".
-        """
-        return self.script_platforms if self.script_platforms is not None else self.platforms
-
-    def uses_script(self, platform_id: str) -> bool:
-        """True if installing on `platform_id` means running the bash script."""
-        return platform_id in self.scripted_platforms()
-
-    def is_native(self, platform_id: str) -> bool:
-        """True if installing on `platform_id` means the native engine.
-
-        Supported here, but not by the script. Deliberately NOT "not scripted":
-        a platform the entry does not support at all is the 6.1 refusal, and
-        answering True for it would turn an honest "not on Windows yet" into an
-        engine that starts and then fails.
-        """
-        return self.supports(platform_id) and not self.uses_script(platform_id)
-
-    def script_for(self, package_manager: str | None) -> str:
-        """The script for a host with `package_manager` (None → default), relative to
-        `catalog/installers/`."""
-        for pm, script in self.script_variants.items():
-            if pm == package_manager:
-                return script
-        return self.script
 
 
 class Containers(_Strict):

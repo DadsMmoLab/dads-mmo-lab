@@ -108,60 +108,33 @@ def test_no_engine_and_no_script_left_is_the_app_bug_family_for_words(
     refusal took a `model_copy` that also emptied `Install.script`. F.3 deleted
     that engine, which leaves one answer for the state and it is the sentence
     `family_for()` already had — so the sentence is not written a second time
-    here. The entry used below is the shipped one, script field and all (F.4
-    removes the field), which is what makes this the assertion that the
-    fallback is GONE rather than merely unreachable.
+    here. The entry used below is the shipped one, unmodified. Until F.4 that
+    mattered for a second reason — it still carried the `script` field the
+    fallback used to read, so asserting the field's presence said the fallback
+    was GONE rather than merely starved. F.4 deleted the field, and what makes
+    the fixture honest now is that the REGISTRY, not the entry, is what
+    `without_cmangos` narrows: the entry is real catalog data throughout.
     """
     without_cmangos(monkeypatch)
     tbc = load_catalog().get("wow-tbc")
-    assert tbc.install.script, "the fallback's condition is still on the entry"
+    assert tbc.install.native is not None and tbc.install.native.family == "cmangos"
     with pytest.raises(InstallerError, match="install family this app does not have"):
         installer_for(tbc, platform_id=lambda: "linux")
 
 
-def test_the_entry_names_its_family_and_a_scriptless_entry_still_reads_as_scripted() -> None:
-    """`family` is catalog data; `platforms`/`script_platforms` still say "scripted"."""
+def test_the_wotlk_entry_names_the_family_of_the_engine_that_installs_it() -> None:
+    """The class attribute and the catalog datum agree, for this file's own family.
+
+    Everything else the deleted `..._still_reads_as_scripted` test held was
+    about the script path (`scripted_platforms`/`uses_script`/`is_native` on
+    TBC), which F.4 removed. The catalog-wide version of the agreement below
+    — every native entry reaching the class its family id names — is
+    `test_spine.py`'s, because it is true of every family; this is the
+    AzerothCore half, which is this file's subject.
+    """
     assert ENTRY.install.native is not None
     assert ENTRY.install.native.family == "azerothcore"
     assert AzerothCoreInstaller.family == ENTRY.install.native.family
-    assert TBC.install.native is not None and TBC.install.native.family == "cmangos"
-    assert TBC.install.scripted_platforms() == TBC.install.platforms
-    assert TBC.install.uses_script("linux") is True
-    assert TBC.install.is_native("linux") is False
-    # And a platform the entry does not support is never "native" — that is the
-    # honest 6.1 refusal, not an engine that starts and then fails.
-    assert TBC.install.is_native("macos") is False
-    assert TBC.install.is_native("windows") is False
-
-
-def test_wotlk_drops_script_platforms_so_its_fallback_matches_every_old_entry() -> None:
-    """The 7.1 flip's data half (B.7): one JSON key gone, `scripted_platforms()` falls back.
-
-    `installer_for()` in this tree already dispatches on `install.native` alone
-    (see `test_the_family_decides_which_engine_installs_and_linux_no_longer_keeps_the_script`
-    above) — the A.3 dispatch rewrite has already landed here, ahead of the
-    plan's stated B.7-then-A.1..A.3 order. So there is no transitional window in
-    this tree where `installer_for()` still reads `is_native()`/`uses_script()`
-    for WotLK: those method bodies are provably dead for WotLK already, kept
-    only until 7.2 deletes them (A1). This test pins what they still SAY, now
-    that the field they used to narrow (`script_platforms`) is gone: with no
-    narrower answer on file, WotLK reads exactly like TBC above — "scripted
-    everywhere it is installable" — even though nothing acts on that anymore.
-    """
-    assert ENTRY.install.script_platforms is None
-    assert ENTRY.install.native is not None
-    assert ENTRY.install.scripted_platforms() == ENTRY.install.platforms
-    assert ENTRY.install.uses_script("linux") is True
-    assert ENTRY.install.uses_script("macos") is True
-    assert ENTRY.install.uses_script("windows") is True
-    assert ENTRY.install.is_native("linux") is False
-    assert ENTRY.install.is_native("macos") is False
-    assert ENTRY.install.is_native("windows") is False
-    # And the real dispatcher does not care: WotLK installs natively everywhere,
-    # `is_native()`'s "False" above notwithstanding.
-    assert isinstance(installer_for(ENTRY, platform_id=lambda: "linux"), AzerothCoreInstaller)
-    assert isinstance(installer_for(ENTRY, platform_id=lambda: "macos"), AzerothCoreInstaller)
-    assert isinstance(installer_for(ENTRY, platform_id=lambda: "windows"), AzerothCoreInstaller)
 
 
 def test_the_unsupported_platform_refusal_still_comes_first(tmp_path: Path) -> None:

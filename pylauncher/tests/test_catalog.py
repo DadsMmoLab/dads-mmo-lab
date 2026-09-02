@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from yulon.catalog.catalog import (
     DbFacts,
     EmulatorSource,
     ExtractPlan,
+    Install,
     NativeInstall,
     PasswordPlan,
     ReadyMarkers,
@@ -48,31 +50,171 @@ def test_wotlk_entry_matches_the_controller_spec() -> None:
     )
 
 
-def test_script_variant_keys_must_be_known_package_managers() -> None:
-    """A typo like "ubuntu" would silently fall back to the pacman script — refuse it."""
-    bad = {
-        "schema_version": 1,
-        "games": [
-            {
-                "id": "x-y",
-                "name": "X",
-                "status": "wip",
-                "emulator": {"name": "e", "sources": [{"repo": "a/b", "dest": "."}]},
-                "install": {
-                    "script": "s.sh",
-                    "default_server_dir": "d",
-                    "password": {"mode": "fixed", "value": "x"},
-                    "script_variants": {"ubuntu": "s-ubuntu.sh"},
-                },
-                "containers": {"db": "d", "auth": "a", "world": "w"},
-                "ports": {"auth": 1, "world": 2, "db": 3},
-                "databases": {"auth": "a", "characters": "c", "world": "w"},
-                "client": {"version": "1", "build": 1},
-            }
-        ],
+def _entry(**install: object) -> dict[str, object]:
+    """A minimal valid catalog entry, with `install` members merged over the defaults.
+
+    Written as a helper rather than repeated literals because the tests below
+    differ from each other by exactly one `install` member, and that member is
+    the thing each of them is about.
+    """
+    return {
+        "id": "x-y",
+        "name": "X",
+        "status": "wip",
+        "emulator": {"name": "e", "sources": [{"repo": "a/b", "dest": "."}]},
+        "install": {
+            "default_server_dir": "d",
+            "password": {"mode": "fixed", "value": "x"},
+            **install,
+        },
+        "containers": {"db": "d", "auth": "a", "world": "w"},
+        "ports": {"auth": 1, "world": 2, "db": 3},
+        "databases": {"auth": "a", "characters": "c", "world": "w"},
+        "client": {"version": "1", "build": 1},
     }
-    with pytest.raises(ValidationError):
-        parse_catalog(bad)
+
+
+def test_no_field_or_method_of_install_is_about_a_bash_script() -> None:
+    """7.2: the script path is gone from the model, not merely unused.
+
+    The whole field set is compared, not the names that were deleted: a
+    mutation adding `bash_file` — the script field back under a name that
+    never says "script" — survived a substring check and dies here.
+
+    ORDER MATTERS, and it was wrong when this was written. The substring line
+    was placed AFTER the set comparison and could therefore never fail: any
+    field name containing "script" already breaks the set, so the set assertion
+    always fired first. Its docstring claimed it "stays anyway, because it fails
+    with the offending name in the message" — a purpose the written order
+    forbade. Found by review 2026-09-02, proved by a mutation that restored a
+    real `script` field and watched the set assertion be the one that fell. It
+    now runs first, which is the only arrangement in which that reason is true.
+
+    LIMIT, recorded rather than fixed: this enumerates `Install`'s own fields
+    and namespace. Measured 2026-09-02, three shapes survive it — a plain
+    `@property`, a `@computed_field @property`, and a `script` field on the
+    NESTED `NativeInstall`. What backstops them is
+    `test_the_shipped_catalog_names_no_bash_file`: a re-added field only matters
+    once it carries `.sh` data, and that test walks the JSON. A guard that
+    enumerates one model says nothing about its neighbours.
+
+    `is_native` is named on its own because it is the one deleted symbol whose
+    name does not say "script": it meant "supported, but not by the script",
+    and with a single install path left it could only be a synonym for
+    `supports()`.
+    """
+    assert [name for name in Install.model_fields if "script" in name] == []
+    assert set(Install.model_fields) == {
+        "default_server_dir",
+        "password",
+        "requires_client_dir",
+        "platforms",
+        "native",
+    }
+    assert [name for name in vars(Install) if "script" in name] == []
+    assert not hasattr(Install, "is_native")
+
+
+def test_the_shipped_catalog_names_no_bash_file() -> None:
+    """F.2 deleted the six `install-*.sh`; nothing in `catalog.json` may still point at one.
+
+    Read off the raw JSON rather than the model, because the model can only
+    speak for fields it still has: a `.sh` path pasted into some other string
+    — a template dir, a server dir — would parse cleanly and name a file that
+    was deleted. Every string value in the file is walked, so this does not
+    depend on knowing which key it landed in.
+    """
+    raw = json.loads(CATALOG_FILE.read_text(encoding="utf-8"))
+    found: list[str] = []
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+        elif isinstance(node, str) and node.endswith(".sh"):
+            found.append(node)
+
+    walk(raw)
+    assert found == [], found
+    assert raw["games"], "an empty games list would walk nothing"
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("script", "s.sh"),
+        ("script_platforms", ["linux"]),
+        ("script_variants", {"apt": "s-ubuntu.sh"}),
+    ],
+)
+def test_a_script_member_is_refused_by_forbid_and_by_nothing_else(
+    field: str, value: object
+) -> None:
+    """A stale `script*` key in an entry is an error, not a silently ignored member.
+
+    The error list is compared whole rather than matched on a phrase: that pins
+    the refusal to `extra="forbid"` on `Install` (`extra_forbidden`, at
+    `install.<field>`) and to no other rule.
+
+    THE REASON THIS MATTERS, corrected 2026-09-02 after review. The reason first
+    given here was that `match="script"` could also match a `default_server_dir`
+    error mentioning a `.sh` path — and that is not reproducible against this
+    fixture, whose `default_server_dir` is `"d"`. A confident reason with nothing
+    behind it, attached to a correct decision.
+
+    The demonstrable reason is a different rule on the SAME field. Measured: with
+    a real `script: Literal["none"]` field restored to `Install`, `"script":
+    "s.sh"` is refused by `literal_error` at `install.script` rather than by
+    `extra_forbidden` — and the `match=`-based form PASSES, green, with the
+    deleted field back in the model. The `(loc, type)` comparison fails, naming
+    it. Proved in both directions: with `extra="ignore"` on `Install` alone,
+    every case here fails with DID NOT RAISE rather than with some other error,
+    so no neighbouring rule refuses this fixture at all.
+
+    That is the fifth time in Phase 7 a test passed because a NEIGHBOURING rule
+    refused, and the first where the neighbour was on the same field.
+    """
+    with pytest.raises(ValidationError) as caught:
+        parse_catalog({"schema_version": 1, "games": [_entry(**{field: value})]})
+    assert [(e["loc"], e["type"]) for e in caught.value.errors()] == [
+        (("games", 0, "install", field), "extra_forbidden")
+    ]
+
+
+def test_an_entry_installable_nowhere_is_refused() -> None:
+    """`platforms: []` stays out of the model: after 7.3 it can only be a mistake.
+
+    It was a legal state while the CMaNGOS entries had data but no engine —
+    the tile would have said "not on this platform" instead of starting an
+    install that could not finish. 7.3 gave all three an engine and a family,
+    so an empty list now says only "this entry's Install button is dead", and
+    `min_length=1` is what refuses to ship that by accident.
+    """
+    with pytest.raises(ValidationError) as caught:
+        parse_catalog({"schema_version": 1, "games": [_entry(platforms=[])]})
+    assert [(e["loc"], e["type"]) for e in caught.value.errors()] == [
+        (("games", 0, "install", "platforms"), "too_short")
+    ]
+
+
+def test_every_shipped_entry_is_installable_on_linux_and_names_its_family() -> None:
+    """The relationship the Install button depends on, asserted over the whole catalog.
+
+    `catalog_view` enables the button from `install.supports()` and the engine
+    is built from `install.native.family`, so an entry with one and not the
+    other is a tile that either offers an install nothing can run or hides one
+    that works. Enumerated rather than spot-checked: the four entries are not
+    named here, so a fifth is held to the same rule the day it is added.
+    """
+    games = load_catalog().games
+    assert games, "an empty catalog would pass every loop below"
+    for game in games:
+        assert game.install.platforms, game.id
+        assert game.install.native is not None, game.id
+        assert game.install.supports("linux") is True, game.id
 
 
 def test_only_one_server_runs_at_a_time_is_visible_in_the_data() -> None:
@@ -98,7 +240,6 @@ def test_unknown_game_and_bad_entries_are_rejected() -> None:
                             "sources": [{"repo": "ftp://evil/x", "dest": "."}],
                         },
                         "install": {
-                            "script": "s.sh",
                             "default_server_dir": "d",
                             "password": {"mode": "fixed", "value": "x"},
                         },
@@ -218,7 +359,6 @@ def test_the_old_password_fields_are_gone_not_ignored() -> None:
                         "status": "wip",
                         "emulator": {"name": "e", "sources": [{"repo": "a/b", "dest": "."}]},
                         "install": {
-                            "script": "s.sh",
                             "default_server_dir": "d",
                             "password": {"mode": "fixed", "value": "x"},
                             "db_root_password": "x",
@@ -392,13 +532,17 @@ def test_a_game_with_a_one_shot_import_service_must_carry_a_fixed_password() -> 
     ), "no entry names an import service at all, so this test would pass on an empty catalog"
 
 
-def test_wotlk_names_no_script_platform_but_still_ships_its_scripts_until_7_2() -> None:
-    """One JSON key changes; the bash files and `script` field stay until 7.2 deletes this test."""
+def test_wotlk_is_installable_on_all_three_platforms() -> None:
+    """WotLK's `platforms` is the widest in the catalog, and the engine is the only path.
+
+    B.7 wrote this test to hold a transitional state (`script_platforms` gone,
+    the `script` field still on the entry); F.4 deleted both fields, so what
+    is left to hold is the list itself — the one entry the 6.1 refusal never
+    fires for.
+    """
     wotlk = load_catalog().get("wow-wotlk")
-    assert wotlk.install.script_platforms is None
     assert wotlk.install.platforms == ("linux", "macos", "windows")
-    assert wotlk.install.native is not None
-    assert wotlk.install.script == "wow-wotlk/install-wow-wotlk.sh"
+    assert all(wotlk.install.supports(p) for p in ("linux", "macos", "windows"))
 
 
 # -- the CMaNGOS blocks (7.3, task G.2) ---------------------------------------
@@ -575,28 +719,28 @@ CMANGOS_GAMES = ("wow-tbc", "wow-vanilla", "wow-tortoise")
 
 @pytest.mark.parametrize("game_id", CMANGOS_GAMES)
 def test_the_cmangos_entries_carry_a_full_family_block(game_id: str) -> None:
-    """The data lands in 7.3 while the engine that reads it is still four groups away.
+    """The block the CMaNGOS engine reads, and the Linux install it enables.
 
-    `platforms` deliberately still says `["linux"]` and the entries keep their
-    `script`. The plan for this task had both go — `"platforms": []`, no
-    `script` — on the strength of 7.2 having already deleted the bash path.
+    G.4 landed this data while `FAMILIES` still had no `cmangos` engine, so the
+    entries kept their bash `script` and this test asserted it. K.8 registered the
+    engine and F.4 deleted the field: the same three entries now install through
+    `CmangosInstaller` on Linux and nothing else, which is what `supports("linux")`
+    below stands for. What installs the game is asserted in
+    `test_families_cmangos.py`, on the dispatcher.
 
-    WRITTEN when that was true and CORRECTED 2026-09-02, because a reader is sent
-    here on purpose: `cmangos_entries()` points at this test for WHICH games
-    declare the family, and landing on a present-tense falsehood teaches the
-    opposite of the truth. What stood here was "those three scripts are the only
-    thing that installs these games today, `FAMILIES` has no `cmangos` engine to
-    replace them with until K.8". K.8 landed; the family is registered and all
-    three entries dispatch to it.
+    THIS DOCSTRING IS LOAD-BEARING, which is why it has been corrected twice in a
+    day: `cmangos_entries()` points a reader HERE for which games declare the
+    family, so a present-tense falsehood teaches the opposite of the truth. It has
+    said, at different times, that the three scripts are "the only thing that
+    installs these games" and that the entries "keep their `script`". Both were
+    true when written.
 
-    Still true, and the reason this task did not empty `platforms`:
-    `Install.platforms` carries `min_length=1`, so `[]` is not a value the model
-    accepts. F.4 drops the `script*` fields; it leaves `platforms` alone, because
-    after 7.3 these entries really are installable on Linux and an empty list
-    would disable their Install button.
-
-    What changes here is the DATA; what installs the game is asserted in
-    `test_families_azerothcore.py`, on the dispatcher.
+    7.2's plan, written for an order in which it ran BEFORE 7.3, had these three
+    go to `platforms: []`. That would have disabled the Install button on three of
+    the four shipped games -- `Install.supports()` is `platform_id in platforms`
+    and `catalog_view` gates on it twice. It is also not a value the model accepts:
+    `Install.platforms` carries `min_length=1`, kept deliberately, because after
+    7.3 an entry installable nowhere can only be a mistake.
     """
     entry = load_catalog().get(game_id)
     native = entry.install.native
@@ -610,7 +754,8 @@ def test_the_cmangos_entries_carry_a_full_family_block(game_id: str) -> None:
     assert entry.install.password.mode == "generated"
     assert entry.install.password.file == ".db_password"
     assert entry.install.platforms == ("linux",)
-    assert entry.install.script
+    assert entry.install.supports("linux") is True
+    assert entry.install.supports("windows") is False
     assert entry.install.requires_client_dir is True
     for source in entry.emulator.sources:
         assert source.dest.startswith("src/")
