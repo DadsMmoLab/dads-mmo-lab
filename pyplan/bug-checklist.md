@@ -872,97 +872,6 @@ was found by reading code; each is a line in a resolved compose document from a 
   the probe's own pull rather than an answer about the folder" and carried on — the three-outcome
   discipline behaving correctly against a real-world failure it had never seen.
 
-- **A catalog URL change is never followed for a module that is already installed** — 2026-09-01,
-  found by review while the module-clone ownership guard was being added, and pre-existing to it.
-  `Applier.install()` over an existing clone reaches `git.clone()`, which takes the
-  `(spec.dest / ".git").is_dir()` branch and runs `fetch origin <ref>` + `reset --hard FETCH_HEAD`.
-  `origin` there is the URL STORED in that checkout when it was created; `manifest.source.url` is
-  only ever passed to the INITIAL clone. So editing an item's `source.repo` in the catalog — a fork
-  replacing an abandoned upstream, a repository that moved host — changes nothing for anybody who
-  already has the module: every later Install keeps pulling the old repository, reports success,
-  and asks for a rebuild.
-  *Recorded, not fixed:* the update path is not the ownership guard's subject, and the fix belongs
-  with whoever owns `git.py`'s update semantics — compare `remote_url(dest)` with
-  `manifest.source.url` before the fetch, then `remote set-url` or re-clone. It is written down now
-  because the guard made it HARDER to notice: `Ownership.OWNED` returns from
-  `Applier._require_own_clone()` before `remote_url()` is ever called, and deliberately so (a
-  per-clone claim is its own corroboration, and asking would cost a container round-trip per update
-  plus a class of false refusals on a machine whose git cannot answer). The one code path that read
-  a clone's actual `origin` therefore no longer runs for the clones this app owns — which are the
-  only clones this can happen to.
-
-- **A clean working tree is not "nothing of the user's is here", and adoption read it as one** —
-  2026-09-01, found by adversarial review of the guard the day after it landed, fixed the same day.
-  `Applier._may_adopt()` (renamed `_adoption_refusal()` on 2026-09-01) took a checkout on three
-  facts, and its third was `is_unmodified(clone, ".")` — `git status --porcelain`, which compares
-  the working tree and the index **against HEAD** and is therefore silent about HEAD itself. A
-  user who cloned the catalog's own repository into a server directory this app created and then
-  COMMITTED their customisations had a spotless tree: all three facts passed, adoption succeeded,
-  and the very next call was `git.clone()` → `fetch` + `reset --hard FETCH_HEAD`, which moved HEAD
-  off those commits and left them reachable only through the reflog. *Fixed* by a fourth fact and
-  a third read-only git seam, `HistoryReader.no_local_commits()`: `rev-list FETCH_HEAD..HEAD` must
-  be empty, and a `None` — git could not be asked, or the fetch could not reach the remote —
-  refuses. (The first version of that fact compared against a remote-tracking ref instead, which
-  was wrong for every branchless manifest; see the entry below.)
-  **Third instance of one pattern in this codebase**, after `native.read_claim()` collapsing
-  absent-vs-unreadable and `read_clone_claim()`'s note about it: *a question with more states than
-  the answer being carried*. Worth stating as a review question in its own right — "how many states
-  does the thing you asked about have, and how many does your variable hold?"
-
-- **Adoption does NOT rescue every existing user, and the commit that added it said it did** —
-  2026-09-01. `201990d2`'s message claims adoption "closes the 'every existing module user is
-  refused on first Install' gap". Proved false against real git for one population: a module whose
-  upstream ships no `include.sh` gets one written by `install()` itself, that file is untracked,
-  `is_unmodified(clone, ".")` reports untracked files, so adoption is refused for exactly those
-  modules and their users still meet the refusal and its remedy.
-  *Behaviour is correct and stays; only the claim was wrong.* Refusing costs a re-clone, and a
-  `reset --hard` would not have deleted an untracked file anyway, so the guard errs in the cheap
-  direction. **Deliberately not allowlisted**, including as an exact match on that one generated
-  name: the `include.sh` this app writes is empty and a user's need not be, so a name-only
-  allowlist would have to grow a content check to be safe — and a content check is the first step
-  of deciding which of somebody's untracked files are innocent, which is the reasoning that loses
-  work. The correction is written into `Applier._adoption_refusal()`'s docstring, where a reader
-  will actually look; a pushed commit message cannot be amended.
-
-- **`git fetch origin HEAD` moves no remote-tracking ref, and a docstring said it moved one** —
-  2026-09-01, found by verification review reproducing it end-to-end with the app's own `RunnerGit`
-  and `CloneSpec` against a `file://` remote, fixed the same day. The fourth adoption fact above
-  counted `rev-list <ref>..HEAD` against `refs/remotes/origin/<branch>`, or
-  `refs/remotes/origin/HEAD` when the manifest named none, on the stated grounds that the update's
-  fetch "also moves" that ref. Measured: `fetch origin <named-branch>` does; `fetch origin HEAD` —
-  the literal command both update paths run when `branch is None` — updates only `FETCH_HEAD`,
-  because a refspec on the command line REPLACES the remote's configured one and nothing is
-  opportunistically updated. `refs/remotes/origin/HEAD` is written once at clone time and never
-  again, and the default branch's own tracking ref is left just as stale. So one legitimate
-  app-driven update made the fact answer "1 commit ahead" for a checkout the user had never
-  touched, and **all 21 `manifests/wow-wotlk/modules/*.json` omit `source.branch`** — so the guard
-  refused adoption for the entire catalog, and specifically for the already-updated installs the
-  migration exists to rescue. It failed closed, so nothing was destroyed; it just defeated its own
-  purpose. *Fixed* by fetching inside the check and counting against `FETCH_HEAD` — the literal
-  thing `_update()` resets to — at the price of one network round trip, which is why the fact is
-  asked last and why offline means refuse.
-  **The reusable lesson is not about git.** Every `branch is None` test in the diff was a mock, and
-  the single real-git test passed a named branch: the one case that worked. The certainty lived in a
-  prose claim about what an external tool does, and a mock can only ever confirm the argv you
-  already believed in. *Review question:* when a docstring asserts what a tool writes, reads or
-  moves, which test would fail if that sentence were false — and does it use the real tool?
-
-- **One refusal for five different facts, and for one of them it said the opposite of the truth** —
-  2026-09-01, found by verification review of the fix above, fixed the same day. Adoption carried
-  "adopted / not adopted" out of a check whose last two facts have THREE answers each, so every
-  failure raised the same sentence: "there is no record here of one this app made … throws away
-  anything you have changed there." Correct for the fact it was written for, and untrue in both
-  halves for the case the network fetch created: an offline user reaches fact 4 having already
-  proved the folder is one this app installed (fact 2) and has nothing uncommitted in it (fact 3),
-  gets `None` for want of a connection, and is then told there is no record of the folder and that
-  they have changes to lose. *Refusing is right* — the install could not have fetched either — so
-  only the wording was fixed: `_may_adopt()` became `_adoption_refusal()` and returns the fact that
-  stopped it, and each outcome has its own sentence, with the offline one pointing at the internet
-  connection instead of at a folder to move aside.
-  **Fourth instance of the same pattern**, and the sharpest, because it was in the message that
-  reports the pattern: a question with more states than the answer being carried. *Review question:*
-  when one message serves several failures, is there a caller for whom it states something nobody
-  established?
 - **`--provision` never asks for a sudo password, so the packaged artifact cannot provision any
   password-sudo Linux box** — 2026-09-01, found on clean Arch during the 7.1 gate. The shipped
   `.tar.gz`'s headless entry point runs `ensure_docker()`, finds `sudo -n` refused, and SKIPS:
@@ -1007,6 +916,115 @@ was found by reading code; each is a line in a resolved compose document from a 
   correct rules rather than an oversight — so the fix (record the applied rev in the state file and
   re-pin when the catalog's differs, or exempt pinned sources from the gate) is a call for whoever
   owns 7.6 and its Tortoise pin, not a patch to make in passing.
+
+- **The extractor cannot read the game client at all on enforcing SELinux, and `Mount` has no way to
+  say so** — 2026-09-01, raised as a question by task H.1, **measured on `yulon-fedora-gate`**
+  (Fedora 44, SELinux Enforcing, Docker 29.7.2) rather than argued. `docker.Mount` emits no SELinux
+  label, and the plan's Group I builds `Mount(client_dir, CLIENT_MOUNT, read_only=True)` and
+  `Mount(data_dir, OUT_MOUNT)` with none. Five cases, busybox, one minute:
+
+  | case | mount | context | result |
+  |---|---|---|---|
+  | A. fresh dir, default label | none | `user_tmp_t` | **DENIED** |
+  | B. parent relabelled first, `data/` created after | none | `container_file_t` | ALLOWED |
+  | C. the relabel did not happen | none | `user_tmp_t` | **DENIED** |
+  | D. same dir | `:z` | `container_file_t` | ALLOWED |
+  | E. the user's client dir | `:ro` | `user_tmp_t` | **DENIED** |
+
+  **B settles the argument about `data/` in the reviewer's favour, and against my own first reading.**
+  `stage_generate_compose` relabels the whole server directory before extract runs, `data/` is created
+  under it afterwards, and it inherits `container_file_t` - so the write succeeds without `:z`. C
+  shows the exposure is real but narrow: that `chcon` is explicitly non-fatal, the compose-managed
+  binds self-heal at `up` through `{{BIND_LABEL}}`, and the extractor's ephemeral mount has no second
+  chance.
+
+  **E is the blocker, and nobody predicted it.** The game client is the user's own directory. It lives
+  OUTSIDE the server dir, so no `chcon` ever reaches it, and `:z`/`:Z` must never be used on it -
+  they recursively rewrite the labels of the user's client, which is exactly why `bind_mount_ok()`'s
+  probe bans them. So on any enforcing Fedora the extractor cannot read a single MPQ. Not a loss of
+  redundancy: a certain failure, on the one distribution most likely to hit it.
+
+  **The fix already exists in this codebase, for exactly this reason.** `--security-opt
+  label:disable` - what `platform.label_disable_args()` returns and what `git.py`'s read path already
+  uses for a repository it must not relabel. Measured: it read the client, and the client's context
+  was byte-identical before and after (`user_tmp_t` both times). It also let the data dir be written.
+
+  **This corrects the API shape recorded when H.1 landed.** A per-mount `label: str = ""` on `Mount`
+  is the wrong seam: `label:disable` is a **container-level** `--security-opt`, not a mount suffix.
+  The extractor's container holds both mounts - the client it must not touch and the data dir it must
+  write - and one container-wide flag serves both. So the field belongs on `ContainerRun`, not on
+  `Mount`, and Group I should ask `platform.label_disable_args(enforcing=selinux_enforcing())` for it,
+  which already keeps the three-outcome answer (enforcing / not / could-not-ask).
+  *Recorded, not fixed:* H.1 deliberately shipped no uncalled field, and Group I is where the caller
+  arrives. It must not land without this.
+
+- **`composegen.write_plan()` skips a CRLF file forever, and accuses the user when a read flickers** —
+  2026-09-01, found while writing I.3's own version of the same "may we overwrite this" question, and
+  **confirmed by running the real `write_plan()`**, not a reconstruction. Two defects, both in merged,
+  shipping code (`yulon/catalog/composegen.py`, `is_ours()` and `write_plan()`):
+
+  1. **The unchanged-file skip uses `read_text()`, which translates `
+` to `
+`.** So a
+     byte-for-byte CRLF copy of our own compose file compares EQUAL, the write is skipped, and the
+     CRLF stays on disk permanently — the skip preserving the exact thing it should repair. Measured:
+     with a CRLF copy present, `write_plan()` returned `()` and left it. I.3's `_look()` avoids this
+     by opening with `newline=""`.
+  2. **Each file is read twice — once by `is_ours()`, once for the equality check.** A transient
+     failure on the FIRST read makes `is_ours()` swallow the `OSError` and answer `False`, producing
+     *"was not written by Yu'lon"* — an accusation against a file we did write. A failure on the
+     SECOND read is not caught at all and escapes as a raw `PermissionError`. Both measured with a
+     stateful `Path.open`.
+
+  **Severity: real, currently low-probability.** `write_plan`'s targets are pure engine output with no
+  shipped starting content, so the CRLF skip needs a `git` round-trip of a generated file or an editor
+  with the wrong default. The double-read bites on any transient read during a resume, which is an
+  installer-robustness gap rather than a rare one.
+
+  *Recorded, not fixed, and the reason matters.* I.3 deferred it saying a change there would risk the
+  A16 byte snapshot. **That justification does not hold** — the reviewer checked, and `render()`
+  (which A16 exercises) and `is_ours()`/`write_plan()` are disjoint with no shared helpers. The honest
+  reason to defer is scope: `write_plan` is load-bearing, has two other callers, and has its own test
+  suite with no CRLF or double-read coverage yet. Fixing it is its own task, and it should consolidate
+  with `dockerfile._look()` rather than grow a second three-way answer beside it — the same question
+  currently gets an honest three-way answer for a Dockerfile and a two-way one for a compose file.
+
+- **`conf.CONF_MODE = 0o600` is only safe while the CMaNGOS image runs as root** — 2026-09-01, raised
+  during J.1's review, correct today, filed because the day it stops being correct nobody will look
+  here. The patched `.conf` files are written by the HOST user; the server that reads them runs
+  inside the container. Checked: `catalog/installers/shared/cmangos/{base,build,override}.yml.tmpl`
+  carry no `user:` key and `wow-*/native/Dockerfile.tmpl` carries no `USER` directive, so the runtime
+  image runs `mangosd`/`realmd` as root — and root bypasses POSIX permission checks, so a
+  host-owned `0600` file is readable anyway.
+  **The trap:** a future hardening pass adding a non-root `USER` to those Dockerfiles is an ordinary,
+  well-intentioned change. It would silently make every conf file unreadable to the server, and the
+  symptom is "the server will not boot" with nothing pointing at a permissions constant three modules
+  away. `0o600` is also the first file-permission constant in this codebase (grepped `yulon/` — no
+  other `chmod`/`0o6..`), so there is no convention to remind anyone.
+  *Recorded, not fixed:* J.1 only defines the constant; `materialise()` (J.2) is what will `chmod`.
+  The right moment to decide is J.2's review — either widen the mode, or make the Dockerfile's user
+  and the conf mode answer to one place instead of two.
+
+- **`Path("/etc/x").is_absolute()` is FALSE on Windows, so a path-escape check built on it admits
+  the one pattern it exists to refuse — and the test that would catch it passes on Linux CI** —
+  2026-09-01, found while writing `sqlplan._matches`, measured on this laptop, and filed here rather
+  than in that module because it is a trap for **any** escape check in this codebase.
+
+  Two measurements, both on Windows Python:
+  - `Path("/etc/x").is_absolute()` -> **False**. A rooted POSIX pattern is not "absolute" to a
+    `WindowsPath`, so a guard reading `if Path(pattern).is_absolute(): refuse` waves it through.
+  - `Path("C:/srv") / "/etc/x"` -> **`C:\etc\x`**. The join then discards the server directory and
+    escapes to the drive root — which is exactly what the guard existed to prevent.
+
+  So the check admits the pattern **and** the join escapes, on the same platform, and the two halves
+  only line up there. On Linux the guard works and any test of it passes, which is why CI is no help:
+  the platform that needs the check is the one where it silently is not there.
+
+  *The fix is to test the pattern's own spelling rather than ask `Path` what it thinks* — a leading
+  `/` or `\`, a drive letter, and `..` segments, refused as text. Anyone adding a new escape check
+  should do the same, and should write at least one test whose expectation is stated in terms of the
+  pattern string rather than a `Path` predicate.
+  *Found independently by two sessions working J.3 in parallel.*
 
 
 ### One thing worth keeping

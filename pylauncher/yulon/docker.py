@@ -16,6 +16,7 @@ logic, generalized and given explicit, overridable timeouts.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -23,11 +24,11 @@ import subprocess
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import IO, BinaryIO, Literal
 
 from yulon import platform, runner, wsl
 from yulon.log import get_logger
@@ -61,6 +62,32 @@ class DockerCliMissingError(DockerCommandError):
     no `COMPOSE_PROJECT_NAME` pinned — blaming the install for the absence of
     Docker — and `wait_ready()` polled out its full 480s without a word above
     DEBUG.
+    """
+
+
+class SourceUnreadableError(RuntimeError):
+    """Raised when the stream `exec_stdin()` was pumping stopped being readable.
+
+    Deliberately NOT a `DockerCommandError`: docker did as it was told, the
+    container is fine, and a caller that reads the two apart would otherwise
+    tell a user with a half-downloaded file that their container refused the
+    import. What broke is the file on this side.
+
+    It exists because the alternative is no type at all. `source` is a
+    `BinaryIO`, so what it raises belongs to whoever opened it: a truncated
+    `.sql.gz` — a download over a flaky connection, the commonest corruption
+    there is — raises `EOFError`, mangled deflate bytes raise `zlib.error`, a
+    file that is not gzip at all raises `gzip.BadGzipFile`, and only the last
+    of those three is an `OSError`. Letting each one through as it came would
+    hand every caller the same open-ended set to catch that this module just
+    stopped trying to enumerate; the apply stages catch
+    `(RuntimeError, OSError)`, and being a `RuntimeError` is what makes that
+    clause enough. The original is kept as `__cause__`, so nothing about which
+    corruption it was is lost — it just stops being the caller's problem to
+    predict.
+
+    `BaseException` is not wrapped. A `KeyboardInterrupt` mid-pump is the user
+    stopping the import, not a broken dump, and it travels on unchanged.
     """
 
 
@@ -2763,3 +2790,567 @@ def _first_populated_ancestor(path: Path) -> Path | None:
         if probe == probe.parent:
             return None
         probe = probe.parent
+
+
+# ------------------------------------------- containers, copies and exec (7.3)
+
+
+@dataclass(frozen=True)
+class Mount:
+    """One host directory a container gets to see, and whether it may write there.
+
+    `read_only` is a field rather than a caller-supplied `:ro` suffix because it
+    is the extraction stage's whole safety argument (phase 7): the user's client
+    is mounted read-only, so an interrupted run can leave nothing behind in it.
+    A suffix is a string convention; a field is something a test asserts by name.
+
+    **No SELinux label is emitted, and that is a decision the CALLER still owns.**
+    Everywhere else in this app a bind mount carries one: `composegen` fills
+    `{{BIND_LABEL}}` with `platform.bind_label()`'s answer on every generated
+    host bind, and `git.ContainerGit` asks the same function for its writable
+    clone mount. Neither answer belongs here. `to_argv()` is pure — it asks the
+    machine nothing — and the SELinux question has three answers (enforcing, not
+    enforcing, could not ask) that `platform.bind_label()` already keeps three;
+    re-asking it from a dataclass would be a second spelling of one security
+    decision, which is the mistake `_probe_selinux_argv()` was written against.
+
+    It is also not one label for the whole run. `:z` RECURSIVELY relabels the
+    mount source, so it is right for a directory this app created (the server's
+    `data/`) and wrong for the user's game client, exactly as it is wrong for
+    `$HOME` in `bind_mount_ok()`'s probe. Whoever builds these mounts has to
+    answer per mount, and until a caller needs to, no field is invented for it.
+    """
+
+    host: Path
+    guest: str
+    read_only: bool = False
+
+
+@dataclass(frozen=True)
+class ContainerRun:
+    """One `docker run --rm`, described rather than spelled.
+
+    `to_argv()` derives the argv from typed fields so a test can audit it by
+    field — which mount is `:ro`, which user it runs as, where its cwd is —
+    instead of matching a string that a reordered flag would silently break.
+
+    `user_args` is passed in rather than computed here because the uid:gid
+    policy has exactly one home, `platform.container_user_args()`, and this
+    module knows nothing about a platform's rules (style-guide §3).
+
+    `env` is for values that are not secrets. `to_argv()` is pure, so every
+    variable named here lands in the command line as `-e NAME=value`, and a
+    command line is world-readable. A secret goes through `exec_stdin()`, which
+    forwards it from this process's environment and never spells it.
+
+    There is deliberately no field for `git.py`'s `_READ_ONLY_CONTAINER_ARGS`
+    (`--network none --cap-drop ALL --security-opt no-new-privileges
+    --read-only`). Those exist there because that container is handed a
+    STRANGER'S repository — content this app did not make, which gets to choose
+    what git executes. What this class describes is an image this app built from
+    its own Dockerfile, running a tool this app named, and needing to write its
+    output to a bind mount; `--read-only` and a dropped capability set are not
+    free there, and none of it has been measured against the extraction tools.
+    A caller that wants hardening states it, and states why, at its own call
+    site rather than getting it silently from here.
+    """
+
+    image: str
+    argv: tuple[str, ...]
+    mounts: tuple[Mount, ...] = ()
+    workdir: str | None = None
+    env: Mapping[str, str] = field(default_factory=dict)
+    user_args: tuple[str, ...] = ()
+    ulimits: tuple[str, ...] = ()
+
+    def to_argv(self) -> list[str]:
+        """The `docker` argv (without the program name), fields in a fixed order.
+
+        `--rm` always. Every run this describes is a tool that runs to
+        completion and leaves its result on a bind mount; a container left
+        behind per extraction tool is a leak nobody sees until `docker ps -a`.
+
+        Every option precedes the image on purpose: docker stops reading its
+        own options at the image name, so anything after it belongs to the
+        tool — which is why `argv` is copied verbatim at the end. Same shape as
+        the two argvs this module and `git.py` already spell by hand —
+        `bind_mount_ok()`'s probe, and the one built inline in
+        `ContainerGit._capture()` — which is `run`, `--rm`, options, `-v`, `-w`,
+        image, then theirs.
+
+        The user args sit right after `--rm` here rather than just before the
+        image as `git.py` places them. Docker reads its own options in any order
+        up to the image name, so the position carries no meaning; the test
+        audits by flag rather than by index for the same reason.
+
+        Raises:
+            ValueError: a mount's host path is not absolute. Docker refuses a
+                relative bind source with a daemon-side error that names
+                neither the field nor the caller; refusing here does both.
+        """
+        argv = ["run", "--rm", *self.user_args]
+        for limit in self.ulimits:
+            argv += ["--ulimit", limit]
+        for mount in self.mounts:
+            if not mount.host.is_absolute():
+                raise ValueError(f"bind mount source must be absolute, got {mount.host!r}")
+            suffix = ":ro" if mount.read_only else ""
+            argv += ["-v", f"{mount.host}:{mount.guest}{suffix}"]
+        if self.workdir is not None:
+            argv += ["-w", self.workdir]
+        for name, value in self.env.items():
+            argv += ["-e", f"{name}={value}"]
+        argv.append(self.image)
+        argv.extend(self.argv)
+        return argv
+
+
+def run_container(
+    spec: ContainerRun, *, sink: OutputSink, cancel: threading.Event | None = None
+) -> AttachedRun:
+    """Run one throwaway container attached, streaming its output to `sink`.
+
+    `run_attached()` does the work, so this has the build's cancel semantics
+    (the client is abandoned; the daemon finishes the container — the caller's
+    `Stage.cancel_note` says so, and the spine yields it) and the build's
+    bounded tail. Output is read merged because the tools this exists for —
+    the map, vmap and mmap extractors — print their progress to stderr, which
+    `runner.stream()` otherwise withholds until the tool has exited.
+
+    Four different things can come back, and they stay four, because a stage
+    that cannot tell them apart says the wrong sentence to the user:
+
+    * `0` — the tool ran and was happy.
+    * `CANCELLED_RETURNCODE` — the user pressed Stop. Not an exit status the
+      tool produced, and not a reason to say the extraction failed.
+    * `_CLI_MISSING_RETURNCODE` with `DOCKER_CLI_MISSING_HELP` as the whole
+      tail — nothing was spawned at all. "Could not ask", not "it answered no".
+    * anything else — what the container exited with, its last lines kept.
+      `docker run` uses 125 for an image it could not find or pull, so the
+      caller reads the words rather than inventing a meaning for the number.
+
+    A bad spec is none of those. `to_argv()` raises `ValueError` for a relative
+    mount source and that is left to propagate: it says this code built the
+    wrong command, where an `AttachedRun` would say the user's machine could
+    not run the tool, and the install engine treats those very differently.
+
+    **This addresses the local daemon and takes no `wsl_distro`** — the one
+    function in this module that reaches the spawn seam without being able to
+    name a distro, which is why it is listed in the completeness test's
+    `_DAEMON_AGNOSTIC` rather than growing the parameter. A bind mount is the
+    reason: `Mount.host` is a path on THIS machine, `to_argv()` is pure and
+    translates nothing, and handing a Windows drive path to a docker living
+    inside a distro mounts a directory that does not exist there.
+    Making this WSL-capable is a question about where the mounts are built, not
+    one this function can answer alone — the same shape as the SELinux label
+    `Mount` deliberately leaves to its caller. `git.ContainerGit._capture()`,
+    the app's other `docker run` over a host bind, resolves `docker_program()`
+    directly for exactly this reason.
+
+    The cwd handed to the docker client is this process's own and nothing
+    depends on it: `to_argv()` refuses a relative mount source, so no path in
+    the argv is resolved against it. The container's working directory is
+    `spec.workdir`, which is the one that matters.
+
+    `sink` is required, not optional as in `run_attached()`: every caller of
+    this is a stage that has a log panel to fill, and a run whose only trace
+    is a 200-line tail after an hour is the silence phase 6 measured against.
+    """
+    argv = spec.to_argv()
+    logger.info(f"run_container(): `docker {' '.join(argv)}`")
+    return run_attached(argv, Path.cwd(), sink=sink, cancel=cancel, merge_stderr=True)
+
+
+_MISSING_IN_IMAGE = re.compile(r"No such container:path|Could not find the file", re.IGNORECASE)
+"""How `docker cp` says the source path was not in there, across CLI generations.
+
+Both spellings, because they are the same fact told by two different halves of
+docker - the CLI when it stats the path itself, the daemon when it is the one
+asked - and which of them answers is not something this code can predict.
+Measured on Engine 29.6.2, a missing source in a real image comes back as
+`Could not find the file <path> in container <id>`; `No such container:path`
+is the other half's wording. An earlier version of this comment attributed each
+spelling to a CLI generation, newest-first, and had them the wrong way round.
+Matching only one would send a whole class of "this image does not ship that
+file" through as an unexplained copy failure, and the two are not worth keeping
+apart: what differs is the wording, not the situation.
+"""
+
+
+def copy_from_image(image: str, src: str, dest: Path) -> None:
+    """Copy `src` out of `image` into `dest` on the host, without running anything.
+
+    `docker create` + `docker cp` + `docker rm`, which is how the conf stage
+    gets `*.conf.dist` out of a built image on every platform: no shell in the
+    image is needed, no bind mount has to be shareable with Docker Desktop, and
+    the files arrive owned by this user rather than by root — a bind mount
+    written from inside the container is what needed the `sudo chown` the
+    scripts did.
+
+    `--entrypoint true`, because `docker create` refuses an image that declares
+    neither an ENTRYPOINT nor a CMD ("Error response from daemon: no command
+    specified", measured against docker 29.6.2), and an image built around a
+    server binary may well be one. Note that inheriting one counts: a Dockerfile
+    that says nothing about either still gets its base image's, so only an
+    image that clears them — or a `FROM scratch` — actually hits this. Nothing
+    is ever started, so the command named here never runs.
+
+    `docker cp`'s own rules apply to `dest`: a directory `src` copied to a
+    `dest` that already exists lands INSIDE it, and to one that does not exist
+    becomes it. The caller chooses which by whether it made `dest` first.
+
+    **This addresses the local daemon and takes no `wsl_distro`**, which is why
+    it is listed in the completeness test's `_DAEMON_AGNOSTIC`; the reason
+    recorded there is that only an install reaches this, and an install is local
+    by construction (`install_wiring.installer_for_app()` says so and passes no
+    distro), while `dest` is a host path that `docker cp` resolves on whichever
+    side of the WSL boundary the CLI runs.
+
+    The created container is removed whether or not the copy worked. A failed
+    `cp` on every resume would otherwise leave one more stopped container each
+    time, and `docker ps -a` is not somewhere a user looks. `finally` rather
+    than `except`, so a cancel — which arrives here as `KeyboardInterrupt`,
+    since `_run()` has no cancel event to watch — takes the container with it
+    too.
+
+    Three different failures reach the caller and they stay three, because the
+    stage above says a different sentence to each:
+
+    * `DockerCliMissingError` — nothing was asked of Docker at all. Re-raised
+      untouched: it carries `DOCKER_CLI_MISSING_HELP` and nothing else on
+      purpose, and wrapping it in a sentence about the image would bury the one
+      instruction the user can act on.
+    * the image does not ship `src` — a catalog bug, which no amount of retrying
+      fixes. Docker's own wording for it blames a *container* (`No such
+      container:path: 0123456789ab:/opt/etc`), and read at face value that says
+      the throwaway container vanished, which is a machine problem and reads as
+      worth a retry. So the message leads with the image and the path.
+    * anything else the copy hit — a full disk, a permission, a daemon that went
+      away mid-stream. Docker's stderr is kept whole; only the lead changes.
+
+    Raises:
+        DockerCliMissingError: there was no docker CLI to run.
+        DockerCommandError: the create failed, the create printed no id, or the
+            copy failed. The removal's own failure is logged, not raised: the
+            copy's error is the one that explains anything.
+    """
+    created = _run(["create", "--entrypoint", "true", image])
+    # The id is the LAST stdout line: a first-time pull prints its progress on
+    # stderr, but some CLI versions have put a line on stdout before the id.
+    lines = [line.strip() for line in created.stdout.splitlines() if line.strip()]
+    container = lines[-1] if lines else ""
+    if not container:
+        raise DockerCommandError(f"docker create {image} printed no container id")
+    # Load-bearing past the debugging. The container is created anonymously, so
+    # this id is the only thing that distinguishes it from any other container
+    # made from the same image — including the ones belonging to whatever else
+    # shares this daemon. The live leak gate reads it for exactly that reason;
+    # it used to count the daemon's containers for the image instead, and went
+    # red 4 runs in 6 when anything else on the box touched one. Move or rename
+    # this line and that gate fails loudly rather than passing on an empty set.
+    logger.debug(f"copy_from_image(): {image}:{src} -> {dest} via {container[:12]}")
+    try:
+        _run(["cp", f"{container}:{src}", str(dest)])
+    except DockerCliMissingError:
+        # Ahead of the DockerCommandError clause, which is its base class and
+        # would otherwise swallow it into a sentence about the image.
+        raise
+    except DockerCommandError as exc:
+        if _MISSING_IN_IMAGE.search(str(exc)):
+            raise DockerCommandError(f"{image} has no {src} to copy out: {exc}") from exc
+        raise DockerCommandError(f"could not copy {src} out of {image}: {exc}") from exc
+    finally:
+        removal = _docker(["rm", "-f", container])
+        if removal.returncode != 0:
+            if _cli_missing(removal):
+                # `removal.stderr` here is the whole install-Docker help text,
+                # and it has already reached the user through the error being
+                # raised past this. What the log needs is the container that is
+                # now genuinely stranded, by name.
+                logger.warning(
+                    f"no docker CLI left to remove {container[:12]} with; it is still "
+                    f"there, and `docker rm -f {container[:12]}` clears it once docker is back"
+                )
+            else:
+                logger.warning(
+                    f"could not remove {container[:12]} after the copy: {removal.stderr.strip()}"
+                )
+
+
+_STDIN_CHUNK_BYTES = 1 << 20
+"""How much of `source` is read per write. A dump is measured in gigabytes."""
+
+
+def exec_stdin(
+    container: str,
+    argv: Sequence[str],
+    source: BinaryIO,
+    *,
+    env: Mapping[str, str],
+    wsl_distro: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """`docker exec -i <container> <argv…>` with `source` streamed to its stdin.
+
+    The SQL transport (phase 7): each dump file is streamed from the host
+    checkout into the database client inside the container, so no helper
+    container, no shared compose network and no shell pipeline is involved.
+
+    Every name in `env` is forwarded as a bare `-e NAME`. The value is placed
+    in THIS process's environment for the child, and `docker exec` copies it
+    from there into the container. That is the rule `apply.mysql_env()` and
+    `maintenance.DockerMysql._exec()` already keep for `MYSQL_PWD`, and the
+    reason is unchanged: an argv is world-readable (`ps`,
+    `/proc/<pid>/cmdline`, Task Manager); an environment is not. Tests assert
+    the value is in no argv element, that the `args` of the returned result
+    carry none either, and that no line this function logs contains it.
+
+    `wsl_distro` is the second half of that rule and not decoration. A
+    container name means nothing to the daemon that does not hold it: asked of
+    Docker Desktop, a server running inside a distro answers `No such
+    container`. And a variable set here does NOT reach a process inside a
+    distro unless `WSLENV` names it — measured, it arrives EMPTY, and mysql
+    then reports an authentication failure against a perfectly healthy
+    database. `platform.wsl_env()` is what carries it across, so the crossing
+    is got right here rather than remembered at each call site. Both existing
+    `docker exec -e MYSQL_PWD` call sites (`apply.DockerSql._argv()`,
+    `maintenance.DockerMysql._exec()`) take a distro; this one is the third,
+    and the completeness test in `tests/test_docker.py` is why it must.
+
+    `source` is PUMPED through a pipe rather than handed to the child as its
+    file descriptor, and that is not an optimisation. `subprocess` turns a file
+    object into `stdin` by calling `fileno()`, and a `gzip.open()` handle
+    answers with the descriptor of the COMPRESSED file underneath it — the
+    client would receive gzip bytes, and the "decompressed by Python on the way
+    in" this exists for would silently not happen. Copying from `source`
+    ourselves is what makes any `BinaryIO` — a gzip stream, a `BytesIO`, a
+    plain file — mean what it says. The copy runs on this thread while two
+    readers drain the child's stdout and stderr, so a client that prints a lot
+    cannot stall on a full pipe while we are still writing to it.
+
+    `subprocess.run` is not used, for the reason `maintenance.DockerMysql`'s
+    docstring records: `runner.run()` has no stdin, and `communicate()` closes
+    the stdin it is handed, which is the pipe the pump is writing to.
+
+    The two ends of the pump fail for opposite reasons and are NOT one
+    `except OSError`:
+
+    * writing raises `BrokenPipeError` (EINVAL on Windows) when the client has
+      already exited — a syntax error early in a dump, a wrong password. Its
+      exit status and stderr say why, so the broken pipe is not the error and
+      replacing `ERROR 1045: Access denied` with `[Errno 32] Broken pipe`
+      would name nothing the user can fix.
+    * reading raises when the SOURCE is unreadable. Swallowed the same way, a
+      corrupt or truncated dump feeds the client half a file — still valid
+      SQL, so it exits 0 and every check downstream agrees the import worked.
+      That one is raised, as `SourceUnreadableError`.
+
+    Which is a matter of one `finally`, not of a longer `except`. The first
+    version of this caught `OSError` on the read side because `gzip.BadGzipFile`
+    is one — and a TRUNCATED `.sql.gz`, the failure a flaky download actually
+    produces, raises `EOFError` instead, while mangled deflate bytes raise
+    `zlib.error`. Neither is an `OSError`; both left this function before the
+    child was waited for and before the readers were joined, leaking a live
+    `docker exec` and two threads per failed import. Widening the clause to
+    those two would have been wrong again at the third, because `source` is a
+    `BinaryIO` and what it raises is the caller's choice, not this module's —
+    a `KeyboardInterrupt` mid-pump is not even an `Exception`. So the child is
+    reaped and the readers joined on EVERY way out, which needs to know
+    nothing about types, and the read failure is normalised on its way past
+    (see `SourceUnreadableError`) so a caller does not inherit the same
+    open-ended set to catch.
+
+    Returns:
+        A text `CompletedProcess`. NOT raised on non-zero exit: `sqlplan.apply()`
+        decides per phase whether a failing file stops the stage or is reported
+        and passed over, and only it knows which. The three non-zero states a
+        caller has to tell apart — the SQL was wrong, the container is not
+        running, the daemon never answered — stay apart, because docker's own
+        stderr is returned untouched.
+
+    Raises:
+        DockerCliMissingError: there is no docker CLI to run (nor `wsl.exe` for
+            a distro), or the one resolved earlier has since been uninstalled
+            (the `OSError` road). "Could not ask", never "it answered no".
+        SourceUnreadableError: `source` could not be read — truncated, corrupt,
+            or anything else it chose to raise, kept as `__cause__`.
+
+    Guaranteed on the way out whatever was raised, this included and a
+    `KeyboardInterrupt` too: the child's stdin is closed, the child has been
+    waited for, and both reader threads have been joined. Nothing is left
+    running behind a failure. This promise is about the exit, not about a type
+    — the earlier wording named `OSError`, and the exceptions it did not name
+    were exactly the ones that leaked.
+    """
+    prefix = platform.docker_prefix(wsl_distro)
+    if prefix is None:
+        raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP)
+    forwarded: list[str] = []
+    for name in env:
+        forwarded += ["-e", name]
+    command = [*prefix, "exec", "-i", *forwarded, container, *argv]
+    # The NAMES of the forwarded variables, never their values: this is the one
+    # function in the module that is handed a secret, and a log file is
+    # something users attach to bug reports.
+    logger.debug(f"exec_stdin(): {' '.join(command)}")
+    child = platform.wsl_env(dict(env)) if wsl_distro is not None else {**os.environ, **env}
+    try:
+        proc = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=runner.child_env(child),
+            creationflags=runner.creationflags(),
+        )
+    except OSError as exc:
+        logger.warning(f"{prefix[0]} could not be started: {exc}")
+        raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP) from exc
+    # All three are pipes because all three were asked for as pipes; the
+    # asserts are type narrowing, not a check.
+    assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+    captured: dict[str, bytes] = {}
+
+    def _drain(name: str, pipe: IO[bytes]) -> None:
+        captured[name] = pipe.read()
+
+    readers = (
+        threading.Thread(target=_drain, args=("stdout", proc.stdout), daemon=True),
+        threading.Thread(target=_drain, args=("stderr", proc.stderr), daemon=True),
+    )
+    for reader in readers:
+        reader.start()
+    try:
+        _pump(source, proc.stdin, container)
+    finally:
+        # Unconditional, and a `finally` rather than a list of clauses,
+        # because the pump can end in a way this module does not get to
+        # choose: `source` is the caller's object and a Ctrl+C is nobody's.
+        # `_pump` has closed the child's stdin by now on every one of those
+        # roads, so the client sees EOF and this wait is not the one that
+        # hangs.
+        returncode = proc.wait()
+        for reader in readers:
+            reader.join()
+    return subprocess.CompletedProcess(
+        list(command),
+        returncode,
+        captured.get("stdout", b"").decode("utf-8", errors="replace"),
+        captured.get("stderr", b"").decode("utf-8", errors="replace"),
+    )
+
+
+def _pump(source: BinaryIO, sink: IO[bytes], container: str) -> None:
+    """Copy `source` into `sink` and close it, telling the two failures apart.
+
+    The `except` sits around the WRITE alone, which is the only side whose
+    failures this function can name. Its own docstring used to promise the
+    read side was an `OSError`; it is whatever `source` decides, so nothing is
+    caught around the read but the wrap that gives it one type — see
+    `SourceUnreadableError`. `BaseException` passes through untouched.
+
+    `sink` is closed on every way out, including that one. Without the EOF a
+    client that has read everything it was sent waits forever, and the
+    `proc.wait()` that follows would wait with it.
+
+    Raises:
+        SourceUnreadableError: `source` could not be read, whatever it raised.
+    """
+    try:
+        while True:
+            try:
+                chunk = source.read(_STDIN_CHUNK_BYTES)
+            except Exception as exc:
+                raise SourceUnreadableError(
+                    f"the dump being streamed into {container} could not be read: {exc}"
+                ) from exc
+            if not chunk:
+                break
+            try:
+                sink.write(chunk)
+            except OSError as exc:
+                logger.debug(f"stdin of docker exec {container} closed early: {exc}")
+                break
+    finally:
+        try:
+            sink.close()  # without EOF a client that read everything waits forever
+        except OSError as exc:
+            logger.debug(f"stdin of docker exec {container} would not close: {exc}")
+
+
+def sql_query(
+    container: str,
+    client: str,
+    password: str,
+    schema: str | None,
+    statement: str,
+    *,
+    wsl_distro: str | None = None,
+) -> str:
+    """One statement as root, batch mode, through `exec_stdin()`; the client's stdout.
+
+    `--batch --skip-column-names` gives tab-separated rows and nothing else, so
+    a caller counting rows or reading one value never parses a table border.
+    Both `mysql` and `mariadb` accept the long spellings, which is the point of
+    taking the client's name as data (`DbFacts.client`): this module does not
+    know which one the image ships.
+
+    The statement travels on stdin exactly as a dump file does, and the password
+    in `MYSQL_PWD` through the environment - neither is ever in argv. The error
+    raised carries the client's stderr, which names the user and the reason and
+    never the password.
+
+    Root, because the import streams as root and the probe reads the same
+    schemas it wrote (phase 7 "one secret"); the app user in `DbFacts.user` is
+    what the emulator connects as, not what the installer asks with.
+
+    `wsl_distro` is forwarded, not defaulted away. A container living inside a
+    distro is `No such container` to Docker Desktop, and this is a PROBE: its
+    answer decides whether an install runs. Asked of the wrong daemon it reads
+    as "nothing is imported" for a database that is fully populated, and the
+    stage would re-import over a working server. `exec_stdin()` also carries
+    the secret across the boundary (`WSLENV`), which is the other half of the
+    same rule, so all this has to do is hand the distro over.
+
+    The three answers a caller has to tell apart stay apart, and the types are
+    how:
+
+    * **no rows** - exit 0 with nothing on stdout, returned as `""`. That is a
+      verdict, not a failure: the database was asked and said no.
+    * **the query failed** - `DockerCommandError` carrying the client's own
+      words (`ERROR 1064 ... syntax`, `ERROR 1045 ... Access denied`) or
+      docker's (`container ... is not running`), untouched.
+    * **the database could not be asked** - `DockerCliMissingError` from
+      `exec_stdin()`, passed through. It is a subclass of the above, so a
+      caller wanting them apart must catch it FIRST.
+
+    Stdout is returned VERBATIM, and the trailing newline matters. Under
+    `--skip-column-names` a single row holding the empty string prints one
+    empty line and no rows print nothing; stripping the result would flatten
+    both to `""` and a caller counting `splitlines()` would see zero rows where
+    there is one. Trimming is the caller's decision because only the caller
+    knows whether it asked for a value or for a count.
+
+    Raises:
+        DockerCommandError: the client exited non-zero - no such schema, access
+            denied, a syntax error, or the container is not running.
+        DockerCliMissingError: there was no docker CLI to ask with. Nothing
+            reached a database, so this is never a verdict about one.
+    """
+    argv = [client, "-u", "root", "--batch", "--skip-column-names"]
+    if schema is not None:
+        argv.append(schema)
+    with io.BytesIO(statement.encode("utf-8")) as source:
+        proc = exec_stdin(
+            container, argv, source, env={"MYSQL_PWD": password}, wsl_distro=wsl_distro
+        )
+    if proc.returncode != 0:
+        # `stderr` is where both the client and the daemon put their reason, in
+        # every failure measured against mariadb:11 (2026-09-01): the syntax
+        # error, the unknown database, the access denial, `No such container`
+        # and `container ... is not running`. The fallbacks are for the one
+        # shape that says nothing there - a client killed by a signal exits 137
+        # with BOTH pipes empty, and "exited 137: " trailing off into a colon
+        # names nothing the reader can act on.
+        said = proc.stderr.strip() or proc.stdout.strip() or "no output"
+        raise DockerCommandError(f"{client} in {container} exited {proc.returncode}: {said}")
+    return proc.stdout

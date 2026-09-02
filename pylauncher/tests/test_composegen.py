@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import re
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -1179,3 +1179,145 @@ def test_the_cmangos_host_binds_carry_the_label_and_the_volume_does_not(tmp_path
     assert "/var/lib/mysql:z" not in plan.base
     assert "./etc:/opt/mangos/etc:z" in plan.base
     assert "./data:/opt/mangos/data:z" in plan.base
+
+
+# -- G.6: the per-game Dockerfile / dockerignore pair --------------------------
+
+
+def cmangos_native(entry: CatalogEntry) -> NativeInstall:
+    """The entry's native block, proved present so the tests below can index it."""
+    native = entry.install.native
+    assert native is not None and native.cmangos is not None
+    assert native.dockerfile_dir is not None
+    return native
+
+
+def dockerfile_text(entry: CatalogEntry) -> str:
+    native = cmangos_native(entry)
+    path = TEMPLATES / str(native.dockerfile_dir) / "Dockerfile.tmpl"
+    return composegen.fill(path.read_text(encoding="utf-8"), composegen.entry_tokens(entry))
+
+
+def dockerignore_text(entry: CatalogEntry) -> str:
+    native = cmangos_native(entry)
+    path = TEMPLATES / str(native.dockerfile_dir) / "dockerignore.tmpl"
+    return path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("entry", CMANGOS_ENTRIES, ids=lambda e: e.id)
+def test_every_cmangos_entry_has_a_dockerfile_pair_that_fills_from_its_tokens(
+    entry: CatalogEntry,
+) -> None:
+    """Rendered through the one `fill()`; the marker is a `#` first line so the
+    generated-file rule (`dockerfile.write()` refuses an unmarked file) has something to read.
+
+    The pair fills from `entry_tokens(entry)` ALONE — not from the installer's
+    wider mapping — because that is all a build-time render has: the image is
+    built before any per-install secret or port is in hand. A template reaching
+    for `DB_PASSWORD` therefore raises here, not in front of a user.
+    """
+    native = cmangos_native(entry)
+    template_dir = TEMPLATES / str(native.dockerfile_dir)
+    tokens = composegen.entry_tokens(entry)
+    for name in ("Dockerfile.tmpl", "dockerignore.tmpl"):
+        text = composegen.fill((template_dir / name).read_text(encoding="utf-8"), tokens)
+        assert text.startswith(composegen.GENERATED_MARKER), name
+        assert "{{" not in text
+    dockerfile = dockerfile_text(entry)
+    assert native.cmangos is not None
+    assert f"make -j{native.cmangos.dockerfile.make_jobs}" in dockerfile
+    assert "git clone" not in dockerfile, "sources are COPY'd from the clone stage, never fetched"
+    core = entry.emulator.sources[0].dest
+    assert f"COPY {core} " in dockerfile
+    assert f"CMAKE_INSTALL_PREFIX={tokens['CORE_DIR']}" in dockerfile
+    assert tokens["CORE_DIR"].startswith("/opt/"), "the in-image prefix, never the host src dir"
+    ignore = dockerignore_text(entry)
+    assert ".git" in ignore, "the .git tree is not build context"
+
+
+@pytest.mark.parametrize("entry", CMANGOS_ENTRIES, ids=lambda e: e.id)
+def test_every_cmangos_dockerignore_admits_only_the_core_tree_it_copies(
+    entry: CatalogEntry,
+) -> None:
+    """`*` then one re-include, and the `.git` of every tree that re-include pulls in.
+
+    The build context is the server dir, which by build time also holds the
+    world-database checkout (hundreds of MB), the extracted client data and the
+    `.git` of every clone. Only the tree the Dockerfile COPYs may reach the
+    daemon, and the re-include has to name exactly that tree: a bare `!src`
+    would hand over `src/tbc-db` as well, which the SQL import streams from the
+    host and the image has no use for.
+    """
+    ignore = dockerignore_text(entry)
+    lines = [line for line in ignore.splitlines() if line and not line.startswith("#")]
+    assert lines[0] == "*"
+    core = entry.emulator.sources[0].dest
+    assert [line for line in lines if line.startswith("!")] == [f"!{core}"]
+    assert f"{core}/.git" in lines
+    for source in entry.emulator.sources[1:]:
+        nested = source.dest.startswith(f"{core}/")
+        assert nested == (f"{source.dest}/.git" in lines), source.dest
+        assert nested or source.dest not in ignore, f"{source.dest} is host-only, not context"
+
+
+def test_the_tortoise_dockerfile_keeps_every_flag_and_library_its_script_proved() -> None:
+    """The Tortoise image is transcribed from `install-tortoise-wow-wsl.sh`, which ran.
+
+    Three things in that script are load-bearing and were missing from the
+    plan's transcription of it:
+
+    * `-DBUILD_PLAYERBOTS=ON`. The entry clones `Shyalya/tortoise-wow` on branch
+      `playerbots-integration-gh` and its description sells the bots; without
+      the flag the fork compiles into a bot-less server that boots and looks
+      fine. It is also what emits `aiplayerbot.conf.dist` into `etc/`, which the
+      conf stage copies out of the image.
+    * `libboost-{thread,filesystem,system}-dev`. The script installed them in
+      the ONE image that both compiled and ran, so here they belong to both
+      stages — a runtime stage without them is a `mangosd` that cannot link.
+    * the `sql/` and `tools/mmap/` trees under `CORE_DIR`, named by this entry's
+      own `Database.AutoUpdate.Path` conf value and by `mmaps.argv`. If the
+      image does not carry them, those two settings point at nothing.
+    """
+    entry = load_catalog().get("wow-tortoise")
+    native = cmangos_native(entry)
+    assert native.cmangos is not None
+    dockerfile = dockerfile_text(entry)
+    for flag in (
+        "-DUSE_EXTRACTORS=ON",
+        "-DUSE_SCRIPTS=ON",
+        "-DUSE_STD_MALLOC=ON",
+        "-DDEBUG_SYMBOLS=OFF",
+        "-DUSE_ANTICHEAT=OFF",
+        "-DALLOW_TURTLE_ADDONS=ON",
+        "-DBUILD_PLAYERBOTS=ON",
+    ):
+        assert flag in dockerfile, flag
+    for package in ("libboost-thread-dev", "libboost-filesystem-dev", "libboost-system-dev"):
+        assert dockerfile.count(package) == 2, f"{package} is a build AND a runtime dependency"
+    core_dir = composegen.entry_tokens(entry)["CORE_DIR"]
+    autoupdate = native.cmangos.conf.files["mangosd.conf"].keys["Database.AutoUpdate.Path"]
+    assert f"{core_dir}/sql" in dockerfile and f"{core_dir}/sql" in autoupdate
+    for argument in native.cmangos.mmaps.argv:
+        if argument.startswith(f"{core_dir}/src/"):
+            assert str(PurePosixPath(argument).parent) in dockerfile, argument
+
+
+@pytest.mark.parametrize("entry", CMANGOS_ENTRIES, ids=lambda e: e.id)
+def test_the_cmangos_runtime_stage_carries_the_tools_the_extract_stage_runs(
+    entry: CatalogEntry,
+) -> None:
+    """One image serves the server AND the extractors, as in every script it replaces.
+
+    `extract.image` is `server` for all three games, so the argv in the catalog
+    are paths inside THIS image: the builder's whole install prefix has to land
+    in the runtime stage, and the cmake run has to have asked for the tools.
+    """
+    native = cmangos_native(entry)
+    assert native.cmangos is not None
+    assert native.cmangos.extract.image == "server"
+    dockerfile = dockerfile_text(entry)
+    core_dir = composegen.entry_tokens(entry)["CORE_DIR"]
+    assert f"COPY --from=builder {core_dir} {core_dir}" in dockerfile
+    assert dockerfile.count("FROM ubuntu:22.04") == 2, "a builder stage and a slim runtime"
+    for tool in native.cmangos.extract.tools:
+        assert tool.argv[0].startswith(f"{core_dir}/bin/"), tool.argv[0]

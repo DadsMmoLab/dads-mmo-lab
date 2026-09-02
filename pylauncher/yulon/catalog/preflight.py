@@ -30,7 +30,7 @@ from typing import Literal
 
 from yulon import docker, git, platform
 from yulon.catalog import composegen
-from yulon.catalog.catalog import CatalogEntry
+from yulon.catalog.catalog import CatalogEntry, ClientSpec
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -66,6 +66,16 @@ class Check:
         return f"{said} {self.remedy}".rstrip()
 
 
+ClientValidate = Callable[[Path | None, ClientSpec], tuple[Check, ...]]
+"""The client-folder seam: `clientdir.validate` with preflight's free-space reader bound in.
+
+Declared here rather than beside `Verdict` so it can name `Check` without a
+forward reference. `Path | None` is the first argument on purpose: "no folder
+was chosen" is one of the rules, not a case for the caller to special-case
+before asking.
+"""
+
+
 @dataclass(frozen=True)
 class Facts:
     """What could be established about this machine. `None` means "not established".
@@ -87,6 +97,15 @@ class Facts:
     ports_in_use: tuple[int, ...] = ()
     selinux_enforcing: bool | None = None
     server_fs_type: str | None = None
+    client_checks: tuple[Check, ...] = ()
+    client_bind: bool | None = None
+    """Could a container read the CLIENT folder? `None` is "nobody asked".
+
+    Kept apart from `bind_mount`, which is the server folder's answer: they are
+    routinely two different drives, and Docker Desktop shares them one tree at
+    a time. `None` here is no daemon, or a folder the rules already refused —
+    never a probe that ran and came back empty-handed, which is `False`.
+    """
 
 
 @dataclass(frozen=True)
@@ -124,6 +143,7 @@ def gather(
     server_dir: Path,
     *,
     client_dir: Path | None = None,
+    client_validate: ClientValidate | None = None,
     platform_id: Callable[[], str] = platform.detect,
     docker_ready: Callable[[], bool] = platform.docker_ready,
     vm_resources: Callable[[], platform.VmResources | None] = platform.vm_resources,
@@ -151,10 +171,11 @@ def gather(
     SELinux and the server folder's filesystem are asked only on Linux, where
     they exist.
 
-    `client_dir` is carried from 7.1 and unused until 7.3 adds the client
-    checks (A9). The spine passes it on every call, so the seam that will do
-    the checking is already wired when the checks arrive; accepting it now is
-    what keeps that from being a second change to every caller.
+    `client_dir` arrived from the spine in 7.1 (A9) and is read here from 7.3
+    on: entries whose family block carries a `ClientSpec` get the folder rules
+    of `families/clientdir.py` plus a bind probe of their own. Entries without
+    one — AzerothCore extracts nothing from a client — are not asked anything
+    about a client, and `client_validate` is not called for them at all.
     """
     here = platform_id()
     ready = docker_ready()
@@ -181,9 +202,38 @@ def gather(
     # check below can tell "not applicable" from "could not read it".
     enforcing = selinux() if here == "linux" else None
     server_fs = fs_type(server_dir) if here == "linux" else None
-    # `client_dir` is threaded through from `InstallOptions` now so the spine's
-    # call shape is final; the client-folder checks that read it arrive in 7.3.
-    del client_dir
+    # The server folder is probed here rather than inside the `Facts(...)` call
+    # below, so that the two bind probes run in the order they are reported.
+    # Left inline it would be the client that goes first: the client block sits
+    # above a `return` whose arguments are evaluated after it.
+    #
+    # An earlier draft of this comment also claimed the order mattered because
+    # `_preflight_lines()` wraps its `DockerCommandError` handler around the
+    # first Docker call. A review checked, and it does not: `bind_mount_ok()`
+    # and `images_built()` both go through `_docker()`, which hands back a
+    # `CompletedProcess` and never raises that error. The only call here that
+    # can is `port_conflicts()`, and it runs last either way. The hoist is right
+    # for the order it produces; it was never right for that reason.
+    bind = probe(server_dir) if ready else None
+    spec = _client_spec(entry)
+    client_checks: tuple[Check, ...] = ()
+    client_bind: bool | None = None
+    if spec is not None:
+        # The folder rules need no daemon and run regardless; the bind probe is
+        # a question to Docker and is asked only when Docker answered, like the
+        # server folder's. It is also skipped once the rules have refused the
+        # folder: `evaluate()` drops the row in that case, so the probe would
+        # spend up to 30 s on a container to produce a fact nobody reads — and
+        # asking the filesystem a second time here is how the two answers get
+        # to disagree. No ancestor walk is needed for the client: it is
+        # populated by definition, so `bind_mount_ok()` probes it directly.
+        validate = (
+            client_validate if client_validate is not None else _default_client_validate(free)
+        )
+        client_checks = validate(client_dir, spec)
+        refused = any(check.verdict == "refuse" for check in client_checks)
+        if ready and client_dir is not None and not refused:
+            client_bind = probe(client_dir)
     return Facts(
         platform_id=here,
         docker_ready=ready,
@@ -193,16 +243,45 @@ def gather(
         server_dir_free=dir_free,
         same_volume=_same_volume(root, server_dir, here),
         dir_problem=dir_problem(server_dir),
-        bind_mount=probe(server_dir) if ready else None,
+        bind_mount=bind,
         port_conflicts=tuple(conflicts()) if ready else (),
         ports_in_use=tuple(listening),
         selinux_enforcing=enforcing,
         server_fs_type=server_fs,
+        client_checks=client_checks,
+        client_bind=client_bind,
     )
 
 
 def _default_bind_probe(server_dir: Path) -> bool | None:
     return docker.bind_mount_ok(server_dir, PROBE_IMAGE)
+
+
+def _client_spec(entry: CatalogEntry) -> ClientSpec | None:
+    """The entry's client rules, if its family block has any; AzerothCore's has none.
+
+    The one place that decides whether this install reads a client at all, so
+    `gather()` and `evaluate()` cannot come to different conclusions about it.
+    """
+    native = entry.install.native
+    if native is None or native.cmangos is None:
+        return None
+    return native.cmangos.client
+
+
+def _default_client_validate(free: Callable[[Path], int | None]) -> ClientValidate:
+    """`clientdir.validate` with this module's free-space reader bound in.
+
+    Imported inside the function rather than at the top because `families/`
+    imports this module for `Check`, and a module-level import back would be a
+    cycle. The seam exists so `gather()`'s tests never touch a real client
+    folder — and `free` is `gather()`'s own `disk_free` seam, not `shutil`, so
+    the client's drive is measured through the same injection as every other
+    number this function reports.
+    """
+    from yulon.catalog.families import clientdir
+
+    return lambda client_dir, spec: clientdir.validate(client_dir, spec, free_bytes=free)
 
 
 def _default_conflicts(
@@ -310,6 +389,18 @@ def evaluate(entry: CatalogEntry, server_dir: Path, facts: Facts) -> Report:
     checks.append(_bind_check(facts, server_dir))
     checks.append(_selinux_check(facts))
     checks.append(_port_check(facts))
+    # The client's rows come last: they are about a second folder, and the ones
+    # above are about the machine. `clientdir`'s verdicts are carried through
+    # unchanged — its `unchecked` rows stay `unchecked`, the way every
+    # measurement this module could not take does.
+    checks.extend(facts.client_checks)
+    if _client_spec(entry) is not None and not any(
+        check.verdict == "refuse" for check in facts.client_checks
+    ):
+        # Only when the folder itself survived: a mount test on something that
+        # is not a client answers a question nobody asked, and its `unchecked`
+        # line would read as a second problem beside the one that matters.
+        checks.append(_client_bind_check(facts))
     return Report(tuple(checks))
 
 
@@ -515,6 +606,39 @@ def _bind_check(facts: Facts, server_dir: Path) -> Check:
         "refuse",
         f"a container could not see {server_dir}, so the server files would be invisible to it",
         _sentence(_bind_remedy(facts, server_dir)),
+    )
+
+
+def _client_bind_check(facts: Facts) -> Check:
+    """The client folder's twin of `_bind_check`: refused before a two-hour build, not after it.
+
+    A client outside Docker Desktop's file-sharing list mounts as an EMPTY
+    directory, and the first thing that would report it is an extractor finding
+    no archives — after the image was built. The client is routinely on a
+    second drive the server folder's own probe says nothing about.
+
+    Three answers, and the middle one is the point: `None` is "nobody ran the
+    probe" (no daemon, or the folder rules already refused), `False` is "a
+    container looked and could not see it". A bool holds two of the three, and
+    folding `None` into `False` refuses a machine that would have installed.
+    """
+    if facts.client_bind is None:
+        return Check(
+            "sharing the client with Docker",
+            "unchecked",
+            "the client folder could not be tested inside a container — that is not a pass",
+            "If extraction finds no archives, check Docker Desktop's file sharing settings.",
+        )
+    if facts.client_bind:
+        return Check(
+            "sharing the client with Docker", "pass", "a container can read the client folder"
+        )
+    return Check(
+        "sharing the client with Docker",
+        "refuse",
+        "a container could not see the client folder, so its archives would be invisible to it",
+        "Add the client folder (or its parent) to Docker Desktop's Settings → Resources → File "
+        "sharing, then try again.",
     )
 
 
