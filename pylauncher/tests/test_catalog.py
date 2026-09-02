@@ -438,7 +438,14 @@ def test_wotlk_native_block_names_its_family_images_database_and_ready_markers()
     assert native.ready == ReadyMarkers(world="ready...", auth="{{REALM_HOST}}:{{WORLD_PORT}}")
     assert native.ready.fatal is None
     assert native.ready.regex is False
-    assert native.ready.timeout_s == 600 and native.ready.restart_loop == 4
+    # wow-wotlk names no `timeout_s`, so it INHERITS the model default, and
+    # raising that default from 600 to 1800 changed this entry too. Deliberate:
+    # the 793s TBC boot that disproved 600 was measured on a 4-core box, and
+    # nothing about AzerothCore makes it immune to a slow machine. `restart_loop`
+    # is what catches a server that is never coming up, so a longer wait only
+    # ever binds on one that is merely slow (review, 2026-09-02).
+    assert native.ready.timeout_s == ReadyMarkers(world="x").timeout_s
+    assert native.ready.timeout_s == 1800 and native.ready.restart_loop == 4
     assert native.azerothcore is not None
     assert native.azerothcore.world_env == {
         "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS": "500",

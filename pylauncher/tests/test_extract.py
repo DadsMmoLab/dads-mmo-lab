@@ -2406,3 +2406,52 @@ def test_mmaps_output_folder_exists_before_movemapgen_runs(tmp_path: Path) -> No
     mmaps(MMAPS, _Watching(MMAPS_WRITES), tmp_path)
 
     assert seen_at_start == [True], "MoveMapGen ran with no mmaps/ folder to write into"
+
+
+def test_a_retried_tool_the_main_loop_never_reached_still_gets_its_output_folder(
+    tmp_path: Path,
+) -> None:
+    """The retry recipe can reach a tool the main loop has not run yet.
+
+    `wow-vanilla` is the only entry that ships a `retry`, and its recipe is
+    `["vmap extract", "vmap assemble"]` -- the two tools this fixture mirrors.
+    So the ONE crash the recipe exists for, a segfault in `vmap extract`, makes
+    the recipe re-run `vmap assemble` BEFORE the main loop has ever reached it,
+    and therefore before anything created `vmaps/`.
+
+    That is precisely the `Cannot open vmaps/000.vmtree` failure `make_out_dirs`
+    was added to prevent, still reachable after the fix, on the only recipe in
+    the catalog. Two independent reviews found it on 2026-09-02; five mutations
+    of the original change had all been killed, because none of them ran a
+    retry.
+
+    Records existence AT THE MOMENT THE CONTAINER STARTS, for the same reason
+    the sibling test does: `Runner` fabricates the output, so checking afterwards
+    would pass against no fix at all.
+    """
+    seen_at_start: dict[str, bool] = {}
+
+    class _WatchingRetry(Runner):
+        def __call__(
+            self,
+            spec: docker.ContainerRun,
+            *,
+            sink: docker.OutputSink,
+            cancel: threading.Event | None,
+        ) -> docker.AttachedRun:
+            program = tool_program(spec)
+            out = next(mount.host for mount in spec.mounts if mount.guest == "/out")
+            for folder in FULL.get(program, {}):
+                # Last write wins: the retry's observation is the one that
+                # matters, and it happens after the main loop's.
+                seen_at_start[folder] = (out / folder).is_dir()
+            return super().__call__(spec, sink=sink, cancel=cancel)
+
+    runner = _WatchingRetry(FULL, fail={VMAP.argv[0]: SEGFAULT})
+
+    lines = run(RETRY_PLAN, runner, tmp_path)
+
+    assert any("retrying" in line for line in lines), f"no retry happened: {lines}"
+    assert (
+        seen_at_start.get("vmaps") is True
+    ), "vmap assemble ran on the retry path with no vmaps/ folder to write into"

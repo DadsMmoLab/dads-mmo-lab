@@ -1574,15 +1574,21 @@ def test_ready_markers_are_filled_and_escaped_unless_the_catalog_says_regex(
 
 
 def test_the_catalogue_timeout_wins_over_the_docker_default() -> None:
-    """Two contract-mandated numbers meet here: 600 from the data, 480 in `docker.py`.
+    """Two contract-mandated numbers meet here: the data's, and 480 in `docker.py`.
 
-    `ReadyMarkers.timeout_s` is 600 and `docker.ReadySpec`'s own default is
-    480. A spec built from catalogue data uses the data (A.2 review finding),
-    and the numbers must actually differ or this pins nothing.
+    A spec built from catalogue data uses the DATA (A.2 review finding), not
+    `docker.ReadySpec`'s own 480. The data's number is read from
+    `ReadyMarkers` rather than restated: it was written as the literal 600 and
+    that is what the field defaulted to, so raising the default to 1800 after a
+    measurement disproved 600 failed this test for a reason it is not about.
+    The guard below keeps it meaningful -- the two numbers must actually differ
+    or this pins nothing (review, 2026-09-02).
     """
-    spec = _build(Recorder(), AzerothCoreInstaller)._ready_spec(ReadyMarkers(world="ready..."))
+    markers = ReadyMarkers(world="ready...")
+    spec = _build(Recorder(), AzerothCoreInstaller)._ready_spec(markers)
     assert docker.ReadySpec(world="x").timeout == 480.0
-    assert spec.timeout == 600.0
+    assert markers.timeout_s != 480, "the data must differ from docker's default"
+    assert spec.timeout == float(markers.timeout_s)
 
 
 def test_a_broken_ready_pattern_is_refused_where_it_is_read_not_mid_poll() -> None:

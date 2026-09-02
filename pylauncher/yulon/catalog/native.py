@@ -808,10 +808,18 @@ class StagedInstaller:
         """
         if not state.last_error:
             return
-        try:
-            write_state(server_dir, replace(state, last_error=""))
-        except OSError as exc:
-            logger.warning(f"could not clear the previous error from the state file: {exc}")
+        if not (server_dir / STATE_FILE).is_file():
+            # The same guard `_record_error` carries, for the same reason: a
+            # state file removed while this ran must not be RE-CREATED here.
+            # `write_state` does `mkdir(parents=True, exist_ok=True)`, so
+            # without this a folder the user emptied mid-install gets a state
+            # file back, and `_guard()` then refuses the retry on the strength
+            # of the record it just wrote (review, 2026-09-02).
+            return
+        # No try/except: `write_state` catches its own `OSError` and logs
+        # "could not record install progress in ...". A handler here was dead
+        # code that made this function look more careful than it is.
+        write_state(server_dir, replace(state, last_error=""))
 
     def _run_one(self, stage: Stage, ctx: StageContext) -> Generator[str, None, InstallState]:
         """Run one stage and, if the family says so, write it down."""

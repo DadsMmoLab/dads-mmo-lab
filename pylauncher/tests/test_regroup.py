@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -32,7 +33,9 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
-def _id_saying(*groups: str) -> Callable[[list[str]], subprocess.CompletedProcess[str]]:
+def _id_saying(
+    *groups: str, asked_about: str = "pk"
+) -> Callable[[list[str]], subprocess.CompletedProcess[str]]:
     """A `RunCmd` standing in for `id -nG <user>` -- the DATABASE side.
 
     Asserts the argv it was handed rather than answering anything it is asked:
@@ -42,7 +45,13 @@ def _id_saying(*groups: str) -> Callable[[list[str]], subprocess.CompletedProces
     """
 
     def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
-        assert argv[:2] == ["id", "-nG"], argv
+        # The WHOLE argv, including the user. It used to assert `argv[:2]` --
+        # the two words that never vary -- so replacing `_linux_user(None)` with
+        # the literal "root" left the suite green while production asked whether
+        # ROOT was in the docker group and re-exec'd on the answer. Asserting a
+        # parameter's shape is not asserting that the value arrives
+        # (review, 2026-09-02).
+        assert argv == ["id", "-nG", asked_about], argv
         return subprocess.CompletedProcess(argv, 0, " ".join(groups) + "\n", "")
 
     return run
@@ -450,3 +459,188 @@ def test_the_manual_step_for_a_granted_join_names_the_restart_first() -> None:
 
     assert "restart yu'lon" in step, step
     assert step.index("restart yu'lon") < step.index("log out and back in"), step
+
+
+# --------------------------------------------------------------------------
+# The PRODUCTION defaults. `_reexec()` above injects every seam, which is what
+# makes those tests readable -- and it left three defaults with no coverage at
+# all. A mutation review on 2026-09-02 turned each into a no-op and the whole
+# 2086-test suite stayed green:
+#   * `which=None -> _which` made to return None: the feature is dead on every
+#     real machine.
+#   * `orig_argv=None -> sys.orig_argv` swapped for `sys.argv`: exactly the
+#     regression `docker_group_reexec`'s docstring spends a paragraph arguing
+#     against.
+#   * the user handed to `id -nG` replaced by the literal "root".
+
+
+def test_the_production_defaults_are_the_ones_the_docstring_promises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`which`, `orig_argv` and the user, left at their defaults and driven through.
+
+    Patches the module-level names the defaults resolve to rather than passing
+    substitutes, so the wiring under test is the wiring production uses. Asserts
+    the whole argv: the interpreter and `-m` form come from `sys.orig_argv`, and
+    the `sg` path from `_which`.
+    """
+    monkeypatch.setattr(platform, "_which", lambda name, path=None: f"/usr/bin/{name}")
+    monkeypatch.setattr(sys, "orig_argv", ["/usr/bin/python3", "-m", "yulon.install_wiring"])
+    monkeypatch.setattr(platform, "_linux_user", lambda explicit: "pk")
+
+    got = platform.docker_group_reexec(
+        platform_id=lambda: "linux",
+        environ={},
+        getgroups=lambda: [1000],
+        run=_id_saying("pk", "docker"),
+    )
+
+    assert got == [
+        "/usr/bin/sg",
+        "docker",
+        "-c",
+        "/usr/bin/python3 -m yulon.install_wiring",
+    ], got
+
+
+def test_a_machine_with_no_sg_is_found_through_the_real_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `which=None` default, taken. A stub that always answers hides this."""
+    monkeypatch.setattr(platform, "_which", lambda name, path=None: None)
+    monkeypatch.setattr(sys, "orig_argv", ["/usr/bin/python3", "-m", "x"])
+    monkeypatch.setattr(platform, "_linux_user", lambda explicit: "pk")
+
+    assert (
+        platform.docker_group_reexec(
+            platform_id=lambda: "linux",
+            environ={},
+            getgroups=lambda: [1000],
+            run=_id_saying("pk", "docker"),
+        )
+        is None
+    )
+
+
+def test_root_never_restarts_because_it_has_nothing_to_regain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under `sudo` the two halves of the predicate are about DIFFERENT accounts.
+
+    `os.getgroups()` describes this process (root); `_linux_user(None)` returns
+    `$SUDO_USER`, so the database half describes the invoking user. Both answer
+    yes, so the predicate was permanently true for a process that already
+    reached the socket -- and `CatalogView._offer_a_restart_instead()` gates on
+    exactly that, so EVERY install failure (disk full, missing client, a failed
+    compile) was answered with "Docker is set up ... Restart Yu'lon now?" while
+    the real message was suppressed.
+
+    Measured on yulon-ubuntu 2026-09-02: `sudo python3 -c 'os.getgroups()'` is
+    `[0]`, and `sudo sh -c 'id -nG $SUDO_USER'` contains `docker`.
+    """
+    monkeypatch.setattr(os, "geteuid", lambda: 0, raising=False)
+
+    assert _reexec() is None
+
+
+def test_the_launcher_actually_calls_it_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deleting the call from `main()` left the whole suite green.
+
+    Every other test here calls `_regain_docker_group()` directly, so nothing
+    proved the launcher ever reaches it -- the silent half of the fix could
+    simply not run, and every user with a pending group join would be back to
+    logging out. Asserts it happens BEFORE the `--provision` branch, which is
+    where the headless path would otherwise leave without it.
+    """
+    calls: list[str] = []
+    monkeypatch.setattr(main, "_regain_docker_group", lambda: calls.append("regain"))
+    monkeypatch.setattr(main, "provision_headless", lambda: calls.append("provision") or 0)
+    monkeypatch.setenv("YULON_PROVISION", "1")
+
+    main.main()
+
+    assert calls == ["regain", "provision"], calls
+
+
+def test_a_successful_install_shows_no_dialog_at_all(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dropping `not ok` from the call site left the suite green.
+
+    `_on_run_finished(True, ...)` would then run through
+    `_offer_a_restart_instead`, get False, and show `QMessageBox.warning(self,
+    "Install failed", ...)` on a successful install. Nothing caught it because
+    `conftest`'s autouse `_no_modal_dialogs` stubs `warning`/`information` to a
+    silent Ok for every test that does not patch them itself -- so no test in
+    the suite can observe an UNEXPECTED dialog. This one patches them itself
+    and asserts silence (review, 2026-09-02).
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    warned: list[str] = []
+    asked: list[str] = []
+    monkeypatch.setattr(
+        platform, "docker_group_reexec", lambda: ["/usr/bin/sg", "docker", "-c", "x"]
+    )
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: asked.append(a[2]))
+
+    view = _view(tmp_path)
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    view._on_run_finished(True, "done")
+
+    assert warned == [], f"a successful install showed a warning: {warned}"
+    assert asked == [], f"a successful install asked something: {asked}"
+
+
+def test_the_restart_question_carries_what_actually_failed(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The dialog suppresses the plain warning, so it must carry the message itself.
+
+    That is the stated justification for returning True. Removing `{message}`
+    from the dialog text left the suite green: the existing assertions look for
+    "do NOT" and "log out", which both live in the STATIC half of the string,
+    so the user could lose the only statement of what went wrong and every test
+    still passed (review, 2026-09-02).
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    asked: list[str] = []
+    monkeypatch.setattr(
+        platform, "docker_group_reexec", lambda: ["/usr/bin/sg", "docker", "-c", "x"]
+    )
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *a, **k: asked.append(a[2]) or QMessageBox.StandardButton.No,
+    )
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
+
+    _view(tmp_path)._on_run_finished(False, "not enough disk space on /home")
+
+    assert asked and "not enough disk space on /home" in asked[0], asked
+
+
+def test_a_restart_that_could_not_happen_still_reports_the_failure(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Yes, then the exec fails: the user must not be left with a closed dialog.
+
+    `restart_under_docker_group()` returns False when `os.execv` raised. The
+    recovery `QMessageBox.warning` was unasserted -- deleting it left the suite
+    green and the user staring at a dialog that closed and did nothing.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    warned: list[str] = []
+    monkeypatch.setattr(
+        platform, "docker_group_reexec", lambda: ["/usr/bin/sg", "docker", "-c", "x"]
+    )
+    monkeypatch.setattr(platform, "restart_under_docker_group", lambda *a, **k: False)
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
+
+    _view(tmp_path)._on_run_finished(False, "Docker is installed and set up.")
+
+    assert warned == ["Docker is installed and set up."], warned

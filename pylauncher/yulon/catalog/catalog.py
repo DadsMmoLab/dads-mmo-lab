@@ -159,7 +159,7 @@ class ReadyMarkers(_Strict):
     auth: str | None = None
     fatal: str | None = None
     timeout_s: int = Field(
-        default=600,
+        default=1800,
         gt=0,
         description=(
             "Seconds to wait for `world` before calling the install failed. Generous on "
@@ -168,7 +168,11 @@ class ReadyMarkers(_Strict):
             "tells a user their working server failed. Measured on m910q 2026-09-02, WoW TBC "
             "first boot on 4 cores: container start 15:51:15, first `Avg Diff:` 16:04:28 -- "
             "793s, against the 600 the three CMaNGOS entries then carried. The server was "
-            "healthy and idle 44 minutes later; the install had already reported failure."
+            "healthy and idle 44 minutes later; the install had already reported failure. "
+            "The DEFAULT was 600 too, and stayed there for a day after the measurement "
+            "disproved it -- so a new entry that omitted the field inherited the number known "
+            "to call a working server a failed install, and no test would have failed "
+            "(review, 2026-09-02)."
         ),
     )
     restart_loop: int = Field(

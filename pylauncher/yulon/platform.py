@@ -1482,6 +1482,16 @@ def docker_group_reexec(
     env = os.environ if environ is None else environ
     if env.get(REGROUP_ENV):
         return None
+    # Root already reaches the docker socket; there is nothing to regain, and
+    # asking would compare two different accounts. `_linux_user(None)` returns
+    # `$SUDO_USER` when euid is 0, so under `sudo` the database half of the
+    # predicate is about the invoking user while `os.getgroups()` is about root
+    # -- both answer yes, the predicate is permanently true, and a GUI that
+    # gates on it offers a pointless restart for every unrelated install
+    # failure (review, 2026-09-02).
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is not None and geteuid() == 0:
+        return None
     find = _which if which is None else which
     sg = find("sg")
     if sg is None:

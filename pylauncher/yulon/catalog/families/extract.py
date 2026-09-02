@@ -345,6 +345,11 @@ def make_out_dirs(produces: Iterable[str], data_dir: Path) -> None:
     so an empty one reads 0 and a shortfall is still a shortfall. Safe to run
     before every tool, and it is, rather than only before the one known to need
     it -- the assembler was not special, it was first.
+
+    "Before every tool" means BOTH loops in `run_plan()`. The first version of
+    this call sat only in the main loop, and a retry recipe names tools by name,
+    so it can re-run one the main loop never reached -- which is how the fix
+    missed the single recipe that ships.
     """
     for folder in produces:
         target = data_dir / folder
@@ -853,6 +858,16 @@ def run_plan(
             )
             for name in plan.retry.tools:
                 again = _tool_named(plan, name)
+                # NOT redundant with the call in the outer loop, and the one
+                # place this was missed. A recipe names tools by NAME, so it can
+                # reach a tool the outer loop has not run yet -- `wow-vanilla`'s
+                # is `["vmap extract", "vmap assemble"]`, so a segfault in the
+                # first re-runs the second here, BEFORE the outer loop ever
+                # created `vmaps/`. That is exactly the `Cannot open
+                # vmaps/000.vmtree` this function was changed to prevent, on the
+                # one recipe that ships, reachable by the one crash it exists
+                # for (two independent reviews, 2026-09-02).
+                make_out_dirs(again.produces, data_dir)
                 yield f"{again.name}: retrying {' '.join(again.argv)}"
                 run = run_container(spec_for(again), sink=sink, cancel=cancel)
                 current, seen = _conclude(
@@ -1116,7 +1131,15 @@ def run_mmaps(
     # assembler one stage earlier -- see `make_out_dirs()`. Found by reading
     # rather than by running: the extract failure blocks this stage, so no run
     # has reached it yet on any CMaNGOS entry.
-    make_out_dirs([MMAPS_DIR], data_dir)
+    try:
+        make_out_dirs([MMAPS_DIR], data_dir)
+    except InstallerError as exc:
+        # `make_out_dirs`'s own sentence ends "Nothing was run", which is true
+        # of the TOOL and false of the folder: `_remove_tree` above may already
+        # have deleted `mmaps/`. This stage's docstring promises that every
+        # ending after a wipe says so, and this was the one ending that did not
+        # (review, 2026-09-02).
+        raise InstallerError(f"{exc}{cleared}") from exc
     yield f"mmaps: running {' '.join(plan.argv)}"
     run = run_container(
         docker.ContainerRun(
