@@ -363,9 +363,21 @@ class CmangosInstaller(StagedInstaller):
             text, ignore = dockerfile.render(template_dir, self._public_tokens(ctx.server_dir))
             written = dockerfile.write(ctx.server_dir, text, ignore)
         except dockerfile.DockerfileError as exc:
-            # Already the sentence a user reads — `stage_generate_compose` passes
-            # `ComposeGenError` through the same way. A class name in front of
+            # Already the sentence a user reads. A class name in front of
             # "that file was not written by Yu'lon" would be noise, not evidence.
+            #
+            # This comment used to add that `stage_generate_compose` passed
+            # `ComposeGenError` through the same way. It did not, and the
+            # sentence described an ASYMMETRY as if it were symmetry: this
+            # `try` covers `render()` AND `write()`, while the spine's covered
+            # only `write_plan()` and left `composegen.render()` bare - on the
+            # install path of every shipped game, because `generate-compose` is
+            # the spine's own body and every family binds it. Measured through
+            # `install_wiring.main()` on 2026-09-02: a traceback instead of a
+            # sentence, and no `last_error` recorded. The spine wraps `render()`
+            # now, so the TRANSLATION matches. The COVERAGE still does not: the
+            # broad `(RuntimeError, OSError)` arm below has no counterpart
+            # there, and `stage_build`'s `built_image_refs()` call is bare.
             raise InstallerError(str(exc)) from exc
         except InstallerError:
             # MUST stay ahead of the broad clause whatever else changes:

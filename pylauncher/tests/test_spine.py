@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
 import subprocess
 import threading
 import traceback
@@ -22,7 +23,7 @@ from pathlib import Path
 import pytest
 
 from tests.support_native import ENTRY, IMPORTED, PARTIAL, TBC, Recorder, install
-from yulon import docker, platform, resources
+from yulon import docker, install_wiring, platform, resources
 from yulon.catalog import composegen, native, preflight
 from yulon.catalog.catalog import CatalogEntry, ReadyMarkers, load_catalog
 from yulon.catalog.families import FAMILIES, family_for
@@ -1522,3 +1523,130 @@ def test_a_relabel_that_fails_is_a_warning_line_not_a_refusal(tmp_path: Path) ->
     assert any("could not be relabelled" in line for line in lines)
     assert any("chcon -Rt container_file_t" in line for line in lines)
     assert "start" in rec.calls
+
+
+# -- a refusal that is not an InstallerError ---------------------------------
+#
+# `run()` catches `InstallerError` and nothing else, and composegen's
+# `ComposeGenError` is not one: both subclass `RuntimeError` independently, so
+# neither `except` clause can ever see the other's refusal. Everything below
+# drives the real `install_wiring.main()`, because the two things that break
+# when such a refusal escapes a stage body are both invisible from inside one --
+# the traceback the caller gets instead of a sentence, and the `last_error` that
+# is then never recorded.
+#
+# `generate-compose` is bound to the SPINE's own body by every family, so this
+# is not one game's defect. It was reproduced through the CLI on `wow-wotlk`,
+# the only game with green live gates, as well as on the CMaNGOS side.
+
+UNFILLED_TOKEN = "YULON_UNFILLED_TOKEN"
+"""A placeholder no `entry_tokens()` mapping will ever hold, so `fill()` refuses on it."""
+
+UNFILLED_PLACEHOLDER = f"{{{{{UNFILLED_TOKEN}}}}}"
+"""The token as a template spells it - derived, so template and assertion cannot drift."""
+
+
+def _installers_with_an_unfilled_token(entry: CatalogEntry, tmp_path: Path) -> Path:
+    """A copy of the shipped installers tree whose compose template names a token nobody fills.
+
+    `fill()`'s refusal and not `_refuse_unsafe()`'s, because this one is
+    reachable on BOTH families: `wow-wotlk`'s database password is fixed in the
+    catalog and safe, so the password refusal can never fire for it. It is also
+    the honest shape of the real failure - an `--installers-root` pointed at an
+    incomplete checkout, or a bundle that shipped short.
+
+    Only the compose template is touched. A wholesale broken tree would be
+    refused one stage earlier by CMaNGOS's `write-dockerfile`, whose
+    `DockerfileError` IS translated, and the test would then go green on the
+    neighbour while proving nothing about this stage.
+    """
+    native_block = entry.install.native
+    assert native_block is not None, f"{entry.id} has no native block to render"
+    root = tmp_path / "installers"
+    shutil.copytree(resources.installers_dir(), root)
+    template = root / native_block.templates / "base.yml.tmpl"
+    template.write_text(
+        template.read_text(encoding="utf-8") + f"\n# {UNFILLED_PLACEHOLDER}\n",
+        encoding="utf-8",
+    )
+    return root
+
+
+def _cli_engine_over(rec: Recorder, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point `install_wiring.installer_for_app` at the real family engine over `rec`.
+
+    `main()`, the entry, the family, the spine and the templates are all real;
+    only the machine underneath is a double. `installers_root` is taken from the
+    keyword `main()` passes down, which is what keeps `--installers-root` the
+    trigger rather than a fixture reaching around the CLI.
+    """
+
+    def build(entry: CatalogEntry, **kwargs: object) -> native.StagedInstaller:
+        root = kwargs["installers_root"]
+        assert isinstance(root, Path)
+        linux = entry.model_copy(
+            update={"install": entry.install.model_copy(update={"platforms": ("linux",)})}
+        )
+        return family_for(linux)(
+            linux,
+            installers_root=root,
+            import_probe=rec.probe,
+            reset_unfinished=rec.reset,
+            seams=rec.seams(platform_id=lambda: "linux"),
+        )
+
+    monkeypatch.setattr(install_wiring, "installer_for_app", build)
+
+
+@pytest.mark.parametrize("game_id", ["wow-wotlk", "wow-tbc"])
+def test_a_compose_refusal_reaches_the_cli_as_a_sentence_and_is_recorded(
+    game_id: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A `ComposeGenError` out of `render()` is a refusal, and every refusal is an `InstallerError`.
+
+    Measured on `f6ed1b9a` before the fix, for both games: `main()` raised
+    `ComposeGenError` from `native.py:1309`, the harness printed a traceback
+    where its own docstring promises "the sentence written for a person", and
+    because `run()`'s `except InstallerError` never fired, `_record_error` did
+    not run - the state file kept `"last_error": ""` where every other stage
+    failure records its sentence.
+
+    The rule under test is `fill()`'s. Its neighbour on this path is
+    `write_plan()`'s refusal, which was the one `ComposeGenError` already
+    translated, so the message is pinned to the first and the compose files are
+    asserted absent: a run that reached the neighbour would fail here rather
+    than pass on the neighbour's words.
+    """
+    entry = load_catalog().get(game_id)
+    server_dir = tmp_path / "server"
+    root = _installers_with_an_unfilled_token(entry, tmp_path)
+    _cli_engine_over(Recorder(images=False), monkeypatch)
+    try:
+        code = install_wiring.main(
+            [game_id, "--server-dir", str(server_dir), "--installers-root", str(root)]
+        )
+    except Exception as exc:
+        pytest.fail(
+            f"a compose refusal escaped install_wiring.main() as {type(exc).__name__}: "
+            + "".join(traceback.format_exception(exc)).strip()
+        )
+    streamed = capsys.readouterr()
+    refusal = f"unfilled compose placeholder {UNFILLED_PLACEHOLDER}"
+    assert code == 1
+    assert f"install failed: {refusal}" in streamed.err
+    assert "--- generate-compose" in streamed.out, "the run never reached the stage under test"
+    assert "was not written by Yu'lon" not in streamed.err, "that is write_plan()'s refusal"
+    for name in composegen.COMPOSE_FILES:
+        path = server_dir / name
+        assert not path.exists() or not composegen.is_ours(path), (
+            f"{name} carries the generated marker, so write_plan() ran - the refusal under "
+            "test is render()'s, one call earlier"
+        )
+    recorded = json.loads((server_dir / native.STATE_FILE).read_text(encoding="utf-8"))
+    assert recorded["last_error"] == refusal, (
+        "the refusal was not recorded, so `run()`'s `except InstallerError` never saw it "
+        "and `_record_error` did not run"
+    )

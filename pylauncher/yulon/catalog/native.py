@@ -1306,14 +1306,30 @@ class StagedInstaller:
         label = platform.bind_label(
             enforcing=self._seams.selinux_enforcing(), fs_type=self._seams.fs_type(ctx.server_dir)
         )
-        plan = composegen.render(
-            self.entry,
-            ctx.server_dir,
-            templates_root=self.installers_root,
-            db_password=ctx.secrets.db_password,
-            bind_label=label,
-            platform_id=self._seams.platform_id,
-        )
+        # `render()` INSIDE a `try`, not beside one. It was called bare until
+        # 2026-09-02, and `ComposeGenError` is not an `InstallerError` - both
+        # subclass `RuntimeError` independently, so neither `except` clause can
+        # see the other's refusal and `run()`'s caught nothing here. Measured
+        # through the real `install_wiring.main()` on `wow-wotlk` and on
+        # `wow-tbc`: an unfilled placeholder in a compose template printed a
+        # traceback where the harness's own docstring promises the sentence
+        # written for a person, and `_record_error` never ran, so the state file
+        # kept `"last_error": ""` where every other stage failure records its
+        # own. Every refusal reachable from `render()` escaped that way; the one
+        # exception was `write_plan()`'s, below, which was already translated.
+        # This body is bound by EVERY family (`azerothcore.py`'s stage tuple and
+        # `cmangos.py`'s both name this method), so it was never one game's bug.
+        try:
+            plan = composegen.render(
+                self.entry,
+                ctx.server_dir,
+                templates_root=self.installers_root,
+                db_password=ctx.secrets.db_password,
+                bind_label=label,
+                platform_id=self._seams.platform_id,
+            )
+        except composegen.ComposeGenError as exc:
+            raise InstallerError(str(exc)) from exc
         replaceable = self._replaceable_compose(ctx.server_dir)
         if replaceable:
             yield (
