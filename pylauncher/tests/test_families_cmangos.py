@@ -29,10 +29,11 @@ import ast
 import gzip
 import inspect
 import os
+import re
 import subprocess
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from dataclasses import fields, is_dataclass, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -42,7 +43,7 @@ from tests.support_native import Recorder
 from yulon import docker, platform, resources
 from yulon.catalog import composegen, native
 from yulon.catalog.catalog import CatalogEntry, PasswordPlan, SqlPlan, load_catalog
-from yulon.catalog.families import dockerfile, extract, sqlplan
+from yulon.catalog.families import cmangos, dockerfile, extract, sqlplan
 from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import InstallerError, InstallOptions
 
@@ -289,33 +290,44 @@ def test_the_module_constants_are_the_shared_template_s_own_spellings() -> None:
     assert f"- {cmangos.DB_DATA_VOLUME}:/var/lib/mysql" in base
 
 
-def test_tokens_carry_the_family_set_from_catalog_data(tmp_path: Path) -> None:
+def test_both_token_mappings_carry_the_family_set_from_catalog_data(tmp_path: Path) -> None:
+    """Every catalog- and install-derived key is in BOTH mappings; only one carries the secret.
+
+    Asserted over both, not over the public one with a note about the other:
+    the split's cost would be a conf table quietly losing `WORLD_PORT` because
+    someone added a key to whichever mapping they had open.
+    """
     server_dir = tmp_path / "srv"
-    tokens = engine(Recorder())._tokens(context(server_dir))
+    eng = engine(Recorder())
+    public = eng._public_tokens(server_dir)
+    secret = eng._secret_tokens(context(server_dir))
     native_block = ENTRY.install.native
     assert native_block is not None and CMANGOS is not None
-    assert tokens["DB_HOST"] == ENTRY.containers.db
-    assert tokens["DB_USER"] == native_block.db.user
-    assert tokens["DB_IMAGE"] == native_block.db.image
-    assert tokens["DB_PASSWORD"] == DB_PASSWORD
-    assert tokens["AUTH_DB"] == ENTRY.databases.auth
-    assert tokens["WORLD_DB"] == ENTRY.databases.world
-    assert tokens["CHAR_DB"] == ENTRY.databases.characters
-    assert tokens["LOGS_DB"] == ENTRY.databases.extra[0]
-    assert tokens["CORE_DIR"] == str(PurePosixPath(CMANGOS.conf.source_dir).parent)
-    assert tokens["CORE_DIR"] == "/opt/mangos", "the in-image install prefix, never a host path"
-    assert tokens["CLIENT_BUILD"] == str(ENTRY.client.build)
-    assert tokens["MAKE_JOBS"] == str(CMANGOS.dockerfile.make_jobs)
-    assert tokens["DB_PORT"] == str(ENTRY.ports.db)
-    assert tokens["AUTH_PORT"] == str(ENTRY.ports.auth)
-    assert tokens["WORLD_PORT"] == str(ENTRY.ports.world)
-    assert tokens["REALM_HOST"] == native.INSTALL_REALM_HOST == "127.0.0.1"
-    assert tokens["PROJECT_NAME"] == composegen.project_name(
-        ENTRY.id, server_dir, platform_id=lambda: "linux"
-    )
-    assert tokens["IMAGE_TAG"] == composegen.image_tag(server_dir, platform_id=lambda: "linux")
-    assert tokens["IMAGE_PREFIX"] == native_block.image_prefix
-    assert "" not in tokens.values(), "an absent value is an absent key, never an empty fill"
+    for tokens in (public, secret):
+        assert tokens["DB_HOST"] == ENTRY.containers.db
+        assert tokens["DB_USER"] == native_block.db.user
+        assert tokens["DB_IMAGE"] == native_block.db.image
+        assert tokens["AUTH_DB"] == ENTRY.databases.auth
+        assert tokens["WORLD_DB"] == ENTRY.databases.world
+        assert tokens["CHAR_DB"] == ENTRY.databases.characters
+        assert tokens["LOGS_DB"] == ENTRY.databases.extra[0]
+        assert tokens["CORE_DIR"] == str(PurePosixPath(CMANGOS.conf.source_dir).parent)
+        assert tokens["CORE_DIR"] == "/opt/mangos", "the in-image prefix, never a host path"
+        assert tokens["CLIENT_BUILD"] == str(ENTRY.client.build)
+        assert tokens["MAKE_JOBS"] == str(CMANGOS.dockerfile.make_jobs)
+        assert tokens["DB_PORT"] == str(ENTRY.ports.db)
+        assert tokens["AUTH_PORT"] == str(ENTRY.ports.auth)
+        assert tokens["WORLD_PORT"] == str(ENTRY.ports.world)
+        assert tokens["REALM_HOST"] == native.INSTALL_REALM_HOST == "127.0.0.1"
+        assert tokens["PROJECT_NAME"] == composegen.project_name(
+            ENTRY.id, server_dir, platform_id=lambda: "linux"
+        )
+        assert tokens["IMAGE_TAG"] == composegen.image_tag(server_dir, platform_id=lambda: "linux")
+        assert tokens["IMAGE_PREFIX"] == native_block.image_prefix
+        assert "" not in tokens.values(), "an absent value is an absent key, never an empty fill"
+    assert "DB_PASSWORD" not in public
+    assert secret["DB_PASSWORD"] == DB_PASSWORD
+    assert secret == {**public, "DB_PASSWORD": DB_PASSWORD}, "one set is the other plus the secrets"
 
 
 def test_tokens_omit_logs_db_when_the_entry_has_no_extra_schema(tmp_path: Path) -> None:
@@ -325,17 +337,470 @@ def test_tokens_omit_logs_db_when_the_entry_has_no_extra_schema(tmp_path: Path) 
         installers_root=resources.installers_dir(),
         seams=Recorder().seams(platform_id=lambda: "linux"),
     )
-    assert "LOGS_DB" not in eng._tokens(context(tmp_path / "srv"))
+    assert "LOGS_DB" not in eng._public_tokens(tmp_path / "srv")
+    assert "LOGS_DB" not in eng._secret_tokens(context(tmp_path / "srv"))
 
 
-def test_no_dockerfile_template_names_the_secret_this_one_mapping_carries() -> None:
-    """`_tokens()` is handed to `dockerfile.render()` whole (K.4), and it holds `DB_PASSWORD`.
+def secrets_with_a_sentinel_per_field() -> tuple[native.Secrets, dict[str, str]]:
+    """A `Secrets` whose every field holds a distinct, unmistakable string, and that mapping.
 
-    A tripwire over the shipped templates, kept — but it is no longer what
-    stands between the mapping and the secret. `dockerfile.SECRET_TOKEN` is:
-    `render()` now refuses the token BY NAME, the way `composegen.generate()`
-    refuses it in a compose template, and drops the key from the mapping it
-    fills with. This test says the shipped six are clean; the refusal says the
+    Built from `dataclasses.fields()` rather than from `db_password=...`, so a
+    secret added to `native.Secrets` is covered by every caller of this helper
+    on the day it is added and not on the day somebody remembers. That is the
+    difference the M15 mutation turned on: the protection K.4 shipped covered
+    the NAME `DB_PASSWORD`, and a second secret walked past it.
+    """
+    named = fields(native.Secrets)
+    assert named, "native.Secrets has no fields; every test built on this would pass vacuously"
+    for field in named:
+        assert field.type in ("str", str), (
+            f"native.Secrets.{field.name} is {field.type!r}, not a string. The sentinel "
+            "trick below assumes strings; re-read these tests before widening the type."
+        )
+    values = {field.name: f"SENTINEL-{field.name}-a4f19c7e" for field in named}
+    return native.Secrets(**values), values
+
+
+def test_the_build_context_mapping_needs_no_secret_and_still_fills_the_shipped_templates(
+    tmp_path: Path,
+) -> None:
+    """`_public_tokens()` is complete on its own — no `Secrets` anywhere in the call.
+
+    This is the by-construction half, and it is a behaviour and not a
+    signature claim: the mapping the build context is rendered from is
+    produced from a `server_dir` alone, and the SHIPPED Dockerfile pair fills
+    from it with nothing left over. `composegen.fill()` refuses an unfilled
+    `{{TOKEN}}`, so "the build context never needs a secret" is what a green
+    render here means — not "we remembered to leave one out".
+    """
+    server_dir = tmp_path / "srv"
+    public = engine(Recorder())._public_tokens(server_dir)
+    native_block = ENTRY.install.native
+    assert native_block is not None and native_block.dockerfile_dir is not None
+    template_dir = resources.installers_dir() / native_block.dockerfile_dir
+    text, ignore = dockerfile.render(template_dir, public)
+    assert "{{" not in text and "{{" not in ignore
+    assert text.startswith(composegen.GENERATED_MARKER)
+
+
+def test_neither_the_context_secrets_nor_the_password_on_disk_reaches_the_rendered_mapping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M15 and M-R2, killed at the THREE roads listed below — and covering no others.
+
+    Mutation M15 (2026-09-01) added a second secret key to the single
+    `_tokens()` mapping — `"ROOT_PASSWORD": ctx.secrets.db_password` — and a
+    planted template spelling `{{ROOT_PASSWORD}}` rendered
+    `ENV ROOT_PASSWORD=tbc-0123456789abcdef` into the Dockerfile while all
+    1872 tests passed. `dockerfile.render()` drops one KEY BY NAME, so the
+    second name walked past it, and no test in the suite looked at the mapping
+    as a whole.
+
+    So this one does, and it names no token: it puts a distinct sentinel in
+    every field of `Secrets`, spies on the mapping the stage actually hands
+    `render()`, and asserts no sentinel is anywhere in it — as a value or
+    inside one.
+
+    **The roads, and the mutation that put each one here.** `_public_tokens()`
+    is handed a `server_dir`, so `ctx.secrets` is not the only place a password
+    can be reached from: whatever the earlier stages have already written into
+    that directory is in reach too. The sentinel therefore goes into each of
+    these before the stage runs.
+
+    * `ctx.secrets` itself — M15, above.
+    * The file `install.password` names, which K.3's `db-password` stage writes
+      two stages before the build. `resolve_secrets(server_dir)` is a public
+      inherited method taking exactly the argument this body already holds, and
+      by that point it READS that file rather than minting. A mutation taking
+      that route walked past the `ctx.secrets`-only version of this test with
+      the whole suite green (measured 2026-09-02).
+    * `<server_dir>/.env` — mutation M-R2, measured 2026-09-02. K.4's
+      `generate-compose` stage merges `DB_ROOT_PASSWORD=<the plaintext
+      password>` into that file, and it runs at `STAGE_NAMES` index 3, ONE
+      stage before `build` at index 4. A seven-line helper reading it, with no
+      public method and no cache anywhere, put that value under
+      `"ROOT_PASSWORD"`, rendered `ENV ROOT_PASSWORD=tbc-0123456789abcdef` into
+      a Dockerfile, and left the suite at 1889 passed, 3 skipped with mypy,
+      ruff and black clean. The `.env` below is written by RUNNING the real
+      `generate-compose` stage rather than by spelling its key out here, so a
+      renamed key or file follows it; the assertion that the sentinel reached
+      the file is what keeps that from going quietly vacuous.
+
+    **What it still does not catch, said out loud so the name is not read as
+    more than it is.** The set covered is one context and two files, not "the
+    server dir". A mutation reading some OTHER file under `server_dir` that a
+    stage writes a password into is uncovered. So is one that resolves the
+    password ONCE and caches it — on the class, in a module global, anywhere
+    outside this call — because a cached value can have come from an earlier
+    `server_dir` that no sentinel here ever occupied; that variant was measured
+    surviving on 2026-09-02. `_public_tokens()`'s docstring records why no test
+    in this shape can close the set, and the guarantee against a NAMED secret
+    remains `dockerfile.SECRET_TOKENS`' key-drop and refusal, which run
+    whatever the mapping holds.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    secrets, sentinels = secrets_with_a_sentinel_per_field()
+    eng = engine(Recorder())
+    ctx = replace(context(server_dir), secrets=secrets)
+    # The second road: what K.3's `db-password` stage leaves in the build
+    # context, and therefore what `resolve_secrets(server_dir)` reads back.
+    plan = ENTRY.install.password
+    assert plan.file is not None, "wow-tbc's password plan names no file; the disk road is untested"
+    assert "db_password" in sentinels, (
+        "the password FILE holds `Secrets.db_password` specifically; that field is gone or "
+        "renamed, so re-read which sentinel belongs on disk before trusting this test"
+    )
+    (server_dir / plan.file).write_text(sentinels["db_password"] + "\n", encoding="utf-8")
+    # The third road: what K.4's `generate-compose` leaves in `.env` one stage
+    # before the build. Run, not spelled out, so this follows a renamed key.
+    list(eng.stage_generate_compose(ctx))
+    dotenv = (server_dir / composegen.DOTENV_FILE).read_text(encoding="utf-8")
+    assert sentinels["db_password"] in dotenv, (
+        "`generate-compose` no longer writes the install password into `.env`, so the M-R2 "
+        f"road is untested and a mutation reading it would survive again:\n{dotenv}"
+    )
+    seen: list[dict[str, str]] = []
+    real = dockerfile.render
+
+    def spy(template_dir: Path, tokens: Mapping[str, str]) -> tuple[str, str]:
+        seen.append(dict(tokens))
+        return real(template_dir, tokens)
+
+    monkeypatch.setattr(dockerfile, "render", spy)
+    list(eng._write_dockerfile(ctx))
+    assert len(seen) == 1, "the renderer was not called once; this test would prove nothing"
+    for name, value in sentinels.items():
+        leaked = [key for key, held in seen[0].items() if value in held]
+        assert not leaked, f"{leaked} in the build-context mapping carries Secrets.{name}"
+    for name in ("Dockerfile", ".dockerignore"):
+        built = (server_dir / name).read_text(encoding="utf-8")
+        assert not [value for value in sentinels.values() if value in built], name
+
+
+def test_the_secret_mapping_carries_a_second_secret_nobody_listed(tmp_path: Path) -> None:
+    """A secret added to the secret TYPE arrives in `_secret_tokens()` with no list edited.
+
+    The other half of M15's lesson. Covering the name `DB_PASSWORD` is what
+    failed; the fix derives the secret token names from the fields of the
+    `Secrets` instance, so the derivation has to be shown to answer for a
+    field that did not exist when it was written. A subclass is how a second
+    secret is added here without editing `yulon/catalog/native.py`, and
+    `secret_token_map()` asks `fields()` of the INSTANCE for exactly that
+    reason.
+
+    **The line this test used to end on was not a guard.** It read
+    `assert "API_TOKEN" not in eng._public_tokens(server_dir)`, and `API_TOKEN`
+    exists only on the local subclass below — which `_public_tokens()` is never
+    handed, since it takes a `server_dir` and no context. No edit to that
+    method's body could fail it short of literally spelling `API_TOKEN`; undoing
+    the split makes it raise `AttributeError`, which is a claim about a
+    DECLARATION and not about a value. It is replaced by the enumeration below,
+    which is this test's actual subject: the keys `_secret_tokens()` adds on top
+    of the public half are exactly the ones the derivation predicts from the
+    fields of the secret handed in — no fewer (a dropped field), no more (a
+    listed name), and spelled the one way.
+
+    Measured 2026-09-02, and corrected the same day. The first version of this
+    note said an extra undeclared key was caught here but that
+    `test_both_token_mappings_carry_the_family_set_from_catalog_data` caught it
+    too, and that "no mutation was found that this line alone kills". A review
+    found one, and it is exactly the shape this test exists for: a key added
+    only when the secret carries more fields than `native.Secrets` declares —
+
+        if len(fields(ctx.secrets)) > 1:
+            secret = {**secret, "UNDECLARED_EXTRA": "x"}
+
+    — is invisible to every test that builds a real `native.Secrets`, because
+    for one the branch never runs. Reproduced 2026-09-02: with that edit in
+    `_secret_tokens()` the suite came back `1 failed, 1888 passed, 3 skipped`
+    and the one failure was this test. So the enumeration below is not
+    redundant with the other: it reaches a field that exists only on a
+    subclass, and that reach is what caught this.
+
+    Whether a secret VALUE can reach the public mapping is a different question
+    with a different answer, and it belongs to
+    `test_neither_the_context_secrets_nor_the_password_on_disk_reaches_the_rendered_mapping`
+    — asserted over values, over the real `native.Secrets`, and over both the
+    context and the on-disk roads, none of which a subclass-only token reaches.
+    """
+
+    @dataclass(frozen=True)
+    class TwoSecrets(native.Secrets):
+        api_token: str = "second-secret-6b2d0f11"
+
+    server_dir = tmp_path / "srv"
+    eng = engine(Recorder())
+    ctx = replace(context(server_dir), secrets=TwoSecrets(db_password=DB_PASSWORD))
+    assert cmangos.secret_token_map(native.Secrets(db_password=DB_PASSWORD)) == {
+        "DB_PASSWORD": DB_PASSWORD
+    }
+    tokens = eng._secret_tokens(ctx)
+    assert tokens["API_TOKEN"] == "second-secret-6b2d0f11", "derived, not listed"
+    assert tokens["DB_PASSWORD"] == DB_PASSWORD
+    added = set(tokens) - set(eng._public_tokens(server_dir))
+    declared = {native.secret_token_name(f.name) for f in fields(TwoSecrets)}
+    assert added == declared, "a declared field is missing, or a name nobody declared is present"
+
+
+def test_a_secret_named_like_a_public_token_is_refused_instead_of_shadowing_it(
+    tmp_path: Path,
+) -> None:
+    """`{**public, **secret}` lets the secret WIN, so a name collision is a silent swap.
+
+    Not hypothetical arithmetic: the public half already spells `DB_HOST`,
+    `DB_USER`, `DB_PORT` and `CORE_DIR`, and `native.Secrets` is a dataclass
+    one field away from any of them. A field named `db_host` would put the
+    PASSWORD wherever the conf tables, the SQL and (K.7) verify expect the
+    database host — every value still filled, every file still well-formed,
+    and `test_the_secret_mapping_spells_each_field_the_way_the_templates_do`
+    still green, because `{{DB_PASSWORD}}` would keep coming out right.
+
+    So the collision is refused rather than merged, and the refusal is asserted
+    HERE rather than left to the docstring that describes it. The subclass
+    names `db_host` because that is the collision this catalog actually
+    affords; the assertion is over the token the engine itself produces, not
+    over a literal restated in this file, so it follows a rename of the public
+    key.
+    """
+
+    @dataclass(frozen=True)
+    class ShadowingSecrets(native.Secrets):
+        db_host: str = "not-a-host-but-a-password"
+
+    server_dir = tmp_path / "srv"
+    eng = engine(Recorder())
+    collision = native.secret_token_name("db_host")
+    assert collision in eng._public_tokens(server_dir), (
+        "the public half no longer spells this token, so the fixture no longer collides "
+        "with anything and this test would pass for the wrong reason"
+    )
+    ctx = replace(context(server_dir), secrets=ShadowingSecrets(db_password=DB_PASSWORD))
+    with pytest.raises(InstallerError, match=collision):
+        eng._secret_tokens(ctx)
+
+
+def test_the_build_context_already_holds_the_plaintext_password_before_the_build_stage(
+    tmp_path: Path,
+) -> None:
+    """The build context is NOT secret-free, and enumeration is what says which stages.
+
+    `_public_tokens()`'s docstring once counted the stages writing into the
+    server dir before the build and got the count wrong twice over: it said
+    two, and the stage it left out was `generate-compose`, the one immediately
+    before the build. A number in prose cannot go red, so the ordering is read
+    off `STAGE_NAMES` here instead and the CONTENT is read off the disk each
+    stage wrote.
+
+    Two roads into the context, both asserted below as values on disk:
+
+    * `db-password` runs before `build` and puts the plaintext password at the
+      ROOT of the server dir, which is the directory `docker build` is pointed
+      at.
+    * `generate-compose` runs IMMEDIATELY before `build` and merges the same
+      plaintext into `<server_dir>/.env` under `DB_ROOT_PASSWORD`. Nothing
+      asserted that road until 2026-09-02, when mutation M-R2 read that file
+      out of `_public_tokens()` and left the suite at 1889 passed, 3 skipped.
+
+    So from stage 1 the secret is inside the build context as a file, and from
+    stage 3 as two. What keeps them out of what the daemon receives is the
+    leading `*` of the `.dockerignore`;
+    `test_every_shipped_dockerignore_excludes_the_entrys_password_file` covers
+    the password file and `test_composegen.py`'s
+    `test_every_cmangos_dockerignore_admits_only_the_core_tree_it_copies`
+    covers the shape, and no half of this means anything alone.
+
+    What this test does NOT do is notice a stage being ADDED: it names the
+    three it cares about and ignores the rest.
+    `test_family_and_stage_names_are_the_contract_tuple` restates the whole
+    tuple and is the one that goes red for that.
+    """
+    order = CmangosInstaller.STAGE_NAMES
+    wanted = {"db-password", "generate-compose", "build"}
+    assert wanted <= set(order), f"a stage was renamed; this test cannot find them all: {order}"
+    assert order.index("db-password") < order.index("build")
+    assert order.index("generate-compose") == order.index("build") - 1, (
+        "`generate-compose` is no longer the stage immediately before the build, so re-read "
+        "which stages leave a secret in the context before trusting `_public_tokens()`'s list"
+    )
+
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    eng = engine(Recorder())
+    ctx = context(server_dir)
+    list(eng._db_password(ctx))
+    plan = ENTRY.install.password
+    assert plan.file is not None
+    written = server_dir / plan.file
+    assert written.read_text(encoding="utf-8").strip() == DB_PASSWORD, "in plaintext, as it must be"
+    assert written.parent == server_dir, (
+        "the password no longer sits at the root of the build context; re-derive what the "
+        "shipped `.dockerignore` has to exclude before trusting the guard that pairs with this"
+    )
+
+    list(eng.stage_generate_compose(ctx))
+    dotenv = server_dir / composegen.DOTENV_FILE
+    assert dotenv.parent == server_dir
+    written_env = dotenv.read_text(encoding="utf-8")
+    assert f"DB_ROOT_PASSWORD={DB_PASSWORD}" in written_env, (
+        "`generate-compose` no longer leaves the plaintext password in the build context; "
+        f"re-read what a build ships before trusting the note that says it does:\n{written_env}"
+    )
+
+
+def dockerignore_excludes(ignore_text: str, path: str) -> bool:
+    """Would `docker build` withhold `path` from the daemon, given this `.dockerignore`?
+
+    Enough of Docker's rule to answer for a name at the ROOT of the context,
+    which is all this file asks about (`.db_password`): patterns are tried in
+    order, the LAST one that matches decides, a leading `!` re-includes, and
+    `*` does not cross a `/` (Go's `filepath.Match`, one segment at a time).
+    Comments and blank lines are skipped.
+
+    Deliberately NOT a general implementation: the parent-directory walk that
+    decides a nested path like `etc/mangosd.conf` is where Docker's real
+    algorithm gets interesting, and a half-right version of it here would be a
+    test asserting this function's bugs. A root-level name needs none of it.
+    """
+    verdict = False
+    for raw in ignore_text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        negated = line.startswith("!")
+        pattern = re.escape(line[1:] if negated else line)
+        # `**` before `*`, or the first replacement eats the second star.
+        pattern = pattern.replace(r"\*\*", ".*").replace(r"\*", "[^/]*").replace(r"\?", "[^/]")
+        if re.fullmatch(pattern, path):
+            verdict = not negated
+    return verdict
+
+
+@pytest.mark.parametrize("game", ["wow-tbc", "wow-vanilla", "wow-tortoise"])
+def test_every_shipped_dockerignore_excludes_the_entrys_password_file(
+    game: str, tmp_path: Path
+) -> None:
+    """The leading `*` is the whole of the defence, and this covers the ROOT-level half.
+
+    `db-password` writes the plaintext password into the server dir two stages
+    before the build (the test above), so the file is inside the build context
+    on disk. What keeps it out of the tarball `docker build` streams to the
+    daemon is one character in each shipped `dockerignore.tmpl`: the `*` that
+    excludes everything, before the `!src/...` line re-includes the core tree.
+
+    Nothing tested that. A `!` re-include added below those lines — the shape
+    of edit somebody makes to get one more file into a build — would ship the
+    password into an image layer with the whole suite green, and an image layer
+    is the expensive kind of leak: `docker history` prints it long after the
+    file is deleted.
+
+    Rendered through the real `dockerfile.render()` and the real
+    `_public_tokens()`, not read as a template, because it is the RENDERED text
+    the daemon reads; and asked about the file the ENTRY names rather than a
+    literal `.db_password`, so a catalog that renamed it is answered about the
+    file it actually writes.
+
+    **What was measured about its overlap, and about its limit, 2026-09-02.**
+    `test_composegen.py`'s
+    `test_every_cmangos_dockerignore_admits_only_the_core_tree_it_copies`
+    arrived with `yulon-phase7` and pins the SHAPE — first line `*`, exactly one
+    `!` line, and it names the core tree. Three mutations were run against the
+    pair:
+
+    * the leading `*` deleted — both go red.
+    * `!.db_password` appended — both go red.
+    * `!etc` appended to `wow-tbc/native/dockerignore.tmpl` — the shape test
+      goes red for `wow-tbc`; THIS test stays green on all three
+      parametrisations.
+
+    The third is the honest limit and is written down rather than left for a
+    reader to infer coverage this test does not have. `dockerignore_excludes()`
+    answers for a name at the ROOT of the context and has no parent-directory
+    walk, so the password-bearing `.conf` files `conf` writes under `etc/` are
+    outside what it can be asked about. Nothing on this branch asserts that
+    `etc/*.conf` stays out of the build context; what stands there is the shape
+    test's refusal of a second `!` line plus Docker's own rule that an excluded
+    directory takes its children with it.
+
+    The two are kept apart because they answer to different owners: that one is
+    about which SOURCE TREE reaches the daemon — its whole docstring is about
+    `src/tbc-db` and `.git` — so a legitimate build change needing a second `!`
+    line will be argued with by editing its assertions, and after that edit
+    nothing would be left saying the PASSWORD must not go. This test names the
+    password, derives it from `install.password`, and has to be argued with
+    separately.
+    """
+    entry = installable(load_catalog().get(game))
+    plan = entry.install.password
+    assert plan.mode == "generated" and plan.file is not None, (
+        f"{game} keeps no password file, so there is nothing here to exclude and this "
+        "parametrisation is vacuous for it"
+    )
+    native_block = entry.install.native
+    assert native_block is not None and native_block.dockerfile_dir is not None
+    eng = engine_for(entry, Recorder(), platform_id=lambda: "linux")
+    template_dir = resources.installers_dir() / native_block.dockerfile_dir
+    _text, ignore = dockerfile.render(template_dir, eng._public_tokens(tmp_path / "srv"))
+
+    withheld = dockerignore_excludes(ignore, plan.file)
+    assert withheld, f"{game} would send {plan.file} to the build daemon:\n{ignore}"
+    # The matcher must be able to answer "no", or the assertion above is a
+    # function that returns True. Two controls, because the obvious one covers
+    # less than it used to say. The core tree is the one path these templates
+    # deliberately let THROUGH; a comment here claimed it answered "no" only if
+    # the `!` lines were read AND `*` was kept from crossing a `/`. Measured
+    # 2026-09-02: only the second half was true. With the `!` branch deleted
+    # (`negated = False`) all three parametrisations stayed green, because
+    # `!src/mangos-tbc` then matches nothing at all and the verdict for a
+    # nested path is left False by `*` alone.
+    core = entry.emulator.sources[0].dest
+    assert "/" in core, (
+        f"{core} no longer has a path separator, so this control now depends on the `!` "
+        "handling rather than on `*` not crossing a `/`; re-read what it proves"
+    )
+    assert not dockerignore_excludes(ignore, core), (
+        f"the matcher withholds {core}, which every one of these templates re-includes, so "
+        "it is letting `*` cross a `/` and the assertion above proves nothing"
+    )
+    # So the `!` branch gets a control of its own, on a fixture rather than on a
+    # shipped template: a root-level name that only a re-include can rescue.
+    # This one does go red when the branch is deleted.
+    assert dockerignore_excludes("*", "keepme"), "the fixture control is not excluded to begin with"
+    assert not dockerignore_excludes("*\n!keepme", "keepme"), (
+        "the matcher ignores a `!` re-include, so it cannot be trusted to notice one added "
+        "below the leading `*` — which is the edit this test exists to catch"
+    )
+
+
+def test_the_secret_mapping_spells_each_field_the_way_the_templates_do(tmp_path: Path) -> None:
+    """`db_password` -> `DB_PASSWORD`: the derivation has to match what the catalog wrote.
+
+    A derivation is only as good as its spelling rule, and the shipped conf
+    tables and SQL statements name `{{DB_PASSWORD}}` literally — a rule that
+    produced `DBPASSWORD` would leave `_secret_tokens()` looking correct and
+    every conf value unfilled. So the assertion is against the catalog's own
+    text, not against a constant restated here.
+    """
+    assert CMANGOS is not None
+    written = "\n".join(
+        f"{key} = {value}"
+        for patch in CMANGOS.conf.files.values()
+        for key, value in patch.keys.items()
+    )
+    assert "{{DB_PASSWORD}}" in written, "no shipped conf value names the secret; test is vacuous"
+    tokens = engine(Recorder())._secret_tokens(context(tmp_path / "srv"))
+    assert set(cmangos.secret_token_map(native.Secrets(db_password=DB_PASSWORD))) == {"DB_PASSWORD"}
+    assert composegen.fill(written, tokens).count(DB_PASSWORD) == written.count("{{DB_PASSWORD}}")
+
+
+def test_no_dockerfile_template_names_the_secret_the_conf_mapping_carries() -> None:
+    """A tripwire over the shipped templates, third in a line of three protections.
+
+    It is not what stands between the mapping and the secret, and since 7.3 it
+    is not even second. `_write_dockerfile` renders from `_public_tokens()`,
+    which has no secret in it; `dockerfile.SECRET_TOKENS` refuses the token BY
+    NAME and drops the key, for any mapping any caller hands over; and this
+    test says the shipped six templates are clean. The refusal says the
     seventh cannot happen wherever it is put.
 
     Which is the correction this test needed. A reviewer defeated the version
@@ -372,8 +837,12 @@ def test_a_dockerfile_template_the_glob_cannot_see_still_cannot_bake_the_secret(
     password in it. The glob is widened to the whole tree as a tripwire; this is
     the guarantee.
 
-    Rendered from the REAL `_tokens()` mapping, so what is refused is the object
-    K.4 hands over rather than a convenient stand-in.
+    Rendered from the REAL `_secret_tokens()` mapping — the SECRET-bearing one,
+    deliberately, and not the one `_write_dockerfile` now passes. 7.3 took the
+    password out of the build-context mapping; if this test followed it there,
+    `render()`'s own refusal would stop being proved by anything and could be
+    deleted green. Defence in depth is only defence while something still
+    attacks it.
     """
     folder = tmp_path / "shared" / "cmangos"
     folder.mkdir(parents=True)
@@ -386,8 +855,8 @@ def test_a_dockerfile_template_the_glob_cannot_see_still_cannot_bake_the_secret(
     (folder / "dockerignore.tmpl").write_text(
         f"{composegen.GENERATED_MARKER} - do not hand-edit.\n*\n", encoding="utf-8", newline="\n"
     )
-    tokens = engine(Recorder())._tokens(context(tmp_path / "srv"))
-    assert tokens["DB_PASSWORD"] == DB_PASSWORD, "the whole mapping, secret included (K.4)"
+    tokens = engine(Recorder())._secret_tokens(context(tmp_path / "srv"))
+    assert tokens["DB_PASSWORD"] == DB_PASSWORD, "the secret-bearing set, on purpose"
     with pytest.raises(dockerfile.DockerfileError, match="DB_PASSWORD") as caught:
         dockerfile.render(folder, tokens)
     assert DB_PASSWORD not in str(caught.value)
@@ -409,21 +878,53 @@ def test_image_ref_names_the_built_server_image_and_refuses_an_unknown_service(
         eng._image_ref(context(server_dir), "no-such-service")
 
 
-def test_the_family_s_catalog_refusals_end_in_one_tail_and_not_two(tmp_path: Path) -> None:
-    """Three refusals about a malformed entry, one sentence — they said it two ways.
+def functions_spending(tail_name: str) -> set[str]:
+    """Every function in `cmangos.py` whose body interpolates the module constant `tail_name`.
 
-    Until 2026-09-01 two ended "That is a catalog error in the app…" and the
+    Read off the module's own AST rather than counted by hand, because a count
+    in a docstring is what went stale here: this test said "Three refusals" and
+    enumerated three, and the commit that wrote that sentence added a FOURTH
+    user of `CATALOG_ERROR_TAIL` in the same diff (`_secret_tokens()`'s
+    collision refusal, since moved to `DECLARATION_ERROR_TAIL`). A `Name` node
+    is what is looked for, so the mentions inside docstrings — `_data()`'s, and
+    the constants' own — are not counted; only code that spends it is.
+    """
+    tree = ast.parse(inspect.getsource(cmangos))
+    return {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        for inner in ast.walk(node)
+        if isinstance(inner, ast.Name) and inner.id == tail_name
+    }
+
+
+def test_the_family_s_catalog_refusals_end_in_one_tail_and_not_two(tmp_path: Path) -> None:
+    """Every refusal that spends the catalog tail, driven — the set derived, not restated.
+
+    Until 2026-09-01 two ended "That is a catalog error in the app…" and a
     third "That is a bug in the app's catalog…", 65 lines apart. A second
     wording for one thing drifts further from the first every time either is
     edited, which is why `test_sqlplan.py` asserts two of its refusals are the
     SAME string rather than merely that both complain.
 
-    `_native()` is deliberately not among them: its refusal ("has no
+    The list of refusals is now derived from the module rather than counted
+    here, and the reason is this test's own history: it opened "Three refusals
+    …" and named three, in the same commit that gave `CATALOG_ERROR_TAIL` a
+    fourth user. The prose was stale before it was pushed. `functions_spending()`
+    asks the AST instead, so a fifth user turns this red with the name of the
+    function that added it.
+
+    `DECLARATION_ERROR_TAIL` is asserted here too, and against a different
+    owner: `_secret_tokens()`'s collision refusal cannot be caused by any
+    catalog file — both halves of the collision are Python declarations — so it
+    ended in the wrong tail until 2026-09-02. Pinning WHICH functions spend
+    WHICH tail is what keeps that from sliding back.
+
+    `_native()` is deliberately in neither set: its refusal ("has no
     `install.native` section") carries no tail at all, and whether it should is
     a separate question this does not settle.
     """
-    from yulon.catalog.families import cmangos
-
     server_dir = tmp_path / "srv"
     server_dir.mkdir()
     no_block = ENTRY.model_copy(
@@ -442,22 +943,46 @@ def test_the_family_s_catalog_refusals_end_in_one_tail_and_not_two(tmp_path: Pat
     no_file = entry_with_password(
         PasswordPlan.model_construct(mode="generated", value=None, file=None, prefix="tbc-")
     )
-    said: list[str] = []
+
+    @dataclass(frozen=True)
+    class ShadowingSecrets(native.Secrets):
+        db_host: str = "not-a-host-but-a-password"
+
+    said: dict[str, str] = {}
     with pytest.raises(InstallerError) as from_block:
         engine_for(no_block, Recorder(), volume_exists=refuse_to_answer)._data()
-    said.append(str(from_block.value))
+    said["_data"] = str(from_block.value)
     with pytest.raises(InstallerError) as from_image:
         engine(Recorder())._image_ref(context(server_dir), "no-such-service")
-    said.append(str(from_image.value))
+    said["_image_ref"] = str(from_image.value)
     with pytest.raises(InstallerError) as from_password:
         eng = engine_for(no_file, Recorder(), volume_exists=refuse_to_answer)
         list(eng._db_password(context(server_dir)))
-    said.append(str(from_password.value))
+    said["_db_password"] = str(from_password.value)
 
-    assert len(said) == 3
-    for refusal in said:
-        assert refusal.endswith(cmangos.CATALOG_ERROR_TAIL), refusal
+    assert set(said) == functions_spending("CATALOG_ERROR_TAIL"), (
+        "a function spends the catalog tail that this test does not drive, or drives one "
+        "that no longer spends it; add or remove the case rather than editing this line"
+    )
+    for where, refusal in said.items():
+        assert refusal.endswith(cmangos.CATALOG_ERROR_TAIL), f"{where}: {refusal}"
         assert refusal != cmangos.CATALOG_ERROR_TAIL, "the tail is a tail, not the whole refusal"
+
+    # The other tail, driven the same way: derived set, then the value.
+    collided = replace(context(server_dir), secrets=ShadowingSecrets(db_password=DB_PASSWORD))
+    declared: dict[str, str] = {}
+    with pytest.raises(InstallerError) as from_collision:
+        engine(Recorder())._secret_tokens(collided)
+    declared["_secret_tokens"] = str(from_collision.value)
+    assert set(declared) == functions_spending("DECLARATION_ERROR_TAIL"), (
+        "a function spends the declaration tail that this test does not drive, or drives "
+        "one that no longer spends it"
+    )
+    for where, refusal in declared.items():
+        assert refusal.endswith(cmangos.DECLARATION_ERROR_TAIL), f"{where}: {refusal}"
+        sent_to_catalog = refusal.endswith(cmangos.CATALOG_ERROR_TAIL)
+        wrong_tail = f"{where} sends the reader to the catalog, which cannot cause this refusal"
+        assert not sent_to_catalog, wrong_tail
 
 
 def test_the_typed_blocks_refuse_a_catalog_that_does_not_carry_them(tmp_path: Path) -> None:
@@ -811,8 +1336,9 @@ def test_the_bound_stages_run_in_order_and_record_the_recorded_ones(tmp_path: Pa
         "conf",
     )
     # The pair really landed, from the whole install rather than from a direct
-    # call to the body, and the password is in neither: `_tokens()` hands the
-    # secret over and `dockerfile.render()` is what keeps it out of the context.
+    # call to the body, and the password is in neither: the stage renders from
+    # `_public_tokens()`, which never held it, and `dockerfile.render()`'s own
+    # by-name refusal stands behind that.
     for name in ("Dockerfile", ".dockerignore"):
         built = (server_dir / name).read_text(encoding="utf-8")
         assert built.startswith(composegen.GENERATED_MARKER)
@@ -1370,29 +1896,29 @@ def test_write_dockerfile_renders_the_marked_pair_from_the_entry_template(tmp_pa
     assert said == ["Wrote Dockerfile", "Wrote .dockerignore"]
 
 
-def test_write_dockerfile_hands_the_renderer_the_whole_mapping_and_no_file_carries_the_secret(
+def test_write_dockerfile_hands_the_renderer_the_public_mapping_and_nothing_else(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The K.4 decision, asserted as behaviour rather than defended in a docstring.
+    """The 7.3 contract change (A6), asserted as behaviour rather than defended in a docstring.
 
-    Contract A6 is one mapping for the Dockerfile, the conf tables, the SQL and
-    verify alike, and it carries `DB_PASSWORD` because the conf tables need it.
-    The stage hands that mapping over WHOLE, and what keeps the password out of
-    the build context is `dockerfile.render()` — which refuses a template
-    naming the token and drops the key before it fills anything. So this test
-    asserts both halves at once: what goes in still has the secret, and what
-    lands on disk does not.
+    A6 specified ONE mapping for the Dockerfile, the conf tables, the SQL and
+    verify alike, and K.4 handed it over whole with `DB_PASSWORD` in it. 7.3
+    splits it by capability: this stage gets `_public_tokens()`, and the
+    equality below is what says so — not "a mapping without `DB_PASSWORD`",
+    which would still be satisfied by a mapping carrying a secret under some
+    other name.
 
-    Narrowing the mapping HERE was the alternative, and it was rejected: it
-    would put a third copy of the same rule at a call site, which is the level
-    the rule keeps being got wrong at. See `_write_dockerfile`'s docstring.
+    The sentinel test above is the property version; this one pins the
+    identity, so a stage that built its own nearly-right mapping instead of
+    asking for the public one is caught here even if that mapping happens to
+    be secret-free today.
     """
     server_dir = tmp_path / "srv"
     server_dir.mkdir()
     seen: list[dict[str, str]] = []
     real = dockerfile.render
 
-    def spy(template_dir: Path, tokens: dict[str, str]) -> tuple[str, str]:
+    def spy(template_dir: Path, tokens: Mapping[str, str]) -> tuple[str, str]:
         seen.append(dict(tokens))
         return real(template_dir, tokens)
 
@@ -1400,8 +1926,8 @@ def test_write_dockerfile_hands_the_renderer_the_whole_mapping_and_no_file_carri
     eng = engine(Recorder())
     ctx = context(server_dir)
     list(eng._write_dockerfile(ctx))
-    assert seen == [eng._tokens(ctx)], "the whole mapping, not a copy with keys taken out"
-    assert seen[0]["DB_PASSWORD"] == DB_PASSWORD
+    assert seen == [eng._public_tokens(server_dir)], "the public mapping itself, not a near copy"
+    assert "DB_PASSWORD" not in seen[0]
     for name in ("Dockerfile", ".dockerignore"):
         assert DB_PASSWORD not in (server_dir / name).read_text(encoding="utf-8")
 
@@ -1990,7 +2516,7 @@ def test_the_relabel_that_lets_mmaps_run_confined_happens_before_the_first_extra
 def test_conf_copies_dist_files_out_of_the_server_image_once_and_patches_them(
     tmp_path: Path,
 ) -> None:
-    """One round trip to the image, then every key in the table set from `_tokens()`.
+    """One round trip to the image, then every key in the table set from `_secret_tokens()`.
 
     Both streams are asserted against the catalog's OWN table rather than a
     list spelled here, so a file added to `conf.files` has to show up in each
