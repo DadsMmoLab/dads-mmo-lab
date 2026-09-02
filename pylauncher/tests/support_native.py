@@ -83,6 +83,18 @@ class Recorder:
     one_shot_result: docker.AttachedRun = docker.AttachedRun(0, ("ran",))
     probe_answers: list[docker.ImportState] = field(default_factory=lambda: [ABSENT, IMPORTED])
     reset_answer: tuple[str, ...] = ("acore_world",)
+    reset_error: Exception | None = None
+    """What `reset()` RAISES instead of answering, or None to answer.
+
+    The seam behind it is `controller_wow_wotlk.repair.reset_unfinished()`,
+    whose own `Raises:` names three: `MaintenanceError` (the schemas could not
+    be listed, or one survived its `DROP`), `ApplyError` (the server refused a
+    `DROP DATABASE`) and a bare `RuntimeError` (there is player data, so
+    nothing was dropped). None of the three is an `InstallerError`, and a
+    double that could only ever answer could not produce the refusal the
+    engine has to translate — which is this module's own rule.
+    """
+
     containers: dict[str, str | None] = field(default_factory=dict)
     """Containers that EXIST on this machine, and the compose project owning each.
 
@@ -212,6 +224,8 @@ class Recorder:
 
     def reset(self) -> tuple[str, ...]:
         self.calls.append("reset")
+        if self.reset_error is not None:
+            raise self.reset_error
         return self.reset_answer
 
     def container_exists(self, name: str) -> bool:

@@ -1861,7 +1861,7 @@ Recording it here rather than deciding it — the trade is "an unexercised path 
 2026-09-01 record filed under 7.1. That run predates `test_sqlplan_live.py` entirely — 21 test functions
 then, 23 now — so it could not have executed two of the six things the gate line names.
 
-### 33. The suite has load-sensitive tests, and a flake let a merge go through on red — 2026-09-02, OPEN
+### 33. The suite has load-sensitive tests, and a flake let a merge go through on red — 2026-09-02, the steam-deck half FIXED, the rest OPEN
 
 **What happened, recorded because the process failure is the more useful half.** The verification run
 before merging `fix/gate-7.2-7.3-code` reported **`1 failed, 2003 passed, 3 skipped`**. The merge went
@@ -1884,10 +1884,66 @@ order-sensitive:
 readers to re-run rather than to look — and the cost is not the wasted minute, it is that a *real* single
 failure becomes indistinguishable from noise. Every merge decision tonight rested on a count.
 
-**Not fixed.** The honest fixes are per-test: give the steam-deck test a bound proportional to load or
-mark it `serial`, and treat any wall-clock assertion in a parallel suite as suspect. The identity of the
-failure in the run above was not captured — the grep that read it kept only the totals — which is itself
-the lesson: **capture the failing test id, not the count.**
+**The steam-deck half is fixed (2026-09-02, `fix/remaining-error-boundary-holes`).** Measured on
+yulon-ubuntu first: that test costs **0.16 s** serially, **under 0.61 s** inside `-n auto --dist loadfile`
+(it did not reach the slowest-twelve list at all), and **0.24 s** at 30 workers on 15 cores. Against 0.16 s
+the old bound was a stopwatch reading, and a 60 s stall is not contention of that shape — the VM runs its
+fifteen workers with about 2 GB free, and a starved or swapping box stalls a healthy process for a minute.
+So the bound is now `HANG_BOUND`, named and documented as a **deadlock breaker**: contention is bounded by
+some multiple of a run costing milliseconds, a hang is unbounded, and any finite bound catches the
+unbounded case. Deleting it is not an option — without one, that file's pty test wedged the suite when its
+subject regressed, which CI reports as a stuck job rather than a red one. `DWELL_PROOF` names the one bound
+in the file that IS an assertion and points the other way (the script must still be running when it
+elapses, so load makes it pass more surely). An AST test requires every `timeout=` there to be one of the
+two names, because a number typed at a call site carries no argument for its size. And a timeout in the
+flaking test now reports how far the script actually got, so a starved run and a hung script are told apart
+**in the report** rather than by re-running — which is the damage this entry is really about.
+
+**Rejected, and why.** *A bound proportional to load* needs a calibration step that is itself load-sensitive,
+and a bound that moves run to run cannot be reasoned about when it fires: you cannot tell a hang from a
+starved calibration. *Marking the test serial* is not available — xdist's `--dist loadgroup` co-locates
+tests, it does not serialise them, and a cross-worker lock would still leave the other fourteen workers
+loading the box, so it would hide the bound's fragility behind a scheduling choice rather than remove it.
+*A merely larger number* would have been the same defect with a bigger constant; what changed is what the
+bound MEANS and that its reasoning now travels with it.
+
+**Still open:** the `test_log_panel.py` candidate, mitigated but not fixed — `--dist loadfile` is a
+harness setting, so the test is still order-sensitive for anyone who runs the suite another way. And the
+identity of the failure in the run above was never captured — the grep that read it kept only the totals —
+which is itself the lesson: **capture the failing test id, not the count.** The original 60 s stall was
+NOT reproduced here; the sizing above rests on the measurements, not on a reproduction.
+
+### 34. Two more refusals that were nobody's to catch, in the same spine — 2026-09-02, FIXED
+
+The `composegen.render()` blocker (`b22ab381`) was one instance of a class, and an audit of every other
+outward call in the install spine found two more. Both were reproduced through the real
+`install_wiring.main()` on `697adca6` before either was touched, and both cost the same two things the
+blocker did: a traceback where `main()`'s own docstring promises "the sentence written for a person", and —
+wherever the call sits inside `run()` — no `_record_error`, so the state file kept `"last_error": ""` where
+every other stage failure records its own.
+
+**A folder that will not list.** Four sites asked `folder.iterdir()` bare: `_claim_folder()`, which all
+four shipped games reach through preflight and `_guard()`; `stage_clone_sources()`, which the three CMaNGOS
+games bind; and AzerothCore's `_clone_core()` and `_clone_modules()`. `OSError` is not an `InstallerError`,
+and `iterdir()` raises it for a permission change, an unreadable mount, a drive that went away, or a stale
+UNC path into a WSL distro — the app reaches folders that way often enough that `Identification.UNVERIFIED`
+exists in the UI for it. All four go through one `_listing()` now, which **refuses rather than assuming
+empty**: a listing that failed says nothing about what is in the folder, and the caller's next move on
+"empty" is a clone whose seam `shutil.rmtree`s a destination it does not recognise. Mutating the helper to
+return `[]` on `OSError` showed exactly that — the CMaNGOS run walked past the unreadable folder and died
+four stages later asking for a client directory. `_guard()` stays outside `run()`'s `try`, which is correct
+and not a bug (its refusals concern a state file that may be somebody else's), and the regression asserts
+that folder was left as empty as it was found.
+
+**A reset that will not finish.** `stage_import()`'s `partial` branch called `gate.reset()` bare. Its seam
+on the AzerothCore path, `repair.reset_unfinished()`, declares three refusals — `MaintenanceError`,
+`ApplyError` and a bare `RuntimeError` for player data — and none of the three is an `InstallerError`.
+Wrapped with `except Exception` rather than a named tuple, because `gate` is an `ImportGate` **protocol**
+and the spine cannot import `controller_wow_wotlk` to name two of them; `InstallerError` is re-raised
+untouched and first, so `CallableGate`'s own no-reset-seam refusal is not buried inside the wrapper.
+
+Regressions drive the real CLI at every site, assert the sentence the user gets, assert `last_error`
+**equals** it, and assert the neighbouring rule was not the one that fired. Eleven mutations, eleven killed.
 
 ### One thing worth keeping
 
