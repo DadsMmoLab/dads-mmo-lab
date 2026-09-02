@@ -3,6 +3,13 @@
 `installer.installer_for()` reads `install.native.family` off the entry and
 asks here. Adding an emulator lineage is one class in this package and one
 line in `FAMILIES`; a game of an existing lineage is catalog data only.
+
+Catalog data that names a family this build has no engine for is a DEFECT and
+not a supported window: `family_for()`'s refusal is the only answer, and the
+spine's shipped-entry test fails on exactly that state. (F.3 deleted the bash
+`Installer` such an entry used to fall back to; G.7 deleted the
+`is_registered()` predicate that had called the state a supported window, which
+nothing had referenced since that branch went.)
 """
 
 from __future__ import annotations
@@ -19,25 +26,6 @@ FAMILIES: Mapping[str, type[StagedInstaller]] = {
     "azerothcore": AzerothCoreInstaller,
     "cmangos": CmangosInstaller,
 }
-
-
-def is_registered(family: str) -> bool:
-    """Does THIS build have an engine for `family`? The question, not the mapping.
-
-    Catalog data outruns the engines that read it. It did in 7.3: the `cmangos`
-    blocks landed in group G (task G.4) and the class that consumes them was
-    registered four groups later in K.8, and for the length of that gap three
-    shipped entries named a family that had no engine above. K.8 closed that
-    gap, so as of this commit no shipped entry is in that state — the predicate
-    is kept because the NEXT family will reopen it, not because one is open.
-    `installer.installer_for()` has to be able to tell that state apart from a
-    typo, and it cannot read `FAMILIES` to do it —
-    importing this package at its module scope is the cycle its own in-function
-    import exists to avoid, and an import moved inside a branch is the same
-    coupling with the name filed off. A predicate lives here, where the mapping
-    does, and the registry stays this package's business.
-    """
-    return family in FAMILIES
 
 
 def family_for(entry: CatalogEntry) -> type[StagedInstaller]:

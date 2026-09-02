@@ -472,7 +472,14 @@ class NativeInstall(_Strict):
         ),
     )
     family: Literal["azerothcore", "cmangos"] = Field(
-        description="Which family engine installs this game; must equal the engine's `family`."
+        description=(
+            "Which family engine installs this game; must equal the engine's `family`. "
+            "This Literal is the first file a new lineage's data touches, so the policy "
+            "is stated here too: a family with no registered engine is a DEFECT and not "
+            "a supported window — `installer_for()` refuses the entry rather than "
+            "falling back to anything. A new lineage is a class in `catalog/families/`, "
+            "a line in `FAMILIES`, and then a member here."
+        )
     )
     images: tuple[str, ...] = Field(
         min_length=1,
