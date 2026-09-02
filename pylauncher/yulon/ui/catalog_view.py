@@ -119,7 +119,7 @@ run headless, and the logic worth testing is what happens with the answer.
 def _qt_wsl_server_picker(found: tuple[wsl.FoundServer, ...]) -> wsl.FoundServer | None:
     """The real picker: one line per server, chosen by name."""
     labels = [
-        f"{server.project}  —  {server.distro}" f"  ({'running' if server.running else 'stopped'})"
+        f"{server.project}  —  {server.distro}  ({'running' if server.running else 'stopped'})"
         for server in found
     ]
     choice, ok = QInputDialog.getItem(
@@ -688,12 +688,59 @@ class CatalogView(QWidget):
                 "Look in the folder, then install again or pick a different one."
             )
             logger.info(f"{game_id} exited 0 with no compose file in {server_dir}; not remembered")
-        if not ok:
+        if not ok and not self._offer_a_restart_instead(message):
             QMessageBox.warning(self, "Install failed", message)
         self.install_finished.emit(game_id, ok, message)
         if ok:
             _pin_compose_project(server_dir)
             self.installed.emit(game_id, server_dir, client_dir)
+
+    def _offer_a_restart_instead(self, message: str) -> bool:
+        """Offer to restart when a restart is now the whole of what is missing.
+
+        The install that just failed is the one that ASKED for the docker group
+        and got it: `usermod` ran, and the very process that ran it cannot see
+        the result, because supplementary groups are credentials fixed at login.
+        Before this, that user was told to log out and back in — measured on the
+        live Ubuntu gate as: consent, sudo, log out, log back in, find the
+        launcher, press Install again.
+
+        Asks the MACHINE whether a restart would help, rather than remembering
+        that a join happened. `docker_group_reexec()` returns an argv only when
+        the group is in the database and not in this process — which is the
+        condition, stated exactly, and it is right on the four paths a flag gets
+        wrong: the user declined, the join failed, the group was revoked, or
+        Docker was never the problem in the first place. On every other failure
+        this returns False and the plain warning is shown, unchanged.
+
+        Returns True when it has spoken to the user, so the caller does not also
+        show its own dialog: the question below already carries `message` in
+        full. `is ... Yes` and not `is not ... No`, because Escape and the
+        window's close button both return `NoButton`, and only an explicit Yes
+        may throw away a running application.
+        """
+        if platform.docker_group_reexec() is None:
+            return False
+        if (
+            QMessageBox.question(
+                self,
+                "Restart Yu'lon to finish setting up Docker",
+                f"{message}\n\n"
+                "Docker is set up and your account has been given access to it. "
+                "Yu'lon just needs to start again to pick that up — you do NOT "
+                "need to log out.\n\n"
+                "Restart Yu'lon now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            is QMessageBox.StandardButton.Yes
+        ):
+            # Only returns if the exec failed, and then the user is told what
+            # actually went wrong rather than being left looking at a dialog
+            # that closed and did nothing.
+            platform.restart_under_docker_group()
+            QMessageBox.warning(self, "Install failed", message)
+        return True
 
     def _set_buttons_enabled(self, enabled: bool) -> None:
         """Lock the tiles while a job runs, and unlock them when it ends.

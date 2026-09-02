@@ -480,9 +480,29 @@ def provision_headless() -> int:
     return PROVISION_READY if report.ok else PROVISION_MANUAL
 
 
+def _regain_docker_group() -> None:
+    """Restart under `sg docker` when that is all that stands between us and Docker.
+
+    The SILENT half of the fix, and deliberately silent: it runs before the
+    window exists and before any Docker question is asked, so the user never
+    sees the process it replaces. There is nothing to click and nothing to
+    explain -- the app simply opens able to use Docker.
+
+    It covers the user who was joined to the group and then closed the launcher.
+    The other half is `CatalogView._offer_a_restart_instead()`, which covers the
+    user still sitting in the session the join happened in; that one has to ask,
+    because it throws away a running application.
+
+    Costs one `os.getgroups()` call on every normal start, which is what
+    `docker_group_reexec()` spends before returning None.
+    """
+    platform.restart_under_docker_group()
+
+
 def main() -> int:
     """Start the launcher."""
     configure(config_dir=platform.config_dir())
+    _regain_docker_group()
     if "--provision" in sys.argv[1:] or os.environ.get("YULON_PROVISION"):
         return provision_headless()
     logger.info("Yu'lon launcher starting")
