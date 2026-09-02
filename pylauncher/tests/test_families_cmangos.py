@@ -3356,3 +3356,73 @@ def test_the_real_gate_asks_this_installs_container_with_this_installs_password(
     assert state.state == "absent"
     for name in {*SQL.create, SQL.marker_db, *(rule.db for rule in SQL.verify)}:
         assert name in state.detail, state.detail
+
+
+# -- the one guard on a Tortoise password ------------------------------------
+
+
+def test_the_compose_scalar_set_is_the_only_guard_on_the_tortoise_password(tmp_path: Path) -> None:
+    """`wow-tortoise`'s `sql.create` is empty, so `create_schemas()`'s value checks never run.
+
+    Measured 2026-09-02 against a mutant that dropped the single quote from
+    `composegen._UNSAFE_SCALAR_CHARS`: a `.db_password` holding
+    `tortoise-a'b--x` rendered into the compose files, into `.env` and into both
+    conf files, and `IDENTIFIED BY 'tortoise-a'b--x'` reached the SQL stream.
+    The whole suite stayed green through it. `resolve_secrets()` takes an
+    existing file AS WRITTEN, so the value is the user's, not this app's.
+
+    The neighbour is `sqlplan._refuse_unquotable()`, which holds the quote too.
+    It is asserted unreached twice over: `create_schemas()` is handed the same
+    bad password and an `exec_stdin` that fails the test if it is called at all,
+    and the refusal that does arrive is pinned to composegen's words rather than
+    to sqlplan's.
+    """
+    entry = installable(load_catalog().get("wow-tortoise"))
+    native_block = entry.install.native
+    assert native_block is not None and native_block.cmangos is not None
+    plan = native_block.cmangos.sql
+    assert plan.create == (), "the premise: with a `create` list this test would prove nothing"
+
+    bad = "tortoise-a'b--x"
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    password_file = entry.install.password.file
+    assert password_file is not None, "a generated plan names the file it persists to"
+    (server_dir / password_file).write_text(bad + "\n", encoding="utf-8")
+    eng = engine_for(entry, Recorder())
+    assert eng.resolve_secrets(server_dir).db_password == bad, "the file is read as written"
+
+    def never_executed(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("create_schemas() ran a statement for a plan with no `create` list")
+
+    sqlplan.create_schemas(
+        plan,
+        container=entry.containers.db,
+        client="mysql",
+        password=bad,
+        # The identity map over the plan's own database NAMES, which is what
+        # `sqlplan` looks every one of them up in; `entry.schema_map()` is keyed
+        # by role and answers for none of them.
+        schemas=eng._schemas(),
+        user=native_block.db.user,
+        charset=native_block.db.charset,
+        exec_stdin=never_executed,
+    )
+
+    ctx = native.StageContext(
+        server_dir=server_dir,
+        client_dir=None,
+        state=native.InstallState(
+            game_id=entry.id,
+            install_id=composegen.install_id(server_dir, platform_id=lambda: "linux"),
+            family="cmangos",
+        ),
+        cancel=None,
+        secrets=native.Secrets(db_password=bad),
+    )
+    with pytest.raises(InstallerError) as caught:
+        list(eng.stage_generate_compose(ctx))
+    said = str(caught.value)
+    assert "cannot be written into a compose file safely" in said
+    assert "into SQL safely" not in said, "that is sqlplan's refusal, not the one under test"
+    assert repr("'") in said, "the refusal must name the character it refused"
