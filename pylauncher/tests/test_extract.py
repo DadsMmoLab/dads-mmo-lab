@@ -2265,3 +2265,144 @@ def test_the_mmaps_cancel_note_promises_exactly_what_the_stage_delivers(tmp_path
     again = Runner(MMAPS_WRITES)
     mmaps(MMAPS, again, tmp_path)
     assert len(again.specs) == 1, "it starts from the beginning rather than being skipped"
+
+
+# --------------------------------------------------------------------------
+# Output folders, and who creates them. Found on m910q on 2026-09-02, on the
+# first WoW TBC install ever run: `vmap_assembler Buildings vmaps` died with
+# `Cannot open vmaps/000.vmtree`, then `error converting
+# Abandonedorcbarracks.wmo`, exit 1 -- twice, identically. The assembler does
+# not create its own output folder. `mkdir vmaps` and re-running the
+# byte-identical `docker run` produced 1869 `.vmtile` files.
+
+
+class _SeesItsFolder(Runner):
+    """A `Runner` that also records whether each tool's output folder existed AT START.
+
+    Subclassed rather than replaced so the fabricated output, the recorded
+    specs and the failure handling all stay the ones every other test in this
+    file exercises -- the only added fact is the one the ordering bug is about.
+    """
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self.folder_existed: list[tuple[str, bool]] = []
+
+    def __call__(
+        self, spec: docker.ContainerRun, *, sink: docker.OutputSink, cancel: threading.Event | None
+    ) -> docker.AttachedRun:
+        program = tool_program(spec)
+        out = next(mount.host for mount in spec.mounts if mount.guest == "/out")
+        for folder in FULL.get(program, {}):
+            self.folder_existed.append((folder, (out / folder).is_dir()))
+        return super().__call__(spec, sink=sink, cancel=cancel)
+
+
+def test_every_tools_output_folder_exists_before_that_tool_runs(tmp_path: Path) -> None:
+    """Created by us, because the tool that needs it does not create it.
+
+    Asserts existence AT THE MOMENT THE CONTAINER STARTS, not afterwards: the
+    defect is entirely one of ordering, and a check made after the run would
+    pass against a version that creates the folder too late, and against no fix
+    at all whenever an earlier tool happened to leave the folder behind.
+
+    Every folder in the plan, not just `vmaps`: the assembler was not special,
+    it was merely the first tool whose output folder nothing else had made.
+    """
+    runner = _SeesItsFolder(FULL)
+
+    run(PLAN, runner, tmp_path)
+
+    assert runner.folder_existed, "no tool ran, so the ordering was never observed"
+    missing = [folder for folder, existed in runner.folder_existed if not existed]
+    assert missing == [], f"these tools ran before their output folder existed: {missing}"
+
+
+def test_making_the_folder_does_not_make_an_unrun_tool_look_finished(tmp_path: Path) -> None:
+    """An empty folder counts zero files, so the shortfall gate still refuses.
+
+    The obvious objection to creating output folders up front, answered rather
+    than argued: `counts()` walks FILES. Without this, the fix could have been
+    written to create the folder and let the count gate pass, which would report
+    a finished extraction over an empty `vmaps/`.
+    """
+    data_dir = tmp_path / "data"
+    (data_dir / "vmaps").mkdir(parents=True)
+
+    assert extract.counts({"vmaps": 100}, data_dir) == {"vmaps": 0}
+    assert extract.shortfall({"vmaps": 100}, data_dir) == {"vmaps": (0, 100)}
+
+
+def test_a_slashed_produces_name_is_created_where_the_count_gate_looks(tmp_path: Path) -> None:
+    """`counts()` reads `data_dir / folder`, so the folder is made at that same path.
+
+    `ExtractTool` does not forbid a slash, and `STAGE_SCRIPT`'s `cp` form is
+    documented to land a slashed name at exactly this path. A `mkdir` without
+    `parents=True` raises on it; one that split the name differently would
+    create a folder the gate never reads.
+    """
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+
+    extract.make_out_dirs(["Cameras/Buildings"], data_dir)
+
+    assert (data_dir / "Cameras" / "Buildings").is_dir()
+
+
+def test_a_folder_that_cannot_be_created_refuses_and_names_it(tmp_path: Path) -> None:
+    """A sentence naming the folder, not an `OSError` escaping into a container run."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    # A FILE where the folder must go. `mkdir` raises `FileExistsError`, an
+    # `OSError`, without depending on permissions a test cannot arrange on
+    # every platform this suite runs on.
+    (data_dir / "vmaps").write_text("not a folder", encoding="utf-8")
+
+    with pytest.raises(InstallerError) as caught:
+        extract.make_out_dirs(["vmaps"], data_dir)
+
+    assert "vmaps" in str(caught.value), caught.value
+    assert "could not be created" in str(caught.value), caught.value
+
+
+def test_mmaps_output_folder_exists_before_movemapgen_runs(tmp_path: Path) -> None:
+    """The stage WIPES `mmaps/` and nothing put it back, so the tool met no folder.
+
+    The same defect as the assembler's, one stage later, and it survived the
+    first mutation pass over that fix -- V5 removed the `make_out_dirs` call
+    here and every test in this file stayed green. This is the test that was
+    missing.
+
+    Driven through the wipe on purpose: `_remove_tree()` runs whenever no
+    finished record vouches for the folder, which is exactly the resume a user
+    performs after an interrupted generation, so the folder is at its most
+    absent on the path most likely to be taken twice.
+
+    Records existence AT THE MOMENT THE CONTAINER STARTS. Checking afterwards
+    would pass against a version that creates it too late and against no fix at
+    all, since MoveMapGen's fabricated output makes the folder either way.
+    """
+    run(PLAN, Runner(FULL), tmp_path)
+    data_dir = tmp_path / "server" / "data"
+    # A folder no finished run vouches for: what an interrupted generation
+    # leaves, and what `run_mmaps` removes before it starts.
+    (data_dir / "mmaps").mkdir(parents=True, exist_ok=True)
+    (data_dir / "mmaps" / "half-written.mmtile").write_text("x", encoding="utf-8")
+
+    seen_at_start: list[bool] = []
+
+    class _Watching(Runner):
+        def __call__(
+            self,
+            spec: docker.ContainerRun,
+            *,
+            sink: docker.OutputSink,
+            cancel: threading.Event | None,
+        ) -> docker.AttachedRun:
+            out = next(mount.host for mount in spec.mounts if mount.guest == "/out")
+            seen_at_start.append((out / "mmaps").is_dir())
+            return super().__call__(spec, sink=sink, cancel=cancel)
+
+    mmaps(MMAPS, _Watching(MMAPS_WRITES), tmp_path)
+
+    assert seen_at_start == [True], "MoveMapGen ran with no mmaps/ folder to write into"

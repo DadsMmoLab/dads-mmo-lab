@@ -45,7 +45,7 @@ import re
 import shutil
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -320,6 +320,42 @@ def counts(produces: Mapping[str, int], data_dir: Path) -> dict[str, int]:
     and the number is the whole content of both.
     """
     return {folder: file_count(data_dir / folder) for folder in produces}
+
+
+def make_out_dirs(produces: Iterable[str], data_dir: Path) -> None:
+    """Create the folders a tool writes into. Not every tool creates its own.
+
+    CMaNGOS's `vmap_assembler Buildings vmaps` does not. It opens
+    `vmaps/000.vmtree` for writing, and with no `vmaps/` there the open fails,
+    the tool prints `Cannot open vmaps/000.vmtree`, carries on into model
+    conversion, fails on the first `.wmo` for the same reason, and exits 1 --
+    so the message a user gets names a model file and not the missing folder.
+
+    Measured on m910q, 2026-09-02, on the first TBC install: the run died there
+    twice, identically. `mkdir vmaps` and re-running the byte-identical
+    `docker run` produced 1869 `.vmtile` files. The directory was the whole of
+    it.
+
+    `data_dir / folder` is where `counts()` looks, so this creates exactly the
+    paths the gate reads -- including a slashed `produces` name, which
+    `parents=True` handles and which the staging script's `cp` form is also
+    documented to land there.
+
+    Creating a folder cannot make a tool look finished: `counts()` counts FILES,
+    so an empty one reads 0 and a shortfall is still a shortfall. Safe to run
+    before every tool, and it is, rather than only before the one known to need
+    it -- the assembler was not special, it was first.
+    """
+    for folder in produces:
+        target = data_dir / folder
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise InstallerError(
+                f"{target} could not be created ({exc}), and the tool that writes into it does "
+                "not create it either. Nothing was run. Free up the folder above, or pick a "
+                "different server folder, then try again."
+            ) from exc
 
 
 def short_of(seen: Mapping[str, int], produces: Mapping[str, int]) -> dict[str, tuple[int, int]]:
@@ -793,6 +829,7 @@ def run_plan(
             seen = counts(tool.produces, data_dir)
             yield f"{tool.name}: already extracted ({_counts_text(seen)})"
             continue
+        make_out_dirs(tool.produces, data_dir)
         yield f"{tool.name}: running {' '.join(tool.argv)}"
         run = run_container(spec_for(tool), sink=sink, cancel=cancel)
         if not retried and plan.retry is not None and _retry_applies(plan.retry, tool, run, cancel):
@@ -812,8 +849,7 @@ def run_plan(
             retried = True
             names = ", ".join(plan.retry.tools)
             yield (
-                f"{tool.name} crashed the way the retry recipe expects; "
-                f"running {names} again once"
+                f"{tool.name} crashed the way the retry recipe expects; running {names} again once"
             )
             for name in plan.retry.tools:
                 again = _tool_named(plan, name)
@@ -1075,6 +1111,12 @@ def run_mmaps(
     cleared = f" {MMAPS_CLEARED_NOTE}" if wiped else ""
     if wiped:
         yield "mmaps: removed a folder no finished run vouches for, so generation starts clean"
+    # The wipe above removes `mmaps/` and nothing here put it back, so this
+    # stage reached MoveMapGen with the same missing folder that stopped the
+    # assembler one stage earlier -- see `make_out_dirs()`. Found by reading
+    # rather than by running: the extract failure blocks this stage, so no run
+    # has reached it yet on any CMaNGOS entry.
+    make_out_dirs([MMAPS_DIR], data_dir)
     yield f"mmaps: running {' '.join(plan.argv)}"
     run = run_container(
         docker.ContainerRun(
