@@ -579,12 +579,24 @@ def test_the_cmangos_entries_carry_a_full_family_block(game_id: str) -> None:
 
     `platforms` deliberately still says `["linux"]` and the entries keep their
     `script`. The plan for this task had both go — `"platforms": []`, no
-    `script` — on the strength of 7.2 having already deleted the bash path. It
-    has not: those three scripts are the only thing that installs these games
-    today, `FAMILIES` has no `cmangos` engine to replace them with until K.8,
-    and `Install.platforms` carries `min_length=1` so an empty list is not even
-    a value this model accepts. What changes here is the DATA; what installs
-    the game is asserted in `test_families_azerothcore.py`, on the dispatcher.
+    `script` — on the strength of 7.2 having already deleted the bash path.
+
+    WRITTEN when that was true and CORRECTED 2026-09-02, because a reader is sent
+    here on purpose: `cmangos_entries()` points at this test for WHICH games
+    declare the family, and landing on a present-tense falsehood teaches the
+    opposite of the truth. What stood here was "those three scripts are the only
+    thing that installs these games today, `FAMILIES` has no `cmangos` engine to
+    replace them with until K.8". K.8 landed; the family is registered and all
+    three entries dispatch to it.
+
+    Still true, and the reason this task did not empty `platforms`:
+    `Install.platforms` carries `min_length=1`, so `[]` is not a value the model
+    accepts. F.4 drops the `script*` fields; it leaves `platforms` alone, because
+    after 7.3 these entries really are installable on Linux and an empty list
+    would disable their Install button.
+
+    What changes here is the DATA; what installs the game is asserted in
+    `test_families_azerothcore.py`, on the dispatcher.
     """
     entry = load_catalog().get(game_id)
     native = entry.install.native
