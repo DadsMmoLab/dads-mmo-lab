@@ -649,3 +649,41 @@ def test_write_names_the_file_it_could_not_lay_down(tmp_path: Path) -> None:
     with pytest.raises(dockerfile.DockerfileError, match="could not be written") as caught:
         dockerfile.write(missing, text, ignore)
     assert str(missing / "Dockerfile") in str(caught.value)
+
+
+@pytest.mark.parametrize("entry", CMANGOS_ENTRIES, ids=lambda e: e.id)
+def test_every_cmangos_build_forces_http_1_1_before_cmake_runs(entry: CatalogEntry) -> None:
+    """The build CLONES from GitHub, and over HTTP/2 that clone fails.
+
+    CMake's `FetchContent_MakeAvailable(zlib)` clones madler/zlib at CONFIGURE
+    time, so the build reaches the network before compiling anything. Measured
+    on `yulon-ubuntu` 2026-09-02, first WoW Vanilla install: three failed
+    clones, `could not read Username for 'https://github.com'` / `expected
+    flush after ref listing`, cmake dead at `Build step for zlib failed: 2`.
+    `git ls-remote` from `alpine/git` on that same box worked, from
+    `ubuntu:22.04` failed, and from `ubuntu:22.04` with `-c
+    http.version=HTTP/1.1` worked.
+
+    Parametrised over all three entries and asserted on the SHIPPED templates,
+    not on a fixture: TBC built fine on m910q with no such line, so a test
+    written against one entry -- or against a template a test authored itself
+    -- would have passed while two real builds stayed broken on any network
+    with this fault.
+
+    ORDER is asserted, not presence. The line is worthless after the cmake step
+    that does the cloning, and `git config` placed below `RUN cmake` is a
+    perfectly plausible edit that presence alone would accept.
+
+    `git.py` makes the same choice for the clones this app performs, measured
+    from the other side on real Windows. This is the build context agreeing
+    with it.
+    """
+    text, _ = dockerfile.render(shipped(entry), composegen.entry_tokens(entry))
+
+    assert "http.version HTTP/1.1" in text, f"{entry.id} lets its build clone over HTTP/2"
+    # `cmake ..` and not `cmake`: the bare word matches the APT PACKAGE NAME in
+    # the install list first, which sits above this line in every template, so
+    # the loose spelling failed all three entries against a correct fix.
+    assert text.index("http.version HTTP/1.1") < text.index(
+        "cmake .."
+    ), f"{entry.id} sets HTTP/1.1 after the cmake step that does the cloning"
