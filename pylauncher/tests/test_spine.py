@@ -112,6 +112,102 @@ def test_read_state_keeps_only_the_stage_names_the_entry_has(tmp_path: Path) -> 
     assert state.completed == ("build",)
 
 
+def test_an_unknown_stage_name_survives_a_read_and_a_write(tmp_path: Path) -> None:
+    """A downgrade must not strip the newer build's progress off disk.
+
+    `read_state` filtered unknown names out and `write_state` then persisted the
+    filtered tuple, so an older Yu'lon opening a newer install PERMANENTLY removed
+    the names it did not recognise — and the "Already finished: ..." line printed
+    the filtered list, so nothing said so. Resuming on the newer build afterwards
+    redid whatever those stages were, which for this family includes a multi-hour
+    compile. Bug-checklist section 23; fixed 2026-09-02.
+
+    Asserts the round trip through the FILE rather than the object, because the
+    file is what the other build reads. The two halves stay separate on the way
+    in — this build must not act on a stage it cannot interpret — and are rejoined
+    on the way out.
+    """
+    (tmp_path / native.STATE_FILE).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "game_id": "wow-tbc",
+                "install_id": "abc",
+                "completed": ["build", "a-stage-from-the-future"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = native.read_state(tmp_path, valid=ORDER)
+    assert state is not None
+    assert state.completed == ("build",), "an uninterpretable stage must not become a skip"
+    assert state.unknown == ("a-stage-from-the-future",)
+
+    native.write_state(tmp_path, state)
+    on_disk = json.loads((tmp_path / native.STATE_FILE).read_text(encoding="utf-8"))["completed"]
+    assert (
+        "a-stage-from-the-future" in on_disk
+    ), "the older build wrote the newer build's progress out of existence"
+
+
+def test_recording_a_stage_does_not_drop_the_names_this_build_cannot_read(
+    tmp_path: Path,
+) -> None:
+    """The lossy path was a WRITE, so the write that happens every stage is the one to pin.
+
+    `with_stage()` rebuilds `completed` from `order`, and a future name is by
+    definition not in `order`. If `unknown` did not ride along beside it, the very
+    first stage an older build completed would erase the newer one's record — the
+    same defect as the read-side filter, reached by the commoner route.
+    """
+    (tmp_path / native.STATE_FILE).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "game_id": "wow-tbc",
+                "install_id": "abc",
+                "completed": ["clone-core", "a-stage-from-the-future"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = native.read_state(tmp_path, valid=ORDER)
+    assert state is not None
+    native.write_state(tmp_path, state.with_stage("build", ORDER))
+
+    on_disk = json.loads((tmp_path / native.STATE_FILE).read_text(encoding="utf-8"))["completed"]
+    assert "build" in on_disk and "clone-core" in on_disk, "the ordinary record still works"
+    assert "a-stage-from-the-future" in on_disk, "recording a stage erased the future one"
+
+
+def test_a_stage_this_build_cannot_read_is_reported_rather_than_dropped_in_silence(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Keeping the name is not enough if nobody is told why a resume looks short.
+
+    The user-facing "Already finished" line prints `completed`, which by design
+    excludes these. Without a log line the only visible symptom is an install that
+    appears to have done less than it did, with nothing naming the cause.
+    """
+    (tmp_path / native.STATE_FILE).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "game_id": "wow-tbc",
+                "install_id": "abc",
+                "completed": ["build", "a-stage-from-the-future"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with caplog.at_level(logging.WARNING, logger="yulon.catalog.native"):
+        native.read_state(tmp_path, valid=ORDER)
+    said = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "a-stage-from-the-future" in m for m in said
+    ), f"the dropped name was never reported: {said}"
+
+
 def test_the_same_file_reads_differently_for_two_entries_stage_tuples(tmp_path: Path) -> None:
     """`valid` is per entry, so "known stage" is not a property of the module.
 
