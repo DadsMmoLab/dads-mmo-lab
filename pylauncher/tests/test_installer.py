@@ -12,7 +12,10 @@ with and without a trailing newline. Nothing in this file starts an install.
 
 from __future__ import annotations
 
+import ast
 import subprocess
+import threading
+from collections.abc import Iterator
 from dataclasses import fields
 from pathlib import Path
 
@@ -81,13 +84,41 @@ def _canned_responder(install_path: str) -> object:
     return respond
 
 
+def _expiring_cancel(after: float = 20.0) -> threading.Event:
+    """A deadline for the two tests below, so a wedged transport fails instead of hanging.
+
+    `runner.interact()` has no wall-clock bound of its own and this repo has no
+    `pytest-timeout`, so a child that stops answering blocks the reader loop
+    forever. A review mutation of the responder arrived as a permanent block
+    rather than a red test (m4, 2026-09-02), and a test that wedges CI is worse
+    than no test: the run never reports, so nobody learns anything from it.
+    `cancel` is the bound `interact()` does have — it is checked every loop turn
+    and terminates the child — which is why every `interact()` test in
+    `test_prompt.py` already passes one.
+
+    Generous on purpose. These two drive a real bash script that answers three
+    prompts and exits, so 20 s is nowhere near the honest running time; the
+    deadline exists to end a hang, never to measure one, and a machine slow
+    enough to trip it would have been reported by the whole suite first.
+    """
+    event = threading.Event()
+    timer = threading.Timer(after, event.set)
+    timer.daemon = True
+    timer.start()
+    return event
+
+
 @needs_bash
 def test_interact_answers_prompts_with_and_without_newlines(tmp_path: Path) -> None:
     """Partial-line prompts (`echo -ne`) and full-line prompts both get answered."""
     script = tmp_path / "fake.sh"
     script.write_text(FAKE_INSTALLER, encoding="utf-8")
     lines = list(
-        runner.interact(["bash", str(script)], respond=_canned_responder("/srv/wow"))  # type: ignore[arg-type]
+        runner.interact(
+            ["bash", str(script)],
+            respond=_canned_responder("/srv/wow"),  # type: ignore[arg-type]
+            cancel=_expiring_cancel(),
+        )
     )
     stripped = [runner.strip_ansi(line) for line in lines]
     assert "dir=[/srv/wow]" in stripped  # answered a prompt with no trailing newline
@@ -105,6 +136,7 @@ def test_interact_raises_on_nonzero_exit_after_yielding_output(tmp_path: Path) -
             ["bash", str(script)],
             respond=_canned_responder(""),  # type: ignore[arg-type]
             env={"EXIT_CODE": "3"},
+            cancel=_expiring_cancel(),
         ):
             got.append(runner.strip_ansi(line))
     assert "dir=[]" in got  # everything printed before the failure was still yielded
@@ -161,14 +193,23 @@ MODULE_SURFACE_AFTER_7_2 = {
 
 
 def test_the_script_lineage_is_gone() -> None:
-    """The module's whole surface, so a deleted symbol cannot return renamed.
+    """This module's namespace, so a deleted symbol cannot return renamed.
 
     A list of forbidden NAMES would pass the day one of them came back as
     `ScriptInstaller` or `_PROMPT_RULES`. This enumerates instead: every
-    attribute the module has, against every one it is supposed to have. The
-    imports are in the set on purpose — `subprocess`, `secrets`, `re` and `os`
-    were there for the engine that ran the scripts, and a diff that ignored
-    them would let the machinery back in one import at a time.
+    attribute the module namespace has, against every one it is supposed to
+    have. The imports are in the set on purpose — `subprocess`, `secrets`, `re`
+    and `os` were there for the engine that ran the scripts, and a diff that
+    ignored them would let the machinery back in one import at a time.
+
+    `vars(module)` is the NAMESPACE and nothing deeper, which is narrower than
+    it reads: a review put `PROMPT_RULES` and `make_responder` back as members
+    of `InstallOptions` and this assertion stayed green, because a class's own
+    attributes are not the module's (mutation m7, reproduced 2026-09-02: the
+    rule table and a working `make_responder` were back, and this test passed).
+    What closes that is
+    `test_no_module_under_yulon_binds_a_script_lineage_name` below, which reads
+    every binding in the package rather than one namespace's top layer.
 
     Adding something to this module is meant to fail here once; the fix is to
     add the name above, deliberately.
@@ -177,6 +218,80 @@ def test_the_script_lineage_is_gone() -> None:
         MODULE_SURFACE_AFTER_7_2
     )
     assert {f.name for f in fields(InstallOptions)} == {"server_dir", "client_dir"}
+
+
+# The names the bash engine owned, every one of them deleted by F.3 or by the
+# commits it depended on. Not a wish list: every one of them was measured absent
+# from every module under `yulon/` on the day this test was written (2026-09-02).
+SCRIPT_LINEAGE_NAMES = frozenset(
+    {
+        "Installer",
+        "AskTheUser",
+        "ASK_THE_USER",
+        "PromptRule",
+        "PROMPT_RULES",
+        "make_responder",
+        "host_package_manager",
+        "bash_available",
+        "NO_BASH_HELP",
+        "DEFAULT_TERM",
+        "_ERROR_TAIL_LINES",
+    }
+)
+
+
+def _bindings(tree: ast.Module) -> Iterator[tuple[str, int]]:
+    """Every name this file BINDS, at any depth, with the line that binds it.
+
+    Bindings rather than occurrences, so a docstring or an error message that
+    happens to spell one of these is not a finding — and so the resurrection
+    that matters is caught wherever it is written: a def or a class at any
+    nesting, a plain or annotated assignment (module scope, class body, or
+    inside a function), an attribute assigned onto an existing object, a
+    parameter, and an import alias.
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            yield node.name, node.lineno
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            yield node.id, node.lineno
+        elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store):
+            yield node.attr, node.lineno
+        elif isinstance(node, ast.arg):
+            yield node.arg, node.lineno
+        elif isinstance(node, ast.Import | ast.ImportFrom):
+            for alias in node.names:
+                yield alias.asname or alias.name.split(".")[0], node.lineno
+
+
+def test_no_module_under_yulon_binds_a_script_lineage_name() -> None:
+    """The claim the namespace diff above only looks like it makes.
+
+    The module-surface test watches one dict. This walks the whole package and
+    every binding in it, which is where m7 put the rule table back: as a class
+    attribute of `InstallOptions`, in the very module the surface test guards,
+    and green. Reading files rather than importing them is deliberate — an
+    import gives back a namespace, and a namespace is exactly the layer that
+    missed it.
+
+    The positive control matters more than the assertion. A walk that found no
+    files, or a `_bindings()` that yielded nothing, would pass this silently
+    and would be indistinguishable from a clean tree, so it is asked for a name
+    it must find first.
+    """
+    package = Path(installer_module.__file__ or "").parents[1]
+    bound: dict[str, list[str]] = {}
+    for path in sorted(package.rglob("*.py")):
+        tree = ast.parse(path.read_bytes().decode("utf-8"), filename=str(path))
+        for name, lineno in _bindings(tree):
+            bound.setdefault(name, []).append(f"{path.relative_to(package).as_posix()}:{lineno}")
+
+    assert package.name == "yulon", f"the walk started somewhere else: {package}"
+    assert "StagedInstaller" in bound, "the walk read no bindings, so its silence proves nothing"
+    assert "InstallOptions" in bound, "the walk never reached the module the surface test guards"
+
+    resurrected = {name: where for name, where in bound.items() if name in SCRIPT_LINEAGE_NAMES}
+    assert resurrected == {}
 
 
 # ------------------------------------------------------------------ the dispatch
