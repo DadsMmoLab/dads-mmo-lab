@@ -98,6 +98,92 @@ def _sql_literal(ip: str) -> str:
     return ip
 
 
+LOOPBACK = frozenset({"::1", "0.0.0.0", "localhost"})
+"""Addresses that name the machine ASKING, in every spelling but `127.*`.
+
+Sibling of the `127.` prefix test in `advertisable()`, kept as data because
+`0.0.0.0` is a bind address rather than a loopback and belongs in the same
+refusal for a different reason: a realm advertising it hands the client a
+string no client can dial.
+"""
+
+
+def advertisable(address: str | None) -> str | None:
+    """`address`, if a realm may advertise it to other machines; else None.
+
+    The one predicate for "is this worth writing into the realmlist row", so
+    that nothing downstream has to ask half of it. Three refusals, and each is
+    an answer some real detector gives:
+
+    * **nothing at all** — `platform.detect_lan_ip()` answers None for a
+      machine whose routing table it could not read, and its WSL branch answers
+      None for a PowerShell that printed an empty line.
+    * **the loopback**, `127.*` or a member of `LOOPBACK`. This is the whole of
+      bug-checklist §35: a realm advertising `127.0.0.1` tells every client that
+      the world server is on the CLIENT's own machine, so the client hangs at
+      "Connecting" and says nothing useful. `detect_lan_ip()` filters `127.` on
+      its local branch and its WSL branch does NOT — it takes whatever
+      `Get-NetIPConfiguration` printed — so the filter has to exist somewhere
+      both branches pass through, and this is it.
+    * **anything `_sql_literal()` would refuse.** Asked HERE, by calling it,
+      rather than restated: a caller that has been handed an address by this
+      function can then build the UPDATE without a `ValueError` reaching it, and
+      the two rules cannot drift apart because there is only one of them.
+
+    Surrounding whitespace is stripped rather than refused — a detector that
+    reads a command's stdout is the normal source of a trailing newline, and
+    `_sql_literal()` would call that "not an address".
+    """
+    if not address:
+        return None
+    candidate = address.strip()
+    if not candidate or candidate.startswith("127.") or candidate in LOOPBACK:
+        return None
+    try:
+        _sql_literal(candidate)
+    except ValueError:
+        return None
+    return candidate
+
+
+def realmlist_columns(entry: CatalogEntry) -> tuple[str, ...]:
+    """The address columns `realmlist_sql()` writes, in the order it writes them.
+
+    Spelled once so that a reader of the row and a writer of the row cannot
+    disagree about which columns the answer is about. `local_address_column`
+    is optional per core, and `realmlist_sql()` includes it exactly when it is
+    set and a local address was given — this function is the "and a local
+    address was given" case, which is every caller that advertises one address
+    to everybody (`plan()`'s `lan` mode, and the installer's closing step).
+    """
+    rl = entry.realmlist
+    if rl.local_address_column:
+        return (rl.address_column, rl.local_address_column)
+    return (rl.address_column,)
+
+
+def realmlist_address_query(entry: CatalogEntry) -> str:
+    """The SELECT that says whether `realmlist_sql()` would change anything.
+
+    EVERY column the UPDATE sets, not just `address`, and that is the point of
+    it. An install whose `address` is already the LAN IP while its
+    `localAddress` is still `127.0.0.1` is the same outage with a smaller blast
+    radius: AzerothCore hands `localAddress` to a client it decides is on the
+    realm's own subnet, so the players most likely to be on the LAN are exactly
+    the ones sent to their own machine. A caller comparing one column would
+    call that row unchanged and leave it.
+
+    Fully qualified with the auth schema, like `realmlist_sql()`, so the reader
+    and the writer address the same table without either needing a connection
+    already pointed at a database.
+    """
+    rl = entry.realmlist
+    return (
+        f"SELECT {', '.join(realmlist_columns(entry))} "
+        f"FROM {entry.databases.auth}.{rl.table} WHERE id={rl.realm_id};"
+    )
+
+
 def _alf_notes(state: platform.AlfState) -> tuple[list[str], list[str]]:
     """(warnings, manual steps) for a macOS firewall state. Never a command to run.
 

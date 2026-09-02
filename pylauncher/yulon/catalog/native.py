@@ -52,6 +52,7 @@ which are measured on yulon-ubuntu (Linux), and which are merely written.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import queue
@@ -66,7 +67,7 @@ from pathlib import Path
 from secrets import token_hex
 from typing import ClassVar, Protocol
 
-from yulon import docker, git, platform, resources, runner
+from yulon import docker, git, networking, platform, resources, runner
 from yulon.catalog import composegen, preflight
 from yulon.catalog.catalog import CatalogEntry, EmulatorSource, NativeInstall, ReadyMarkers
 from yulon.catalog.installer import (
@@ -185,8 +186,38 @@ A fresh install's realmlist row is the loopback address and the world port —
 AzerothCore's default row, and the row the CMaNGOS plan writes — so the auth
 log's own line is what the catalog's `ready.auth` marker names through
 `{{REALM_HOST}}:{{WORLD_PORT}}`. Public: `families/cmangos.py` fills its
-templates and SQL from the same constant (A3). The Networking tab is what
-changes it afterwards; the engine never does.
+templates and SQL from the same constant (A3).
+
+**It is what the row says UNTIL the install's last act, and no longer.**
+`StagedInstaller._advertise_realm()` replaces it with this machine's LAN
+address once every stage has finished, which is the fix for bug-checklist §35
+— a realm left on this value tells every remote client that the world server
+lives on the CLIENT's own machine. That step runs AFTER `ready` and can never
+run before it, because `wow-wotlk`'s `ready.auth` marker is literally this
+string plus the world port: an install that advertised the LAN IP first would
+wait 1800 seconds for a line the auth server was never going to print. The
+Networking tab still changes it afterwards, and is what the install names when
+it could not.
+"""
+
+REALM_ADDRESS_UNKNOWN = (
+    "This machine's address on the local network could not be worked out, so the realm still "
+    f"advertises {INSTALL_REALM_HOST} and only this computer can reach the server. Nothing is "
+    "broken and nothing needs reinstalling: connect this machine to your network, then open "
+    "this server's Networking tab, press Show plan and then Apply, and it will set the address "
+    "for you."
+)
+"""Said when there is no address to advertise — never a refusal, and never a guess.
+
+The install has already succeeded by the time this can be said, so the only
+two honest options are to say what is owed or to say nothing. A guess is not
+among them: writing a plausible-looking address into the realm row produces a
+server that fails in exactly the way §35 describes, with the app's own
+fingerprints on it instead of the default's.
+
+It names the Networking tab and its two buttons because "configure networking"
+is not an instruction anybody can follow, and because that action already
+exists and already does this job (`networking.plan()` + `apply()`).
 """
 
 
@@ -602,6 +633,16 @@ class Seams:
     selinux_enforcing: Callable[[], bool | None] = platform.selinux_enforcing
     fs_type: Callable[[Path], str | None] = platform.filesystem_type
     keep_awake: Callable[[], AbstractContextManager[None]] = platform.keep_awake
+    lan_ip: Callable[[], str | None] = platform.detect_lan_ip
+    """This machine's LAN address, for the realm row the install ends by setting.
+
+    A seam for this module's usual reason and for one that is specific to it:
+    the real function's answer depends on what network the machine happens to
+    be on, so an assertion about the closing realmlist step that did NOT go
+    through a seam would be a statement about a test box's DHCP lease. `None`
+    is a first-class answer here (no network, or a route that could not be
+    read) and `_advertise_realm()` treats it as such; see `REALM_ADDRESS_UNKNOWN`.
+    """
     # The 7.3 primitives. Four of the five real functions take a `wsl_distro`
     # keyword that these types do not carry — exactly as `container_exists`,
     # `start_db` and `start` above have not carried it since 7.1. **That
@@ -775,6 +816,15 @@ class StagedInstaller:
             # would be refused by the record of the failure it is retrying.
             self._record_error(server_dir, state, str(exc))
             raise
+        # OUTSIDE the `try`, and after the last stage, on purpose. Outside,
+        # because everything in there is a reason to fail the install and this
+        # is not one — a realm row that could not be written is a sentence, not
+        # a failed install (`_advertise_realm()` raises nothing at all). After,
+        # because `ready` waits for an auth log line that is `INSTALL_REALM_HOST`
+        # plus the world port, so advertising the LAN address any earlier would
+        # make a working server time out. Before the closing line, because that
+        # line is asserted to be LAST.
+        yield from self._advertise_realm(replace(ctx, state=state))
         # The bash path logs `install of <id> finished` (installer.py); this path
         # logged nothing at the end, so the only sign a run had ended was the
         # compose-project pin - which is how a tester on yulon-win11 (2026-08-28)
@@ -1764,6 +1814,153 @@ class StagedInstaller:
             restart_loop=markers.restart_loop,
         )
 
+    # -- what the realm advertises, once everything else has finished ----
+
+    def _advertise_realm(self, ctx: StageContext) -> Iterator[str]:
+        """Set the realm's advertised address to one other machines can reach.
+
+        The fix for bug-checklist §35, driven on real hardware 2026-09-02: a
+        WoW TBC server this app installed on m910q was joined from another PC
+        over Tailscale, auth succeeded, the realm list arrived, and the world
+        connect could not — `realmd.realmlist.address` was still
+        `127.0.0.1`, so the client had been told the world server was on its
+        OWN machine and hung at "Connecting" saying nothing. One
+        `UPDATE realmd.realmlist SET address='100.78.24.50' WHERE id=1` later
+        the same client reached a character screen. Every piece of this existed
+        (`networking.realmlist_sql()`, `CatalogEntry.realmlist`,
+        `platform.detect_lan_ip()`, the Networking tab) and nothing on the
+        install path ever ran any of it, so EVERY server this app installed was
+        unreachable from every other machine until somebody found that tab.
+
+        Here rather than in a family, because all four shipped games have a
+        `realmlist` block and all four had the bug. NOT a stage: `STAGE_NAMES`
+        is pinned by equality tests in two families, a new name would be
+        written into every state file in the wild, and a step that must run on
+        every resume would have to be `recorded=False` anyway — which is to say
+        it would be this, with a name.
+
+        **Nothing here can fail the install, and that is the whole design.**
+        By the time this runs the server is built, imported, started and has
+        reported ready; the user has been promised a working server and has
+        one. Four outcomes, one line each:
+
+        * no address — `REALM_ADDRESS_UNKNOWN`, and no SQL is attempted at all.
+          A guess would be worse than the default, and a refusal would be a lie
+          about what happened;
+        * the row already says it — nothing is sent. Re-writing a correct row
+          is not free: it is a write to somebody's live auth database for no
+          reason, and the log line claiming it happened is one more thing a
+          reader has to discount;
+        * the UPDATE failed — said, with what the database answered, plus where
+          to fix it by hand. The install stays successful;
+        * it worked — said, naming the address, because the address is what the
+          user has to type into their client next.
+        """
+        address = self._detected_lan_ip()
+        if address is None:
+            yield REALM_ADDRESS_UNKNOWN
+            return
+        columns = networking.realmlist_columns(self.entry)
+        if self._stored_realm_row(ctx) == (address,) * len(columns):
+            yield f"The realm already advertises {address}; its row was left exactly as it is."
+            return
+        failed = self._run_auth_statement(
+            networking.realmlist_sql(self.entry, address, address), ctx
+        )
+        if failed:
+            yield (
+                f"The install is finished and the server is running, but the address the realm "
+                f"advertises could not be set to {address} ({failed}), so it is unchanged and "
+                "players on other machines may still be sent to their own computer. Nothing "
+                "needs reinstalling: open this server's Networking tab, press Show plan and "
+                "then Apply."
+            )
+            return
+        yield (
+            f"The realm now advertises {address}, so players on other machines can reach this "
+            f"server: {address} is the address they set in their client's realmlist. The server "
+            "was already running when this was set, so if a client is still sent to the old "
+            "address, stop and start it again on the Server tab."
+        )
+
+    def _detected_lan_ip(self) -> str | None:
+        """The seam's answer, or None — including when the seam itself blew up.
+
+        `platform.detect_lan_ip()` catches `OSError` on its local branch, and
+        its WSL branch does not: it shells out to `powershell.exe` through
+        `runner.run()`, which on a machine without one raises `FileNotFoundError`.
+        That is an `OSError` escaping into the last three lines of a successful
+        install, and it must be a missing address rather than a traceback.
+        """
+        try:
+            found = self._seams.lan_ip()
+        except (OSError, RuntimeError) as exc:
+            logger.debug(f"this machine's LAN address could not be detected: {exc}")
+            return None
+        return networking.advertisable(found)
+
+    def _stored_realm_row(self, ctx: StageContext) -> tuple[str, ...] | None:
+        """What the realm row's address columns say now, or None if it would not say.
+
+        **None means UNKNOWN and never "it is already fine".** The caller writes
+        on None, deliberately: the UPDATE is idempotent and cheap, while the
+        other reading of an unanswerable database — skip, say nothing — is
+        exactly how a server ends up advertising the loopback with a green
+        install log above it. That is the failure this method is part of fixing,
+        so it may not be reintroduced by its own error handling.
+
+        A row count other than one is unknown for the same reason: no rows is a
+        realm id this core does not have, more than one is not one realm's row,
+        and neither is something to compare an address against.
+        """
+        try:
+            answer = self._seams.sql_query(
+                self.entry.container_spec().db,
+                self._native().db.client,
+                ctx.secrets.db_password,
+                None,
+                networking.realmlist_address_query(self.entry),
+            )
+        except docker.DockerCommandError as exc:
+            logger.debug(f"the realmlist row could not be read: {exc}")
+            return None
+        rows = answer.splitlines()
+        if len(rows) != 1:
+            return None
+        return tuple(field.strip() for field in rows[0].split("\t"))
+
+    def _run_auth_statement(self, statement: str, ctx: StageContext) -> str:
+        """Send one statement to this server's database; `""` if it worked, else why not.
+
+        The same transport `sqlplan._run_sql()` uses and for the same reasons —
+        stdin rather than `-e <sql>`, `MYSQL_PWD` in the exec environment rather
+        than in an argv anyone can read — but it answers instead of raising,
+        because its one caller must not turn a finished install into a failed
+        one. The statement is fully qualified with the auth schema by
+        `networking.realmlist_sql()`, so no schema argument is needed.
+
+        Whatever the client said is passed back for the log line, with the
+        password taken out of it (`_without()`). That is not theoretical
+        caution: a client quotes the line it could not parse back at you, and an
+        install log is what a user pastes into a bug report.
+        """
+        password = ctx.secrets.db_password
+        try:
+            proc = self._seams.exec_stdin(
+                self.entry.container_spec().db,
+                [self._native().db.client, "-u", "root"],
+                io.BytesIO(statement.encode("utf-8")),
+                env={"MYSQL_PWD": password},
+            )
+        except docker.DockerCommandError as exc:
+            return _without(str(exc), password)
+        if proc.returncode == 0:
+            return ""
+        said = (proc.stderr or "").strip().splitlines()
+        return _without(
+            said[-1] if said else f"the database client exited {proc.returncode}", password
+        )
+
     # -- plumbing --------------------------------------------------------
 
     def _replaceable_compose(self, server_dir: Path) -> tuple[str, ...]:
@@ -1884,6 +2081,19 @@ class StagedInstaller:
         if not (server_dir / STATE_FILE).is_file():
             return
         write_state(server_dir, replace(state, last_error=message))
+
+
+def _without(said: str, secret: str) -> str:
+    """`said` with the database password taken back out of it, every occurrence.
+
+    `sqlplan._redact()`'s rule, spelled again here rather than imported:
+    `yulon.catalog.families` imports this module, so importing back out of it
+    would close a cycle at import time. The guard on an empty secret is not
+    decoration — `"".replace("", "***")` puts the marker between every
+    character, so a `Secrets` that somehow held nothing would produce a log
+    line nobody could read.
+    """
+    return said.replace(secret, "***") if secret else said
 
 
 def _cancelled_message(what: str, note: str = "") -> str:

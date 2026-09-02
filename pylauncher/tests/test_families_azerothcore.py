@@ -202,6 +202,8 @@ def test_a_fresh_install_runs_every_stage_in_order(tmp_path: Path) -> None:
         "one-shot:ac-db-import",
         "verify",
         "start",
+        "query",
+        "sql",
     ]
     assert "compiling" in lines  # the build's output is streamed, not buffered
     state = native.read_state(server_dir, valid=STAGE_NAMES)
@@ -1605,6 +1607,8 @@ def test_macos_native_installer_full_run_and_compose_generation(tmp_path: Path) 
         "one-shot:ac-db-import",
         "verify",
         "start",
+        "query",
+        "sql",
     ]
     assert any("The server is up." in line for line in lines)
 

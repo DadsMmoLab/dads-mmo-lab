@@ -377,6 +377,11 @@ class Recorder:
             return IMPORTED
 
         seams = native.Seams(
+            # STATED, not detected. A successful install now advertises the realm at
+            # the end, and the default seam is the real `platform.detect_lan_ip`, so
+            # without this the recorded call lists below depend on whatever network
+            # the test box is on -- present on the VM, absent on a machine with no LAN.
+            lan_ip=lambda: "192.168.1.25",
             platform_id=lambda: "macos",
             docker_ready=lambda: True,
             ensure_docker=_never_provisions,

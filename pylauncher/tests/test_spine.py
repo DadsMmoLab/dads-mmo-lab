@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 from tests.support_native import ENTRY, IMPORTED, PARTIAL, TBC, Recorder, install
-from yulon import docker, install_wiring, platform, resources
+from yulon import docker, install_wiring, networking, platform, resources
 from yulon.apply import ApplyError
 from yulon.catalog import composegen, native, preflight
 from yulon.catalog.catalog import CatalogEntry, ReadyMarkers, load_catalog
@@ -2321,3 +2321,214 @@ def test_a_state_file_deleted_mid_install_is_not_written_back_at_the_end(tmp_pat
     assert not (
         server_dir / native.STATE_FILE
     ).exists(), "a finished install wrote back a state file the run itself had deleted"
+
+
+# -- the address the realm advertises when the install ends -----------------
+#
+# bug-checklist §35, driven on real hardware 2026-09-02: a TBC server this app
+# installed on m910q was joined from another PC over Tailscale, auth succeeded,
+# the realm list arrived, and the world connect could not — the realmlist row
+# still said 127.0.0.1, so the client had been told the world server was on its
+# own machine. Every part of the fix existed; nothing on the install path ran
+# any of it. These tests are about the closing step that now does.
+
+
+def _advertising(rec: Recorder, server_dir: Path, **overrides: object) -> list[str]:
+    """A whole successful install of a one-stage family, with the seams `overrides` says."""
+    family = _family(lambda me: (native.Stage("only", _say),))
+    return list(_build(rec, family, **overrides).run(InstallOptions(server_dir=server_dir)))
+
+
+def _statements(rec: Recorder) -> list[str]:
+    """Everything sent through the WRITE seam, whole — `sql_calls` also holds queries."""
+    return rec.sql_scripts
+
+
+def test_the_install_ends_by_advertising_the_address_the_seam_detected(tmp_path: Path) -> None:
+    """The UPDATE reaches the SQL seam, carrying the detected address and nothing else.
+
+    The defect in one assertion. Before this step existed the install sent no
+    statement at all, so `_statements(rec) == []` was the shipped behaviour and
+    every server it produced was reachable only from the machine it was on.
+
+    Asserted against `networking.realmlist_sql()`'s own output rather than a
+    string typed here, because that builder is what the Networking tab already
+    spends and the two must not drift into writing different rows.
+
+    Mutations this catches: sending `INSTALL_REALM_HOST` instead of the detected
+    address (the bug itself), asking with no password (`sql_secrets`), and
+    dropping the write while keeping the reassuring line — the line and the
+    statement are asserted over the same run.
+    """
+    rec = Recorder()
+    said = _advertising(rec, tmp_path / "wow", lan_ip=lambda: "100.78.24.50")
+
+    assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.78.24.50", "100.78.24.50")]
+    assert "127.0.0.1" not in _statements(rec)[0], "the loopback was written as the realm address"
+    assert rec.sql_secrets[-1] == "password", "it asked the database with no password"
+    assert [line for line in said if "now advertises 100.78.24.50" in line], said
+
+
+def test_the_line_a_user_reads_names_the_address_they_have_to_type(tmp_path: Path) -> None:
+    """The address is the one thing the reader has to carry away, so it is IN the sentence.
+
+    A player joining from another PC types this into their client's realmlist;
+    an install that changed the row and said only "networking configured" leaves
+    them with nothing to type and no way to find it. It is also what makes the
+    line falsifiable — a message that named no address would pass every other
+    test here while advertising the wrong one.
+
+    Breaks on any mutation that drops the interpolation, and on one that names
+    the address only once: the count asserts both mentions, the fact and the
+    instruction, because dropping the second is how the sentence stops telling
+    anybody what to do with it.
+    """
+    rec = Recorder()
+    said = _advertising(rec, tmp_path / "wow", lan_ip=lambda: "192.168.1.25")
+    line = next(line for line in said if "now advertises" in line)
+    assert line.count("192.168.1.25") == 2, line
+    assert "realmlist" in line, f"it never says what the address is for: {line!r}"
+
+
+@pytest.mark.parametrize("detected", [None, "127.0.0.1", "", "not an address!"])
+def test_no_detectable_address_is_a_sentence_and_never_a_guess(
+    tmp_path: Path, detected: str | None
+) -> None:
+    """No address means: say what is owed, write nothing, and finish successfully.
+
+    Three separate refusals to get wrong. Guessing writes a plausible address
+    into a live auth database and produces the §35 outage with the app's own
+    fingerprints on it. Failing the install would be a lie — every stage passed
+    and the server is running. Saying nothing leaves a user with a server only
+    they can reach and no idea why.
+
+    `127.0.0.1` is in the list because it is an address a detector really
+    returns: `platform.detect_lan_ip()` filters it on its local branch and its
+    WSL branch, which asks Windows, does not.
+
+    Mutations this catches: treating `None` as "already correct" and skipping
+    silently (no line is said), writing whatever was detected (a statement
+    appears), asking the database about a row nothing was going to change
+    (`sql_calls`), and raising instead of saying (the closing line disappears).
+    """
+    rec = Recorder()
+    said = _advertising(rec, tmp_path / "wow", lan_ip=lambda: detected)
+
+    assert native.REALM_ADDRESS_UNKNOWN in said
+    assert _statements(rec) == [], "an undetectable address was written to the database anyway"
+    assert rec.sql_calls == [], "the database was asked about a row nothing was going to change"
+    assert "Networking tab" in native.REALM_ADDRESS_UNKNOWN, "it does not say where the fix is"
+    assert said[-1].startswith(f"{ENTRY.name} is installed"), said[-1]
+
+
+def test_a_row_that_already_says_the_detected_address_is_left_alone(tmp_path: Path) -> None:
+    """Nothing is sent when there is nothing to change — on EVERY column, not just one.
+
+    The double answer is what the read is for: WotLK's realmlist has `address`
+    and `localAddress`, `realmlist_sql()` writes both, so both have to match
+    before this is a no-op. The second half of the test is the reason the query
+    reads both columns — a row whose `address` is right and whose `localAddress`
+    is still the loopback hands 127.0.0.1 to precisely the clients AzerothCore
+    decides are on the realm's own subnet.
+
+    Mutations this catches: skipping the read and always writing (first half),
+    and comparing only `address` (second half). A version of this test with a
+    single-column fixture would survive the second.
+    """
+    rec = Recorder(query_answer="10.1.2.3\t10.1.2.3\n")
+    said = _advertising(rec, tmp_path / "wow", lan_ip=lambda: "10.1.2.3")
+    assert _statements(rec) == [], "a row that was already correct was written again"
+    assert [line for line in said if "already advertises 10.1.2.3" in line], said
+
+    half = Recorder(query_answer=f"10.1.2.3\t{native.INSTALL_REALM_HOST}\n")
+    _advertising(half, tmp_path / "second", lan_ip=lambda: "10.1.2.3")
+    assert _statements(half) == [
+        networking.realmlist_sql(ENTRY, "10.1.2.3", "10.1.2.3")
+    ], "a localAddress still on the loopback was read as nothing to change"
+
+
+def _no_docker_cli(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+    raise docker.DockerCliMissingError("docker: command not found")
+
+
+@pytest.mark.parametrize("how", ["rejected", "unreachable"])
+def test_an_update_that_fails_says_so_and_leaves_the_install_successful(
+    tmp_path: Path, how: str
+) -> None:
+    """A realm row that could not be written is a sentence, never a failed install.
+
+    By the time this runs the server is built, imported, started and has
+    reported ready, and the user has been told so. Turning that into an
+    `InstallerError` would send somebody to delete a working server, and would
+    write a `last_error` into the state file of an install that finished — the
+    exact wrong label `_clear_error()` exists to remove.
+
+    Both ways it can fail, because they arrive differently: the client rejecting
+    the statement is a non-zero exit with stderr, and a database that could not
+    be asked at all is a `DockerCommandError` raised OUT of the seam — the arm
+    that would otherwise escape `run()` as a traceback from three lines above
+    the closing message.
+
+    Mutations this catches: letting either failure propagate (the closing line
+    disappears and `run()` raises), and swallowing it silently (nothing names
+    the address that is still owed).
+    """
+    rec = Recorder(failing_sql="UPDATE")
+    overrides: dict[str, object] = {"lan_ip": lambda: "100.78.24.50"}
+    if how == "unreachable":
+        overrides["exec_stdin"] = _no_docker_cli
+    said = _advertising(rec, tmp_path / "wow", **overrides)
+
+    assert said[-1].startswith(f"{ENTRY.name} is installed"), said[-1]
+    unhappy = [line for line in said if "could not be set to 100.78.24.50" in line]
+    assert len(unhappy) == 1, said
+    assert "Networking tab" in unhappy[0], unhappy[0]
+    recorded = json.loads((tmp_path / "wow" / native.STATE_FILE).read_text(encoding="utf-8"))
+    assert recorded["last_error"] == "", "a finished install recorded itself as failed"
+
+
+def test_the_realm_address_is_set_after_the_server_is_ready_and_before_the_last_line(
+    tmp_path: Path,
+) -> None:
+    """Ordering, and each end of it is load-bearing for a different reason.
+
+    AFTER `ready`: `wow-wotlk`'s catalogued `ready.auth` marker is
+    `{{REALM_HOST}}:{{WORLD_PORT}}`, filled with `INSTALL_REALM_HOST` — the auth
+    server prints the address the realmlist row holds. Advertise the LAN IP
+    before that wait and a perfectly healthy server never prints the line being
+    waited for, so the install fails on a 1800-second timeout. This is the one
+    ordering constraint that turns the fix into a worse outage than the bug.
+
+    BEFORE the closing line: `test_a_finished_install_says_so_last_and_says_where`
+    pins that line as the last thing said, because a success message with output
+    after it reads as a run that carried on and then stopped for an unsaid
+    reason.
+
+    The marker assertion is not decoration either: it is the evidence for the
+    first paragraph, so a catalog edit that stops waiting on the loopback makes
+    this test say so instead of leaving a stale justification in a docstring.
+    """
+    rec = Recorder()
+
+    def wait_ready(spec: docker.ContainerSpec, ready: docker.ReadySpec) -> bool:
+        rec.calls.append("wait-ready")
+        return True
+
+    # The spine's REAL `ready` stage, not a stand-in: the wait this test is
+    # about is the one every family binds, and a double for it could be ordered
+    # correctly while the real one was not.
+    family = _family(
+        lambda me: (
+            native.Stage("only", _say),
+            native.Stage("ready", me.stage_ready, recorded=False),
+        )
+    )
+    engine = _build(rec, family, lan_ip=lambda: "10.1.2.3", wait_ready=wait_ready)
+    said = list(engine.run(InstallOptions(server_dir=tmp_path / "wow")))
+    assert ENTRY.install.native is not None
+    assert native.INSTALL_REALM_HOST in composegen.fill(
+        ENTRY.install.native.ready.auth or "",
+        {"REALM_HOST": native.INSTALL_REALM_HOST, "WORLD_PORT": str(ENTRY.ports.world)},
+    ), "this entry no longer waits on the loopback address; re-derive the ordering above"
+    assert rec.calls.index("wait-ready") < rec.calls.index("sql"), rec.calls
+    assert said[-1].startswith(f"{ENTRY.name} is installed"), said[-1]

@@ -1528,3 +1528,243 @@ def test_a_repository_that_tracks_the_claim_file_s_name_does_not_lock_the_module
 
     assert len(git.calls) == 1
     assert apply_module.CLAIM_FILE in git.asked_about  # asked about that file by name
+
+
+# ------------------------------------------- the client comes from the entry (7.9)
+#
+# `mysql` was a literal in `_argv()` and the first guess in `_CLIENT_NAMES`.
+# `install.native.db.client` says `mysql` for AzerothCore and `mariadb` for the
+# three CMaNGOS entries, and `mariadb:11` ships neither `mysql` nor
+# `mysqldump` — so the literal named a binary that is not in the container and
+# every statement died before it reached a database (measured on a live TBC
+# server, 2026-08-26).
+
+
+class _Probe:
+    """The client probe with a memory: what it was asked, and what it answers."""
+
+    def __init__(self, answer: str | None = None) -> None:
+        self.answer = answer
+        self.asked: list[tuple[str, tuple[str, ...]]] = []
+
+    def __call__(self, container: str, candidates: tuple[str, ...]) -> str | None:
+        self.asked.append((container, candidates))
+        return self.answer
+
+
+def test_the_declared_client_is_asked_for_first_and_is_what_an_unanswered_probe_uses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole of what reading the catalog buys, in the case that made it matter.
+
+    A probe that cannot run falls back to the first candidate. Left as a guess
+    that first candidate is `mysql`, so a wedged daemon or a slow `docker exec`
+    turned a CMaNGOS install into `executable file not found` on every
+    statement — a failure that reads like a broken database rather than an
+    unanswered question.
+    """
+    apply_module._client_cache.clear()
+    probe = _Probe(None)
+    monkeypatch.setattr(apply_module, "_probe_client", probe)
+
+    assert apply_module.mysql_client("tbc-db", client="mariadb") == "mariadb"
+    assert probe.asked[-1] == ("tbc-db", ("mariadb", "mysql")), probe.asked
+    assert apply_module.mysql_client("ac-database", client="mysql") == "mysql"
+    assert probe.asked[-1] == ("ac-database", ("mysql", "mariadb")), probe.asked
+
+
+def test_an_undeclared_client_leaves_the_order_exactly_as_it_was(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every caller that holds no catalog entry must read as it did before 7.9."""
+    apply_module._client_cache.clear()
+    probe = _Probe(None)
+    monkeypatch.setattr(apply_module, "_probe_client", probe)
+
+    assert apply_module.mysql_client("whatever") == "mysql"
+    assert probe.asked[-1][1] == ("mysql", "mariadb"), probe.asked
+    assert apply_module.mysql_client("whatever", "mysqldump") == "mysqldump"
+    assert probe.asked[-1][1] == ("mysqldump", "mariadb-dump"), probe.asked
+
+
+def test_the_declaration_is_a_hint_and_the_container_still_decides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An entry saying `mariadb` over an image that has `mysql` must still work.
+
+    The catalog's `client` is written from the image the entry pins, and images
+    get rebuilt. Putting the declared spelling FIRST rather than using it
+    INSTEAD of the probe is what keeps a stale declaration from breaking a
+    container that answers perfectly well to the other name.
+    """
+    apply_module._client_cache.clear()
+    monkeypatch.setattr(apply_module, "_probe_client", _Probe("mysql"))
+
+    assert apply_module.mysql_client("tortoise-db", client="mariadb") == "mysql"
+
+
+def test_the_dump_tool_follows_the_declared_client_family(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`DbFacts.client` names a FAMILY, and that family's dump tool is not its name.
+
+    `mariadb`'s is `mariadb-dump`, not `mariadb`; a caller passing the declared
+    client straight through as the binary would ask for a program no image has.
+    """
+    apply_module._client_cache.clear()
+    probe = _Probe(None)
+    monkeypatch.setattr(apply_module, "_probe_client", probe)
+
+    assert apply_module.mysql_client("tbc-db", "mysqldump", client="mariadb") == "mariadb-dump"
+    assert probe.asked[-1][1] == ("mariadb-dump", "mysqldump"), probe.asked
+    assert apply_module.mysql_client("ac-database", "mysqldump", client="mysql") == "mysqldump"
+
+
+def test_the_answer_is_cached_per_declared_client_and_not_across_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The declaration decides the ORDER, and the order decides the answer.
+
+    An image with both spellings answers whichever was asked for first, because
+    the probe is `command -v a || command -v b` and `||` short-circuits. So the
+    client belongs in the cache key: without it the first caller's declaration
+    would be handed to the second one's container.
+    """
+    apply_module._client_cache.clear()
+    asked: list[tuple[str, ...]] = []
+
+    def probe(container: str, candidates: tuple[str, ...]) -> str:
+        asked.append(candidates)
+        return candidates[0]
+
+    monkeypatch.setattr(apply_module, "_probe_client", probe)
+
+    assert apply_module.mysql_client("both-db", client="mariadb") == "mariadb"
+    assert apply_module.mysql_client("both-db", client="mysql") == "mysql"
+    assert len(asked) == 2, "one declaration's answer was served to the other"
+
+    for _ in range(3):
+        apply_module.mysql_client("both-db", client="mariadb")
+    assert len(asked) == 2, "the probe is on a hot path and was asked again"
+
+
+def test_the_sql_seam_runs_the_client_its_entry_declared(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The argv a CMaNGOS install really gets, with nobody to ask about the container.
+
+    This is the seam every SQL-backed control on the Server tab goes through,
+    and both per-install facts in it used to be AzerothCore's: the schema and
+    the binary. `schemas=` already had its test; the binary is 7.9's half.
+    """
+    import subprocess
+
+    seen: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    apply_module._client_cache.clear()
+    monkeypatch.setattr(apply_module, "_probe_client", _Probe(None))
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        apply_module.platform, "docker_prefix", lambda wsl_distro=None, **kw: ("docker",)
+    )
+
+    DockerSql("tbc-db", "hunter2", schemas={"auth": "realmd"}, client="mariadb").run_statement(
+        "auth", "SELECT 1"
+    )
+    DockerSql("ac-database", "hunter2").run_statement("auth", "SELECT 1")
+
+    cmangos, azerothcore = seen
+    assert cmangos[cmangos.index("-uroot") - 1] == "mariadb", cmangos
+    assert "mysql" not in cmangos, cmangos
+    assert azerothcore[azerothcore.index("-uroot") - 1] == "mysql", azerothcore
+
+
+def test_the_sql_seam_without_a_declared_client_is_byte_identical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`client=None` is "nothing was declared", and must change no argv at all.
+
+    Every caller outside `ui/controller_view.py` still builds `DockerSql`
+    without one — `install_wiring.import_gate_for()` and each game package's
+    `sql_for()` — so this is most of the tree, and it has to be provably
+    untouched rather than probably untouched.
+    """
+    import subprocess
+
+    seen: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    apply_module._client_cache.clear()
+    monkeypatch.setattr(apply_module, "_probe_client", _Probe(None))
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        apply_module.platform, "docker_prefix", lambda wsl_distro=None, **kw: ("docker",)
+    )
+
+    DockerSql("ac-database", "hunter2").run_statement("auth", "SELECT 1")
+    DockerSql("ac-database", "hunter2", client="mysql").run_statement("auth", "SELECT 1")
+
+    undeclared, declared = seen
+    assert undeclared == declared, (undeclared, declared)
+
+
+# ------------------------------- the relocation licence needs this app's handwriting
+
+
+@pytest.mark.parametrize(
+    "clone_id",
+    ['"clone_id": null, ', '"clone_id": 12, ', '"clone_id": ["x"], ', ""],
+    ids=["null", "number", "list", "absent"],
+)
+def test_the_relocation_licence_needs_a_clone_id_that_is_a_string(
+    tmp_path: Path, clone_id: str
+) -> None:
+    """`remove()`'s weaker proof is "this app's own handwriting", not "close enough".
+
+    A record with `clone_id` missing, null or of the wrong type is MALFORMED,
+    not relocated: nothing in it says which folder it was written in, so there
+    is no field that has stopped matching. It is `UNKNOWN`, and `UNKNOWN`
+    refuses.
+
+    Dropping the `isinstance(..., str)` clause from
+    `claim_written_by_this_app()` left the whole suite green (mutation review,
+    2026-09-02) — every fixture in this file carried a proper string
+    `clone_id`, so nothing ever put a malformed one in front of the predicate.
+    Without that clause `parsed.get("clone_id") != install_id(clone)` is
+    trivially true for `None`, and a folder whose claim says nothing about
+    where it came from is handed the licence to delete a user's checkout and
+    run one module's remove-time SQL.
+
+    The relocated claim this is the edge of — a string that simply differs — is
+    still accepted; `test_a_moved_install_can_still_be_uninstalled_through_the_app`
+    is that half.
+    """
+    import json
+
+    clone, before = _user_module(tmp_path, checkout_of="ours, from its old path")
+    (clone / apply_module.CLAIM_FILE).write_text(
+        f'{{"version": {apply_module.CLAIM_VERSION}, "item_id": "mod-ah-bot", '
+        f'{clone_id}"url": "{OWNED_URL}"}}\n',
+        encoding="utf-8",
+    )
+    assert json.loads((clone / apply_module.CLAIM_FILE).read_text(encoding="utf-8"))
+
+    assert apply_module.read_clone_claim(clone, item_id="mod-ah-bot") is Ownership.UNKNOWN
+    assert apply_module.claim_written_by_this_app(clone, item_id="mod-ah-bot") is False
+
+    sql = _FakeSql()
+    m = parse_manifest(
+        {**OWNED_ITEM, "sql": [{"db": "world", "statement": "DELETE FROM x", "when": "remove"}]}
+    )
+    applier = Applier(tmp_path, git=_FakeGit({}), sql=sql, remote_url=_Origins(OWNED_URL))
+
+    with pytest.raises(ApplyError, match=apply_module.CLAIM_FILE):
+        applier.remove(m)
+
+    assert (clone / "src" / "mine.cpp").read_bytes() == before
+    assert sql.statements == [] and sql.files == []

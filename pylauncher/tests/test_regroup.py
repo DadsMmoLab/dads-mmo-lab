@@ -113,6 +113,13 @@ def _known_group_names(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(platform.importlib, "import_module", fake)
 
+    # STATE the user, never measure it. `_linux_user(None)` returns whoever is
+    # running the suite -- `pk` on the test VM, `runner` on GitHub Actions -- so
+    # `_id_saying`'s assertion that the right user reaches `id -nG` passed here and
+    # failed on CI for three commits before anyone looked (2026-09-02). Pinning it is
+    # what makes that assertion mean "the value arrives" rather than "this box is pk".
+    monkeypatch.setattr(platform, "_linux_user", lambda explicit: "pk")
+
 
 def test_a_stale_session_whose_join_already_happened_is_restarted_under_sg() -> None:
     """The one case the feature exists for, and the only one that returns an argv.

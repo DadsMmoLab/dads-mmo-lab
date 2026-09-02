@@ -1957,3 +1957,34 @@ Three of these have an obvious fix that is **wrong**, and two of them arm a wors
 
 The pattern: *check whether the thing you are about to make true is guarded by something that is
 only safe while it is false.*
+
+
+### 35. Every CMaNGOS install is unreachable from any other machine — 2026-09-02, OPEN
+
+`realmd.realmlist.address` is left at `127.0.0.1`. A client on another machine authenticates
+FINE — realmd answers on 3724, the account is accepted, the realm list arrives — and then the
+client is told the world server lives at `127.0.0.1:8085`, which on the player's own PC means
+the player's own PC. It hangs at "Connecting" or drops back to the realm screen with nothing
+useful said.
+
+**Found by driving it (2026-09-02).** WoW TBC on `m910q`, reached over Tailscale at
+`100.78.24.50`. Auth succeeded and the realm `MaNGOS` appeared; the world connect could not.
+One `update realmd.realmlist set address='100.78.24.50'` later, the same client reached a
+character screen, created `Administrato` (guid 901, account 1, Troll warrior) and the world
+server logged `Sessions online: 1`.
+
+**Why it is worth an entry rather than a one-line fix.** The value that belongs there is not
+knowable from inside the container: it is whichever address the PLAYER can reach, and that is a
+LAN address, a Tailscale address, a public IP or a DNS name depending on how the owner intends
+to play. The installer cannot guess it, and guessing wrong is worse than `127.0.0.1` because it
+looks configured. Phase 7.1's gate line already names "the LAN step" as a separate act; nothing
+performs it, and nothing tells the user it is owed.
+
+**Not the same as the networking work in 6.5.** That line is about firewalls, port-forwarding
+and a realmlist WRITER for the client side. This is the SERVER side — one row in the server's
+own database — and a launcher that installs a server nobody outside the box can join has not
+finished installing it.
+
+**Only demonstrated on TBC.** Vanilla and Tortoise share the family and almost certainly share
+the row; WotLK/AzerothCore keeps the same fact in `acore_auth.realmlist` and was NOT checked.
+UNVERIFIED for the other three.

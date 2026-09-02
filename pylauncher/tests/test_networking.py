@@ -586,3 +586,83 @@ def test_the_cmangos_cores_get_no_local_address_column_either() -> None:
         assert networking.realmlist_sql(entry, "98.24.105.7", "192.168.1.25") == (
             "UPDATE realmd.realmlist SET address='98.24.105.7' WHERE id=1;"
         ), game_id
+
+
+# -- what may be advertised, and how to tell whether it already is ----------
+
+
+@pytest.mark.parametrize(
+    "given",
+    [
+        None,
+        "",
+        "   ",
+        "127.0.0.1",
+        "127.1.2.3",
+        "::1",
+        "0.0.0.0",
+        "localhost",
+        "1.2.3.4'; DROP TABLE x; --",
+        "192.168.1.25 8085",
+    ],
+)
+def test_no_realm_may_advertise_an_address_that_names_the_machine_asking(given: str) -> None:
+    """Every input `advertisable()` must answer None to, one per real source.
+
+    The list is not decoration: `detect_lan_ip()` answers None for an unreadable
+    route, its WSL branch answers "" for a PowerShell that printed nothing, and
+    that same branch takes whatever Windows said WITHOUT the `127.` filter the
+    local branch applies — so a loopback really can arrive here. The last two
+    are `_sql_literal()`'s job, asked through this function so that a caller
+    which has consulted it can build the UPDATE without a `ValueError`.
+
+    Breaks on the mutation that matters: dropping the `127.` prefix test, or
+    the `LOOPBACK` membership test, or the `_sql_literal()` call, each leaves at
+    least one of these returning the input. A weaker version of this test that
+    only passed `None` would survive all three.
+    """
+    assert networking.advertisable(given) is None
+
+
+def test_an_address_other_machines_can_dial_survives_and_loses_its_whitespace() -> None:
+    """The other half: the function must not refuse everything.
+
+    Without this, `return None` is a passing implementation of `advertisable()`
+    — and a passing implementation that leaves every realm on 127.0.0.1, which
+    is the bug. The trailing newline is what a detector reading a command's
+    stdout hands over, and `_sql_literal()` would call that "not an address".
+    """
+    assert networking.advertisable("100.78.24.50") == "100.78.24.50"
+    assert networking.advertisable(" 192.168.1.25\n") == "192.168.1.25"
+    assert networking.advertisable("wow.example.com") == "wow.example.com"
+
+
+def test_the_row_is_read_on_every_column_the_update_writes() -> None:
+    """The reader and the writer address the same columns, per core.
+
+    A comparison over `address` alone would call a row unchanged while
+    `localAddress` still said 127.0.0.1 — and AzerothCore hands `localAddress`
+    to exactly the clients it decides are on the realm's own subnet, i.e. the
+    LAN players this whole step exists for. So the query names both columns for
+    WotLK and one for a core whose realmlist has no local column, which is what
+    `realmlist_sql()` writes in each case.
+
+    Mutating `realmlist_columns()` to return only `address_column` fails the
+    first assertion; dropping the `local_address_column` guard fails the second
+    with a column CMaNGOS's realmd does not have.
+    """
+    assert networking.realmlist_columns(WOTLK) == ("address", "localAddress")
+    assert networking.realmlist_address_query(WOTLK) == (
+        "SELECT address, localAddress FROM acore_auth.realmlist WHERE id=1;"
+    )
+    assert networking.realmlist_columns(TORTOISE) == ("address",)
+    assert networking.realmlist_address_query(TORTOISE) == (
+        "SELECT address FROM tw_logon.realmlist WHERE id=1;"
+    )
+    # The join that matters: every column the query reads is a column the
+    # UPDATE writes, for every shipped core, so "the answer equals the address
+    # in every field" really is "there is nothing to change".
+    for entry in load_catalog().games:
+        written = networking.realmlist_sql(entry, "10.0.0.9", "10.0.0.9")
+        for column in networking.realmlist_columns(entry):
+            assert f"{column}='10.0.0.9'" in written, (entry.id, column)
