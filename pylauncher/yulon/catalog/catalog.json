@@ -149,7 +149,7 @@
             "auth": null,
             "fatal": null,
             "regex": false,
-            "timeout_s": 600,
+            "timeout_s": 1800,
             "restart_loop": 4
           },
           "cmangos": {
@@ -499,7 +499,7 @@
             "auth": null,
             "fatal": null,
             "regex": false,
-            "timeout_s": 600,
+            "timeout_s": 1800,
             "restart_loop": 4
           },
           "cmangos": {
@@ -835,7 +835,7 @@
             "auth": null,
             "fatal": "Correct \\*.map files not found|Could not open|Database .* not found",
             "regex": true,
-            "timeout_s": 600,
+            "timeout_s": 1800,
             "restart_loop": 4
           },
           "cmangos": {

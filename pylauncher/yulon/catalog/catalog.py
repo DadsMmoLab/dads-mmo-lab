@@ -158,7 +158,19 @@ class ReadyMarkers(_Strict):
     world: str = Field(min_length=1)
     auth: str | None = None
     fatal: str | None = None
-    timeout_s: int = Field(default=600, gt=0)
+    timeout_s: int = Field(
+        default=600,
+        gt=0,
+        description=(
+            "Seconds to wait for `world` before calling the install failed. Generous on "
+            "purpose: `restart_loop` already catches the server that is never coming up, so "
+            "this only ever binds on one that is merely SLOW, and cutting a slow one short "
+            "tells a user their working server failed. Measured on m910q 2026-09-02, WoW TBC "
+            "first boot on 4 cores: container start 15:51:15, first `Avg Diff:` 16:04:28 -- "
+            "793s, against the 600 the three CMaNGOS entries then carried. The server was "
+            "healthy and idle 44 minutes later; the install had already reported failure."
+        ),
+    )
     restart_loop: int = Field(
         default=4,
         ge=1,

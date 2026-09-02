@@ -687,3 +687,36 @@ def test_every_cmangos_build_forces_http_1_1_before_cmake_runs(entry: CatalogEnt
     assert text.index("http.version HTTP/1.1") < text.index(
         "cmake .."
     ), f"{entry.id} sets HTTP/1.1 after the cmake step that does the cloning"
+
+
+@pytest.mark.parametrize("entry", CMANGOS_ENTRIES, ids=lambda e: e.id)
+def test_the_ready_wait_outlasts_a_measured_first_boot(entry: CatalogEntry) -> None:
+    """A slow first boot must not be reported to the user as a failed install.
+
+    Measured on m910q 2026-09-02, WoW TBC, 4 cores, first boot: container
+    started 15:51:15, first `Avg Diff:` at 16:04:28 -- 793 seconds. The entries
+    carried 600, so the install reported
+
+        The server started but never reported ready.
+
+    while all three containers stayed Up and the world server sat idle printing
+    `Avg Diff: 50. Sessions online: 0.` It had been running 44 minutes by the
+    time anyone looked.
+
+    The floor is the MEASURED 793s and not the shipped number, so this fails if
+    anyone lowers the timeout back under a boot that really happened. Being
+    generous costs nothing here: `restart_loop` catches the server that is
+    never coming up, so this value only ever binds on one that is merely slow,
+    and 4 cores is not the slowest machine a user will have.
+
+    All three CMaNGOS entries, though only TBC was timed: they share the family,
+    the boot work and the marker, and Vanilla was mid-build when this was
+    written. If one of them turns out to need more, that is a measurement to
+    take, not a reason to leave the other two under a number already disproved.
+    """
+    ready = entry.install.native.ready
+    assert ready is not None, f"{entry.id} has no ready markers"
+    assert ready.timeout_s >= 793, (
+        f"{entry.id} gives up after {ready.timeout_s}s, under the 793s a TBC first boot "
+        "actually took -- a working server reported as a failed install"
+    )
