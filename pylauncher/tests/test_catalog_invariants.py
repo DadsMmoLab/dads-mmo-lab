@@ -2,8 +2,12 @@
 
 Every case is enumerated over the shipped catalog rather than over a list of ids, because
 the point of one engine per lineage is that the same rule holds for every game it serves.
-A red here names a drift in DATA or in a TEMPLATE — fix the file the assertion names, never
-the number in the test. Nothing here starts a container or reads a network.
+A red here names a drift in DATA or in a TEMPLATE, and the fix belongs in the file the
+assertion names rather than in the number that made it red. One case is not like that:
+the derived game-word set at the bottom has measured false positives, recorded in
+`game_words()`, so a red from `test_family_modules_contain_no_game_literal` is read
+before it is believed and may be answered by rewording prose. Nothing here starts a
+container or reads a network.
 
 **What this file deliberately does NOT assert.** `"cmangos" in families.FAMILIES` is a
 declaration, and the 7.3 plan had this task assert it. The property it gestures at is owned
@@ -62,7 +66,16 @@ _NAMED_VOLUME = re.compile(r"^\s*-\s*[A-Za-z][\w-]*:/")
 _KEY = re.compile(r"^\s*(?:-\s*)?(?P<key>[A-Za-z_][\w.-]*)\s*:")
 _SERVICE = re.compile(r"^  (?P<name>[A-Za-z0-9_-]+):\s*$")
 _IMAGE = re.compile(r"^\s+image:\s*(?P<ref>\S+)\s*$")
+_CONTAINER_NAME = re.compile(r"^\s+container_name:\s*(?P<name>\S+)\s*$")
 _SERVICE_VOLUMES = re.compile(r"^(?P<indent>\s+)volumes:\s*$")
+# Both spellings compose honours: `${VAR:-x}` defaults when unset OR empty,
+# `${VAR-x}` when unset. Only the first was looked for until 2026-09-02.
+_PASSWORD_DEFAULT = re.compile(r"\$\{DB_ROOT_PASSWORD:?-")
+
+IMPORT_ROOT = Path(composegen.__file__).resolve().parents[2]
+"""The directory the `yulon` package sits in, so a module path becomes a dotted name."""
+
+CONTROLLER_MODULE = "yulon.controller"
 
 TEST_PASSWORD = "generated-0123456789abcdef"
 """A stand-in for the per-install secret, in the shape `_refuse_unsafe()` accepts."""
@@ -129,6 +142,31 @@ def images_by_service(compose_text: str) -> dict[str, str]:
         image = _IMAGE.match(line)
         if image and service:
             found[service] = image.group("ref")
+    return found
+
+
+def container_names_by_service(compose_text: str) -> dict[str, str]:
+    """`{service: container_name}` — the PAIRING, and not two sets compared apart.
+
+    Until 2026-09-02 the case below compared the set of service names to the
+    entry's containers and then asked that each name appear as SOME
+    `container_name:` line anywhere in the file. Swapping the two
+    `container_name:` lines between the `realmd` and `mangosd` services leaves
+    both of those true, and the whole suite stayed green with them swapped —
+    while every command addressed by service name reaches the other container.
+    The convention `docker.start_database()` relies on is service<->container
+    IDENTITY, which is the half that was never asserted.
+    """
+    found: dict[str, str] = {}
+    service = ""
+    for line in service_lines(compose_text):
+        top = _SERVICE.match(line)
+        if top:
+            service = top.group("name")
+            continue
+        named = _CONTAINER_NAME.match(line)
+        if named and service:
+            found[service] = named.group("name")
     return found
 
 
@@ -201,6 +239,23 @@ def sentinel_secrets() -> native.Secrets:
     return native.Secrets(**{field.name: f"SENTINEL-{field.name}" for field in named})
 
 
+def fills_from(text: str, tokens: dict[str, str], where: str) -> None:
+    """`composegen.fill()`, with the entry's own coordinates added to its refusal.
+
+    The rule that fires on an unknown token is `fill()`'s own `ComposeGenError:
+    unfilled compose placeholder {{…}}` — it RAISES rather than returning the
+    text, so `assert "{{" not in composegen.fill(...)`, which is how the case
+    below was spelled until 2026-09-02, is a line that cannot run. Red either
+    way, but the assertion a reader was shown was not the rule that would fire,
+    and `fill()`'s message names the token without naming WHERE in the entry it
+    sits.
+    """
+    try:
+        composegen.fill(text, tokens)
+    except composegen.ComposeGenError as exc:
+        raise AssertionError(f"{where}: {exc}") from None
+
+
 def secret_tokens(entry: CatalogEntry, server_dir: Path) -> dict[str, str]:
     """The mapping the conf and import stages spend, asked of the engine itself.
 
@@ -208,6 +263,12 @@ def secret_tokens(entry: CatalogEntry, server_dir: Path) -> dict[str, str]:
     that rots is the copy: a token added to `_public_tokens()` would leave this
     file's set narrower than the one an install spends, so a conf value naming the
     new token would pass here and fail at stage time.
+
+    The ready-marker case further down DOES hand-type its two keys, against that
+    rule, and deliberately — see its docstring. The rule holds where the mapping
+    is WIDE and the test only spends it; it inverts where the mapping's width is
+    itself the property under test, because then asking the engine for the
+    mapping and filling with the same mapping asserts nothing at all.
     """
     engine = cmangos_engine(entry)
     ctx = native.StageContext(
@@ -306,7 +367,13 @@ def test_the_build_overlay_builds_exactly_the_images_the_entry_declares(
 def test_every_service_is_named_after_a_container_the_entry_declares(
     entry: CatalogEntry, tmp_path: Path
 ) -> None:
-    """The AzerothCore convention `docker.start_database()` relies on, held for every game."""
+    """The AzerothCore convention `docker.start_database()` relies on, held for every game.
+
+    That convention is an IDENTITY — the service key and its `container_name:`
+    are the same string — so it is asserted as one mapping and not as two sets
+    that happen to have the same members. `container_names_by_service()` says
+    what the weaker form let through.
+    """
     plan = render(entry, tmp_path / entry.id)
     containers = entry.containers
     expected = {containers.db, containers.auth, containers.world}
@@ -315,9 +382,8 @@ def test_every_service_is_named_after_a_container_the_entry_declares(
     if containers.client_data:
         expected.add(containers.client_data)
     assert service_names(plan.base) == expected, entry.id
-    for name in expected:
-        pattern = rf"^\s+container_name:\s*{re.escape(name)}\s*$"
-        assert re.search(pattern, plan.base, re.MULTILINE), (entry.id, name)
+    named = container_names_by_service(plan.base)
+    assert named == {name: name for name in expected}, (entry.id, named)
 
 
 @pytest.mark.parametrize("entry", ENTRIES, ids=IDS)
@@ -330,6 +396,16 @@ def test_a_generated_password_is_never_spelled_in_a_template(entry: CatalogEntry
     were deleted. `${DB_ROOT_PASSWORD:-…}` is the half no refusal sees at all: a
     default IS password text, and it is what makes compose start a database with
     a password nobody chose instead of refusing to start.
+
+    BOTH default spellings, since 2026-09-02. Compose honours `${VAR:-x}` (unset
+    or empty) and `${VAR-x}` (unset only), and this looked for the first as a
+    literal substring: `${DB_ROOT_PASSWORD-mangos}` was added to the shared
+    CMaNGOS base template and the entire suite stayed green. The paragraph above
+    is the argument against the spelling it did not check, word for word.
+
+    The base file's `:?` is deliberately not widened the same way. `${VAR?msg}`
+    refuses an unset variable and accepts an empty one, and an empty root
+    password is the state this rule exists to keep out of a running database.
     """
     block = native_of(entry)
     if entry.install.password.mode == "fixed":
@@ -338,7 +414,7 @@ def test_a_generated_password_is_never_spelled_in_a_template(entry: CatalogEntry
     for name in COMPOSE_TEMPLATES:
         text = (TEMPLATES / block.templates / name).read_text(encoding="utf-8")
         assert "{{DB_PASSWORD}}" not in text, f"{entry.id}: {name}"
-        assert "${DB_ROOT_PASSWORD:-" not in text, f"{entry.id}: {name} defaults the secret"
+        assert not _PASSWORD_DEFAULT.search(text), f"{entry.id}: {name} defaults the secret"
     base = (TEMPLATES / block.templates / "base.yml.tmpl").read_text(encoding="utf-8")
     assert "${DB_ROOT_PASSWORD:?" in base, f"{entry.id}: the base file must refuse an empty .env"
 
@@ -355,16 +431,30 @@ def test_every_mount_is_a_labelled_host_bind_or_an_unlabelled_named_volume(
     so a per-entry count of matches would still come out right while the new
     mount carried no label, and the report would be "Permission denied" from a
     container on Fedora, long after the build.
+
+    ALL THREE compose templates, since 2026-09-02. The loop read `base` and
+    `override`, and the single line that mentioned the third asserted `":z" not
+    in plan.build` under the sentence "the build overlay mounts nothing" — so an
+    UNLABELLED `- ./cache:{{CORE_DIR}}/cache` added to
+    `shared/cmangos/build.yml.tmpl` satisfied it: the missing label was the pass
+    condition, the whole suite stayed green, and the report would have been the
+    Fedora denial this case exists to prevent. The build overlay's real claim is
+    the stronger one — it declares no mount at all — so that is what is
+    asserted, on the template and on the render, and `":z" not in` is gone with
+    it. An unlabelled bind there now dies on the label rule below and a
+    labelled one dies on the emptiness rule after it.
     """
     block = native_of(entry)
+    plan = render(entry, tmp_path / entry.id)
     labelled = 0
-    for name in ("base.yml.tmpl", "override.yml.tmpl"):
+    for name in COMPOSE_TEMPLATES:
         path = TEMPLATES / block.templates / name
         for line in volume_entries(path.read_text(encoding="utf-8")):
             item = line.strip()
             if _HOST_BIND.match(line):
                 assert line.rstrip().endswith("{{BIND_LABEL}}"), f"{entry.id} {name}: {item}"
-                labelled += 1
+                if name != "build.yml.tmpl":
+                    labelled += 1
             elif _NAMED_VOLUME.match(line):
                 assert "{{BIND_LABEL}}" not in line, f"{entry.id} {name}: {item}"
             else:
@@ -373,7 +463,13 @@ def test_every_mount_is_a_labelled_host_bind_or_an_unlabelled_named_volume(
                     "volume, so nothing here decides whether it needs the SELinux label"
                 )
     assert labelled, f"{entry.id} mounts no host directory at all"
-    plan = render(entry, tmp_path / entry.id)
+    build_template = TEMPLATES / block.templates / "build.yml.tmpl"
+    for source, text in (
+        ("build.yml.tmpl", build_template.read_text(encoding="utf-8")),
+        ("the rendered build overlay", plan.build),
+    ):
+        mounts = [line.strip() for line in volume_entries(text)]
+        assert not mounts, f"{entry.id}: {source} declares a mount: {mounts}"
     rendered = [
         line
         for text in (plan.base, plan.override)
@@ -382,7 +478,6 @@ def test_every_mount_is_a_labelled_host_bind_or_an_unlabelled_named_volume(
     ]
     assert len(rendered) == labelled, (entry.id, len(rendered), labelled)
     assert all(line.rstrip().endswith(":z") for line in rendered), (entry.id, rendered)
-    assert ":z" not in plan.build, f"{entry.id}: the build overlay mounts nothing"
 
 
 # -- the CMaNGOS family blocks ------------------------------------------------
@@ -421,12 +516,22 @@ def test_no_sql_pattern_carries_a_token_because_expand_never_fills_one(
     `{{TOKEN}}` in a glob is matched literally against the filesystem and nothing
     matches it. In a `fail` phase that is a refused install and in a `warn` phase
     a silently skipped dump, and neither names the token as the cause.
+
+    `assert seen` since 2026-09-02, matching its four siblings. `SqlPhase.files`
+    defaults to `()` and is the one part of the SQL plan with no `min_length`,
+    so an entry whose every phase runs STATEMENTS reaches this loop with nothing
+    to examine — measured by turning wow-tbc's twelve phases into statement
+    phases, which took the sibling above red on its own `assert seen` and left
+    this case green.
     """
     data = native_of(entry).cmangos
     assert data is not None
+    seen = 0
     for phase in data.sql.phases:
         for pattern in list(phase.files) + list((phase.into_each or {}).values()):
             assert "{{" not in pattern, (entry.id, phase.name, pattern)
+            seen += 1
+    assert seen, f"{entry.id}'s SQL plan names no file pattern, so nothing was examined"
 
 
 @pytest.mark.parametrize("entry", CMANGOS_ENTRIES, ids=CMANGOS_IDS)
@@ -458,6 +563,9 @@ def test_every_conf_value_and_sql_statement_fills_from_the_mapping_its_stage_spe
     their own, and a case routed through them would also go red for a missing file
     or for a database name outside the entry — failures that say nothing about the
     tokens this case is about.
+
+    The refusal is `fill()`'s, not this file's: see `fills_from()` for why the
+    assertion this case used to spell could never have run.
     """
     data = native_of(entry).cmangos
     assert data is not None
@@ -465,12 +573,12 @@ def test_every_conf_value_and_sql_statement_fills_from_the_mapping_its_stage_spe
     values = 0
     for file_name, patch in data.conf.files.items():
         for key, value in patch.keys.items():
-            assert "{{" not in composegen.fill(value, tokens), (entry.id, file_name, key)
+            fills_from(value, tokens, f"{entry.id} {file_name}[{key}]")
             values += 1
     statements = 0
     for phase in data.sql.phases:
         for statement in phase.statements:
-            assert "{{" not in composegen.fill(statement, tokens), (entry.id, phase.name)
+            fills_from(statement, tokens, f"{entry.id} phase {phase.name!r}")
             statements += 1
     assert values, f"{entry.id} patches no conf value"
     assert statements, f"{entry.id}'s SQL plan runs no literal statement"
@@ -480,12 +588,21 @@ def test_every_conf_value_and_sql_statement_fills_from_the_mapping_its_stage_spe
 def test_no_conf_value_carries_a_line_break_that_would_write_a_second_key(
     entry: CatalogEntry,
 ) -> None:
-    """`conf.apply_table()` writes one line per key, so a break in a value writes two."""
+    """`conf.apply_table()` writes one line per key, so a break in a value writes two.
+
+    `assert values` since 2026-09-02, matching its siblings. `ConfPatchTable.files`
+    and `ConfPatch.keys` both carry `min_length=1` today, so this loop cannot in
+    fact run empty against the shipped models — the guard is what keeps the case
+    self-contained if either constraint is ever relaxed, and it costs one line.
+    """
     data = native_of(entry).cmangos
     assert data is not None
+    values = 0
     for file_name, patch in data.conf.files.items():
         for key, value in patch.keys.items():
             assert "\n" not in value and "\r" not in value, (entry.id, file_name, key)
+            values += 1
+    assert values, f"{entry.id} patches no conf value, so nothing was examined"
 
 
 @pytest.mark.parametrize("entry", CMANGOS_ENTRIES, ids=CMANGOS_IDS)
@@ -539,6 +656,14 @@ def test_every_ready_marker_fills_from_the_two_tokens_the_spine_gives_it(
     two-key mapping, so a marker naming `{{CORE_DIR}}` would pass a family-mapping
     check and then break the last stage of an otherwise finished install. Asked of
     the real engine, so the answer comes from the mapping the install spends.
+
+    `given` is hand-typed, which `secret_tokens()` argues against for the family
+    mapping — the opposite call here, and on purpose. The property under test IS
+    the width of `_ready_spec()`'s mapping, so filling the marker from that same
+    mapping and matching it against that same mapping's output would be a
+    tautology. The fill side is written out so the marker is filled from
+    OUTSIDE the engine and only the pattern side is asked of it; a key added to
+    `_ready_spec()` therefore turns this case red, which is the right way round.
     """
     block = native_of(entry)
     spec = engine_for(entry)._ready_spec(block.ready)
@@ -611,10 +736,12 @@ def literal_strings(source: str) -> list[tuple[int, str]]:
 def per_game_values(entry: CatalogEntry) -> set[str]:
     """Every value of this entry that names its GAME, plus each path segment of one.
 
-    Read off the entry rather than typed out, so a game added to `catalog.json`
-    brings its own vocabulary into the check with it. Segments are split on `/`
-    only: `-` and `_` are how these names are BUILT (`tbc-db`, `tw_world`), and
-    splitting on them would offer `db` and `world` as game words.
+    Read off the entry rather than typed out. That is NOT the same as a new game
+    widening the check: `game_words()` then deletes every value this entry
+    shares with another, so a sibling entry mostly subtracts. What that costs is
+    measured there. Segments are split on `/` only: `-` and `_` are how these
+    names are BUILT (`tbc-db`, `tw_world`), and splitting on them would offer
+    `db` and `world` as game words.
     """
     block = native_of(entry)
     values = {
@@ -661,16 +788,43 @@ def per_game_values(entry: CatalogEntry) -> set[str]:
 def game_words() -> dict[str, set[str]]:
     """Per entry, the values naming THAT game and no other, minus the engines' own words.
 
-    Two filters, and each was measured against the tree on 2026-09-02. A value
-    more than one entry carries is a word of the lineage or of English —
-    `server`, `characters`, `mangos` — and the first two appear in dozens of
-    user-facing sentences in these modules. A stage name is Python's vocabulary:
-    `client-data` is AzerothCore's fourth stage and also its third image, and the
-    stage tuple is where that word belongs.
+    Two filters. A value more than one entry carries is a word of the lineage or
+    of English — `server`, `characters`, `mangos` — and the first two appear in
+    dozens of user-facing sentences in these modules. A stage name is Python's
+    vocabulary: `client-data` is AzerothCore's fourth stage and also its third
+    image, and the stage tuple is where that word belongs.
 
-    What the filters cost is written down rather than implied: a value two CMaNGOS
-    games share (`/opt/mangos/etc`, `mangos`) is not caught here, and neither is a
-    game word that collides with a stage name.
+    **What the filters cost, MEASURED against the tree on 2026-09-02** (four
+    entries, 126 words: wow-tbc 36, wow-vanilla 34, wow-tortoise 32, wow-wotlk
+    24). None of the four below was reasoned about; each was run.
+
+    * The set is not a superset of what an engine would plausibly hardcode.
+      `Avg Diff:` is `install.native.ready.world` for BOTH wow-tbc and
+      wow-vanilla, so the uniqueness filter deletes it — and a ready marker is
+      the single most likely thing a family engine would hardcode.
+    * Nothing about the CMaNGOS in-image layout is protected. `/opt/mangos/etc`,
+      `mangosd.conf`, `Avg Diff:`, `/opt/mangos/bin/tools/MoveMapGen` and
+      `vmap_extractor` were each put through the check as a literal in a family
+      module and all five passed. wow-tbc and wow-vanilla are byte-identical in
+      `conf.source_dir`, `conf.files`, `mmaps.argv` and two of three
+      `extract.tools`, which is why.
+    * It DECAYS as the catalog grows, which is the growth one engine per lineage
+      exists for. Cloning `wow-wotlk` as a sibling `wow-wotlk-hd` took wow-wotlk
+      from 24 words to 2 (`wotlk`, `wow-wotlk`) and gave the clone 1, and
+      `test_the_catalog_words_catch_something` still passed — that control asks
+      only whether each game contributes at least one word, and an entry's own
+      id always survives.
+    * It has false positives, and they are ordinary English. `dbc` (wow-tbc's)
+      and `worldserver`, `authserver`, `12340` (wow-wotlk's) turn a family
+      module red wherever they appear, in a sentence as readily as in data:
+      "extract the dbc files before the maps" and "the worldserver container
+      never came back" are both red. `native.py` already yields *"Waiting for
+      the world server to finish loading"*, which is one respelling away.
+
+    So a red from `test_family_modules_contain_no_game_literal` is read before
+    it is believed, and the answer may be to reword prose rather than to move
+    data. Redesigning the filter is a follow-up; this is the honest account of
+    what it does today.
     """
     per_entry = {entry.id: per_game_values(entry) for entry in ENTRIES}
     seen: dict[str, int] = {}
@@ -708,10 +862,14 @@ def test_family_modules_contain_no_game_literal(module: Path) -> None:
     `cmangos.py`'s module docstring names this test as the thing that will hold
     that claim; until this task the claim was held by a reading done by hand.
 
-    The words are derived from the catalog rather than listed, so the third
-    CMaNGOS game brings its own into the check.
-    `test_the_catalog_words_catch_something` is the control that the derivation is
-    not empty.
+    The words are DERIVED from the catalog rather than listed, which is not the
+    same as a new game widening the check: a new entry contributes its id and
+    SUBTRACTS everything it shares with an existing one. What that costs, and
+    the false positives it carries, are measured in `game_words()` and are worth
+    reading before a red here is acted on.
+    `test_the_catalog_words_catch_something` is the control that the derivation
+    is not empty — and only that. It does not show the set is adequate; the
+    measurements say it is not.
     """
     found = game_literals_in(module.read_text(encoding="utf-8"))
     assert not found, f"{module.name} spells catalog values: {found}"
@@ -742,17 +900,83 @@ def test_the_catalog_words_catch_something() -> None:
 # -- what the catalog package may not import ----------------------------------
 
 
+def imported_modules(module: Path, source: str) -> set[str]:
+    """Every module `source` imports, resolved to an ABSOLUTE dotted name.
+
+    Four spellings reach `yulon/controller.py` from inside `catalog/`, and until
+    2026-09-02 this read two. `from yulon import controller` puts `"yulon"` in
+    `node.module` and the module's own name in `node.names`, which was read for
+    `ast.Import` and never for `ast.ImportFrom`; and every relative import
+    (`from ..controller import X`, `level > 0`) carries a module name that
+    starts with no package at all. Both were added to `composegen.py` and the
+    whole suite stayed green. `yulon/controller.py` is a MODULE and not a
+    package, so `from yulon import controller` is the spelling a person would
+    write — the two that were caught are the two nobody uses.
+
+    `node.names` is folded in for `ImportFrom` unconditionally, because
+    `from yulon.catalog import composegen` and `from yulon import controller`
+    are the same node shape and only the resolved name tells them apart. A
+    class name imported the same way (`from x import Thing`) resolves to a
+    dotted string that is no module, which costs nothing here.
+    """
+    package = ".".join(module.relative_to(IMPORT_ROOT).with_suffix("").parts[:-1])
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            found.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base = ""
+            if node.level:
+                parts = package.split(".")
+                base = ".".join(parts[: len(parts) - node.level + 1])
+            head = ".".join(part for part in (base, node.module or "") if part)
+            found.add(head)
+            found.update(f"{head}.{alias.name}" if head else alias.name for alias in node.names)
+    return {name for name in found if name}
+
+
+def reaches_the_controller(name: str) -> bool:
+    """`yulon.controller` itself or a dotted child of it — never a name that merely starts so.
+
+    The dot is the point. `startswith("yulon.controller")`, which is what this
+    rule used to spell, would also ban a future `yulon.controllers` that has
+    nothing to do with the per-game probes.
+    """
+    return name == CONTROLLER_MODULE or name.startswith(f"{CONTROLLER_MODULE}.")
+
+
 def test_the_catalog_package_imports_no_controller() -> None:
     """The per-game probes are injected by the caller; `catalog/` never reaches into one."""
     modules = sorted(CATALOG_PACKAGE.rglob("*.py"))
     assert modules, f"no modules under {CATALOG_PACKAGE}"
+    seen = 0
     for module in modules:
-        tree = ast.parse(module.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            names: list[str] = []
-            if isinstance(node, ast.Import):
-                names = [alias.name for alias in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                names = [node.module]
-            for name in names:
-                assert not name.startswith("yulon.controller"), f"{module}: imports {name}"
+        for name in imported_modules(module, module.read_text(encoding="utf-8")):
+            assert not reaches_the_controller(name), f"{module}: imports {name}"
+            seen += 1
+    assert seen, f"nothing under {CATALOG_PACKAGE} imports anything, so nothing was read"
+
+
+def test_the_import_reader_answers_every_spelling_of_the_controller() -> None:
+    """The control for the case above: a ban is only as wide as the reader under it.
+
+    Each line reaches `yulon/controller.py` from a module in `catalog/`, and the
+    two marked below are the two that got past the ban while the whole suite
+    stayed green. The last line is the neighbour on the other side — a rule that
+    over-bans is also a broken rule.
+    """
+    module = CATALOG_PACKAGE / "composegen.py"
+    reaches = (
+        "import yulon.controller",
+        "from yulon.controller import Controller",
+        "from yulon import controller",  # green until 2026-09-02
+        "from ..controller import Controller",  # green until 2026-09-02
+        "from .. import controller",
+    )
+    for line in reaches:
+        found = imported_modules(module, line)
+        assert any(reaches_the_controller(name) for name in found), (line, sorted(found))
+    for line in ("from yulon import platform", "from yulon.catalog import composegen"):
+        found = imported_modules(module, line)
+        assert not any(reaches_the_controller(name) for name in found), (line, sorted(found))
+    assert not reaches_the_controller("yulon.controllers")

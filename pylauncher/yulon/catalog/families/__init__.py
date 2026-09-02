@@ -5,12 +5,11 @@ asks here. Adding an emulator lineage is one class in this package and one
 line in `FAMILIES`; a game of an existing lineage is catalog data only.
 
 Catalog data that names a family this build has no engine for is a DEFECT and
-not a supported window: F.3 deleted the bash `Installer` such an entry used to
-fall back to, so the only answer left is `family_for()`'s refusal, and the
-`is_registered()` predicate that had described the window — unreferenced since
-that branch went — was deleted in G.7 rather than left contradicting
-`test_spine.py::test_every_shipped_native_entry_reaches_the_class_its_family_id_names`,
-which fails on exactly that state.
+not a supported window: `family_for()`'s refusal is the only answer, and the
+spine's shipped-entry test fails on exactly that state. (F.3 deleted the bash
+`Installer` such an entry used to fall back to; G.7 deleted the
+`is_registered()` predicate that had called the state a supported window, which
+nothing had referenced since that branch went.)
 """
 
 from __future__ import annotations
