@@ -420,6 +420,18 @@ def secret_token_name(field_name: str) -> str:
     a cross-module equality test is one more thing to keep and it can only
     report a drift that this function makes impossible.
 
+    "Spelled ONCE" is true of the DEFINITION and not of the bindings, and the
+    difference bites exactly one kind of test. Both users import the function
+    by name (`from yulon.catalog.native import secret_token_name`), so the
+    object is reachable through three module namespaces — this one, and each of
+    `families/dockerfile.py` and `families/cmangos.py` — and rebinding any one
+    of them leaves the other two pointing at the original. Checked 2026-09-02:
+    nothing monkeypatches it, and the only mentions under `tests/` are two
+    direct calls in `test_families_cmangos.py`. A future test that set
+    `native.secret_token_name` and then exercised either derivation would be a
+    silent no-op rather than a failure; patch the module that spends it, or
+    pass the spelling in.
+
     It takes the field NAME rather than a `Field` so a caller with only a
     string can spend it, and it is deliberately not `str.upper` under a new
     name: the grammar the catalog's templates use is what this states, and if

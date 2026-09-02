@@ -67,12 +67,38 @@ CATALOG_ERROR_TAIL = "That is a catalog error in the app, not something to fix o
 Three refusals said it in two spellings until 2026-09-01 — two "a catalog
 error in the app", one "a bug in the app's catalog" — and a second wording for
 one thing drifts further from the first every time either is edited.
-`test_the_family_s_catalog_refusals_end_in_one_tail_and_not_two` holds the
-three together.
+`test_the_family_s_catalog_refusals_end_in_one_tail_and_not_two` holds them
+together, and derives WHICH refusals those are from this module's AST rather
+than restating a count: that test opened "Three refusals" on the day a fourth
+user was added in the same diff.
 
 Checked 2026-09-01: `sqlplan.py` carries `_CATALOG_ERROR`, the same sentence
 without "in the app", private to that module and ending six refusals there.
 Whether the two become one string is undecided, and is not decided here.
+
+Not every refusal in this module belongs to it: see `DECLARATION_ERROR_TAIL`,
+which is for the ones no catalog file can cause.
+"""
+
+DECLARATION_ERROR_TAIL = (
+    "That is a bug in the app's own declarations, not something to fix on this machine "
+    "and not anything a catalog file can cause."
+)
+"""For a refusal a catalog entry cannot trigger, however malformed.
+
+`CATALOG_ERROR_TAIL` sends a reader to the catalog, and that is right for the
+refusals it ends: each of those fires on a shape a `catalog.json` entry can
+actually take. `_secret_tokens()`'s collision refusal is not one of them and
+was ending in it until 2026-09-02. It fires only when a field of
+`native.Secrets` — a Python dataclass field, in `yulon/catalog/native.py` — is
+named like a key the public half already spells, and the public half's keys are
+literals in this file plus `composegen.entry_tokens()`'s. No catalog data
+reaches either set, so a user sent to the catalog by that sentence would have
+found nothing to fix there.
+
+Deliberately a second CONSTANT rather than a second wording spelled inline: one
+sentence written out twice is exactly the drift `CATALOG_ERROR_TAIL` exists to
+have stopped.
 """
 
 DATA_DIR = "data"
@@ -687,12 +713,30 @@ class CmangosInstaller(StagedInstaller):
         for a reason that has nothing to do with secrecy. A leak that is
         careful enough to be consistent is not caught at all.)
 
-        So what the split is worth is the difference between ONE token added to
-        a mapping that already held the password and about SIX lines that have
-        to name a public method and cache its answer. That is a real rise in
-        the cost and the visibility of the edit, and it is why the split is
-        kept. It is not a guarantee, and nothing below should be read as one —
-        the guarantees are `render()`'s key-drop and its by-name refusal, which
+        **The price is not a figure, and both figures written here were refuted
+        by execution.** The first draft said "structurally out of reach" and the
+        route above disproved it. The second said "about SIX lines that have to
+        name a public method and cache its answer", and a review disproved that
+        on 2026-09-02 with a cheaper route (M-R2, reproduced here the same day):
+        `generate-compose` merges `DB_ROOT_PASSWORD=<the plaintext install
+        password>` into `<server_dir>/.env`, so a plain helper reading that
+        file — naming no public method, caching nothing, holding nothing
+        between calls — put the real password in this mapping under
+        `"ROOT_PASSWORD"` and rendered `ENV ROOT_PASSWORD=tbc-0123456789abcdef`
+        into a Dockerfile, with the suite at 1889 passed, 3 skipped and mypy,
+        ruff and black clean.
+
+        So what is claimed for the split is only what has been measured, and it
+        is about visibility rather than reach. Three leaks have now been
+        measured into this mapping — M15 through `ctx.secrets`, the
+        `resolve_secrets()` cache, and M-R2 through `.env` — and each had to add
+        a line naming something outside this body (a context field, an
+        inherited method, a file path) where the pre-split single mapping needed
+        only one more key next to a password it already held. Nobody has
+        measured a cheaper route than M-R2; nobody has shown there is none, and
+        the two attempts to write down a floor were both wrong within a day. It
+        is not a guarantee and nothing below should be read as one — the
+        guarantees are `render()`'s key-drop and its by-name refusal, which
         cover the names in `SECRET_TOKENS` for any mapping any caller passes.
         `pyplan/bug-checklist.md` §29 states the general form: a secret minted
         inside a function rather than passed into it was never a field of
@@ -708,24 +752,67 @@ class CmangosInstaller(StagedInstaller):
         literal: an unknown token is refused.
 
         **The server dir `docker build` is pointed at is not secret-free, and
-        has not been since K.3.** An earlier draft said two stages wrote into
-        it before the build; the number was wrong and the number is the wrong
-        thing to write down, so it is not restated here —
-        `test_every_stage_before_the_build_that_writes_into_the_build_context`
-        enumerates `STAGE_NAMES` instead, and goes red when a stage is added.
-        What matters is WHICH of them carries a secret: `db-password` writes
-        the plaintext password to `.db_password` in the server dir, two stages
-        before the build; `_conf` later writes password-bearing `.conf` files
-        under `etc/` in the same tree. Only the leading `*` in each shipped
-        `dockerignore.tmpl` keeps those files out of what the daemon receives,
-        and `test_every_shipped_dockerignore_excludes_the_entrys_password_file`
-        is what holds that line.
+        has not been since K.3.** An earlier draft said two stages wrote into it
+        before the build; the count was wrong twice over, and a count in prose
+        cannot go red, so what follows is the stages themselves, each read off
+        `STAGE_NAMES` and each verified on 2026-09-02 by running the stage and
+        reading the file it left:
+
+        * `db-password` (index 1) writes the plaintext password to the file
+          `install.password` names, at the ROOT of the server dir.
+        * `generate-compose` (index 3 — the stage IMMEDIATELY before `build` at
+          index 4) merges `DB_ROOT_PASSWORD=<that same plaintext>` into
+          `<server_dir>/.env` for every generated-password entry, which is all
+          three CMaNGOS games. This is the one the earlier draft's "two stages"
+          left out, and it is the one M-R2 read.
+        * `conf` (index 7) writes password-bearing `.conf` files under `etc/`
+          in the same tree, after the build rather than before — a later
+          rebuild in the same folder still finds them there.
+
+        The first two are asserted rather than described:
+        `test_the_build_context_already_holds_the_plaintext_password_before_the_build_stage`
+        reads both orderings off `STAGE_NAMES` and both files off the disk the
+        stages wrote, so a renamed stage stops it dead and a reordered one
+        turns it red. It does NOT go red when a stage is merely added —
+        `test_family_and_stage_names_are_the_contract_tuple` is the one that
+        does, by restating the tuple in full.
+
+        Only the leading `*` in each shipped `dockerignore.tmpl` keeps any of
+        the three out of what the daemon receives. Two tests go red when it is
+        deleted; nothing on this branch is checking that `.env` and `etc/` in
+        particular stay out. What each one actually asserts, measured
+        2026-09-02:
+
+        * `test_every_shipped_dockerignore_excludes_the_entrys_password_file`
+          holds the line for the password FILE, and only for that. It asks
+          `install.password` for the name rather than restating `.db_password`,
+          and its matcher answers only for a name at the ROOT of the context —
+          the helper has no parent-directory walk and its own docstring says
+          so. It cannot speak for `etc/mangosd.conf` or, though it sits at the
+          root, for anything the templates re-include: appending `!etc` to
+          `wow-tbc/native/dockerignore.tmpl` left all three of its
+          parametrisations green.
+        * `test_every_cmangos_dockerignore_admits_only_the_core_tree_it_copies`
+          (`test_composegen.py`, arrived with `yulon-phase7`) is what caught
+          that `!etc` edit. It pins the SHAPE — first line `*`, exactly ONE `!`
+          line, and that line names the core tree — so a second re-include of
+          any spelling turns it red.
+
+        Said plainly, because the credit for this used to sit in the wrong
+        place: the exclusion of `etc/*.conf` is asserted by NOTHING on this
+        branch. What stands between those confs and an image layer is that
+        shape test refusing a second `!` line, plus Docker's own rule that an
+        excluded directory takes its children with it — a rule this app does
+        not implement and no test here exercises.
 
         Of the stages that take a token mapping from this class,
-        `write-dockerfile` takes THIS one through `dockerfile.render()`, and
+        `write-dockerfile` takes THIS one through `dockerfile.render()`.
         `generate-compose` takes none at all — `composegen.generate()` builds
         its own from `entry_tokens(entry)` and refuses a compose template
-        naming `{{DB_PASSWORD}}` in generated mode.
+        naming `{{DB_PASSWORD}}` in generated mode. That is a statement about
+        TOKEN MAPPINGS only and must not be read as one about the build
+        context: the same stage still writes the plaintext password into `.env`
+        in that directory, which is the second bullet above.
 
         Why the Dockerfile is the harder half: a secret in a compose file sits
         in a file the user owns — delete it, rotate, done — while a Dockerfile
@@ -777,9 +864,14 @@ class CmangosInstaller(StagedInstaller):
         spends this mapping, and each of them would still be filled, still be
         syntactically fine, and still pass a test that only checks
         `{{DB_PASSWORD}}` came out right. So the collision is refused rather
-        than merged. It can only be a mistake in the app's own declarations,
-        never anything about this machine, which is why it reads like the rest
-        of the catalog errors.
+        than merged.
+
+        It ends in `DECLARATION_ERROR_TAIL` and not `CATALOG_ERROR_TAIL`,
+        corrected 2026-09-02. Both halves of the collision are Python: the
+        secret half's names come from the fields of `native.Secrets`, and the
+        public half's from string literals in this file and in
+        `composegen.entry_tokens()`. No catalog file can reach either, so the
+        catalog tail sent a reader somewhere there was nothing to find.
         """
         public = self._public_tokens(ctx.server_dir)
         secret = secret_token_map(ctx.secrets)
@@ -788,7 +880,8 @@ class CmangosInstaller(StagedInstaller):
             raise InstallerError(
                 f"{', '.join(shadowed)} is both a public install token and a field of "
                 "`native.Secrets`, so building the conf mapping would put the password where "
-                f"the public value belongs. Rename the `native.Secrets` field. {CATALOG_ERROR_TAIL}"
+                "the public value belongs. Rename the `native.Secrets` field. "
+                f"{DECLARATION_ERROR_TAIL}"
             )
         return {**public, **secret}
 
