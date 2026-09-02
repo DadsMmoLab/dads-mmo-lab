@@ -77,13 +77,24 @@ def _entry(**install: object) -> dict[str, object]:
 def test_no_field_or_method_of_install_is_about_a_bash_script() -> None:
     """7.2: the script path is gone from the model, not merely unused.
 
-    Asked of the model's own field set rather than by restating the names that
-    were deleted, so a field coming back under a different spelling still
-    fails. `is_native` is named because it is the one deleted symbol whose
+    The whole field set is compared, not the names that were deleted: a
+    mutation adding `bash_file` — the script field back under a name that
+    never says "script" — survived a substring check and dies here. The
+    substring line stays anyway, because it fails with the offending name in
+    the message while a set diff only says the set differs.
+
+    `is_native` is named on its own because it is the one deleted symbol whose
     name does not say "script": it meant "supported, but not by the script",
     and with a single install path left it could only be a synonym for
     `supports()`.
     """
+    assert set(Install.model_fields) == {
+        "default_server_dir",
+        "password",
+        "requires_client_dir",
+        "platforms",
+        "native",
+    }
     assert [name for name in Install.model_fields if "script" in name] == []
     assert [name for name in vars(Install) if "script" in name] == []
     assert not hasattr(Install, "is_native")
