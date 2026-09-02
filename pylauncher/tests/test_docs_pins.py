@@ -18,7 +18,9 @@ def test_the_contribution_harness_is_the_engine_not_the_scripts() -> None:
 
 def test_the_style_guide_rows_describe_the_post_7_2_modules() -> None:
     text = (PYPLAN / "style-guide.md").read_text(encoding="utf-8")
-    rows = {ln.split("|")[1].strip(): ln for ln in text.splitlines() if ln.startswith("| `catalog/")}
+    rows = {
+        ln.split("|")[1].strip(): ln for ln in text.splitlines() if ln.startswith("| `catalog/")
+    }
     installer = rows["`catalog/installer.py`"]
     assert "installer_for()" in installer and "never runs a subprocess" in installer
     assert "deps → clone → build → config" not in installer
