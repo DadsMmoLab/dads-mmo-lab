@@ -28,11 +28,6 @@
           "macos",
           "windows"
         ],
-        "script": "wow-wotlk/install-wow-wotlk.sh",
-        "script_variants": {
-          "apt": "wow-wotlk/install-wow-wotlk-ubuntu.sh",
-          "dnf": "wow-wotlk/install-wow-wotlk-fedora.sh"
-        },
         "default_server_dir": "wow-server-playerbots",
         "password": {
           "mode": "fixed",
@@ -122,7 +117,6 @@
         "platforms": [
           "linux"
         ],
-        "script": "wow-tbc/install-wow-tbc.sh",
         "default_server_dir": "wow-tbc-server",
         "requires_client_dir": true,
         "password": {
@@ -473,7 +467,6 @@
         "platforms": [
           "linux"
         ],
-        "script": "wow-vanilla/install-wow-vanilla.sh",
         "default_server_dir": "wow-vanilla-server",
         "requires_client_dir": true,
         "password": {
@@ -810,7 +803,6 @@
         "platforms": [
           "linux"
         ],
-        "script": "wow-tortoise/install-tortoise-wow-wsl.sh",
         "default_server_dir": "tortoise-wow-server",
         "requires_client_dir": true,
         "password": {
