@@ -1398,7 +1398,7 @@ Unreachable for cmangos today (it is not in `FAMILIES` until K.8). Recorded now 
 precisely the mechanism that would hide a `stages()`/`STAGE_NAMES` mismatch** — the thing K.2's
 inertness argument depends on being visible. **Note it in K.8's brief.**
 
-### 24. The false 0600 guarantee K.3 removed is still live in `conf.py` — 2026-09-01, OPEN
+### 24. The false 0600 guarantee K.3 removed is still live in `conf.py` — 2026-09-01, **FIXED 2026-09-02**
 
 **Measured twice, on PKGAME-LAPTOP, Windows 10.0.26200, CPython 3.13.14, 2026-09-01.** On Windows the
 POSIX mode is a **no-op** and the ACL is purely inherited:
@@ -1418,6 +1418,18 @@ written down stops the next reader checking, which is why this is worse than sil
 **And `conf.py` is strictly weaker than K.3 on POSIX too:** it writes with `open()` and chmods
 **after**, so the temp file holds the password at the umask default until the chmod lands. K.3's
 `os.open`-with-mode has no such window. (Read, not measured — flagged as read.)
+
+**FIXED 2026-09-02, both halves.** The sentence is gone, replaced by a record of what was measured and
+of what the mode does and does not buy. And the POSIX window it described is gone too: `_write` now uses
+`os.open(tmp, O_WRONLY|O_CREAT|O_TRUNC, CONF_MODE)` + `os.fdopen`, so the mode is applied by the creating
+syscall rather than by a `chmod` a moment later — the same shape `cmangos._write_secret` already had.
+
+The test that guarded this was pointed at the wrong syscall. It asserted two `os.chmod` calls under the
+heading "the conf is never briefly readable" — a *declaration* that something was intended, which passed
+happily while the window was open. It now records `os.open`'s third argument, the value that decides the
+outcome, and asserts no chmod follows. Verified by reverting `_write` to `open()` + `chmod` and watching
+it fail. It deliberately claims nothing about Windows: the mode is a no-op there, and a test asserting a
+guarantee on that platform would be this very bug restated as a test.
 
 Deferring the Windows **fix** is right — a real DACL means pywin32 or an `icacls` subprocess on every
 path that touches the file, and that is an app-wide posture decision. **Correcting the false sentence

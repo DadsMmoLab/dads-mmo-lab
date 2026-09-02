@@ -369,11 +369,34 @@ def _write(path: Path, text: str) -> None:
     server reads the surviving half, silently takes defaults for everything past the cut,
     and boots looking healthy.
 
-    The rename is within `path`'s own directory so it is atomic, and the mode is set on
-    the temporary file before the rename rather than after, so the conf is never readable
-    by anyone else even for an instant (the database password is in it). `newline=""` for
-    the same reason `_read` has it: text mode on Windows would turn every `\\n` into
-    `\\r\\n` and convert an LF conf on a developer's machine.
+    The rename is within `path`'s own directory so it is atomic, and the mode is asked
+    for at CREATION rather than set afterwards. `newline=""` for the same reason `_read`
+    has it: text mode on Windows would turn every `\\n` into `\\r\\n` and convert an LF
+    conf on a developer's machine.
+
+    **What the mode buys, and what it does not.** This docstring used to say the conf "is
+    never readable by anyone else even for an instant (the database password is in it)".
+    That was false in both directions, and it was the more dangerous kind of false: a
+    guarantee written down stops the next reader checking.
+
+    Measured on PKGAME-LAPTOP, Windows 10.0.26200, CPython 3.13.14, 2026-09-01, by K.3
+    while writing the sibling `_write_secret`: on **Windows** the POSIX mode is a complete
+    no-op. `os.open(..., 0o600)`, `open()` + `os.chmod(0o600)`, and a plain `open()` all
+    produce `st_mode & 0o777 == 0o666` with byte-identical `icacls` output, and under a
+    folder granting `BUILTIN\\Users:(RX)` the file is readable by every local account. A
+    following `chmod` changes neither mode nor ACL, so no rearrangement of these calls
+    buys anything there.
+
+    On **POSIX** the mode is real, but the old code did not get it: it wrote with `open()`
+    and chmodded AFTER, so the temp file held the password at the umask default until the
+    chmod landed. That window is now gone — `os.open` applies the mode in the creating
+    syscall, the same way `cmangos._write_secret` does. Corrected 2026-09-02; the window
+    was read off the code rather than raced, so no timing measurement is claimed.
+
+    So this is a POSIX guarantee and a Windows no-op. Making it true on Windows needs an
+    explicit DACL (`pywin32`, or `icacls /inheritance:r /grant:r`) on every path that
+    touches the file — a decision about the app's Windows security posture, not about this
+    function, and `cmangos._write_secret` writes the same password under the same limit.
 
     `UnicodeEncodeError` is caught beside `OSError` for the reason `_read` catches
     `UnicodeDecodeError`: it is a `ValueError` too, so the obvious `except OSError` misses
@@ -393,9 +416,11 @@ def _write(path: Path, text: str) -> None:
     """
     tmp = path.with_name(f"{path.name}{_TEMP_SUFFIX}")
     try:
-        with tmp.open("w", encoding="utf-8", newline="") as fh:
+        # `os.open` with the mode, not `open()` then `chmod`: on POSIX the latter
+        # leaves the password at the umask default until the chmod lands.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, CONF_MODE)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
             fh.write(text)
-        os.chmod(tmp, CONF_MODE)
         os.replace(tmp, path)
     except (OSError, UnicodeEncodeError) as exc:
         raise InstallerError(
