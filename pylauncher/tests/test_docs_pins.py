@@ -28,6 +28,55 @@ def test_the_style_guide_rows_describe_the_post_7_2_modules() -> None:
     assert "deps → clone → build → config" not in installer
     catalog = rows["`catalog/catalog.py`"]
     assert "install script" not in catalog and "family" in catalog
+    # Added 2026-09-02: this pin read the two rows 7.2's plan named and stopped
+    # there, so the `catalog/native.py` row went on describing "the same `run()`
+    # contract as `Installer`" for as long as F.3 had deleted that class. The row
+    # now names the two symbols that survive, and both resolve in the code.
+    native = rows["`catalog/native.py`"]
+    assert "StagedInstaller" in native and "InstallEngine" in native
+    assert "contract as `Installer`" not in native
+
+
+def _plans_whose_phase_the_checklist_ticks(pyplan: Path = PYPLAN) -> list[Path]:
+    """The `phase7-plans/` pages whose phase line in `checklist.md` is `- [x]`.
+
+    The phase number is the plan filename's own prefix (`7.2-retire-bash.md` ->
+    `7.2`), matched against the ticked top-level lines of the checklist. Reading
+    the checklist rather than keeping a list here is deliberate: a list would be
+    a second place to remember, and this guard exists because a second place to
+    remember is what let the dead citations accumulate.
+
+    `pyplan` is a parameter so the rule itself can be driven against a fixture
+    that ticks a box — see the test below. Without that, "the guard widens when a
+    phase closes" is a sentence in a docstring and nothing more, because on this
+    branch 7.1, 7.2 and 7.3 are all unticked and the widened set is empty.
+    """
+    checklist = (pyplan / "checklist.md").read_text(encoding="utf-8")
+    ticked = set(re.findall(r"^- \[x\] (\d+\.\d+[a-z]?) ", checklist, re.M))
+    plans = sorted((pyplan / "phase7-plans").glob("*.md"))
+    return [p for p in plans if p.name.split("-")[0] in ticked]
+
+
+def test_the_citation_guard_widens_to_a_plan_the_moment_its_phase_is_ticked(tmp_path: Path) -> None:
+    """The scoping RULE, driven, because against the real tree it selected nothing.
+
+    Measured 2026-09-02 at `f6ed1b9a`: every phase-7 box was `- [ ]`, so
+    `_plans_whose_phase_the_checklist_ticks()` answered `[]` and the guard above
+    was scoped exactly as it had been. That is correct and it is also
+    unobservable — a rule that answers empty says nothing about what it would
+    answer otherwise, which is the standing "assert the value ARRIVES" rule. So
+    the same function is run here over a fixture with one box ticked and one not.
+    """
+    (tmp_path / "phase7-plans").mkdir()
+    for name in ("7.2-retire-bash.md", "7.3-cmangos-family.md"):
+        (tmp_path / "phase7-plans" / name).write_text("x\n", encoding="utf-8")
+    (tmp_path / "checklist.md").write_text(
+        "- [x] 7.2 Delete the bash lineage — done\n- [ ] 7.3 CMaNGOS data model — open\n",
+        encoding="utf-8",
+    )
+    assert [p.name for p in _plans_whose_phase_the_checklist_ticks(tmp_path)] == [
+        "7.2-retire-bash.md"
+    ]
 
 
 def test_every_test_these_pages_name_by_hand_actually_exists() -> None:
@@ -46,16 +95,33 @@ def test_every_test_these_pages_name_by_hand_actually_exists() -> None:
     is untested, and a reader who follows a renamed one lands somewhere else
     entirely.
 
-    Scoped to the pages 7.2 owns. Widening it to all of `pyplan/` would fail on
-    the plan documents, which cite tests they intend a future task to WRITE — a
-    forward reference is legitimate there and a defect here.
+    Scoped to the pages 7.2 owns, PLUS every phase plan whose checklist box is
+    ticked — read off `checklist.md` here rather than listed, so nobody has to
+    remember to add one. A plan cites tests it intends a future task to WRITE, so
+    a dead citation there is a forward reference while the phase is open and a
+    claim about the tree once it closes. The tick is what flips it.
+
+    Measured 2026-09-02 at `f6ed1b9a`, when 7.1, 7.2 and 7.3 were all still
+    unticked and so all still out of scope: `7.1-spine-azerothcore-linux.md` had
+    13 of 141 cited names unresolved, `7.2-retire-bash.md` 27 of 70, and
+    `7.3-cmangos-family.md` 41 of 224. Most are in-flight renames rather than
+    aspirations, so ticking a box will cost a cleanup pass — which is the point.
+
+    Widening to all of `pyplan/` instead does NOT reduce to "the plans are the
+    problem". On the same measurement, `pyplan/` with the plans excluded still
+    had unresolved names: `checklist.md` 5, `bug-checklist.md` 3 and
+    `phase7-decisions.md` 2. Those three are dated records of what a run said on
+    a day, and a test deleted afterwards is a different failure from a citation
+    that never resolved; they are left out until someone decides which rule they
+    are under, not because they are clean.
     """
+    pages = [PYPLAN / "contribution.md", PYPLAN / "style-guide.md"]
+    pages += _plans_whose_phase_the_checklist_ticks()
     named: dict[str, set[str]] = {}
-    for page in ("contribution.md", "style-guide.md"):
-        text = (PYPLAN / page).read_text(encoding="utf-8")
-        found = set(re.findall(r"\btest_[a-z0-9_]+\b", text))
+    for path in pages:
+        found = set(re.findall(r"\btest_[a-z0-9_]+\b", path.read_text(encoding="utf-8")))
         if found:
-            named[page] = found
+            named[path.name] = found
     assert named, "no page cites a test by name; this guard has gone vacuous"
 
     # Both kinds of citation resolve: a test FUNCTION and a test MODULE. The first

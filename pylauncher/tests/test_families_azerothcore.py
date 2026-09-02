@@ -192,7 +192,11 @@ def test_a_fresh_install_runs_every_stage_in_order(tmp_path: Path) -> None:
         "one-shot:ac-client-data-init",
         # The database is up BEFORE the probe is asked anything. Without this
         # the probe cannot answer, and the install refused itself after the
-        # multi-hour build — see `test_the_import_cannot_be_asked_anything...`.
+        # multi-hour build — see
+        # `test_the_database_is_started_before_the_import_is_asked_anything`,
+        # which owns that claim. (The name cited here until 2026-09-02,
+        # `test_the_import_cannot_be_asked_anything...`, has never existed;
+        # an elided citation cannot be checked by eye, so it is spelled out.)
         "start-db",
         "probe",
         "one-shot:ac-db-import",

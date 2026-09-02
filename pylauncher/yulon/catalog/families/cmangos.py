@@ -29,22 +29,32 @@ claims a secret exists.
 of K.7, which bound `import` — the last one outstanding. They were allowed to
 disagree while the family was being built, because nothing in the app reads
 `STAGE_NAMES` — `stage_names()`, derived from `stages()`, is what the spine
-validates a resume against — and because this class is not in `FAMILIES` until
-K.8 puts it there. Meanwhile the agreement is held by tests in
-`tests/test_families_cmangos.py`, and the two DIRECTIONS are held by different
-ones — measured 2026-09-02 by deleting `import` from each side in turn. Take
-the `Stage` out of `stages()` and three fail:
+validates a resume against — and because this class was not in `FAMILIES` until
+K.8 put it there. Both of those allowances are spent: K.8 registered `cmangos`,
+and `test_stage_names_is_the_pinned_tuple_now_that_every_stage_is_bound` spells
+the literal `stage_names() == STAGE_NAMES`.
+
+The agreement is held by tests in `tests/test_families_cmangos.py`, and the two
+DIRECTIONS are held by different ones. Measured 2026-09-02 at `f6ed1b9a`, whole
+suite each time against a 1974-passed/3-skipped baseline, by deleting `import`
+from each side in turn. Take the `Stage` out of `stages()` and FIVE fail:
 `test_the_bound_stages_run_in_order_and_record_the_recorded_ones`, which
 restates all twelve `--- <name>` lines one whole install said,
-`test_the_import_cancel_note_is_said_at_the_import_and_nowhere_else`, and
-`test_import_is_recorded_and_sits_between_start_db_and_up`. Take the name out
-of `STAGE_NAMES` and two others fail:
+`test_the_import_cancel_note_is_said_at_the_import_and_nowhere_else`,
+`test_import_is_recorded_and_sits_between_start_db_and_up`, and the two
+equality tests below. Take the name out of `STAGE_NAMES` and FOUR fail:
 `test_family_and_stage_names_are_the_contract_tuple`, which restates the tuple,
-and `test_stages_are_unique_and_a_subset_of_the_pinned_names_in_order`. That
-last one is a SUBSET check, and it stayed green over a `stages()` short a
-stage — it sees the tuple's direction only. What no test spells is the literal
-`stage_names() == STAGE_NAMES`, and that is what K.8 adds along with the entry
-in `FAMILIES`.
+`test_stages_are_unique_and_a_subset_of_the_pinned_names_in_order`, and those
+same two — `test_stage_names_is_the_pinned_tuple_now_that_every_stage_is_bound`
+and `test_every_cmangos_entry_dispatches_to_an_engine_that_runs_this_familys_stages`,
+which read `stage_names()` back off the object dispatch returns and so catch
+either side. The subset check is the weak one: it stayed green over a `stages()`
+short a stage, seeing the tuple's direction only, which is why the equality was
+added rather than relied on.
+
+This paragraph read "three", "two", "is not in `FAMILIES` until K.8" and "what
+no test spells" for as long as K.8 had been merged. Counts and registrations
+rot; the mutation run above is how they were re-checked rather than re-copied.
 """
 
 from __future__ import annotations
@@ -159,8 +169,9 @@ def secret_token_map(secrets: Secrets) -> dict[str, str]:
     half. Listing the names instead is what K.4 had, and what mutation M15
     defeated on 2026-09-01: a second secret key added to the single `_tokens()`
     mapping rendered `ENV ROOT_PASSWORD=<the password>` into a Dockerfile while
-    all 1872 tests passed, because the protection covered the NAME
-    `DB_PASSWORD` and not the property.
+    all 1872 tests passed — the whole suite as it stood that day, recorded at
+    `9e198c05`; it is 1974 at `f6ed1b9a` — because the protection covered the
+    NAME `DB_PASSWORD` and not the property.
 
     `fields()` is asked of the INSTANCE, so a subclass carrying a second secret
     answers with both fields — which is how
@@ -337,7 +348,8 @@ class CmangosInstaller(StagedInstaller):
         a second secret key added to the single mapping —
         `"ROOT_PASSWORD": ctx.secrets.db_password` — rendered
         `ENV ROOT_PASSWORD=tbc-0123456789abcdef` into a Dockerfile with all
-        1872 tests green. Splitting the mapping by capability is contract A6's
+        1872 tests green (the whole suite on 2026-09-01, recorded at
+        `9e198c05`). Splitting the mapping by capability is contract A6's
         answer, taken at 7.3 before K.7's SQL and verify arrived to inherit the
         old shape.
 
@@ -366,22 +378,33 @@ class CmangosInstaller(StagedInstaller):
             # Already the sentence a user reads. A class name in front of
             # "that file was not written by Yu'lon" would be noise, not evidence.
             #
+            # BOTH calls inside this `try` are covered - `render()` and `write()`
+            # each raise `DockerfileError`, and each is translated here.
+            #
             # This comment used to add that `stage_generate_compose` passed
-            # `ComposeGenError` through the same way. It did not, and the
-            # sentence described an ASYMMETRY as if it were symmetry: this
-            # `try` covers `render()` AND `write()`, while the spine's covered
-            # only `write_plan()` and left `composegen.render()` bare - on the
-            # install path of every shipped game, because `generate-compose` is
-            # the spine's own body and every family binds it. Measured through
-            # `install_wiring.main()` on 2026-09-02: a traceback instead of a
-            # sentence, and no `last_error` recorded. The spine wraps `render()`
-            # now, so the TRANSLATION matches. The COVERAGE still does not: the
-            # broad `(RuntimeError, OSError)` arm below has no counterpart
-            # there, and `stage_build`'s `built_image_refs()` call is bare.
+            # `ComposeGenError` through the same way. It did not, and it
+            # described an ASYMMETRY as if it were symmetry. Measured by AST on
+            # 2026-09-02: eight functions in `composegen.py` raise
+            # `ComposeGenError`, `render()` reaches seven of them, and the spine
+            # translated only `write_plan` - the one of the eight `render()`
+            # cannot reach. Measured through `install_wiring.main()` the same
+            # day: a traceback instead of a sentence, and no `last_error`
+            # recorded, on the install path of EVERY shipped game, because
+            # `generate-compose` is the spine's own body and every family binds
+            # it. That sentence is why nobody looked.
+            #
+            # The spine wraps `render()` now, so the TRANSLATION matches. The
+            # COVERAGE still does not: the broad `(RuntimeError, OSError)` arm
+            # below has no counterpart there, and `stage_build`'s
+            # `built_image_refs()` call is bare - unreachable today behind
+            # preflight's own check, but bare.
             raise InstallerError(str(exc)) from exc
         except InstallerError:
             # MUST stay ahead of the broad clause whatever else changes:
-            # `InstallerError` subclasses `RuntimeError` (`installer.py:100`), so
+            # `InstallerError` subclasses `RuntimeError` (its `class` line in
+            # `catalog/installer.py`; cited here as `installer.py:100` until
+            # 2026-09-02, by which time it had moved to 92 — the symbol keeps,
+            # the number does not), so
             # the clause below would otherwise catch a refusal and rewrap its
             # sentence inside a second one. Nothing in the `try` raises one as
             # this stands — `_native()` has already succeeded above, so the copy
@@ -917,15 +940,18 @@ class CmangosInstaller(StagedInstaller):
         `"ROOT_PASSWORD": ctx.secrets.db_password` next to the first). With the
         single mapping that mutation rendered
         `ENV ROOT_PASSWORD=tbc-0123456789abcdef` into a Dockerfile and all 1872
-        tests still passed.
+        tests still passed — the whole suite on 2026-09-01, recorded at
+        `9e198c05`.
 
         **It is a price, not a wall, and the price was measured.** An earlier
         draft of this docstring said the secret was structurally out of reach
         here. A review disproved that BY EXECUTION on 2026-09-02, on the merge
         of this branch with `yulon-phase7`. `resolve_secrets(server_dir)` is a
         PUBLIC inherited method (`native.py`) taking exactly the one argument
-        this body already holds, and K.3's `db-password` stage runs two stages
-        ahead of `write-dockerfile` and writes the password into that very
+        this body already holds, and K.3's `db-password` stage (`STAGE_NAMES`
+        index 1) runs ONE stage ahead of `write-dockerfile` (index 2) — this
+        said "two stages" until 2026-09-02, the same off-by-one the stage list
+        below was rewritten to stop — and writes the password into that very
         `server_dir` — so by the time this runs, `resolve_secrets()` no longer
         mints anything: it reads the install's real password back off disk.
         Six lines,
@@ -937,7 +963,8 @@ class CmangosInstaller(StagedInstaller):
 
         rendered `ENV ROOT_PASSWORD=tbc-deadbeefcafe1234` — the value read from
         `.db_password`, not a minted one — into a Dockerfile on disk, with the
-        whole suite at 1884 passed, 3 skipped. (The cache is load-bearing in
+        whole suite at 1884 passed, 3 skipped (2026-09-02, recorded at
+        `2116231b`). (The cache is load-bearing in
         the mutation, not in the argument: resolving on every call makes this
         mapping non-deterministic and a dict-equality test then kills the edit
         for a reason that has nothing to do with secrecy. A leak that is
@@ -953,8 +980,13 @@ class CmangosInstaller(StagedInstaller):
         file — naming no public method, caching nothing, holding nothing
         between calls — put the real password in this mapping under
         `"ROOT_PASSWORD"` and rendered `ENV ROOT_PASSWORD=tbc-0123456789abcdef`
-        into a Dockerfile, with the suite at 1889 passed, 3 skipped and mypy,
-        ruff and black clean.
+        into a Dockerfile, with the suite at 1889 passed, 3 skipped (2026-09-02,
+        recorded at `e176af17`) and mypy, ruff and black clean. That route needs
+        `.env` to be on disk already: `generate-compose` is index 3 and this
+        method's only build-context caller, `_write_dockerfile`, is index 2 — so
+        it reads an empty hand on a FIRST install and the real password on any
+        run where a previous attempt reached `generate-compose`. A price, still,
+        just not one paid on the first press.
 
         So what is claimed for the split is only what has been measured, and it
         is about visibility rather than reach. Three leaks have now been

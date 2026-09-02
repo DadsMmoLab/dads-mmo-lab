@@ -7,20 +7,16 @@ it proves the family's control flow, its refusals, what a resume repeats, and
 that every `docker run` it asks for is shaped the way the design says (client
 `:ro`, `--user` on Linux, cwd `/out`), asserted by FIELD on `ContainerRun`.
 
-The import gate is meant to be swapped for a `CallableGate` over
-`Recorder.probe/reset`: `MarkerGate`'s five branches are `test_sqlplan.py`'s to
-prove, and this file is to prove the family's reaction to each answer. That is
-not wired yet and cannot be — K.7 is what binds the `import` stage and names
-the method resolving the gate, and no such method exists in `yulon/` on this
-branch. (Written as K.6 until 2026-09-01. K.6 is the `conf` stage; the plan's
-K.7 section is the one listing `_import` and `_gate`. An off-by-one task number
-here would have told K.7's author that the wiring was somebody else's, done.)
-`engine()` already attaches the pair as `_test_gate`, and the `gated`
-fixture patches `CmangosInstaller._gate` with `raising=False`, which today adds
-an attribute nothing calls;
-`test_the_import_gate_seam_has_not_landed_so_the_gated_fixture_is_inert` is
-what says so out loud, and it goes red the day K.7 lands so the fixture is
-re-pointed at the real method rather than staying quietly inert.
+The import gate here is a `CallableGate` over `Recorder.probe`/`Recorder.reset`:
+`MarkerGate`'s five branches belong to `test_sqlplan.py`, and this file proves
+the family's reaction to each answer. K.7 bound the `import` stage and added
+`CmangosInstaller._gate`; `engine()` attaches the pair as `_test_gate`, and the
+autouse `gated` fixture patches `_gate` to hand it back, with `raising=True`.
+What that keyword buys — and what stood in for it while no `_gate` existed — is
+recorded in that fixture's own docstring rather than up here, because this
+paragraph went on saying the seam "is not wired yet and cannot be" after K.7 had
+wired it, and cited a test that has never existed. A module docstring is the
+first thing read and the last thing re-checked.
 """
 
 from __future__ import annotations
@@ -312,11 +308,19 @@ def test_the_install_button_is_offered_for_every_cmangos_entry_on_linux() -> Non
 
     One-sided on purpose, and the mutation run says what that costs. A `supports()`
     rewritten to `return True` SURVIVES this test — an always-open gate does not
-    break the claim made here — and was killed by
-    `test_installer.py::test_installer_refuses_a_platform_its_script_cannot_run`
-    and two in `test_families_azerothcore.py`, which own the other half. Folding
+    break the claim made here. Measured 2026-09-02 at `f6ed1b9a`, whole suite:
+    that mutation is killed SEVEN times over, in four files — three
+    parametrisations of `test_the_cmangos_entries_carry_a_full_family_block`
+    (`test_catalog.py`); `test_catalog_view.py`'s
+    `test_unsupported_platform_is_said_on_the_tile_and_refused_before_any_prompt`
+    and `test_unlocking_after_a_job_never_re_enables_a_gated_tile`;
+    `test_installer_for_does_not_consult_the_platform_but_does_pass_it_on`
+    (`test_installer.py`); and exactly ONE in `test_families_azerothcore.py`,
+    `test_the_unsupported_platform_refusal_still_comes_first`. This paragraph
+    credited `test_installer_refuses_a_platform_its_script_cannot_run` — deleted
+    with the bash path in 7.2 — and "two in azerothcore". Folding
     the closure in here would put two rules in one fixture for coverage that
-    already exists three times over. What this test is not vacuous about was
+    already exists seven times over. What this test is not vacuous about was
     measured the same way: moving `wow-tortoise` to `platforms: ["macos"]` failed
     it by name, so it really does read each shipped entry rather than TBC alone.
     """
@@ -440,7 +444,9 @@ def test_neither_the_context_secrets_nor_the_password_on_disk_reaches_the_render
     `_tokens()` mapping — `"ROOT_PASSWORD": ctx.secrets.db_password` — and a
     planted template spelling `{{ROOT_PASSWORD}}` rendered
     `ENV ROOT_PASSWORD=tbc-0123456789abcdef` into the Dockerfile while all
-    1872 tests passed. `dockerfile.render()` drops one KEY BY NAME, so the
+    1872 tests passed — the whole suite as it stood that day, recorded at
+    `9e198c05`; it is 1974 at `f6ed1b9a`, so read the number as a date and not
+    as a size. `dockerfile.render()` drops one KEY BY NAME, so the
     second name walked past it, and no test in the suite looked at the mapping
     as a whole.
 
@@ -468,8 +474,9 @@ def test_neither_the_context_secrets_nor_the_password_on_disk_reaches_the_render
       stage before `build` at index 4. A seven-line helper reading it, with no
       public method and no cache anywhere, put that value under
       `"ROOT_PASSWORD"`, rendered `ENV ROOT_PASSWORD=tbc-0123456789abcdef` into
-      a Dockerfile, and left the suite at 1889 passed, 3 skipped with mypy,
-      ruff and black clean. The `.env` below is written by RUNNING the real
+      a Dockerfile, and left the suite at 1889 passed, 3 skipped (2026-09-02,
+      recorded at `e176af17`) with mypy, ruff and black clean. The `.env` below
+      is written by RUNNING the real
       `generate-compose` stage rather than by spelling its key out here, so a
       renamed key or file follows it; the assertion that the sentinel reached
       the file is what keeps that from going quietly vacuous.
@@ -562,7 +569,8 @@ def test_the_secret_mapping_carries_a_second_secret_nobody_listed(tmp_path: Path
     — is invisible to every test that builds a real `native.Secrets`, because
     for one the branch never runs. Reproduced 2026-09-02: with that edit in
     `_secret_tokens()` the suite came back `1 failed, 1888 passed, 3 skipped`
-    and the one failure was this test. So the enumeration below is not
+    (recorded at `e176af17`; the baseline was 1889 that day and is 1974 at
+    `f6ed1b9a`) and the one failure was this test. So the enumeration below is not
     redundant with the other: it reaches a field that exists only on a
     subclass, and that reach is what caught this.
 
@@ -648,7 +656,8 @@ def test_the_build_context_already_holds_the_plaintext_password_before_the_build
     * `generate-compose` runs IMMEDIATELY before `build` and merges the same
       plaintext into `<server_dir>/.env` under `DB_ROOT_PASSWORD`. Nothing
       asserted that road until 2026-09-02, when mutation M-R2 read that file
-      out of `_public_tokens()` and left the suite at 1889 passed, 3 skipped.
+      out of `_public_tokens()` and left the suite at 1889 passed, 3 skipped
+      (2026-09-02, recorded at `e176af17`).
 
     So from stage 1 the secret is inside the build context as a file, and from
     stage 3 as two. What keeps them out of what the daemon receives is the

@@ -1117,7 +1117,7 @@ Done here as **#143**, and the branch is green verified by SHA (run `33538836096
 `headSha == 18cbacdd`) — by SHA because `gh pr checks` will happily show a green run that predates
 the current head.
 
-### 19. The database password reaches the install log and a user-facing error — 2026-09-01, OPEN
+### 19. The database password reaches the install log and a user-facing error — 2026-09-01, **FIXED 2026-09-01 at `2371b979`**
 
 **Reproduced end to end, in already-merged code.** Not found by a test; found by a reviewer asking
 where a docstring's authority came from.
@@ -1161,9 +1161,15 @@ password is **not remotely exploitable on its own**; it needs local access or an
 does not excuse it — the secret is still in a file the user is encouraged to share, and it is the same
 secret across a reinstall — but this is **"rotate and fix", not "an exposed database"**.
 
-*Fix in flight* on `feat/7.3-j5-sqlplan-verify`: redact where client output enters the module rather
-than at each call site, because **K.7 will add a fourth site** and sprinkling is how the next one gets
-missed. Update this entry to FIXED with the mutation evidence when it lands.
+**LANDED at `2371b979` (2026-09-01 20:09), from `feat/7.3-j5-sqlplan-verify`.** Redacted where client
+output ENTERS the module rather than at each call site, because K.7 would have added a fourth site and
+sprinkling is how the next one gets missed. `apply()` passes the client's stderr through
+`_redact_lines()` at the moment it splits it, and the install log, the `fail` message, the log record
+and the `warn` line all read that one redacted local; `apply()`'s two `except` clauses, `verify()`'s
+unanswerable rule, `_run_sql()` and the schema listing are separate entrances and each call `_redact()`
+of their own. Checked 2026-09-02 at `f6ed1b9a` by reading the module: every place that puts client
+text into a sink, an error or a log record reads a value that went through `_redact`. The heading
+still said OPEN a day after the fix landed, which is how a reader concludes a live secret leak.
 
 **Two mutations that survived the implementer's own "17 killed" table**, found by re-running it:
 
@@ -1191,28 +1197,59 @@ missed. Update this entry to FIXED with the mutation evidence when it lands.
 `_refuse_unquotable(password, ...)` runs only inside `create_schemas()`, and Tortoise never reaches it
 (`create` is empty) while still splicing `{{DB_PASSWORD}}` into `IDENTIFIED BY '...'` through
 `expand()`'s token fill. That looked like the same gap one layer up. It is not: `composegen.render()`
-calls `_refuse_unsafe(password, ...)` at `composegen.py:318`, and
+calls `_refuse_unsafe(password, "the database root password")` — cited here as `composegen.py:318`
+until 2026-09-02, when it was at 319; the symbol keeps, the number does not — and
 `_UNSAFE_SCALAR_CHARS = frozenset("$\"\;#{}
 
 	'")` **includes the single quote, the backslash
 and both line breaks** — so such a password is refused when the compose files are generated, which is
 stage 4 of 12, six stages before `import`.
 **But it is guarded by STAGE ORDERING, not by the function that appears to own the rule.** Anything
-that reorders the stages, or removes `_refuse_unsafe` from `render()` as redundant, reopens it
-silently. Named here so that edit gets challenged.
+that reorders the stages reopens it.
+
+**The edit to fear is NOT the one named here, and the difference was measured.** This paragraph said
+that "removes `_refuse_unsafe` from `render()` as redundant … reopens it silently". Measured
+2026-09-02 at `f6ed1b9a`, whole suite each time against a 1974-passed / 3-skipped baseline:
+
+- **Deleting the `_refuse_unsafe(password, …)` call from `render()` is LOUD.** Four tests go red, all
+  four parametrisations of `test_composegen.py::test_a_password_that_cannot_be_spliced_is_refused` —
+  `pass"word`, `pass$word`, `pass;word`, `pass#word`. Nobody removes that call by accident.
+- **NARROWING `_UNSAFE_SCALAR_CHARS` is SILENT.** Delete the single quote alone and the suite comes
+  back **1974 passed, 3 skipped — byte-identical to the baseline**. The four parametrisations above
+  are the only cases that exercise the set, and not one of them is a quote.
+
+And the single quote is the character that matters here: it is what closes `IDENTIFIED BY '<pw>'` in
+the shipped **Tortoise** phase, and Tortoise's `sql.create == ()` means `create_schemas()` — and so
+`_refuse_unquotable()` — is never entered for it. So the whole of this game's protection rests on one
+character of one frozenset, which no test names. Add a case for `'` before touching that set.
 
 **Also known, harmless only by ordering:** `create_schemas()` returns on `if not plan.create` *before*
 validating its schemas, so a plan with an empty `create` and a bogus `marker_db` is refused by
 `expand()` and silently accepted here. The two call sites are not equivalent — and **Tortoise is
 exactly the empty-`create` case**, so the asymmetry sits on a live path.
 
-### 20. The secret-in-a-generated-file rule was decided for compose and never carried to the Dockerfile — 2026-09-01, OPEN
+### 20. The secret-in-a-generated-file rule was decided for compose and never carried to the Dockerfile — 2026-09-01, **PREMISE GONE 2026-09-02; residual filed as §29**
 
-Found while implementing K.2, by asking a question the plan did not raise. **Nothing exploits it
-today; the exposure is one template edit away.**
+**READ THIS FIRST — the entry below argues about a mapping that no longer exists.** Everything from
+"Found while implementing K.2" down is the record of how the decision was reached, kept because the
+reasoning is what makes §29 legible. What it argues FOR has landed. Verified 2026-09-02 at `f6ed1b9a`:
 
-`CmangosInstaller._tokens(ctx)` is ONE mapping used for the Dockerfile, the conf tables, the SQL
-statements and verify — and it contains `DB_PASSWORD`. **K.4 hands that whole mapping to
+- **`CmangosInstaller._tokens()` is gone.** 7.3 split it by capability into `_public_tokens(server_dir)`
+  — no `StageContext`, so `ctx.secrets` is not in lexical scope — and `_secret_tokens(ctx)`, which the
+  conf and SQL consumers ask for by name. `_write_dockerfile` passes the public one, and it is the only
+  caller that writes into the build context.
+- **D4's "public bypass" is closed.** `dockerfile.write()` refuses text that is not a `_Rendered` —
+  *"the … text did not come from dockerfile.render(), so nothing has checked it for a secret; refusing
+  to write it into the build context"* — so hand-built marked text no longer reaches disk.
+- **What is NOT closed** is the relationship between the mapping's keys and `native.Secrets`' fields: a
+  secret filed under an undeclared name, or minted inside `_public_tokens` rather than passed in, is
+  still invisible to a by-name refusal. That is §29, and it is where the live question lives now.
+
+Found while implementing K.2, by asking a question the plan did not raise. **Nothing exploited it;
+the exposure was one template edit away.**
+
+`CmangosInstaller._tokens(ctx)` WAS ONE mapping used for the Dockerfile, the conf tables, the SQL
+statements and verify — and it contained `DB_PASSWORD`. **K.4 hands that whole mapping to
 `dockerfile.render()`** (plan ~line 4884). `dockerfile.render()` → `_render_one()` →
 `composegen.fill()`, which refuses an **unfilled** `{{TOKEN}}` and says nothing about a spelled one —
 its own docstring: *"Unused tokens are fine."*
@@ -1270,10 +1307,15 @@ reached the identical conclusion by **mutation** rather than by reasoning, which
 of agreement available here:
 
 - **M15 — a SECOND secret key in `_tokens()` renders straight into the Dockerfile, and the mutation
-  SURVIVES ALL 1960 TESTS.** The by-name refusal covers **one name**, not the property. This is
-  precisely Codex's "ambient authority" point, arrived at from the opposite direction.
-- **D4 — `dockerfile.write()` accepts hand-built marked text containing a secret and writes it.** It
-  validates only the generated marker, never content — exactly the public bypass Codex named.
+  SURVIVED THE WHOLE SUITE: 1960 tests as it stood on 2026-09-01, recorded at `973b615f`** (the same
+  mutation is written up as "1872 tests" in `cmangos.py`, recorded at `9e198c05`; both are dated
+  counts of the suite of the day, not a size — it is 1974 at `f6ed1b9a`). The by-name refusal covers
+  **one name**, not the property. This is precisely Codex's "ambient authority" point, arrived at from
+  the opposite direction.
+- **D4 — `dockerfile.write()` accepted hand-built marked text containing a secret and wrote it.** It
+  validated only the generated marker, never content — exactly the public bypass Codex named.
+  **Closed:** `write()` now refuses any text that is not a `_Rendered`, i.e. anything that did not come
+  out of `render()` unchanged (checked 2026-09-02 at `f6ed1b9a`).
 
 **What the review also established, and it bounds how much the tripwire is worth:** a template placed
 **outside `resources.installers_dir()`** makes the `rglob` tripwire blind, and **`--installers-root`
@@ -1448,25 +1490,35 @@ Deferring the Windows **fix** is right — a real DACL means pywin32 or an `icac
 path that touches the file, and that is an app-wide posture decision. **Correcting the false sentence
 is not deferrable.**
 
-### 25. The bash lineage still deletes a volume silently — 2026-09-01, unreachable today
+### 25. The bash lineage still deletes a volume silently — 2026-09-01, **GONE 2026-09-02: both halves deleted**
 
-`install-wow-vanilla.sh:2043` runs `docker volume rm "${db_volume}"` with no confirmation — **the exact
+`install-wow-vanilla.sh` ran `docker volume rm "${db_volume}"` with no confirmation — **the exact
 destructive answer the Python design rejects**, and the reason `db-password` refuses rather than
 wiping.
 
-Unreachable while `cmangos` is registered: `installer.py:896` falls back to a script only for an
-**unregistered** family. So the guard is **registration**, not a check — the sixth standing rule's
-shape (a guard held by its position rather than by the thing it protects). 7.2 deletes this lineage;
-until then, note that de-registering the family for any reason re-arms it.
+While it existed it was unreachable only by **registration**: `installer_for()` fell back to a script
+for an **unregistered** family, and K.8 registered `cmangos`. That made the guard a position rather
+than a check — the sixth standing rule's shape — and this entry closed by saying "de-registering the
+family for any reason re-arms it."
 
-Enumerated at argv level across `yulon/` and `main.py`: the **only** volume argv in the Python app is
-`docker.py:679` `["volume","inspect",...]`, which is read-only. No `volume rm`, no `volume prune`, no
+**That conclusion is now impossible, and it is the sentence to correct rather than the finding.**
+Verified 2026-09-02 at `f6ed1b9a`: the file is gone (F.1 deleted all eight bash files), and the
+fallback is gone with it (F.3) — `installer_for()` has one rule, `families.family_for()` on
+`install.native.family`, and an unregistered family now raises "an install family this app does not
+have" instead of reaching for a script. There is no longer anything for de-registration to re-arm.
+
+The argv census below still holds and is worth keeping:
+
+Enumerated at argv level across `yulon/` and `main.py` (re-run 2026-09-02 at `f6ed1b9a`): the **only**
+volume argv in the Python app is `docker.volume_exists()`'s `["volume", "inspect", …]`, read-only.
+No `volume rm`, no `volume prune`, no
 `down -v`, no `--volumes`. `remove_staged` is `["compose","down","-t",…,"--remove-orphans"]`.
 
-### 26. The three CMaNGOS entries name compose services that the rendered file does not have — 2026-09-01, OPEN, goes LIVE at K.8
+### 26. The three CMaNGOS entries name compose services that the rendered file does not have — 2026-09-01, **FIXED 2026-09-02 at `27209099`**
 
 Found by **F.2's reviewer**, while reviewing a 7.2 deletion — a 7.3 defect surfaced from an unrelated
-task. Verified independently here:
+task. Verified independently at the time; the block below is what the catalog said **on 2026-09-01**,
+not what it says now:
 
 ```
 wow-tbc / wow-vanilla / wow-tortoise   catalog compose_services() -> ('db', 'realmd', 'mangosd')
@@ -1478,9 +1530,24 @@ wow-wotlk                              compose_services() -> None  (uses the def
 `docker.start_staged()` runs `compose up -d --no-deps db realmd mangosd`. Against the file this repo
 actually generates that answers **`no such service`** — every one of the three is missing.
 
-**Not live today** only because `FAMILIES` registers `azerothcore` alone; `CmangosInstaller` exists but
-is unregistered. **K.8 is the task that registers it, so K.8 is when this becomes a broken install.**
-Fix before K.8, not after.
+**It was not live only because `FAMILIES` registered `azerothcore` alone**, and K.8 was the task that
+would register `CmangosInstaller`.
+
+**FIXED at `27209099` (2026-09-02 00:07), before K.8 registered the family, which is the order this
+entry asked for.** The three `containers.services` declarations were DROPPED rather than prefixed:
+`wow-wotlk` returns `None` and takes the default because its containers ARE its services, and the
+shared CMaNGOS template follows the same convention by design, so the entries had nothing left to
+declare. Prefixing instead would have been refused at generation time — `_container_prefix()` rebuilds
+the container names from `containers.services`, so `tbc-` + `tbc-db` raises rather than renders.
+Verified 2026-09-02 at `f6ed1b9a`: no entry in `catalog.json` carries a `containers.services` key, and
+`start_staged()` therefore asks compose for `tbc-db`, `tbc-realmd`, `tbc-mangosd` — the names the
+rendered file defines.
+
+**Read this before re-opening it.** The one shape `_container_prefix()` ACCEPTS for a
+`containers.services` declaration is `container == prefix + service`, which makes `compose_services()`
+the bare suffixes — exactly what `compose up` answers `no such service` for. So "put the service names
+back and prefix them" re-arms this bug while passing every generation-time check. That asymmetry is
+filed separately as §30.
 
 **Two test-level reasons nobody caught it**, both worth more than the bug:
 1. The deleted `test_no_catalog_compose_service_is_really_a_container_name` was the **only** test that
@@ -1488,15 +1555,27 @@ Fix before K.8, not after.
    restoring it verbatim would catch nothing. Its replacement,
    `test_cmangos_games_select_compose_services_not_container_names`, **restates literals instead of
    cross-checking**, and its two halves already contradict each other while both pass.
-2. `test_composegen.py::test_the_cmangos_services_are_named_after_their_containers` carries the
-   docstring *"`ContainerSpec.services` keeps its default"* — **false**; the catalog sets
-   `containers.services` explicitly. A true-sounding premise attached to a passing test.
+2. `test_composegen.py::test_the_cmangos_services_are_named_after_their_containers` carried the
+   docstring *"`ContainerSpec.services` keeps its default"* — false at the time, because the catalog
+   set `containers.services` explicitly. A true-sounding premise attached to a passing test. **Both
+   halves are now true**: `27209099` dropped the declaration and rewrote that docstring to say when it
+   became true and what had been believed before (checked 2026-09-02 at `f6ed1b9a`).
 
-**The test that should exist** (five lines, and it fails today, which is the point): for every entry,
-assert every name in `container_spec().compose_services()` appears as a service key in the **rendered**
-`base` from `composegen.render()`. Cross-check, not restatement.
+**The test that should exist now does**, and landed in the same commit:
+`test_composegen.py::test_every_service_the_catalog_selects_is_defined_in_the_rendered_compose_file`.
+For every entry with a native block it asserts that each name in `container_spec().compose_services()`
+(plus `import_service` and `containers.client_data`) appears as a service key in the **rendered** base
+from `composegen.render()` — cross-check, not restatement. It also carries the vacuity guard the review
+demanded: `compose_services()` mutated to `return self.services` answers empty for every shipped entry
+now that none declares one, and the entry count alone could not see that, so the test asserts each
+entry SELECTED something before checking what it selected. Verified passing 2026-09-02 at `f6ed1b9a`
+(whole suite 1974 passed, 3 skipped). This paragraph read "and it fails today, which is the point"
+until 2026-09-02 — a reader acting on it would have blocked K.8 and put back the one declaration shape
+that re-arms the bug.
 
-**Also minor, same branch:** `test_no_bash_installer_ships` has **no `scanned >= N` vacuity guard** —
+**Also minor, same branch — and STILL OPEN, checked 2026-09-02 at `f6ed1b9a`** (the FIXED in this
+entry's heading is the compose-service defect, not this): `test_no_bash_installer_ships` has **no
+`scanned >= N` vacuity guard** —
 mutation-proven: rename the installers root and it passes while its two siblings in the same file
 fail. Inconsistent with the guard F.2 deliberately added two files over.
 
@@ -1604,16 +1683,29 @@ guard someone must remember."* **That was wrong, and I wrote it.** Two independe
 by execution, each one refuting the round before:
 
 - `_public_tokens(self, server_dir)` can reach the password through `self.resolve_secrets(server_dir)`,
-  a public inherited method taking exactly the two things in scope. K.3's `db-password` stage wrote the
-  password into `server_dir` two stages earlier, so `resolve_secrets` no longer mints — it reads the real
-  install password back off disk. Six lines, full suite green, `ENV ROOT_PASSWORD=…` in a Dockerfile.
+  a public inherited method taking exactly the two things in scope. K.3's `db-password` stage
+  (`STAGE_NAMES` index 1) wrote the password into `server_dir` **one stage** before `write-dockerfile`
+  (index 2) — this said "two stages earlier" until 2026-09-02 — so `resolve_secrets` no longer mints:
+  it reads the real install password back off disk. Six lines, full suite green, `ENV ROOT_PASSWORD=…`
+  in a Dockerfile. **This route is live on a first install**, and it is the one that carries this
+  entry's conclusion.
 - Then: it needs neither a method nor a cache. `generate-compose` writes the plaintext password into
-  `<server_dir>/.env` as `DB_ROOT_PASSWORD=`, **one stage before `build`**. A file read in
-  `_public_tokens` leaks it, uncached and deterministic. Full suite green again.
+  `<server_dir>/.env` as `DB_ROOT_PASSWORD=`. A file read in `_public_tokens` leaks it, uncached and
+  deterministic. Full suite green again. **But the ordering here was framed against the wrong
+  consumer.** "One stage before `build`" is true of `build` (index 3 → 4) and is not the question:
+  `_public_tokens()`'s only build-context caller is `_write_dockerfile`, the `write-dockerfile` stage
+  at **index 2**, which runs *before* `generate-compose` at index 3, the sole writer of `.env`. So on a
+  FIRST install this helper reads a file that does not exist yet. It is reachable on a **resume**, or
+  on any second press into a server dir a previous attempt had already carried past
+  `generate-compose` — and `_write_dockerfile` really does re-run there, because its own docstring
+  records that `ctx.state` is not read in that body and a recorded `write-dockerfile` reaches it
+  exactly like a first run. Measured 2026-09-02 at `f6ed1b9a` off `stages()` and `STAGE_NAMES`.
 
 So the split is **a price, not a wall**: it raises the cost of writing that leak, and it removes the
 secret from the mapping by default. It does not make the leak unwritable, and no arrangement of
-parameters can, while the build context itself holds the plaintext — which it has since K.3.
+parameters can, while the build context itself holds the plaintext — which it has since K.3. **That
+conclusion is unchanged by the correction above**: the first route needs nothing but `server_dir`, and
+it is live on the first press.
 
 **The lesson, which is the reason to keep this paragraph rather than silently correct it:** every round
 here stated a guarantee, and the next reviewer found it too strong. A claim of the form *"X cannot

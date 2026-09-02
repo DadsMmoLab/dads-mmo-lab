@@ -1539,7 +1539,12 @@ class StagedInstaller:
     ) -> Iterator[str]:
         """Populate the databases, using the same probe/reset machinery as the repair button.
 
-        Four answers, four different things to do — the branch table is
+        Five answers, four different things to do — `docker.DatabaseImport` is a
+        five-member `Literal`, and `populated` splits on `complete`, joining
+        `imported` on one side and `unreadable` on the other. That is why this
+        count and the "five-branch table" below are different numbers. This
+        opened "Four answers" until 2026-09-02, which read as a contradiction of
+        its own closing paragraph and of `cmangos._import`. The branch table is
         `docker.repair_import()`'s, because an installer and a repair ask the
         same question of the same databases:
 
