@@ -493,6 +493,67 @@ def test_an_unrecorded_stage_is_never_written_down(tmp_path: Path) -> None:
     assert state.family == "azerothcore"
 
 
+def test_a_finished_install_says_so_last_and_says_where(tmp_path: Path) -> None:
+    """The sentence a user reads when the install ends, asserted by anything at all.
+
+    Nothing in the suite read it before 2026-09-02: `grep "is installed and
+    running"` over `tests/` found no hit, so the last line of every successful
+    install was free to change or disappear silently. That is not hypothetical
+    here — the line exists BECAUSE it went missing once. The comment above it
+    records why: this path used to log nothing at the end, and a tester on
+    yulon-win11 (2026-08-28) read a seven-minute readiness wait as "the install
+    was not remembered", because the only sign a run had ended was the
+    compose-project pin.
+
+    Asserts three things a support question depends on: that it is there, that it
+    names the SERVER DIRECTORY (the one fact that distinguishes two installs of
+    the same game), and that it is LAST — a success line with stage output after
+    it reads as a run that carried on and then stopped for an unsaid reason.
+    """
+    rec = Recorder()
+    family = _family(lambda me: (native.Stage("only", _say),))
+    server_dir = tmp_path / "wow"
+    lines = list(_build(rec, family).run(InstallOptions(server_dir=server_dir)))
+
+    ending = [line for line in lines if "is installed and running" in line]
+    assert len(ending) == 1, f"expected exactly one closing line, got {ending}"
+    assert str(server_dir) in ending[0], (
+        "the closing line does not say which folder, so two installs of the same "
+        f"game are indistinguishable in a log: {ending[0]!r}"
+    )
+    assert (
+        lines[-1] == ending[0]
+    ), f"something is said after the install claims to be finished: {lines[-1]!r}"
+
+
+def test_a_failed_install_never_says_it_finished(tmp_path: Path) -> None:
+    """The other half, which is the half that would actually hurt.
+
+    A closing line that survives a raising stage would tell a user their server is
+    installed and running when it is not, and send them looking for a working
+    install rather than at the error. Pinned separately from the success case
+    because the two can fail independently: moving the yield above the `try` would
+    keep this green while breaking the ordering, and moving it inside the `try`
+    would keep the ordering while breaking this.
+    """
+    rec = Recorder()
+
+    def _boom(ctx: native.StageContext) -> Iterator[str]:
+        yield "starting"
+        raise InstallerError("the build died")
+
+    family = _family(lambda me: (native.Stage("build", _boom),))
+    engine = _build(rec, family)
+    said: list[str] = []
+    with pytest.raises(InstallerError):
+        for line in engine.run(InstallOptions(server_dir=tmp_path / "wow")):
+            said.append(line)
+
+    assert not [
+        line for line in said if "is installed and running" in line
+    ], f"a failed install announced success: {said}"
+
+
 def test_the_cancel_note_is_said_by_the_spine_right_after_the_stage_heading(
     tmp_path: Path,
 ) -> None:
