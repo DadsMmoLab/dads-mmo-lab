@@ -2455,3 +2455,45 @@ def test_a_retried_tool_the_main_loop_never_reached_still_gets_its_output_folder
     assert (
         seen_at_start.get("vmaps") is True
     ), "vmap assemble ran on the retry path with no vmaps/ folder to write into"
+
+
+def test_a_wipe_followed_by_an_unmakeable_folder_still_says_the_mmaps_are_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The FIFTH ending after a wipe, and the one that had no test.
+
+    `run_mmaps` removes `mmaps/` when no finished record vouches for it, then
+    creates it again for MoveMapGen. If that creation fails -- ENOSPC, a mount
+    gone read-only, something else holding the name -- `make_out_dirs`'s own
+    sentence ends "Nothing was run", which is true of the TOOL and false of the
+    FOLDER that was just deleted.
+
+    Deliberately NOT a fifth entry in `MMAPS_ENDINGS`: those four are each
+    tripped by a different `Runner`, and this one is tripped before any runner
+    is reached, so it needs a different hook and would have to fake its way into
+    that list.
+
+    `make_out_dirs` is stubbed rather than provoked with a real unwritable path:
+    it has its own tests for WHEN it raises, and permissions behave differently
+    on the three platforms this suite runs on. What is under test here is that
+    `run_mmaps` catches it and appends what the wipe did -- which a review added
+    on 2026-09-02 and nothing asserted, so deleting `{cleared}` left all 2095
+    tests green.
+    """
+    run(PLAN, Runner(FULL), tmp_path)
+    data_dir = tmp_path / "server" / "data"
+    fill(data_dir, "mmaps", 5)
+
+    def refuse(produces: object, where: Path) -> None:
+        raise InstallerError(f"{where / 'mmaps'} could not be created (boom). Nothing was run.")
+
+    monkeypatch.setattr(extract, "make_out_dirs", refuse)
+
+    with pytest.raises(InstallerError) as caught:
+        mmaps(MMAPS, Runner(MMAPS_WRITES), tmp_path)
+
+    message = str(caught.value)
+    assert "could not be created" in message, message
+    assert extract.MMAPS_CLEARED_NOTE in message, (
+        "the folder was wiped and the refusal did not say so: " + message
+    )

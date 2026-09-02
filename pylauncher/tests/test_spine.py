@@ -2263,3 +2263,61 @@ def test_a_finished_install_drops_the_previous_runs_failure(tmp_path: Path) -> N
         "a finished install left the previous failure in the state file: " f"{after.last_error!r}"
     )
     assert after.completed == ("always",), "clearing the error must not disturb what was done"
+
+
+def test_a_state_file_deleted_mid_install_is_not_written_back_at_the_end(tmp_path: Path) -> None:
+    """Finishing must not RE-CREATE a record the user removed while it ran.
+
+    `_clear_error` ends a successful run by rewriting the state file without the
+    previous failure's sentence. `write_state` does
+    `mkdir(parents=True, exist_ok=True)`, so with no guard it will happily
+    recreate a file -- and a folder -- that is not there any more. The next
+    press then meets `_guard()`, which refuses on the strength of the record the
+    previous run just wrote: a folder the user emptied by hand becomes
+    permanently un-installable.
+
+    Its sibling `_record_error` has carried that guard all along; `_clear_error`
+    got it from a review on 2026-09-02, and nothing asserted it -- deleting the
+    guard left the whole suite green.
+
+    The deletion is done by an UNRECORDED stage, which is what makes this the
+    real path rather than a contrivance: unrecorded stages run on every attempt,
+    they are the last four CMaNGOS stages, and they are exactly where a
+    long-running install is when someone reaches for the folder.
+    """
+    rec = Recorder()
+    server_dir = tmp_path / "wow"
+    passes: list[int] = []
+
+    def _delete_the_record(ctx: native.StageContext) -> Iterator[str]:
+        # Only on the SECOND pass. An unrecorded stage runs on every attempt --
+        # that is what unrecorded means -- so deleting unconditionally would
+        # take the record away at the end of the first run too, leaving nothing
+        # to plant a failure in. The first version of this test did exactly
+        # that and failed on its own setup.
+        passes.append(1)
+        if len(passes) > 1:
+            (ctx.server_dir / native.STATE_FILE).unlink()
+        yield "the record is gone"
+
+    family = _family(
+        lambda me: (
+            native.Stage("always", _say),
+            native.Stage("never", _delete_the_record, recorded=False),
+        )
+    )
+
+    # First run records "always" and leaves a state file behind.
+    list(_build(rec, family).run(InstallOptions(server_dir=server_dir)))
+    state = native.read_state(server_dir, valid=("always", "never"))
+    assert state is not None
+    native.write_state(server_dir, replace(state, last_error="the server never reported ready"))
+    assert (server_dir / native.STATE_FILE).is_file()
+
+    # Second run: "always" is already done, "never" deletes the record, and the
+    # install finishes successfully.
+    list(_build(rec, family).run(InstallOptions(server_dir=server_dir)))
+
+    assert not (
+        server_dir / native.STATE_FILE
+    ).exists(), "a finished install wrote back a state file the run itself had deleted"
