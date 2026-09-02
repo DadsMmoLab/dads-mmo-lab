@@ -1,11 +1,11 @@
 """The CMaNGOS-lineage install engine: one class for every entry whose `family` is `cmangos`.
 
 Stage ORDER is Python (this tuple); stage PARAMETERS are the entry's typed
-`install.native.cmangos` block. The class therefore names no game — checked
-by hand against this file and clean (review, 2026-09-01); the test that will
-assert it, over code with docstrings stripped and for every family module, is
-`test_family_modules_contain_no_game_literal` in
-`tests/test_catalog_invariants.py`, and G.7 is the task that lands it — and
+`install.native.cmangos` block. The class therefore names no game — held since
+G.7 by `test_family_modules_contain_no_game_literal` in
+`tests/test_catalog_invariants.py`, which asks it of every family module over
+the string constants that RUN, against the values `catalog.json` gives each
+game; before that it was a reading done by hand (review, 2026-09-01) — and
 the third CMaNGOS game costs a catalog entry plus templates, no Python
 (`pyplan/phase7-decisions.md`, "Family engines — chosen").
 
