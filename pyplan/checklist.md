@@ -327,10 +327,80 @@
  The eleven steps are in `pyplan/phase7-plans/7.3-cmangos-family.md`, Task K.8 step 7: hand the box over with `yulon-use.ps1 ubuntu`, announce through `claude-say`, sync the checkout, run the unit suite, pull `busybox:1.36` and `mariadb:11`, run `pytest -m integration tests/integration`, copy the log to `pyplan/gates/7.3-yulon-ubuntu.log` (that directory does not exist yet), record the five numbers here, shut the box down. K.8 landed the code half only — the family registered, the stage tuple pinned, dispatch proved for all three CMaNGOS entries — because this gate starts containers and pulls images and the standing rule is that the owner starts a run himself. Nothing is blocked; it needs the VM powered on and someone to press go. **Do not tick from a unit suite alone:** a `SKIPPED` in the integration run means the daemon was never reached, which is the failure a gate this shape exists to catch.
     - **This gate's text is duplicated verbatim under 7.1 above, where it is recorded as PASSED on 2026-09-01** (`yulon-ubuntu`, Docker 29.1.3, `yulon-phase7` at `79ea63c`, 20 passed / 1 skipped). **It is one gate written twice, mis-filed** — `79ea63c` is *"Task H.6: the Group H primitives get gates that run them for real"*, which is a 7.3 task recorded under 7.1.
     - **But the 7.3 line still needs its own run, and an earlier draft of this note said otherwise.** It claimed "same suite, same two images, so the substance of the run below already exists". Measured 2026-09-02: `git diff --stat 79ea63c HEAD -- pylauncher/tests/integration/` is `conftest.py +10/-…`, `test_docker_live.py +101/-…`, and **`test_sqlplan_live.py` +160, which did not exist at all**. At `79ea63c` the integration suite held exactly **21** test functions (4 + 16 + 1) — precisely the 20 passed / 1 skipped on that record. Today it holds **23**. The live `sqlplan.apply` / `exec_stdin` + gzip proof against a real `mariadb:11` is two of the six things this gate line names, and it **postdates the recorded run**. So the 2026-09-01 numbers cannot stand for this gate; whoever runs it runs it fresh, and the 7.1 copy should be moved here rather than counted twice.
-- [ ] 7.4a WoW TBC through `build` on yulon-ubuntu — build time and context-transfer time recorded; kill + resume skips the build
-- [ ] 7.4b WoW TBC extract + mmaps with the 2.4.3 client — client tree checksummed before/after (nothing written into it); per-tool counts; kill after `ad`, resume runs only the later tools; symlink-farm fallback recorded if a tool refuses `:ro`
+- [x] 7.4a WoW TBC through `build` — build time and context-transfer time recorded; kill + resume skips the build
+  - **PASSED 2026-09-02 on `m910q`**, not on `yulon-ubuntu` as the line says. TBC has
+    `requires_client_dir: true` and its preflight REFUSES without one, so "through build" cannot be
+    reached on a box with no client; m910q is where the clients live. The line's box name was
+    written before that was known.
+  - **Build: 2357.1s (39m17s)** on 4 cores, producing `yulon.local/cmangos-tbc-server:native-1cbfa4ac`
+    (395 MB). **Context transfer: 279.81 MB in 2.8s**; the Dockerfile itself 3.88 kB.
+  - **Resume skips the compile**, in the engine's own words: `The server is already built; skipping
+    the compile.` The three clones likewise: `cmangos/mangos-tbc is already in src/mangos-tbc;
+    leaving it exactly as it is.`
+  - **The mid-build kill was measured on WotLK instead, and the number is the useful part.** Killed
+    at object 1597/1829 after 757s; the resume reached 1682/1829 in 120s, because
+    `apps/docker/Dockerfile` line 83 mounts `--mount=type=cache,target=/ccache`. BuildKit does not
+    cache a partial `RUN`, so the STAGE re-runs — what is skipped is the compilation, not the step.
+    A gate line that says "resume skips the build" is describing the effect, not the mechanism.
+- [x] 7.4b WoW TBC extract + mmaps with the 2.4.3 client — client untouched; per-tool counts; resume runs only the unfinished tool
+  - **PASSED 2026-09-02 on `m910q`.** Per-tool counts: **dbc 185, maps 3586, Buildings 7171,
+    vmaps 8099, mmaps 2819** across 72 maps.
+  - **Nothing was written into the client**, established three ways rather than asserted: **0 files**
+    under `~/clients/WoW-Client-2.4.3` have an mtime at or after the install began (15:35:50); the
+    newest file in the whole 8.0 GB tree dates from **2023-03-24**; and **all four** client mounts
+    across both runs were `:ro` with **zero** writable ones (`grep -c` on the recorded `docker run`
+    lines). Baseline for future runs, taken after the install:
+    `sha256 bff72303c63c1a202c78ce8b56f8bfe5342ca15816f45a71c68d220c6be3a358`, 200 files,
+    8,490,172,040 bytes. **The mtime evidence is the weaker half** — a write that preserved mtimes
+    would not show — which is why the content hash exists; it is a baseline, not a before/after.
+  - **Resume ran only the unfinished tool.** The first run died inside `vmap assemble`; the resume
+    reported `dbc and maps: already extracted (dbc: 185 files, maps: 3586 files)` and `vmap extract:
+    already extracted (Buildings: 7171 files)` and re-ran the assembler alone. That is the criterion
+    in substance; no separate kill-after-`ad` was staged because a real failure supplied one.
+  - **No symlink-farm fallback was needed**: no tool refused the `:ro` mount. Recorded because the
+    line asks for it, not because it happened.
+  - **It found a real defect, which is why it took two runs.** `vmap_assembler Buildings vmaps` does
+    not create its output folder; it died with `Cannot open vmaps/000.vmtree` and then `error
+    converting Abandonedorcbarracks.wmo`, naming a model file rather than the missing directory.
+    Fixed in `extract.make_out_dirs()` (2ce89000), with the same hole found by reading one stage
+    later in `run_mmaps`, which WIPES `mmaps/` and never put it back.
 - [ ] 7.4c WoW TBC conf + import + ready — every `warn` phase justified or flipped; marker written; interrupted import → `partial` → reset → re-run; second Install press ends in seconds; realmd's ready line recorded; client logs in
+  - **Substantially done 2026-09-02 on `m910q`; deliberately NOT ticked.** `conf`, `start-db`,
+    `import`, `up` and `ready` all completed and `WoW TBC is installed and running` was printed;
+    three containers Up.
+  - **realmd's ready line, recorded as the line asks:** `Added realm id 1, name 'MaNGOS'`. Note the
+    catalog sets `ready.auth: null` for TBC, so the engine does not wait on the auth log at all —
+    this line is evidence, not a marker in use.
+  - **Second press: 70s**, from a state where only `up` and `ready` remained.
+  - **Still owed, and each is a real gap rather than a formality:** the three preflight `warn`
+    phases (CPU-vs-memory, and free space twice) are not yet justified or flipped; the interrupted
+    `import` → `partial` → reset → re-run path was never exercised; and **the client login needs the
+    owner at a WoW client**, which is the same item 7.1's Ubuntu gate waits on.
+  - **This gate caught the worst defect of the day.** `ready` gave up after 600s on a boot that
+    took **793s** (container start 15:51:15, first `Avg Diff:` 16:04:28) and told the user
+    `The server started but never reported ready.` — while the server was healthy and idle. Raised
+    to 1800s in `1b88d49d`; the test pins the floor at the measured 793, not at the shipped number.
 - [ ] 7.5 WoW Vanilla — data + templates only; full install with the 1.12.1 client incl. a forced vmap retry; the change set contains no Python
+  - **Installed and running 2026-09-02 19:17 on `yulon-ubuntu`** (15 cores), against
+    `WoW-Client-1.12.1` downloaded to that box and extracted (5.1 GB, `Data/` with 14 MPQs). All
+    twelve stages; `WoW Vanilla is installed and running in /home/pk/vanilla-server`.
+  - **Build 2744.3s (45m44s)**; context transfer 441.59 kB in 0.3s — three orders of magnitude
+    smaller than TBC's 279.81 MB, because this entry's `.dockerignore` keeps the already-cloned
+    sources out and the sources are COPYed rather than shipped in the context. Data counts:
+    **dbc 158, maps 2429, Buildings 5076, vmaps 5667, mmaps 2008**.
+  - **NOT ticked, on two counts.** The line requires a **forced vmap retry**, which this run never
+    triggered — `plan.retry` exists and no tool crashed, so the path is unexercised. And the line
+    says **"the change set contains no Python"**: it does not. Reaching a running Vanilla needed
+    `make_out_dirs()` in `extract.py` and the HTTP/1.1 line in all three Dockerfile templates.
+    That is not a failure of the run; it is the line's premise being wrong, and the premise is what
+    7.5 was for — it predicted Vanilla would be data-only and it was not.
+  - **It found the second-worst defect of the day.** The build died at cmake configure, before
+    compiling anything: CMaNGOS's `FetchContent_MakeAvailable(zlib)` CLONES madler/zlib at configure
+    time, and over HTTP/2 that clone fails (`could not read Username for 'https://github.com'` /
+    `expected flush after ref listing`). Established by three runs on the same box — `alpine/git`
+    worked, `ubuntu:22.04` failed, `ubuntu:22.04` with `-c http.version=HTTP/1.1` worked — and fixed
+    in all three templates (`12d7e240`). `git.py` had already made this choice for the clones the
+    app itself makes; the build context was the last place still speaking HTTP/2.
 - [ ] 7.6 WoW Tortoise — data + templates; first-ever extraction from a 7272 client; boot to `Ready to login`; client connects; `status` promoted from `wip`; source pinned
 - [ ] 7.7 Native Windows, all four — WotLK first (closes the 6.3 `ac-db-import` blocker), then TBC, Vanilla, Tortoise from `yulon-win11`'s clean checkpoint; 9p extract/mmaps throughput recorded; `platforms` widened per entry
 - [ ] 7.8 macOS, all four — **[blocked]** on hardware
