@@ -336,23 +336,84 @@ def test_a_missing_template_says_which_file(tmp_path: Path) -> None:
         )
 
 
-@pytest.mark.parametrize("password", ['pass"word', "pass$word", "pass;word", "pass#word"])
-def test_a_password_that_cannot_be_spliced_is_refused(tmp_path: Path, password: str) -> None:
+UNSAFE_SCALAR_REASONS = {
+    "$": "opens another compose interpolation",
+    '"': "ends the quoted, semicolon-separated database field list",
+    "\\": "escapes the next character inside that quoted string",
+    ";": "splits the database field list",
+    "#": "truncates a bare YAML value at a comment",
+    "{": "opens a `${...}` interpolation",
+    "}": "ends a `${VAR:-default}` early",
+    "\r": "a line end that YAML and the SQL client both act on, and that a paste hides",
+    "\n": "splices arbitrary YAML, and closes a joined SQL line to write the next one",
+    "\t": "is not legal YAML indentation",
+    "'": "closes `IDENTIFIED BY '<pw>'` in the SQL a plan with no `create` list writes",
+}
+"""Why each character is in `_UNSAFE_SCALAR_CHARS`, restated here ON PURPOSE.
+
+A parametrisation derived from the constant shrinks with the constant, so it
+can never see a narrowing. Measured 2026-09-02 on `f6ed1b9a`: deleting the
+single quote — one character — from `_UNSAFE_SCALAR_CHARS` left the whole suite
+passing, byte-identical to baseline, because the four cases the old
+parametrisation restated did not include it. Deleting the `_refuse_unsafe()`
+CALL was killed by four tests; narrowing the set it reads was silent. Something
+outside the constant has to hold its membership, and a reason per character is
+what makes that a review rather than a magic literal.
+
+`test_every_unsafe_scalar_character_is_refused_*` then drives every member
+through the real refusal, so this table cannot claim a character the code does
+not enforce either.
+"""
+
+
+def test_the_unsafe_scalar_set_is_exactly_the_characters_with_a_reason() -> None:
+    """The membership pin. Narrowing the set is loud here and nowhere else."""
+    assert composegen._UNSAFE_SCALAR_CHARS == frozenset(UNSAFE_SCALAR_REASONS)
+
+
+@pytest.mark.parametrize("char", sorted(composegen._UNSAFE_SCALAR_CHARS))
+def test_every_unsafe_scalar_character_is_refused_in_the_database_password(
+    tmp_path: Path, char: str
+) -> None:
     """Refused rather than escaped: the same scalar lands in two contexts at once.
 
     A bare YAML value and a quoted, semicolon-separated one, with compose's own
     interpolation running on top of both — no single escaping survives all of
     it, and this is an install-time option the user can simply spell
-    differently.
+    differently. Derived from the constant, so a character ADDED to the set
+    arrives here with a case of its own; the membership pin above is what
+    covers a character taken out.
     """
     with pytest.raises(composegen.ComposeGenError, match="database root password"):
         composegen.render(
             ENTRY,
             tmp_path / "wow",
             templates_root=TEMPLATES,
-            db_password=password,
+            db_password=f"pass{char}word",
             platform_id=lambda: "macos",
         )
+
+
+@pytest.mark.parametrize("char", sorted(composegen._UNSAFE_SCALAR_CHARS))
+def test_every_unsafe_scalar_character_is_refused_in_a_world_env_value(
+    tmp_path: Path, char: str
+) -> None:
+    """`_env_block()` reads the same constant, and its values are catalog data, not a secret.
+
+    The second call site, driven through `render()` rather than through the
+    private function, because what is under test is that the same set guards
+    both — the password refusal one line earlier must not be what answers, so
+    the message names the variable and not the password.
+    """
+    with pytest.raises(composegen.ComposeGenError, match="the value of AC_A_TEST_SETTING") as bad:
+        composegen.render(
+            ENTRY,
+            tmp_path / "wow",
+            templates_root=TEMPLATES,
+            world_env={"AC_A_TEST_SETTING": f"on{char}off"},
+            platform_id=lambda: "macos",
+        )
+    assert "database root password" not in str(bad.value), "the password refusal answered instead"
 
 
 def test_write_plan_refuses_a_compose_file_it_did_not_write(tmp_path: Path) -> None:
