@@ -61,42 +61,61 @@ from yulon.catalog.installer import (
 STAGE_NAMES = AzerothCoreInstaller.STAGE_NAMES
 
 
+def without_cmangos(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The registry as it stood before K.8: `azerothcore` and nothing else.
+
+    Two tests below are about the branch `installer_for()` takes when a shipped
+    entry names a family THIS BUILD has no engine for. That was the tree's real
+    state for the four groups between G.4 (which landed the three CMaNGOS
+    `native` blocks) and K.8 (which registered the class that reads them), and
+    `wow-tbc` was the live example. K.8 registered it, and the example went
+    away; the branch did not, because the next lineage's catalog data will
+    arrive ahead of its engine the same way.
+
+    Narrowing the REGISTRY rather than editing an entry is what keeps the
+    fixture honest about which rule it violates: `NativeInstall.family` is a
+    `Literal["azerothcore", "cmangos"]`, so an entry naming a third family is a
+    state no `catalog.json` can reach, and a test built on one would be
+    proving the branch against data the app cannot receive.
+    """
+    monkeypatch.setattr(family_registry, "FAMILIES", {"azerothcore": AzerothCoreInstaller})
+
+
 def test_the_family_decides_which_engine_installs_and_linux_no_longer_keeps_the_script() -> None:
     """One place decides, from `catalog.json` data — now on `install.native` (7.1, A1).
 
     WotLK is native on every platform, Linux included: the flip is one JSON key.
-    The three CMaNGOS entries carry a `native` block from G.4 and STILL take the
-    script path, because that block names a family (`cmangos`) `FAMILIES` has no
-    engine for until K.8. That is what the second fact `installer_for()` reads
-    is for: for the several groups between the data landing and the engine
-    landing, dispatching on the block alone would take these three games away
-    from the only thing that installs them and hand them a refusal instead. Off
-    Linux they still meet the 6.1 refusal, which comes from `Installer`, the one
-    place that words it, until 7.2 deletes it.
+
+    This also asserted that the three CMaNGOS entries took the SCRIPT path,
+    which was true until K.8 registered `CmangosInstaller` and made it false in
+    the same commit. Where those three go now is asserted in
+    `test_families_cmangos.py`, beside the class that receives them, and the
+    catalog-wide relationship — every native entry reaching the class its family
+    id names — is `test_spine.py`'s, since it is true of every family. What is
+    left here is the AzerothCore half, which is this file's subject.
     """
     assert isinstance(installer_for(ENTRY, platform_id=lambda: "linux"), AzerothCoreInstaller)
     assert isinstance(installer_for(ENTRY, platform_id=lambda: "macos"), AzerothCoreInstaller)
     assert isinstance(installer_for(ENTRY, platform_id=lambda: "windows"), AzerothCoreInstaller)
-    for game_id in ("wow-tbc", "wow-vanilla", "wow-tortoise"):
-        entry = load_catalog().get(game_id)
-        assert entry.install.native is not None and entry.install.native.family == "cmangos"
-        assert isinstance(installer_for(entry, platform_id=lambda: "linux"), Installer), game_id
-        assert isinstance(installer_for(entry, platform_id=lambda: "macos"), Installer), game_id
-        assert isinstance(installer_for(entry, platform_id=lambda: "windows"), Installer), game_id
 
 
 def test_a_family_with_no_engine_yet_falls_back_to_the_script_and_says_so(
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The fallback is logged, because a silent one is how a typo becomes a mystery.
 
     A family id that no engine claims has two causes and they need opposite
-    responses: data that arrived ahead of its engine (`cmangos`, today), and a
-    misspelling that will never match anything. Both look identical from the
-    outside — the game installs, exactly as it did last week — so the only thing
-    that can tell the second story is a line in the log naming the family that
-    was not found and the script that ran instead.
+    responses: data that arrived ahead of its engine, and a misspelling that
+    will never match anything. Both look identical from the outside — the game
+    installs, exactly as it did last week — so the only thing that can tell the
+    second story is a line in the log naming the family that was not found and
+    the script that ran instead.
+
+    `cmangos` was the live example of the first cause until K.8; see
+    `without_cmangos`.
     """
+    without_cmangos(monkeypatch)
     with caplog.at_level("INFO", logger="yulon.catalog.installer"):
         engine_for_tbc = installer_for(load_catalog().get("wow-tbc"), platform_id=lambda: "linux")
     assert isinstance(engine_for_tbc, Installer)
@@ -104,7 +123,9 @@ def test_a_family_with_no_engine_yet_falls_back_to_the_script_and_says_so(
     assert "cmangos" in said and "install-wow-tbc.sh" in said
 
 
-def test_no_engine_and_no_script_left_is_the_app_bug_family_for_words() -> None:
+def test_no_engine_and_no_script_left_is_the_app_bug_family_for_words(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The third state, and the one 7.2 turns the middle branch into.
 
     The fallback needs something to fall back TO. Once the bash path is gone an
@@ -114,35 +135,11 @@ def test_no_engine_and_no_script_left_is_the_app_bug_family_for_words() -> None:
     catalog edit: `Install.script` is still a required non-empty string, so this
     state cannot be reached through `catalog.json` today.
     """
+    without_cmangos(monkeypatch)
     tbc = load_catalog().get("wow-tbc")
     scriptless = tbc.model_copy(update={"install": tbc.install.model_copy(update={"script": ""})})
     with pytest.raises(InstallerError, match="install family this app does not have"):
         installer_for(scriptless, platform_id=lambda: "linux")
-
-
-def test_the_same_entry_dispatches_to_its_family_the_day_the_family_is_registered(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The other half of the fallback: it is the REGISTRY that is missing, not the data.
-
-    K.8 adds one line to `FAMILIES`, and these three entries must move to the
-    family engine on that line alone — no catalog edit, no second flip. A
-    stand-in class is registered for the duration of this test rather than
-    weakening the shipped registry, so what is proved is the dispatch rule and
-    not a property of `CmangosInstaller`, which does not exist yet.
-    """
-    tbc = load_catalog().get("wow-tbc")
-
-    class _StandIn(AzerothCoreInstaller):
-        family = "cmangos"
-
-    assert family_registry.is_registered("cmangos") is False, "K.8 has landed; retire this test"
-    monkeypatch.setattr(
-        family_registry, "FAMILIES", {**family_registry.FAMILIES, "cmangos": _StandIn}
-    )
-    assert family_registry.is_registered("cmangos") is True
-    assert isinstance(installer_for(tbc, platform_id=lambda: "linux"), _StandIn)
-    assert isinstance(installer_for(ENTRY, platform_id=lambda: "linux"), AzerothCoreInstaller)
 
 
 def test_the_entry_names_its_family_and_a_scriptless_entry_still_reads_as_scripted() -> None:

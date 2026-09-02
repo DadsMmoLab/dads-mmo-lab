@@ -11,20 +11,27 @@ from collections.abc import Mapping
 
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
+from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import InstallerError
 from yulon.catalog.native import StagedInstaller
 
-FAMILIES: Mapping[str, type[StagedInstaller]] = {"azerothcore": AzerothCoreInstaller}
+FAMILIES: Mapping[str, type[StagedInstaller]] = {
+    "azerothcore": AzerothCoreInstaller,
+    "cmangos": CmangosInstaller,
+}
 
 
 def is_registered(family: str) -> bool:
     """Does THIS build have an engine for `family`? The question, not the mapping.
 
-    Catalog data outruns the engines that read it: the `cmangos` blocks land in
-    7.3's group G and the class that consumes them is registered above four
-    groups later, so between the two there is a shipped entry naming a family
-    that does not exist here. `installer.installer_for()` has to be able to tell
-    that state apart from a typo, and it cannot read `FAMILIES` to do it —
+    Catalog data outruns the engines that read it. It did in 7.3: the `cmangos`
+    blocks landed in group G (task G.4) and the class that consumes them was
+    registered four groups later in K.8, and for the length of that gap three
+    shipped entries named a family that had no engine above. K.8 closed that
+    gap, so as of this commit no shipped entry is in that state — the predicate
+    is kept because the NEXT family will reopen it, not because one is open.
+    `installer.installer_for()` has to be able to tell that state apart from a
+    typo, and it cannot read `FAMILIES` to do it —
     importing this package at its module scope is the cycle its own in-function
     import exists to avoid, and an import moved inside a branch is the same
     coupling with the name filed off. A predicate lives here, where the mapping
