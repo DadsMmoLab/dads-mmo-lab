@@ -721,15 +721,26 @@ CMANGOS_GAMES = ("wow-tbc", "wow-vanilla", "wow-tortoise")
 def test_the_cmangos_entries_carry_a_full_family_block(game_id: str) -> None:
     """The block the CMaNGOS engine reads, and the Linux install it enables.
 
-    G.4 landed this data while `FAMILIES` still had no `cmangos` engine, so
-    the entries kept their bash `script` and this test asserted it. K.8
-    registered the engine and F.4 deleted the field: the same three entries
-    now install through `CmangosInstaller` on Linux and nothing else, which is
-    what `supports("linux")` below stands for. 7.2's plan, written for an
-    order in which it ran before 7.3, had these three go to `platforms: []`;
-    that would have disabled the Install button on three of the four shipped
-    games. What installs the game is asserted in `test_families_cmangos.py`,
-    on the dispatcher.
+    G.4 landed this data while `FAMILIES` still had no `cmangos` engine, so the
+    entries kept their bash `script` and this test asserted it. K.8 registered the
+    engine and F.4 deleted the field: the same three entries now install through
+    `CmangosInstaller` on Linux and nothing else, which is what `supports("linux")`
+    below stands for. What installs the game is asserted in
+    `test_families_cmangos.py`, on the dispatcher.
+
+    THIS DOCSTRING IS LOAD-BEARING, which is why it has been corrected twice in a
+    day: `cmangos_entries()` points a reader HERE for which games declare the
+    family, so a present-tense falsehood teaches the opposite of the truth. It has
+    said, at different times, that the three scripts are "the only thing that
+    installs these games" and that the entries "keep their `script`". Both were
+    true when written.
+
+    7.2's plan, written for an order in which it ran BEFORE 7.3, had these three
+    go to `platforms: []`. That would have disabled the Install button on three of
+    the four shipped games -- `Install.supports()` is `platform_id in platforms`
+    and `catalog_view` gates on it twice. It is also not a value the model accepts:
+    `Install.platforms` carries `min_length=1`, kept deliberately, because after
+    7.3 an entry installable nowhere can only be a mistake.
     """
     entry = load_catalog().get(game_id)
     native = entry.install.native

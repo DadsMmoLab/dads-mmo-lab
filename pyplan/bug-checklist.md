@@ -1741,6 +1741,34 @@ both build a `DockerSql`. `Applier` genuinely has that skip-everything mode (`ap
 `applier()` intercepts every route to it. Same family: a `None` default folding "unset" into
 "explicitly absent". Fix is a flag or deleting the sentence.
 
+### 32. Three Install buttons now run an engine that has never installed a server — 2026-09-02, OWNER DECISION
+
+Not a defect. Raised by K.8's independent review so that it is a choice rather than a discovery.
+
+K.8 registered `cmangos` in `FAMILIES`, so `wow-tbc`, `wow-vanilla` and `wow-tortoise` no longer fall
+back to their bash scripts — they dispatch to `CmangosInstaller`. That is exactly what the plan asks
+for, and every unit-level guarantee is in place: dispatch is proved for all three entries enumerated
+from `catalog.json`, the stage tuple is pinned, and a working-looking wrong answer
+(`FAMILIES["cmangos"] = AzerothCoreInstaller`) is killed by test.
+
+**What has NOT happened is a live install.** Gates 7.4a/b/c (TBC through `build`; extract + mmaps with
+the 2.4.3 client; conf + import + ready) are unticked, and `pyplan/gates/` does not exist yet. The 7.3
+primitives gate is written and ready but was deliberately not run — it starts containers and pulls
+images, and the standing rule is that the owner starts a run himself.
+
+**The blast radius is bounded by status**: those three entries are `beta`, `beta` and `wip`. A user who
+presses Install gets a real attempt rather than a refusal, and the failure modes are the ordinary ones
+of an unexercised path.
+
+**The alternative, if that is not wanted yet**, is one line: leave the family registered and keep the
+three entries off the Install path until their gates are ticked. It is a data change, not a code change.
+Recording it here rather than deciding it — the trade is "an unexercised path is reachable" against
+"the work 7.3 exists for is not usable", and that is the owner's call.
+
+**Related and already corrected** (`514c2351`): the 7.3 primitives gate cannot be ticked from the
+2026-09-01 record filed under 7.1. That run predates `test_sqlplan_live.py` entirely — 21 test functions
+then, 23 now — so it could not have executed two of the six things the gate line names.
+
 ### One thing worth keeping
 
 Three of these have an obvious fix that is **wrong**, and two of them arm a worse bug:

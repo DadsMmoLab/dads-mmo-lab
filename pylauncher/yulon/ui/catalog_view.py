@@ -380,13 +380,19 @@ class CatalogView(QWidget):
         an older build, or before the app was reinstalled never pass through
         `start_install()`, so this is how they get a controller tab. Two checks:
         a compose file in the chosen folder, under any of the names Compose
-        itself accepts (`installer.COMPOSE_FILENAMES`) - TBC and Vanilla
-        installs are called `compose.yml`, not `docker-compose.yml` - and the
-        same folder rule
-        `start_install()` applies, because a folder Docker cannot mount is no
-        more attachable than it is installable. That second one was missing
-        until a tester attached a server living inside WSL (2026-08-26): the
-        rule existed and simply was not wired to the button they pressed.
+        itself accepts (`installer.COMPOSE_FILENAMES`), because the TBC and
+        Vanilla scripts wrote `compose.yml` rather than `docker-compose.yml`
+        and those installs are still on disk - nothing Yu'lon writes has that
+        name since 7.2, when both families moved to `composegen`, whose
+        `BASE_FILE` is `docker-compose.yml` - and the same folder rule the
+        INSTALL path applies
+        (`platform.server_dir_problem`, which `StagedInstaller.preflight()`
+        asks before it provisions anything), because a folder Docker cannot
+        mount is no more attachable than it is installable. Attaching never
+        reaches an engine, which is why the rule is asked here by hand. That
+        second check was missing until a tester attached a server living inside
+        WSL (2026-08-26): the rule existed and simply was not wired to the
+        button they pressed.
         """
         server_dir = self._pick_dir(
             self,
