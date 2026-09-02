@@ -79,15 +79,31 @@ def test_no_field_or_method_of_install_is_about_a_bash_script() -> None:
 
     The whole field set is compared, not the names that were deleted: a
     mutation adding `bash_file` — the script field back under a name that
-    never says "script" — survived a substring check and dies here. The
-    substring line stays anyway, because it fails with the offending name in
-    the message while a set diff only says the set differs.
+    never says "script" — survived a substring check and dies here.
+
+    ORDER MATTERS, and it was wrong when this was written. The substring line
+    was placed AFTER the set comparison and could therefore never fail: any
+    field name containing "script" already breaks the set, so the set assertion
+    always fired first. Its docstring claimed it "stays anyway, because it fails
+    with the offending name in the message" — a purpose the written order
+    forbade. Found by review 2026-09-02, proved by a mutation that restored a
+    real `script` field and watched the set assertion be the one that fell. It
+    now runs first, which is the only arrangement in which that reason is true.
+
+    LIMIT, recorded rather than fixed: this enumerates `Install`'s own fields
+    and namespace. Measured 2026-09-02, three shapes survive it — a plain
+    `@property`, a `@computed_field @property`, and a `script` field on the
+    NESTED `NativeInstall`. What backstops them is
+    `test_the_shipped_catalog_names_no_bash_file`: a re-added field only matters
+    once it carries `.sh` data, and that test walks the JSON. A guard that
+    enumerates one model says nothing about its neighbours.
 
     `is_native` is named on its own because it is the one deleted symbol whose
     name does not say "script": it meant "supported, but not by the script",
     and with a single install path left it could only be a synonym for
     `supports()`.
     """
+    assert [name for name in Install.model_fields if "script" in name] == []
     assert set(Install.model_fields) == {
         "default_server_dir",
         "password",
@@ -95,7 +111,6 @@ def test_no_field_or_method_of_install_is_about_a_bash_script() -> None:
         "platforms",
         "native",
     }
-    assert [name for name in Install.model_fields if "script" in name] == []
     assert [name for name in vars(Install) if "script" in name] == []
     assert not hasattr(Install, "is_native")
 
@@ -140,11 +155,27 @@ def test_a_script_member_is_refused_by_forbid_and_by_nothing_else(
 ) -> None:
     """A stale `script*` key in an entry is an error, not a silently ignored member.
 
-    The error list is compared whole rather than matched on a phrase: that
-    pins the refusal to `extra="forbid"` on `Install` (`extra_forbidden`, at
-    `install.<field>`) and to no other rule. Matching text would not — three
-    times in Phase 7 a test passed because a NEIGHBOURING rule refused the
-    fixture and its message happened to contain the same word.
+    The error list is compared whole rather than matched on a phrase: that pins
+    the refusal to `extra="forbid"` on `Install` (`extra_forbidden`, at
+    `install.<field>`) and to no other rule.
+
+    THE REASON THIS MATTERS, corrected 2026-09-02 after review. The reason first
+    given here was that `match="script"` could also match a `default_server_dir`
+    error mentioning a `.sh` path — and that is not reproducible against this
+    fixture, whose `default_server_dir` is `"d"`. A confident reason with nothing
+    behind it, attached to a correct decision.
+
+    The demonstrable reason is a different rule on the SAME field. Measured: with
+    a real `script: Literal["none"]` field restored to `Install`, `"script":
+    "s.sh"` is refused by `literal_error` at `install.script` rather than by
+    `extra_forbidden` — and the `match=`-based form PASSES, green, with the
+    deleted field back in the model. The `(loc, type)` comparison fails, naming
+    it. Proved in both directions: with `extra="ignore"` on `Install` alone,
+    every case here fails with DID NOT RAISE rather than with some other error,
+    so no neighbouring rule refuses this fixture at all.
+
+    That is the fifth time in Phase 7 a test passed because a NEIGHBOURING rule
+    refused, and the first where the neighbour was on the same field.
     """
     with pytest.raises(ValidationError) as caught:
         parse_catalog({"schema_version": 1, "games": [_entry(**{field: value})]})
@@ -169,7 +200,7 @@ def test_an_entry_installable_nowhere_is_refused() -> None:
     ]
 
 
-def test_every_shipped_entry_is_installable_somewhere_and_names_its_family() -> None:
+def test_every_shipped_entry_is_installable_on_linux_and_names_its_family() -> None:
     """The relationship the Install button depends on, asserted over the whole catalog.
 
     `catalog_view` enables the button from `install.supports()` and the engine
