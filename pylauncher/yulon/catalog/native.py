@@ -878,6 +878,18 @@ class StagedInstaller:
             raise InstallerError(
                 f"{folder_problem} Pick a different folder and try again. Nothing was written."
             )
+        # ...and the rest of the folder's own rules with it, for the same reason
+        # and one more: each says some version of `Nothing was written`, and after
+        # provisioning that sentence is false of the machine. The state file, the
+        # ownership checks and the emptiness check are filesystem reads that no
+        # daemon can help with, so a user whose folder was never usable is now
+        # told so before being asked for a root password. The answer is thrown
+        # away here: `_guard()` asks again for the state it returns.
+        #
+        # `_refuse_foreign_containers()` deliberately does NOT move up. It asks
+        # which compose project owns a container wearing this entry's names, and
+        # there is no answer to that without a daemon.
+        self._claim_folder(server_dir)
         yield "Checking Docker."
         if not self._seams.docker_ready():
             # Provisioning prints nothing of its own and can be a Docker
@@ -942,12 +954,50 @@ class StagedInstaller:
     def _guard(self, server_dir: Path) -> InstallState:
         """Claim the directory, or refuse it. Never recorded, so a resume re-runs it.
 
+        TWO halves, and the split is about WHEN each may be answered rather
+        than about what each asks. `_claim_folder()` is pure filesystem and is
+        called from `_preflight_lines()` before anything is provisioned;
+        `_refuse_foreign_containers()` needs a daemon to answer which compose
+        project owns a container, so it can only run here, after one exists.
+
+        Both are still called from here, and that is not belt and braces: this
+        is the call `run()` takes its `InstallState` from, and re-reading a
+        state file that may have changed between preflight and the run is the
+        honest answer rather than a cached one. Every rule below is a read.
+        """
+        state = self._claim_folder(server_dir)
+        self._refuse_foreign_containers(server_dir, state.install_id)
+        return state
+
+    def _claim_folder(self, server_dir: Path) -> InstallState:
+        """The half of the guard that is pure filesystem, and so needs no daemon.
+
+        Called from `_preflight_lines()` BEFORE provisioning, and again from
+        `_guard()`. Until 2026-09-02 every rule here ran only in the second
+        place, which is after `ensure_docker()` -- a sudo password, the
+        docker-group consent and a package install -- and after `gather()`'s
+        docker ps, port scan and image-pulling bind-mount probe. Recorded seam
+        order on a real run:
+
+            dir_problem -> None | 'Checking Docker.' | docker_ready -> False
+            ensure_docker
+            preflight.gather
+            REFUSED: ...server is not empty and was not created by this app.
+                     Nothing was written.
+
+        `Nothing was written` was untrue of the machine by the time it was
+        said. `7cb3bf17` hoisted the one sibling rule that lives in
+        `platform.server_dir_problem()` and left these below it.
+
+        Nothing here writes, deletes or asks anything outside this directory,
+        which is what makes running it twice free and running it early safe.
+
         Distinct from preflight, which is about the machine. This is about this
         one folder and this one install: it must be empty, or ours by
-        `install_id`, and no container wearing this entry's names may belong to
-        a different compose project. It must also be ours by `family`: a
-        catalog edit that moves a game between families is a refusal here,
-        never a reinterpretation.
+        `install_id`. It must also be ours by `family`: a catalog edit that
+        moves a game between families is a refusal here, never a
+        reinterpretation. The container rule this paragraph used to name as
+        well is `_guard()`'s other half, and it is the reason there are two.
 
         A state file that will not parse is refused rather than ignored, and
         that refusal is the whole of `Ownership.UNKNOWN`. Treating it as absent
@@ -1006,7 +1056,6 @@ class StagedInstaller:
                     f"({', '.join(sorted(leftovers)[:5])}). Nothing was written. Pick an empty "
                     "folder, or remove that one yourself if you no longer want it."
                 )
-        self._refuse_foreign_containers(server_dir, install_id)
         return existing or InstallState(
             game_id=self.entry.id, install_id=install_id, family=self.family
         )
