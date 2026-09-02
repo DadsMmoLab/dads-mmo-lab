@@ -572,17 +572,35 @@ def test_ask_receives_only_the_prompt_not_the_output_stuck_in_front_of_it() -> N
 
 
 def test_a_sudo_marker_shaped_label_is_masked() -> None:
-    """The one dialog that asks for a password has to be recognised as one by its label.
+    """A sudo-shaped label must not TRIP the not-secret allowlist. Nothing recognises it.
 
-    The bash engine minted this shape per install — `SUDO_PROMPT_PREFIX` plus a
-    random token — so that sudo announced itself unambiguously in any locale.
-    7.2 deleted the engine, but `install_wiring._terminal_prompter()` and this
-    predicate still recognise the spelling, and a label not recognised as
-    sudo's is one typed into an echoed field.
+    An earlier version of this docstring said `install_wiring._terminal_prompter()`
+    "and this predicate still recognise the spelling". Half of that was false and
+    it was the half this file could check. `is_secret()` recognises nothing: it
+    is `not _NOT_SECRET.search(prompt)` over an allowlist of harmless spellings
+    (`path`, `folder`, `directory`, `(y/n)`, `press enter`), so it answers True
+    for this marker, for gibberish, and for the empty string alike — measured
+    2026-09-02, with the prefix and without it. The assertion passed because a
+    neighbouring rule did the work, which makes it a test of the union of every
+    rule here rather than of one of them.
+
+    The rule it can honestly pin is the other direction, and it is the one that
+    can break: this label must not match the allowlist. The two lines below say
+    so by showing the default and then flipping the answer with a single word —
+    reword the marker to mention a folder or a path, the words most likely to
+    reach an install prompt, and a root password is typed into an echoed field.
+
+    That `_terminal_prompter()` recognises the prefix at all is asserted where
+    that function runs:
+    `test_install_wiring.py::test_the_terminal_prompter_hides_a_password_and_shows_a_consent_question`.
     """
     marker = f"{installer.SUDO_PROMPT_PREFIX}0123456789abcdef] password:"
     assert "sudo" in marker and "password" in marker
     assert is_secret(marker) is True
+    # Masked by default: this is what carried the assertion above, not the label.
+    assert is_secret("") is True
+    # And the allowlist is what decides — one of its words flips the same label.
+    assert is_secret(marker.replace("password:", "install folder:")) is False
 
 
 def test_a_canned_rule_cannot_answer_the_sudo_prompt_from_neighbouring_output() -> None:
