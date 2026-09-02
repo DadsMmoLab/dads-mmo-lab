@@ -33,6 +33,16 @@ shrank the window.
 """
 
 
+_CATALOG_MIN_WIDTH = 420
+"""Narrowest the catalog pane may become, in pixels.
+
+Sized to the widest game tile plus its scrollbar, measured 2026-09-02: below
+this the tile text clips mid-word and the Install button leaves the viewport.
+It is a floor for the splitter, not a preference -- the pane is free to be
+wider, and the user is free to drag it.
+"""
+
+
 def _warn_about_the_log_file(parent: Any) -> None:
     """Say once, on screen, that the log did not go where it was meant to.
 
@@ -147,6 +157,18 @@ def build_window() -> object:
     splitter = QSplitter()
     splitter.addWidget(catalog_view)
     splitter.addWidget(log_panel)
+    # The catalog is the thing the window is for; it may shrink, never vanish.
+    # A bare QSplitter honours whatever minimum its children ask for, so one
+    # widget with a wide size hint can squeeze the other to nothing -- which is
+    # exactly what an unwrapped status label did on 2026-09-02, leaving the
+    # tiles clipped mid-word and their buttons unreachable. That label now
+    # wraps, which is the fix; this is the floor, so the next widget with a wide
+    # hint cannot do it again. Stretch goes to the log because it is the pane
+    # whose content grows.
+    splitter.setCollapsible(0, False)
+    splitter.setStretchFactor(0, 0)
+    splitter.setStretchFactor(1, 1)
+    catalog_view.setMinimumWidth(_CATALOG_MIN_WIDTH)
     tabs.addTab(splitter, "Catalog")
 
     # Typed as the concrete view, not QWidget: `drop_controller()` and the

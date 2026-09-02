@@ -339,3 +339,68 @@ def test_a_runner_dropped_before_its_thread_runs_does_not_leave_the_worker_dead(
     assert not thread.isRunning(), "the job thread never exited"
     _pump_until(qapp, lambda: worker_ref() is None)
     assert worker_ref() is None
+
+
+def test_a_long_refusal_does_not_make_the_panel_demand_the_whole_window(
+    qapp: object,
+) -> None:
+    """The status label wraps, so a refusal cannot squeeze whatever sits beside it.
+
+    `_finished()` hands this label the whole of a refusal. An unwrapped `QLabel`
+    has a size hint as wide as its text, that hint becomes the panel's minimum
+    width, and a `QSplitter` has to honour it -- so the pane next to it is
+    squeezed to nothing.
+
+    Measured 2026-09-02 on yulon-ubuntu, in a 986px window, with the real
+    home-folder refusal: the catalog pane went 684px -> 88px while this panel
+    demanded 1478px. Tiles clipped mid-word, Install buttons off-screen, no way
+    back without resizing the window. The owner hit it on the first refusal a
+    real user would ever see.
+
+    Asserts the WIDTH THE PANEL DEMANDS rather than `wordWrap()`, which is a
+    declaration and would still pass if the label were replaced by something
+    else that does not wrap. Compares a short status against one twenty times
+    longer instead of pinning a pixel count, because the number depends on the
+    font the box happens to have.
+    """
+    panel = LogPanel()
+    panel.resize(400, 300)
+
+    panel._status.setText("idle")
+    # `activate()` is load-bearing, and its absence made the first version of
+    # this test pass against the bug: a layout that has not been activated
+    # returns the size hint it last computed, so both readings below were the
+    # same stale number and the mutation survived. Caught by removing the fix
+    # and watching this test stay green.
+    panel.layout().activate()
+    short = panel.minimumSizeHint().width()
+
+    panel._status.setText(
+        "FAILED: InstallerError: /home/pk is your home folder itself. A server "
+        "install owns the folder it is given - a reinstall removes it - so pick a "
+        "dedicated subfolder inside your home folder instead. Pick a different "
+        "folder and try again. Nothing was written."
+    )
+    panel.layout().activate()
+    long = panel.minimumSizeHint().width()
+
+    assert long <= short * 2, (
+        "a long status inflated the panel's minimum width from "
+        f"{short}px to {long}px, so a splitter must starve whatever is beside it"
+    )
+
+
+def test_the_status_label_still_says_what_failed(qapp: object) -> None:
+    """Wrapping must not have been bought by truncating the sentence.
+
+    The neighbour of the fix above: a label that elides its text would also stop
+    demanding the window's width, and would pass that test while telling the user
+    less than it used to. This asserts the whole refusal is still readable.
+    """
+    panel = LogPanel()
+    message = (
+        "/home/pk is your home folder itself. A server install owns the folder it "
+        "is given - a reinstall removes it - so pick a dedicated subfolder."
+    )
+    panel._status.setText("FAILED: " + message)
+    assert panel.status_text() == "FAILED: " + message

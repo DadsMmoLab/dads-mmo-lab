@@ -86,6 +86,20 @@ class LogPanel(QWidget):
         self._text.setReadOnly(True)
         self._text.setMaximumBlockCount(_MAX_BLOCKS)
         self._status = QLabel("idle", self)
+        # WRAPPED, and the app is unusable without it. This label is handed the
+        # whole of a refusal -- `("finished: " if ok else "FAILED: ") + message`
+        # below -- and an unwrapped QLabel's size hint is as wide as its text.
+        # That hint becomes this panel's minimum width, and the splitter in
+        # `main.py` has to honour it, so the catalog pane next to it is squeezed
+        # to nothing.
+        #
+        # Measured 2026-09-02 on yulon-ubuntu, in a 986px window, with the real
+        # home-folder refusal (196 characters): the catalog pane went from 684px
+        # to 88px and this panel demanded 1478px -- wider than the window. Game
+        # tiles were clipped mid-word and their Install buttons unreachable, so
+        # the only way out was to resize or restart. Found by the owner during
+        # the 7.2 gate, on the first refusal a real user would ever see.
+        self._status.setWordWrap(True)
         self._stop_button = QPushButton("Stop", self)
         self._stop_button.setEnabled(False)
         self._stop_button.clicked.connect(self.stop)
