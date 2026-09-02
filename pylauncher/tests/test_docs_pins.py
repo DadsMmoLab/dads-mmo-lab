@@ -58,8 +58,14 @@ def test_every_test_these_pages_name_by_hand_actually_exists() -> None:
             named[page] = found
     assert named, "no page cites a test by name; this guard has gone vacuous"
 
+    # Both kinds of citation resolve: a test FUNCTION and a test MODULE. The first
+    # version of this guard collected functions only and reported `test_catalog`,
+    # `test_docker_live` and two others as missing -- they are files. A guard that
+    # cries wolf on a legitimate citation gets deleted, which is worse than not
+    # having one.
     defined: set[str] = set()
     for path in TESTS.rglob("test_*.py"):
+        defined.add(path.stem)
         defined |= set(
             re.findall(r"^def (test_[a-z0-9_]+)", path.read_text(encoding="utf-8"), re.M)
         )
