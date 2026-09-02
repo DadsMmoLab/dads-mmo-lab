@@ -198,6 +198,30 @@ def test_a_gid_with_no_group_row_is_skipped_rather_than_fatal() -> None:
     assert _reexec(getgroups=lambda: [4242, 999]) is None
 
 
+def test_a_host_claiming_linux_without_os_getgroups_refuses_rather_than_guessing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No gids means no way to tell "already has the group" from "does not".
+
+    `os.getgroups` is POSIX-only. The direct call was `Module has no attribute
+    "getgroups"` under `mypy --platform win32` -- a CI pass the Linux run, the
+    suite and `ruff` were all green across, so this branch exists because CI
+    caught what three local checks could not.
+
+    Refusing is the safe direction, and it is asserted rather than assumed: the
+    other reading is "no gids, so the group cannot be among them, so restart",
+    which relaunches a user who had nothing to gain and, on a box where `sg`
+    also cannot deliver, does it behind the marker exactly once and leaves them
+    confused rather than looping.
+
+    `getgroups=None` so the production path to `os` is the one taken; deleting
+    the attribute is what a non-POSIX host looks like from inside this function.
+    """
+    monkeypatch.delattr(os, "getgroups", raising=False)
+
+    assert _reexec(getgroups=None) is None
+
+
 def test_the_launcher_sets_the_marker_before_it_execs(monkeypatch: pytest.MonkeyPatch) -> None:
     """The loop guard is only real if it is set BEFORE control leaves the process.
 

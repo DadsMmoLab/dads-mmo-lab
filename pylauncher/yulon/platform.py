@@ -1487,7 +1487,25 @@ def docker_group_reexec(
     if sg is None:
         logger.info("no `sg` on PATH; the docker group cannot be picked up without a logout")
         return None
-    gids = list(os.getgroups()) if getgroups is None else list(getgroups())
+    if getgroups is not None:
+        gids = list(getgroups())
+    else:
+        # `getattr`, the same shape `container_user_args()` uses for `os.getuid`:
+        # `os.getgroups` is POSIX-only and this file is type-checked for Windows
+        # too, where the direct call is `Module has no attribute "getgroups"`.
+        # Caught by CI's `mypy --platform win32` pass and by nothing else -- the
+        # Linux run, the test suite and `ruff` were all green on it.
+        #
+        # Reachable only on a host that says it is Linux and has no
+        # `os.getgroups`, which is the same impossible-but-checked case the
+        # `--user` builder guards. Refusing is the safe direction: without the
+        # gids there is no way to tell "already has the group" from "does not",
+        # and guessing the second restarts a launcher that had nothing to gain.
+        read = getattr(os, "getgroups", None)
+        if read is None:
+            logger.warning("this host says it is linux but has no os.getgroups; not restarting")
+            return None
+        gids = list(read())
     if "docker" in _process_group_names(gids):
         return None
     do: RunCmd = run if run is not None else (lambda argv: runner.run(argv, timeout=5.0))
