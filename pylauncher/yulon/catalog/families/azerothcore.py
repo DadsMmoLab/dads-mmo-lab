@@ -31,7 +31,6 @@ from yulon.catalog.native import (
     StageContext,
     StagedInstaller,
     _listing,
-    _same_repo,
 )
 
 
@@ -93,7 +92,7 @@ class AzerothCoreInstaller(StagedInstaller):
         # this body and two others, which left the method whose docstring calls
         # itself "the one path in this engine that could still destroy a user's
         # work" unable to protect itself (review, 2026-08-31).
-        if existing is not None and not _same_repo(existing, source.url):
+        if existing is not None and not git.same_repo(existing, source.url):
             raise InstallerError(
                 f"{server_dir} is already a git checkout of {existing}, not of {source.url}. "
                 "Nothing was changed. Install into an empty folder instead."
@@ -152,7 +151,7 @@ class AzerothCoreInstaller(StagedInstaller):
             dest = ctx.server_dir / source.dest
             has_git = (dest / ".git").is_dir()
             existing = self._remote_of(dest)
-            if existing is not None and not _same_repo(existing, source.url):
+            if existing is not None and not git.same_repo(existing, source.url):
                 raise InstallerError(
                     f"{dest} is a checkout of {existing}, not of {source.url}. Nothing was "
                     "changed."

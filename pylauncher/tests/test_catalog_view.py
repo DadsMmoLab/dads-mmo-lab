@@ -15,6 +15,7 @@ from PySide6.QtWidgets import QPushButton, QScrollArea, QSplitter, QWidget
 from main import DEFAULT_WINDOW_SIZE
 from tests.conftest import process_events
 from yulon import runner, wsl
+from yulon.apply import ApplyError
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.installer import InstallEngine, InstallOptions
 from yulon.controller_wow_wotlk import modules as wotlk_modules
@@ -1409,18 +1410,27 @@ class _RealCloneThenStop:
         raise _StopAfterClone(str(spec.dest))
 
 
-def test_an_unverified_adoption_reaches_the_applier_with_no_ownership_check(
+def test_an_unverified_adoption_can_no_longer_delete_what_it_finds(
     qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Nothing between "adopted without evidence" and deleting files in that folder.
+    """The cost the `UNVERIFIED` dialog used to be paid for, now refused instead.
 
-    This is the cost the `UNVERIFIED` dialog is paid for, asserted end to end
-    rather than described: a folder nothing identified is adopted, the entry it
-    was adopted under carries `has_manifests`, so `controller_view` builds an
-    `Applier` rooted at that folder, and the first thing `RunnerGit.clone()`
-    does at a destination that exists and is not a git checkout is
-    `shutil.rmtree()` - before it contacts a remote, so a clone that was never
-    going to succeed still deletes.
+    THIS TEST ASSERTED THE HAZARD UNTIL 2026-09-02. It drove the whole path end
+    to end -- a folder nothing identified is adopted, the entry carries
+    `has_manifests`, `controller_view` builds an `Applier` rooted there, and
+    `RunnerGit.clone()` `shutil.rmtree()`s a destination that exists and is not
+    a git checkout, BEFORE contacting a remote -- and its closing assertions
+    were `not victim.exists()` and `not clone.exists()`. A user file, gone, on a
+    clone that had not yet been attempted.
+
+    `apply._require_own_clone()` closed it (upstream PR #142, merged into this
+    branch the same day), so the test now asserts the refusal it earned. The
+    walk above is kept verbatim because it is the evidence for WHY the guard is
+    at that spot: anything that reaches `install()` reaches a `rmtree` first.
+
+    The strong assertion is that git was never invoked at all -- not that the
+    file survived. A guard that let the clone start and merely put the folder
+    back would satisfy "the file exists" and still have deleted it.
 
     Checked at the level of the code on 2026-09-02, on branch
     `fix/adoption-guard-fails-open` at fda035d: `yulon/git.py` `RunnerGit.clone`
@@ -1492,16 +1502,21 @@ def test_an_unverified_adoption_reaches_the_applier_with_no_ownership_check(
 
     monkeypatch.setattr(runner, "run", fake_run)
 
-    with pytest.raises(_StopAfterClone):
+    # 4. Refused, by name, before git was asked for anything.
+    with pytest.raises(ApplyError) as caught:
         applier.install(manifest)
 
-    # 4. Gone, and gone before git was asked for anything - so no failure of the
-    #    clone itself could have saved it.
-    assert git.specs and git.specs[0].dest == clone
-    assert still_there_when_git_ran, "git was never invoked; the assertion below would be empty"
-    assert still_there_when_git_ran[0] is False
-    assert not victim.exists()
-    assert not clone.exists()
+    assert victim.name in str(
+        caught.value
+    ), f"the refusal does not say which file stopped it: {caught.value}"
+    assert victim.exists(), "the file the user kept was deleted anyway"
+    assert victim.read_text(encoding="utf-8") == "a file the user had in that folder"
+    assert clone.exists(), "the folder was removed even though the install refused"
+    assert still_there_when_git_ran == [], (
+        "git ran at all -- the guard is downstream of the clone, so a destination "
+        "that exists and is not a checkout was still rmtree'd on the way"
+    )
+    assert git.specs == [], "a clone was specified despite the refusal"
 
 
 def _catalog_in_the_default_window(

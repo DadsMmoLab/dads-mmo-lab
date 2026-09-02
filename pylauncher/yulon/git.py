@@ -35,7 +35,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from yulon import platform, runner
 from yulon.log import get_logger
@@ -260,11 +260,96 @@ class Git(Protocol):
     def clone(self, spec: CloneSpec) -> None: ...
 
 
-# `remote_url()` is deliberately NOT on that Protocol. `apply.py` — the only
-# other user of this seam — never asks the question, and widening a Protocol
+# `remote_url()` is still deliberately NOT on that Protocol: widening `Git`
 # breaks every fake that implements it for a capability the fake's caller does
-# not use. The install engine asks for the concrete implementation's method
-# through its own seam instead (roadmap 6.2).
+# not use. `apply.py` DID start asking the question — a clone into
+# `modules/<id>` has to know whose repository is already sitting there — so the
+# question got its own one-method Protocol below rather than a wider `Git`.
+
+
+@runtime_checkable
+class RemoteReader(Protocol):
+    """ "What is this checkout a checkout of?" — the seam the ownership guards ask.
+
+    Both concrete implementations here satisfy it, so a caller handed a real
+    `Git` can narrow to it with `isinstance()` and get the SAME transport its
+    clones use (host git, or the containerized one on a machine with no git).
+    A fake that only clones does not satisfy it, which is the point: the caller
+    then falls back to a default it names itself instead of crashing.
+    """
+
+    def remote_url(self, dest: Path) -> str | None: ...
+
+
+@runtime_checkable
+class TreeReader(Protocol):
+    """ "Is this path exactly what HEAD committed?" — the second read-only question.
+
+    Its own Protocol rather than a method on `RemoteReader`, for the reason that
+    one is not on `Git`: a fake satisfies a Protocol by having the methods, so
+    adding this to `RemoteReader` would silently stop every existing fake from
+    narrowing and send the question to the host CLI instead. Both concrete
+    implementations here have both methods, so a real `Git` narrows to both.
+    """
+
+    def is_unmodified(self, dest: Path, relative_path: str) -> bool | None: ...
+
+
+@runtime_checkable
+class HistoryReader(Protocol):
+    """ "Does HEAD carry anything the update would not?" — the third read-only question.
+
+    `TreeReader` answers about the working tree and the index. This one answers
+    about COMMITS, and the two are genuinely different facts: a checkout in
+    which somebody committed their own work is perfectly clean by `status`.
+    Anything that reads "clean" as "there is nothing of the user's here" is
+    reading a question with more states than the answer it is holding.
+
+    A third one-method Protocol rather than a method on `TreeReader`, for the
+    reason `TreeReader` is not a method on `RemoteReader`: a fake satisfies a
+    Protocol by having the methods, so widening an existing one silently stops
+    every existing fake from narrowing and sends the question to the host CLI
+    instead. Both concrete implementations here have all three methods, so a
+    real `Git` narrows to all three.
+    """
+
+    def no_local_commits(self, dest: Path, branch: str | None) -> bool | None: ...
+
+
+def _fetch_ref(branch: str | None) -> str:
+    """What both update paths name on the `git fetch` command line.
+
+    The manifest's branch, or the literal `HEAD` when it names none — which is
+    every module in the `wow-wotlk` catalog. One spelling, in one place, so the
+    question `no_local_commits()` asks cannot drift from the update it is
+    predicting.
+    """
+    return branch or "HEAD"
+
+
+def same_repo(existing: str, wanted: str) -> bool:
+    """Do two clone URLs name the same repository?
+
+    Compared loosely on purpose: `https://github.com/x/y.git`,
+    `https://github.com/x/y` and `git@github.com:x/y.git` are one repository,
+    and refusing an install because git wrote the URL back with a `.git` on it
+    would be a refusal about punctuation.
+
+    Lives here rather than in either engine because both of them refuse on the
+    answer: `catalog/native.py` for a server source, `apply.py` for a module
+    clone (roadmap 2.3).
+    """
+    return _repo_key(existing) == _repo_key(wanted)
+
+
+def _repo_key(url: str) -> str:
+    text = url.strip().rstrip("/")
+    if text.endswith(".git"):
+        text = text[: -len(".git")]
+    for prefix in ("https://", "http://", "ssh://", "git@"):
+        if text.startswith(prefix):
+            text = text[len(prefix) :]
+    return text.replace(":", "/").lower()
 
 
 def _depth_args(depth: int | None) -> list[str]:
@@ -352,6 +437,91 @@ class RunnerGit:
             return None
         return not proc.stdout.strip()
 
+    def no_local_commits(self, dest: Path, branch: str | None) -> bool | None:
+        """Is every commit on HEAD already on what the update would reset to? None = cannot ask.
+
+        The question `is_unmodified()` cannot answer. `git status --porcelain`
+        compares the working tree and the index against HEAD, so a checkout in
+        which the user COMMITTED their work is clean by that test and stays
+        clean no matter how much of their work is in it. `reset --hard
+        FETCH_HEAD` then moves HEAD, and those commits are only reachable
+        through the reflog.
+
+        `rev-list --count <target>..HEAD` is the whole answer: it counts the
+        commits reachable from HEAD and not from the target, so zero means
+        moving HEAD onto it discards no history.
+
+        **The target is `FETCH_HEAD`, after this method does the fetch itself,
+        and NOT a remote-tracking ref.** The obvious-looking
+        `refs/remotes/origin/<branch>` — what this asked until 2026-09-01 —
+        holds only for a branch the update NAMES. Measured against real git,
+        `file://` remote, depth 1:
+
+            $ git fetch origin HEAD          # what every branchless update runs
+            * branch  HEAD -> FETCH_HEAD
+            $ git rev-parse FETCH_HEAD                    -> 02fbb2a
+            $ git rev-parse refs/remotes/origin/HEAD      -> e7a89c7   (stale)
+            $ git rev-parse refs/remotes/origin/main      -> e7a89c7   (stale)
+
+        A refspec given on the command line replaces the remote's configured
+        one, so `fetch origin HEAD` opportunistically updates NOTHING:
+        `refs/remotes/origin/HEAD` is written once at clone time and never
+        again by this code, and the default branch's own tracking ref is just
+        as stale. So after ONE legitimate app-driven update, the old question
+        answered "1 commit ahead" for a checkout the user had never touched,
+        and the guard refused adoption for every module in the catalog — all 21
+        `wow-wotlk` manifests omit `source.branch`, which is precisely the
+        population this fact exists to let through. Resolving the remote's real
+        default branch (`ls-remote --symref origin HEAD`) does not fix that: the
+        measurement above shows `origin/main` stale too, so it would still need
+        this fetch, and would then be a second network call answering a question
+        `FETCH_HEAD` has already answered.
+
+        `FETCH_HEAD` is also the *literal* thing `_update()` resets to, so the
+        comparison stops predicting the update and simply reads it.
+
+        **The cost is a network round trip inside an adoption check**, and it is
+        paid knowingly. `_adoption_refusal()` asks this fact last, only once the
+        claim file and the clean tree have both said yes, and the update is
+        about to fetch the same refs a moment later. Nothing is written outside
+        `.git` and no working tree is touched. When the network is down the
+        fetch fails, this returns `None`, and `_adoption_refusal()` refuses —
+        the same direction as every other `None` here, and an install that could
+        not have fetched anyway. The refusal says which of the two it is: an
+        offline user is told the remote could not be reached, and never that
+        they have commits of their own, because this answer establishes nothing
+        about that.
+
+        Depth is deliberately not passed, for `_update()`'s reason: `git fetch
+        --depth=1` truncates a full clone in place. Verified on a depth-1 clone
+        that the shallow boundary survives this fetch and the count is still
+        right.
+
+        `None` when git could not be asked at all — no `.git`, a fetch that
+        failed, or a `rev-list` that would not answer. "We could not check" is
+        not "there is nothing to lose", and every caller fails closed on `None`.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        ref = _fetch_ref(branch)
+        try:
+            # The same argv `_update()` fetches with, minus nothing: the flags
+            # are repeated because `git -c` did not persist into a repository
+            # cloned by an older build of this launcher.
+            _run_git(
+                ["git", *_LINE_ENDING_ARGS, *_HTTP_VERSION_ARGS, "fetch", "origin", ref],
+                cwd=dest,
+            )
+        except GitError as exc:
+            logger.debug(f"could not fetch origin {ref} in {dest} to compare HEAD against: {exc}")
+            return None
+        try:
+            proc = _run_git(["git", "rev-list", "--count", "FETCH_HEAD..HEAD"], cwd=dest)
+        except GitError as exc:
+            logger.debug(f"could not ask git what {dest} has that the update would not: {exc}")
+            return None
+        return proc.stdout.strip() == "0"
+
     def clone(self, spec: CloneSpec) -> None:
         if (spec.dest / ".git").is_dir():
             self._update(spec)
@@ -422,7 +592,7 @@ class RunnerGit:
         The line-ending flags are repeated because `git -c` did not persist into
         this repository if it was cloned by an older build of this launcher.
         """
-        ref = spec.branch or "HEAD"
+        ref = _fetch_ref(spec.branch)
         _run_git(
             ["git", *_LINE_ENDING_ARGS, *_HTTP_VERSION_ARGS, "fetch", "origin", ref],
             cwd=spec.dest,
@@ -568,11 +738,58 @@ class ContainerGit:
             return None
         return not proc.stdout.strip()
 
+    def no_local_commits(self, dest: Path, branch: str | None) -> bool | None:
+        """Is every commit on HEAD already on what the update would reset to? None = cannot ask.
+
+        Containerized like the other two questions, and for the same reason:
+        this class exists for a machine that may have no git, so a question
+        answered on the host would put the second prerequisite back.
+
+        `RunnerGit.no_local_commits()` carries the reasoning — why the target is
+        `FETCH_HEAD` after this method's own fetch and not a remote-tracking ref
+        that a branchless `fetch origin HEAD` never refreshes, and what the
+        network round trip buys. Both implementations must answer identically:
+        a caller narrowing to `HistoryReader` never learns which one it got, and
+        this is a guard's input, so a disagreement would be a guard that means
+        something different on Windows than on Linux.
+
+        **The fetch is `writes=True` and it has to be.** It writes `FETCH_HEAD`
+        and new objects into `.git`, and — decisive — `_READ_ONLY_CONTAINER_ARGS`
+        carries `--network none`, so a reader container cannot reach a remote at
+        all. That brings the read-write mount and, on an enforcing SELinux box,
+        the recursive `:z` relabel of `dest`. Safe only because of WHERE this is
+        asked: `_adoption_refusal()` reaches fact 4 only after
+        `server_dir_claim()` has said this app created the server directory, so
+        the folder relabelled is one this app owns and is about to `fetch` into
+        anyway — the very same container `_update()` runs. A future caller that
+        asked this about a FOREIGN checkout would be relabelling somebody else's
+        repository in order to decide whether to leave it alone; do not add one.
+
+        The `rev-list` that follows stays `writes=False`: it answers from the
+        objects the fetch just landed, needs no network, and there is no reason
+        to hand a second unconfined container to a question that only counts.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        ref = _fetch_ref(branch)
+        try:
+            self._capture(dest, ["fetch", "origin", ref], writes=True)
+        except GitError as exc:
+            logger.debug(f"could not fetch origin {ref} in {dest} to compare HEAD against: {exc}")
+            return None
+        try:
+            proc = self._capture(dest, ["rev-list", "--count", "FETCH_HEAD..HEAD"], writes=False)
+        except GitError as exc:
+            logger.debug(f"could not ask git what {dest} has that the update would not: {exc}")
+            return None
+        return proc.stdout.strip() == "0"
+
     def clone(self, spec: CloneSpec) -> None:
         if (spec.dest / ".git").is_dir():
             try:
                 self._run(
-                    spec, ["fetch", *_pull_depth_args(spec.depth), "origin", spec.branch or "HEAD"]
+                    spec,
+                    ["fetch", *_pull_depth_args(spec.depth), "origin", _fetch_ref(spec.branch)],
                 )
                 self._run(spec, ["reset", "--hard", "FETCH_HEAD"])
             except GitError as exc:
