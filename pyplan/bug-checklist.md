@@ -1382,7 +1382,7 @@ Two lesser notes from the same audit:
 - **`catalog_view._looks_like()` fails OPEN** (`catalog_view.py:151-162`) — and it is the supply route
   that admits a foreign folder into the `Applier`.
 
-### 23. A future-version state file is silently downgraded on disk — 2026-09-01, OPEN, pre-existing
+### 23. A future-version state file is silently downgraded on disk — 2026-09-01, **FIXED 2026-09-02**
 
 Both families share one state filename (`STATE_FILE = ".yulon-install.json"`, no family suffix). A
 **cross-family** file is refused by `_guard` on `game_id` (`native.py:894`) and `family` (`:899`) — but
@@ -1394,7 +1394,20 @@ know are dropped at `native.py:335` **with no log at any level**, `write_state` 
 disk**, and the only user-facing line (`:667-669`) prints the already-filtered tuple. A downgrade is
 therefore lossy and silent in both directions.
 
-Unreachable for cmangos today (it is not in `FAMILIES` until K.8). Recorded now because **it is
+**FIXED 2026-09-02, on the day K.8 was about to make it reachable.** `InstallState` gained `unknown` —
+the names on disk this build does not recognise. `read_state()` now SPLITS rather than filters, logs a
+warning naming what it did not understand, and `write_state()` persists both halves, so a downgrade is
+no longer destructive. The two stay separate deliberately: this build must not act on a stage it cannot
+interpret, so behaviour reads `completed` while persistence writes `completed + unknown`.
+
+**The read filter was not the dangerous route.** Mutation found a second one that runs far more often:
+`with_stage()` rebuilds `completed` from `order`, and a future name is by definition not in `order`, so
+without `unknown` riding alongside, **the very first stage an older build completed would erase the
+newer build's record** — the same loss, reached on every stage rather than only on a read. Three tests,
+3/3 mutations killed, one of them that route specifically.
+
+Original note follows. Unreachable for cmangos at the time (not in `FAMILIES` until K.8); recorded then
+because **it is
 precisely the mechanism that would hide a `stages()`/`STAGE_NAMES` mismatch** — the thing K.2's
 inertness argument depends on being visible. **Note it in K.8's brief.**
 
