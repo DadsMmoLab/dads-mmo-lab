@@ -2211,3 +2211,49 @@ def test_a_reset_that_fails_reaches_the_cli_as_a_sentence_and_is_recorded(
         "the refusal was not recorded, so `run()`'s `except InstallerError` never saw it "
         "and `_record_error` did not run"
     )
+
+
+def test_a_finished_install_drops_the_previous_runs_failure(tmp_path: Path) -> None:
+    """A success must not leave the last failure's sentence in the state file.
+
+    `record()` clears `last_error`, and until 2026-09-02 that was the only thing
+    that did -- so it cleared nothing on the run where it matters most. It
+    returns `self` untouched when the stage is already in `completed`, and an
+    unrecorded stage never reaches it, so a RESUME that finishes every remaining
+    stage records nothing new and clears nothing.
+
+    Seen on m910q the same day: WoW TBC printed "WoW TBC is installed and
+    running", three containers up, and `.yulon-install.json` still said
+    `"last_error": "The server started but never reported ready..."` with
+    `updated_unix` freshly bumped -- a working install describing itself as a
+    failed one, on exactly the retry-after-failure path where someone is most
+    likely to believe it.
+
+    Shaped as that resume rather than as a fresh install: the recorded stage is
+    ALREADY done before this run starts, so `record()`'s early return is taken
+    and the only remaining stage is unrecorded. A test that drove a first run
+    would pass against the broken code, because there `record()` clears the
+    field on the way past.
+    """
+    rec = Recorder()
+    family = _family(
+        lambda me: (native.Stage("always", _say), native.Stage("never", _say, recorded=False))
+    )
+    server_dir = tmp_path / "wow"
+
+    # Run once so "always" is recorded, then plant a failure the way
+    # `_record_error` does.
+    list(_build(rec, family).run(InstallOptions(server_dir=server_dir)))
+    state = native.read_state(server_dir, valid=("always", "never"))
+    assert state is not None
+    native.write_state(server_dir, replace(state, last_error="the server never reported ready"))
+    assert native.read_state(server_dir, valid=("always", "never")).last_error  # type: ignore[union-attr]
+
+    list(_build(rec, family).run(InstallOptions(server_dir=server_dir)))
+
+    after = native.read_state(server_dir, valid=("always", "never"))
+    assert after is not None
+    assert after.last_error == "", (
+        "a finished install left the previous failure in the state file: " f"{after.last_error!r}"
+    )
+    assert after.completed == ("always",), "clearing the error must not disturb what was done"

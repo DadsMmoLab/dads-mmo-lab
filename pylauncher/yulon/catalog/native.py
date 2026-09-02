@@ -809,7 +809,38 @@ class StagedInstaller:
         # compose-project pin - which is how a tester on yulon-win11 (2026-08-28)
         # read a seven-minute readiness wait as "the install was not remembered".
         logger.info(f"install of {self.entry.id} finished")
+        self._clear_error(server_dir, state)
         yield f"{self.entry.name} is installed and running in {server_dir}"
+
+    def _clear_error(self, server_dir: Path, state: InstallState) -> None:
+        """Drop a previous run's failure sentence once this run has finished.
+
+        `record()` clears `last_error`, and that was the ONLY thing that did --
+        which meant it cleared nothing on the run where it matters most. It
+        returns `self` untouched when the stage is already in `completed`, and
+        the last four CMaNGOS stages (`db-password`, `start-db`, `up`, `ready`)
+        are `recorded=False` and never reach it at all. So a resume that
+        finishes every remaining stage records nothing new, clears nothing, and
+        leaves the old sentence sitting in a state file it has just rewritten.
+
+        Seen on m910q 2026-09-02: WoW TBC finished -- three containers up, "WoW
+        TBC is installed and running" printed -- with
+        `"last_error": "The server started but never reported ready..."` still
+        in `.yulon-install.json`, `updated_unix` freshly bumped. A working
+        install describing itself as a failed one, on exactly the path -- retry
+        after a failure -- where a reader is most likely to believe it.
+
+        Best-effort: the install HAS succeeded and the user has been told so, so
+        a state file that cannot be written now must not turn that into a
+        failure. The stale sentence is a wrong label on a working server; an
+        exception here would be a wrong outcome.
+        """
+        if not state.last_error:
+            return
+        try:
+            write_state(server_dir, replace(state, last_error=""))
+        except OSError as exc:
+            logger.warning(f"could not clear the previous error from the state file: {exc}")
 
     def _run_one(self, stage: Stage, ctx: StageContext) -> Generator[str, None, InstallState]:
         """Run one stage and, if the family says so, write it down."""
