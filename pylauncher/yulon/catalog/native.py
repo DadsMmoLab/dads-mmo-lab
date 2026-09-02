@@ -213,6 +213,21 @@ class InstallState:
     last_error: str = ""
     updated_unix: int = 0
     version: int = STATE_VERSION
+    unknown: tuple[str, ...] = ()
+    """Stage names the file carried that THIS binary does not recognise.
+
+    Kept so a downgrade is not destructive. `read_state()` used to drop them
+    silently and `write_state()` then persisted the filtered tuple, so running an
+    older build against a newer install PERMANENTLY stripped the newer names off
+    disk — and the user-facing "Already finished: ..." line printed the filtered
+    list, so nothing said it had happened. A resume on the newer build afterwards
+    would redo whatever those stages were, which for this family includes a
+    multi-hour compile.
+
+    They are deliberately NOT merged into `completed`: this binary must not act on
+    a stage it cannot interpret. Behaviour reads `completed`; persistence writes
+    both. Added 2026-09-02 with bug-checklist section 23.
+    """
 
     def with_stage(self, stage: str, order: Sequence[str]) -> InstallState:
         """This state plus `stage`, in `order`, with nothing recorded twice.
@@ -225,6 +240,8 @@ class InstallState:
         if stage in self.completed:
             return self
         done = set(self.completed) | {stage}
+        # `unknown` rides along untouched: `replace()` keeps it, and it is not in
+        # `order`, so the comprehension below could not carry it even by accident.
         return replace(self, completed=tuple(s for s in order if s in done), last_error="")
 
     def has(self, stage: str) -> bool:
@@ -331,11 +348,18 @@ def _parse_state(server_dir: Path, *, valid: Sequence[str]) -> InstallState | No
         logger.warning(f"{path} does not say which install it belongs to; ignoring it")
         return None
     completed = parsed.get("completed")
-    stages = (
-        tuple(stage for stage in completed if isinstance(stage, str) and stage in valid)
-        if isinstance(completed, list)
-        else ()
-    )
+    named = tuple(s for s in completed if isinstance(s, str)) if isinstance(completed, list) else ()
+    stages = tuple(s for s in named if s in valid)
+    unknown = tuple(s for s in named if s not in valid)
+    if unknown:
+        # Loud, because the silent version cost a downgrade its progress. This is
+        # the ordinary shape of running an older build against a newer install;
+        # it is not an error, and the names are kept and written back.
+        logger.warning(
+            f"{path} records stages this build does not know: {', '.join(unknown)}. "
+            "They are kept in the file and ignored for this run — this is usually an "
+            "older Yu'lon opening an install a newer one created."
+        )
     # A missing or non-string `family` reads as "" — the one value that means
     # "this file does not say". It is never a family name, so it can never
     # match the wrong one; the guard treats it as the entry's own family, which
@@ -353,6 +377,7 @@ def _parse_state(server_dir: Path, *, valid: Sequence[str]) -> InstallState | No
         last_error=error if isinstance(error, str) else "",
         updated_unix=updated if isinstance(updated, int) else 0,
         version=version if isinstance(version, int) else STATE_VERSION,
+        unknown=unknown,
     )
 
 
@@ -374,7 +399,11 @@ def write_state(server_dir: Path, state: InstallState) -> None:
         "game_id": state.game_id,
         "family": state.family,
         "install_id": state.install_id,
-        "completed": list(state.completed),
+        # Both halves. `completed` alone is what used to make a downgrade lossy:
+        # the unknown names were read, dropped, and then written out of existence.
+        # Appended after the known ones rather than interleaved, because their
+        # position in a future stage order is exactly what this build cannot know.
+        "completed": [*state.completed, *state.unknown],
         "last_error": state.last_error,
         "updated_unix": int(time.time()),
     }

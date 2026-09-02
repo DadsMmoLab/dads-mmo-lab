@@ -756,22 +756,46 @@ def test_materialise_chmods_every_conf_it_creates(
     assert calls == [(etc / "mangosd.conf", conf.CONF_MODE), (etc / "realmd.conf", conf.CONF_MODE)]
 
 
-def test_apply_table_chmods_the_conf_before_it_becomes_the_conf(
+def test_apply_table_asks_for_the_mode_at_creation_not_after(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The temporary file is what gets the mode, so the conf is never briefly readable.
+    """The temp file is created owner-only, rather than created and then chmodded.
 
-    Chmod-after-rename would leave a window in which anyone on the machine could
-    read the database password - short, and wide enough on a multi-user box.
+    This used to assert two `os.chmod` calls on the temp files, under the heading
+    "the conf is never briefly readable". That was the right instinct pointed at
+    the wrong syscall: `open()` then `chmod()` creates the file at the umask
+    default and closes the window a moment later, so on POSIX the password really
+    was on disk world-readable in between. Corrected 2026-09-02 to ask for the
+    mode in the creating syscall, the way `cmangos._write_secret` already did.
+
+    Asserted through `os.open`'s third argument, which is the value that decides
+    the outcome - not through the presence of a chmod, which is a declaration
+    that something was intended.
+
+    Says nothing about Windows, deliberately: the mode is a documented no-op
+    there (see `_write`), so a test claiming a guarantee on that platform would be
+    the false-guarantee bug this change removes, restated as a test.
     """
     etc = _materialised(tmp_path)
-    calls = _chmods(monkeypatch)
+    opened: list[tuple[str, int]] = []
+    real_open = os.open
+
+    def record(path: object, flags: int, mode: int = 0o777, **kw: object) -> int:
+        opened.append((Path(str(path)).name, mode))
+        return real_open(path, flags, mode, **kw)
+
+    monkeypatch.setattr(os, "open", record)
+    chmods = _chmods(monkeypatch)
     conf.apply_table(TABLE, etc, TOKENS)
-    assert [mode for _, mode in calls] == [conf.CONF_MODE, conf.CONF_MODE]
-    assert [path.name for path, _ in calls] == [
-        f"mangosd.conf{conf._TEMP_SUFFIX}",
-        f"realmd.conf{conf._TEMP_SUFFIX}",
-    ]
+
+    temps = [(name, mode) for name, mode in opened if name.endswith(conf._TEMP_SUFFIX)]
+    assert temps == [
+        (f"mangosd.conf{conf._TEMP_SUFFIX}", conf.CONF_MODE),
+        (f"realmd.conf{conf._TEMP_SUFFIX}", conf.CONF_MODE),
+    ], f"the conf temp files were not created owner-only: {opened}"
+    assert chmods == [], (
+        "a chmod after creation means there was a window at the umask default; " f"got {chmods}"
+    )
 
 
 def test_the_conf_mode_stays_owner_only_only_while_the_images_run_as_root() -> None:

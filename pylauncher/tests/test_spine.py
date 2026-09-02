@@ -112,6 +112,102 @@ def test_read_state_keeps_only_the_stage_names_the_entry_has(tmp_path: Path) -> 
     assert state.completed == ("build",)
 
 
+def test_an_unknown_stage_name_survives_a_read_and_a_write(tmp_path: Path) -> None:
+    """A downgrade must not strip the newer build's progress off disk.
+
+    `read_state` filtered unknown names out and `write_state` then persisted the
+    filtered tuple, so an older Yu'lon opening a newer install PERMANENTLY removed
+    the names it did not recognise — and the "Already finished: ..." line printed
+    the filtered list, so nothing said so. Resuming on the newer build afterwards
+    redid whatever those stages were, which for this family includes a multi-hour
+    compile. Bug-checklist section 23; fixed 2026-09-02.
+
+    Asserts the round trip through the FILE rather than the object, because the
+    file is what the other build reads. The two halves stay separate on the way
+    in — this build must not act on a stage it cannot interpret — and are rejoined
+    on the way out.
+    """
+    (tmp_path / native.STATE_FILE).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "game_id": "wow-tbc",
+                "install_id": "abc",
+                "completed": ["build", "a-stage-from-the-future"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = native.read_state(tmp_path, valid=ORDER)
+    assert state is not None
+    assert state.completed == ("build",), "an uninterpretable stage must not become a skip"
+    assert state.unknown == ("a-stage-from-the-future",)
+
+    native.write_state(tmp_path, state)
+    on_disk = json.loads((tmp_path / native.STATE_FILE).read_text(encoding="utf-8"))["completed"]
+    assert (
+        "a-stage-from-the-future" in on_disk
+    ), "the older build wrote the newer build's progress out of existence"
+
+
+def test_recording_a_stage_does_not_drop_the_names_this_build_cannot_read(
+    tmp_path: Path,
+) -> None:
+    """The lossy path was a WRITE, so the write that happens every stage is the one to pin.
+
+    `with_stage()` rebuilds `completed` from `order`, and a future name is by
+    definition not in `order`. If `unknown` did not ride along beside it, the very
+    first stage an older build completed would erase the newer one's record — the
+    same defect as the read-side filter, reached by the commoner route.
+    """
+    (tmp_path / native.STATE_FILE).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "game_id": "wow-tbc",
+                "install_id": "abc",
+                "completed": ["clone-core", "a-stage-from-the-future"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = native.read_state(tmp_path, valid=ORDER)
+    assert state is not None
+    native.write_state(tmp_path, state.with_stage("build", ORDER))
+
+    on_disk = json.loads((tmp_path / native.STATE_FILE).read_text(encoding="utf-8"))["completed"]
+    assert "build" in on_disk and "clone-core" in on_disk, "the ordinary record still works"
+    assert "a-stage-from-the-future" in on_disk, "recording a stage erased the future one"
+
+
+def test_a_stage_this_build_cannot_read_is_reported_rather_than_dropped_in_silence(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Keeping the name is not enough if nobody is told why a resume looks short.
+
+    The user-facing "Already finished" line prints `completed`, which by design
+    excludes these. Without a log line the only visible symptom is an install that
+    appears to have done less than it did, with nothing naming the cause.
+    """
+    (tmp_path / native.STATE_FILE).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "game_id": "wow-tbc",
+                "install_id": "abc",
+                "completed": ["build", "a-stage-from-the-future"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with caplog.at_level(logging.WARNING, logger="yulon.catalog.native"):
+        native.read_state(tmp_path, valid=ORDER)
+    said = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "a-stage-from-the-future" in m for m in said
+    ), f"the dropped name was never reported: {said}"
+
+
 def test_the_same_file_reads_differently_for_two_entries_stage_tuples(tmp_path: Path) -> None:
     """`valid` is per entry, so "known stage" is not a property of the module.
 
@@ -442,6 +538,67 @@ def test_an_unrecorded_stage_is_never_written_down(tmp_path: Path) -> None:
     assert state is not None
     assert state.completed == ("always",)
     assert state.family == "azerothcore"
+
+
+def test_a_finished_install_says_so_last_and_says_where(tmp_path: Path) -> None:
+    """The sentence a user reads when the install ends, asserted by anything at all.
+
+    Nothing in the suite read it before 2026-09-02: `grep "is installed and
+    running"` over `tests/` found no hit, so the last line of every successful
+    install was free to change or disappear silently. That is not hypothetical
+    here — the line exists BECAUSE it went missing once. The comment above it
+    records why: this path used to log nothing at the end, and a tester on
+    yulon-win11 (2026-08-28) read a seven-minute readiness wait as "the install
+    was not remembered", because the only sign a run had ended was the
+    compose-project pin.
+
+    Asserts three things a support question depends on: that it is there, that it
+    names the SERVER DIRECTORY (the one fact that distinguishes two installs of
+    the same game), and that it is LAST — a success line with stage output after
+    it reads as a run that carried on and then stopped for an unsaid reason.
+    """
+    rec = Recorder()
+    family = _family(lambda me: (native.Stage("only", _say),))
+    server_dir = tmp_path / "wow"
+    lines = list(_build(rec, family).run(InstallOptions(server_dir=server_dir)))
+
+    ending = [line for line in lines if "is installed and running" in line]
+    assert len(ending) == 1, f"expected exactly one closing line, got {ending}"
+    assert str(server_dir) in ending[0], (
+        "the closing line does not say which folder, so two installs of the same "
+        f"game are indistinguishable in a log: {ending[0]!r}"
+    )
+    assert (
+        lines[-1] == ending[0]
+    ), f"something is said after the install claims to be finished: {lines[-1]!r}"
+
+
+def test_a_failed_install_never_says_it_finished(tmp_path: Path) -> None:
+    """The other half, which is the half that would actually hurt.
+
+    A closing line that survives a raising stage would tell a user their server is
+    installed and running when it is not, and send them looking for a working
+    install rather than at the error. Pinned separately from the success case
+    because the two can fail independently: moving the yield above the `try` would
+    keep this green while breaking the ordering, and moving it inside the `try`
+    would keep the ordering while breaking this.
+    """
+    rec = Recorder()
+
+    def _boom(ctx: native.StageContext) -> Iterator[str]:
+        yield "starting"
+        raise InstallerError("the build died")
+
+    family = _family(lambda me: (native.Stage("build", _boom),))
+    engine = _build(rec, family)
+    said: list[str] = []
+    with pytest.raises(InstallerError):
+        for line in engine.run(InstallOptions(server_dir=tmp_path / "wow")):
+            said.append(line)
+
+    assert not [
+        line for line in said if "is installed and running" in line
+    ], f"a failed install announced success: {said}"
 
 
 def test_the_cancel_note_is_said_by_the_spine_right_after_the_stage_heading(
