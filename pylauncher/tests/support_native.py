@@ -194,6 +194,13 @@ class Recorder:
     """A substring; any stream containing it exits 1 with a mariadb-shaped stderr."""
 
     query_answer: str = "20000\n"
+    realm_row: str = "127.0.0.1\t127.0.0.1\n"
+    """What the realm query answers. A FRESH install holds loopback.
+
+    Separate from `query_answer`, which is a row count for the import probe.
+    One canned string for every question let the realm guard read "20000" as a
+    perfectly good address and skip its write, which made a correct guard look
+    broken (review, 2026-09-03)."""
     """What `sql_query` answers, VERBATIM — trailing newline and all.
 
     `docker.sql_query()` returns the client's stdout untouched, and under
@@ -335,6 +342,9 @@ class Recorder:
         self.sql_calls.append(statement)
         self.sql_secrets.append(password)
         self.distros.append(wsl_distro)
+        # The realm row is answered separately; see `realm_row`.
+        if "realmlist" in statement:
+            return self.realm_row
         return self.query_answer
 
     def volume_exists(self, name: str) -> bool:

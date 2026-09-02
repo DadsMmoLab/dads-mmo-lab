@@ -201,8 +201,9 @@ it could not.
 """
 
 REALM_ADDRESS_UNKNOWN = (
-    "This machine's address on the local network could not be worked out, so the realm still "
-    f"advertises {INSTALL_REALM_HOST} and only this computer can reach the server. Nothing is "
+    "This machine's address on the local network could not be worked out, so the address the "
+    "realm advertises was left exactly as it is — which on a new install is "
+    f"{INSTALL_REALM_HOST}, and means only this computer can reach the server. Nothing is "
     "broken and nothing needs reinstalling: connect this machine to your network, then open "
     "this server's Networking tab, press Show plan and then Apply, and it will set the address "
     "for you."
@@ -1847,10 +1848,16 @@ class StagedInstaller:
         * no address — `REALM_ADDRESS_UNKNOWN`, and no SQL is attempted at all.
           A guess would be worse than the default, and a refusal would be a lie
           about what happened;
-        * the row already says it — nothing is sent. Re-writing a correct row
-          is not free: it is a write to somebody's live auth database for no
-          reason, and the log line claiming it happened is one more thing a
-          reader has to discount;
+        * the row is ALREADY REACHABLE — nothing is sent. Not "already equal
+          to the LAN address": equality is the wrong question, and asking it
+          was a real defect. `networking.apply()` exists so a user can advertise
+          a PUBLIC address for internet play, and every ordinary resume of the
+          installer runs this method again. Comparing against the LAN address
+          overwrote that public address with a LAN one and printed "players on
+          other machines can reach this server", which was the opposite of what
+          had just happened (review, 2026-09-03). The question that matters is
+          whether the row can be reached from another machine at all, which is
+          exactly what `networking.advertisable()` already answers;
         * the UPDATE failed — said, with what the database answered, plus where
           to fix it by hand. The install stays successful;
         * it worked — said, naming the address, because the address is what the
@@ -1860,9 +1867,16 @@ class StagedInstaller:
         if address is None:
             yield REALM_ADDRESS_UNKNOWN
             return
-        columns = networking.realmlist_columns(self.entry)
-        if self._stored_realm_row(ctx) == (address,) * len(columns):
-            yield f"The realm already advertises {address}; its row was left exactly as it is."
+        stored = self._stored_realm_row(ctx)
+        # EVERY column the UPDATE would write must already be reachable. One
+        # loopback among them still leaves a client that is sent to its own
+        # machine, so `all()` and not `any()`.
+        if stored is not None and all(networking.advertisable(value) for value in stored):
+            shown = ", ".join(dict.fromkeys(stored))
+            yield (
+                f"The realm already advertises {shown}, which other machines can reach, so its "
+                "row was left exactly as it is."
+            )
             return
         failed = self._run_auth_statement(
             networking.realmlist_sql(self.entry, address, address), ctx

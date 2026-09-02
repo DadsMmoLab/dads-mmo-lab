@@ -2421,26 +2421,42 @@ def test_no_detectable_address_is_a_sentence_and_never_a_guess(
     assert said[-1].startswith(f"{ENTRY.name} is installed"), said[-1]
 
 
-def test_a_row_that_already_says_the_detected_address_is_left_alone(tmp_path: Path) -> None:
-    """Nothing is sent when there is nothing to change — on EVERY column, not just one.
+def test_a_row_that_is_already_reachable_is_left_alone_whatever_it_says(tmp_path: Path) -> None:
+    """The question is REACHABILITY, not equality with the LAN address.
 
-    The double answer is what the read is for: WotLK's realmlist has `address`
-    and `localAddress`, `realmlist_sql()` writes both, so both have to match
-    before this is a no-op. The second half of the test is the reason the query
-    reads both columns — a row whose `address` is right and whose `localAddress`
-    is still the loopback hands 127.0.0.1 to precisely the clients AzerothCore
-    decides are on the realm's own subnet.
+    This test asserted equality until 2026-09-03, and the rule it encoded was
+    wrong in a way that cost real users their servers. `networking.apply()`
+    exists so somebody can advertise a PUBLIC address for internet play; every
+    ordinary resume of the installer runs this step again; and comparing the row
+    against the LAN address meant the resume overwrote that public address with
+    a LAN one — while printing "players on other machines can reach this
+    server", which was the exact opposite of what had just happened. A review
+    drove it through the real engine and caught it.
 
-    Mutations this catches: skipping the read and always writing (first half),
-    and comparing only `address` (second half). A version of this test with a
-    single-column fixture would survive the second.
+    So the three cases below are the rule:
+
+    * a row holding the detected LAN address is left alone;
+    * a row holding a DIFFERENT but reachable address is ALSO left alone —
+      this is the case the old rule got wrong, and it is why the test is no
+      longer named after equality;
+    * a row where ANY column is still loopback is written, because one loopback
+      among them still sends somebody to their own machine. WotLK's realmlist
+      has `address` and `localAddress` and `realmlist_sql()` writes both, so a
+      single-column fixture would survive a version that checked only the first.
     """
-    rec = Recorder(query_answer="10.1.2.3\t10.1.2.3\n")
-    said = _advertising(rec, tmp_path / "wow", lan_ip=lambda: "10.1.2.3")
-    assert _statements(rec) == [], "a row that was already correct was written again"
+    same = Recorder(realm_row="10.1.2.3\t10.1.2.3\n")
+    said = _advertising(same, tmp_path / "wow", lan_ip=lambda: "10.1.2.3")
+    assert _statements(same) == [], "a row that was already correct was written again"
     assert [line for line in said if "already advertises 10.1.2.3" in line], said
 
-    half = Recorder(query_answer=f"10.1.2.3\t{native.INSTALL_REALM_HOST}\n")
+    public = Recorder(realm_row="203.0.113.9\t192.168.1.25\n")
+    spoke = _advertising(public, tmp_path / "internet", lan_ip=lambda: "192.168.1.25")
+    assert (
+        _statements(public) == []
+    ), "a public address somebody set for internet play was overwritten with a LAN one"
+    assert [line for line in spoke if "203.0.113.9" in line], spoke
+
+    half = Recorder(realm_row=f"10.1.2.3\t{native.INSTALL_REALM_HOST}\n")
     _advertising(half, tmp_path / "second", lan_ip=lambda: "10.1.2.3")
     assert _statements(half) == [
         networking.realmlist_sql(ENTRY, "10.1.2.3", "10.1.2.3")
