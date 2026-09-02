@@ -7,4 +7,8 @@
 *
 !src/tortoise-wow
 src/tortoise-wow/.git
+# Eluna is cloned as a SECOND source into the core tree (it is the fork's one git
+# submodule, and cmake refuses to build without its LuaEngine.h). The re-include above
+# is the whole core tree, so its .git would ride along into the context unless named.
+src/tortoise-wow/src/modules/Eluna/.git
 src/tortoise-wow/_build

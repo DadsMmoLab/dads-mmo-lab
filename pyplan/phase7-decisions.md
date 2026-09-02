@@ -1045,6 +1045,40 @@ definitions of done, no narrative.
 1. Catalog data and templates; compile inside the Dockerfile.
 2. _Definition of done:_ extraction from a 7272 client, boot to ready, update tables present,
    client connects; `status` promoted from `wip`; source pinned.
+3. **Tortoise ships WITH the Eluna Lua scripting engine (owner decision, 2026-09-02).**
+
+   The first Tortoise build reached cmake and stopped there:
+
+       CMake Error at CMakeLists.txt:50 (message):
+         Eluna submodule is missing.  Run: git submodule update --init --recursive
+         src/modules/Eluna
+
+   `Shyalya/tortoise-wow` @ `playerbots-integration-gh` declares exactly ONE submodule --
+   `src/modules/Eluna` from `https://github.com/ElunaLuaEngine/Eluna.git`, pinned at
+   `1b06f28ff3a00054d915d824c725fb4283fee74d` -- and the engine clones repositories without
+   fetching their submodules. Tortoise is the first entry that has one: the other three get their
+   extra modules as separate catalog sources (`cmangos/playerbots` into
+   `src/mangos-*/src/modules/Bots`).
+
+   **Two fixes existed and BOTH satisfy this line's "data and templates only" rule**, which is why
+   this is recorded as a decision rather than settled as a bug:
+
+   - **A (chosen).** Add Eluna as another `emulator.sources` entry, cloned at the pinned commit
+     into `src/tortoise-wow/src/modules/Eluna`. Tortoise ships with Lua scripting.
+   - **B (rejected).** Pass `-DBUILD_ELUNA=OFF` in the template. One flag, no clone, a shorter
+     build -- and a Tortoise without the scripting engine.
+
+   `CMakeLists.txt` defaults `BUILD_ELUNA` to `ON` and the template never passed it either way, so
+   B would have been a silent feature removal dressed as a build fix. The owner chose A: a
+   Turtle-derived server with playerbots plausibly carries content that depends on Eluna, and
+   shipping it without would be discovered by a user rather than by us.
+
+   `BUILD_ELUNA_TESTS` also defaults `ON` and calls `enable_testing()`; an install build has no
+   use for the Lua smoke test, so the template should turn it off. That is a build-time saving,
+   not part of the decision above.
+
+   **Still owed:** a rebuild proving the clone satisfies cmake. Nothing about A is confirmed until
+   a Tortoise build gets past `CMakeLists.txt:50`.
 
 ### 7.7 Native Windows, all four
 1. WotLK first (closes 6.3's `ac-db-import` bind-mount blocker), then TBC, Vanilla, Tortoise.

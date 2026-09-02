@@ -796,6 +796,11 @@
             "repo": "Shyalya/tortoise-wow",
             "branch": "playerbots-integration-gh",
             "dest": "src/tortoise-wow"
+          },
+          {
+            "repo": "ElunaLuaEngine/Eluna",
+            "dest": "src/tortoise-wow/src/modules/Eluna",
+            "rev": "1b06f28ff3a00054d915d824c725fb4283fee74d"
           }
         ]
       },

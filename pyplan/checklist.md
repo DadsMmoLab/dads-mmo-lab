@@ -247,6 +247,31 @@
 > The roadmap's §7 has NOT been edited (roadmap is edited only when explicitly tasked);
 > `phase7-decisions.md` Appendix A holds the proposed text.
 
+> **Getting a game client onto a Hyper-V VM: use a VHDX, not the network (2026-09-02).** Filed here
+> rather than in a gate log because every Phase 7 gate left needs a multi-GB client on a VM, and the
+> next person to want one should not rediscover this. Over the network, laptop → Hyper-V guest ran at
+> **0.42 MB/s** (200 MB in 8 minutes, measured) — the DERP-relayed path, so 4 GB that way is about
+> **2.7 hours**. What was done instead: a **16 GiB dynamic VHDX created on the host**, formatted
+> exFAT, filled **host-locally** (3.8 GB in 52 s, recorded as ~74 MB/s), then **hot-added to the
+> RUNNING VM on the SCSI controller** and read by the guest (4.0 GB in 14.6 s, recorded as
+> ~265 MB/s). **About 70 seconds end to end against 2.7 hours.**
+>
+> **Two gotchas, both from the run.** The exFAT volume comes up as **`/dev/sdb2`, not `sdb1`** — GPT
+> puts a 16 MB Microsoft-reserved partition first, so mounting `sdb1` fails in a way that looks like
+> a bad format. And **no VM restart is needed**: the disk was added to a live guest and appeared at
+> once. That second one is independently confirmed rather than taken on trust — the file landed on
+> `yulon-ubuntu` at 22:00 while `vanilla-db`, `vanilla-mangosd` and `vanilla-realmd` still read
+> `Up 3 hours` at 22:07, so the guest that received the disk had been running since before the
+> Vanilla install finished at 19:17.
+>
+> **The VHDX is kept at `D:\VMs\transfer\yulon-transfer.vhdx`** on the VM host (`ssh vmhost`), for
+> the next gate to reuse rather than rebuild. Re-checked there 2026-09-02 22:1x: `Size`
+> 17,179,869,184 (16 GiB), `FileSize` 4,097,835,008, `VhdType Dynamic`, **`Attached: False`** — so it
+> is detached and free. The payload it carried this time is on the guest as
+> `~/clients/TurtleWoW-1.18.1-7272-Hotfix-2026-04-12.zip`, **4,038,524,880 bytes**, which is the size
+> the 14.6 s figure refers to. The durations above were taken by the run that did it; what is
+> re-verified here is the geometry, the detached state, and the bytes that arrived.
+
 - [ ] 7.1 Spine + `AzerothCoreInstaller`, Linux native — `StagedInstaller`/`Stage` extracted from `native.py`, WotLK stage names unchanged and pinned; the 7.1 catalog models (`EmulatorSource.dest`, `PasswordPlan`, `DbFacts`, `ReadyMarkers`, `NativeInstall.family/images/image_prefix/azerothcore`); `ask` forwarded to `ensure_docker`; once-only sudo password (`SudoSession`, `sudo -S`) in provisioning; `docker-buildx` on the dnf and pacman lists; SELinux facts + `{{BIND_LABEL}}` on every host bind line + relabel; `systemd-inhibit`; `install_wiring.py` (probe wiring + the CLI harness); `wait_ready(ReadySpec)`; the proven install's `docker compose config` committed as `tests/data/wotlk-compose-config.json`; wow-wotlk dispatches native on Linux
   - [ ] Gate: yulon-ubuntu clean checkpoint, **two presses** — press 1: consent dialog + sudo dialog once + re-login report; re-login; press 2: `ready`; kill mid-build, resume skips the compile; `docker compose config` matches the fixture; auth log `127.0.0.1:8085` with no `UPDATE`; account + client login from the host after the LAN step
   - [ ] Gate: packaged artifact on clean Fedora 44 (SELinux, password sudo, moby-engine + buildx) and clean Arch (pacman + buildx)
@@ -384,6 +409,14 @@
   - **Installed and running 2026-09-02 19:17 on `yulon-ubuntu`** (15 cores), against
     `WoW-Client-1.12.1` downloaded to that box and extracted (5.1 GB, `Data/` with 14 MPQs). All
     twelve stages; `WoW Vanilla is installed and running in /home/pk/vanilla-server`.
+    The twelve, in the order the log records them: `clone-sources`, `db-password`,
+    `write-dockerfile`, `generate-compose`, `build`, `extract`, `mmaps`, `conf`, `start-db`,
+    `import`, `up`, `ready`. **Still running when this was written** — re-checked on the box at
+    22:07 the same evening: `vanilla-db` healthy, `vanilla-mangosd` and `vanilla-realmd` both `Up
+    3 hours`, so it survived the ~3 h after the installer let go of it rather than only reaching
+    `ready` once. The four data counts were read back off the log the same way
+    (`dbc: 158 files`, `maps: 2429 files`, `Buildings: 5076 files`, `vmaps: 5667 files`,
+    `mmaps: 2008 files`).
   - **Build 2744.3s (45m44s)**; context transfer 441.59 kB in 0.3s — three orders of magnitude
     smaller than TBC's 279.81 MB, because this entry's `.dockerignore` keeps the already-cloned
     sources out and the sources are COPYed rather than shipped in the context. Data counts:
@@ -394,6 +427,29 @@
     `make_out_dirs()` in `extract.py` and the HTTP/1.1 line in all three Dockerfile templates.
     That is not a failure of the run; it is the line's premise being wrong, and the premise is what
     7.5 was for — it predicted Vanilla would be data-only and it was not.
+    **Both counts re-checked 2026-09-02 and both still hold**, rather than being carried forward on
+    the earlier reading: `grep -c -i retry` over `~/vanilla2.log` on `yulon-ubuntu` returns **0**, so
+    no retry path was entered at all; and the Python is still there and still needed —
+    `make_out_dirs` at `yulon/catalog/families/extract.py:325`, plus the HTTP/1.1 line now in all
+    three `native/Dockerfile.tmpl` files (`wow-tbc`, `wow-vanilla`, `wow-tortoise`).
+  - **A third thing this run left open — not one of the line's own criteria, which is why it is a
+    separate bullet: 171 of the 172 `core updates` SQL files FAILED, and `on_error: warn` printed
+    success over them.** Counted off `~/vanilla2.log` on 2026-09-02: 172 files under
+    `src/mangos-classic/sql/updates/` were attempted, exactly **one** applied
+    (`z2837_01_mangos_gobject_near_link.sql`), and the other **171** died the same way —
+    `ERROR 1054 (42S22) at line 1: Unknown column 'required_<the previous update>' in 'db_version'`
+    (or `character_db_version`). Each file's first statement renames the column the previous update
+    left behind, so a chain that does not start cannot continue: the earliest failure in the run,
+    `z2683_01_mangos_scriptdev2_tables.sql`, already could not find
+    `required_z2681_01_mangos_mangos_string`, and every one after it is that same miss inherited.
+    Because the phase is `on_error: warn`, the engine logged each as `continuing because 'core
+    updates' is on_error: warn` and finished with `WoW Vanilla is installed and running`.
+    **UNVERIFIED, and it is the whole question:** whether the base dump this entry pins already
+    contains those updates — in which case the warnings are noise and the phase is re-running
+    applied work — or whether this realm is genuinely 171 updates behind, in which case a `warn` is
+    covering a broken world. Nobody has asked the database which, so nobody knows. Worth settling
+    before Vanilla is called done, and worth remembering that a run reporting `installed and
+    running` is what it looked like from the outside.
   - **It found the second-worst defect of the day.** The build died at cmake configure, before
     compiling anything: CMaNGOS's `FetchContent_MakeAvailable(zlib)` CLONES madler/zlib at configure
     time, and over HTTP/2 that clone fails (`could not read Username for 'https://github.com'` /
@@ -402,6 +458,46 @@
     in all three templates (`12d7e240`). `git.py` had already made this choice for the clones the
     app itself makes; the build context was the last place still speaking HTTP/2.
 - [ ] 7.6 WoW Tortoise — data + templates; first-ever extraction from a 7272 client; boot to `Ready to login`; client connects; `status` promoted from `wip`; source pinned
+  - **Reached `build` and FAILED there, 2026-09-02 on `m910q`** — the first time this entry has been
+    driven at all. Five stages ran in order — `clone-sources`, `db-password`, `write-dockerfile`,
+    `generate-compose`, `build` — the build was invoked at 21:44:05 and the run ended at 21:44:49,
+    killed at **cmake configure**, 0.585 s into the `cmake ..` step, before one object was compiled:
+
+        Eluna submodule is missing.  Run: git submodule update --init --recursive
+        src/modules/Eluna
+        -- Configuring incomplete, errors occurred!
+
+    `install failed: the build failed (exit 1)`, and the failing step is `Dockerfile:71`, the
+    `cmake .. -DCMAKE_INSTALL_PREFIX=/opt/tortoise … -DBUILD_PLAYERBOTS=ON` line. Log kept at
+    `~/tortoise.log` on m910q (104,741 bytes).
+  - **What the failure proves is bigger than one broken build: the engine clones a repository and
+    nothing fetches that repository's git SUBMODULES.** Established from the clone it produced
+    rather than read off the error message. `src/tortoise-wow/.gitmodules` declares
+    `[submodule "src/modules/Eluna"]` with `url = https://github.com/ElunaLuaEngine/Eluna.git`; the
+    directory `src/modules/Eluna` exists on disk and is **empty** — git creates the mount point and
+    stops there. And the argv `yulon.git` logged for the clone carries no `--recurse-submodules` and
+    is followed by no `submodule update`: `clone --config core.autocrlf=false --config core.eol=lf
+    --config http.version=HTTP/1.1 --depth 1 --branch playerbots-integration-gh
+    https://github.com/Shyalya/tortoise-wow.git .`. So the defect is in the clone step and Tortoise
+    is only the first of the four entries whose source needs one — nothing about this is
+    Tortoise-specific except that it is the entry that exposed it. (A fix was being written
+    elsewhere while this was recorded; what is recorded here is the failure and what it establishes,
+    not the remedy.)
+  - **Preflight on that box is worth reading before the next attempt, because it already warned
+    about the thing 7.6 is for.** Nine checks passed and three warned: free space 44 GB against a
+    60 GB comfortable figure (twice — Docker's disk and the server folder share the drive), and the
+    one that matters, *"the client's origin: realmlist.wtf sits at the root of /home/pk/TurtleWoW
+    and there is no locale folder, which is how a repack looks"*, alongside `21 MPQ archives in
+    /home/pk/TurtleWoW/Data`. Whether a repack extracts completely is exactly what "first-ever
+    extraction from a 7272 client" exists to answer, and this run stopped four stages short of it.
+  - **The old Tortoise test server on m910q was removed by owner decision (2026-09-02)** — to free
+    the container names, which AzerothCore/CMaNGOS compose stacks pin GLOBALLY, so a second Tortoise
+    install cannot stand beside an old one. Three containers and two volumes went. The volumes were
+    `tortoise-wow-hunt_dbdata` and `tortoise-wow-server_dbdata`, named in
+    `~/tortoise-volumes-before.txt` before the removal and gone afterwards: the box now holds one
+    volume (`yulon-wow-tbc-1cbfa4ac_db-data`) and three containers (the exited TBC set), checked
+    after the fact. **The 428 MB the removal reclaimed was read at the time and cannot be
+    re-measured** now that the volumes are deleted; it is recorded as reported, not as re-verified.
 - [ ] 7.7 Native Windows, all four — WotLK first (closes the 6.3 `ac-db-import` blocker), then TBC, Vanilla, Tortoise from `yulon-win11`'s clean checkpoint; 9p extract/mmaps throughput recorded; `platforms` widened per entry
 - [ ] 7.8 macOS, all four — **[blocked]** on hardware
 - [ ] 7.9 Controllers — `controller_wow_tbc/`, `controller_wow_vanilla/`, `controller_wow_tortoise/` mirroring `controller_wow_wotlk/`; `mysql` → `db.client` in `apply.py`/`maintenance.py`; CMaNGOS-family account creation (was 7.1–7.3 before the scope change; still owed, now after install)

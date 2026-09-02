@@ -399,7 +399,10 @@ def test_every_source_says_where_it_lands() -> None:
             "src/mangos-classic/src/modules/Bots",
             "src/classic-db",
         ),
-        "wow-tortoise": ("src/tortoise-wow",),
+        "wow-tortoise": (
+            "src/tortoise-wow",
+            "src/tortoise-wow/src/modules/Eluna",
+        ),
     }
     for game_id, dests in expected.items():
         sources = catalog.get(game_id).emulator.sources
@@ -831,3 +834,76 @@ def test_tortoise_still_clones_the_fork_that_carries_the_playerbots() -> None:
     source = load_catalog().get("wow-tortoise").emulator.sources[0]
     assert source.repo == "Shyalya/tortoise-wow"
     assert source.branch == "playerbots-integration-gh"
+
+
+# Every gitlink `Shyalya/tortoise-wow` declares on `playerbots-integration-gh`,
+# read off GitHub on 2026-09-02. `.gitmodules` named one submodule
+# (`src/modules/Eluna` -> https://github.com/ElunaLuaEngine/Eluna.git) and the
+# recursive tree API answered with exactly one entry of type `commit` and
+# `truncated: false`, so this was the whole list and not the first of several.
+# The sha is the gitlink that branch pins. `Eluna` at that commit shipped no
+# `.gitmodules` of its own (raw.githubusercontent answered 404), so the
+# `--recursive` in CMake's advice had nothing further to fetch.
+#
+# This table is a transcript, not a live query: a submodule ADDED upstream after
+# that date will not turn this red. What it does hold is the other direction —
+# an edit that drops one of these sources takes the build down at `cmake`, and
+# takes this test down first.
+TORTOISE_SUBMODULES = {
+    "src/modules/Eluna": ("ElunaLuaEngine/Eluna", "1b06f28ff3a00054d915d824c725fb4283fee74d"),
+}
+
+
+def test_tortoise_clones_the_submodules_its_cmake_refuses_to_build_without() -> None:
+    """The clone stage does not run `git submodule update`, so each gitlink is a source.
+
+    Measured on m910q 2026-09-02: the Tortoise build died at configure with
+    `CMakeLists.txt:50 (message): Eluna submodule is missing.  Run: git
+    submodule update --init --recursive src/modules/Eluna`. `clone-sources` had
+    cloned the fork and nothing had fetched its submodules, so the gitlink left
+    an empty `src/modules/Eluna` behind.
+
+    Nothing here needs a submodule to BE a submodule. That CMake guard is
+    `if(NOT EXISTS "${CMAKE_SOURCE_DIR}/src/modules/Eluna/LuaEngine.h")` and
+    reads no git metadata at all, so an ordinary clone parked at the pinned
+    commit satisfies it — which is why the fix is a row of data beside the core
+    rather than engine support for `.gitmodules`.
+
+    Three properties, and each one is a way the fix silently stops working:
+
+    * The **rev** is the sha the superproject pins. Without it the clone takes
+      whatever `ElunaLuaEngine/Eluna` publishes next against a fork that has not
+      moved, which is a compile error nobody edited anything to cause.
+    * The **order** — every submodule after the core that contains it.
+      `stage_clone_sources()` walks the list in order and refuses a dest that
+      holds files but no `.git`, so a submodule cloned FIRST turns the core's
+      own clone into "move that folder aside and try again".
+    * The **depth**, left at 1. Measured here on 2026-09-02, running the argv
+      `git.py` runs: a `--depth 1` clone of Eluna's default branch (`master`),
+      then `fetch --depth=1 origin <sha>` and `checkout --detach <sha>`,
+      succeeded and left `LuaEngine.h` on disk in 5.6 MB. That is why no
+      `branch` is spelled: the pinned commit was the head of a side branch
+      (`cmangos-spell-update`), `_pin()` fetches it by hash regardless, and
+      naming a branch that upstream may delete would break the clone outright
+      where the default branch will not.
+    """
+    sources = load_catalog().get("wow-tortoise").emulator.sources
+    core = sources[0]
+    assert core.dest == "src/tortoise-wow", "the submodule dests below are built onto this"
+    by_dest = {source.dest: source for source in sources}
+    for path, (repo, rev) in TORTOISE_SUBMODULES.items():
+        dest = f"{core.dest}/{path}"
+        assert dest in by_dest, f"{path} is declared as a submodule and nothing clones it"
+        source = by_dest[dest]
+        assert source.repo == repo
+        assert source.url == f"https://github.com/{repo}.git", "the .gitmodules url, respelled"
+        assert source.rev == rev, "the gitlink the fork pins, not the tip of some branch"
+        assert source.branch is None
+        assert source.depth == 1
+    cloned_before_the_tree_it_lands_in = [
+        (inner.dest, outer.dest)
+        for i, inner in enumerate(sources)
+        for j, outer in enumerate(sources)
+        if inner.dest.startswith(f"{outer.dest}/") and i < j
+    ]
+    assert not cloned_before_the_tree_it_lands_in, cloned_before_the_tree_it_lands_in
