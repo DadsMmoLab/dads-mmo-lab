@@ -385,3 +385,44 @@ def test_saying_yes_restarts_under_the_docker_group(
     _view(tmp_path)._on_run_finished(False, "Docker is installed and set up.")
 
     assert restarts == ["did"]
+
+
+# --------------------------------------------------------------------------
+# The advice itself. Changing the mechanism without changing these sentences
+# leaves an app that restarts itself while still telling the user to log out --
+# and the dialog in `_offer_a_restart_instead()` shows the message it is
+# offering to act on, so the two would contradict each other inside one box.
+# The whole suite was green across that wording change, which is why these
+# exist: 2034 tests could not see it.
+
+
+@pytest.mark.parametrize("outcome", ["granted", "already-member"])
+def test_the_restart_is_offered_before_the_logout(outcome: str) -> None:
+    """Both refusals name restarting FIRST and a logout only as the fallback.
+
+    Order is the assertion, not presence. Both remedies are named on purpose --
+    `docker_group_reexec()` refuses on a box with no `sg`, and that user still
+    needs the old one -- so a test that only checked "restart is mentioned"
+    would pass against a sentence that buries it after the logout, which is the
+    sentence this replaced.
+    """
+    from yulon.catalog.installer import docker_unavailable
+
+    report = platform.ProvisionReport(platform="linux", docker_group=outcome)  # type: ignore[arg-type]
+    message = str(docker_unavailable(report)).lower()
+
+    assert "restart yu'lon" in message, message
+    assert "log out and back in" in message, message
+    assert message.index("restart yu'lon") < message.index("log out and back in"), message
+
+
+def test_the_manual_step_for_a_granted_join_names_the_restart_first() -> None:
+    """`DOCKER_GROUP_RELOGIN_STEP` is the line a headless `--provision` prints.
+
+    It reaches a user with no dialog at all, so it carries the same order as
+    the dialogs do.
+    """
+    step = platform.DOCKER_GROUP_RELOGIN_STEP.format(user="pk").lower()
+
+    assert "restart yu'lon" in step, step
+    assert step.index("restart yu'lon") < step.index("log out and back in"), step

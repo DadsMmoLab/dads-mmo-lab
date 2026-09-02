@@ -151,7 +151,11 @@ def docker_unavailable(report: platform.ProvisionReport) -> DockerUnavailableErr
             "Docker is installed and set up. It cannot be used from this session yet: your "
             "account was added to the docker group, and a session that was already open does "
             "not pick up a new group. "
-            + (details or "Log out and back in, then start the install again.")
+            + (
+                details
+                or "Restart Yu'lon and start the install again. Log out and back in if a "
+                "restart is not enough."
+            )
         )
     if report.docker_group == "already-member":
         # Two causes, and the report cannot tell them apart, so both are named,
@@ -168,9 +172,10 @@ def docker_unavailable(report: platform.ProvisionReport) -> DockerUnavailableErr
         return DockerNeedsReLoginError(
             "Docker is installed and your account is already in the docker group, but this "
             "session still cannot reach the daemon. A session that was open before the group "
-            "was granted does not pick it up: log out and back in, then start the install "
-            "again. If you have already done that, the Docker service is not running - start "
-            "it and try again." + (f" {details}" if details else "")
+            "was granted does not pick it up: restart Yu'lon and start the install again, or "
+            "log out and back in if a restart is not enough. If you have already done that, "
+            "the Docker service is not running - start it and try again."
+            + (f" {details}" if details else "")
         )
     return DockerUnavailableError(
         "Docker isn't available and could not be set up automatically. "

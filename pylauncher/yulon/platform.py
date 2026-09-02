@@ -1342,8 +1342,8 @@ DOCKER_GROUP_UNASKED_STEP = (
 )
 
 DOCKER_GROUP_RELOGIN_STEP = (
-    "Log out and back in (or run `newgrp docker`) so {user} can use Docker without sudo, "
-    "then click Install again."
+    "Restart Yu'lon so {user} can use Docker without sudo, then click Install again. "
+    "Log out and back in if a restart is not enough."
 )
 """Shown only where it is true: after a join that ran, or for an existing member.
 
