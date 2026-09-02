@@ -406,6 +406,14 @@ def test_a_generated_password_is_never_spelled_in_a_template(entry: CatalogEntry
     The base file's `:?` is deliberately not widened the same way. `${VAR?msg}`
     refuses an unset variable and accepts an empty one, and an empty root
     password is the state this rule exists to keep out of a running database.
+
+    The neighbour of a default is a BARE `${DB_ROOT_PASSWORD}`, which is not a
+    default and starts the database with an empty root password just the same —
+    so every mention of the variable in a generated-password template has to be
+    the refusing `:?` form. That last rule subsumes both spellings above; the
+    substring check is kept in front of it because "defaults the secret" is the
+    sentence that names what went wrong, and "spells ${DB_ROOT_PASSWORD}" is the
+    one that catches what nobody thought of.
     """
     block = native_of(entry)
     if entry.install.password.mode == "fixed":
@@ -415,6 +423,8 @@ def test_a_generated_password_is_never_spelled_in_a_template(entry: CatalogEntry
         text = (TEMPLATES / block.templates / name).read_text(encoding="utf-8")
         assert "{{DB_PASSWORD}}" not in text, f"{entry.id}: {name}"
         assert not _PASSWORD_DEFAULT.search(text), f"{entry.id}: {name} defaults the secret"
+        for spelled in re.findall(r"\$\{DB_ROOT_PASSWORD[^}]*\}", text):
+            assert spelled.startswith("${DB_ROOT_PASSWORD:?"), f"{entry.id}: {name} {spelled}"
     base = (TEMPLATES / block.templates / "base.yml.tmpl").read_text(encoding="utf-8")
     assert "${DB_ROOT_PASSWORD:?" in base, f"{entry.id}: the base file must refuse an empty .env"
 
