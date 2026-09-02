@@ -30,9 +30,21 @@ of K.7, which bound `import` — the last one outstanding. They were allowed to
 disagree while the family was being built, because nothing in the app reads
 `STAGE_NAMES` — `stage_names()`, derived from `stages()`, is what the spine
 validates a resume against — and because this class is not in `FAMILIES` until
-K.8 puts it there. K.8 is also what pins the equality with a test; on this
-branch nothing asserts it, so the agreement above was checked by hand
-(2026-09-02) and is not held by anything.
+K.8 puts it there. Meanwhile the agreement is held by tests in
+`tests/test_families_cmangos.py`, and the two DIRECTIONS are held by different
+ones — measured 2026-09-02 by deleting `import` from each side in turn. Take
+the `Stage` out of `stages()` and three fail:
+`test_the_bound_stages_run_in_order_and_record_the_recorded_ones`, which
+restates all twelve `--- <name>` lines one whole install said,
+`test_the_import_cancel_note_is_said_at_the_import_and_nowhere_else`, and
+`test_import_is_recorded_and_sits_between_start_db_and_up`. Take the name out
+of `STAGE_NAMES` and two others fail:
+`test_family_and_stage_names_are_the_contract_tuple`, which restates the tuple,
+and `test_stages_are_unique_and_a_subset_of_the_pinned_names_in_order`. That
+last one is a SUBSET check, and it stayed green over a `stages()` short a
+stage — it sees the tuple's direction only. What no test spells is the literal
+`stage_names() == STAGE_NAMES`, and that is what K.8 adds along with the entry
+in `FAMILIES`.
 """
 
 from __future__ import annotations
@@ -627,11 +639,20 @@ class CmangosInstaller(StagedInstaller):
         `_Remembering` — because a second probe is a second question, and
         between the two the answer can differ.
 
-        Then, in order: phase 0 (the schemas, the app user and its grants,
-        skipped by `create_schemas()` itself when `create` is empty, which is
-        Tortoise), every phase in the plan's own order with its statements
-        filled through the one token mapping, `sqlplan.verify()`, and only then
-        the marker.
+        Then, in order: phase 0 (the schemas, the app user and its grants),
+        every phase in the plan's own order with its statements filled through
+        the one token mapping, `sqlplan.verify()`, and only then the marker.
+
+        Phase 0 is skipped by the `if plan.create:` below, HERE and not inside
+        `create_schemas()`, so for Tortoise — whose `create` is empty — that
+        function is never entered at all. This bypasses its deliberate
+        ordering: it judges the plan's schema names before its own
+        empty-`create` shortcut, precisely so a plan naming a database this
+        game does not have is refused whether or not it creates anything.
+        Nothing is lost today, because `sqlplan.expand()` a line below calls
+        the same `_check_plan_schemas()` over the same mapping and raises the
+        same sentence; the guard here is about not saying "Creating the
+        databases ()" over an empty list.
 
         **The marker is written after verify and never before**, and that
         ordering is the whole of this stage's safety argument: `MarkerGate`
@@ -774,11 +795,18 @@ class CmangosInstaller(StagedInstaller):
         every real implementation takes it.
 
         Checked 2026-09-02: `docker.sql_query`, `Recorder.sql_query` and every
-        double in `test_families_cmangos.py` accept `wsl_distro`, and neither
-        `sqlplan.verify()` nor `MarkerGate` passes anything but `None` from
-        this family — no install-side caller holds a distro (see `Seams`). So
-        the cast asserts a keyword that is present and unused, not one that is
-        missing.
+        double in `test_families_cmangos.py` accept `wsl_distro`, and the
+        keyword is passed on every call made through this seam —
+        `sqlplan.verify()` spells `wsl_distro=wsl_distro` unconditionally and
+        `MarkerGate` spells `wsl_distro=self._wsl_distro`. What is always
+        `None` from this family is the VALUE, because no install-side caller
+        holds a distro (see `Seams`). So the cast asserts a keyword that is
+        present and travelling, not one that is missing.
+
+        Widening `Seams.sql_query` to spell the keyword would delete this cast
+        and `_query_seam()` with it. That is a change to the seam contract and
+        not to this stage; `native.py` records the erasure as open and
+        undecided, and it is left where it is recorded.
         """
         return cast("sqlplan.SqlQuery", self._seams.sql_query)
 
@@ -1168,10 +1196,16 @@ class _Remembering:
     two answers the import could have been finished by another press, and the
     branch this stage then takes would be the one the spine did not.
 
-    `last` is None only before the first probe, which cannot happen after
-    `stage_import()` has run: its first act is `gate.probe()`. The family still
-    tests it, because "cannot happen" is a claim about a function in another
-    file.
+    `last` is None only before the first probe, and `stage_import()`'s first
+    act is `gate.probe()`, so `_import` reads the attribute after that has
+    happened.
+    `test_the_remembering_gate_keeps_the_last_answer_and_has_none_before_the_first_probe`
+    holds this class's own half of that: the None before anything is asked, the
+    inner gate's answer passed through rather than replaced, the LAST of
+    several answers rather than the first, and `reset()` reaching the inner
+    gate. The `is not None` in `_import` is defence over a state that call
+    cannot leave behind, and it reads as one — measured 2026-09-02, removing it
+    left the suite green.
     """
 
     inner: ImportGate

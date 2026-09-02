@@ -64,29 +64,38 @@ pip install -r requirements-dev.txt
 python main.py
 ```
 
-## Installing a server from the CLI (Phase 3 harness)
+## Installing a server from the CLI (the harness)
 
 ```bash
-python -m yulon.catalog.installer wow-wotlk --server-dir ~/wow-server-playerbots
-python -m yulon.catalog.installer wow-tbc --client-dir ~/Games/WoWTBC   # games that need a client folder
+python -m yulon.install_wiring wow-wotlk --server-dir ~/wow-server-playerbots
+python -m yulon.install_wiring wow-tbc --client-dir ~/Games/WoWTBC   # games that need a client folder
 ```
 
-Needs Docker — but no longer a *reachable* one to begin with: when no daemon answers, preflight
-runs the real provisioner (`platform.ensure_docker()`) and refuses only if what comes back still
-cannot be used, needing a reboot or a manual install. The Phase 3.3 placeholder message this
-used to name is not emitted anywhere any more. Cached or
-passwordless sudo — the wrapped scripts still start with `sudo -v`. The **app** no longer needs
-that (roadmap 6.1.5 runs the script on a pty and answers the password through a dialog), but this
-CLI harness has no dialog to answer with, so the old requirement stands here.
+The harness builds the same engine the Catalog's Install button builds
+(`install_wiring.installer_for_app()` → `installer_for()` → the entry's family engine on
+`native.StagedInstaller`) and streams its stages to stdout, so what it proves, the button proves.
 
-The harness also **declines** the installers' docker-group question, because there is nobody to
-ask: joining that group is a root-equivalent privilege change, and the app never makes one
-silently. Add yourself with `sudo usermod -aG docker "$USER"` if you want it.
+Needs Docker — but not a reachable one to begin with: when no daemon answers, preflight runs the
+real provisioner (`platform.ensure_docker()`) and refuses only if what comes back still cannot be
+used, needing a reboot or a manual install. It needs no `bash`; 7.2 deleted the shell installers
+and the engine that drove them, and nothing left on this path is a script.
 
-**This harness is the Linux bash-script path only.** `_main()` builds an `Installer` directly
-instead of asking `installer_for()`, so it never reaches the native engine. `wow-wotlk` now lists
-`macos` in `catalog.json`'s `install.platforms`, so on a Mac the platform check passes and the
-harness goes on to run the Linux install script. Use the app there.
+It does not need cached sudo either, because it can ask. `main()` hands the engine
+`_terminal_prompter` as its `ask` seam, and `ask` reaches Docker provisioning and nothing else: the
+sudo password, read through `getpass` so it is never echoed back, and the docker-group consent,
+asked in words a person can see themselves agreeing to. Off a terminal there is nobody to ask, so
+the prompter says so on stderr and answers empty — which sudo and a y/n question both take as no —
+and provisioning reports the group join as a manual step (`sudo usermod -aG docker "$USER"`, then
+log out and back in) rather than making a root-equivalent change with no one watching. On a box
+where Docker already answers, nothing is asked at all.
+
+The harness refuses what the app refuses, in the same words. An entry that does not list this OS
+in `install.platforms` is stopped by the engine's preflight with
+`installer.unsupported_platform_message()` — the sentence the Catalog tile hangs on its disabled
+Install button. An entry with no `install.native` block is refused by `installer_for()` itself,
+and `main()` prints that refusal and exits 1;
+`test_catalog.py::test_every_shipped_entry_is_installable_on_linux_and_names_its_family` is what
+keeps a shipped entry from reaching that branch.
 
 ## Building the desktop binary
 
@@ -122,7 +131,7 @@ built, stopped, and pointed at via an env var — it will start it, wait for `re
 
 ```bash
 YULON_WOTLK_SERVER_DIR=~/wow-server-playerbots pytest -m integration tests/integration
-# optional: YULON_WOTLK_REALM_ADDRESS=127.0.0.1 (dml-start.sh's DML_REALM_ADDRESS)
+# optional: YULON_WOTLK_REALM_ADDRESS=127.0.0.1 (the realm host the auth log must show)
 ```
 
 `test_accounts_live.py` writes real accounts into `acore_auth`, so it needs the WotLK database
