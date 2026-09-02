@@ -156,6 +156,15 @@ def install(rec: Recorder, server_dir: Path, client_dir: Path, **overrides: obje
     )
 
 
+REAL_GATE = CmangosInstaller._gate
+"""The unpatched `_gate`, bound at import — the only way to reach it in this file.
+
+`gated` is autouse, so inside a test body `CmangosInstaller._gate` is the
+double. Every test here wants that; exactly one wants the real thing, and it
+has to have been taken before the first fixture ran.
+"""
+
+
 @pytest.fixture(autouse=True)
 def gated(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every engine's import gate is the one `engine()` attached, not a real `MarkerGate`.
@@ -2999,3 +3008,44 @@ def test_import_is_recorded_and_sits_between_start_db_and_up() -> None:
     assert names[at + 1 : at + 3] == ["import", "up"]
     stage = next(s for s in stages if s.name == "import")
     assert stage.recorded, "a finished import must not be re-run by a resume"
+
+
+def test_the_real_gate_asks_this_installs_container_with_this_installs_password(
+    tmp_path: Path,
+) -> None:
+    """The one run of the unpatched `_gate()`; `gated` replaces it everywhere else here.
+
+    A `MarkerGate` built against another install's container answers `absent`
+    for a database that is full, and the import then runs again over a working
+    server — `MarkerGate`'s own docstring says so. Its wiring is therefore
+    asserted by what reached the seam, not by the class of the object returned.
+
+    The schema names in the answer are the second half: `self._names` is what
+    `_plan_schemas(plan, schemas)` made of the plan through `_schemas()`, so a
+    gate handed the wrong mapping could not have produced them.
+    """
+    seen: list[tuple[str, str, str, str | None, str]] = []
+
+    def spy(
+        container: str,
+        client: str,
+        password: str,
+        schema: str | None,
+        statement: str,
+        *,
+        wsl_distro: str | None = None,
+    ) -> str:
+        seen.append((container, client, password, schema, statement))
+        return ""  # no databases at all on this server yet
+
+    rec = Recorder()
+    state = REAL_GATE(engine(rec, sql_query=spy), context(tmp_path)).probe()
+    assert seen, "the gate asked the database nothing"
+    # One question per plan schema, and every one of them to the SAME place: it is a
+    # call going somewhere else that this asserts against, not the number of calls.
+    assert set(seen) == {
+        (ENTRY.container_spec().db, DB_FACTS.client, DB_PASSWORD, None, "SHOW DATABASES")
+    }
+    assert state.state == "absent"
+    for name in {*SQL.create, SQL.marker_db, *(rule.db for rule in SQL.verify)}:
+        assert name in state.detail, state.detail
