@@ -32,9 +32,10 @@ import os
 import re
 import subprocess
 import threading
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass, replace
 from pathlib import Path, PurePosixPath
+from typing import BinaryIO
 
 import pytest
 
@@ -88,9 +89,18 @@ def client_folder(tmp_path: Path) -> Path:
 
 
 def context(
-    server_dir: Path, client_dir: Path | None = None, *, completed: Iterable[str] = ()
+    server_dir: Path,
+    client_dir: Path | None = None,
+    *,
+    completed: Iterable[str] = (),
+    cancel: threading.Event | None = None,
 ) -> native.StageContext:
-    """A `StageContext` for calling one stage body directly."""
+    """A `StageContext` for calling one stage body directly.
+
+    `cancel` defaults to None — the spine hands a stage body an Event only
+    while a run is cancellable, and None is what a body sees in every test that
+    is not about being stopped.
+    """
     return native.StageContext(
         server_dir=server_dir,
         client_dir=client_dir,
@@ -100,7 +110,7 @@ def context(
             family="cmangos",
             completed=tuple(completed),
         ),
-        cancel=None,
+        cancel=cancel,
         secrets=native.Secrets(db_password=DB_PASSWORD),
     )
 
@@ -2726,9 +2736,9 @@ def entry_with_sql(plan: SqlPlan) -> CatalogEntry:
     )
 
 
-def engine_with_sql(plan: SqlPlan, rec: Recorder) -> CmangosInstaller:
+def engine_with_sql(plan: SqlPlan, rec: Recorder, **overrides: object) -> CmangosInstaller:
     """An engine over a patched SQL plan, carrying the same test gate `engine()` attaches."""
-    eng = engine_for(entry_with_sql(plan), rec)
+    eng = engine_for(entry_with_sql(plan), rec, **overrides)
     eng._test_gate = native.CallableGate(rec.probe, rec.reset)  # type: ignore[attr-defined]
     return eng
 
@@ -2746,7 +2756,8 @@ def one_statement_plan(*statements: str) -> SqlPlan:
     )
 
 
-def test_schemas_answers_for_every_database_name_the_shipped_plan_spells() -> None:
+@pytest.mark.parametrize("game", ["wow-tbc", "wow-vanilla", "wow-tortoise"])
+def test_schemas_answers_for_every_database_name_the_shipped_plan_spells(game: str) -> None:
     """Keyed by NAME and not by role (A10): `sqlplan` looks the plan's own spellings up here.
 
     Enumerated off the plan, so the question asked is the one
@@ -2757,19 +2768,31 @@ def test_schemas_answers_for_every_database_name_the_shipped_plan_spells() -> No
     `Databases.schema_map()` is the role-keyed mapping this must not be: it
     answers `world` -> `mangos`, and every name below is on the wrong side of
     that arrow.
+
+    Over all three CMaNGOS entries, because the plan and the `databases` block
+    are two independently written halves of every entry and they agree only by
+    hand. Tortoise's plan spells `tw_world` where TBC's and vanilla's spell
+    `mangos`, and its `create` is empty where theirs lists four names — so the
+    entry whose names differ most is the one a `wow-tbc`-only check said
+    nothing about. The refusal half — a name the mapping does not carry — is
+    `test_sqlplan.py`'s, and is not repeated here.
     """
-    schemas = engine(Recorder())._schemas()
+    entry = load_catalog().get(game)
+    native_block = entry.install.native
+    assert native_block is not None and native_block.cmangos is not None, game
+    plan = native_block.cmangos.sql
+    schemas = engine_for(entry, Recorder())._schemas()
     named = {
-        *SQL.create,
-        SQL.marker_db,
-        *(rule.db for rule in SQL.verify),
-        *(data.db for data in SQL.player_data),
+        *plan.create,
+        plan.marker_db,
+        *(rule.db for rule in plan.verify),
+        *(data.db for data in plan.player_data),
     }
-    for phase in SQL.phases:
+    for phase in plan.phases:
         if phase.into is not None:
             named.add(phase.into)
         named.update(phase.into_each or {})
-    assert named, "the shipped plan names no database at all; this fixture proves nothing"
+    assert named, f"{game}'s plan names no database at all; this fixture proves nothing"
     assert named <= set(schemas), sorted(named - set(schemas))
     assert all(schemas[name] == name for name in named)
 
@@ -2808,7 +2831,73 @@ def test_phase_zero_creates_the_plans_schemas_before_the_first_dump_is_streamed(
     )
     dumps = [i for i, line in enumerate(rec.sql_calls) if line.startswith("-- ")]
     assert dumps and min(dumps) > 0
-    assert any(db.user in line for line in said), "the log says whose user was created"
+    # About the LOG and nothing else. The sentence is built from `db.user` itself, so
+    # it reads the same whatever `create_schemas()` was handed — what the DATABASE was
+    # told is asserted off the script in
+    # `test_phase_zero_grants_to_the_user_the_entry_says_the_emulator_connects_as`.
+    assert any(db.user in line for line in said), "the log does not say whose user it was"
+
+
+def test_phase_zero_grants_to_the_user_the_entry_says_the_emulator_connects_as(
+    tmp_path: Path,
+) -> None:
+    """The account named in the SCRIPT, not the account named in the log line.
+
+    The stage yields "... and the <user> user." built from `db.user` itself, so
+    an assertion over what it SAID is satisfied by the family repeating its own
+    sentence whatever `create_schemas()` was handed. What the database was told
+    is the script, and the account lines are line 2 onward of it — `CREATE
+    DATABASE` is line 1 and was all this file could see until 2026-09-02.
+
+    The account and its grants are read together because that is the defect
+    that lives between them: the emulator connects as the entry's user while
+    the privileges were granted to another, and the server then starts and
+    cannot read its world. Every account the script names is enumerated rather
+    than one line matched, so a second account added below reads as a failure
+    instead of passing unseen.
+    """
+    rec = ready_to_import(ABSENT)
+    list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    phase_zero = rec.sql_scripts[0]
+    assert phase_zero.startswith("CREATE DATABASE "), phase_zero
+    named = set(re.findall(r"'([^']*)'@'%'", phase_zero))
+    assert named == {DB_FACTS.user}, phase_zero
+    granted = [line for line in phase_zero.splitlines() if line.startswith("GRANT ")]
+    assert granted, phase_zero
+    assert all(f"TO '{DB_FACTS.user}'@'%'" in line for line in granted), granted
+
+
+def test_every_database_the_import_speaks_to_is_asked_with_this_installs_password(
+    tmp_path: Path,
+) -> None:
+    """The secret resolved once at the top of the stage, read off every seam it reaches.
+
+    That one local is the `MYSQL_PWD` of phase 0, of every dump `apply()`
+    streams and of the marker, the `IDENTIFIED BY` the app user is given, and
+    `verify()`'s own connection secret. A password this install did not mint is
+    refused by all of them — and the stage would still yield exactly the same
+    sentences, because nothing it says carries the secret. Nothing here reads
+    the log for that reason.
+
+    `sql_secrets` is what ARRIVED at the double (`env["MYSQL_PWD"]` at
+    `exec_stdin`, the `password` argument at `sql_query`), so a call carrying
+    the wrong secret is visible even where the script it sent spells none. Both
+    seams are asserted to have been reached, or the enumeration could narrow to
+    one of them and still pass.
+    """
+    rec = ready_to_import(ABSENT)
+    list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    assert {"sql", "query"} <= set(rec.calls), rec.calls
+    assert len(rec.sql_secrets) == len(rec.sql_calls), rec.sql_calls
+    assert set(rec.sql_secrets) == {DB_PASSWORD}
+    identified = [
+        line
+        for script in rec.sql_scripts
+        for line in script.splitlines()
+        if "IDENTIFIED BY" in line
+    ]
+    assert identified, "the app user was never given a password"
+    assert all(f"IDENTIFIED BY '{DB_PASSWORD}'" in line for line in identified), identified
 
 
 def test_the_completion_marker_is_written_after_every_verify_rule_and_last_of_all(
@@ -2845,6 +2934,44 @@ def test_the_import_asks_the_databases_what_state_they_are_in_exactly_once(
     rec = ready_to_import(ABSENT)
     list(engine(rec)._import(context(server_with_sql(tmp_path))))
     assert rec.calls.count("probe") == 1, rec.calls
+
+
+def test_the_remembering_gate_keeps_the_last_answer_and_has_none_before_the_first_probe() -> None:
+    """What `_import` reads instead of asking the databases a second question.
+
+    The family branches on `gate.last` once `stage_import()` has returned, so
+    this wrapper has to answer four things: nothing at all before a probe, the
+    inner gate's OWN answer passed through rather than replaced, the LAST of
+    several answers rather than the first — a wrapper keeping the first would
+    hand the family the state from before the reset instead of the state after
+    it — and a `reset()` that reaches the inner gate and is not itself an
+    answer about the databases.
+
+    Driven through the real `CallableGate`, which is the gate an install
+    actually wraps, and the inner pair records what it was asked, so a second
+    probe smuggled in here reads as an extra entry rather than as the same
+    answer twice.
+    """
+    remaining = [PARTIAL, IMPORTED]
+    asked: list[str] = []
+
+    def probe() -> docker.ImportState:
+        asked.append("probe")
+        return remaining.pop(0)
+
+    def reset() -> tuple[str, ...]:
+        asked.append("reset")
+        return (ENTRY.databases.world,)
+
+    gate = cmangos._Remembering(native.CallableGate(probe, reset))
+    assert gate.last is None, "it answered about databases nobody had asked about"
+    assert gate.probe() is PARTIAL
+    assert gate.last is PARTIAL
+    assert gate.reset() == (ENTRY.databases.world,)
+    assert gate.last is PARTIAL, "a reset is not an answer about what the databases hold"
+    assert gate.probe() is IMPORTED
+    assert gate.last is IMPORTED
+    assert asked == ["probe", "reset", "probe"]
 
 
 def test_the_import_leaves_a_finished_one_alone_even_when_an_older_plan_wrote_it(
@@ -2982,6 +3109,91 @@ def test_a_phase_statement_naming_the_password_is_filled_from_the_secret_half(
     plan = one_statement_plan("CREATE USER 'x'@'%' IDENTIFIED BY '{{DB_PASSWORD}}'")
     list(engine_with_sql(plan, rec)._import(context(server_dir)))
     assert f"CREATE USER 'x'@'%' IDENTIFIED BY '{DB_PASSWORD}'" in rec.sql_calls, rec.sql_calls
+
+
+def test_a_stop_arriving_during_the_last_dump_is_caught_before_verify_and_the_marker(
+    tmp_path: Path,
+) -> None:
+    """The window `sqlplan.apply()` cannot close, because it checks cancel BEFORE each run.
+
+    A Stop pressed while the last file is streaming is seen by nothing inside
+    `apply()` — there is no run left after it to check it — so `apply()`
+    returns normally, and without the family's own check the stage would go on
+    to verify the databases and write the completion marker for an import the
+    user stopped. The marker is what makes that permanent: the next press reads
+    a marker row as `imported` and leaves the half-loaded world alone.
+
+    The Stop is set from inside the seam, on the way out of the last run, so
+    the window is the real one rather than a cancel that was pending all along
+    — and that run is asserted to have gone out, which is what says the refusal
+    came from after `apply()` rather than from inside it. The two checks word
+    it differently and that is what tells them apart: `sqlplan._check_cancel`
+    says "The import was stopped", the spine's says "the install was stopped".
+
+    Over a one-statement plan, because the trigger has to fire on the run
+    `apply()` has no successor for, and only a plan short enough to name its
+    own last run makes that identifiable without the test re-deriving
+    `expand()`'s ordering. Written first against the shipped plan's last DUMP,
+    which failed on 2026-09-02 with `sqlplan`'s wording: `expand()` puts a
+    phase's statements before its files, so dumps are not where that plan ends
+    and the Stop was caught one run early, inside `apply()`.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(ABSENT)
+    stop = threading.Event()
+    last = "SELECT 'the last run this plan has'"
+    inner = rec.exec_stdin
+
+    def exec_stdin(
+        container: str,
+        argv: Sequence[str],
+        source: BinaryIO,
+        *,
+        env: Mapping[str, str],
+        wsl_distro: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        proc = inner(container, argv, source, env=env, wsl_distro=wsl_distro)
+        if rec.sql_calls[-1] == last:
+            stop.set()
+        return proc
+
+    eng = engine_with_sql(one_statement_plan(last), rec, exec_stdin=exec_stdin)
+    with pytest.raises(InstallerError, match="the install was stopped"):
+        list(eng._import(context(server_dir, cancel=stop)))
+    assert last in rec.sql_calls, "the Stop was meant to arrive after the last run went out"
+    asked = {rule.query for rule in SQL.verify}
+    assert not [s for s in rec.sql_calls if s in asked], "the databases were checked anyway"
+    assert not [s for s in rec.sql_scripts if sqlplan.MARKER_TABLE in s], "a marker was written"
+
+
+def test_a_marker_that_could_not_be_written_arrives_as_the_modules_own_sentence(
+    tmp_path: Path,
+) -> None:
+    """`write_marker()` has already named the marker; wrapping it would name it twice.
+
+    `sqlplan._run_sql()` turns both of its failures into an `InstallerError`
+    that is already the sentence a user reads. The clause below it catches
+    `RuntimeError` and `InstallerError` is one, so without the narrow arm ahead
+    of it the refusal arrives folded inside a second sentence with a class name
+    in the middle of it — "The import finished but its completion marker could
+    not be written (InstallerError: The import stopped while writing the import
+    marker: ERROR 1064 ...)".
+
+    The switch is the marker table's own name, and the fixture asserts that
+    exactly one script this install streamed contained it, so the refusal under
+    test is the marker's and not some dump's.
+    """
+    rec = ready_to_import(ABSENT)
+    rec.failing_sql = sqlplan.MARKER_TABLE
+    with pytest.raises(InstallerError) as refusal:
+        list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    hit = [s for s in rec.sql_scripts if rec.failing_sql in s]
+    assert hit == [rec.sql_scripts[-1]], "the switch failed something other than the marker"
+    said = str(refusal.value)
+    assert said.startswith("The import stopped while writing the import marker: "), said
+    assert "could not be written" not in said, said
+    assert "InstallerError" not in said, said
 
 
 def test_the_import_cancel_note_is_said_at_the_import_and_nowhere_else(tmp_path: Path) -> None:

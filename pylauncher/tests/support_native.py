@@ -106,7 +106,12 @@ class Recorder:
 
     copied: list[tuple[str, str, Path]] = field(default_factory=list)
     sql_calls: list[str] = field(default_factory=list)
-    """The first line of every stream fed to `exec_stdin`, plus every `sql_query` statement."""
+    """The first line of every stream fed to `exec_stdin`, plus every `sql_query` statement.
+
+    A first line names a dump and is the wrong thing to reach for when the
+    question is what a multi-line script said; `sql_scripts` below holds those
+    whole.
+    """
 
     distros: list[str | None] = field(default_factory=list)
     """The `wsl_distro` of every `exec_stdin`/`sql_query` call, in order — recorded, not dropped.
@@ -118,6 +123,30 @@ class Recorder:
     keyword because a container name means nothing to a daemon that does not
     hold it, and a double that accepted and discarded it would let a call go to
     the wrong daemon with nothing in a test to show it.
+    """
+
+    sql_scripts: list[str] = field(default_factory=list)
+    """The WHOLE text of every script fed to `exec_stdin`, in order.
+
+    `sql_calls` keeps the FIRST line of each, which names a dump by its
+    `-- <path>` header and was all this double kept until 2026-09-02. That is
+    not enough to see what the database was told: `create_schemas()` writes its
+    `CREATE DATABASE` on line 1 and its `CREATE USER`, `ALTER USER` and `GRANT`
+    lines below it, so an assertion with only the first line in reach cannot
+    tell a grant made for the emulator's user from one made for somebody
+    else's — and a review found exactly that hole under a test that looked
+    like it covered the user. Kept ALONGSIDE the first lines, never instead of
+    them, because every existing assertion reads `sql_calls`.
+    """
+
+    sql_secrets: list[str] = field(default_factory=list)
+    """The connection secret every SQL call carried — one entry per `sql_calls` entry.
+
+    `env["MYSQL_PWD"]` at `exec_stdin`, the `password` argument at `sql_query`:
+    the two seams this app reaches a database through, recorded as one list
+    because "which password did this install spend" is one question about
+    both. `""` is a call that carried no `MYSQL_PWD` at all, which is an answer
+    no caller in `sqlplan` produces and a mutation of one that does.
     """
 
     volumes: set[str] = field(default_factory=set)
@@ -269,6 +298,8 @@ class Recorder:
         first = text.strip().splitlines()[0] if text.strip() else ""
         self.calls.append("sql")
         self.sql_calls.append(first)
+        self.sql_scripts.append(text)
+        self.sql_secrets.append(env.get("MYSQL_PWD", ""))
         self.distros.append(wsl_distro)
         if self.failing_sql and self.failing_sql in text:
             return subprocess.CompletedProcess(
@@ -288,6 +319,7 @@ class Recorder:
     ) -> str:
         self.calls.append("query")
         self.sql_calls.append(statement)
+        self.sql_secrets.append(password)
         self.distros.append(wsl_distro)
         return self.query_answer
 
