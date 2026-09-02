@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from yulon import platform
-from yulon.log import configure, file_log_problem, get_logger
+from yulon.log import configure, file_log_problem, get_logger, use_utf8_streams
 
 if TYPE_CHECKING:  # `yulon.state` pulls in pydantic; `--provision` must not pay for it.
     from yulon.state import AppState
@@ -425,15 +425,9 @@ def provision_headless() -> int:
     """
     # The same defect's other half: the human-readable lines below put that same
     # step text through `logging`, and a cp1252 stream cannot encode it either.
-    # `errors="replace"` rather than letting it raise, because a diagnostic that
-    # kills the thing it is diagnosing is worse than one with a "?" in it.
-    for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is not None:
-            try:
-                reconfigure(encoding="utf-8", errors="replace")
-            except (OSError, ValueError):  # a stream that cannot be re-wrapped
-                pass
+    # One home for the rule since 2026-09-03 -- `install_wiring` needed it too
+    # and did not have it, which is what stopped the first Windows gate.
+    use_utf8_streams()
     logger.info("Yu'lon provisioning (headless)")
     report = platform.ensure_docker()
     payload = {

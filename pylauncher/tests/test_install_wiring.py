@@ -428,3 +428,42 @@ def test_main_still_tells_an_unknown_game_apart_from_a_refused_one(
     captured = capsys.readouterr()
     assert "unknown game 'wow-nonesuch'" in captured.err
     assert "install failed" not in captured.err
+
+
+def test_the_harness_makes_its_streams_utf8_before_it_prints_anything(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows hands a redirected stream cp1252, and this harness prints arrows.
+
+    Measured on `yulon-win11` 2026-09-03: `python -m yulon.install_wiring
+    wow-wotlk` reached the end of preflight and died with `'charmap' codec can't
+    encode character '→' in position 210`. `main.py` had carried this fix
+    since the provisioning work; the CLI harness every gate runs through never
+    had it, so no Windows gate could reach a single stage.
+
+    Asserts the call happens BEFORE argument parsing, by driving the path that
+    exits earliest -- an unknown game, which returns 2 without touching a
+    catalog entry. A reconfigure that ran later would still leave the first
+    printed line to crash.
+    """
+    calls: list[dict[str, object]] = []
+
+    class _Stream:
+        def reconfigure(self, **kw: object) -> None:
+            calls.append(kw)
+
+        def write(self, _text: str) -> int:
+            return 0
+
+        def flush(self) -> None:
+            return None
+
+    monkeypatch.setattr(sys, "stdout", _Stream())
+    monkeypatch.setattr(sys, "stderr", _Stream())
+
+    assert install_wiring.main(["not-a-game"]) == 2
+    assert calls, "the harness printed without making its streams encodable"
+    assert all(c.get("encoding") == "utf-8" for c in calls), calls
+    assert all(
+        c.get("errors") == "replace" for c in calls
+    ), "a diagnostic that raises kills the thing it is diagnosing"

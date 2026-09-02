@@ -26,6 +26,7 @@ configures logging.
 from __future__ import annotations
 
 import logging
+import sys
 import tempfile
 import threading
 from logging.handlers import RotatingFileHandler
@@ -173,3 +174,31 @@ def _reset_for_tests() -> None:
         _stderr_configured = False
         _file_configured = False
         _file_problem = None
+
+
+def use_utf8_streams() -> None:
+    """Make stdout/stderr encode UTF-8, replacing what they cannot.
+
+    Windows gives a redirected stream cp1252, and this app's own messages carry
+    characters cp1252 has no place for -- `apply.py` alone writes `->` as a real
+    arrow in six sentences. Writing one raises `UnicodeEncodeError` and takes the
+    process down.
+
+    Measured 2026-09-03 on `yulon-win11`: `python -m yulon.install_wiring
+    wow-wotlk` reached the end of preflight and died with
+    `'charmap' codec can't encode character '→' in position 210`. The GUI
+    entry point had carried this fix since the provisioning work; the CLI harness
+    every gate runs through had never had it, so no Windows gate could get past
+    the first non-ASCII line.
+
+    `errors="replace"` rather than letting it raise: a diagnostic that kills the
+    thing it is diagnosing is worse than one with a "?" in it. A stream that
+    cannot be re-wrapped is left alone.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):  # a stream that cannot be re-wrapped
+                pass

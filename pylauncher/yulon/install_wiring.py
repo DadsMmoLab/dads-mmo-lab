@@ -36,7 +36,7 @@ from yulon.catalog.installer import (
     InstallOptions,
     installer_for,
 )
-from yulon.log import get_logger
+from yulon.log import get_logger, use_utf8_streams
 
 logger = get_logger(__name__)
 
@@ -195,6 +195,11 @@ def main(argv: list[str] | None = None) -> int:
     product surface: it lets a gate point the engine at a checkout's templates
     instead of a packaged bundle's.
     """
+    # Before ANY output. Windows hands a redirected stream cp1252, and this
+    # harness prints whatever the engine yields -- which includes real arrows.
+    # Measured on yulon-win11 2026-09-03: the install died at the end of
+    # preflight on `→`, so no Windows gate could reach a stage at all.
+    use_utf8_streams()
     parser = argparse.ArgumentParser(prog="yulon.install_wiring")
     parser.add_argument("game", help="catalog id, e.g. wow-wotlk")
     parser.add_argument("--server-dir", type=Path, default=None)
