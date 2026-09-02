@@ -265,6 +265,22 @@
 
 - [ ] 7.2 Delete the bash lineage — six `install-*.sh`, `dml-start.sh`, `wow-manage.sh` (eight files, 19,451 lines), `installer.Installer`/`PROMPT_RULES`/`make_responder`/`bash_available`, script tests, `Install.script*` fields; the three CMaNGOS entries set `platforms: []` until their own gates; gaming mode → `catalog/installers/steam-deck/setup-gaming-mode.sh`; `contribution.md` harness paragraph rewritten; style-guide §3 rows for `catalog/installer.py` and `catalog/catalog.py`
   - [ ] Gate: full checks green; 7.1's Ubuntu gate re-run from the same checkpoint with no other change
+    - **Static half PASSED, 2026-09-02, overnight run.** `yulon-phase7` at `0e394d9b`: **1974 passed,
+      3 skipped** on yulon-ubuntu (`-m "not integration"`), mypy `Success: no issues found in 48 source
+      files`, ruff `All checks passed!`, black `105 files would be left unchanged`, working tree clean.
+      7.2 F.1-F.6 and the whole of 7.3 are merged.
+    - **LIVE half NOT RUN, and deliberately.** The gate is a two-press WotLK install driven through the
+      GUI on the restored `clean-ssh` checkpoint — press 2 is a **2-4 hour compile**. The plan's own
+      Step 3 opens with *"the user's go-ahead first"*, and the standing rule is that the owner starts a
+      build himself. Nothing is blocked; it needs the VM powered on and someone to press go.
+    - **What it still owes when someone runs it:** press 2's wall clock (the `--- ready` timestamp minus
+      the press), and `docker compose config --format json` from `~/wow-server-playerbots` diffed against
+      `tests/data/wotlk-compose-config.json`, 7.1's fixture. **Do not tick this from a unit suite** — the
+      integration tests self-skip without a daemon, so a green `pytest` says nothing about the half that
+      matters. Same trap as the 7.3 primitives gate, recorded above.
+    - **Also still owed by 7.3:** its primitives gate, written by K.8 and likewise not run. And note the
+      correction filed there — the 2026-09-01 record under 7.1 **cannot** stand in for it, because
+      `test_sqlplan_live.py` postdates that run entirely (21 test functions then, 23 now).
 - [ ] 7.3 CMaNGOS data model + pure stage kinds — catalog 7.3 models (`Source.rev`, `dockerfile_dir`, `CmangosData`: `ClientSpec`, `DockerfileSpec`, `ExtractPlan`, `MmapPlan`, `ConfPatchTable`, `SqlPlan`); `families/cmangos.py`; `clientdir`/`dockerfile`/`extract`/`conf`/`sqlplan`; `docker.run_container`/`copy_from_image`/`exec_stdin`; all four entries validate; WotLK templates byte-identical; static catalog invariants test
   - [ ] Gate: busybox/mariadb:11 primitives live (`-u`, `:ro` refusal, `copy_from_image`, `exec_stdin` + gzip, `mariadb` client name, restart-loop detection)
     - **Runbook written, deliberately not run (2026-09-02, task K.8).** The eleven steps are in `pyplan/phase7-plans/7.3-cmangos-family.md`, Task K.8 step 7: hand the box over with `yulon-use.ps1 ubuntu`, announce through `claude-say`, sync the checkout, run the unit suite, pull `busybox:1.36` and `mariadb:11`, run `pytest -m integration tests/integration`, copy the log to `pyplan/gates/7.3-yulon-ubuntu.log` (that directory does not exist yet), record the five numbers here, shut the box down. K.8 landed the code half only — the family registered, the stage tuple pinned, dispatch proved for all three CMaNGOS entries — because this gate starts containers and pulls images and the standing rule is that the owner starts a run himself. Nothing is blocked; it needs the VM powered on and someone to press go. **Do not tick from a unit suite alone:** a `SKIPPED` in the integration run means the daemon was never reached, which is the failure a gate this shape exists to catch.
