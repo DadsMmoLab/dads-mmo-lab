@@ -2,8 +2,8 @@
 
 Renders `catalog.json` as one tile per game with an Install button. The view
 delegates: clicking Install asks the user for the server folder (and, where
-the game needs it, their own client folder — README §3a), builds an
-`Installer` through the factory it was given, and streams `installer.run()`
+the game needs it, their own client folder — README §3a), builds an engine
+through the factory it was given, and streams `engine.run()`
 into the `LogPanel`. No Docker, no subprocess, no business logic here
 (style-guide §3); results go up as signals (§5).
 """
@@ -48,10 +48,9 @@ logger = get_logger(__name__)
 InstallerFactory = Callable[[CatalogEntry], InstallEngine]
 """What builds the engine for one entry.
 
-The Protocol rather than the `Installer` class since roadmap 6.2: an entry may
-now be installed by the bash script or by the native engine, `installer_for()`
-decides which from `catalog.json` data, and this view is deliberately not told
-what it got — the two have the same `run()`.
+The `InstallEngine` protocol rather than a class: `installer_for()` decides the
+family engine from `catalog.json` data, and this view is deliberately not told
+what it got — every family has the same `run()`.
 """
 DirPicker = Callable[[QWidget, str, Path | None], Path | None]
 
@@ -377,12 +376,13 @@ class CatalogView(QWidget):
     def attach_existing(self, entry: CatalogEntry) -> bool:
         """Register a server dir that already holds an install; False if not attached.
 
-        Installs made by the shell scripts or the CLI harness (or before the app
-        was reinstalled) never pass through `start_install()`, so this is how
-        they get a controller tab. Two checks: a compose file in the chosen
-        folder, under any of the names Compose itself accepts
-        (`installer.COMPOSE_FILENAMES`) - the TBC and Vanilla scripts write
-        `compose.yml`, not `docker-compose.yml` - and the same folder rule
+        Installs made by the CLI harness (`python -m yulon.install_wiring`), by
+        an older build, or before the app was reinstalled never pass through
+        `start_install()`, so this is how they get a controller tab. Two checks:
+        a compose file in the chosen folder, under any of the names Compose
+        itself accepts (`installer.COMPOSE_FILENAMES`) - TBC and Vanilla
+        installs are called `compose.yml`, not `docker-compose.yml` - and the
+        same folder rule
         `start_install()` applies, because a folder Docker cannot mount is no
         more attachable than it is installable. That second one was missing
         until a tester attached a server living inside WSL (2026-08-26): the
@@ -662,26 +662,24 @@ class CatalogView(QWidget):
             self.install_finished.emit(game_id, False, note)
             return
         if ok and compose_file(server_dir) is None:
-            # A clean exit is not proof of an install. The scripts exit 0 for
-            # "Keeping existing install — exiting." too, which is what a user
-            # gets by pressing Install a second time on a folder the previous
-            # attempt left behind: `PROMPT_RULES` answers "n" to "Remove it and
-            # start fresh?" because nothing in the GUI ever sets `reinstall`.
-            # That used to pin a compose project name into a half-cloned folder
-            # and grow a permanent tab for a server that was never built — and
-            # the pin is the part with teeth, since `docker.py` records that an
-            # install-time pin is inherited by any copy of the folder, so Stop
-            # in the copy can stop the original's server. The check is the one
-            # `attach_existing()` makes, deliberately: the compose file is the
-            # single thing every install of every game has (review, 2026-08-23).
+            # A clean exit is not proof of an install. Until 7.2 the bash
+            # installer exited 0 for "Keeping existing install — exiting.",
+            # which is what a user got by pressing Install a second time on a
+            # folder the previous attempt left behind; that pinned a compose
+            # project name into a half-cloned folder and grew a permanent tab
+            # for a server that was never built. The engine has no such path,
+            # but the check stays because it is the one `attach_existing()`
+            # makes, deliberately: the compose file is the single thing every
+            # install of every game has, and the pin below is the part with
+            # teeth — `docker.py` records that an install-time pin is inherited
+            # by any copy of the folder, so Stop in the copy can stop the
+            # original's server (review, 2026-08-23).
             ok = False
             message = (
                 f"The installer exited without error, but {server_dir} has no "
                 "compose file (compose.yml or docker-compose.yml) — so there is nothing "
                 "installed there to remember. "
-                "That is what the scripts do when they find an existing folder and are "
-                "told not to replace it: delete the folder and install again, or pick a "
-                "different one."
+                "Look in the folder, then install again or pick a different one."
             )
             logger.info(f"{game_id} exited 0 with no compose file in {server_dir}; not remembered")
         if not ok:

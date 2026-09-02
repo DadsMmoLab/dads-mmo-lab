@@ -168,7 +168,7 @@ class LogPanel(QWidget):
         """Start streaming `source()` into the panel. Returns False if a job is already running.
 
         `cancel`, when given, is set by `stop()` so a source that supports it
-        (e.g. `Installer.run(cancel=...)`) can be interrupted even while blocked
+        (e.g. an engine's `run(cancel=...)`) can be interrupted even while blocked
         between lines (review finding, 2026-08-21).
         """
         if self.running:

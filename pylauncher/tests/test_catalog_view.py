@@ -16,7 +16,7 @@ from main import DEFAULT_WINDOW_SIZE
 from tests.conftest import process_events
 from yulon import runner, wsl
 from yulon.catalog.catalog import CatalogEntry, load_catalog
-from yulon.catalog.installer import Installer, InstallOptions
+from yulon.catalog.installer import InstallEngine, InstallOptions
 from yulon.controller_wow_wotlk import modules as wotlk_modules
 from yulon.git import CloneSpec, RunnerGit
 from yulon.ui import catalog_view
@@ -31,8 +31,14 @@ def _completed() -> subprocess.CompletedProcess[str]:
 CATALOG = load_catalog()
 
 
-class _FakeInstaller(Installer):
-    """An `Installer` whose run() is a canned stream; preflight is a no-op."""
+class _FakeInstaller:
+    """An engine whose run() is a canned stream; preflight is a no-op.
+
+    A plain class since 7.2 rather than an `installer.Installer` subclass: that
+    class is gone, and the view only ever needed the `InstallEngine` protocol —
+    which is the point the subclassing hid, since a double that inherits proves
+    nothing about what the view actually requires.
+    """
 
     def __init__(
         self,
@@ -42,7 +48,7 @@ class _FakeInstaller(Installer):
         installs: bool = True,
         compose_name: str = "docker-compose.yml",
     ) -> None:
-        super().__init__(entry, docker_check=lambda: True)
+        self.entry = entry
         self.lines = lines
         self.installs = installs
         self.compose_name = compose_name
@@ -50,7 +56,9 @@ class _FakeInstaller(Installer):
         self.cancels: list[threading.Event | None] = []
         self.asks: list[object] = []
 
-    def preflight(self, options: InstallOptions) -> None:
+    def preflight(
+        self, options: InstallOptions, cancel: threading.Event | None = None, *, ask: object = None
+    ) -> None:
         if self.entry.install.requires_client_dir and options.client_dir is None:
             raise AssertionError("view must not run without a client dir")
 
@@ -68,29 +76,31 @@ class _FakeInstaller(Installer):
         yield from self.lines
         # A real install leaves a compose file in the server dir, and that is the
         # one artefact every install of every game has — but NOT always under the
-        # same name, which is what `compose_name` exists to model: the WotLK and
-        # Tortoise scripts write `docker-compose.yml`, the TBC and Vanilla ones
-        # write `compose.yml`. `installs=False` models the OTHER way these
-        # scripts exit 0 — "Keeping existing install — exiting." — which the view
-        # must not read as a finished install.
+        # same name, which is what `compose_name` exists to model: WotLK and
+        # Tortoise installs are called `docker-compose.yml`, TBC and Vanilla
+        # ones `compose.yml`. `installs=False` models an engine that exits
+        # cleanly without writing one at all, which the view must not read as a
+        # finished install.
         if self.installs and opts.server_dir is not None:
             opts.server_dir.mkdir(parents=True, exist_ok=True)
             (opts.server_dir / self.compose_name).write_text("services: {}\n", encoding="utf-8")
 
 
-class _CancellableInstaller(Installer):
+class _CancellableInstaller:
     """Shaped like the real thing under cancel: it yields, then RETURNS — never raises.
 
-    That is what `runner.interact()` does when its cancel event is set, and it
+    That is what the engine's `_pump` does when its cancel event is set, and it
     is the whole difficulty: from anywhere downstream a stopped install looks
     exactly like a finished one.
     """
 
     def __init__(self, entry: CatalogEntry) -> None:
-        super().__init__(entry, docker_check=lambda: True)
+        self.entry = entry
         self.streaming = threading.Event()
 
-    def preflight(self, options: InstallOptions, cancel: threading.Event | None = None) -> None:
+    def preflight(
+        self, options: InstallOptions, cancel: threading.Event | None = None, *, ask: object = None
+    ) -> None:
         return None
 
     def run(
@@ -126,7 +136,7 @@ def test_install_asks_for_folders_then_streams_the_installer(qapp: object, tmp_p
     made: list[_FakeInstaller] = []
     prompts: list[str] = []
 
-    def factory(entry: CatalogEntry) -> Installer:
+    def factory(entry: CatalogEntry) -> InstallEngine:
         inst = _FakeInstaller(entry, ["cloning", "building", "done"])
         made.append(inst)
         return inst
@@ -171,9 +181,9 @@ def test_install_asks_for_folders_then_streams_the_installer(qapp: object, tmp_p
 
 def test_cancelling_the_folder_dialog_starts_nothing(qapp: object) -> None:
     panel = LogPanel()
-    made: list[Installer] = []
+    made: list[InstallEngine] = []
 
-    def factory(entry: CatalogEntry) -> Installer:
+    def factory(entry: CatalogEntry) -> InstallEngine:
         inst = _FakeInstaller(entry, ["x"])
         made.append(inst)
         return inst
@@ -389,16 +399,21 @@ def test_use_existing_cancel_emits_nothing(qapp: object) -> None:
 def test_a_script_that_exits_0_without_installing_is_not_remembered(
     qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Exit 0 is not proof of an install, and the scripts have a path that proves it.
+    """Exit 0 is not proof of an install, and the check outlives the path that proved it.
 
-    Press Install on a folder a previous attempt left behind: line 961 finds no
-    built worldserver image, the existing-folder branch asks "Remove it and
-    start fresh? (y/n):", and `PROMPT_RULES` answers "n" because nothing in the
-    GUI ever sets `reinstall`. The script prints "Keeping existing install —
-    exiting." and exits 0. That used to pin a compose project name into the
-    folder and grow a permanent tab for a server that was never built — and the
-    pin is inherited by any copy of the folder, so Stop in the copy can stop the
-    original's server (review, 2026-08-23).
+    The bash installer had one: pressing Install on a folder a previous attempt
+    left behind, its line 961 found no built worldserver image, the
+    existing-folder branch asked "Remove it and start fresh? (y/n):", the rule
+    table answered "n" because nothing in the GUI ever set `reinstall`, and it
+    printed "Keeping existing install — exiting." and exited 0. That pinned a
+    compose project name into the folder and grew a permanent tab for a server
+    that was never built — and the pin is inherited by any copy of the folder,
+    so Stop in the copy can stop the original's server (review, 2026-08-23).
+
+    7.2 deleted that engine and no native path exits 0 without a compose file,
+    so this now pins the GUARD rather than a reachable defect: the view's proof
+    of an install is the artefact on disk, not the exit code, and an engine
+    that streams cleanly and writes nothing must still not be remembered.
     """
     from PySide6.QtWidgets import QMessageBox
 
@@ -458,7 +473,7 @@ def test_a_cancelled_install_is_not_remembered_and_says_what_it_left(
     panel = LogPanel()
     made: list[_CancellableInstaller] = []
 
-    def factory(entry: CatalogEntry) -> Installer:
+    def factory(entry: CatalogEntry) -> InstallEngine:
         inst = _CancellableInstaller(entry)
         made.append(inst)
         return inst
@@ -492,10 +507,16 @@ def test_a_cancelled_install_is_not_remembered_and_says_what_it_left(
     assert str(tmp_path) in told[0][1]
     assert "NOT been remembered as an install" in told[0][1]
     assert "build cache" in told[0][1]
-    # And it must not send them back into the bug this test exists for: pressing
-    # Install again on a folder with no built images answers "n" to "Remove it
-    # and start fresh?" and exits 0, which is a false registration.
-    assert "carry on" not in told[0][1], "the cancel copy still promises a resume"
+    # It used to have to promise the OPPOSITE of this. Pressing Install again on
+    # a folder with no built images made the bash installer answer "n" to "Remove
+    # it and start fresh?" and exit 0, which the view read as a finished install,
+    # so the copy had to warn that resuming would not work. 7.2 deleted that
+    # engine: the native one resumes from `native.STATE_FILE` and re-checks the
+    # disk before skipping a stage, so the honest advice inverted with it. The
+    # assertion is kept, inverted, because the copy is the only thing standing
+    # between a stopped install and a user deleting a folder they could resume.
+    assert "carry on" in told[0][1], "the cancel copy no longer offers the resume"
+    assert "will not pick up" not in told[0][1], "the pre-7.2 warning came back"
     assert told[0][1] == events[0][3]
     assert panel.status_text() == "cancelled"
     assert view.button_for("wow-wotlk").isEnabled() is True  # and the tiles come back

@@ -6,9 +6,9 @@ directory/ownership guard, preflight and Docker provisioning, the
 refuse-not-delete clone safety, the compose marker rules, streaming, cancel
 copy, keep-awake — and a FAMILY (`families/azerothcore.py`, `families/cmangos.py`)
 composes its stages into an ordered tuple. `installer.installer_for()` picks
-the family from `catalog.json`'s `install.native.family`. The contract is the
-same as `installer.Installer`'s (`run(options, *, cancel, ask) -> Iterator[str]`),
-so the catalog view, the log panel and the job runner need no changes.
+the family from `catalog.json`'s `install.native.family`. Every family engine
+has the same contract (`run(options, *, cancel, ask) -> Iterator[str]`), so the
+catalog view, the log panel and the job runner need no changes.
 
 **Staged and resumable.** The stages are recorded by NAME in
 `.yulon-install.json`, so reordering them can never re-interpret an existing
@@ -695,10 +695,10 @@ class StagedInstaller:
     ) -> None:
         """Everything that must be true before anything is written. Raises, or returns.
 
-        Same signature as `Installer.preflight()` so the two are
-        interchangeable. Docker provisioning is attempted exactly once before
-        the machine facts are gathered, because every number below it is
-        fabricated without a daemon.
+        Same signature on every family engine, which is what lets the view
+        drive one without knowing which it got. Docker provisioning is
+        attempted exactly once before the machine facts are gathered, because
+        every number below it is fabricated without a daemon.
 
         `ask` is forwarded to Docker provisioning — the docker-group consent
         and the Linux sudo password — and to nothing else; see the module

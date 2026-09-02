@@ -19,7 +19,7 @@ import pytest
 from yulon import docker, install_wiring, platform
 from yulon.apply import DockerSql
 from yulon.catalog.catalog import CatalogEntry, load_catalog
-from yulon.catalog.installer import InstallerError, InstallOptions
+from yulon.catalog.installer import InstallEngine, InstallerError, InstallOptions
 from yulon.controller_wow_wotlk import repair as wotlk_repair
 from yulon.controller_wow_wotlk.maintenance import DockerMysql
 
@@ -384,3 +384,47 @@ def test_the_wiring_never_renders_the_password_it_carries(
     rendered.append(caplog.text)
     for text in rendered:
         assert canary not in text, text
+
+
+def test_main_exits_1_when_no_engine_can_be_built(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A1: `installer_for()` raises for `native: None` since 7.2; the harness must not traceback.
+
+    The refusal is raised by the FACTORY, not by `run()`, so it is only caught
+    if building the engine happens inside the `try` — which is the whole edit
+    A1 asks for and the one a reader of `main()` cannot see is load-bearing.
+    The double refuses on the same terms the real factory does; what is under
+    test is where the call sits, not the sentence it raises.
+
+    Both streams are asserted: the sentence is what a person reads, and the
+    exit code is what a gate script branches on.
+    """
+
+    def refuse(entry: CatalogEntry, **_k: object) -> InstallEngine:
+        raise InstallerError(
+            f"{entry.name} cannot be installed yet: its catalog entry has no `install.native` "
+            "section. Nothing was started."
+        )
+
+    monkeypatch.setattr(install_wiring, "installer_for_app", refuse)
+    assert install_wiring.main(["wow-wotlk"]) == 1
+    captured = capsys.readouterr()
+    assert "install failed: WoW WotLK cannot be installed yet" in captured.err
+    assert "no `install.native` section" in captured.err
+    assert captured.out == "", "nothing was installed, so nothing may be streamed"
+
+
+def test_main_still_tells_an_unknown_game_apart_from_a_refused_one(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Exit 2 and exit 1 are different answers, and a gate script branches on which.
+
+    Moving the factory inside the `try` (A1) puts a second `return` in front of
+    the unknown-game path's; this pins that it still gets its own code and its
+    own sentence.
+    """
+    assert install_wiring.main(["wow-nonesuch"]) == 2
+    captured = capsys.readouterr()
+    assert "unknown game 'wow-nonesuch'" in captured.err
+    assert "install failed" not in captured.err

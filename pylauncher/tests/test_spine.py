@@ -485,9 +485,10 @@ def test_every_shipped_native_entry_reaches_the_class_its_family_id_names() -> N
     guaranteed not to notice it.
 
     Through `installer_for()` rather than `family_for()`, so what is proved is
-    dispatch and not a dictionary lookup: the fallback branch hands an entry
-    whose family is unregistered back to `Installer`, which is not a
-    `StagedInstaller` and has no `family` at all.
+    dispatch and not a dictionary lookup. Until F.3 the fallback branch handed
+    an entry whose family was unregistered back to the bash `Installer`, which
+    is not a `StagedInstaller` and had no `family` at all; F.3 deleted that
+    branch, and the isinstance below is what would have caught it.
     """
     entries = [entry for entry in load_catalog().games if entry.install.native is not None]
     assert entries, "the shipped catalog has no native entry left to check"
