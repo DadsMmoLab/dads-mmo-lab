@@ -79,6 +79,7 @@ from yulon.catalog.installer import (
     unsupported_platform_message,
 )
 from yulon.log import get_logger
+from yulon.ownership import Ownership as Ownership
 
 logger = get_logger(__name__)
 
@@ -1609,27 +1610,6 @@ def _cancelled_message(what: str, note: str = "") -> str:
     beyond `OPENING_NOTE`, which the user was already told.
     """
     return f"{what} was stopped. {note}".rstrip()
-
-
-def _same_repo(existing: str, wanted: str) -> bool:
-    """Do two clone URLs name the same repository?
-
-    Compared loosely on purpose: `https://github.com/x/y.git`,
-    `https://github.com/x/y` and `git@github.com:x/y.git` are one repository,
-    and refusing an install because git wrote the URL back with a `.git` on it
-    would be a refusal about punctuation.
-    """
-    return _repo_key(existing) == _repo_key(wanted)
-
-
-def _repo_key(url: str) -> str:
-    text = url.strip().rstrip("/")
-    if text.endswith(".git"):
-        text = text[: -len(".git")]
-    for prefix in ("https://", "http://", "ssh://", "git@"):
-        if text.startswith(prefix):
-            text = text[len(prefix) :]
-    return text.replace(":", "/").lower()
 
 
 def _git_remote_url(dest: Path) -> str | None:
