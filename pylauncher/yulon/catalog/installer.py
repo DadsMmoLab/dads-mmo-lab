@@ -38,12 +38,18 @@ DEFAULT_INSTALLERS_ROOT = resources.installers_dir()
 # Every filename Docker Compose accepts for a project's compose file, in its own
 # precedence order.
 #
-# Not ours to shorten: the app only ever looked for `docker-compose.yml`, which
-# is what the WotLK and Tortoise scripts write - while the TBC and Vanilla ones
-# write `compose.yml`. The result was that a finished install of those two was
-# invisible to "Use existing..." AND was thrown away by the remember check at
-# the end of a multi-hour install, both reporting that nothing was installed.
-# Being stricter than the tool we drive buys nothing and costs exactly that.
+# Not ours to shorten. The app only ever looked for `docker-compose.yml`, which
+# was what the WotLK and Tortoise scripts wrote - while the TBC and Vanilla ones
+# wrote `compose.yml`. A finished install of those two was therefore invisible
+# to "Use existing..." AND was thrown away by the remember check at the end of a
+# multi-hour install, both reporting that nothing was installed.
+#
+# 7.2 deleted those scripts. Every family now renders its compose through
+# `composegen`, whose `BASE_FILE` is `docker-compose.yml`, so nothing Yu'lon
+# writes today is called `compose.yml`. The list stays anyway, and not out of
+# caution: installs made before 7.2 are on real disks with that name, and
+# "Use existing..." adopts a folder whatever wrote it. Being stricter than the
+# tool we drive would buy nothing and would cost exactly what it cost then.
 COMPOSE_FILENAMES: tuple[str, ...] = (
     "compose.yaml",
     "compose.yml",

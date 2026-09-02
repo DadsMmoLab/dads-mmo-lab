@@ -16,6 +16,7 @@ import subprocess
 import threading
 import traceback
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -541,6 +542,67 @@ def test_an_unrecorded_stage_is_never_written_down(tmp_path: Path) -> None:
     assert state.family == "azerothcore"
 
 
+def test_a_finished_install_says_so_last_and_says_where(tmp_path: Path) -> None:
+    """The sentence a user reads when the install ends, asserted by anything at all.
+
+    Nothing in the suite read it before 2026-09-02: `grep "is installed and
+    running"` over `tests/` found no hit, so the last line of every successful
+    install was free to change or disappear silently. That is not hypothetical
+    here — the line exists BECAUSE it went missing once. The comment above it
+    records why: this path used to log nothing at the end, and a tester on
+    yulon-win11 (2026-08-28) read a seven-minute readiness wait as "the install
+    was not remembered", because the only sign a run had ended was the
+    compose-project pin.
+
+    Asserts three things a support question depends on: that it is there, that it
+    names the SERVER DIRECTORY (the one fact that distinguishes two installs of
+    the same game), and that it is LAST — a success line with stage output after
+    it reads as a run that carried on and then stopped for an unsaid reason.
+    """
+    rec = Recorder()
+    family = _family(lambda me: (native.Stage("only", _say),))
+    server_dir = tmp_path / "wow"
+    lines = list(_build(rec, family).run(InstallOptions(server_dir=server_dir)))
+
+    ending = [line for line in lines if "is installed and running" in line]
+    assert len(ending) == 1, f"expected exactly one closing line, got {ending}"
+    assert str(server_dir) in ending[0], (
+        "the closing line does not say which folder, so two installs of the same "
+        f"game are indistinguishable in a log: {ending[0]!r}"
+    )
+    assert (
+        lines[-1] == ending[0]
+    ), f"something is said after the install claims to be finished: {lines[-1]!r}"
+
+
+def test_a_failed_install_never_says_it_finished(tmp_path: Path) -> None:
+    """The other half, which is the half that would actually hurt.
+
+    A closing line that survives a raising stage would tell a user their server is
+    installed and running when it is not, and send them looking for a working
+    install rather than at the error. Pinned separately from the success case
+    because the two can fail independently: moving the yield above the `try` would
+    keep this green while breaking the ordering, and moving it inside the `try`
+    would keep the ordering while breaking this.
+    """
+    rec = Recorder()
+
+    def _boom(ctx: native.StageContext) -> Iterator[str]:
+        yield "starting"
+        raise InstallerError("the build died")
+
+    family = _family(lambda me: (native.Stage("build", _boom),))
+    engine = _build(rec, family)
+    said: list[str] = []
+    with pytest.raises(InstallerError):
+        for line in engine.run(InstallOptions(server_dir=tmp_path / "wow")):
+            said.append(line)
+
+    assert not [
+        line for line in said if "is installed and running" in line
+    ], f"a failed install announced success: {said}"
+
+
 def test_the_cancel_note_is_said_by_the_spine_right_after_the_stage_heading(
     tmp_path: Path,
 ) -> None:
@@ -649,6 +711,12 @@ def test_preflight_hands_the_client_dir_to_gather(tmp_path: Path) -> None:
     assert seen["client_dir"] == client
     assert seen["platform_id"] is installer._seams.platform_id
     assert seen["docker_ready"] is installer._seams.docker_ready
+    # The folder rule as well, since C1. The engine now refuses a bad folder
+    # before it provisions anything, and `evaluate()` still judges the same
+    # folder from `Facts`; handing the seam down is what stops those two
+    # asking different functions - an engine could otherwise refuse a folder
+    # that its own report went on to pass.
+    assert seen["dir_problem"] is installer._seams.dir_problem
 
 
 def test_the_real_gather_takes_the_client_dir_and_ignores_it_until_7_3(tmp_path: Path) -> None:
@@ -666,6 +734,82 @@ def test_the_real_gather_takes_the_client_dir_and_ignores_it_until_7_3(tmp_path:
     )
     assert facts.platform_id == "macos"
     assert facts.docker_ready is False
+
+
+def test_the_real_gather_takes_the_folder_rule_the_engine_hands_it(tmp_path: Path) -> None:
+    """The seam the engine threads must reach `Facts`, not a default underneath it.
+
+    The same blind spot as the client-dir test above: `Seams.gather` is typed
+    `Callable[..., Facts]`, so mypy sees no keyword at the seam and the double
+    in `support_native.py` swallows every kwarg. A `dir_problem=` the real
+    `gather()` silently ignored would leave the engine refusing a folder its own
+    report then passed, and only this call would notice.
+    """
+    facts = preflight.gather(
+        ENTRY,
+        tmp_path,
+        platform_id=lambda: "macos",
+        docker_ready=lambda: False,
+        dir_problem=lambda path: f"{path} is the canary folder",
+    )
+    assert facts.dir_problem == f"{tmp_path} is the canary folder"
+
+
+def test_preflight_refuses_a_reserved_folder_before_it_provisions_anything() -> None:
+    """The folder rule fires BEFORE `ensure_docker()`, not from the report after it.
+
+    Both halves of preflight know this rule and until C1 only the late one ran:
+    `evaluate()` reads `Facts.dir_problem`, `Facts` come from `gather()`, and
+    `gather()` runs after provisioning. Picking the home folder on a clean Linux
+    box therefore bought the docker-group consent dialog, a sudo password typed
+    into Yu'lon's own dialog and a package install, and only then "Cannot use
+    '/home/pk' as the install location" - measured on Fedora 44, 2026-08-25,
+    against the shell installer this engine replaced. The native engine
+    inherited that order in 7.1, and F.3 deleted the last test that named it.
+
+    `provisioned == []` is the assertion that matters, and the doubles are
+    arranged so that it is the one that fails. The `gather` double reads the
+    folder rule through the seam it is handed, exactly as the real one does, so
+    an engine with the early check removed STILL refuses with these words and
+    still matches `home folder itself`; the only thing that changes is that it
+    refuses second. A refusal test that stopped at `pytest.raises` would pass
+    against that engine, and would be a test of the union of every rule on this
+    path rather than of one of them.
+    """
+    rec = Recorder(images=False)
+    provisioned: list[str] = []
+    gathered: list[Path] = []
+
+    def ensure_docker(**_kwargs: object) -> platform.ProvisionReport:
+        provisioned.append("ensure_docker")
+        # The generous answer - a provisioner that SUCCEEDED - so that nothing
+        # further down refuses for a reason of its own and the order is the only
+        # thing this test can fail on.
+        return platform.ProvisionReport(platform="linux", docker_ready=True)
+
+    def gather(entry: object, server_dir: Path, **kwargs: object) -> preflight.Facts:
+        gathered.append(server_dir)
+        rule = kwargs["dir_problem"]
+        assert callable(rule)
+        return replace(rec.gather(entry, server_dir), dir_problem=rule(server_dir))
+
+    installer = _build(
+        rec,
+        AzerothCoreInstaller,
+        # No daemon answering, so provisioning is the very next thing this
+        # engine would do - which is what makes an empty list evidence.
+        docker_ready=lambda: False,
+        ensure_docker=ensure_docker,
+        gather=gather,
+    )
+    home = Path.home()
+    assert platform.server_dir_problem(home) is not None, "the rule under test must hold here"
+    with pytest.raises(InstallerError, match="home folder itself") as caught:
+        installer.preflight(InstallOptions(server_dir=home))
+    assert provisioned == [], "a sudo/consent dialog was reached before the folder was judged"
+    assert gathered == [], "the machine was measured before the folder was judged"
+    # preflight's own words, so the early refusal and the late one cannot drift.
+    assert "Pick a different folder and try again. Nothing was written." in str(caught.value)
 
 
 # -- the forwarded prompter, all the way down to the sudo dialog ---------------
