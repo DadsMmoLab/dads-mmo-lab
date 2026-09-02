@@ -209,17 +209,35 @@ def test_installer_for_does_not_consult_the_platform_but_does_pass_it_on(
         off_platform.preflight(InstallOptions(server_dir=tmp_path / "srv"))
 
 
-def test_installer_for_refuses_an_entry_with_no_native_block() -> None:
-    """No `native` means no family to name — a catalog-authoring error, raised at once.
+def test_installer_for_refuses_an_entry_with_no_native_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No `native` means no family to name — a catalog-authoring error, raised AT ONCE.
 
     The entry is a copy of a shipped one with exactly `native` removed, so the
     only rule it breaks is the one under test: it keeps its platforms, its
     script field and everything else that could otherwise raise first.
+
+    `family_for()` refuses the same state, in a sentence that shares the phrase
+    "`install.native` section" with this one — so a test that matched only that
+    phrase passed with this guard DELETED, `family_for()` having raised in its
+    place (measured: mutation m1, 2026-09-02). Two things separate them: the
+    wording that is this function's alone, and the fact that `family_for()` is
+    never reached, which is what "raised here rather than deferred" means.
     """
+    from yulon.catalog import families
+
+    reached: list[object] = []
+    monkeypatch.setattr(
+        families, "family_for", lambda entry: reached.append(entry)  # type: ignore[arg-type]
+    )
+
     no_native = TBC.model_copy(update={"install": TBC.install.model_copy(update={"native": None})})
     assert no_native.install.native is None
-    with pytest.raises(InstallerError, match="no `install.native` section"):
+    with pytest.raises(InstallerError, match="cannot be installed yet") as caught:
         installer_for(no_native)
+    assert "no `install.native` section" in str(caught.value)
+    assert reached == [], "the refusal was deferred to family_for() instead of raised here"
 
 
 def test_installer_for_hands_the_probe_and_reset_to_the_engine() -> None:
