@@ -86,8 +86,10 @@ All of the below on Linux; none of it yet on Windows or macOS.
   was driven by the CLI harness (then `python -m yulon.catalog.installer wow-wotlk --server-dir …`,
   today `python -m yulon.install_wiring wow-wotlk --server-dir …`),
   which built AzerothCore with playerbots from source and ended with all three containers up. The
-  Catalog's Install button reaches the same `Installer`, but the button has not itself been the
-  thing pressed on a fresh machine.
+  Catalog's Install button reaches the same engine — both go through `installer_for()`, which
+  since 7.2 returns the family engine named by the catalog entry (`AzerothCoreInstaller` for
+  WotLK); the `Installer` class this line named until 2026-09-02 was the bash driver, and it is
+  deleted. The button has not itself been the thing pressed on a fresh machine.
 - **A human click-through of the management UI** — same VM, same day, against that running
   server.
 - **Database backup and restore** — 2026-08-23, full round trip against a live AzerothCore install:
