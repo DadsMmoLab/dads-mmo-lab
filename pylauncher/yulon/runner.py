@@ -99,11 +99,13 @@ def child_env(env: Mapping[str, str] | None = None) -> dict[str, str] | None:
                  (required by /usr/lib/libcurl.so.4)
         git   -> libpcre2-8.so.0: no version information available
 
-    bash dies outright, so `installer.bash_available()` - which runs
-    `bash -c "exit 0"` and is the FIRST subprocess an install makes - answers
-    False, and the user is told "this machine has no working bash" about a
-    machine whose bash is fine. curl loses HTTPS entirely, which is what
-    "refuses to download files" looks like from the outside.
+    bash died outright, so `installer.bash_available()` - which ran
+    `bash -c "exit 0"` and was the FIRST subprocess an install made - answered
+    False, and the user was told "this machine has no working bash" about a
+    machine whose bash was fine. That probe went with the bash engine in 7.2;
+    the leak is unchanged and still reaches every child. curl loses HTTPS
+    entirely, which is what "refuses to download files" looks like from the
+    outside.
 
     PyInstaller saves the pre-launch value as `<VAR>_ORIG` for exactly this
     purpose. Restoring it (or removing the variable when there was nothing to
@@ -570,10 +572,11 @@ def interact(
         if prompt is not None:
             # The marker proves the child is blocked on the ONE prompt we know
             # about. Everything printed before it is unrelated output that
-            # merely shares the buffer, and `respond()`'s rules are unanchored
-            # `search`es — so giving them the whole buffer let a bare
-            # `PromptRule(r"\(y/n\)", "y")` answer sudo's password read with
-            # "y". Measured: a child printing `Reset the keyring? (y/n) \r` and
+            # merely shares the buffer, and a `respond()` built from unanchored
+            # `search`es — as the bash engine's rule table was until 7.2 — got
+            # the whole buffer, so its bare `(y/n)` catch-all answered sudo's
+            # password read with "y". Measured: a child printing
+            # `Reset the keyring? (y/n) \r` and
             # then the marker got `GOT:y` and `ask()` was never called, which is
             # the pre-6.1.5 symptom arriving by a new route. Slicing for `ask`
             # alone was half a fix (review, 2026-08-23).
@@ -607,9 +610,9 @@ def interact(
                     #
                     # This used to require an EMPTY buffer, so a script whose
                     # last line had no trailing newline never took it — and on
-                    # cancel those bytes were dropped, which is exactly the text
-                    # `Installer.run()` builds its failure message from. Yield
-                    # them, then stop (review, 2026-08-23).
+                    # cancel those bytes were dropped, which was exactly the
+                    # text the bash engine's `run()` built its failure message
+                    # from. Yield them, then stop (review, 2026-08-23).
                     logger.debug("child exited; ending the read rather than waiting for EOF")
                     if buffer:
                         yield buffer

@@ -1125,9 +1125,10 @@ def test_linux_never_joins_the_docker_group_without_consent(
 
     Nothing here is asked, because nothing here can ask: `ensure_docker()` is
     given no consent seam. The codebase's rule for that case is already
-    settled in `make_responder()` — with nobody to ask, a privilege change is
-    declined, because refusing one is recoverable and visible while granting
-    one silently is neither.
+    settled — with nobody to ask, a privilege change is declined, because
+    refusing one is recoverable and visible while granting one silently is
+    neither. The bash engine's rule table read it the same way until 7.2
+    deleted the table.
     """
     _linux(monkeypatch, steamos=steamos)
     run = _Run()
@@ -1153,11 +1154,12 @@ def test_linux_asks_before_it_escalates_and_joins_only_on_yes(
 ) -> None:
     """A yes joins the group exactly once, and the question came first.
 
-    The order is the defect this closes, not a detail. `Installer.preflight()`
-    calls `ensure_docker()` before the bash script runs, so the old code
-    granted the group and the script's own `docker_group_consent()` then found
-    the user already a member and never asked. One question, asked before
-    anything privileged runs, is the whole shape.
+    The order is the defect this closes, not a detail. Preflight called
+    `ensure_docker()` before the bash script ran, so the old code granted the
+    group and the script's own `docker_group_consent()` then found the user
+    already a member and never asked. The script went in 7.2; every engine's
+    preflight still provisions first, so one question, asked before anything
+    privileged runs, is still the whole shape.
     """
     _linux(monkeypatch)
     asked: list[str] = []
@@ -1188,8 +1190,9 @@ def test_linux_treats_anything_but_a_deliberate_yes_as_no(
 ) -> None:
     """A dismissed dialog is not consent, and neither is an ambiguous answer.
 
-    The same reading `make_responder()` applies to the installers' version of
-    this question. `yeah` and `1` are in the list because a helpful widening of
+    The same reading the bash engine's rule table applied to the installers'
+    version of this question, kept after 7.2 deleted the table. `yeah` and `1`
+    are in the list because a helpful widening of
     `_explicit_yes()` is exactly the mutation this must catch.
     """
     _linux(monkeypatch)

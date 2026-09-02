@@ -159,11 +159,15 @@ def _terminal_prompter(prompt: str) -> str:
     an install can raise, and the others are consent questions — "Add '$USER'
     to the docker group (grants root-equivalent access)?", "Install Docker via
     rpm-ostree and reboot now?" — which a person must be able to see themselves
-    answering. Two spellings are secret, not one: the bash `Installer` builds
-    its sudo prompt with a random marker behind `SUDO_PROMPT_PREFIX`, and the
-    native path asks `platform.SUDO_PASSWORD_QUESTION` through `SudoSession`.
-    The harness this replaced knew only the first, so on the native path a root
-    password would have been echoed to the terminal as it was typed.
+    answering. Two spellings are secret, not one, and both are still matched.
+    The bash engine set `SUDO_PROMPT` to a random marker behind
+    `SUDO_PROMPT_PREFIX`; 7.2 deleted that engine, so nothing writes that
+    spelling today and only the native path's
+    `platform.SUDO_PASSWORD_QUESTION`, asked through `SudoSession`, arrives
+    here. The prefix is kept rather than dropped because it costs one `in` test
+    and the failure it guards against is a root password echoed to the terminal
+    as it is typed — which is what the harness this replaced did on the native
+    path, knowing only the first spelling.
     """
     if not sys.stdin.isatty():
         sys.stderr.write(f"no terminal to answer {prompt.strip()!r}; declining\n")
@@ -177,12 +181,15 @@ def main(argv: list[str] | None = None) -> int:
     """CLI harness: `python -m yulon.install_wiring <game-id> [--server-dir] [--client-dir]`.
 
     Streams the engine's lines to stdout and exits 1 with the user-readable
-    error on failure — an engine that cannot be built for this game on this
-    platform included (7.2 makes `installer_for()` raise for that) — and 2
-    for an unknown game. The Catalog tab drives the same `run()`; this is how
-    a gate is run from a terminal on a test VM. There is no `--reinstall`:
-    the harness never re-answers the existing-server-dir question, and 7.2
-    deletes `InstallOptions.reinstall`.
+    error on failure — an engine that cannot be built for this game included,
+    which since 7.2 is what `installer_for()` raises for an entry with no
+    `install.native` block — and 2 for an unknown game. Building the engine is
+    INSIDE the `try` for that reason (A1): a refusal that escaped it left the
+    harness printing a traceback instead of the sentence written for a person.
+    The Catalog tab drives the same `run()`; this is how a gate is run from a
+    terminal on a test VM. There is no `--reinstall`: the harness never
+    re-answered the existing-server-dir question, and 7.2 deleted
+    `InstallOptions.reinstall` along with the rule that read it.
 
     `--installers-root` is not in the contract's CLI spelling and is not a
     product surface: it lets a gate point the engine at a checkout's templates

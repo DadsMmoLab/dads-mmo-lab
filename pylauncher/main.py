@@ -381,8 +381,8 @@ def provision_headless() -> int:
     only they can do.
 
     The clean-box harness (checklist 6.3's "proven on a clean box"): on Windows
-    every shipped catalog entry is `platforms: ["linux"]`, so `Installer.preflight()`
-    refuses before `ensure_docker()` is ever reached and the provisioning chain
+    every shipped catalog entry is `platforms: ["linux"]`, so the engine's
+    `preflight()` refuses before `ensure_docker()` is ever reached and the chain
     cannot be exercised through the app at all. That chain is nonetheless where
     the four Cross-cutting Windows defects live — download over a verified
     connection, silent install, find the executable that was just installed,

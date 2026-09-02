@@ -51,7 +51,6 @@ from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.installer import (
     DockerNeedsReLoginError,
     DockerUnavailableError,
-    Installer,
     InstallerError,
     InstallOptions,
     UnsupportedPlatformError,
@@ -64,13 +63,14 @@ STAGE_NAMES = AzerothCoreInstaller.STAGE_NAMES
 def without_cmangos(monkeypatch: pytest.MonkeyPatch) -> None:
     """The registry as it stood before K.8: `azerothcore` and nothing else.
 
-    Two tests below are about the branch `installer_for()` takes when a shipped
-    entry names a family THIS BUILD has no engine for. That was the tree's real
-    state for the four groups between G.4 (which landed the three CMaNGOS
-    `native` blocks) and K.8 (which registered the class that reads them), and
-    `wow-tbc` was the live example. K.8 registered it, and the example went
-    away; the branch did not, because the next lineage's catalog data will
-    arrive ahead of its engine the same way.
+    The test below is about what `installer_for()` does when a shipped entry
+    names a family THIS BUILD has no engine for. That was the tree's real state
+    for the four groups between G.4 (which landed the three CMaNGOS `native`
+    blocks) and K.8 (which registered the class that reads them), and `wow-tbc`
+    was the live example. K.8 registered it, and the example went away; the
+    state did not, because the next lineage's catalog data will arrive ahead of
+    its engine the same way. What F.3 changed is the ANSWER: it used to be a
+    fallback to the entry's bash script, and it is now a refusal.
 
     Narrowing the REGISTRY rather than editing an entry is what keeps the
     fixture honest about which rule it violates: `NativeInstall.family` is a
@@ -99,47 +99,24 @@ def test_the_family_decides_which_engine_installs_and_linux_no_longer_keeps_the_
     assert isinstance(installer_for(ENTRY, platform_id=lambda: "windows"), AzerothCoreInstaller)
 
 
-def test_a_family_with_no_engine_yet_falls_back_to_the_script_and_says_so(
-    caplog: pytest.LogCaptureFixture,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The fallback is logged, because a silent one is how a typo becomes a mystery.
-
-    A family id that no engine claims has two causes and they need opposite
-    responses: data that arrived ahead of its engine, and a misspelling that
-    will never match anything. Both look identical from the outside — the game
-    installs, exactly as it did last week — so the only thing that can tell the
-    second story is a line in the log naming the family that was not found and
-    the script that ran instead.
-
-    `cmangos` was the live example of the first cause until K.8; see
-    `without_cmangos`.
-    """
-    without_cmangos(monkeypatch)
-    with caplog.at_level("INFO", logger="yulon.catalog.installer"):
-        engine_for_tbc = installer_for(load_catalog().get("wow-tbc"), platform_id=lambda: "linux")
-    assert isinstance(engine_for_tbc, Installer)
-    said = "\n".join(record.getMessage() for record in caplog.records)
-    assert "cmangos" in said and "install-wow-tbc.sh" in said
-
-
 def test_no_engine_and_no_script_left_is_the_app_bug_family_for_words(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The third state, and the one 7.2 turns the middle branch into.
+    """A family this build has no engine for is the app bug, not a fallback (F.3).
 
-    The fallback needs something to fall back TO. Once the bash path is gone an
-    entry naming an unregistered family has neither an engine nor a script, and
-    that is precisely the app bug `family_for()` already has a sentence for — so
-    the sentence is not written a second time here. `model_copy` rather than a
-    catalog edit: `Install.script` is still a required non-empty string, so this
-    state cannot be reached through `catalog.json` today.
+    Until F.3 such an entry was handed back to its bash script, so reaching the
+    refusal took a `model_copy` that also emptied `Install.script`. F.3 deleted
+    that engine, which leaves one answer for the state and it is the sentence
+    `family_for()` already had — so the sentence is not written a second time
+    here. The entry used below is the shipped one, script field and all (F.4
+    removes the field), which is what makes this the assertion that the
+    fallback is GONE rather than merely unreachable.
     """
     without_cmangos(monkeypatch)
     tbc = load_catalog().get("wow-tbc")
-    scriptless = tbc.model_copy(update={"install": tbc.install.model_copy(update={"script": ""})})
+    assert tbc.install.script, "the fallback's condition is still on the entry"
     with pytest.raises(InstallerError, match="install family this app does not have"):
-        installer_for(scriptless, platform_id=lambda: "linux")
+        installer_for(tbc, platform_id=lambda: "linux")
 
 
 def test_the_entry_names_its_family_and_a_scriptless_entry_still_reads_as_scripted() -> None:

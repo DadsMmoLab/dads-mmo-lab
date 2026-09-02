@@ -6,9 +6,9 @@ directory/ownership guard, preflight and Docker provisioning, the
 refuse-not-delete clone safety, the compose marker rules, streaming, cancel
 copy, keep-awake — and a FAMILY (`families/azerothcore.py`, `families/cmangos.py`)
 composes its stages into an ordered tuple. `installer.installer_for()` picks
-the family from `catalog.json`'s `install.native.family`. The contract is the
-same as `installer.Installer`'s (`run(options, *, cancel, ask) -> Iterator[str]`),
-so the catalog view, the log panel and the job runner need no changes.
+the family from `catalog.json`'s `install.native.family`. Every family engine
+has the same contract (`run(options, *, cancel, ask) -> Iterator[str]`), so the
+catalog view, the log panel and the job runner need no changes.
 
 **Staged and resumable.** The stages are recorded by NAME in
 `.yulon-install.json`, so reordering them can never re-interpret an existing
@@ -563,6 +563,11 @@ class Seams:
     platform_id: Callable[[], str] = platform.detect
     docker_ready: Callable[[], bool] = platform.docker_ready
     ensure_docker: Callable[..., platform.ProvisionReport] = platform.ensure_docker
+    # Read twice on purpose. `_preflight_lines()` asks it before anything is
+    # provisioned, and it is ALSO handed to `gather()` so the report's folder
+    # check and the early refusal cannot answer from two different functions —
+    # the same reason `platform_id` is threaded rather than left to default.
+    dir_problem: Callable[[Path], str | None] = platform.server_dir_problem
     gather: Callable[..., preflight.Facts] = preflight.gather
     clone: Callable[[git.CloneSpec], None] = field(default_factory=lambda: git.ContainerGit().clone)
     remote_url: Callable[[Path], str | None] | None = None
@@ -695,10 +700,10 @@ class StagedInstaller:
     ) -> None:
         """Everything that must be true before anything is written. Raises, or returns.
 
-        Same signature as `Installer.preflight()` so the two are
-        interchangeable. Docker provisioning is attempted exactly once before
-        the machine facts are gathered, because every number below it is
-        fabricated without a daemon.
+        Same signature on every family engine, which is what lets the view
+        drive one without knowing which it got. Docker provisioning is
+        attempted exactly once before the machine facts are gathered, because
+        every number below it is fabricated without a daemon.
 
         `ask` is forwarded to Docker provisioning — the docker-group consent
         and the Linux sudo password — and to nothing else; see the module
@@ -857,6 +862,22 @@ class StagedInstaller:
                 "fix on this machine."
             )
         server_dir = self.server_dir(options)
+        # Before provisioning, not after it. The same rule is in the report
+        # `preflight.evaluate()` builds, but that report is built from
+        # `gather()`, which runs after `ensure_docker()` — so picking $HOME on a
+        # clean Linux box bought the docker-group consent dialog, a sudo
+        # password typed into Yu'lon's own dialog and a package install, and
+        # only then "that folder will not work". Measured on Fedora 44
+        # (2026-08-25) against the shell installer, whose own `case
+        # "$SERVER_DIR" in /|"$HOME"|...` refused in that same order; the native
+        # engine inherited the order in 7.1 and kept it until this call site
+        # existed. The words are `preflight._folder_check()`'s, so a user reads
+        # the same refusal whichever half of preflight reaches it.
+        folder_problem = self._seams.dir_problem(server_dir)
+        if folder_problem is not None:
+            raise InstallerError(
+                f"{folder_problem} Pick a different folder and try again. Nothing was written."
+            )
         yield "Checking Docker."
         if not self._seams.docker_ready():
             # Provisioning prints nothing of its own and can be a Docker
@@ -898,6 +919,7 @@ class StagedInstaller:
                 client_dir=options.client_dir,
                 platform_id=self._seams.platform_id,
                 docker_ready=self._seams.docker_ready,
+                dir_problem=self._seams.dir_problem,
             )
         except docker.DockerCommandError as exc:
             # `gather()`'s port scan goes through `docker._run()`, which RAISES.

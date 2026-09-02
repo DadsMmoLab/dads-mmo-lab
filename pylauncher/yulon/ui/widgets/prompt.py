@@ -1,9 +1,9 @@
 """Ask the user for a line of input on behalf of a subprocess (roadmap 6.1.5).
 
-The install scripts run `sudo`, and `sudo` asks for a password. No rule in
-`installer.PROMPT_RULES` can answer that — only the person sitting at the
-machine knows it — so before this existed the script simply stopped on the
-prompt and the window looked frozen.
+Docker provisioning runs `sudo`, and `sudo` asks for a password; the
+docker-group join asks for consent. No rule can answer either — only the
+person sitting at the machine can — so before this existed the install simply
+stopped on the prompt and the window looked frozen.
 
 The awkward part is which thread is which. The installer runs on a worker
 thread (the window must not freeze during a two-hour install), but a dialog may

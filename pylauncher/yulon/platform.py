@@ -1358,10 +1358,11 @@ answer was yes. Saying otherwise would promise an install that cannot start.
 def _explicit_yes(reply: str | None) -> bool:
     """Only a deliberate yes is consent. A dismissed dialog is not.
 
-    The same reading `make_responder()` applies to the installers' version of
-    this question, deliberately written the same way here: silence, an empty
-    string and a closed dialog all mean no, because refusing a privilege change
-    is recoverable and visible while granting one by accident is neither.
+    The same reading the bash engine's rule table applied to the installers'
+    version of this question, deliberately written the same way here and kept
+    after 7.2 deleted that table: silence, an empty string and a closed dialog
+    all mean no, because refusing a privilege change is recoverable and visible
+    while granting one by accident is neither.
     """
     return reply is not None and reply.strip().lower() in ("y", "yes")
 
