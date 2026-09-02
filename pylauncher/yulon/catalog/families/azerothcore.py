@@ -30,6 +30,7 @@ from yulon.catalog.native import (
     Stage,
     StageContext,
     StagedInstaller,
+    _listing,
     _same_repo,
 )
 
@@ -103,7 +104,7 @@ class AzerothCoreInstaller(StagedInstaller):
             # deletes a non-git destination before cloning, and the guard that
             # protects a user's files should still be there after somebody
             # reorders the stages.
-            leftovers = [item.name for item in server_dir.iterdir() if item.name != STATE_FILE]
+            leftovers = _listing(server_dir, ignoring=STATE_FILE)
             if leftovers:
                 raise InstallerError(
                     f"{server_dir} has files in it but is not a checkout of {source.url}, so it "
@@ -156,7 +157,7 @@ class AzerothCoreInstaller(StagedInstaller):
                     f"{dest} is a checkout of {existing}, not of {source.url}. Nothing was "
                     "changed."
                 )
-            if not has_git and dest.is_dir() and any(dest.iterdir()):
+            if not has_git and dest.is_dir() and _listing(dest):
                 raise InstallerError(
                     f"{dest} has files in it but is not a checkout of {source.url}, so it was "
                     "left alone. Move that folder aside and try again."

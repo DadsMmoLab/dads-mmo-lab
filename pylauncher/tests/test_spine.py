@@ -9,6 +9,7 @@ and may not contain. Anything AzerothCore-shaped lives in
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import re
@@ -17,16 +18,17 @@ import subprocess
 import threading
 import traceback
 from collections.abc import Callable, Iterator
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
 
 from tests.support_native import ENTRY, IMPORTED, PARTIAL, TBC, Recorder, install
 from yulon import docker, install_wiring, platform, resources
+from yulon.apply import ApplyError
 from yulon.catalog import composegen, native, preflight
 from yulon.catalog.catalog import CatalogEntry, ReadyMarkers, load_catalog
-from yulon.catalog.families import FAMILIES, family_for
+from yulon.catalog.families import FAMILIES, azerothcore, family_for
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.installer import (
     DockerUnavailableError,
@@ -34,6 +36,7 @@ from yulon.catalog.installer import (
     InstallOptions,
     installer_for,
 )
+from yulon.controller_wow_wotlk.maintenance import MaintenanceError
 
 ORDER = ("clone-sources", "build", "import", "up")
 CANARY = "hunter2-a2-canary"
@@ -1905,6 +1908,304 @@ def test_a_compose_refusal_reaches_the_cli_as_a_sentence_and_is_recorded(
             f"{name} carries the generated marker, so write_plan() ran - the refusal under "
             "test is render()'s, one call earlier"
         )
+    recorded = json.loads((server_dir / native.STATE_FILE).read_text(encoding="utf-8"))
+    assert recorded["last_error"] == refusal, (
+        "the refusal was not recorded, so `run()`'s `except InstallerError` never saw it "
+        "and `_record_error` did not run"
+    )
+
+
+# -- a folder that will not list ---------------------------------------------
+#
+# Every "may this install write here?" rule in the engine is decided by listing
+# a directory, and `Path.iterdir()` raises `OSError` for reasons that have
+# nothing to do with what the folder holds: a permission change, an unreadable
+# mount, a vanished drive, a stale UNC path into a WSL distro. The app really
+# does reach folders that way - `Identification.UNVERIFIED` exists in the UI for
+# exactly that - so this is not an exotic input.
+#
+# Untranslated it is the blocker's shape again: a traceback where the harness
+# promises a sentence, and no `last_error` at the stage sites. The sites are
+# ENUMERATED rather than described, because they are what the fix is about; a
+# fifth one added later without the helper is caught by
+# `test_no_folder_in_the_install_spine_is_listed_outside_the_helper`.
+
+
+@dataclass(frozen=True)
+class _ListingSite:
+    """One place the engine lists a folder to decide whether it may write into it.
+
+    `neighbour` is the refusal that site makes when the listing SUCCEEDS and
+    finds files. It is asserted absent from the run under test and present from
+    the paired readable run, so a fixture that never reached the site cannot
+    pass on the neighbour's words - and a fixture that reached nothing at all
+    cannot pass either.
+    """
+
+    site: str
+    game_id: str
+    folder: str
+    """Relative to the server dir; empty is the server dir itself."""
+
+    stage: str | None
+    """The stage the refusal comes from, or None for the guard, which precedes them all."""
+
+    neighbour: str
+
+
+_LISTING_SITES = (
+    _ListingSite(
+        "_claim_folder", "wow-wotlk", "", None, "is not empty and was not created by this app"
+    ),
+    _ListingSite(
+        "_clone_core", "wow-wotlk", "", "clone-core", "has files in it but is not a checkout"
+    ),
+    _ListingSite(
+        "_clone_modules",
+        "wow-wotlk",
+        "modules/mod-playerbots",
+        "clone-modules",
+        "has files in it but is not a checkout",
+    ),
+    _ListingSite(
+        "stage_clone_sources",
+        "wow-tbc",
+        "src/mangos-tbc",
+        "clone-sources",
+        "has files in it but is not a checkout",
+    ),
+)
+"""Every folder listing that decides whether this engine may write somewhere.
+
+Two are the spine's own - `_claim_folder`, which all four shipped games reach
+through preflight and `_guard()`, and `stage_clone_sources`, which the three
+CMaNGOS games bind - and two are AzerothCore's, the game with green live gates.
+Written out rather than derived from the code: these ARE the list under test,
+and a parametrisation computed from it would delete its own case the moment a
+site went missing.
+"""
+
+
+def _claimable(server_dir: Path, entry: CatalogEntry, **fields: object) -> None:
+    """Write the state file that makes `server_dir` this install's own, resuming.
+
+    Without it `_claim_folder()` refuses a non-empty, non-git folder during
+    preflight and no stage runs at all - that is the FIRST site below, and it
+    would otherwise hide the three under it.
+    """
+    native_block = entry.install.native
+    assert native_block is not None, f"{entry.id} has no native block"
+    server_dir.mkdir(parents=True, exist_ok=True)
+    native.write_state(
+        server_dir,
+        native.InstallState(
+            game_id=entry.id,
+            # `_cli_engine_over()` pins the engine to linux and the id is
+            # derived from the path THROUGH that seam; a mismatch is refused as
+            # a copied install, one rule before anything here.
+            install_id=composegen.install_id(server_dir, platform_id=lambda: "linux"),
+            family=native_block.family,
+            **fields,  # type: ignore[arg-type]
+        ),
+    )
+
+
+def _prepare_listing_site(site: _ListingSite, rec: Recorder, server_dir: Path) -> Path:
+    """Build the tree that puts a run at `site`, and return the folder that run will list."""
+    entry = load_catalog().get(site.game_id)
+    folder = server_dir / site.folder if site.folder else server_dir
+    if site.site == "_claim_folder":
+        server_dir.mkdir(parents=True, exist_ok=True)
+        return folder
+    if site.site == "_clone_modules":
+        _claimable(server_dir, entry, completed=("clone-core",))
+        (server_dir / ".git").mkdir(exist_ok=True)
+        rec.remotes[server_dir] = entry.emulator.sources[0].url
+    else:
+        _claimable(server_dir, entry)
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def _unlistable(monkeypatch: pytest.MonkeyPatch, folder: Path, error: OSError) -> None:
+    """Make ONE directory refuse to list itself, the way a real unreadable one does.
+
+    Scoped to a single path rather than replacing `Path.iterdir` wholesale: the
+    run lists other folders on its way past this one, and a blanket refusal
+    would stop it somewhere else entirely and prove nothing about the site.
+    """
+    listing = Path.iterdir
+
+    def refuse(self: Path) -> Iterator[Path]:
+        if self == folder:
+            raise error
+        return listing(self)
+
+    monkeypatch.setattr(Path, "iterdir", refuse)
+
+
+def _refusal_from(captured: str) -> str:
+    """The sentence `install_wiring.main()` wrote for a person, without its prefix."""
+    for line in captured.splitlines():
+        if line.startswith("install failed: "):
+            return line[len("install failed: ") :]
+    raise AssertionError(f"main() wrote no refusal at all; it wrote {captured!r}")
+
+
+@pytest.mark.parametrize("site", _LISTING_SITES, ids=lambda site: site.site)
+def test_a_folder_that_will_not_list_is_a_refusal_and_not_a_traceback(
+    site: _ListingSite,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`iterdir()` raises `OSError`, which is not an `InstallerError` and never was one.
+
+    Measured on `697adca6` at all four sites: `install_wiring.main()` raised
+    `PermissionError` out of the list comprehension, the harness printed a
+    traceback where its own docstring promises "the sentence written for a
+    person", and at the three stage sites `run()`'s `except InstallerError`
+    never fired, so the state file kept `"last_error": ""`.
+
+    The guard site's second half is deliberately the opposite assertion.
+    `_claim_folder()` runs from preflight and from `_guard()`, both OUTSIDE
+    `run()`'s `try`, because its refusals concern a state file that may be
+    somebody else's - so nothing may be written there, and this asserts the
+    folder was left exactly as empty as it was found.
+
+    The paired readable run is what proves the fixture reached the site at all:
+    the same tree with one thing changed answers with the site's NEIGHBOURING
+    rule, which the first half asserts absent.
+    """
+    server_dir = tmp_path / "unreadable" / "server"
+    rec = Recorder(images=False)
+    folder = _prepare_listing_site(site, rec, server_dir)
+    _cli_engine_over(rec, monkeypatch)
+    _unlistable(monkeypatch, folder, PermissionError(13, "Permission denied"))
+    try:
+        code = install_wiring.main([site.game_id, "--server-dir", str(server_dir)])
+    except Exception as exc:
+        pytest.fail(
+            f"an unreadable folder escaped install_wiring.main() as {type(exc).__name__}: "
+            + "".join(traceback.format_exception(exc)).strip()
+        )
+    streamed = capsys.readouterr()
+    refusal = _refusal_from(streamed.err)
+    assert code == 1
+    assert refusal.startswith(f"{folder} could not be listed"), refusal
+    assert "Permission denied" in refusal, "the refusal drops what the machine actually said"
+    assert site.neighbour not in refusal, "that is the sentence for a folder that COULD be read"
+    if site.stage is None:
+        assert "--- " not in streamed.out, "the guard refused, so no stage may have started"
+        assert not (server_dir / native.STATE_FILE).exists(), (
+            "a state file was written into a folder the guard had just refused; the guard sits "
+            "outside `run()`'s `try` precisely so that cannot happen"
+        )
+    else:
+        assert f"--- {site.stage}" in streamed.out, "the run never reached the stage under test"
+        recorded = json.loads((server_dir / native.STATE_FILE).read_text(encoding="utf-8"))
+        assert recorded["last_error"] == refusal, (
+            "the refusal was not recorded, so `run()`'s `except InstallerError` never saw it "
+            "and `_record_error` did not run"
+        )
+
+    readable = tmp_path / "readable" / "server"
+    other = Recorder(images=False)
+    theirs = _prepare_listing_site(site, other, readable)
+    (theirs / "somebody-elses-work.txt").write_text("mine", encoding="utf-8")
+    _cli_engine_over(other, monkeypatch)
+    assert install_wiring.main([site.game_id, "--server-dir", str(readable)]) == 1
+    assert site.neighbour in _refusal_from(capsys.readouterr().err), (
+        "the same tree with that folder READABLE never reached this site's own rule, so the "
+        "half above proved nothing about this site"
+    )
+
+
+def test_no_folder_in_the_install_spine_is_listed_outside_the_helper() -> None:
+    """One translation means one place that lists a folder, so the next site cannot miss it.
+
+    Four sites carried the same untranslated listing and were found one at a
+    time. Asked of the syntax tree rather than of the text, because the comments
+    explaining the fix name `iterdir()` too and a grep would match those.
+    """
+    callers = {
+        module.__name__: {
+            enclosing.name
+            for enclosing in ast.walk(ast.parse(Path(module.__file__ or "").read_text("utf-8")))
+            if isinstance(enclosing, ast.FunctionDef)
+            for node in ast.walk(enclosing)
+            if isinstance(node, ast.Attribute) and node.attr == "iterdir"
+        }
+        for module in (native, azerothcore)
+    }
+    assert callers == {native.__name__: {native._listing.__name__}, azerothcore.__name__: set()}
+
+
+# -- a reset that will not finish --------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        MaintenanceError("the schemas could not be listed"),
+        ApplyError("DROP DATABASE acore_world was refused"),
+        RuntimeError("this install holds player data, so nothing was dropped."),
+    ],
+    ids=["MaintenanceError", "ApplyError", "RuntimeError"],
+)
+def test_a_reset_that_fails_reaches_the_cli_as_a_sentence_and_is_recorded(
+    error: Exception,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`gate.reset()` on the `partial` branch, whose seam raises three things and none is ours.
+
+    The three are `reset_unfinished()`'s own `Raises:` list, enumerated because
+    that list is the thing under test: `MaintenanceError` and `ApplyError` are
+    independent `RuntimeError` subclasses and the bare `RuntimeError` is
+    deliberately neither, so no `except` clause in the spine could ever have
+    seen them. Measured on `697adca6`: `install_wiring.main()` raised each one
+    through, the harness printed a traceback, and the state file kept
+    `"last_error": ""`.
+
+    Driven on `wow-wotlk` - AzerothCore, the game with green live gates, and the
+    only family whose import gate is the injected `acore_*` pair this seam
+    belongs to.
+
+    The neighbours are the other four answers in the same five-branch table,
+    and the `partial` branch's own second refusal. All are asserted absent, and
+    the probe's own line is asserted present, so a run that took another branch
+    fails here rather than passing on that branch's words. The one-shot is
+    asserted never to have run, because re-importing over a half-written schema
+    is the destruction this branch exists to prevent.
+    """
+    server_dir = tmp_path / "server"
+    rec = Recorder(images=False, probe_answers=[PARTIAL, IMPORTED], reset_error=error)
+    _cli_engine_over(rec, monkeypatch)
+    try:
+        code = install_wiring.main(["wow-wotlk", "--server-dir", str(server_dir)])
+    except Exception as exc:
+        pytest.fail(
+            f"a failed reset escaped install_wiring.main() as {type(exc).__name__}: "
+            + "".join(traceback.format_exception(exc)).strip()
+        )
+    streamed = capsys.readouterr()
+    refusal = _refusal_from(streamed.err)
+    assert code == 1
+    assert "reset" in rec.calls, "the run never reached the call under test"
+    assert f"The databases read as {PARTIAL.state}: {PARTIAL.detail}" in streamed.out
+    expected = "The half-written databases could not be cleared, so the import was not run: "
+    assert refusal == expected + str(error)
+    assert "nothing was found to clear" not in refusal, "that is the empty-tuple refusal below it"
+    neighbours = ("already hold data", "could not be asked")
+    assert not any(
+        words in refusal for words in neighbours
+    ), "those are the `populated` and `unreadable` branches, which this run never took"
+    assert "one-shot:ac-db-import" not in rec.calls, (
+        "the import ran over databases that were never cleared, which is the 28-second "
+        "success that leaves `acore_world` permanently unimportable"
+    )
     recorded = json.loads((server_dir / native.STATE_FILE).read_text(encoding="utf-8"))
     assert recorded["last_error"] == refusal, (
         "the refusal was not recorded, so `run()`'s `except InstallerError` never saw it "

@@ -25,6 +25,7 @@ thing a module docstring cannot keep true.
 
 from __future__ import annotations
 
+import ast
 import os
 import re
 import subprocess
@@ -40,6 +41,45 @@ SCRIPT = resources.installers_dir() / "steam-deck" / "setup-gaming-mode.sh"
 needs_bash = pytest.mark.skipif(
     not bash_available(), reason="no bash that can run a script on this machine"
 )
+
+HANG_BOUND = 300.0
+"""A DEADLOCK BREAKER, not an assertion about how fast the script runs.
+
+Every test here stubs `sleep` so it records instead of waiting, so a healthy
+run of the longest of them costs milliseconds. Measured on yulon-ubuntu
+2026-09-02: this whole file took 3.57s serially, of which the 300-second client
+wait was 0.16s, and under `-n auto --dist loadfile` alongside the rest of the
+suite no test in it reached the slowest-twelve list at all (the twelfth was
+0.61s).
+
+The number is nonetheless large on purpose, because the bound is on the CHILD
+and the contention is on the BOX. A gate reviewer watched
+`test_without_a_terminal_the_client_wait_sleeps_instead_of_reading_stdin` spend
+the whole of the previous 60-second bound under 15-way parallel load and then
+pass 14 times out of 14 re-run serially, and that VM runs its fifteen workers
+with about 2 GB free -- a starved or swapping box can stall a process for a
+minute without anything being wrong with it. A bound sized like a stopwatch
+turns that into a red suite, and the run it happened in was read as a real
+single failure (bug-checklist section 33): three clean re-runs later, a merge
+went through on a result nobody had explained.
+
+So it is sized against the failure it can actually catch. Contention is bounded
+-- some multiple of a run that costs milliseconds -- while a hang is unbounded,
+and any finite bound catches an unbounded wait eventually. Deleting the bound
+is not an option: without one this file's pty test WEDGED the suite when its
+subject regressed, which CI reports as a stuck job rather than a red one (see
+`test_with_a_terminal_enter_still_stops_the_server`). Five minutes is the price
+of reporting such a regression as a failure.
+"""
+
+DWELL_PROOF = 3.0
+"""The one bound here that IS an assertion, and it points the other way.
+
+`test_the_default_pause_holds_the_closing_message_on_screen` requires the
+script to be STILL RUNNING when this elapses, so a slow or loaded box makes it
+pass more surely rather than less. It is small for the same reason
+`HANG_BOUND` is large.
+"""
 
 
 def _code() -> str:
@@ -112,7 +152,7 @@ def _run(
     *args: str,
     pause: str | None = "0",
     stubs: _Stubs | None = None,
-    timeout: float = 60,
+    timeout: float = HANG_BOUND,
 ) -> subprocess.CompletedProcess[str]:
     """Run the script with stdin at EOF, as a Steam-launched process would have it.
 
@@ -137,7 +177,9 @@ def _run(
 
 @needs_bash
 def test_the_gaming_mode_script_parses() -> None:
-    result = subprocess.run(["bash", "-n", str(SCRIPT)], capture_output=True, text=True, timeout=30)
+    result = subprocess.run(
+        ["bash", "-n", str(SCRIPT)], capture_output=True, text=True, timeout=HANG_BOUND
+    )
     assert result.returncode == 0, result.stderr
 
 
@@ -226,7 +268,7 @@ def test_the_default_pause_holds_the_closing_message_on_screen(tmp_path: Path) -
     process is still alive rather than timing it.
     """
     with pytest.raises(subprocess.TimeoutExpired):
-        _run(str(tmp_path), "wow-wotlk", "ready", pause=None, timeout=3)
+        _run(str(tmp_path), "wow-wotlk", "ready", pause=None, timeout=DWELL_PROOF)
 
 
 @needs_bash
@@ -242,9 +284,25 @@ def test_without_a_terminal_the_client_wait_sleeps_instead_of_reading_stdin(
     stopped seconds after starting. Both halves are asserted — sixty five-second
     sleeps really happened, and the closing prompt does not ask for an ENTER that
     can never arrive.
+
+    This is the test a gate reviewer watched spend the whole of the old
+    60-second bound under 15-way parallel load, then pass 14 of 14 re-run
+    serially (bug-checklist section 33). The bound is now `HANG_BOUND`, which is
+    sized so contention cannot reach it, and a timeout is reported here with the
+    script's own progress attached — because the damage a rare flake does is not
+    the red run, it is that a reader cannot tell it from a real single failure
+    and re-runs instead of looking.
     """
     stubs = _stubs(tmp_path, pgrep_true_calls=0)
-    result = _run(str(_server_dir(tmp_path)), "wow-wotlk", "ready", stubs=stubs)
+    try:
+        result = _run(str(_server_dir(tmp_path)), "wow-wotlk", "ready", stubs=stubs)
+    except subprocess.TimeoutExpired as expired:
+        pytest.fail(
+            f"the script was killed after {expired.timeout}s, having recorded "
+            f"{len(stubs.sleeps())} sleeps. A count near the number asserted below is a box "
+            "that stalled part-way, not a script that hung, and nothing is wrong with the "
+            "script; a count near zero is the regression this test exists for."
+        )
     assert result.returncode == 0
     assert stubs.sleeps().count("5") == 60
     assert "No client detected in 300s - stopping the server." in result.stdout
@@ -305,7 +363,7 @@ def test_with_a_terminal_enter_still_stops_the_server(tmp_path: Path) -> None:
             os.close(slave)
             slave = -1
             os.write(master, b"\n")
-            stdout, _ = proc.communicate(timeout=60)
+            stdout, _ = proc.communicate(timeout=HANG_BOUND)
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.communicate()
@@ -366,3 +424,34 @@ def test_it_detects_the_client_and_launches_nothing() -> None:
     code = _code()
     assert "pgrep" in code
     assert re.search(r"[^&>]&[ \t]*$", code, re.MULTILINE) is None
+
+
+def test_no_wall_clock_bound_in_this_file_is_written_as_a_bare_number() -> None:
+    """Every `timeout=` here must be one of the two named ones, and nothing else.
+
+    A source-shape read of THIS file, not of the script — the kind its module
+    docstring warns about, and deliberate: what it pins is that the reasoning
+    stays attached to the number. The bounds are the only thing in this file a
+    loaded box can move, and the last bare one that was in here (60 seconds on a
+    run measured at 0.16) produced a red suite nobody could explain and a merge
+    made on three clean re-runs instead (bug-checklist section 33). A number
+    typed at a call site carries no docstring, so the next person to add a
+    subprocess here cannot inherit the argument for its size.
+
+    `HANG_BOUND` and `DWELL_PROOF` are named individually rather than counted:
+    they mean opposite things — one must never be reached, the other must be —
+    and a test that only asked "is it a name?" would let a hang bound be sized
+    like the dwell one.
+    """
+    bounds = [
+        keyword.value
+        for node in ast.walk(ast.parse(Path(__file__).read_text(encoding="utf-8")))
+        if isinstance(node, ast.Call)
+        for keyword in node.keywords
+        if keyword.arg == "timeout"
+    ]
+    assert bounds, "no wall-clock bound was found at all, so this pins nothing"
+    spelled = [ast.unparse(value) for value in bounds]
+    # `timeout` itself is `_run()`'s own parameter being forwarded to
+    # `subprocess.run()`; its default is `HANG_BOUND`, one hop up.
+    assert set(spelled) == {"HANG_BOUND", "DWELL_PROOF", "timeout"}, spelled

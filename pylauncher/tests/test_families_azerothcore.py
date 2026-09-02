@@ -1044,6 +1044,15 @@ def test_a_populated_but_unfinished_database_is_refused(tmp_path: Path) -> None:
 
 
 def test_an_engine_without_the_reset_seam_refuses_a_partial_database(tmp_path: Path) -> None:
+    """`CallableGate.reset()`'s own refusal, and it must arrive whole.
+
+    Asserted by EQUALITY, not by a phrase. `stage_import()` translates anything
+    else `reset()` raises into a sentence of its own (2026-09-02), and an
+    `InstallerError` caught by that translation would come back wrapped inside
+    it - two refusals in one line, the second explaining the first. `match=`
+    alone could not see that, because the wrapper interpolates the message it
+    wrapped and the phrase survives inside it.
+    """
     rec = Recorder(images=False, probe_answers=[PARTIAL])
     installer = AzerothCoreInstaller(
         ENTRY,
@@ -1052,8 +1061,12 @@ def test_an_engine_without_the_reset_seam_refuses_a_partial_database(tmp_path: P
         reset_unfinished=None,
         seams=rec.seams(),
     )
-    with pytest.raises(InstallerError, match="no way to clear"):
+    with pytest.raises(InstallerError) as refused:
         list(installer.run(InstallOptions(server_dir=tmp_path / "wow")))
+    assert str(refused.value) == (
+        "This install's databases were left half-written and this installer has no way "
+        "to clear them, so nothing was run."
+    )
 
 
 def test_an_engine_with_no_probe_at_all_refuses_before_anything_runs(tmp_path: Path) -> None:

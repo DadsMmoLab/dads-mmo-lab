@@ -1098,7 +1098,7 @@ class StagedInstaller:
             # a checkout of somebody else's fork" is a far better sentence than
             # "this folder is not empty". Everything else is refused before a
             # byte is written.
-            leftovers = [item.name for item in server_dir.iterdir() if item.name != STATE_FILE]
+            leftovers = _listing(server_dir, ignoring=STATE_FILE)
             if leftovers:
                 raise InstallerError(
                     f"{server_dir} is not empty and was not created by this app "
@@ -1338,7 +1338,7 @@ class StagedInstaller:
                     "changed."
                 )
             if not has_git and dest.is_dir():
-                leftovers = [item.name for item in dest.iterdir() if item.name != STATE_FILE]
+                leftovers = _listing(dest, ignoring=STATE_FILE)
                 if leftovers:
                     raise InstallerError(
                         f"{dest} has files in it but is not a checkout of {source.url}, so it "
@@ -1588,7 +1588,41 @@ class StagedInstaller:
             )
         if before.state == "partial":
             yield f"Clearing the half-written databases first ({before.detail})."
-            dropped = gate.reset()
+            # `reset()` INSIDE a `try`. It was called bare until 2026-09-02, and
+            # the seam behind it on the AzerothCore path,
+            # `controller_wow_wotlk.repair.reset_unfinished()`, names three
+            # things it raises: `MaintenanceError` (the schemas could not be
+            # listed, or one survived its `DROP`), `ApplyError` (the server
+            # refused a `DROP DATABASE`) and a bare `RuntimeError` (there is
+            # player data). None of the three is an `InstallerError` -- they
+            # subclass `RuntimeError` independently -- so `run()`'s `except
+            # InstallerError` could not see them. Reproduced through the real
+            # `install_wiring.main()` on `wow-wotlk` for each: a traceback where
+            # the harness promises a sentence, and `"last_error": ""` where
+            # every other stage failure records its own. Same shape, and the
+            # same fix, as the `composegen.render()` blocker (`b22ab381`).
+            #
+            # `Exception`, not a named tuple of types: `gate` is an `ImportGate`
+            # PROTOCOL, and the spine is family-neutral by construction -- it
+            # cannot import `controller_wow_wotlk` to name those two classes,
+            # and 7.3's CMaNGOS gate answers through entirely different
+            # machinery. What a seam raises is the seam's business; that
+            # everything crossing this boundary is an `InstallerError` is this
+            # engine's.
+            #
+            # `InstallerError` is re-raised untouched and FIRST, because
+            # `CallableGate.reset()` already raises one -- the refusal for an
+            # engine built with no reset seam at all -- and re-wrapping it would
+            # bury that sentence inside this one.
+            try:
+                dropped = gate.reset()
+            except InstallerError:
+                raise
+            except Exception as exc:
+                raise InstallerError(
+                    "The half-written databases could not be cleared, so the import was not "
+                    f"run: {exc}"
+                ) from exc
             if not dropped:
                 raise InstallerError(
                     "The databases read as unfinished, but nothing was found to clear, so the "
@@ -1845,6 +1879,55 @@ def _cancelled_message(what: str, note: str = "") -> str:
     beyond `OPENING_NOTE`, which the user was already told.
     """
     return f"{what} was stopped. {note}".rstrip()
+
+
+def _listing(folder: Path, *, ignoring: str | None = None) -> list[str]:
+    """What is in `folder`, minus `ignoring` — or a refusal, never a bare `OSError`.
+
+    THE ONLY PLACE THIS ENGINE LISTS A DIRECTORY. Four sites asked
+    `folder.iterdir()` bare until 2026-09-02 — `_claim_folder()`, which every
+    shipped game reaches through preflight and `_guard()`;
+    `stage_clone_sources()`, which the three CMaNGOS games bind; and
+    AzerothCore's `_clone_core()` and `_clone_modules()` — and reproduced
+    through the real `install_wiring.main()` at all four, an unreadable folder
+    printed a `PermissionError` traceback where the harness's own docstring
+    promises the sentence written for a person. At the three stage sites
+    `run()`'s `except InstallerError` could not see it either, so
+    `_record_error` never ran and the state file kept `"last_error": ""`. That
+    is the same shape as the `composegen.render()` blocker (`b22ab381`), and
+    the same fix: translate where the call is.
+
+    REFUSE, never assume empty. A listing that fails says nothing about what is
+    in there, and the caller's next move on "empty" is a clone whose seam
+    `shutil.rmtree`s a destination it does not recognise. Treating an
+    unreadable folder as empty would delete a user's files on exactly the input
+    where the engine knows least — the same trade `_claim_folder()` makes for a
+    state file it cannot parse.
+
+    Not exotic, either: `iterdir()` raises for a permission change, an
+    unreadable mount, a drive that went away, and a stale UNC path into a WSL
+    distro — the app reaches folders that way often enough that
+    `Identification.UNVERIFIED` exists in the UI for it.
+
+    `ignoring` is a single name that does not count as content, which is
+    `STATE_FILE` at three of the four sites; `_clone_modules()` passes nothing,
+    because a module directory holding this app's state file would be a
+    leftover worth refusing over.
+
+    Raises:
+        InstallerError: the folder could not be listed. The sentence names the
+            folder, carries what the OS said, and is distinct from every
+            "this folder has files in it" refusal above it.
+    """
+    try:
+        return [item.name for item in folder.iterdir() if item.name != ignoring]
+    except OSError as exc:
+        raise InstallerError(
+            f"{folder} could not be listed ({exc}), so this app cannot tell whether it is empty "
+            "or holds somebody else's files, and it will not write into a folder it cannot "
+            "read. Nothing was written. If it is on a network drive, an external disk or "
+            "another machine, check that it is still reachable and try again."
+        ) from exc
 
 
 def _same_repo(existing: str, wanted: str) -> bool:
