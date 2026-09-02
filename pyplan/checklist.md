@@ -299,8 +299,32 @@
       correction filed there — the 2026-09-01 record under 7.1 **cannot** stand in for it, because
       `test_sqlplan_live.py` postdates that run entirely (21 test functions then, 23 now).
 - [ ] 7.3 CMaNGOS data model + pure stage kinds — catalog 7.3 models (`Source.rev`, `dockerfile_dir`, `CmangosData`: `ClientSpec`, `DockerfileSpec`, `ExtractPlan`, `MmapPlan`, `ConfPatchTable`, `SqlPlan`); `families/cmangos.py`; `clientdir`/`dockerfile`/`extract`/`conf`/`sqlplan`; `docker.run_container`/`copy_from_image`/`exec_stdin`; all four entries validate; WotLK templates byte-identical; static catalog invariants test
-  - [ ] Gate: busybox/mariadb:11 primitives live (`-u`, `:ro` refusal, `copy_from_image`, `exec_stdin` + gzip, `mariadb` client name, restart-loop detection)
-    - **Runbook written, deliberately not run (2026-09-02, task K.8).** The eleven steps are in `pyplan/phase7-plans/7.3-cmangos-family.md`, Task K.8 step 7: hand the box over with `yulon-use.ps1 ubuntu`, announce through `claude-say`, sync the checkout, run the unit suite, pull `busybox:1.36` and `mariadb:11`, run `pytest -m integration tests/integration`, copy the log to `pyplan/gates/7.3-yulon-ubuntu.log` (that directory does not exist yet), record the five numbers here, shut the box down. K.8 landed the code half only — the family registered, the stage tuple pinned, dispatch proved for all three CMaNGOS entries — because this gate starts containers and pulls images and the standing rule is that the owner starts a run himself. Nothing is blocked; it needs the VM powered on and someone to press go. **Do not tick from a unit suite alone:** a `SKIPPED` in the integration run means the daemon was never reached, which is the failure a gate this shape exists to catch.
+  - [x] Gate: busybox/mariadb:11 primitives live (`-u`, `:ro` refusal, `copy_from_image`, `exec_stdin` + gzip, `mariadb` client name, restart-loop detection)
+    - **PASSED 2026-09-02 on `yulon-ubuntu`** — Linux 7.0.0-30-generic, Docker 29.1.3, Python 3.12.3,
+      `yulon-phase7` at `5a1098d9`. **22 passed, 1 skipped in 149.33s.** Full log:
+      `pyplan/gates/7.3-yulon-ubuntu.log`. Run twice, 154.42s and 149.33s, same counts both times.
+    - **`docker ps -aq` and `docker volume ls -q` byte-identical before and after** — 5 containers and
+      2 volumes each way, diffed, not eyeballed. Nothing leaked.
+    - **Run with `YULON_REQUIRE_DOCKER=1`**, so an unreachable daemon would have been a FAILURE rather
+      than a skip. That is the guard that makes this tick mean something; without it a green run says
+      only that pytest started.
+    - **Each of the six named items has a test, checked by name before this box was ticked** rather
+      than inferred from the total: `-u` → `…run_container_reads_the_client_read_only_and_writes_out_as_this_user`;
+      `:ro` refusal → `…a_read_only_client_mount_refuses_a_write`; `copy_from_image` →
+      `…copy_from_image_leaves_no_container_behind_either_way`; `exec_stdin` + gzip →
+      `…exec_stdin_streams_a_gzipped_dump_and_sql_query_reads_it_back`; restart-loop →
+      `…wait_ready_gives_up_on_a_crash_loop_long_before_its_timeout`; and the **`mariadb` client name**
+      by `test_sqlplan_live.py`, which passes `client="mariadb"` to a real `mariadb:11` at two call
+      sites. `docker.sql_query` takes the client's name as DATA (`DbFacts.client`) and does not know
+      which binary the image ships, so that item is only exercised by a run that names it.
+    - **The one skip is not this gate's:** `test_wotlk_live.py::test_wotlk_controller_start_ready_stop`
+      needs `YULON_WOTLK_SERVER_DIR`, i.e. an AzerothCore server already installed on the box. It
+      belongs to 7.4, not to the primitives.
+    - **This is why the 2026-09-01 record under 7.1 could not stand in.** `test_sqlplan_live.py` — the
+      two tests that carry the `mariadb` client-name item and the live `sqlplan.apply` proof — did not
+      exist at `79ea63c`. Measured: 21 test functions in `tests/integration/` then, 23 now. The earlier
+      run was real and was a different gate.
+ The eleven steps are in `pyplan/phase7-plans/7.3-cmangos-family.md`, Task K.8 step 7: hand the box over with `yulon-use.ps1 ubuntu`, announce through `claude-say`, sync the checkout, run the unit suite, pull `busybox:1.36` and `mariadb:11`, run `pytest -m integration tests/integration`, copy the log to `pyplan/gates/7.3-yulon-ubuntu.log` (that directory does not exist yet), record the five numbers here, shut the box down. K.8 landed the code half only — the family registered, the stage tuple pinned, dispatch proved for all three CMaNGOS entries — because this gate starts containers and pulls images and the standing rule is that the owner starts a run himself. Nothing is blocked; it needs the VM powered on and someone to press go. **Do not tick from a unit suite alone:** a `SKIPPED` in the integration run means the daemon was never reached, which is the failure a gate this shape exists to catch.
     - **This gate's text is duplicated verbatim under 7.1 above, where it is recorded as PASSED on 2026-09-01** (`yulon-ubuntu`, Docker 29.1.3, `yulon-phase7` at `79ea63c`, 20 passed / 1 skipped). **It is one gate written twice, mis-filed** — `79ea63c` is *"Task H.6: the Group H primitives get gates that run them for real"*, which is a 7.3 task recorded under 7.1.
     - **But the 7.3 line still needs its own run, and an earlier draft of this note said otherwise.** It claimed "same suite, same two images, so the substance of the run below already exists". Measured 2026-09-02: `git diff --stat 79ea63c HEAD -- pylauncher/tests/integration/` is `conftest.py +10/-…`, `test_docker_live.py +101/-…`, and **`test_sqlplan_live.py` +160, which did not exist at all**. At `79ea63c` the integration suite held exactly **21** test functions (4 + 16 + 1) — precisely the 20 passed / 1 skipped on that record. Today it holds **23**. The live `sqlplan.apply` / `exec_stdin` + gzip proof against a real `mariadb:11` is two of the six things this gate line names, and it **postdates the recorded run**. So the 2026-09-01 numbers cannot stand for this gate; whoever runs it runs it fresh, and the 7.1 copy should be moved here rather than counted twice.
 - [ ] 7.4a WoW TBC through `build` on yulon-ubuntu — build time and context-transfer time recorded; kill + resume skips the build
