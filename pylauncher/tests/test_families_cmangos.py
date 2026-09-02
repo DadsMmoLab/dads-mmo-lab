@@ -50,16 +50,23 @@ DB_PASSWORD = "tbc-0123456789abcdef"
 def installable(entry: CatalogEntry) -> CatalogEntry:
     """The entry with `platforms: ["linux"]`, because the family is what is under test.
 
-    The 7.3 plan said `wow-tbc` carries `platforms: []` between 7.2 and gate
-    7.4c and that this copy is what makes it installable. That is NOT true of
-    the catalog on this branch: 7.2 has not landed, and all three CMaNGOS
-    entries still ship `platforms: ["linux"]` and their bash `script`
-    (`yulon/catalog/catalog.json`, verified 2026-09-01). So the copy is a no-op
-    today and is kept only so that this file keeps testing the family rather
-    than the dispatch refusal on whichever side of that gate the catalog is —
-    `test_installer.py` is where the refusal is pinned. Whether the entries go
-    back to `platforms: []` is undecided here; nothing in 7.3's landed code
-    depends on it.
+    A no-op today, kept so this file keeps testing the FAMILY rather than the
+    dispatch refusal, whichever side of that question the catalog is on.
+
+    WITHDRAWN, and it is worth recording why rather than deleting it. This said:
+    "7.2 has not landed, and all three CMaNGOS entries still ship
+    `platforms: ["linux"]` and their bash `script`". Both halves were true when
+    written on 2026-09-01 and the second stopped being true the next day: F.4
+    deleted the `script*` fields, and F.1-F.6 merged. Found by the completion
+    gate's prose seat, which was reading for exactly this.
+
+    What is true, measured 2026-09-02 at `697adca6`: the three entries carry
+    `platforms: ["linux"]` and no `script` of any kind. The 7.3 plan expected
+    `platforms: []` here between 7.2 and gate 7.4c; that never happened and now
+    cannot -- `Install.platforms` carries `min_length=1`, and after 7.3 an entry
+    installable nowhere can only be a mistake. `test_catalog.py` is where that
+    refusal is pinned, and `test_the_install_button_is_offered_for_every_cmangos_entry_on_linux`
+    is what would go red if the field were emptied.
     """
     return entry.model_copy(
         update={"install": entry.install.model_copy(update={"platforms": ("linux",)})}
