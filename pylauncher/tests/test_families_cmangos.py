@@ -39,10 +39,10 @@ from pathlib import Path, PurePosixPath
 import pytest
 
 import yulon
-from tests.support_native import Recorder
+from tests.support_native import ABSENT, IMPORTED, PARTIAL, POPULATED_HALF, Recorder
 from yulon import docker, platform, resources
 from yulon.catalog import composegen, native
-from yulon.catalog.catalog import CatalogEntry, PasswordPlan, SqlPlan, load_catalog
+from yulon.catalog.catalog import CatalogEntry, PasswordPlan, SqlPhase, SqlPlan, load_catalog
 from yulon.catalog.families import cmangos, dockerfile, extract, sqlplan
 from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import InstallerError, InstallOptions
@@ -73,6 +73,8 @@ ENTRY = installable(load_catalog().get("wow-tbc"))
 CMANGOS = ENTRY.install.native.cmangos if ENTRY.install.native is not None else None
 assert CMANGOS is not None, "wow-tbc must carry install.native.cmangos (7.3 catalog)"
 SQL = CMANGOS.sql
+DB_FACTS = ENTRY.install.native.db if ENTRY.install.native is not None else None
+assert DB_FACTS is not None, "wow-tbc must carry install.native.db (the client, user and charset)"
 
 
 def client_folder(tmp_path: Path) -> Path:
@@ -154,25 +156,21 @@ def install(rec: Recorder, server_dir: Path, client_dir: Path, **overrides: obje
     )
 
 
-GATE_METHOD_AT_IMPORT = hasattr(CmangosInstaller, "_gate")
-"""Whether the engine carried a `_gate` BEFORE the `gated` fixture patched one on.
-
-Read at import because `gated` is autouse: inside any test body
-`hasattr(CmangosInstaller, "_gate")` is True whether K.6 landed or not, since
-`monkeypatch.setattr(..., raising=False)` puts the attribute on the class
-itself. The question only has an honest answer once.
-"""
-
-
 @pytest.fixture(autouse=True)
 def gated(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every engine's import gate is to be the one `engine()` attached — once there is one.
+    """Every engine's import gate is the one `engine()` attached, not a real `MarkerGate`.
 
-    `raising=False` is kept rather than fixed, because there is nothing here
-    for a strict patch to hit: `CmangosInstaller` has no `_gate` on this branch
-    and `raising=True` would error in every test in this file. It is the
-    inertness that is dangerous, not the keyword, so it is asserted instead —
-    see `test_the_import_gate_seam_has_not_landed_so_the_gated_fixture_is_inert`.
+    `raising=True` since K.7 bound the import stage, and the keyword is what
+    makes this patch mean anything: renaming `CmangosInstaller._gate` now
+    errors here, where before it would have gone on quietly adding an unused
+    attribute while every end-to-end test in this file drove the real gate at a
+    machine that is not there. `GATE_METHOD_AT_IMPORT` and the test that read
+    it were the stand-in for this keyword while no `_gate` existed; they went
+    away with K.7.
+
+    The real `_gate()` — the `MarkerGate` over the plan's marker table — is
+    exercised in `test_sqlplan.py`, which points it at doubles with no engine
+    in the way.
     """
 
     def gate(self: CmangosInstaller, ctx: native.StageContext) -> native.ImportGate:
@@ -180,7 +178,7 @@ def gated(monkeypatch: pytest.MonkeyPatch) -> None:
         assert attached is not None, "build engines with engine(rec) in this file"
         return attached
 
-    monkeypatch.setattr(CmangosInstaller, "_gate", gate, raising=False)
+    monkeypatch.setattr(CmangosInstaller, "_gate", gate, raising=True)
 
 
 # -- identity ---------------------------------------------------------------
@@ -210,70 +208,6 @@ def test_stages_are_unique_and_a_subset_of_the_pinned_names_in_order() -> None:
     assert "preflight" not in names and "guard" not in names
     pinned = [n for n in CmangosInstaller.STAGE_NAMES if n in names]
     assert names == pinned
-
-
-def test_the_unbound_half_of_the_pinned_tuple_is_inert_until_its_stages_land() -> None:
-    """K.7 binds the last name; nothing in the app reads the tuple before then.
-
-    `stage_names()` — not `STAGE_NAMES` — is what the spine validates a resume
-    against (`_guard`, `_ownership`, `with_stage`), and it is derived from
-    `stages()`. So a name with no `Stage` behind it cannot be recorded, cannot
-    be read back out of a state file, and cannot reorder one: a state file
-    naming `import` today has that name DROPPED on the way in, which is the
-    same rule an unknown name has always had. The engine is also not in
-    `FAMILIES` yet, so no user reaches it at all.
-
-    The smuggled name is `import` because K.6 bound `conf`, which is what this
-    test smuggled before that; K.5 bound `extract`, which it smuggled before
-    that. That substitution is the whole maintenance burden of this test, and
-    it is deliberate: the assertion is about the names that are still unbound,
-    so it has to be re-pointed as each one lands, and the day the tuple is
-    whole (K.8) this test goes away with it.
-    """
-    from yulon.catalog.families import FAMILIES
-
-    assert "cmangos" not in FAMILIES
-    bound = engine(Recorder()).stage_names()
-    assert set(bound) < set(CmangosInstaller.STAGE_NAMES)
-    assert "import" not in bound, "K.7 landed: smuggle a name still unbound, or drop this"
-    smuggled = native.InstallState(game_id=ENTRY.id, install_id="x").with_stage("import", bound)
-    assert smuggled.completed == ()
-
-
-def test_the_import_gate_seam_has_not_landed_so_the_gated_fixture_is_inert() -> None:
-    """Red on the day K.7 lands, deliberately: the `gated` fixture must be re-pointed then.
-
-    `gated` patches `CmangosInstaller._gate` with `raising=False`, and no
-    `_gate` exists anywhere in `yulon/`. The hazard is not the missing method,
-    which is only K.7 not having happened; it is a RENAME. If K.7 calls the
-    gate resolver anything else, `monkeypatch.setattr` goes on quietly adding
-    an unused attribute, the fixture silently stops overriding anything, and
-    every end-to-end test here starts driving the real `MarkerGate` at a
-    machine that is not there — a failure with no line in this file pointing
-    at its cause.
-
-    So the assertion is on what makes the inertness HARMLESS rather than on
-    the name: while no `import` stage is bound, no body asks for a gate and
-    nothing reads the attribute either way. The day a stage named `import`
-    appears, this fails, and K.7 has to point `gated` at whatever it really
-    called the method — with `raising=True`, which by then it can afford.
-
-    K.6 bound `conf` and left this green on purpose: it binds no `import`
-    stage and adds no `_gate`, so the inertness is still harmless and the
-    fixture still has nothing to be re-pointed at. The task number in this
-    docstring was K.6 until then, which is the wrong one — see the module
-    docstring.
-
-    The name is asked about too, but through `GATE_METHOD_AT_IMPORT`: `gated`
-    is autouse and puts `_gate` on the class, so a `hasattr` in here would
-    answer True on this branch and the check would pass for the wrong reason.
-    """
-    assert (
-        "import" not in engine(Recorder()).stage_names()
-    ), "K.7 bound the import stage: point `gated` at the real gate method, with raising=True"
-    assert (
-        not GATE_METHOD_AT_IMPORT
-    ), "`_gate` exists now, so `gated` can and must patch it with raising=True"
 
 
 def test_the_module_constants_are_the_shared_template_s_own_spellings() -> None:
@@ -1299,13 +1233,14 @@ def test_the_seams_carry_every_new_double_through_to_the_engine() -> None:
 
 
 def test_the_bound_stages_run_in_order_and_record_the_recorded_ones(tmp_path: Path) -> None:
-    """End to end over the stages bound so far; K.7 inserts `import` between them.
+    """End to end over the whole tuple; K.7 inserted `import` between them.
 
-    Also drives `lay_sql`/`on_clone`, so the SQL fixtures the later tasks import
-    are proved to land under the source that owns them — and it is the only
-    test here that reaches `_write_dockerfile`, `_extract` and `_mmaps` through
-    `run()` rather than by calling the bodies, so each `Stage` really is wired
-    to its method and the two long stages really do sit after the build.
+    Also drives `lay_sql`/`on_clone`, so the SQL fixtures the import spends are
+    proved to land under the source that owns them — and it is the only test
+    here that reaches `_write_dockerfile`, `_extract`, `_mmaps` and `_import`
+    through `run()` rather than by calling the bodies, so each `Stage` really
+    is wired to its method and the two long stages really do sit after the
+    build.
     """
     rec = Recorder()
     server_dir = tmp_path / "srv"
@@ -1321,6 +1256,7 @@ def test_the_bound_stages_run_in_order_and_record_the_recorded_ones(tmp_path: Pa
         "--- mmaps",
         "--- conf",
         "--- start-db",
+        "--- import",
         "--- up",
         "--- ready",
     ]
@@ -1334,6 +1270,7 @@ def test_the_bound_stages_run_in_order_and_record_the_recorded_ones(tmp_path: Pa
         "extract",
         "mmaps",
         "conf",
+        "import",
     )
     # The pair really landed, from the whole install rather than from a direct
     # call to the body, and the password is in neither: the stage renders from
@@ -2705,3 +2642,360 @@ def test_conf_is_recorded_and_sits_between_mmaps_and_start_db() -> None:
     conf_stage = next(stage for stage in stages if stage.name == "conf")
     assert conf_stage.recorded
     assert conf_stage.cancel_note == "", "a copy and a patch are seconds; a Stop costs nothing"
+
+
+# -- import -------------------------------------------------------------------
+
+
+IMPORTED_OLDER_PLAN = docker.ImportState(
+    "imported",
+    f"{sqlplan.MARKER_TABLE} holds plan 0000000000000000; this app's plan differs",
+    complete=True,
+)
+"""A finished import recorded by a DIFFERENT plan than the one this app ships.
+
+`MarkerGate` reads any marker row as `imported` whatever its hash, and the hash
+lives in `detail`, which the family never parses. The fixture is the
+interesting one for that reason: a mismatched hash is a finished import from an
+older app, not a reason to import over it.
+"""
+
+
+def server_with_sql(tmp_path: Path) -> Path:
+    """A server dir holding every file the shipped plan names, under the source that owns it."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    lay = lay_sql(server_dir, SQL)
+    for source in ENTRY.emulator.sources:
+        dest = server_dir / source.dest
+        dest.mkdir(parents=True, exist_ok=True)
+        lay(dest)
+    return server_dir
+
+
+def ready_to_import(*answers: docker.ImportState) -> Recorder:
+    """A Recorder whose database container is up, answering the probe as told.
+
+    `db_started` is what lets `Recorder.probe()` give any answer but
+    `unreadable` — the real probe reaches the databases through `docker exec`,
+    so with nothing running it cannot say `absent` either. The import stage
+    runs after `start-db` for exactly that reason.
+    """
+    rec = Recorder()
+    rec.db_started = True
+    rec.probe_answers = list(answers)
+    return rec
+
+
+def plan_files_in_order() -> list[str]:
+    """The first line of every dump the plan applies, in the order `expand()` must apply them.
+
+    Derived from the plan rather than written out: phases in data order, then
+    each pattern's own files, and `lay_sql` names each file after its own path
+    so the line the client receives says which file it is. Statements are not
+    here — they carry no `-- <path>` line — and that is what makes the caller's
+    filter honest.
+    """
+    order: list[str] = []
+    for phase in SQL.phases:
+        for pattern in list(phase.files) + list((phase.into_each or {}).values()):
+            if "*" in pattern:
+                names = [pattern.replace("*", f"{n:04d}") for n in (1, 2)]
+            else:
+                names = [pattern]
+            order += [f"-- {name}" for name in names]
+    return order
+
+
+def entry_with_sql(plan: SqlPlan) -> CatalogEntry:
+    """`ENTRY` carrying a different `install.native.cmangos.sql`, still installable on linux."""
+    assert ENTRY.install.native is not None and CMANGOS is not None
+    data = CMANGOS.model_copy(update={"sql": plan})
+    native_block = ENTRY.install.native.model_copy(update={"cmangos": data})
+    return ENTRY.model_copy(
+        update={"install": ENTRY.install.model_copy(update={"native": native_block})}
+    )
+
+
+def engine_with_sql(plan: SqlPlan, rec: Recorder) -> CmangosInstaller:
+    """An engine over a patched SQL plan, carrying the same test gate `engine()` attaches."""
+    eng = engine_for(entry_with_sql(plan), rec)
+    eng._test_gate = native.CallableGate(rec.probe, rec.reset)  # type: ignore[attr-defined]
+    return eng
+
+
+def one_statement_plan(*statements: str) -> SqlPlan:
+    """The shipped plan with its phases replaced by one statement-only phase.
+
+    Statements and no files, so nothing has to be laid on disk and what is
+    asserted is the text that reached the client rather than a glob's ordering.
+    """
+    return SQL.model_copy(
+        update={
+            "phases": (SqlPhase(name="tokens", into=ENTRY.databases.world, statements=statements),)
+        }
+    )
+
+
+def test_schemas_answers_for_every_database_name_the_shipped_plan_spells() -> None:
+    """Keyed by NAME and not by role (A10): `sqlplan` looks the plan's own spellings up here.
+
+    Enumerated off the plan, so the question asked is the one
+    `sqlplan._check_plan_schemas()` asks — a name it cannot find is a refusal
+    raised before a single directory is listed, which would put the import's
+    failure two stages away from the mapping that caused it.
+
+    `Databases.schema_map()` is the role-keyed mapping this must not be: it
+    answers `world` -> `mangos`, and every name below is on the wrong side of
+    that arrow.
+    """
+    schemas = engine(Recorder())._schemas()
+    named = {
+        *SQL.create,
+        SQL.marker_db,
+        *(rule.db for rule in SQL.verify),
+        *(data.db for data in SQL.player_data),
+    }
+    for phase in SQL.phases:
+        if phase.into is not None:
+            named.add(phase.into)
+        named.update(phase.into_each or {})
+    assert named, "the shipped plan names no database at all; this fixture proves nothing"
+    assert named <= set(schemas), sorted(named - set(schemas))
+    assert all(schemas[name] == name for name in named)
+
+
+def test_schemas_carries_the_entrys_databases_and_nothing_the_entry_does_not_own() -> None:
+    """The other half: a name outside the entry is absent, so `sqlplan` can refuse it."""
+    schemas = engine(Recorder())._schemas()
+    db = ENTRY.databases
+    assert set(schemas) == {db.auth, db.characters, db.world, *db.extra}
+    assert "acore_world" not in schemas
+
+
+def test_the_import_applies_the_plans_dumps_in_the_plans_own_order(tmp_path: Path) -> None:
+    """Phases in data order; within a phase, each pattern's files in natural order."""
+    rec = ready_to_import(ABSENT)
+    list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    fed = [line for line in rec.sql_calls if line.startswith("-- ")]
+    assert fed == plan_files_in_order()
+
+
+def test_phase_zero_creates_the_plans_schemas_before_the_first_dump_is_streamed(
+    tmp_path: Path,
+) -> None:
+    """`create_schemas()` first, and it creates the plan's OWN names.
+
+    The first thing the client is handed names the first schema `create` lists,
+    which is what a mapping keyed by role could not produce: it would raise on
+    the lookup instead, and nothing would be created at all.
+    """
+    db = DB_FACTS
+    rec = ready_to_import(ABSENT)
+    said = list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    first = SQL.create[0]
+    assert rec.sql_calls[0] == (
+        f"CREATE DATABASE IF NOT EXISTS `{first}` CHARACTER SET {db.charset};"
+    )
+    dumps = [i for i, line in enumerate(rec.sql_calls) if line.startswith("-- ")]
+    assert dumps and min(dumps) > 0
+    assert any(db.user in line for line in said), "the log says whose user was created"
+
+
+def test_the_completion_marker_is_written_after_every_verify_rule_and_last_of_all(
+    tmp_path: Path,
+) -> None:
+    """The ordering the next install press depends on.
+
+    `MarkerGate` reads a marker row as `imported` whatever else is true, so a
+    marker written before the checks — or before the last dump — would leave a
+    hollow world that every later press skips. Both halves are asserted over
+    the same run because they are one ordering, not two.
+    """
+    rec = ready_to_import(ABSENT)
+    said = list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    marker_at = next(i for i, s in enumerate(rec.sql_calls) if sqlplan.MARKER_TABLE in s)
+    asked = {rule.query for rule in SQL.verify}
+    verify_ats = [i for i, s in enumerate(rec.sql_calls) if s in asked]
+    assert len(verify_ats) == len(SQL.verify), rec.sql_calls
+    assert marker_at > max(verify_ats)
+    assert marker_at == len(rec.sql_calls) - 1
+    assert said[-1] == "The databases are imported and marked complete."
+
+
+def test_the_import_asks_the_databases_what_state_they_are_in_exactly_once(
+    tmp_path: Path,
+) -> None:
+    """The spine probes; the family watches that answer rather than asking again.
+
+    A second probe is a second question. Between the two the databases can have
+    become something else, and the branch this stage then takes would not be
+    the branch the spine's table took — the spine would have said "run" over a
+    database this stage then treats as finished, or the reverse.
+    """
+    rec = ready_to_import(ABSENT)
+    list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    assert rec.calls.count("probe") == 1, rec.calls
+
+
+def test_the_import_leaves_a_finished_one_alone_even_when_an_older_plan_wrote_it(
+    tmp_path: Path,
+) -> None:
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    said = list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    assert rec.sql_calls == [], "nothing was sent to the database"
+    assert any("leaving them alone" in line for line in said), said
+
+
+def test_the_import_leaves_a_populated_database_that_is_complete_alone(tmp_path: Path) -> None:
+    """`populated` + `complete` is a finished import, and it is not the `imported` branch.
+
+    It has to be read off the SAME answer the spine's table returned on: the
+    spine returns for it without importing, so a family recognising only
+    `imported` would go on and run the whole plan over a database with a
+    person's characters in it.
+    """
+    full = docker.ImportState("populated", "every schema has tables and rows", complete=True)
+    rec = ready_to_import(full)
+    list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    assert rec.sql_calls == []
+
+
+def test_the_import_clears_a_half_written_database_before_it_runs(tmp_path: Path) -> None:
+    rec = ready_to_import(PARTIAL, IMPORTED)
+    rec.reset_answer = (ENTRY.databases.world,)
+    said = list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    assert rec.calls.index("reset") < rec.calls.index("sql")
+    assert any(f"Cleared {ENTRY.databases.world}" in line for line in said), said
+    assert any(sqlplan.MARKER_TABLE in s for s in rec.sql_calls), "and the import then ran"
+
+
+def test_the_import_refuses_a_database_that_already_holds_somebodys_data(tmp_path: Path) -> None:
+    rec = ready_to_import(POPULATED_HALF)
+    with pytest.raises(InstallerError, match="already hold data"):
+        list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    assert rec.sql_calls == []
+
+
+def test_the_import_refuses_a_database_that_could_not_be_asked(tmp_path: Path) -> None:
+    """No `db_started`, so the probe answers `unreadable` the way the real one does."""
+    rec = Recorder()
+    with pytest.raises(InstallerError, match="could not be asked"):
+        list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    assert rec.sql_calls == []
+
+
+def test_a_warn_phase_failure_names_the_file_by_its_server_relative_path_and_carries_on(
+    tmp_path: Path,
+) -> None:
+    """`on_error: warn` is the scripts' `2>/dev/null` made visible, not made fatal."""
+    phase = next(p for p in SQL.phases if p.on_error == "warn" and p.files)
+    failing = phase.files[0].replace("*", "0001")
+    rec = ready_to_import(ABSENT)
+    rec.failing_sql = f"-- {failing}"
+    said = list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    assert any(failing in line for line in said), said
+    assert any(sqlplan.MARKER_TABLE in s for s in rec.sql_calls), "the import still finished"
+
+
+def test_a_fail_phase_failure_stops_the_import_and_leaves_no_marker(tmp_path: Path) -> None:
+    phase = next(p for p in SQL.phases if p.on_error == "fail" and p.files)
+    failing = phase.files[0].replace("*", "0001")
+    rec = ready_to_import(ABSENT)
+    rec.failing_sql = f"-- {failing}"
+    with pytest.raises(InstallerError, match=re.escape(failing)):
+        list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    assert not any(sqlplan.MARKER_TABLE in s for s in rec.sql_calls)
+
+
+def test_a_verify_shortfall_refuses_and_writes_no_marker(tmp_path: Path) -> None:
+    """The count the database answered reaches the refusal, and no marker is written.
+
+    `4242` fails the first rule, passes the second, and appears nowhere else in
+    the sentence: the family's summary of the RULES quotes every `min` and every
+    query, so a refusal that had lost `verify()`'s own answer would still name
+    the rule. The number is the only part that can only have come from the
+    database.
+    """
+    rec = ready_to_import(ABSENT)
+    rec.query_answer = "4242\n"
+    with pytest.raises(InstallerError) as refusal:
+        list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    said = str(refusal.value)
+    assert "4242" in said, said
+    assert SQL.verify[0].query in said
+    assert "No completion marker was written" in said
+    assert not any(sqlplan.MARKER_TABLE in s for s in rec.sql_calls)
+
+
+def test_a_verify_rule_that_could_not_be_answered_is_a_refusal_and_not_a_marker(
+    tmp_path: Path,
+) -> None:
+    """A database that will not answer is not a database that answered zero."""
+
+    def unanswerable(*args: object, **kwargs: object) -> str:
+        raise docker.DockerCommandError("Error: No such container: yulon-tbc-db")
+
+    rec = ready_to_import(ABSENT)
+    with pytest.raises(InstallerError, match="No such container"):
+        list(engine(rec, sql_query=unanswerable)._import(context(server_with_sql(tmp_path))))
+    assert not any(sqlplan.MARKER_TABLE in s for s in rec.sql_calls)
+
+
+def test_a_phase_statement_reaches_the_client_with_its_tokens_filled_in(tmp_path: Path) -> None:
+    """Statements are filled through the one `composegen.fill`; dumps never are.
+
+    The value asserted is one only the install knows — the entry's database
+    user — arriving in the text the client was handed, rather than that a fill
+    happened.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(ABSENT)
+    plan = one_statement_plan("SELECT '{{DB_USER}}' AS who")
+    list(engine_with_sql(plan, rec)._import(context(server_dir)))
+    assert f"SELECT '{DB_FACTS.user}' AS who" in rec.sql_calls, rec.sql_calls
+
+
+def test_a_phase_statement_naming_the_password_is_filled_from_the_secret_half(
+    tmp_path: Path,
+) -> None:
+    """The shipped Tortoise plan writes `IDENTIFIED BY '{{DB_PASSWORD}}'` as a statement.
+
+    So the import spends `_secret_tokens()` and not `_public_tokens()`. Handed
+    the public half, `expand()` refuses the unknown token and nothing is
+    applied at all — which is why the assertion is that the password ARRIVED,
+    and not that some mapping was passed.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(ABSENT)
+    plan = one_statement_plan("CREATE USER 'x'@'%' IDENTIFIED BY '{{DB_PASSWORD}}'")
+    list(engine_with_sql(plan, rec)._import(context(server_dir)))
+    assert f"CREATE USER 'x'@'%' IDENTIFIED BY '{DB_PASSWORD}'" in rec.sql_calls, rec.sql_calls
+
+
+def test_the_import_cancel_note_is_said_at_the_import_and_nowhere_else(tmp_path: Path) -> None:
+    """A4: the spine says every stage's note, so the body yields none of its own.
+
+    Read off a whole install rather than off `stages()`, because a
+    `cancel_note=` keyword that is present but bound to the wrong stage reads
+    identically in the tuple — the shape of the AzerothCore incident
+    `test_the_build_cancel_note_is_said_at_the_build_and_not_before_every_stage`
+    is written against.
+    """
+    rec = Recorder()
+    said = install(rec, tmp_path / "srv", client_folder(tmp_path))
+    at = said.index("--- import")
+    assert said[at + 1] == native.IMPORT_CANCEL_NOTE
+    assert said.count(native.IMPORT_CANCEL_NOTE) == 1
+
+
+def test_import_is_recorded_and_sits_between_start_db_and_up() -> None:
+    """Order and bookkeeping, because each is one keyword in `stages()`."""
+    stages = engine(Recorder()).stages()
+    names = [stage.name for stage in stages]
+    at = names.index("start-db")
+    assert names[at + 1 : at + 3] == ["import", "up"]
+    stage = next(s for s in stages if s.name == "import")
+    assert stage.recorded, "a finished import must not be re-run by a resume"

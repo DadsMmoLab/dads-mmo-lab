@@ -25,12 +25,14 @@ says run.
 a file and not the state file: a state file must never be the thing that
 claims a secret exists.
 
-`STAGE_NAMES` is the whole tuple from the start; `stages()` binds the six the
-spine already owns, and K.3-K.7 insert the rest in that order — `import` is
-what is left. The two are allowed to disagree in the meantime
-because nothing in the app reads `STAGE_NAMES` — `stage_names()`, derived from
-`stages()`, is what the spine validates a resume against — and because this
-class is not in `FAMILIES` until the tuple is whole. K.8 pins the equality.
+`STAGE_NAMES` and `stages()` name the same twelve stages in the same order as
+of K.7, which bound `import` — the last one outstanding. They were allowed to
+disagree while the family was being built, because nothing in the app reads
+`STAGE_NAMES` — `stage_names()`, derived from `stages()`, is what the spine
+validates a resume against — and because this class is not in `FAMILIES` until
+K.8 puts it there. K.8 is also what pins the equality with a test; on this
+branch nothing asserts it, so the agreement above was checked by hand
+(2026-09-02) and is not held by anything.
 """
 
 from __future__ import annotations
@@ -39,18 +41,20 @@ import os
 import queue
 import threading
 from collections.abc import Callable, Iterator
-from dataclasses import fields
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import ClassVar, cast
 
 from yulon import docker, platform
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CmangosData, NativeInstall
-from yulon.catalog.families import conf, dockerfile, extract
+from yulon.catalog.families import conf, dockerfile, extract, sqlplan
 from yulon.catalog.installer import InstallerError
 from yulon.catalog.native import (
     BUILD_CANCEL_NOTE,
+    IMPORT_CANCEL_NOTE,
     INSTALL_REALM_HOST,
+    ImportGate,
     Secrets,
     Stage,
     StageContext,
@@ -196,6 +200,7 @@ class CmangosInstaller(StagedInstaller):
             Stage("mmaps", self._mmaps, cancel_note=extract.MMAPS_CANCEL_NOTE),
             Stage("conf", self._conf),
             Stage("start-db", self.stage_start_db, recorded=False),
+            Stage("import", self._import, cancel_note=IMPORT_CANCEL_NOTE),
             Stage("up", self.stage_up, recorded=False),
             Stage("ready", self.stage_ready, recorded=False),
         )
@@ -611,6 +616,191 @@ class CmangosInstaller(StagedInstaller):
         for path in changed:
             yield f"Patched {path.name}."
 
+    def _import(self, ctx: StageContext) -> Iterator[str]:
+        """The spine decides (probe → skip/refuse/reset); this family imports when it says run.
+
+        `stage_import()` is called with `service=None`, so it runs the
+        five-branch table over this family's `ImportGate` and returns without
+        importing anything (A7): there is no compose one-shot in a CMaNGOS
+        install, the SQL is applied from here. What the table DECIDED is read
+        off the gate's last answer rather than probed a second time — see
+        `_Remembering` — because a second probe is a second question, and
+        between the two the answer can differ.
+
+        Then, in order: phase 0 (the schemas, the app user and its grants,
+        skipped by `create_schemas()` itself when `create` is empty, which is
+        Tortoise), every phase in the plan's own order with its statements
+        filled through the one token mapping, `sqlplan.verify()`, and only then
+        the marker.
+
+        **The marker is written after verify and never before**, and that
+        ordering is the whole of this stage's safety argument: `MarkerGate`
+        reads a marker row as `imported` whatever the plan hash says, so a
+        marker over a database that failed its checks is a hollow world the
+        next install press would leave alone forever. A verify that fails, or
+        that could not be run at all, therefore raises with no marker written,
+        and the next press imports again.
+
+        The mapping is `_secret_tokens()` and not `_public_tokens()`: a phase
+        statement may legitimately carry `{{DB_PASSWORD}}` — the shipped
+        Tortoise plan's `CREATE USER ... IDENTIFIED BY` does — and none of what
+        is filled here is written into the build context. `sqlplan.expand()`
+        fills statements only; a dump file is streamed as it lies on disk.
+        """
+        plan = self._data().sql
+        gate = _Remembering(self._gate(ctx))
+        yield from self.stage_import(ctx, gate, None)
+        seen = gate.last
+        if seen is not None and (
+            seen.state == "imported" or (seen.state == "populated" and seen.complete)
+        ):
+            return
+        db = self._native().db
+        container = self.entry.container_spec().db
+        password = ctx.secrets.db_password
+        schemas = self._schemas()
+        try:
+            if plan.create:
+                yield f"Creating the databases ({', '.join(plan.create)}) and the {db.user} user."
+                sqlplan.create_schemas(
+                    plan,
+                    container=container,
+                    client=db.client,
+                    password=password,
+                    schemas=schemas,
+                    user=db.user,
+                    charset=db.charset,
+                    exec_stdin=self._seams.exec_stdin,
+                )
+            runs = sqlplan.expand(plan, ctx.server_dir, schemas, self._secret_tokens(ctx))
+        except InstallerError:
+            # Ahead of the broad clause, as everywhere else in this class:
+            # `InstallerError` subclasses `RuntimeError`, and every refusal
+            # `create_schemas()` and `expand()` raise is already the sentence a
+            # user reads.
+            raise
+        except (RuntimeError, OSError) as exc:
+            raise InstallerError(f"The database import could not be prepared: {exc}") from exc
+        yield f"Importing {len(runs)} SQL steps over {len(plan.phases)} phases. This takes a while."
+        yield from self._stream(
+            lambda sink: sqlplan.apply(
+                runs,
+                container=container,
+                client=db.client,
+                password=password,
+                exec_stdin=self._seams.exec_stdin,
+                sink=sink,
+                cancel=ctx.cancel,
+            )
+        )
+        self._check_cancel(ctx.cancel)
+        try:
+            failing = sqlplan.verify(
+                plan,
+                container=container,
+                client=db.client,
+                password=password,
+                sql_query=self._query_seam(),
+            )
+        except InstallerError:
+            raise
+        except (RuntimeError, OSError) as exc:
+            raise InstallerError(
+                f"The import finished but its databases could not be checked "
+                f"({type(exc).__name__}: {exc}). No completion marker was written, so the next "
+                "install press checks again."
+            ) from exc
+        if failing:
+            rules = "; ".join(
+                f"{rule.db}: `{rule.query}` must answer at least {rule.min}" for rule in plan.verify
+            )
+            raise InstallerError(
+                f"The import finished but these checks failed: {', '.join(failing)}. The rules "
+                f"are {rules}. No completion marker was written, so the next install press "
+                "imports again rather than starting a server with an empty world."
+            )
+        yield f"Checked {len(plan.verify)} database rule(s); every one holds."
+        try:
+            sqlplan.write_marker(
+                plan,
+                container=container,
+                client=db.client,
+                password=password,
+                exec_stdin=self._seams.exec_stdin,
+            )
+        except InstallerError:
+            # `write_marker()` goes through `sqlplan._run_sql()`, which turns
+            # both of its failures into an `InstallerError` already naming the
+            # marker. Without this arm the broad clause below would catch that
+            # refusal — `InstallerError` is a `RuntimeError` — and wrap one
+            # finished sentence inside another.
+            raise
+        except (RuntimeError, OSError) as exc:
+            raise InstallerError(
+                f"The import finished but its completion marker could not be written "
+                f"({type(exc).__name__}: {exc})."
+            ) from exc
+        yield "The databases are imported and marked complete."
+
+    def _gate(self, ctx: StageContext) -> ImportGate:
+        """The family's `ImportGate`: the SQL plan's marker table, asked through the seams.
+
+        A method rather than a value on the class because it needs the password
+        out of `ctx.secrets`, which the spine resolves after construction. It
+        is also the one seam this family's own tests replace, so the gate they
+        drive and the gate an install drives are the same argument to
+        `stage_import()`.
+        """
+        db = self._native().db
+        return sqlplan.MarkerGate(
+            self._data().sql,
+            container=self.entry.container_spec().db,
+            client=db.client,
+            password=ctx.secrets.db_password,
+            schemas=self._schemas(),
+            sql_query=self._query_seam(),
+            exec_stdin=self._seams.exec_stdin,
+        )
+
+    def _query_seam(self) -> sqlplan.SqlQuery:
+        """`Seams.sql_query` under the name `sqlplan` declares for it. A cast, nothing else.
+
+        The same shape `_conf` carries for `copy_from_image` and `_user_args`
+        for `platform_id`, and here it is the `wsl_distro` erasure `Seams`
+        documents: `Seams.sql_query` is spelled
+        `Callable[[str, str, str, str | None, str], str]` — five positionals
+        and no keyword — while `sqlplan.SqlQuery` is a Protocol that also
+        declares `wsl_distro`, so mypy refuses the pass-through even though
+        every real implementation takes it.
+
+        Checked 2026-09-02: `docker.sql_query`, `Recorder.sql_query` and every
+        double in `test_families_cmangos.py` accept `wsl_distro`, and neither
+        `sqlplan.verify()` nor `MarkerGate` passes anything but `None` from
+        this family — no install-side caller holds a distro (see `Seams`). So
+        the cast asserts a keyword that is present and unused, not one that is
+        missing.
+        """
+        return cast("sqlplan.SqlQuery", self._seams.sql_query)
+
+    def _schemas(self) -> dict[str, str]:
+        """The identity mapping over this game's schema NAMES, keyed by name (A10).
+
+        Not keyed by role. `sqlplan` looks a plan's `into`, `into_each` keys,
+        `create`, `marker_db`, `verify.db` and `player_data.db` up in here, and
+        every one of those spells a database the way `catalog.json` spells it —
+        `mangos`, `realmd`, `tw_world` — never `world` or `auth`. A mapping
+        keyed by role would answer for none of them, and `expand()` refuses a
+        name it cannot find rather than passing it through, so the import would
+        stop before it wrote anything.
+
+        Identity and not a rename, because the plan's names ARE the server's
+        names; the mapping exists so that a plan naming a database this game
+        does not have is refused by one check in `sqlplan`, in one place, ahead
+        of every listing and every statement.
+        """
+        db = self.entry.databases
+        return {name: name for name in (db.auth, db.characters, db.world, *db.extra)}
+
     # -- what only the engine knows ---------------------------------------
 
     def _data_dir(self, ctx: StageContext) -> Path:
@@ -966,6 +1156,33 @@ class CmangosInstaller(StagedInstaller):
             if isinstance(exc, InstallerError):
                 raise exc
             raise InstallerError(f"the step could not be run: {exc}") from exc
+
+
+@dataclass
+class _Remembering:
+    """An `ImportGate` that keeps its last probe, so the family need not probe twice.
+
+    `stage_import()` yields strings and returns nothing, so a caller that has
+    to know WHICH branch it took has two choices: probe again, or watch. This
+    watches. Probing again is not the same question asked twice — between the
+    two answers the import could have been finished by another press, and the
+    branch this stage then takes would be the one the spine did not.
+
+    `last` is None only before the first probe, which cannot happen after
+    `stage_import()` has run: its first act is `gate.probe()`. The family still
+    tests it, because "cannot happen" is a claim about a function in another
+    file.
+    """
+
+    inner: ImportGate
+    last: docker.ImportState | None = None
+
+    def probe(self) -> docker.ImportState:
+        self.last = self.inner.probe()
+        return self.last
+
+    def reset(self) -> tuple[str, ...]:
+        return self.inner.reset()
 
 
 def _write_secret(path: Path, value: str) -> None:
