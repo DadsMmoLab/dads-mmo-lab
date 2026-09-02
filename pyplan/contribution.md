@@ -94,7 +94,7 @@ in `install.platforms` is stopped by the engine's preflight with
 `installer.unsupported_platform_message()` — the sentence the Catalog tile hangs on its disabled
 Install button. An entry with no `install.native` block is refused by `installer_for()` itself,
 and `main()` prints that refusal and exits 1;
-`test_catalog.py::test_every_shipped_entry_is_installable_somewhere_and_names_its_family` is what
+`test_catalog.py::test_every_shipped_entry_is_installable_on_linux_and_names_its_family` is what
 keeps a shipped entry from reaching that branch.
 
 ## Building the desktop binary
