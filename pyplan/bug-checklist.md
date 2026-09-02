@@ -1513,8 +1513,14 @@ On Linux Yu'lon ships as an **AppImage** (`.github/workflows/release.yml`, "Pack
 ships `catalog/installers/` as a **tree** (`build/pylauncher.spec:29-31`), so the file lands at
 `usr/bin/catalog/installers/steam-deck/` within the bundle. An AppImage self-mounts under
 `/tmp/.mount_<name>XXXXXX/` with a fresh random suffix per launch and unmounts on exit — so the path
-the user Browses to exists only while that particular run is live. The documented flow therefore works
-**once**: on the second launch the shortcut points into a mount that is gone.
+the user Browses to exists only while that particular run is live.
+
+**Sharpened 2026-09-02 by the review of the F.5 branch; my first wording was too generous.** I wrote that
+the flow "works once, and on the second launch the shortcut points into a mount that is gone". The mount
+exists only while **that Yu'lon process is running**, so the shortcut is dead the moment the user closes
+Yu'lon — including within the first session, and including the very first time they press play in gaming
+mode, since gaming mode is exactly the situation where Yu'lon is not also running. The remedy and the
+severity are unchanged; the failure is earlier and more certain than "the second launch".
 
 **Verified here, 2026-09-01:** the AppImage is the Linux release artifact; a plain tarball is built
 beside it (the workflow says why: "an AppImage cannot run without FUSE"); the script ships inside the
@@ -1565,8 +1571,32 @@ inline, a value read from a file, anything not a declared field — is invisible
 
 **What the capability split changes, and what it does not.** `feat/7.3-token-sets-by-capability` gives
 `_public_tokens(server_dir)` no `StageContext` at all, so `ctx.secrets` is not in lexical scope where
-the build-context mapping is built. That closes the case above at the source, and it is the right level
-— the fix is structural rather than a guard someone must remember. **It does not close the general
+the build-context mapping is built.
+
+**CORRECTED 2026-09-02, and the correction is the point of this entry.** What stood here was: *"That
+closes the case above at the source, and it is the right level — the fix is structural rather than a
+guard someone must remember."* **That was wrong, and I wrote it.** Two independent reviewers refuted it
+by execution, each one refuting the round before:
+
+- `_public_tokens(self, server_dir)` can reach the password through `self.resolve_secrets(server_dir)`,
+  a public inherited method taking exactly the two things in scope. K.3's `db-password` stage wrote the
+  password into `server_dir` two stages earlier, so `resolve_secrets` no longer mints — it reads the real
+  install password back off disk. Six lines, full suite green, `ENV ROOT_PASSWORD=…` in a Dockerfile.
+- Then: it needs neither a method nor a cache. `generate-compose` writes the plaintext password into
+  `<server_dir>/.env` as `DB_ROOT_PASSWORD=`, **one stage before `build`**. A file read in
+  `_public_tokens` leaks it, uncached and deterministic. Full suite green again.
+
+So the split is **a price, not a wall**: it raises the cost of writing that leak, and it removes the
+secret from the mapping by default. It does not make the leak unwritable, and no arrangement of
+parameters can, while the build context itself holds the plaintext — which it has since K.3.
+
+**The lesson, which is the reason to keep this paragraph rather than silently correct it:** every round
+here stated a guarantee, and the next reviewer found it too strong. A claim of the form *"X cannot
+happen"* is a standing invitation, and three of them in a row were wrong. State what was measured and
+when. See [[guards-that-prove-declarations]] — this is the same failure at the level of a design
+argument rather than a test.
+
+**It does not close the general
 case**: a secret MINTED inside `_public_tokens` rather than passed into it is still unreachable by a
 by-name refusal, because it was never a field of anything.
 
@@ -1629,6 +1659,62 @@ read it:
 dropping its stop-at-top-level rule was killed by a TBC-only equality test, not by the cross-check. And
 that helper's `^  ([A-Za-z0-9-]+):` excludes `_`, so an underscored service key would read as undefined:
 loud, therefore acceptable, but undocumented.
+
+### 31. `wsl.find_servers()` collapses fifteen situations into one sentence — 2026-09-02, OPEN
+
+The same defect as the adoption guard fixed at `57130ff0`, one level up, and load-bearing. Found by
+that branch's implementer, confirmed and **enlarged** by its reviewer, who counted the cases rather
+than accepting "at least seven".
+
+`adopt_from_wsl()` opens with `found = wsl.find_servers()` / `if not found:` and then tells the user
+*"No servers found in WSL — No Docker Compose projects were found in the running WSL distros."*
+
+An empty tuple is returned for **at least fifteen distinguishable situations**, counted from
+`yulon/wsl.py` and `yulon/platform.py`:
+
+*`distro_states()` yields nothing:* (1) `_which(WSL_PROGRAM)` is None — no `wsl.exe` on PATH;
+(2) `wsl -l -q` raises `OSError`; (3) it raises `TimeoutExpired` at the 60 s probe timeout;
+(4) any other `SubprocessError`; (5) a non-zero exit — the WSL service wedged;
+(6) **the listing genuinely names no distro, the one case that means what the dialog says**.
+
+*distros exist, none is probed:* (7) every distro is stopped and none is in `include`.
+
+*a distro is probed and answers nothing:* (8) `docker_prefix(distro)` is None; (9) compose exited
+non-zero — daemon down inside the distro, compose absent, permission denied; (10) `_compose_ls()`
+raises `OSError`/`SubprocessError`, including the same 60 s timeout.
+
+*compose answered, nothing survives parsing:* (11) stdout is not JSON — an older compose without
+`--format json`, or an error printed to stdout; (12) JSON that is not a list; (13) every project lacks
+`Name` or `ConfigFiles`; (14) every project's first config path starts with `/mnt/` — Docker Desktop
+integration distros; (15) `wsl_unc_path()` returns None for every path.
+
+The dialog does mention stopped distros, which covers (7). **The other thirteen are asserted as fact**,
+and the user is sent off to start a distro that may already be running.
+
+**The sharpest evidence that this is a real defect and not a reading**: `wsl.py` already argues this
+exact point about itself, two functions above, in `missing_distro_problem()` —
+
+> **An EMPTY listing is not evidence of anything.** `_wsl_list()` answers `()` for four different
+> things — no wsl.exe on PATH, `OSError`, a timeout, and a non-zero exit — and only one of them means
+> "there are no distros". […] Reading that silence as "the distro is gone" sent the user off to
+> re-adopt a server that was never missing
+
+The rule was written where a distro is accused of being deleted, and not applied where a user is told
+they have no servers. **A rule that lives in one function's docstring protects one function** — the
+boundary argument again: if it has to be remembered at the next site, it is at the wrong level.
+
+**Not fixed with the adoption branch, deliberately**: it changes `find_servers()`'s return type and
+every caller and test, and four agents were live in the tree. It is the natural next step after that
+branch, and it is bigger than it looks — the return type has to carry *why* it is empty, the way
+`Identification` now carries why a folder is unidentified.
+
+**Also confirmed by the same review, separate and trivial:** `wotlk_modules.applier()`'s docstring says
+*"pass `sql=None` explicitly via a caller that has no database to get every SQL step reported as
+skipped instead"*. `sql=None` is the parameter's default, and the body is `runner = sql; if runner is
+None: runner = DockerSql(...)` — so passing it explicitly is indistinguishable from omitting it and
+both build a `DockerSql`. `Applier` genuinely has that skip-everything mode (`apply.py` documents it);
+`applier()` intercepts every route to it. Same family: a `None` default folding "unset" into
+"explicitly absent". Fix is a flag or deleting the sentence.
 
 ### One thing worth keeping
 
