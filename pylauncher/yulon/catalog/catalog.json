@@ -909,7 +909,8 @@
                 "/opt/tortoise/src/tools/mmap/mmapSettings.txt"
               ],
               "min_files": 500,
-              "required": false
+              "required": false,
+              "success_codes": [1]
             },
             "conf": {
               "source_dir": "/opt/tortoise/etc",

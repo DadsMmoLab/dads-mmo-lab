@@ -24,9 +24,10 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from yulon import docker, platform
-from yulon.catalog.catalog import ExtractPlan, ExtractTool, MmapPlan, RetrySpec
+from yulon.catalog.catalog import ExtractPlan, ExtractTool, MmapPlan, RetrySpec, load_catalog
 from yulon.catalog.families import extract
 from yulon.catalog.installer import InstallerError
 
@@ -1806,6 +1807,84 @@ def test_mmaps_shortfall_refuses_when_required_and_warns_when_not(tmp_path: Path
     assert again.specs == [], "an optional shortfall is recorded, not regenerated on every resume"
 
 
+def test_the_exit_status_that_means_finished_comes_from_the_plan_in_both_directions(
+    tmp_path: Path,
+) -> None:
+    """Zero is a convention, not a promise, and MoveMapGen breaks it.
+
+    The Tortoise fork's `main()` ends `return silent ? 1 : finish("Movemap
+    build is complete!", 1)` (tools/mmap/src/generator.cpp:352, read on the box
+    that built it), so a Tortoise build that wrote every map exits 1. CMaNGOS
+    mangos-classic ends `return 0`. The version of this stage that hard-coded
+    `!= 0` threw away a finished 2.5 GB Tortoise run -- 58 maps, 2075 tiles,
+    about four hours of CPU -- and printed "map generation failed" while
+    quoting the tool's own last line saying it had just written a file
+    (yulon-ubuntu, 2026-09-03).
+
+    Both directions are asserted, and the second is the one that carries the
+    weight. A stage that accepted `0 or plan.success_codes` would pass the
+    first half and be wrong in exactly the way that matters: it would still be
+    reading its own opinion rather than the catalog's fact. So the second half
+    hands a plan that declares ONLY 1 a generator that exited 0 -- which for
+    that tree means it stopped somewhere in argument handling -- and requires a
+    refusal. There is no arrangement of a hard-coded zero that passes both.
+    """
+    run(PLAN, Runner(FULL), tmp_path)
+    finished = MmapPlan(argv=MMAPS.argv, min_files=3, required=True, success_codes=(1,))
+    runner = Runner(MMAPS_WRITES, fail={"/opt/bin/MoveMapGen": (1, "Movemap build is complete!")})
+    said = mmaps(finished, runner, tmp_path)
+    assert any("mmaps: done" in line for line in said), said
+    evidence = extract.read_evidence(tmp_path / "server" / "data")
+    assert (
+        evidence is not None and evidence.record_for(extract.MMAPS_TOOL) is not None
+    ), "a generator that reported the status its own source calls success was not recorded"
+
+    other = tmp_path / "zero"
+    run(PLAN, Runner(FULL), other)
+    with pytest.raises(InstallerError) as caught:
+        mmaps(finished, Runner(MMAPS_WRITES), other)
+    assert "exit 0" in str(caught.value)
+    assert "reports 1 when it finishes" in str(caught.value), str(caught.value)
+    assert extract.read_evidence(other / "server" / "data").record_for(extract.MMAPS_TOOL) is None
+
+
+def test_the_shipped_catalog_says_which_status_each_generator_reports() -> None:
+    """The declaration is worth nothing unless the shipped entries carry the value.
+
+    Asserting that `MmapPlan` HAS a `success_codes` field would pass while every
+    entry defaulted to zero and Tortoise stayed broken. So the three entries are
+    read out of the real catalog and their values pinned to what their own
+    upstream source returns -- checked by reading the C, not by watching a run
+    and writing down whatever it happened to print.
+    """
+    plans = {
+        game.id: game.install.native.cmangos.mmaps
+        for game in load_catalog().games
+        if getattr(getattr(game.install, "native", None), "cmangos", None) is not None
+    }
+    assert plans["wow-tortoise"].success_codes == (1,), (
+        "the Tortoise generator returns 1 when it finishes; a catalog that says 0 throws the "
+        "whole build away"
+    )
+    assert plans["wow-tbc"].success_codes == (0,)
+    assert plans["wow-vanilla"].success_codes == (0,)
+
+
+def test_a_sentinel_can_never_be_declared_a_success() -> None:
+    """`success_codes` is exit statuses only, because two negatives already mean something.
+
+    `docker.CANCELLED_RETURNCODE` is -1 and a signal death is spelled -N. If an
+    entry could name either, a Stop would be read as a finished build, the stage
+    would be recorded, and every later resume would skip it -- the permanently
+    partial set this whole stage is arranged around.
+    """
+    for bad in (-1, -9, 256):
+        with pytest.raises(ValidationError):
+            MmapPlan(argv=MMAPS.argv, min_files=3, success_codes=(bad,))
+    with pytest.raises(ValidationError):
+        MmapPlan(argv=MMAPS.argv, min_files=3, success_codes=())
+
+
 def test_mmaps_before_extraction_is_refused(tmp_path: Path) -> None:
     """A12: no evidence file means no maps to read, and the tool is not started to find out.
 
@@ -1851,6 +1930,12 @@ def test_the_wipe_target_is_built_from_the_data_dir_and_a_constant_no_catalog_na
     `..`, so `data_dir / MMAPS_DIR` cannot leave `data_dir` however either is
     spelled. `MmapPlan` carrying no folder field is the third leg: no catalog
     entry has anywhere to write a different name.
+
+    The field set is pinned rather than a `"folder" not in` check on purpose:
+    the question is not whether today's spelling of a folder field is absent,
+    it is whether ANY new field slipped in without someone asking it.
+    `success_codes` was added on 2026-09-03 and answers it -- a tuple of exit
+    statuses, which `run_mmaps` puts in an `in` test and never in a path.
     """
     parameters = inspect.signature(extract.run_mmaps).parameters
     assert set(parameters) == {
@@ -1866,7 +1951,8 @@ def test_the_wipe_target_is_built_from_the_data_dir_and_a_constant_no_catalog_na
     folder = Path(extract.MMAPS_DIR)
     assert folder.parts == (extract.MMAPS_DIR,)
     assert not folder.is_absolute() and folder.anchor == "" and ".." not in folder.parts
-    assert set(MmapPlan.model_fields) == {"argv", "min_files", "required"}
+    assert set(MmapPlan.model_fields) == {"argv", "min_files", "required", "success_codes"}
+    assert all(isinstance(code, int) for code in MmapPlan(argv=("x",)).success_codes)
 
 
 def test_the_run_hands_rmtree_the_mmaps_folder_and_a_skip_hands_it_nothing(
@@ -1984,7 +2070,14 @@ def _mmaps_fell_short() -> Runner:
 MMAPS_ENDINGS = [
     pytest.param(_mmaps_stopped, "was stopped", id="stopped"),
     pytest.param(_mmaps_never_started, "could not be started", id="never-started"),
-    pytest.param(_mmaps_crashed, "failed (exit 139)", id="failed"),
+    # The clause after the semicolon is the point: a user reading "exit 139" has
+    # no way to know whether that status meant anything, and the answer differs
+    # between the generators this app installs.
+    pytest.param(
+        _mmaps_crashed,
+        "failed (exit 139; this server's generator reports 0 when it finishes)",
+        id="failed",
+    ),
     pytest.param(_mmaps_fell_short, "at least 3 were expected", id="fell-short"),
 ]
 

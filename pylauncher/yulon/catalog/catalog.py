@@ -337,6 +337,40 @@ class MmapPlan(_Strict):
             "does not."
         ),
     )
+    success_codes: tuple[int, ...] = Field(
+        default=(0,),
+        min_length=1,
+        description=(
+            "Which exit statuses mean the generator FINISHED. Not a style choice: MoveMapGen's "
+            "convention is a property of each upstream tree and they disagree. CMaNGOS "
+            "mangos-classic ends `return 0` (contrib/mmap/src/generator.cpp, read 2026-09-03); "
+            'the Tortoise fork ends `return silent ? 1 : finish("Movemap build is complete!", '
+            "1)` (tools/mmap/src/generator.cpp:352), so a complete Tortoise build exits 1. "
+            "Measured, not guessed: the run that forced this wrote 58 maps and 2075 tiles "
+            "(2.5 GB) on yulon-ubuntu and was then thrown away as a failure. Its other endings "
+            "are -1/-2/-3, which a process reports as 255/254/253, so 1 does not overlap "
+            "anything Tortoise says on the way out."
+        ),
+    )
+
+    @field_validator("success_codes")
+    @classmethod
+    def _real_exit_statuses(cls, value: tuple[int, ...]) -> tuple[int, ...]:
+        """0-255 only, so no entry can declare a sentinel as success.
+
+        `docker.CANCELLED_RETURNCODE` is -1 and `run_attached` spells "killed by
+        signal N" as -N. Both are outside the range a process exit status can
+        occupy, and both mean something a catalog entry must never be able to
+        call finished -- a Stop read as success would record the stage and skip
+        it forever after.
+        """
+        bad = [code for code in value if not 0 <= code <= 255]
+        if bad:
+            raise ValueError(
+                f"success_codes must be process exit statuses (0-255), got {bad}; a negative "
+                "value is a cancel or signal sentinel and can never mean success"
+            )
+        return value
 
 
 class ConfPatch(_Strict):

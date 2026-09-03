@@ -1163,9 +1163,20 @@ def run_mmaps(
             f"map generation could not be started, so no movement data was written."
             f"{cleared} {docker.last_words(run.tail)}"
         )
-    if run.returncode != 0:
+    # NOT `!= 0`. "Zero means success" is a POSIX convention, not a promise the
+    # tool made, and MoveMapGen breaks it: the Tortoise fork's main() ends
+    # `return silent ? 1 : finish("Movemap build is complete!", 1)`, so a build
+    # that wrote every map exits 1. The version that hard-coded 0 threw away a
+    # finished 2.5 GB Tortoise run -- 58 maps, 2075 tiles, ~4 hours -- and
+    # reported "map generation failed" while quoting the tool's own last line
+    # saying it had just written a file (yulon-ubuntu, 2026-09-03). The codes
+    # live in the catalog because which ones mean finished is a fact about each
+    # upstream tree, and the three entries do not agree.
+    if run.returncode not in plan.success_codes:
+        expected = ", ".join(str(code) for code in plan.success_codes)
         raise InstallerError(
-            f"map generation failed (exit {run.returncode}).{cleared} Its last words were: "
+            f"map generation failed (exit {run.returncode}; this server's generator reports "
+            f"{expected} when it finishes).{cleared} Its last words were: "
             f"{docker.last_words(run.tail)}"
         )
     wanted = {MMAPS_DIR: plan.min_files}
