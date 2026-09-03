@@ -1778,3 +1778,132 @@ def test_a_claimed_folder_whose_leftovers_are_not_a_checkout_is_still_refused(
         "the ownership record is doing its job; the remaining refusal must not be the one "
         "that asserts the app did not write these bytes: " + message
     )
+
+
+# ---------------------------------------------------------------------------
+# Bug §38: the ownership claim moved AHEAD of the first mutating stage
+# (2026-09-03). The tests below are about WHEN the record is written, which is
+# the whole of the fix: `5eef8d9f` wrote it on the `except InstallerError`
+# path, and SIGKILL, a power cut and an unhandled exception never reach an
+# `except` block -- so the endings a person actually meets still left a folder
+# this app would refuse to recognise.
+
+
+def test_the_folder_is_claimed_before_the_first_stage_writes_a_single_byte(
+    tmp_path: Path,
+) -> None:
+    """Asked from INSIDE the clone, which is the only place the answer means anything.
+
+    A test that drives a failure and then finds a state file cannot tell an
+    early claim from a late one -- both leave the same file on disk. So the
+    question is put while stage one is still running: at the moment the clone
+    seam is called, the record must already be there, because that is the
+    instant after which every ending, cooperative or not, leaves bytes in the
+    folder.
+
+    The claim also has to NAME this install rather than merely exist: a record
+    carrying any other `install_id` is refused by `_guard()` on the next run
+    as "a copy of another install", which is the same dead end wearing a
+    different sentence.
+    """
+    server_dir = tmp_path / "wow"
+    seen: list[native.InstallState | None] = []
+
+    def look_then_clone(spec: git.CloneSpec) -> None:
+        seen.append(native.read_state(server_dir, valid=("clone-core",)))
+        (spec.dest / ".git").mkdir(parents=True, exist_ok=True)
+
+    rec = Recorder()
+    install(rec, server_dir, clone=look_then_clone)
+
+    assert seen, "the clone seam was never reached"
+    claimed = seen[0]
+    assert claimed is not None, (
+        "stage one started writing into a folder this app had not yet claimed; anything that "
+        "ends the process from here leaves a folder the next run refuses as somebody else's"
+    )
+    assert claimed.install_id == composegen.install_id(
+        server_dir, platform_id=lambda: "macos"
+    ), "the folder was claimed under a different install id"
+    assert claimed.game_id == ENTRY.id
+    assert claimed.completed == (), "a claim is not a record of progress"
+
+
+def test_a_death_that_runs_no_except_block_still_leaves_the_folder_claimed(
+    tmp_path: Path,
+) -> None:
+    """The failure that produced the bug, as close as a unit test can get to it.
+
+    The TBC-on-Windows gate was KILLED mid-clone -- its ssh session went away
+    and took the process with it. Nothing about that runs an `except` clause,
+    which is why recording ownership in one covered every failure except the
+    one being fixed. `BaseException` is the honest proxy: `run()` catches
+    `InstallerError` and nothing wider, so a `KeyboardInterrupt` out of stage
+    one traverses exactly the code a signal would have skipped.
+    """
+    server_dir = tmp_path / "wow"
+
+    def die_hard(spec: git.CloneSpec) -> None:
+        (spec.dest / ".git").mkdir(parents=True, exist_ok=True)
+        (spec.dest / "half-a-checkout").write_bytes(b"x")
+        raise KeyboardInterrupt
+
+    rec = Recorder()
+    with pytest.raises(KeyboardInterrupt):
+        install(rec, server_dir, clone=die_hard)
+
+    assert (server_dir / "half-a-checkout").is_file(), "the fixture wrote nothing"
+    assert (server_dir / native.STATE_FILE).is_file(), (
+        "a death that ran no handler left the folder unclaimed, which is the bug this fix "
+        "exists for and the exact shape the previous fix could not cover"
+    )
+
+
+def test_an_install_into_the_users_own_checkout_still_writes_nothing(tmp_path: Path) -> None:
+    """The one folder the early claim must NOT touch, and why it is safe to write in the others.
+
+    `_guard()` refuses every non-empty folder outright with a single deliberate
+    exception: a directory holding `.git`, deferred so the clone stage can say
+    whose fork it is rather than "this folder is not empty". That exception is
+    the reason bug §38 recorded an early write as blocked -- and it is also the
+    reason it is not, because `started_empty` names exactly that case and
+    excludes it. Asserted here in the same file as the two tests above so the
+    pair is read together: claimed early when the folder is ours, never when it
+    is somebody's repository.
+    """
+    server_dir = tmp_path / "wow"
+    rec = Recorder()
+    rec.remotes[server_dir] = "https://github.com/someone/else.git"
+    (server_dir / ".git").mkdir(parents=True)
+    with pytest.raises(InstallerError):
+        install(rec, server_dir)
+    assert not (server_dir / native.STATE_FILE).exists(), (
+        "an install refused because it is somebody else's checkout left a file in their "
+        "repository"
+    )
+    assert sorted(p.name for p in server_dir.iterdir()) == [".git"]
+
+
+def test_a_folder_that_will_not_hold_the_claim_is_refused_before_any_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A claim that could not be written is a refusal, and it says which file and why.
+
+    `write_state()` logs its own `OSError` and returns, which is right for the
+    callers recording PROGRESS -- a lost progress note costs a redone stage.
+    Here it would silently rebuild the whole bug, so the file is read back and
+    its absence refused. The late version of this fix could not refuse anything:
+    it ran with an `InstallerError` already in flight, and raising would have
+    replaced the sentence the user was about to read. Nothing is in flight now.
+
+    `write_state` is stubbed rather than a real unwritable path being provoked,
+    because permissions behave differently on the three platforms this suite
+    runs on and what is under test is the READ-BACK, not the OS.
+    """
+    server_dir = tmp_path / "wow"
+    monkeypatch.setattr(native, "write_state", lambda *_a, **_k: None)
+    rec = Recorder()
+    with pytest.raises(InstallerError, match="would not accept") as refusal:
+        install(rec, server_dir)
+    assert native.STATE_FILE in str(refusal.value)
+    assert rec.clones == [], "work started in a folder whose claim could not be written"

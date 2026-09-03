@@ -2085,7 +2085,7 @@ claiming the behaviour should say where it came from rather than assert it as fa
 PID 1 does not receive an unhandled signal sent from outside — `docker kill --signal=SEGV` on a
 `sleep` left it `Status=running`. A crash has to come from INSIDE the process. That is why the
 probes above squeeze the stack rather than signalling the container.
-### 38. An interrupted first stage still leaves a folder the app disowns — 2026-09-03, OPEN
+### 38. An interrupted first stage still leaves a folder the app disowns — 2026-09-03, FIXED
 
 `_run_one()` writes `.yulon-install.json` only after a stage FINISHES. A stage-one failure
 therefore leaves `src/` and no record, and `_guard()` refuses the retry with "is not empty and was
@@ -2154,3 +2154,51 @@ anything can observe it. `test_a_folder_this_app_filled_and_then_failed_in_is_st
 now asserts the recorded `install_id` by VALUE anyway — the mask is real, and it is not a reason
 for the tests to hold no opinion about what was claimed. Verified by mutating `_record_error()`
 instead: two tests fail.
+
+**FIXED 2026-09-03 by moving the claim ahead of stage one — and the obstacle recorded above was
+not real.** `_claim_before_writing()` replaces `_claim_if_ours()`: the record is written
+immediately after `_guard()` accepts the folder and before any stage runs, so SIGKILL, a power cut
+and an unhandled exception are covered along with the cooperative failures. Finding 1 closed.
+
+**Why the early write turned out to be safe, which this entry had wrong.** It said three tests
+forbid writing before stage one and that the "whose checkout is this" question had to be moved
+ahead of the claim first. Re-read: it is already ahead. `_guard()` refuses every non-empty folder
+outright, with ONE deliberate exception — a directory holding `.git`, deferred so the clone stage
+can name whose fork it is rather than say "this folder is not empty". So the only folder that can
+reach stage one non-empty and unclaimed is somebody's own checkout, and `started_empty` is exactly
+the predicate that excludes it. All three of the tests in question drive a `.git` directory; not
+one of them constrains an empty folder. Proved by mutation rather than by reading: deleting the
+`started_empty` guard so every folder is claimed fails precisely those three
+(`test_a_first_install_into_the_users_own_checkout_is_refused_and_left_alone`,
+`test_an_enforcing_box_still_recognises_a_users_own_checkout_of_this_repository`,
+`test_a_failure_before_anything_was_written_leaves_no_state_file`) plus the new one written beside
+them. They are the guardrail, not the obstacle.
+
+**Finding 2 narrowed, not eliminated.** `started_empty` is still an observation without a lock, but
+it is now read and acted on in consecutive statements instead of being carried across a
+multi-hour install and spent at the end. A second install, a dropped-in file or a remount can
+still race it; that race is microseconds wide rather than hours.
+
+**Finding 3 closed.** A claim that does not land is a refusal naming the file, checked by reading
+the path back — `write_state()` logs its own `OSError` and returns, which is right for the callers
+recording PROGRESS and wrong for this one, where a silent loss rebuilds the whole bug. The late
+version could not refuse anything: it ran with an `InstallerError` already in flight and raising
+would have replaced the sentence the user was about to read. Nothing is in flight at the new site.
+
+**Finding 4 (the two guards disagreeing) closed as a consequence.** `stage_clone_sources()` still
+asks its own question — is there a `.git` at this dest — and still refuses non-git leftovers,
+which is correct, because the clone seam `shutil.rmtree`s a destination it does not recognise.
+What has changed is that the case is now unreachable from an interrupted install of ours: the
+folder is claimed before anything is written, so the retry is a resume rather than a stranger.
+
+**Tests.** `test_the_folder_is_claimed_before_the_first_stage_writes_a_single_byte` asks the
+question from INSIDE the clone seam, which is the only place the answer distinguishes an early
+claim from a late one — both leave the same file on disk afterwards.
+`test_a_death_that_runs_no_except_block_still_leaves_the_folder_claimed` raises `KeyboardInterrupt`
+out of stage one: `run()` catches `InstallerError` and nothing wider, so that traverses exactly the
+code a signal would have skipped. Three mutants, three kills.
+
+**Still owed:** the refusal wording. "is not empty and was not created by this app" is now
+unreachable for our own interrupted installs, but it is still the sentence a user meets when they
+point the app at a folder holding something else, and it still asserts who created the contents
+rather than what is observable — that no valid Yu'lon ownership record exists.
