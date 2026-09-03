@@ -37,6 +37,8 @@ module, not in a fork of it here.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from yulon.apply import DockerSql
 from yulon.controller_wow_tbc import docker_ctl
 
@@ -94,6 +96,34 @@ def sql_for(root_password: str, *, wsl_distro: str | None = None) -> DockerSql:
         schemas=docker_ctl.ENTRY.schema_map(),
         wsl_distro=wsl_distro,
     )
+
+
+def sql_for_install(server_dir: Path, *, wsl_distro: str | None = None) -> DockerSql:
+    """`sql_for()` with the password read from the install at `server_dir`.
+
+    TBC was the one CMaNGOS package without this, and the gap was not cosmetic.
+    This entry's password plan is `generated` -- the installer mints a password
+    and writes it to `.db_password` -- so there is no fixed value any caller can
+    carry, and without this function a caller wanting a TBC account had no way
+    to obtain the one thing it needs. Vanilla and Tortoise both had it; TBC's
+    plan is identical to theirs, so the asymmetry was an omission rather than a
+    difference between the games (review, 2026-09-03).
+
+    Raises:
+        AccountError: the entry names a password file and it cannot be read.
+            Refused rather than defaulted -- falling back to a shared literal is
+            how every SQL-backed control came to authenticate as root with the
+            password "password" (2026-08-26), and a guess here fails later, at
+            the database, in a sentence about access denial that names nothing.
+    """
+    password = docker_ctl.ENTRY.install.db_password(server_dir)
+    if password is None:
+        raise AccountError(
+            f"this install's database password is not knowable: "
+            f"{docker_ctl.ENTRY.install.password.file} could not be read in {server_dir}. "
+            "Nothing was asked of the database."
+        )
+    return sql_for(password, wsl_distro=wsl_distro)
 
 
 def create_account(

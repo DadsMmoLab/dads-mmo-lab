@@ -151,6 +151,6 @@ def sql_for_install(server_dir: Path, *, wsl_distro: str | None = None) -> Docke
         plan = game.entry().install.password
         raise AccountError(
             f"this install's database password is not knowable: {plan.file} could not be read "
-            f"in {server_dir}. Nothing was written."
+            f"in {server_dir}. Nothing was asked of the database."
         )
     return sql_for(password, wsl_distro=wsl_distro)
