@@ -438,7 +438,7 @@
     converting Abandonedorcbarracks.wmo`, naming a model file rather than the missing directory.
     Fixed in `extract.make_out_dirs()` (2ce89000), with the same hole found by reading one stage
     later in `run_mmaps`, which WIPES `mmaps/` and never put it back.
-- [ ] 7.4c WoW TBC conf + import + ready — every `warn` phase justified or flipped; marker written; interrupted import → `partial` → reset → re-run; second Install press ends in seconds; realmd's ready line recorded; client logs in
+- [x] 7.4c WoW TBC conf + import + ready — every `warn` phase justified or flipped; marker written; interrupted import → `partial` → reset → re-run; second Install press ends in seconds; realmd's ready line recorded; client logs in
   - **Substantially done 2026-09-02 on `m910q`; deliberately NOT ticked.** `conf`, `start-db`,
     `import`, `up` and `ready` all completed and `WoW TBC is installed and running` was printed;
     three containers Up.
@@ -472,12 +472,61 @@
        decoration — it is the interval in which an install that has not started yet is likely to
        cross the floor before it finishes, which is exactly what happened.
 
-  - **Still owed:** the interrupted `import` → `partial` → reset → re-run path, which has never
+  - **The last thing owed, the interrupted `import` → `partial` → reset → re-run path, was run on
+    2026-09-04 on `m910q` and is what ticks this box.** Evidence:
+    `pyplan/gates/7.4c-m910q/` — both install logs, the watcher's own log, and the three scripts.
+
+    * **The interruption is real, not carved.** A fresh `wow-tbc` install into `/home/pk/tbc-7.4c`
+      ran unattended from 23:25:21, with `watch_74c.py` beside it counting applied SQL steps in
+      the log and holding a `SIGKILL`. At **01:11:52** it wrote
+      `KILLING pid 826323 after 22 SQL files - this is the interruption`, then
+      `killed; process still present: False`. A hand-built half-written database would have
+      proved only that the probe can read what we wrote, which is not the question.
+    * **22 of 232 steps, and the shape of that matters.** The re-press applied **232** SQL steps;
+      the first press had applied **22** (`grep -c ' -> '` on each log). The 22 are not the small
+      ones — they include the `Full_DB` load — which is why the wreckage was already substantial:
+      `mangos` **184 tables / 259 MB**, `characters` 68 / 2 MB, `realmd` 13, `logs` 3, and **no
+      marker row**.
+    * **`probe` reads `partial`, asked read-only and through the installer's own gate.**
+      `controller_wow_tbc.repair.import_gate()` builds the same `sqlplan.MarkerGate` from the same
+      plan, container and generated password that `stage_import()` will build seconds later, so
+      this is not a second implementation agreeing with itself. It answered
+      `partial — mangos, realmd, characters, logs exist but there is no import marker, so the
+      import never finished`. The controller's own translation was recorded in the same breath
+      and is `unreadable`, exactly as `controller_wow_tbc/repair.py`'s docstring says it must be:
+      the installer may drop on this evidence and a controller may not.
+    * **Preflight refused the re-press first, and that is a result, not an obstacle.** The box was
+      at **39 GB** free against the entry's 40 GB floor (`min_data_root_gb` 20 + `min_server_dir_gb`
+      20, added because both land on one drive). It refused with one row, not two — the merged
+      `free space on Docker's disk and the server folder` row 7.4c's warn-phase work introduced.
+      Cleared by reclaiming only re-pullable things (`docker builder prune`, 1.137 GB, plus
+      `mysql:8.4`, `mariadb:10.6` and `ubuntu:22.04` — pulls, not builds); nothing built and
+      nothing anybody's. At **42 GB** the same row reads `[warn] 42 GB free; 60 GB is the
+      comfortable figure`, which is the band 7.4c already justified.
+    * **The re-press drove the whole chain by itself**, in `stage_import()`'s own words:
+      `The databases read as partial: …` → `Clearing the half-written databases first (…)` →
+      four `dropping <name>: it was left half-written by an interrupted import` warnings →
+      `Cleared mangos, realmd, characters, logs.` → `Importing 232 SQL steps over 12 phases.`
+      → `The databases are imported and marked complete.`
+    * **It finished: `WoW TBC is installed and running`, `INSTALL RETURNED CLEANLY`, 01:38:48.**
+      Whole re-press **13m40s** (01:25:08 → 01:38:48), of which reset + the full 232-step import
+      was **65 s** (01:25:08 → 01:26:13); the rest is the world server loading.
+    * **The marker names this run and no other.** `mangos.yulon_install` holds
+      `plan_hash 7936812f10440345`, `finished_unix 1788477973` = **2026-09-03 23:26:13 UTC** =
+      01:26:13 local — the re-press's own import minute. There was no marker before it.
+    * **The data is new, not the survivor of the drop.** `mangos` went **184 → 197 tables** and
+      **259 → 426 MB**, `characters` 68 → 82. Content on the finished server: **18,799 creature
+      templates, 6,599 quests, 30,396 items, 14,215 gameobjects**. Every one of those rows was
+      written after a `DROP DATABASE`, which is the point.
+    * `realmd` again logged **`Added realm id 1, name 'MaNGOS'`** and `tbc-mangosd` reached
+      **`CMANGOS: World initialized`**; all three containers up.
+  - **What the earlier note said was still owed** — the same chain, which until this run had never
     been exercised on a CMaNGOS entry. (This read "on any entry" until 2026-09-04 and was
     over-broad: line 213 of this file records the identical chain live-gated on WotLK on
     2026-08-23 — `ac-db-import` killed 19 s in, probe reads `partial`, `acore_world` dropped
-    and re-imported in 195 s, back at 316 tables, 10/10 checks. What is unproven is the
-    CMaNGOS family's own `MarkerGate`, a different implementation of the same five branches.)
+    and re-imported in 195 s, back at 316 tables, 10/10 checks. What was unproven was the
+    CMaNGOS family's own `MarkerGate`, a different implementation of the same five branches, and
+    that is what the 2026-09-04 run above exercised.)
 
   - **CLIENT LOGIN DONE 2026-09-03.** The owner drove a real 2.4.3 client on the Hyper-V host
     against this server over Tailscale (`100.78.24.50`). The evidence is what the SERVER recorded,

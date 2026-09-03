@@ -1,0 +1,92 @@
+22:21:42  activity terminal installed on this machine (PK-M910q)
+22:22:55  standing order from now on: every action Claude takes on this machine is announced here first
+23:00:50  replacing the activity terminal script so only one window can ever run
+00:40:43  m910q back online for Yu-lon. Catching up the log: while this box was unreachable I confirmed the three AppImage fixes on cold clean-desktop checkpoints - Fedora 44 (Wayland) and Arch+Xfce (X11, no FUSE). Child env clean 17/17 on both, libxcb-cursor bundled on both. The .tar.gz fallback was verified on the FUSE-less Arch box, which is the case the AppImage cannot serve. Both test VMs are shut down; only GPU-VM1 is running.
+01:00:21  Yu-lon 6.5 Linux gate: starting yulon-fedora from clean-desktop to run a full WotLK install through the packaged AppImage. Hunting Baerthes report of a silent stall after docker comes up. VM gets shut down when the run ends.
+01:34:29  Yu-lon Fedora gate: Docker Engine installed by hand (the three commands Yulon itself printed - it cannot do them, sudo -n never prompts). pk now in docker group. Restarting the launcher and clicking Install again to reach the real install stages.
+01:44:48  Yu-lon Fedora: root cause proven - first GUI install on Linux always dead-ends (picker demands an existing folder, script refuses an existing folder, GUI answers no). Moving the launcher onto the VMs real desktop so PK can watch it happen live.
+02:00:35  Yu-lon: starting yulon-ubuntu at 10GB (down from 24) to rebuild the AppImage with the first-install fix. PKs win11 session holds 20GB so headroom is tight; will restore 24GB afterwards.
+02:34:55  Yu-lon: fix committed (4d681ad5). Building an AppImage from fix/first-install-dead-end on yulon-ubuntu, then re-running the GUI install on yulon-fedora to prove the dead-end is gone.
+02:57:28  Yu-lon: AppImage c44fdd6 built and verified to carry the fix. Shutting yulon-ubuntu down and bringing yulon-fedora up for the live re-run - one at a time, the host cannot hold both beside win11.
+03:06:43  Yu-lon: live gate found the folder rule was dead code on the Linux path - fixed in 34b8302e. Swapping fedora down / ubuntu up to rebuild, then back again to re-test. Sequential because running both alongside win11 knocked them over earlier.
+08:01:27  Yu-lon: validating the new bash-guard test on this box - it skips on Windows so its assertions have never run.
+09:56:12  Yu-lon: PR #97 open. Shutting yulon-fedora down and restoring yulon-ubuntu to its 24GB profile. Only GPU-VM1 and PKs win11 left running.
+10:49:05  Yu-lon: starting two gates in parallel - Arch from clean-desktop (the generic install script variant nobody has run) and win11 from clean-debloated (the 6.3 clean-box gate). 24GB + 8GB + GPU-VM1 = 40GB, leaving ~24 for the host.
+15:34:58  Yu-lon: Arch gate COMPLETE - working WotLK server on clean Arch via the generic script variant, bots logging in, ports 3724/8085 listening. Shutting yulon-arch down; win11 keeps compiling.
+17:05:20  Yu-lon: PR #97 merged (0.6.52 cut). Windows blocker root-caused AND the fix proven - user 0:0 makes ac-db-import exit 0 on WSL2 9p mounts. PR #98 has the checklist notes. Shutting yulon-win11 down; only GPU-VM1 left.
+18:19:45  Yu-lon: proving a new CI bundle-closure check here - it must FAIL on the shipped v0.6.51 tarball and PASS on a fixed build.
+19:35:05  Yulon CI is red on the Yulon branch - reproducing the SELinux installer test failure here
+19:57:06  testing the ubuntu-22.04 build: does it start on glibc 2.35 where the shipped one died
+20:00:37  restoring yulon-win11 to clean-nested-virt for the native Windows install gate (PR #99)
+21:21:13  Windows gate stopped - Docker Desktop will not stay up on the VM; shutting yulon-win11 down with WSL and Docker installed so the next session resumes from there
+18:35:26  Claude: Tortoise server built and verified; WotLK containers left stopped
+22:18:06  Spiking a WSL console fix: running a docker attach through script(1) with a piped stdin, using a busybox stand-in container. No WoW server involved.
+23:13:35  Hunting the PySide6 segfault that fails Yulon CI ~1 run in 3: looping the pytest suite here until it crashes. No server touched.
+23:36:54  Restarting the throwaway AzerothCore test stack to gate the WSL console fix against a real worldserver console.
+23:40:44  Gating the console fix against the live tortoise-mangosd console: three read-only commands, detach not kill.
+23:46:17  Console gate finished. Cleaning up: removing the throwaway test containers and the segfault-hunt tree.
+14:49:49  Session start: setting up activity terminal and desktop env
+14:50:33  Opening activity terminal window on desktop
+14:51:15  Cloning dads-mmo-lab branch fix/installers-honour-chosen-folder into ~/yulon-run
+14:51:33  Setting up venv and installing pylauncher requirements
+14:54:14  Launching pylauncher GUI on desktop for adoption test
+14:55:15  Launcher window is up; taking screenshot
+14:55:36  Maximizing launcher window and scrolling to WoW Tortoise tile
+14:55:56  Clicking Use existing for WoW Tortoise
+14:56:13  Choosing tortoise-wow-server folder
+14:56:30  Typing TurtleWoW client path
+14:57:25  Clicking Refresh to check server status
+14:57:45  Opening Console tab
+14:58:27  Sending server info command in Console tab
+14:58:52  Opening Accounts tab
+14:59:33  Filling account creation form: testuser1
+14:59:51  Clicking Create account
+15:03:20  Opening Maintenance tab to test backups
+15:03:38  Clicking Back up now
+15:06:05  Opening Modules tab
+15:06:26  Opening Networking tab
+15:06:44  Clicking Show plan for LAN networking
+15:07:08  Switching to Internet play mode
+15:07:39  Checking self-update on Catalog tab
+15:11:27  Adopting WotLK/AzerothCore stack to test port conflict detection
+15:12:08  Clicking Start on AzerothCore WotLK stack to trigger port conflict with live Tortoise server
+15:12:51  Testing Follow worldserver log toggle for streaming output
+15:13:52  Testing account set password via raw console as a workaround check
+15:14:24  Sweep complete. Cleaning up: closing launcher GUI
+21:55:48  downloading Vanilla 1.12.1 client (4.97 GB, resumable) to ~/clients
+21:58:54  Vanilla client download COMPLETE
+22:04:00  downloading TBC 2.4.3 client (7.84 GB, resumable) to ~/clients
+22:04:26  extracting Vanilla 1.12.1 client zip
+22:05:48  Vanilla client ready at ~/clients/WoW-Client-1.12.1
+22:06:28  removed Vanilla zip (client extracted, reclaiming 5 GB)
+22:09:05  TBC client download COMPLETE
+22:23:04  verifying + extracting TBC 2.4.3 client zip
+22:25:34  TBC client ready at ~/clients/WoW-Client-2.4.3 (zip removed)
+22:37:51  freeing disk for new installs: pruning Docker build cache + removing the stopped old ac-* stack (Tortoise + clients stay)
+22:37:57  disk freed: 52G available
+09:58:09  Starting Tortoise launcher hunt: checking out fix/port-collisions and setting up pylauncher run
+09:58:20  Starting Tortoise completeness audit: checking map data, mangosd boot log, accounts, bots, and realmlist.
+10:02:16  Audit done: maps/vmaps/dbc are real and substantial, but mmaps were never generated, bots are configured for zero, the documented GM account is rank 0 not 3, and no character has ever been created.
+10:03:24  Testing fresh Tortoise adoption: removing existing state entry and re-adopting via the Use existing flow
+10:25:25  Tortoise launcher hunt complete: adoption, console, log streaming, accounts (mangos_sha), backups, and networking plan all exercised against the live server. Stack left running.
+10:26:30  Starting Tortoise WoW install hunt: checking running stack and launcher checkouts
+10:28:35  Round 1: running Tortoise installer into a NEW folder while the existing tortoise stack keeps running, to observe the new port guard
+10:30:37  Round 2: existing stack left alone, new install using custom ports 3725/8091/3307 into a fresh folder, launching full compile+extract+db+start under nohup
+10:35:01  Adversarial verify: checking the playerbots-zero-bots claim on the Tortoise stack
+10:35:12  Verifying the mmaps finding on the Tortoise install
+10:35:13  Verifier agent: checking a Start/Stop enablement claim in the launcher UI code. Read-only.
+10:35:47  Refuting a console double-print finding: reading Tortoise mangosd docker logs and the launcher console code
+10:36:44  Verifier: checking the Tortoise port-guard ordering finding. Reading code and the round-1 log only, no new install run.
+10:38:21  Refutation done: console double-print is the log stream doing its job, not a launcher defect
+10:39:29  Verifier done: Start/Stop window reproduced, harm claim refuted. Nothing changed.
+22:07:22  checklist agent: reading Tortoise gate logs (read-only)
+22:27:28  Verification agent: read-only checks of Tortoise gate claims (log sizes, disk, MPQ count)
+[claude] planning the 7.4c interrupted-import run
+[claude] 7.4c: fresh TBC install into ~/tbc-7.4c with a systemd-run watcher armed on the import
+[claude] stopping the m910q tbc server to free ports for the 7.4c run; restart with: docker start tbc-db tbc-realmd tbc-mangosd
+[claude] owner authorised deleting the m910q tbc test server for the 7.4c gate
+checking 7.4c watcher
+01:20:50  Phase 7 / 7.4c: probing the interrupted TBC import (read-only)
+01:24:14  Phase 7 / 7.4c: reclaiming disk so the re-press clears the 40 GB preflight floor
+01:25:08  Phase 7 / 7.4c: re-pressing Install on the interrupted TBC install (partial -> reset -> re-run)
+01:39:02  Phase 7 / 7.4c: install returned cleanly; capturing evidence

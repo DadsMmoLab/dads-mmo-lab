@@ -1,0 +1,1593 @@
+Installing WoW TBC into /home/pk/tbc-7.4c
+You can stop this at any time. What an install writes outside the folder below is named here rather than denied: the images this build produces and the volumes holding the database and the server data, which live in Docker's own storage — that is why the checks below look at the space on Docker's disk too; Docker itself, when no daemon answers yet (on Linux: system packages, a service, and the group you are asked about first); and this app's own settings and log, in its config folder. Starting the install again continues from where it stopped: source this app has finished cloning is never fetched, reset or moved, and the build is not run a second time once Docker confirms its images are there. Everything cheap runs again on every attempt — the compose files this app writes are put back the way the catalog says, the server-data download resumes and re-checks itself, and the database and server are started and waited for.
+Checking Docker.
+[pass] Docker: the daemon answered
+[pass] memory: Docker's VM has 15.5 GB
+[pass] compiler jobs vs memory: 2 parallel jobs against about 7 the memory affords
+[warn] free space on Docker's disk and the server folder: 42 GB free; 60 GB is the comfortable figure (the server folder and Docker's disk share one drive, so both needs add up)
+[pass] the server folder: /home/pk/tbc-7.4c looks usable
+[pass] sharing the folder with Docker: a container can read /home/pk/tbc-7.4c
+[pass] SELinux: not enforcing
+[pass] the server's ports: nothing else is using them
+[pass] the client folder: /home/pk/clients/WoW-Client-2.4.3 has a Data directory
+[pass] the client's expansion data: Data/expansion.MPQ is there
+[pass] the client's archives: 12 MPQ archives anywhere under /home/pk/clients/WoW-Client-2.4.3/Data
+[pass] the client's locale: locale archives in enGB
+[pass] the client's origin: nothing suggests a repack
+[pass] free space next to the client: 42 GB free on the drive holding the client
+[pass] sharing the client with Docker: a container can read the client folder
+Using /home/pk/tbc-7.4c (resuming)
+Already finished: clone-sources, write-dockerfile, generate-compose, build, extract, mmaps, conf
+2026-09-04 01:25:09 INFO [yulon.platform] holding this machine awake for the build: systemd-inhibit --what=idle:sleep --who=Yu'lon --why=installing a server sleep infinity
+--- clone-sources
+2026-09-04 01:25:09 INFO [yulon.git] containerized git: `run --rm --network none --cap-drop ALL --security-opt no-new-privileges --read-only -v /home/pk/tbc-7.4c/src/mangos-tbc:/git:ro -w /git --user 1000:1000 alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26 --no-optional-locks --attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904 -c core.attributesFile=/dev/null -c core.fsmonitor=false -c core.hooksPath=/dev/null -c core.autocrlf=false -c core.eol=lf -c http.version=HTTP/1.1 remote get-url origin` into /home/pk/tbc-7.4c/src/mangos-tbc
+cmangos/mangos-tbc is already in src/mangos-tbc; leaving it exactly as it is.
+2026-09-04 01:25:10 INFO [yulon.git] containerized git: `run --rm --network none --cap-drop ALL --security-opt no-new-privileges --read-only -v /home/pk/tbc-7.4c/src/mangos-tbc/src/modules/Bots:/git:ro -w /git --user 1000:1000 alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26 --no-optional-locks --attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904 -c core.attributesFile=/dev/null -c core.fsmonitor=false -c core.hooksPath=/dev/null -c core.autocrlf=false -c core.eol=lf -c http.version=HTTP/1.1 remote get-url origin` into /home/pk/tbc-7.4c/src/mangos-tbc/src/modules/Bots
+cmangos/playerbots is already in src/mangos-tbc/src/modules/Bots; leaving it exactly as it is.
+2026-09-04 01:25:10 INFO [yulon.git] containerized git: `run --rm --network none --cap-drop ALL --security-opt no-new-privileges --read-only -v /home/pk/tbc-7.4c/src/tbc-db:/git:ro -w /git --user 1000:1000 alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26 --no-optional-locks --attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904 -c core.attributesFile=/dev/null -c core.fsmonitor=false -c core.hooksPath=/dev/null -c core.autocrlf=false -c core.eol=lf -c http.version=HTTP/1.1 remote get-url origin` into /home/pk/tbc-7.4c/src/tbc-db
+cmangos/tbc-db is already in src/tbc-db; leaving it exactly as it is.
+Sources are in place.
+--- db-password
+The database password is already in .db_password; keeping it.
+--- write-dockerfile
+Dockerfile is already exactly what this install needs.
+.dockerignore is already exactly what this install needs.
+--- generate-compose
+Wrote .env
+--- build
+Stopping now leaves Docker finishing the build step it is already on, in the background. That is deliberate: the work it has done is kept, and starting this install again picks up from there instead of compiling it all a second time.
+The server is already built; skipping the compile.
+--- extract
+Finished tools are kept; only the tool that was interrupted runs again.
+Extracting server data from /home/pk/clients/WoW-Client-2.4.3 into /home/pk/tbc-7.4c/data (the client is read-only).
+dbc and maps: already extracted (dbc: 185 files, maps: 3586 files)
+vmap extract: already extracted (Buildings: 7171 files)
+vmap assemble: already extracted (vmaps: 8099 files)
+Extraction finished.
+--- mmaps
+Map generation restarts from the beginning; the extracted maps it reads are kept.
+Generating movement maps (this can take an hour or more).
+mmaps: already generated (mmaps: 2819 files)
+Map generation finished.
+--- conf
+The configuration files already say what this install needs.
+--- start-db
+Starting the database, which the import writes into.
+The database is up.
+--- import
+Databases left half-written are detected and cleared before the import is run again, so nothing here has to be undone by hand.
+The databases read as partial: mangos, realmd, characters, logs exist but there is no import marker, so the import never finished
+Clearing the half-written databases first (mangos, realmd, characters, logs exist but there is no import marker, so the import never finished).
+2026-09-04 01:25:13 WARNING [yulon.catalog.families.sqlplan] dropping mangos: it was left half-written by an interrupted import
+2026-09-04 01:25:13 WARNING [yulon.catalog.families.sqlplan] dropping realmd: it was left half-written by an interrupted import
+2026-09-04 01:25:13 WARNING [yulon.catalog.families.sqlplan] dropping characters: it was left half-written by an interrupted import
+2026-09-04 01:25:13 WARNING [yulon.catalog.families.sqlplan] dropping logs: it was left half-written by an interrupted import
+Cleared mangos, realmd, characters, logs.
+Creating the databases (mangos, realmd, characters, logs) and the mangos user.
+Importing 232 SQL steps over 12 phases. This takes a while.
+realmd base: src/mangos-tbc/sql/base/realmd.sql -> realmd
+characters base: src/mangos-tbc/sql/base/characters.sql -> characters
+logs base: src/mangos-tbc/sql/base/logs.sql -> logs
+world content: src/tbc-db/Full_DB/TBCDB_1.11.0_Vengeance_One_A_Cmangos_Story.sql.gz -> mangos
+content updates: src/tbc-db/Updates/0001_ace_cards.sql -> mangos
+content updates: src/tbc-db/Updates/0002_White_Punch_Card.sql -> mangos
+content updates: src/tbc-db/Updates/0003_knothide_leather_80.sql -> mangos
+content updates: src/tbc-db/Updates/0004_c.23593,23714.sql -> mangos
+content updates: src/tbc-db/Updates/0005_imp_spell_lists.sql -> mangos
+content updates: src/tbc-db/Updates/0006_vengeful_harbinger_fixes.sql -> mangos
+content updates: src/tbc-db/Updates/0007_misc_fix_1.sql -> mangos
+content updates: src/tbc-db/Updates/0008_IGNORE_COMBAT_flame_wave.sql -> mangos
+content updates: src/tbc-db/Updates/0009_cipher_of_damnation_fixes.sql -> mangos
+content updates: src/tbc-db/Updates/0010_on_nethery_wings_quest.sql -> mangos
+content updates: src/tbc-db/Updates/0011_underbog_giant_trample.sql -> mangos
+content updates: src/tbc-db/Updates/0012_chess_targeting.sql -> mangos
+content updates: src/tbc-db/Updates/0013_Hratha_yell.sql -> mangos
+content updates: src/tbc-db/Updates/0014_c.6742_spell_list.sql -> mangos
+content updates: src/tbc-db/Updates/0015_bladefist_last_yell.sql -> mangos
+content updates: src/tbc-db/Updates/0016_c.8617_path.sql -> mangos
+content updates: src/tbc-db/Updates/0017_dummy_loot_CREATOR_LOOT.sql -> mangos
+content updates: src/tbc-db/Updates/9999_Final_Misc_Cleanup_Queries.sql -> mangos
+ACID: src/tbc-db/ACID/acid_tbc.sql -> mangos
+dbc data: src/mangos-tbc/sql/base/dbc/original_data/CombatCondition.sql -> mangos
+dbc data: src/mangos-tbc/sql/base/dbc/original_data/DungeonEncounter.sql -> mangos
+dbc data: src/mangos-tbc/sql/base/dbc/original_data/FactionStore.sql -> mangos
+dbc data: src/mangos-tbc/sql/base/dbc/original_data/Spell.sql -> mangos
+dbc data: src/mangos-tbc/sql/base/dbc/original_data/SpellCone.sql -> mangos
+dbc data: src/mangos-tbc/sql/base/dbc/original_data/UnitCondition.sql -> mangos
+dbc data: src/mangos-tbc/sql/base/dbc/original_data/WorldStateExpression.sql -> mangos
+dbc data: src/mangos-tbc/sql/base/dbc/cmangos_fixes/Spell.sql -> mangos
+dbc data: src/mangos-tbc/sql/base/dbc/cmangos_fixes/SpellCone.sql -> mangos
+core updates: src/mangos-tbc/sql/updates/mangos/s2328_01_mangos_scriptdev2_tables.sql -> mangos
+2026-09-04 01:25:44 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2328_01_mangos_scriptdev2_tables.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2326_01_mangos_mangos_string' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2326_01_mangos_mangos_string required_s2328_01_mangos_scriptdev2_tables bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2326_01_mangos_mangos_string' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2328_01_mangos_scriptdev2_tables.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2326_01_mangos_mangos_string' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2329_01_mangos_creature_template.sql -> mangos
+2026-09-04 01:25:44 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2329_01_mangos_creature_template.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2328_01_mangos_scriptdev2_tables' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2328_01_mangos_scriptdev2_tables required_s2329_01_mangos_creature_template bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2328_01_mangos_scriptdev2_tables' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2329_01_mangos_creature_template.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2328_01_mangos_scriptdev2_tables' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2330_01_mangos_spell_data.sql -> mangos
+2026-09-04 01:25:44 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2330_01_mangos_spell_data.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2329_01_mangos_creature_template' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2329_01_mangos_creature_template required_s2330_01_mangos_spell_data bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2329_01_mangos_creature_template' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2330_01_mangos_spell_data.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2329_01_mangos_creature_template' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2331_01_mangos_event_linkedto.sql -> mangos
+2026-09-04 01:25:45 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2331_01_mangos_event_linkedto.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2330_01_mangos_spell_data' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2330_01_mangos_spell_data required_s2331_01_mangos_event_linkedto BIT(1) NULL DEFAULT NULL
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2330_01_mangos_spell_data' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2331_01_mangos_event_linkedto.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2330_01_mangos_spell_data' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2332_01_mangos_more_spell_data.sql -> mangos
+2026-09-04 01:25:45 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2332_01_mangos_more_spell_data.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2331_01_mangos_event_linkedto' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2331_01_mangos_event_linkedto required_s2332_01_mangos_more_spell_data bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2331_01_mangos_event_linkedto' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2332_01_mangos_more_spell_data.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2331_01_mangos_event_linkedto' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2334_01_mangos_flametongue.sql -> mangos
+2026-09-04 01:25:45 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2334_01_mangos_flametongue.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2332_01_mangos_more_spell_data' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2332_01_mangos_more_spell_data required_s2334_01_mangos_flametongue bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2332_01_mangos_more_spell_data' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2334_01_mangos_flametongue.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2332_01_mangos_more_spell_data' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2336_01_mangos_mangle.sql -> mangos
+2026-09-04 01:25:45 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2336_01_mangos_mangle.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2334_01_mangos_flametongue' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2334_01_mangos_flametongue required_s2336_01_mangos_mangle bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2334_01_mangos_flametongue' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2336_01_mangos_mangle.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2334_01_mangos_flametongue' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2338_01_mangos_item_extraflags.sql -> mangos
+2026-09-04 01:25:45 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2338_01_mangos_item_extraflags.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2336_01_mangos_mangle' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2336_01_mangos_mangle required_s2338_01_mangos_item_extraflags bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2336_01_mangos_mangle' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2338_01_mangos_item_extraflags.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2336_01_mangos_mangle' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2339_01_mangos_areatrigger_teleport_condition_id.sql -> mangos
+2026-09-04 01:25:45 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2339_01_mangos_areatrigger_teleport_condition_id.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2338_01_mangos_item_extraflags' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2338_01_mangos_item_extraflags required_s2339_01_mangos_areatrigger_teleport_condition_id bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2338_01_mangos_item_extraflags' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2339_01_mangos_areatrigger_teleport_condition_id.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2338_01_mangos_item_extraflags' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2339_02_mangos_quest_template_RequiredCondition.sql -> mangos
+2026-09-04 01:25:45 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2339_02_mangos_quest_template_RequiredCondition.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2339_01_mangos_areatrigger_teleport_condition_id' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2339_01_mangos_areatrigger_teleport_condition_id required_s2339_02_mangos_quest_template_RequiredCondition bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2339_01_mangos_areatrigger_teleport_condition_id' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2339_02_mangos_quest_template_RequiredCondition.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2339_01_mangos_areatrigger_teleport_condition_id' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2339_03_mangos_npc_trainer_conditon_id.sql -> mangos
+2026-09-04 01:25:45 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2339_03_mangos_npc_trainer_conditon_id.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2339_02_mangos_quest_template_RequiredCondition' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2339_02_mangos_quest_template_RequiredCondition required_s2339_03_mangos_npc_trainer_conditon_id bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2339_02_mangos_quest_template_RequiredCondition' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2339_03_mangos_npc_trainer_conditon_id.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2339_02_mangos_quest_template_RequiredCondition' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2339_04_mangos_npc_trainer_template_conditon_id.sql -> mangos
+2026-09-04 01:25:45 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2339_04_mangos_npc_trainer_template_conditon_id.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2339_03_mangos_npc_trainer_conditon_id' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2339_03_mangos_npc_trainer_conditon_id required_s2339_04_mangos_npc_trainer_template_conditon_id bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2339_03_mangos_npc_trainer_conditon_id' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2339_04_mangos_npc_trainer_template_conditon_id.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2339_03_mangos_npc_trainer_conditon_id' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2340_01_mangos_spell_template.sql -> mangos
+2026-09-04 01:25:45 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2340_01_mangos_spell_template.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2339_04_mangos_npc_trainer_template_conditon_id' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2339_04_mangos_npc_trainer_template_conditon_id required_s2340_01_mangos_spell_template bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2339_04_mangos_npc_trainer_template_conditon_id' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2340_01_mangos_spell_template.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2339_04_mangos_npc_trainer_template_conditon_id' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2341_01_mangos_game_event.sql -> mangos
+2026-09-04 01:25:46 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2341_01_mangos_game_event.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2340_01_mangos_spell_template' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2340_01_mangos_spell_template required_s2341_01_mangos_game_event bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2340_01_mangos_spell_template' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2341_01_mangos_game_event.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2340_01_mangos_spell_template' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2342_01_mangos_game_event_creature_data.sql -> mangos
+2026-09-04 01:25:46 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2342_01_mangos_game_event_creature_data.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2341_01_mangos_game_event' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2341_01_mangos_game_event required_s2342_01_mangos_game_event_creature_data bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2341_01_mangos_game_event' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2342_01_mangos_game_event_creature_data.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2341_01_mangos_game_event' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2343_01_mangos_quest_template.sql -> mangos
+2026-09-04 01:25:46 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2343_01_mangos_quest_template.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2342_01_mangos_game_event_creature_data' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2342_01_mangos_game_event_creature_data required_s2343_01_mangos_quest_template bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2342_01_mangos_game_event_creature_data' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2343_01_mangos_quest_template.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2342_01_mangos_game_event_creature_data' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2344_01_mangos_gameobject_template.sql -> mangos
+2026-09-04 01:25:46 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2344_01_mangos_gameobject_template.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2343_01_mangos_quest_template' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2343_01_mangos_quest_template required_s2344_01_mangos_gameobject_template bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2343_01_mangos_quest_template' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2344_01_mangos_gameobject_template.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2343_01_mangos_quest_template' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2345_01_mangos_instance_encounters.sql -> mangos
+2026-09-04 01:25:46 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2345_01_mangos_instance_encounters.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2344_01_mangos_gameobject_template' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2344_01_mangos_gameobject_template required_s2345_01_mangos_instance_encounters bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2344_01_mangos_gameobject_template' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2345_01_mangos_instance_encounters.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2344_01_mangos_gameobject_template' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2346_01_mangos_instance_template.sql -> mangos
+2026-09-04 01:25:46 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2346_01_mangos_instance_template.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2345_01_mangos_instance_encounters' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2345_01_mangos_instance_encounters required_s2346_01_mangos_instance_template bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2345_01_mangos_instance_encounters' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2346_01_mangos_instance_template.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2345_01_mangos_instance_encounters' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2347_01_mangos_dbscript_string_template.sql -> mangos
+2026-09-04 01:25:46 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2347_01_mangos_dbscript_string_template.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2346_01_mangos_instance_template' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2346_01_mangos_instance_template required_s2347_01_mangos_dbscript_string_template bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2346_01_mangos_instance_template' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2347_01_mangos_dbscript_string_template.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2346_01_mangos_instance_template' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2347_02_mangos_creature_movement_template.sql -> mangos
+2026-09-04 01:25:46 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2347_02_mangos_creature_movement_template.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2347_01_mangos_dbscript_string_template' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2347_01_mangos_dbscript_string_template required_s2347_02_mangos_creature_movement_template bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2347_01_mangos_dbscript_string_template' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2347_02_mangos_creature_movement_template.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2347_01_mangos_dbscript_string_template' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2348_01_mangos_creatures.sql -> mangos
+2026-09-04 01:25:46 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2348_01_mangos_creatures.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2347_02_mangos_creature_movement_template' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2347_02_mangos_creature_movement_template required_s2348_01_mangos_creatures bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2347_02_mangos_creature_movement_template' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2348_01_mangos_creatures.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2347_02_mangos_creature_movement_template' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2348_02_mangos_gameobjects.sql -> mangos
+2026-09-04 01:25:46 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2348_02_mangos_gameobjects.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2348_01_mangos_creatures' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2348_01_mangos_creatures required_s2348_02_mangos_gameobjects bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2348_01_mangos_creatures' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2348_02_mangos_gameobjects.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2348_01_mangos_creatures' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2349_01_mangos_spell_chain_totems.sql -> mangos
+2026-09-04 01:25:47 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2349_01_mangos_spell_chain_totems.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2348_02_mangos_gameobjects' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2348_02_mangos_gameobjects required_s2349_01_mangos_spell_chain_totems bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2348_02_mangos_gameobjects' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2349_01_mangos_spell_chain_totems.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2348_02_mangos_gameobjects' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2350_01_mangos_spell_chain_totems_typos.sql -> mangos
+2026-09-04 01:25:47 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2350_01_mangos_spell_chain_totems_typos.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2349_01_mangos_spell_chain_totems' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2349_01_mangos_spell_chain_totems required_s2350_01_mangos_spell_chain_totems_typos bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2349_01_mangos_spell_chain_totems' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2350_01_mangos_spell_chain_totems_typos.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2349_01_mangos_spell_chain_totems' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2351_01_mangos_gossip_menu_option.sql -> mangos
+2026-09-04 01:25:47 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2351_01_mangos_gossip_menu_option.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2350_01_mangos_spell_chain_totems_typos' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2350_01_mangos_spell_chain_totems_typos required_s2351_01_mangos_gossip_menu_option bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2350_01_mangos_spell_chain_totems_typos' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2351_01_mangos_gossip_menu_option.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2350_01_mangos_spell_chain_totems_typos' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2353_01_mangos_spell_affect.sql -> mangos
+2026-09-04 01:25:47 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2353_01_mangos_spell_affect.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2351_01_mangos_gossip_menu_option' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2351_01_mangos_gossip_menu_option required_s2353_01_mangos_spell_affect bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2351_01_mangos_gossip_menu_option' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2353_01_mangos_spell_affect.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2351_01_mangos_gossip_menu_option' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2354_01_mangos_dbscripts_on_relay.sql -> mangos
+2026-09-04 01:25:47 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2354_01_mangos_dbscripts_on_relay.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2353_01_mangos_spell_affect' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2353_01_mangos_spell_affect required_s2354_01_mangos_dbscripts_on_relay bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2353_01_mangos_spell_affect' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2354_01_mangos_dbscripts_on_relay.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2353_01_mangos_spell_affect' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2355_01_mangos_dbscript_random_template.sql -> mangos
+2026-09-04 01:25:47 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2355_01_mangos_dbscript_random_template.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2354_01_mangos_dbscripts_on_relay' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2354_01_mangos_dbscripts_on_relay required_s2355_01_mangos_dbscript_random_template bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2354_01_mangos_dbscripts_on_relay' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2355_01_mangos_dbscript_random_template.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2354_01_mangos_dbscripts_on_relay' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2356_01_mangos_dbscript_string_rename.sql -> mangos
+2026-09-04 01:25:47 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2356_01_mangos_dbscript_string_rename.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2355_01_mangos_dbscript_random_template' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2355_01_mangos_dbscript_random_template required_s2356_01_mangos_dbscript_string_rename bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2355_01_mangos_dbscript_random_template' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2356_01_mangos_dbscript_string_rename.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2355_01_mangos_dbscript_random_template' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2358_01_mangos_game_event_group.sql -> mangos
+2026-09-04 01:25:47 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2358_01_mangos_game_event_group.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2356_01_mangos_dbscript_string_rename' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2356_01_mangos_dbscript_string_rename required_s2358_01_mangos_game_event_group bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2356_01_mangos_dbscript_string_rename' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2358_01_mangos_game_event_group.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2356_01_mangos_dbscript_string_rename' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2360_01_mangos_comments.sql -> mangos
+2026-09-04 01:25:47 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2360_01_mangos_comments.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2358_01_mangos_game_event_group' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2358_01_mangos_game_event_group required_s2360_01_mangos_comments bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2358_01_mangos_game_event_group' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2360_01_mangos_comments.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2358_01_mangos_game_event_group' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2361_01_mangos_questgiver_greeting.sql -> mangos
+2026-09-04 01:25:47 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2361_01_mangos_questgiver_greeting.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2360_01_mangos_comments' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2360_01_mangos_comments required_s2361_01_mangos_questgiver_greeting bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2360_01_mangos_comments' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2361_01_mangos_questgiver_greeting.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2360_01_mangos_comments' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2362_01_mangos_area_trigger_locales.sql -> mangos
+2026-09-04 01:25:47 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2362_01_mangos_area_trigger_locales.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2361_01_mangos_questgiver_greeting' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2361_01_mangos_questgiver_greeting required_s2362_01_mangos_area_trigger_locales bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2361_01_mangos_questgiver_greeting' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2362_01_mangos_area_trigger_locales.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2361_01_mangos_questgiver_greeting' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2363_01_mangos_creature_movement_drops.sql -> mangos
+2026-09-04 01:25:48 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2363_01_mangos_creature_movement_drops.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2362_01_mangos_area_trigger_locales' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2362_01_mangos_area_trigger_locales required_s2363_01_mangos_creature_movement_drops bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2362_01_mangos_area_trigger_locales' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2363_01_mangos_creature_movement_drops.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2362_01_mangos_area_trigger_locales' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2364_01_mangos_creature_template_leashing.sql -> mangos
+2026-09-04 01:25:48 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2364_01_mangos_creature_template_leashing.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2363_01_mangos_creature_movement_drops' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2363_01_mangos_creature_movement_drops required_s2364_01_mangos_creature_template_leashing bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2363_01_mangos_creature_movement_drops' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2364_01_mangos_creature_template_leashing.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2363_01_mangos_creature_movement_drops' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2365_01_mangos_model_speeds.sql -> mangos
+2026-09-04 01:25:48 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2365_01_mangos_model_speeds.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2364_01_mangos_creature_template_leashing' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2364_01_mangos_creature_template_leashing required_s2365_01_mangos_model_speeds bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2364_01_mangos_creature_template_leashing' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2365_01_mangos_model_speeds.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2364_01_mangos_creature_template_leashing' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2366_01_mangos_spam_records.sql -> mangos
+2026-09-04 01:25:48 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2366_01_mangos_spam_records.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2365_01_mangos_model_speeds' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2365_01_mangos_model_speeds required_s2366_01_mangos_spam_records bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2365_01_mangos_model_speeds' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2366_01_mangos_spam_records.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2365_01_mangos_model_speeds' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2368_01_mangos_spam_records_length.sql -> mangos
+2026-09-04 01:25:48 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2368_01_mangos_spam_records_length.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2366_01_mangos_spam_records' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2366_01_mangos_spam_records required_s2368_01_mangos_spam_records_length bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2366_01_mangos_spam_records' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2368_01_mangos_spam_records_length.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2366_01_mangos_spam_records' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2369_01_mangos_spell_affect.sql -> mangos
+2026-09-04 01:25:48 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2369_01_mangos_spell_affect.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2368_01_mangos_spam_records_length' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2368_01_mangos_spam_records_length required_s2369_01_mangos_spell_affect bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2368_01_mangos_spam_records_length' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2369_01_mangos_spell_affect.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2368_01_mangos_spam_records_length' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2370_01_mangos_taxi_system_update.sql -> mangos
+2026-09-04 01:25:48 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2370_01_mangos_taxi_system_update.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2369_01_mangos_spell_affect' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2369_01_mangos_spell_affect required_s2370_01_mangos_taxi_system_update bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2369_01_mangos_spell_affect' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2370_01_mangos_taxi_system_update.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2369_01_mangos_spell_affect' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2371_01_mangos_game_event_primary_key.sql -> mangos
+2026-09-04 01:25:48 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2371_01_mangos_game_event_primary_key.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2370_01_mangos_taxi_system_update' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2370_01_mangos_taxi_system_update required_s2371_01_mangos_game_event_primary_key bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2370_01_mangos_taxi_system_update' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2371_01_mangos_game_event_primary_key.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2370_01_mangos_taxi_system_update' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2372_01_mangos_creature_template_spells_extension.sql -> mangos
+2026-09-04 01:25:48 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2372_01_mangos_creature_template_spells_extension.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2371_01_mangos_game_event_primary_key' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2371_01_mangos_game_event_primary_key required_s2372_01_mangos_creature_template_spells_extension bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2371_01_mangos_game_event_primary_key' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2372_01_mangos_creature_template_spells_extension.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2371_01_mangos_game_event_primary_key' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2373_01_mangos_creature_waypoint_refurbishing.sql -> mangos
+2026-09-04 01:25:48 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2373_01_mangos_creature_waypoint_refurbishing.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2372_01_mangos_creature_template_spells_extension' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2372_01_mangos_creature_template_spells_extension required_s2373_01_mangos_creature_waypoint_refurbishing bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2372_01_mangos_creature_template_spells_extension' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2373_01_mangos_creature_waypoint_refurbishing.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2372_01_mangos_creature_template_spells_extension' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2374_01_mangos_quest_template_rewmaxrep.sql -> mangos
+2026-09-04 01:25:49 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2374_01_mangos_quest_template_rewmaxrep.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2373_01_mangos_creature_waypoint_refurbishing' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2373_01_mangos_creature_waypoint_refurbishing required_s2374_01_mangos_quest_template_rewmaxrep bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2373_01_mangos_creature_waypoint_refurbishing' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2374_01_mangos_quest_template_rewmaxrep.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2373_01_mangos_creature_waypoint_refurbishing' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2375_01_mangos_trainer_greeting.sql -> mangos
+2026-09-04 01:25:49 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2375_01_mangos_trainer_greeting.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2374_01_mangos_quest_template_rewmaxrep' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2374_01_mangos_quest_template_rewmaxrep required_s2375_01_mangos_trainer_greeting bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2374_01_mangos_quest_template_rewmaxrep' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2375_01_mangos_trainer_greeting.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2374_01_mangos_quest_template_rewmaxrep' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2377_01_mangos_creature_conditional_spawn.sql -> mangos
+2026-09-04 01:25:49 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2377_01_mangos_creature_conditional_spawn.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2375_01_mangos_trainer_greeting' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2375_01_mangos_trainer_greeting required_s2377_01_mangos_creature_conditional_spawn bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2375_01_mangos_trainer_greeting' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2377_01_mangos_creature_conditional_spawn.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2375_01_mangos_trainer_greeting' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2378_01_mangos_event_ai.sql -> mangos
+2026-09-04 01:25:49 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2378_01_mangos_event_ai.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2377_01_mangos_creature_conditional_spawn' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2377_01_mangos_creature_conditional_spawn required_s2378_01_mangos_event_ai bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2377_01_mangos_creature_conditional_spawn' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2378_01_mangos_event_ai.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2377_01_mangos_creature_conditional_spawn' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2380_01_mangos_cones.sql -> mangos
+2026-09-04 01:25:49 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2380_01_mangos_cones.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2378_01_mangos_event_ai' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2378_01_mangos_event_ai required_s2380_01_mangos_cones bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2378_01_mangos_event_ai' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2380_01_mangos_cones.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2378_01_mangos_event_ai' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2381_01_mangos_creature_template_faction_removal.sql -> mangos
+2026-09-04 01:25:49 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2381_01_mangos_creature_template_faction_removal.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2380_01_mangos_cones' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2380_01_mangos_cones required_s2381_01_mangos_creature_template_faction_removal bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2380_01_mangos_cones' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2381_01_mangos_creature_template_faction_removal.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2380_01_mangos_cones' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2382_01_mangos_seal_of_righteousness_restored.sql -> mangos
+2026-09-04 01:25:49 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2382_01_mangos_seal_of_righteousness_restored.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2381_01_mangos_creature_template_faction_removal' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2381_01_mangos_creature_template_faction_removal required_s2382_01_mangos_seal_of_righteousness_restored bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2381_01_mangos_creature_template_faction_removal' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2382_01_mangos_seal_of_righteousness_restored.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2381_01_mangos_creature_template_faction_removal' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2383_01_mangos_seal_of_righteousness_proc_restored.sql -> mangos
+2026-09-04 01:25:49 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2383_01_mangos_seal_of_righteousness_proc_restored.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2382_01_mangos_seal_of_righteousness_restored' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2382_01_mangos_seal_of_righteousness_restored required_s2383_01_mangos_seal_of_righteousness_proc_restored bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2382_01_mangos_seal_of_righteousness_restored' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2383_01_mangos_seal_of_righteousness_proc_restored.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2382_01_mangos_seal_of_righteousness_restored' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2384_01_mangos_seal_of_righteousness_cleanup.sql -> mangos
+2026-09-04 01:25:49 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2384_01_mangos_seal_of_righteousness_cleanup.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2383_01_mangos_seal_of_righteousness_proc_restored' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2383_01_mangos_seal_of_righteousness_proc_restored required_s2384_01_mangos_seal_of_righteousness_cleanup bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2383_01_mangos_seal_of_righteousness_proc_restored' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2384_01_mangos_seal_of_righteousness_cleanup.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2383_01_mangos_seal_of_righteousness_proc_restored' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2385_01_mangos_playercreate_skills_tbc.sql -> mangos
+2026-09-04 01:25:49 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2385_01_mangos_playercreate_skills_tbc.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2384_01_mangos_seal_of_righteousness_cleanup' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2384_01_mangos_seal_of_righteousness_cleanup required_s2385_01_mangos_playercreate_skills_tbc bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2384_01_mangos_seal_of_righteousness_cleanup' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2385_01_mangos_playercreate_skills_tbc.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2384_01_mangos_seal_of_righteousness_cleanup' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2387_01_mangos_weapon_skills_fix_tbc.sql -> mangos
+2026-09-04 01:25:50 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2387_01_mangos_weapon_skills_fix_tbc.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2385_01_mangos_playercreate_skills_tbc' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2385_01_mangos_playercreate_skills_tbc required_s2387_01_mangos_weapon_skills_fix_tbc bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2385_01_mangos_playercreate_skills_tbc' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2387_01_mangos_weapon_skills_fix_tbc.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2385_01_mangos_playercreate_skills_tbc' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2390_01_mangos_creature_spawn_entry.sql -> mangos
+2026-09-04 01:25:50 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2390_01_mangos_creature_spawn_entry.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2387_01_mangos_weapon_skills_fix_tbc' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2387_01_mangos_weapon_skills_fix_tbc required_s2390_01_mangos_creature_spawn_entry bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2387_01_mangos_weapon_skills_fix_tbc' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2390_01_mangos_creature_spawn_entry.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2387_01_mangos_weapon_skills_fix_tbc' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2391_01_mangos_creature_cooldown.sql -> mangos
+2026-09-04 01:25:50 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2391_01_mangos_creature_cooldown.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2390_01_mangos_creature_spawn_entry' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2390_01_mangos_creature_spawn_entry required_s2391_01_mangos_creature_cooldown bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2390_01_mangos_creature_spawn_entry' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2391_01_mangos_creature_cooldown.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2390_01_mangos_creature_spawn_entry' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2392_01_mangos_quest_template_emote_delays.sql -> mangos
+2026-09-04 01:25:50 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2392_01_mangos_quest_template_emote_delays.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2391_01_mangos_creature_cooldown' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2391_01_mangos_creature_cooldown required_s2392_01_mangos_quest_template_emote_delays bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2391_01_mangos_creature_cooldown' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2392_01_mangos_quest_template_emote_delays.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2391_01_mangos_creature_cooldown' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2393_01_mangos_visibility.sql -> mangos
+2026-09-04 01:25:50 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2393_01_mangos_visibility.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2392_01_mangos_quest_template_emote_delays' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2392_01_mangos_quest_template_emote_delays required_s2393_01_mangos_visibility bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2392_01_mangos_quest_template_emote_delays' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2393_01_mangos_visibility.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2392_01_mangos_quest_template_emote_delays' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2396_01_mangos_game_event_split.sql -> mangos
+2026-09-04 01:25:50 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2396_01_mangos_game_event_split.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2393_01_mangos_visibility' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2393_01_mangos_visibility required_s2396_01_mangos_game_event_split bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2393_01_mangos_visibility' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2396_01_mangos_game_event_split.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2393_01_mangos_visibility' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2397_01_mangos_broadcast_text.sql -> mangos
+2026-09-04 01:25:50 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2397_01_mangos_broadcast_text.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2396_01_mangos_game_event_split' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2396_01_mangos_game_event_split required_s2397_01_mangos_broadcast_text bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2396_01_mangos_game_event_split' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2397_01_mangos_broadcast_text.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2396_01_mangos_game_event_split' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2398_01_mangos_world_safe_locs_facing.sql -> mangos
+2026-09-04 01:25:50 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2398_01_mangos_world_safe_locs_facing.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2397_01_mangos_broadcast_text' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2397_01_mangos_broadcast_text required_s2398_01_mangos_world_safe_locs_facing bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2397_01_mangos_broadcast_text' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2398_01_mangos_world_safe_locs_facing.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2397_01_mangos_broadcast_text' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2399_01_mangos_dbscript_priority_miliseconds.sql -> mangos
+2026-09-04 01:25:50 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2399_01_mangos_dbscript_priority_miliseconds.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2398_01_mangos_world_safe_locs_facing' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2398_01_mangos_world_safe_locs_facing required_s2399_01_mangos_dbscript_priority_miliseconds bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2398_01_mangos_world_safe_locs_facing' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2399_01_mangos_dbscript_priority_miliseconds.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2398_01_mangos_world_safe_locs_facing' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2400_01_mangos_graveyard_map_links.sql -> mangos
+2026-09-04 01:25:50 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2400_01_mangos_graveyard_map_links.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2399_01_mangos_dbscript_priority_miliseconds' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2399_01_mangos_dbscript_priority_miliseconds required_s2400_01_mangos_graveyard_map_links bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2399_01_mangos_dbscript_priority_miliseconds' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2400_01_mangos_graveyard_map_links.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2399_01_mangos_dbscript_priority_miliseconds' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2401_01_mangos_new_ticket_system.sql -> mangos
+2026-09-04 01:25:51 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2401_01_mangos_new_ticket_system.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2400_01_mangos_graveyard_map_links' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2400_01_mangos_graveyard_map_links required_s2401_01_mangos_new_ticket_system bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2400_01_mangos_graveyard_map_links' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2401_01_mangos_new_ticket_system.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2400_01_mangos_graveyard_map_links' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2405_01_mangos_static_custom_chat.sql -> mangos
+2026-09-04 01:25:51 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2405_01_mangos_static_custom_chat.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2401_01_mangos_new_ticket_system' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2401_01_mangos_new_ticket_system required_s2405_01_mangos_static_custom_chat bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2401_01_mangos_new_ticket_system' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2405_01_mangos_static_custom_chat.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2401_01_mangos_new_ticket_system' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2406_01_mangos_broadcast_text.sql -> mangos
+2026-09-04 01:25:51 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2406_01_mangos_broadcast_text.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2405_01_mangos_static_custom_chat' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2405_01_mangos_static_custom_chat required_s2406_01_mangos_broadcast_text bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2405_01_mangos_static_custom_chat' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2406_01_mangos_broadcast_text.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2405_01_mangos_static_custom_chat' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2407_01_mangos_new_ticket_system_update.sql -> mangos
+2026-09-04 01:25:51 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2407_01_mangos_new_ticket_system_update.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2406_01_mangos_broadcast_text' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2406_01_mangos_broadcast_text required_s2407_01_mangos_new_ticket_system_update bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2406_01_mangos_broadcast_text' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2407_01_mangos_new_ticket_system_update.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2406_01_mangos_broadcast_text' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2408_01_mangos_channel_commands.sql -> mangos
+2026-09-04 01:25:51 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2408_01_mangos_channel_commands.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2407_01_mangos_new_ticket_system_update' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2407_01_mangos_new_ticket_system_update required_s2408_01_mangos_channel_commands bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2407_01_mangos_new_ticket_system_update' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2408_01_mangos_channel_commands.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2407_01_mangos_new_ticket_system_update' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2409_01_mangos_conditions_upgrade.sql -> mangos
+2026-09-04 01:25:51 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2409_01_mangos_conditions_upgrade.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2408_01_mangos_channel_commands' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2408_01_mangos_channel_commands required_s2409_01_mangos_conditions_upgrade bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2408_01_mangos_channel_commands' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2409_01_mangos_conditions_upgrade.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2408_01_mangos_channel_commands' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2410_01_mangos_gameobject_template.sql -> mangos
+2026-09-04 01:25:51 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2410_01_mangos_gameobject_template.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2409_01_mangos_conditions_upgrade' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2409_01_mangos_conditions_upgrade required_s2410_01_mangos_gameobject_template bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2409_01_mangos_conditions_upgrade' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2410_01_mangos_gameobject_template.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2409_01_mangos_conditions_upgrade' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2411_01_mangos_command.sql -> mangos
+2026-09-04 01:25:51 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2411_01_mangos_command.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2410_01_mangos_gameobject_template' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2410_01_mangos_gameobject_template required_s2411_01_mangos_command bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2410_01_mangos_gameobject_template' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2411_01_mangos_command.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2410_01_mangos_gameobject_template' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2412_01_mangos_mount_commands.sql -> mangos
+2026-09-04 01:25:51 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2412_01_mangos_mount_commands.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2411_01_mangos_command' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2411_01_mangos_command required_s2412_01_mangos_mount_commands bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2411_01_mangos_command' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2412_01_mangos_mount_commands.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2411_01_mangos_command' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2413_01_mangos_gm_mountup_command.sql -> mangos
+2026-09-04 01:25:51 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2413_01_mangos_gm_mountup_command.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2412_01_mangos_mount_commands' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2412_01_mangos_mount_commands required_s2413_01_mangos_gm_mountup_command bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2412_01_mangos_mount_commands' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2413_01_mangos_gm_mountup_command.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2412_01_mangos_mount_commands' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2414_01_mangos_ability_sets.sql -> mangos
+2026-09-04 01:25:51 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2414_01_mangos_ability_sets.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2413_01_mangos_gm_mountup_command' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2413_01_mangos_gm_mountup_command required_s2414_01_mangos_ability_sets bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2413_01_mangos_gm_mountup_command' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2414_01_mangos_ability_sets.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2413_01_mangos_gm_mountup_command' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2416_01_mangos_command_ahbot.sql -> mangos
+2026-09-04 01:25:52 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2416_01_mangos_command_ahbot.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2414_01_mangos_ability_sets' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2414_01_mangos_ability_sets required_s2416_01_mangos_command_ahbot bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2414_01_mangos_ability_sets' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2416_01_mangos_command_ahbot.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2414_01_mangos_ability_sets' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2419_01_mangos_power_regen.sql -> mangos
+2026-09-04 01:25:52 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2419_01_mangos_power_regen.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2416_01_mangos_command_ahbot' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2416_01_mangos_command_ahbot required_s2419_01_mangos_power_regen bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2416_01_mangos_command_ahbot' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2419_01_mangos_power_regen.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2416_01_mangos_command_ahbot' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2422_01_mangos_creature_template_spells_extension.sql -> mangos
+2026-09-04 01:25:52 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2422_01_mangos_creature_template_spells_extension.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2419_01_mangos_power_regen' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2419_01_mangos_power_regen required_s2422_01_mangos_creature_template_spells_extension bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2419_01_mangos_power_regen' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2422_01_mangos_creature_template_spells_extension.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2419_01_mangos_power_regen' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2424_01_mangos_creature_spawn_data.sql -> mangos
+2026-09-04 01:25:52 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2424_01_mangos_creature_spawn_data.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2422_01_mangos_creature_template_spells_extension' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2422_01_mangos_creature_template_spells_extension required_s2424_01_mangos_creature_spawn_data bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2422_01_mangos_creature_template_spells_extension' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2424_01_mangos_creature_spawn_data.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2422_01_mangos_creature_template_spells_extension' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2425_01_mangos_creature_spawn_tideup.sql -> mangos
+2026-09-04 01:25:52 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2425_01_mangos_creature_spawn_tideup.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2424_01_mangos_creature_spawn_data' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2424_01_mangos_creature_spawn_data required_s2425_01_mangos_creature_spawn_tideup bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2424_01_mangos_creature_spawn_data' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2425_01_mangos_creature_spawn_tideup.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2424_01_mangos_creature_spawn_data' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2426_01_mangos_dbscript_npc_flag_update.sql -> mangos
+2026-09-04 01:25:52 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2426_01_mangos_dbscript_npc_flag_update.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2425_01_mangos_creature_spawn_tideup' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2425_01_mangos_creature_spawn_tideup required_s2426_01_mangos_dbscript_npc_flag_update bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2425_01_mangos_creature_spawn_tideup' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2426_01_mangos_dbscript_npc_flag_update.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2425_01_mangos_creature_spawn_tideup' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2427_01_mangos_command.sql -> mangos
+2026-09-04 01:25:52 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2427_01_mangos_command.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2426_01_mangos_dbscript_npc_flag_update' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2426_01_mangos_dbscript_npc_flag_update required_s2427_01_mangos_command bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2426_01_mangos_dbscript_npc_flag_update' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2427_01_mangos_command.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2426_01_mangos_dbscript_npc_flag_update' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2428_01_mangos_column_fix.sql -> mangos
+2026-09-04 01:25:52 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2428_01_mangos_column_fix.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2427_01_mangos_command' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2427_01_mangos_command required_s2428_01_mangos_column_fix bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2427_01_mangos_command' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2428_01_mangos_column_fix.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2427_01_mangos_command' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2430_01_mangos_creature_immunity.sql -> mangos
+2026-09-04 01:25:52 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2430_01_mangos_creature_immunity.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2428_01_mangos_column_fix' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2428_01_mangos_column_fix required_s2430_01_mangos_creature_immunity bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2428_01_mangos_column_fix' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2430_01_mangos_creature_immunity.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2428_01_mangos_column_fix' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2431_01_mangos_corpse_decay.sql -> mangos
+2026-09-04 01:25:52 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2431_01_mangos_corpse_decay.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2430_01_mangos_creature_immunity' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2430_01_mangos_creature_immunity required_s2431_01_mangos_corpse_decay bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2430_01_mangos_creature_immunity' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2431_01_mangos_corpse_decay.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2430_01_mangos_creature_immunity' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2432_01_mangos_gameobject_spawn_entry.sql -> mangos
+2026-09-04 01:25:53 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2432_01_mangos_gameobject_spawn_entry.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2431_01_mangos_corpse_decay' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2431_01_mangos_corpse_decay required_s2432_01_mangos_gameobject_spawn_entry bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2431_01_mangos_corpse_decay' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2432_01_mangos_gameobject_spawn_entry.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2431_01_mangos_corpse_decay' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2433_01_mangos_anticheat.sql -> mangos
+2026-09-04 01:25:53 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2433_01_mangos_anticheat.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2432_01_mangos_gameobject_spawn_entry' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2432_01_mangos_gameobject_spawn_entry required_s2433_01_mangos_anticheat bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2432_01_mangos_gameobject_spawn_entry' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2433_01_mangos_anticheat.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2432_01_mangos_gameobject_spawn_entry' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2434_01_mangos_dbscript_data_flags_widening.sql -> mangos
+2026-09-04 01:25:53 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2434_01_mangos_dbscript_data_flags_widening.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2433_01_mangos_anticheat' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2433_01_mangos_anticheat required_s2434_01_mangos_dbscript_data_flags_widening bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2433_01_mangos_anticheat' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2434_01_mangos_dbscript_data_flags_widening.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2433_01_mangos_anticheat' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2435_01_mangos_creature_spell_lists.sql -> mangos
+2026-09-04 01:25:53 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2435_01_mangos_creature_spell_lists.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2434_01_mangos_dbscript_data_flags_widening' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2434_01_mangos_dbscript_data_flags_widening required_s2435_01_mangos_creature_spell_lists bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2434_01_mangos_dbscript_data_flags_widening' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2435_01_mangos_creature_spell_lists.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2434_01_mangos_dbscript_data_flags_widening' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2436_01_mangos_dbscripts.sql -> mangos
+2026-09-04 01:25:53 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2436_01_mangos_dbscripts.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2435_01_mangos_creature_spell_lists' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2435_01_mangos_creature_spell_lists required_s2436_01_mangos_dbscripts bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2435_01_mangos_creature_spell_lists' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2436_01_mangos_dbscripts.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2435_01_mangos_creature_spell_lists' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2437_01_mangos_spawn_data_template_relay.sql -> mangos
+2026-09-04 01:25:53 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2437_01_mangos_spawn_data_template_relay.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2436_01_mangos_dbscripts' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2436_01_mangos_dbscripts required_s2437_01_mangos_spawn_data_template_relay bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2436_01_mangos_dbscripts' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2437_01_mangos_spawn_data_template_relay.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2436_01_mangos_dbscripts' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2438_01_mangos_spawn_groups.sql -> mangos
+2026-09-04 01:25:53 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2438_01_mangos_spawn_groups.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2437_01_mangos_spawn_data_template_relay' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2437_01_mangos_spawn_data_template_relay required_s2438_01_mangos_spawn_groups bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2437_01_mangos_spawn_data_template_relay' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2438_01_mangos_spawn_groups.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2437_01_mangos_spawn_data_template_relay' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2439_01_mangos_groups_formation.sql -> mangos
+2026-09-04 01:25:53 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2439_01_mangos_groups_formation.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2438_01_mangos_spawn_groups' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2438_01_mangos_spawn_groups required_s2439_01_mangos_groups_formation bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2438_01_mangos_spawn_groups' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2439_01_mangos_groups_formation.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2438_01_mangos_spawn_groups' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2440_01_mangos_artkits.sql -> mangos
+2026-09-04 01:25:53 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2440_01_mangos_artkits.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2439_01_mangos_groups_formation' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2439_01_mangos_groups_formation required_s2440_01_mangos_artkits bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2439_01_mangos_groups_formation' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2440_01_mangos_artkits.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2439_01_mangos_groups_formation' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2441_01_mangos_waypoint_path.sql -> mangos
+2026-09-04 01:25:53 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2441_01_mangos_waypoint_path.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2440_01_mangos_artkits' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2440_01_mangos_artkits required_s2441_01_mangos_waypoint_path bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2440_01_mangos_artkits' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2441_01_mangos_waypoint_path.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2440_01_mangos_artkits' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2442_01_mangos_npc_vendor.sql -> mangos
+2026-09-04 01:25:54 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2442_01_mangos_npc_vendor.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2441_01_mangos_waypoint_path' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2441_01_mangos_waypoint_path required_s2442_01_mangos_npc_vendor bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2441_01_mangos_waypoint_path' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2442_01_mangos_npc_vendor.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2441_01_mangos_waypoint_path' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2443_01_mangos_creature_addon.sql -> mangos
+2026-09-04 01:25:54 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2443_01_mangos_creature_addon.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2442_01_mangos_npc_vendor' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2442_01_mangos_npc_vendor required_s2443_01_mangos_creature_addon bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2442_01_mangos_npc_vendor' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2443_01_mangos_creature_addon.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2442_01_mangos_npc_vendor' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2444_01_mangos_creature_spawn_data_template.sql -> mangos
+2026-09-04 01:25:54 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2444_01_mangos_creature_spawn_data_template.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2443_01_mangos_creature_addon' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2443_01_mangos_creature_addon required_s2444_01_mangos_creature_spawn_data_template bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2443_01_mangos_creature_addon' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2444_01_mangos_creature_spawn_data_template.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2443_01_mangos_creature_addon' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2445_01_mangos_quest_template.sql -> mangos
+2026-09-04 01:25:54 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2445_01_mangos_quest_template.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2444_01_mangos_creature_spawn_data_template' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2444_01_mangos_creature_spawn_data_template required_s2445_01_mangos_quest_template bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2444_01_mangos_creature_spawn_data_template' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2445_01_mangos_quest_template.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2444_01_mangos_creature_spawn_data_template' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2446_01_mangos_command.sql -> mangos
+2026-09-04 01:25:54 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2446_01_mangos_command.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2445_01_mangos_quest_template' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2445_01_mangos_quest_template required_s2446_01_mangos_command bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2445_01_mangos_quest_template' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2446_01_mangos_command.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2445_01_mangos_quest_template' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2447_01_mangos_worldstate_name.sql -> mangos
+2026-09-04 01:25:54 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2447_01_mangos_worldstate_name.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2446_01_mangos_command' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2446_01_mangos_command required_s2447_01_mangos_worldstate_name bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2446_01_mangos_command' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2447_01_mangos_worldstate_name.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2446_01_mangos_command' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2448_01_mangos_dbscript_extension.sql -> mangos
+2026-09-04 01:25:54 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2448_01_mangos_dbscript_extension.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2447_01_mangos_worldstate_name' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2447_01_mangos_worldstate_name required_s2448_01_mangos_dbscript_extension bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2447_01_mangos_worldstate_name' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2448_01_mangos_dbscript_extension.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2447_01_mangos_worldstate_name' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2449_01_mangos_spawn_group_chanced_spawns.sql -> mangos
+2026-09-04 01:25:54 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2449_01_mangos_spawn_group_chanced_spawns.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2448_01_mangos_dbscript_extension' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2448_01_mangos_dbscript_extension required_s2449_01_mangos_spawn_group_chanced_spawns bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2448_01_mangos_dbscript_extension' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2449_01_mangos_spawn_group_chanced_spawns.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2448_01_mangos_dbscript_extension' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2450_01_mangos_quest_maxlevel.sql -> mangos
+2026-09-04 01:25:54 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2450_01_mangos_quest_maxlevel.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2449_01_mangos_spawn_group_chanced_spawns' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2449_01_mangos_spawn_group_chanced_spawns required_s2450_01_mangos_quest_maxlevel bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2449_01_mangos_spawn_group_chanced_spawns' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2450_01_mangos_quest_maxlevel.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2449_01_mangos_spawn_group_chanced_spawns' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2451_01_mangos_waypoint_path_name.sql -> mangos
+2026-09-04 01:25:54 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2451_01_mangos_waypoint_path_name.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2450_01_mangos_quest_maxlevel' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2450_01_mangos_quest_maxlevel required_s2451_01_mangos_waypoint_path_name bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2450_01_mangos_quest_maxlevel' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2451_01_mangos_waypoint_path_name.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2450_01_mangos_quest_maxlevel' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2453_01_mangos_eai_dbguid_support.sql -> mangos
+2026-09-04 01:25:55 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2453_01_mangos_eai_dbguid_support.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2451_01_mangos_waypoint_path_name' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2451_01_mangos_waypoint_path_name required_s2453_01_mangos_eai_dbguid_support bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2451_01_mangos_waypoint_path_name' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2453_01_mangos_eai_dbguid_support.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2451_01_mangos_waypoint_path_name' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2454_01_mangos_battleground_reflooot.sql -> mangos
+2026-09-04 01:25:55 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2454_01_mangos_battleground_reflooot.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2453_01_mangos_eai_dbguid_support' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2453_01_mangos_eai_dbguid_support required_s2454_01_mangos_battleground_reflooot bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2453_01_mangos_eai_dbguid_support' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2454_01_mangos_battleground_reflooot.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2453_01_mangos_eai_dbguid_support' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2456_01_mangos_aggro_range.sql -> mangos
+2026-09-04 01:25:55 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2456_01_mangos_aggro_range.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2454_01_mangos_battleground_reflooot' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2454_01_mangos_battleground_reflooot required_s2456_01_mangos_aggro_range bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2454_01_mangos_battleground_reflooot' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2456_01_mangos_aggro_range.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2454_01_mangos_battleground_reflooot' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2457_01_mangos_reference_loot_template_names.sql -> mangos
+2026-09-04 01:25:55 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2457_01_mangos_reference_loot_template_names.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2456_01_mangos_aggro_range' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2456_01_mangos_aggro_range required_s2457_01_mangos_reference_loot_template_names bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2456_01_mangos_aggro_range' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2457_01_mangos_reference_loot_template_names.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2456_01_mangos_aggro_range' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2458_01_mangos_addon_drop.sql -> mangos
+2026-09-04 01:25:55 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2458_01_mangos_addon_drop.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2457_01_mangos_reference_loot_template_names' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2457_01_mangos_reference_loot_template_names required_s2458_01_mangos_addon_drop bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2457_01_mangos_reference_loot_template_names' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2458_01_mangos_addon_drop.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2457_01_mangos_reference_loot_template_names' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2459_01_mangos_addon_stand_state.sql -> mangos
+2026-09-04 01:25:55 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2459_01_mangos_addon_stand_state.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2458_01_mangos_addon_drop' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2458_01_mangos_addon_drop required_s2459_01_mangos_addon_stand_state bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2458_01_mangos_addon_drop' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2459_01_mangos_addon_stand_state.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2458_01_mangos_addon_drop' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2460_01_mangos_gameobject_data_split.sql -> mangos
+2026-09-04 01:25:55 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2460_01_mangos_gameobject_data_split.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2459_01_mangos_addon_stand_state' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2459_01_mangos_addon_stand_state required_s2460_01_mangos_gameobject_data_split bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2459_01_mangos_addon_stand_state' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2460_01_mangos_gameobject_data_split.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2459_01_mangos_addon_stand_state' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2461_01_mangos_addon_rename.sql -> mangos
+2026-09-04 01:25:55 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2461_01_mangos_addon_rename.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2460_01_mangos_gameobject_data_split' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2460_01_mangos_gameobject_data_split required_s2461_01_mangos_addon_rename bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2460_01_mangos_gameobject_data_split' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2461_01_mangos_addon_rename.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2460_01_mangos_gameobject_data_split' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2462_01_mangos_creature_drops.sql -> mangos
+2026-09-04 01:25:55 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2462_01_mangos_creature_drops.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2461_01_mangos_addon_rename' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2461_01_mangos_addon_rename required_s2462_01_mangos_creature_drops bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2461_01_mangos_addon_rename' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2462_01_mangos_creature_drops.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2461_01_mangos_addon_rename' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2463_01_mangos_spawn_data_equip.sql -> mangos
+2026-09-04 01:25:55 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2463_01_mangos_spawn_data_equip.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2462_01_mangos_creature_drops' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2462_01_mangos_creature_drops required_s2463_01_mangos_spawn_data_equip bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2462_01_mangos_creature_drops' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2463_01_mangos_spawn_data_equip.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2462_01_mangos_creature_drops' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2464_01_mangos_string_id.sql -> mangos
+2026-09-04 01:25:55 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2464_01_mangos_string_id.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2463_01_mangos_spawn_data_equip' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2463_01_mangos_spawn_data_equip required_s2464_01_mangos_string_id bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2463_01_mangos_spawn_data_equip' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2464_01_mangos_string_id.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2463_01_mangos_spawn_data_equip' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2465_01_mangos_creature_equip_drop.sql -> mangos
+2026-09-04 01:25:56 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2465_01_mangos_creature_equip_drop.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2464_01_mangos_string_id' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2464_01_mangos_string_id required_s2465_01_mangos_creature_equip_drop bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2464_01_mangos_string_id' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2465_01_mangos_creature_equip_drop.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2464_01_mangos_string_id' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2466_01_mangos_spell_list_conditions.sql -> mangos
+2026-09-04 01:25:56 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2466_01_mangos_spell_list_conditions.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2465_01_mangos_creature_equip_drop' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2465_01_mangos_creature_equip_drop required_s2466_01_mangos_spell_list_conditions bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2465_01_mangos_creature_equip_drop' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2466_01_mangos_spell_list_conditions.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2465_01_mangos_creature_equip_drop' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2467_01_mangos_creature_static_flags.sql -> mangos
+2026-09-04 01:25:56 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2467_01_mangos_creature_static_flags.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2466_01_mangos_spell_list_conditions' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2466_01_mangos_spell_list_conditions required_s2467_01_mangos_creature_static_flags bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2466_01_mangos_spell_list_conditions' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2467_01_mangos_creature_static_flags.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2466_01_mangos_spell_list_conditions' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2468_01_mangos_visibility.sql -> mangos
+2026-09-04 01:25:56 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2468_01_mangos_visibility.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2467_01_mangos_creature_static_flags' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2467_01_mangos_creature_static_flags required_s2468_01_mangos_visibility bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2467_01_mangos_creature_static_flags' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2468_01_mangos_visibility.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2467_01_mangos_creature_static_flags' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2469_01_mangos_trainer_ability.sql -> mangos
+2026-09-04 01:25:56 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2469_01_mangos_trainer_ability.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2468_01_mangos_visibility' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2468_01_mangos_visibility required_s2469_01_mangos_trainer_ability bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2468_01_mangos_visibility' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2469_01_mangos_trainer_ability.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2468_01_mangos_visibility' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2470_01_mangos_worldstate_expression_spawn_group.sql -> mangos
+2026-09-04 01:25:56 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2470_01_mangos_worldstate_expression_spawn_group.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2469_01_mangos_trainer_ability' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2469_01_mangos_trainer_ability required_s2470_01_mangos_worldstate_expression_spawn_group bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2469_01_mangos_trainer_ability' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2470_01_mangos_worldstate_expression_spawn_group.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2469_01_mangos_trainer_ability' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2471_01_mangos_pursuit.sql -> mangos
+2026-09-04 01:25:56 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2471_01_mangos_pursuit.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2470_01_mangos_worldstate_expression_spawn_group' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2470_01_mangos_worldstate_expression_spawn_group required_s2471_01_mangos_pursuit bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2470_01_mangos_worldstate_expression_spawn_group' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2471_01_mangos_pursuit.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2470_01_mangos_worldstate_expression_spawn_group' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2472_01_mangos_precision_decimal.sql -> mangos
+2026-09-04 01:25:56 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2472_01_mangos_precision_decimal.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2471_01_mangos_pursuit' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2471_01_mangos_pursuit required_s2472_01_mangos_precision_decimal bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2471_01_mangos_pursuit' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2472_01_mangos_precision_decimal.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2471_01_mangos_pursuit' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2475_01_mangos_spell_template.sql -> mangos
+2026-09-04 01:25:56 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2475_01_mangos_spell_template.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2472_01_mangos_precision_decimal' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2472_01_mangos_precision_decimal required_s2475_01_mangos_spell_template bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2472_01_mangos_precision_decimal' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2475_01_mangos_spell_template.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2472_01_mangos_precision_decimal' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2476_01_mangos_spell_template_ap.sql -> mangos
+2026-09-04 01:25:56 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2476_01_mangos_spell_template_ap.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2475_01_mangos_spell_template' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2475_01_mangos_spell_template required_s2476_01_mangos_spell_template_ap bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2475_01_mangos_spell_template' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2476_01_mangos_spell_template_ap.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2475_01_mangos_spell_template' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2477_01_mangos_charmed_spell_list.sql -> mangos
+2026-09-04 01:25:57 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2477_01_mangos_charmed_spell_list.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2476_01_mangos_spell_template_ap' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2476_01_mangos_spell_template_ap required_s2477_01_mangos_charmed_spell_list bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2476_01_mangos_spell_template_ap' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2477_01_mangos_charmed_spell_list.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2476_01_mangos_spell_template_ap' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2478_01_mangos_creature_cls_stats.sql -> mangos
+2026-09-04 01:25:57 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2478_01_mangos_creature_cls_stats.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2477_01_mangos_charmed_spell_list' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2477_01_mangos_charmed_spell_list required_s2478_01_mangos_creature_cls_stats bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2477_01_mangos_charmed_spell_list' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2478_01_mangos_creature_cls_stats.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2477_01_mangos_charmed_spell_list' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2479_01_mangos_displayid_probability.sql -> mangos
+2026-09-04 01:25:57 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2479_01_mangos_displayid_probability.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2478_01_mangos_creature_cls_stats' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2478_01_mangos_creature_cls_stats required_s2479_01_mangos_displayid_probability bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2478_01_mangos_creature_cls_stats' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2479_01_mangos_displayid_probability.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2478_01_mangos_creature_cls_stats' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2480_01_mangos_spawn_group_squad.sql -> mangos
+2026-09-04 01:25:57 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2480_01_mangos_spawn_group_squad.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2479_01_mangos_displayid_probability' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2479_01_mangos_displayid_probability required_s2480_01_mangos_spawn_group_squad bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2479_01_mangos_displayid_probability' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2480_01_mangos_spawn_group_squad.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2479_01_mangos_displayid_probability' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2481_01_mangos_reputation_spillover.sql -> mangos
+2026-09-04 01:25:57 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2481_01_mangos_reputation_spillover.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2480_01_mangos_spawn_group_squad' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2480_01_mangos_spawn_group_squad required_s2481_01_mangos_reputation_spillover bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2480_01_mangos_spawn_group_squad' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2481_01_mangos_reputation_spillover.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2480_01_mangos_spawn_group_squad' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2482_01_mangos_spawn_zone.sql -> mangos
+2026-09-04 01:25:57 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2482_01_mangos_spawn_zone.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2481_01_mangos_reputation_spillover' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2481_01_mangos_reputation_spillover required_s2482_01_mangos_spawn_zone bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2481_01_mangos_reputation_spillover' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2482_01_mangos_spawn_zone.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2481_01_mangos_reputation_spillover' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2483_01_mangos_spell_groups.sql -> mangos
+2026-09-04 01:25:57 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2483_01_mangos_spell_groups.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2482_01_mangos_spawn_zone' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2482_01_mangos_spawn_zone required_s2483_01_mangos_spell_groups bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2482_01_mangos_spawn_zone' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2483_01_mangos_spell_groups.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2482_01_mangos_spawn_zone' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2484_01_mangos_proc_cooldown.sql -> mangos
+2026-09-04 01:25:57 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2484_01_mangos_proc_cooldown.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2483_01_mangos_spell_groups' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2483_01_mangos_spell_groups required_s2484_01_mangos_proc_cooldown bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2483_01_mangos_spell_groups' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2484_01_mangos_proc_cooldown.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2483_01_mangos_spell_groups' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2485_01_mangos_closing_text.sql -> mangos
+2026-09-04 01:25:57 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2485_01_mangos_closing_text.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2484_01_mangos_proc_cooldown' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2484_01_mangos_proc_cooldown required_s2485_01_mangos_closing_text bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2484_01_mangos_proc_cooldown' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2485_01_mangos_closing_text.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2484_01_mangos_proc_cooldown' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2486_01_mangos_wmogroupgen.sql -> mangos
+2026-09-04 01:25:57 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2486_01_mangos_wmogroupgen.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2485_01_mangos_closing_text' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2485_01_mangos_closing_text required_s2486_01_mangos_wmogroupgen bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2485_01_mangos_closing_text' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2486_01_mangos_wmogroupgen.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2485_01_mangos_closing_text' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2487_01_mangos_dbscript_breaking_change.sql -> mangos
+2026-09-04 01:25:58 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2487_01_mangos_dbscript_breaking_change.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2486_01_mangos_wmogroupgen' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2486_01_mangos_wmogroupgen required_s2487_01_mangos_dbscript_breaking_change bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2486_01_mangos_wmogroupgen' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2487_01_mangos_dbscript_breaking_change.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2486_01_mangos_wmogroupgen' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2488_01_mangos_cls_rework.sql -> mangos
+2026-09-04 01:25:58 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2488_01_mangos_cls_rework.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2487_01_mangos_dbscript_breaking_change' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2487_01_mangos_dbscript_breaking_change required_s2488_01_mangos_cls_rework bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2487_01_mangos_dbscript_breaking_change' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2488_01_mangos_cls_rework.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2487_01_mangos_dbscript_breaking_change' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2489_01_mangos_pet_spell_lists.sql -> mangos
+2026-09-04 01:25:58 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2489_01_mangos_pet_spell_lists.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2488_01_mangos_cls_rework' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2488_01_mangos_cls_rework required_s2489_01_mangos_pet_spell_lists bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2488_01_mangos_cls_rework' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2489_01_mangos_pet_spell_lists.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2488_01_mangos_cls_rework' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2490_01_mangos_spell_threat_mask.sql -> mangos
+2026-09-04 01:25:58 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2490_01_mangos_spell_threat_mask.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2489_01_mangos_pet_spell_lists' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2489_01_mangos_pet_spell_lists required_s2490_01_mangos_spell_threat_mask bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2489_01_mangos_pet_spell_lists' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2490_01_mangos_spell_threat_mask.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2489_01_mangos_pet_spell_lists' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2491_01_mangos_spillover_rename.sql -> mangos
+2026-09-04 01:25:58 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/mangos/s2491_01_mangos_spillover_rename.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2490_01_mangos_spell_threat_mask' in 'db_version'
+--------------
+ALTER TABLE db_version CHANGE COLUMN required_s2490_01_mangos_spell_threat_mask required_s2491_01_mangos_spillover_rename bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2490_01_mangos_spell_threat_mask' in 'db_version'
+warning: src/mangos-tbc/sql/updates/mangos/s2491_01_mangos_spillover_rename.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2490_01_mangos_spell_threat_mask' in 'db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/mangos/s2492_01_mangos_gobject_near_link.sql -> mangos
+core updates: src/mangos-tbc/sql/updates/realmd/s2367_01_realmd_totp.sql -> realmd
+2026-09-04 01:25:58 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/realmd/s2367_01_realmd_totp.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2325_01_realmd' in 'realmd_db_version'
+--------------
+ALTER TABLE realmd_db_version CHANGE COLUMN required_s2325_01_realmd required_s2367_01_realmd_totp bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2325_01_realmd' in 'realmd_db_version'
+warning: src/mangos-tbc/sql/updates/realmd/s2367_01_realmd_totp.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2325_01_realmd' in 'realmd_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/realmd/s2394_00_realmd_account_drop_sha.sql -> realmd
+2026-09-04 01:25:58 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/realmd/s2394_00_realmd_account_drop_sha.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2367_01_realmd_totp' in 'realmd_db_version'
+--------------
+ALTER TABLE realmd_db_version CHANGE COLUMN required_s2367_01_realmd_totp required_s2394_00_realmd_account_drop_sha bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2367_01_realmd_totp' in 'realmd_db_version'
+warning: src/mangos-tbc/sql/updates/realmd/s2394_00_realmd_account_drop_sha.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2367_01_realmd_totp' in 'realmd_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/realmd/s2398_01_realmd_banning.sql -> realmd
+2026-09-04 01:25:58 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/realmd/s2398_01_realmd_banning.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2394_00_realmd_account_drop_sha' in 'realmd_db_version'
+--------------
+ALTER TABLE realmd_db_version CHANGE COLUMN required_s2394_00_realmd_account_drop_sha required_s2398_01_realmd_banning bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2394_00_realmd_account_drop_sha' in 'realmd_db_version'
+warning: src/mangos-tbc/sql/updates/realmd/s2398_01_realmd_banning.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2394_00_realmd_account_drop_sha' in 'realmd_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/realmd/s2417_01_realmd_account_logons.sql -> realmd
+2026-09-04 01:25:58 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/realmd/s2417_01_realmd_account_logons.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2398_01_realmd_banning' in 'realmd_db_version'
+--------------
+ALTER TABLE realmd_db_version CHANGE COLUMN required_s2398_01_realmd_banning required_s2417_01_realmd_account_logons bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2398_01_realmd_banning' in 'realmd_db_version'
+warning: src/mangos-tbc/sql/updates/realmd/s2417_01_realmd_account_logons.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2398_01_realmd_banning' in 'realmd_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/realmd/s2421_01_realmd_account_locale_agnostic.sql -> realmd
+2026-09-04 01:25:59 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/realmd/s2421_01_realmd_account_locale_agnostic.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2417_01_realmd_account_logons' in 'realmd_db_version'
+--------------
+ALTER TABLE realmd_db_version CHANGE COLUMN required_s2417_01_realmd_account_logons required_s2421_01_realmd_account_locale_agnostic bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2417_01_realmd_account_logons' in 'realmd_db_version'
+warning: src/mangos-tbc/sql/updates/realmd/s2421_01_realmd_account_locale_agnostic.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2417_01_realmd_account_logons' in 'realmd_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/realmd/s2429_01_realmd_raf.sql -> realmd
+2026-09-04 01:25:59 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/realmd/s2429_01_realmd_raf.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2421_01_realmd_account_locale_agnostic' in 'realmd_db_version'
+--------------
+ALTER TABLE realmd_db_version CHANGE COLUMN required_s2421_01_realmd_account_locale_agnostic required_s2429_01_realmd_raf bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2421_01_realmd_account_locale_agnostic' in 'realmd_db_version'
+warning: src/mangos-tbc/sql/updates/realmd/s2429_01_realmd_raf.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2421_01_realmd_account_locale_agnostic' in 'realmd_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/realmd/s2433_01_realmd_anticheat.sql -> realmd
+2026-09-04 01:25:59 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/realmd/s2433_01_realmd_anticheat.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2429_01_realmd_raf' in 'realmd_db_version'
+--------------
+ALTER TABLE realmd_db_version CHANGE COLUMN required_s2429_01_realmd_raf required_s2433_01_realmd_anticheat bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2429_01_realmd_raf' in 'realmd_db_version'
+warning: src/mangos-tbc/sql/updates/realmd/s2433_01_realmd_anticheat.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2429_01_realmd_raf' in 'realmd_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/realmd/s2455_01_realmd_platform.sql -> realmd
+2026-09-04 01:25:59 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/realmd/s2455_01_realmd_platform.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2433_01_realmd_anticheat' in 'realmd_db_version'
+--------------
+ALTER TABLE realmd_db_version CHANGE COLUMN required_s2433_01_realmd_anticheat required_s2455_01_realmd_platform bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2433_01_realmd_anticheat' in 'realmd_db_version'
+warning: src/mangos-tbc/sql/updates/realmd/s2455_01_realmd_platform.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2433_01_realmd_anticheat' in 'realmd_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/realmd/s2474_01_realmd_joindate_datetime.sql -> realmd
+2026-09-04 01:25:59 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/realmd/s2474_01_realmd_joindate_datetime.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2455_01_realmd_platform' in 'realmd_db_version'
+--------------
+ALTER TABLE realmd_db_version CHANGE COLUMN required_s2455_01_realmd_platform required_s2474_01_realmd_joindate_datetime bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2455_01_realmd_platform' in 'realmd_db_version'
+warning: src/mangos-tbc/sql/updates/realmd/s2474_01_realmd_joindate_datetime.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2455_01_realmd_platform' in 'realmd_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2327_01_characters_pvpstats.sql -> characters
+2026-09-04 01:25:59 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2327_01_characters_pvpstats.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2325_02_characters' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2325_02_characters required_s2327_01_characters_pvpstats bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2325_02_characters' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2327_01_characters_pvpstats.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2325_02_characters' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2333_01_characters_reset_talents.sql -> characters
+2026-09-04 01:25:59 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2333_01_characters_reset_talents.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2327_01_characters_pvpstats' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2327_01_characters_pvpstats required_s2333_01_characters_reset_talents bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2327_01_characters_pvpstats' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2333_01_characters_reset_talents.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2327_01_characters_pvpstats' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2335_01_characters_wotlk_timer_port.sql -> characters
+2026-09-04 01:25:59 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2335_01_characters_wotlk_timer_port.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2333_01_characters_reset_talents' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2333_01_characters_reset_talents required_s2335_01_characters_wotlk_timer_port bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2333_01_characters_reset_talents' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2335_01_characters_wotlk_timer_port.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2333_01_characters_reset_talents' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2337_01_characters_weekly_quests.sql -> characters
+2026-09-04 01:25:59 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2337_01_characters_weekly_quests.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2335_01_characters_wotlk_timer_port' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2335_01_characters_wotlk_timer_port required_s2337_01_characters_weekly_quests bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2335_01_characters_wotlk_timer_port' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2337_01_characters_weekly_quests.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2335_01_characters_wotlk_timer_port' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2343_01_characters_mangle_cleanup.sql -> characters
+2026-09-04 01:25:59 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2343_01_characters_mangle_cleanup.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2337_01_characters_weekly_quests' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2337_01_characters_weekly_quests required_s2343_01_characters_mangle_cleanup bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2337_01_characters_weekly_quests' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2343_01_characters_mangle_cleanup.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2337_01_characters_weekly_quests' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2345_01_characters_instance.sql -> characters
+2026-09-04 01:25:59 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2345_01_characters_instance.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2343_01_characters_mangle_cleanup' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2343_01_characters_mangle_cleanup required_s2345_01_characters_instance bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2343_01_characters_mangle_cleanup' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2345_01_characters_instance.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2343_01_characters_mangle_cleanup' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2346_01_characters_playerbot_saved_data.sql -> characters
+2026-09-04 01:26:00 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2346_01_characters_playerbot_saved_data.sql failed: ERROR 1054 (42S22) at line 6: Unknown column 'required_s2345_01_characters_instance' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2345_01_characters_instance required_s2346_01_characters_playerbot_saved_data bit
+--------------
+
+ERROR 1054 (42S22) at line 6: Unknown column 'required_s2345_01_characters_instance' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2346_01_characters_playerbot_saved_data.sql failed (ERROR 1054 (42S22) at line 6: Unknown column 'required_s2345_01_characters_instance' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2352_01_characters_fix_revision.sql -> characters
+2026-09-04 01:26:00 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2352_01_characters_fix_revision.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2346_01_characters_playerbot_saved_data' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2346_01_characters_playerbot_saved_data required_s2352_01_characters_fix_revision bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2346_01_characters_playerbot_saved_data' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2352_01_characters_fix_revision.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2346_01_characters_playerbot_saved_data' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2357_01_characters_spell_cooldown.sql -> characters
+2026-09-04 01:26:00 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2357_01_characters_spell_cooldown.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2352_01_characters_fix_revision' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2352_01_characters_fix_revision required_s2357_01_characters_spell_cooldown bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2352_01_characters_fix_revision' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2357_01_characters_spell_cooldown.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2352_01_characters_fix_revision' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2358_01_characters_event_group_chosen.sql -> characters
+2026-09-04 01:26:00 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2358_01_characters_event_group_chosen.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2357_01_characters_spell_cooldown' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2357_01_characters_spell_cooldown required_s2358_01_characters_event_group_chosen bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2357_01_characters_spell_cooldown' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2358_01_characters_event_group_chosen.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2357_01_characters_spell_cooldown' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2359_01_characters_account_instances_entered.sql -> characters
+2026-09-04 01:26:00 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2359_01_characters_account_instances_entered.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2358_01_characters_event_group_chosen' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2358_01_characters_event_group_chosen required_s2359_01_characters_account_instances_entered bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2358_01_characters_event_group_chosen' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2359_01_characters_account_instances_entered.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2358_01_characters_event_group_chosen' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2370_01_characters_taxi_system_update.sql -> characters
+2026-09-04 01:26:00 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2370_01_characters_taxi_system_update.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2359_01_characters_account_instances_entered' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2359_01_characters_account_instances_entered required_s2370_01_characters_taxi_system_update bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2359_01_characters_account_instances_entered' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2370_01_characters_taxi_system_update.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2359_01_characters_account_instances_entered' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2375_01_characters_pet_loyalty.sql -> characters
+2026-09-04 01:26:00 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2375_01_characters_pet_loyalty.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2370_01_characters_taxi_system_update' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2370_01_characters_taxi_system_update required_s2375_01_characters_pet_loyalty bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2370_01_characters_taxi_system_update' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2375_01_characters_pet_loyalty.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2370_01_characters_taxi_system_update' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2376_01_characters_taxi_system_format_update.sql -> characters
+2026-09-04 01:26:00 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2376_01_characters_taxi_system_format_update.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2375_01_characters_pet_loyalty' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2375_01_characters_pet_loyalty required_s2376_01_characters_taxi_system_format_update bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2375_01_characters_pet_loyalty' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2376_01_characters_taxi_system_format_update.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2375_01_characters_pet_loyalty' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2379_01_characters_playerbot_saved_data.sql -> characters
+2026-09-04 01:26:00 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2379_01_characters_playerbot_saved_data.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2376_01_characters_taxi_system_format_update' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2376_01_characters_taxi_system_format_update required_s2379_01_characters_playerbot_saved_data bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2376_01_characters_taxi_system_format_update' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2379_01_characters_playerbot_saved_data.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2376_01_characters_taxi_system_format_update' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2386_01_characters_skills_cleanup_1829.sql -> characters
+2026-09-04 01:26:00 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2386_01_characters_skills_cleanup_1829.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2379_01_characters_playerbot_saved_data' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2379_01_characters_playerbot_saved_data required_s2386_01_characters_skills_cleanup_1829 bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2379_01_characters_playerbot_saved_data' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2386_01_characters_skills_cleanup_1829.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2379_01_characters_playerbot_saved_data' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2387_01_characters_weapon_skills_fix_tbc.sql -> characters
+2026-09-04 01:26:01 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2387_01_characters_weapon_skills_fix_tbc.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2386_01_characters_skills_cleanup_1829' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2386_01_characters_skills_cleanup_1829 required_s2387_01_characters_weapon_skills_fix_tbc bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2386_01_characters_skills_cleanup_1829' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2387_01_characters_weapon_skills_fix_tbc.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2386_01_characters_skills_cleanup_1829' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2388_01_characters_fix_skills_overflow.sql -> characters
+2026-09-04 01:26:01 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2388_01_characters_fix_skills_overflow.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2387_01_characters_weapon_skills_fix_tbc' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2387_01_characters_weapon_skills_fix_tbc required_s2388_01_characters_fix_skills_overflow bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2387_01_characters_weapon_skills_fix_tbc' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2388_01_characters_fix_skills_overflow.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2387_01_characters_weapon_skills_fix_tbc' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2389_00_characters_cooldown.sql -> characters
+2026-09-04 01:26:01 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2389_00_characters_cooldown.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2388_01_characters_fix_skills_overflow' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2388_01_characters_fix_skills_overflow required_s2389_00_characters_cooldown bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2388_01_characters_fix_skills_overflow' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2389_00_characters_cooldown.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2388_01_characters_fix_skills_overflow' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2395_01_characters_WorldState.sql -> characters
+2026-09-04 01:26:01 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2395_01_characters_WorldState.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2389_00_characters_cooldown' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2389_00_characters_cooldown required_s2395_01_characters_WorldState bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2389_00_characters_cooldown' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2395_01_characters_WorldState.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2389_00_characters_cooldown' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2401_01_characters_new_ticket_system.sql -> characters
+2026-09-04 01:26:01 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2401_01_characters_new_ticket_system.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2395_01_characters_WorldState' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2395_01_characters_WorldState required_s2401_01_characters_new_ticket_system bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2395_01_characters_WorldState' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2401_01_characters_new_ticket_system.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2395_01_characters_WorldState' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2402_01_characters_new_ticket_system_sql_std.sql -> characters
+2026-09-04 01:26:01 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2402_01_characters_new_ticket_system_sql_std.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2401_01_characters_new_ticket_system' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2401_01_characters_new_ticket_system required_s2402_01_characters_new_ticket_system_sql_std bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2401_01_characters_new_ticket_system' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2402_01_characters_new_ticket_system_sql_std.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2401_01_characters_new_ticket_system' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2403_01_characters_new_ticket_system_sql_dates.sql -> characters
+2026-09-04 01:26:01 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2403_01_characters_new_ticket_system_sql_dates.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2402_01_characters_new_ticket_system_sql_std' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2402_01_characters_new_ticket_system_sql_std required_s2403_01_characters_new_ticket_system_sql_dates bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2402_01_characters_new_ticket_system_sql_std' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2403_01_characters_new_ticket_system_sql_dates.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2402_01_characters_new_ticket_system_sql_std' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2404_01_characters_new_ticket_system_sql_created.sql -> characters
+2026-09-04 01:26:01 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2404_01_characters_new_ticket_system_sql_created.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2403_01_characters_new_ticket_system_sql_dates' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2403_01_characters_new_ticket_system_sql_dates required_s2404_01_characters_new_ticket_system_sql_created bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2403_01_characters_new_ticket_system_sql_dates' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2404_01_characters_new_ticket_system_sql_created.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2403_01_characters_new_ticket_system_sql_dates' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2415_01_characters_ahbot_items.sql -> characters
+2026-09-04 01:26:01 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2415_01_characters_ahbot_items.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2404_01_characters_new_ticket_system_sql_created' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2404_01_characters_new_ticket_system_sql_created required_s2415_01_characters_ahbot_items bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2404_01_characters_new_ticket_system_sql_created' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2415_01_characters_ahbot_items.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2404_01_characters_new_ticket_system_sql_created' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2418_01_characters_account_data.sql -> characters
+2026-09-04 01:26:01 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2418_01_characters_account_data.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2415_01_characters_ahbot_items' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2415_01_characters_ahbot_items required_s2418_01_characters_account_data bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2415_01_characters_ahbot_items' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2418_01_characters_account_data.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2415_01_characters_ahbot_items' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2420_01_characters_item_instance_data_drop.sql -> characters
+2026-09-04 01:26:02 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2420_01_characters_item_instance_data_drop.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2418_01_characters_account_data' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2418_01_characters_account_data required_s2420_01_characters_item_instance_data_drop bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2418_01_characters_account_data' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2420_01_characters_item_instance_data_drop.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2418_01_characters_account_data' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2423_01_characters_item_instance_duration_default.sql -> characters
+2026-09-04 01:26:02 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2423_01_characters_item_instance_duration_default.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2420_01_characters_item_instance_data_drop' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2420_01_characters_item_instance_data_drop required_s2423_01_characters_item_instance_duration_default bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2420_01_characters_item_instance_data_drop' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2423_01_characters_item_instance_duration_default.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2420_01_characters_item_instance_data_drop' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2429_01_characters_raf.sql -> characters
+2026-09-04 01:26:02 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2429_01_characters_raf.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2423_01_characters_item_instance_duration_default' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2423_01_characters_item_instance_duration_default required_s2429_01_characters_raf bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2423_01_characters_item_instance_duration_default' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2429_01_characters_raf.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2423_01_characters_item_instance_duration_default' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2452_01_characters_fishingSteps.sql -> characters
+2026-09-04 01:26:02 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2452_01_characters_fishingSteps.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2429_01_characters_raf' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2429_01_characters_raf required_s2452_01_characters_fishingSteps bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2429_01_characters_raf' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2452_01_characters_fishingSteps.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2429_01_characters_raf' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/characters/s2473_01_characters_item_instance_text_id_fix.sql -> characters
+2026-09-04 01:26:02 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/characters/s2473_01_characters_item_instance_text_id_fix.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2452_01_characters_fishingSteps' in 'character_db_version'
+--------------
+ALTER TABLE character_db_version CHANGE COLUMN required_s2452_01_characters_fishingSteps required_s2473_01_characters_item_instance_text_id_fix bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2452_01_characters_fishingSteps' in 'character_db_version'
+warning: src/mangos-tbc/sql/updates/characters/s2473_01_characters_item_instance_text_id_fix.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2452_01_characters_fishingSteps' in 'character_db_version'); continuing because 'core updates' is on_error: warn
+core updates: src/mangos-tbc/sql/updates/logs/s2433_01_logs_anticheat.sql -> logs
+2026-09-04 01:26:02 WARNING [yulon.catalog.families.sqlplan] SQL phase 'core updates': src/mangos-tbc/sql/updates/logs/s2433_01_logs_anticheat.sql failed: ERROR 1054 (42S22) at line 1: Unknown column 'required_s2325_01_logs' in 'logs_db_version'
+--------------
+ALTER TABLE logs_db_version CHANGE COLUMN required_s2325_01_logs required_s2433_01_logs_anticheat bit
+--------------
+
+ERROR 1054 (42S22) at line 1: Unknown column 'required_s2325_01_logs' in 'logs_db_version'
+warning: src/mangos-tbc/sql/updates/logs/s2433_01_logs_anticheat.sql failed (ERROR 1054 (42S22) at line 1: Unknown column 'required_s2325_01_logs' in 'logs_db_version'); continuing because 'core updates' is on_error: warn
+spell_template hotfix: statement 1 -> mangos
+playerbots characters: src/mangos-tbc/src/modules/Bots/sql/characters/ai_playerbot_ahbot.sql -> characters
+playerbots characters: src/mangos-tbc/src/modules/Bots/sql/characters/ai_playerbot_cache.sql -> characters
+playerbots characters: src/mangos-tbc/src/modules/Bots/sql/characters/ai_playerbot_custom_strategy.sql -> characters
+playerbots characters: src/mangos-tbc/src/modules/Bots/sql/characters/ai_playerbot_db_store.sql -> characters
+playerbots characters: src/mangos-tbc/src/modules/Bots/sql/characters/ai_playerbot_names.sql -> characters
+playerbots characters: src/mangos-tbc/src/modules/Bots/sql/characters/ai_playerbot_random_bots.sql -> characters
+playerbots world: src/mangos-tbc/src/modules/Bots/sql/world/ai_playerbot_indexes.sql -> mangos
+playerbots world: src/mangos-tbc/src/modules/Bots/sql/world/ai_playerbot_rpg_races.sql -> mangos
+playerbots world: src/mangos-tbc/src/modules/Bots/sql/world/ai_playerbot_texts.sql -> mangos
+playerbots world: src/mangos-tbc/src/modules/Bots/sql/world/tbc/ai_playerbot_enchants.sql -> mangos
+playerbots world: src/mangos-tbc/src/modules/Bots/sql/world/tbc/ai_playerbot_named_location.sql -> mangos
+playerbots world: src/mangos-tbc/src/modules/Bots/sql/world/tbc/ai_playerbot_travel_nodes.sql -> mangos
+playerbots world: src/mangos-tbc/src/modules/Bots/sql/world/tbc/ai_playerbot_weightscales.sql -> mangos
+playerbots world: src/mangos-tbc/src/modules/Bots/sql/world/tbc/ai_playerbot_zone_level.sql -> mangos
+expansion unlock: statement 1 -> realmd
+expansion unlock: statement 2 -> realmd
+2026-09-04 01:26:13 INFO [yulon.catalog.families.sqlplan] verified mangos: SELECT COUNT(*) FROM item_template = 30396 (>= 10000)
+2026-09-04 01:26:13 INFO [yulon.catalog.families.sqlplan] verified mangos: SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='mangos' AND table_name LIKE 'ai_playerbot%' = 12 (>= 10)
+2026-09-04 01:26:13 INFO [yulon.catalog.families.sqlplan] mangos is at required_s2492_01_mangos_gobject_near_link (from src/mangos-tbc/sql/updates/mangos/s2492_01_mangos_gobject_near_link.sql)
+2026-09-04 01:26:13 INFO [yulon.catalog.families.sqlplan] realmd is at required_s2474_01_realmd_joindate_datetime (from src/mangos-tbc/sql/updates/realmd/s2474_01_realmd_joindate_datetime.sql)
+2026-09-04 01:26:13 INFO [yulon.catalog.families.sqlplan] characters is at required_s2473_01_characters_item_instance_text_id_fix (from src/mangos-tbc/sql/updates/characters/s2473_01_characters_item_instance_text_id_fix.sql)
+2026-09-04 01:26:13 INFO [yulon.catalog.families.sqlplan] logs is at required_s2433_01_logs_anticheat (from src/mangos-tbc/sql/updates/logs/s2433_01_logs_anticheat.sql)
+Checked 2 database rule(s); every one holds.
+Update level confirmed for characters (required_s2473_01_characters_item_instance_text_id_fix), logs (required_s2433_01_logs_anticheat), mangos (required_s2492_01_mangos_gobject_near_link), realmd (required_s2474_01_realmd_joindate_datetime)
+The databases are imported and marked complete.
+--- up
+Starting the server.
+2026-09-04 01:26:13 INFO [yulon.docker] start_staged(): `compose up -d --no-deps tbc-db tbc-realmd tbc-mangosd` in /home/pk/tbc-7.4c
+--- ready
+Waiting for the database.
+Waiting for the world server to finish loading (this can take many minutes).
+The server is up.
+The realm now advertises 192.168.10.134, so players on other machines can reach this server: 192.168.10.134 is the address they set in their client's realmlist. The server was already running when this was set, so if a client is still sent to the old address, stop and start it again on the Server tab.
+2026-09-04 01:38:48 INFO [yulon.catalog.native] install of wow-tbc finished
+WoW TBC is installed and running in /home/pk/tbc-7.4c
+INSTALL RETURNED CLEANLY
