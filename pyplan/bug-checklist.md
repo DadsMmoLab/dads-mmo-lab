@@ -2127,3 +2127,30 @@ patch, and it is the owner's call.
 **Also worth doing whatever is decided:** reword the refusal to state only what is observable —
 no valid Yu'lon ownership record exists — rather than asserting who created the contents. That
 sentence is wrong in exactly the case a user is most likely to hit it.
+
+**4. The two guards disagree about who owns the folder (found 2026-09-03 by turning the fix's
+own test from a negative into a positive).** `_claim_if_ours()` teaches `_guard()` that the
+folder is this install's. It teaches `stage_clone_sources()` nothing: that stage asks whether
+there is a `.git` at each `dest`, and a destination holding files and no `.git` is refused —
+correctly, because the clone seam `shutil.rmtree`s a destination it does not recognise. So a
+first stage that wrote non-git files and then died still ends at a manual delete, now behind a
+second, narrower sentence ("has files in it but is not a checkout of …"). It is honest and it no
+longer claims the app did not write those bytes, which is why this is a limitation and not a
+regression. Measured, not argued: `test_a_claimed_folder_whose_leftovers_are_not_a_checkout_is_still_refused`.
+
+The common case is fine, and the difference is worth knowing before deciding anything. `git
+clone` creates `.git` in its destination within its first moments, and all four entries clone
+into per-source directories (`.` for AzerothCore, `src/<repo>` for the three CMaNGOS games), so a
+killed clone leaves a partial checkout that `stage_clone_sources()` recognises and resumes. The
+refusal above needs a kill inside that first instant, or a stage that wrote something other than
+a checkout. An early ownership claim the clone stage could CONSULT is what closes it, which is
+the same design change §38 already turns on.
+
+**Not a defect: the foreign-install-id mutation.** A review mutated `_claim_if_ours()` to write
+somebody else's `install_id` and reported that the suite stayed green. It does, and the reason is
+production code rather than a weak test: `_record_error()` runs on the very next line and
+rewrites the file from the same `state`, so a wrong id written inside the claim is erased before
+anything can observe it. `test_a_folder_this_app_filled_and_then_failed_in_is_still_its_own_on_the_retry`
+now asserts the recorded `install_id` by VALUE anyway — the mask is real, and it is not a reason
+for the tests to hold no opinion about what was claimed. Verified by mutating `_record_error()`
+instead: two tests fail.

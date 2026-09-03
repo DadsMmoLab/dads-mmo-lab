@@ -1667,29 +1667,114 @@ def test_a_folder_this_app_filled_and_then_failed_in_is_still_its_own_on_the_ret
     accepted the folder EMPTY, because that is the one moment "did we fill
     this" can be answered — and the neighbouring tests require an install into
     the user's own checkout to leave that checkout untouched.
+
+    **What the fixture leaves behind is the whole test, and the first version
+    got it wrong.** It wrote a plain `src/half-a-checkout` and then asserted
+    only that one sentence was ABSENT from the retry's error. A review pointed
+    out that any other refusal satisfies that, and this is the case: `git clone`
+    creates `.git` in its destination in its first moments, so a killed clone
+    leaves a PARTIAL CHECKOUT, and that is what the retry has to get past. The
+    fixture below leaves one, and what is asserted is positive — the clone was
+    attempted a second time.
     """
     server_dir = tmp_path / "wow"
     rec = Recorder()
+    attempts: list[int] = []
+    url = "https://github.com/mod-playerbots/azerothcore-wotlk.git"
 
-    # Stage one writes into the folder and then the run fails, exactly as an
-    # interrupted clone leaves things.
+    # Stage one gets as far as a partial checkout and then the process dies —
+    # what a killed `git clone` really leaves, `.git` and all.
     def clone_then_die(*_args: object, **_kwargs: object) -> object:
-        (server_dir / "src").mkdir(parents=True, exist_ok=True)
-        (server_dir / "src" / "half-a-checkout").write_bytes(b"x")
+        attempts.append(1)
+        (server_dir / ".git").mkdir(parents=True, exist_ok=True)
+        (server_dir / "half-a-checkout").write_bytes(b"x")
         raise InstallerError("killed mid-clone")
 
     with pytest.raises(InstallerError):
-        install(rec, server_dir, clone=clone_then_die)
+        install(rec, server_dir, clone=clone_then_die, remote_url=lambda _dest: url)
 
-    assert (server_dir / "src" / "half-a-checkout").is_file(), "the fixture wrote nothing"
+    assert (server_dir / "half-a-checkout").is_file(), "the fixture wrote nothing"
     assert (server_dir / native.STATE_FILE).is_file(), (
         "the folder this app filled was left with no record of the install, so the retry is "
         "refused as somebody else's directory"
     )
+    assert attempts == [1], "the first run did not reach the clone at all"
 
-    # And the retry gets past the guard rather than being told the folder is
-    # foreign. It still fails — the fixture always dies — but the refusal must
-    # be about the clone, never about the folder.
+    # The record names THIS folder. A claim written under any other install id
+    # is a claim the guard refuses on the very next run ("looks like a copy of
+    # another install"), which is the same dead end wearing a different
+    # sentence. Asserted as a VALUE rather than left to the retry to reveal:
+    # `_record_error()` runs one line after `_claim_if_ours()` and rewrites the
+    # file from the same `state` object, so a wrong id written inside the claim
+    # is erased before anything can observe it — the mask is real, and it is
+    # not a reason for this file to have no opinion about what was claimed.
+    claimed = native.read_state(server_dir, valid=("clone-core",))
+    assert claimed is not None, "the claim did not parse"
+    assert claimed.install_id == composegen.install_id(
+        server_dir, platform_id=lambda: "macos"
+    ), "the folder was claimed for a different install id"
+
+    # And the retry REACHES THE CLONE. Asserted positively, because the absence
+    # of one sentence is not the presence of progress: a review claimed the
+    # folder under a stranger's install id, which produces a DIFFERENT refusal
+    # ("copy of another install"), leaves the user in exactly the dead end this
+    # test is named for, and passed the old assertion. What the fix has to buy
+    # is a second attempt at the work, so that is what is asserted; the wording
+    # check stays as the specific regression it was.
     with pytest.raises(InstallerError) as again:
-        install(rec, server_dir, clone=clone_then_die)
+        install(rec, server_dir, clone=clone_then_die, remote_url=lambda _dest: url)
+    assert attempts == [
+        1,
+        1,
+    ], "the retry never got as far as the clone; something ahead of it refused the folder: " + str(
+        again.value
+    )
+    assert "killed mid-clone" in str(
+        again.value
+    ), "the second refusal is not the clone's own: " + str(again.value)
     assert "was not created by this app" not in str(again.value), str(again.value)
+
+
+def test_a_claimed_folder_whose_leftovers_are_not_a_checkout_is_still_refused(
+    tmp_path: Path,
+) -> None:
+    """The half the ownership record does NOT buy back, measured rather than assumed.
+
+    `_claim_if_ours()` teaches `_guard()` that the folder is this install's. It
+    teaches `stage_clone_sources()` nothing: that stage asks a different
+    question — is there a `.git` here — and a destination with files and no
+    `.git` is refused, because the clone seam `shutil.rmtree`s a destination it
+    does not recognise and a tree somebody unpacked by hand must not fall
+    through (review, 2026-08-23).
+
+    So a first stage that wrote non-git files and died leaves the user with a
+    second, narrower refusal instead of the first one. It is honest — it names
+    the directory and it does not claim the app did not write it — and it is
+    still a manual delete. Written down here because the fix's own test now
+    passes, and without this the fix would read as complete.
+
+    The two guards disagreeing about who owns the folder is bug §38's open
+    design question, and the answer is the owner's: ownership recorded before
+    the first mutating stage would let the clone stage consult it, which is a
+    change across the spine and the families rather than a patch.
+    """
+    server_dir = tmp_path / "wow"
+    rec = Recorder()
+
+    def write_then_die(*_args: object, **_kwargs: object) -> object:
+        (server_dir / "src").mkdir(parents=True, exist_ok=True)
+        (server_dir / "src" / "not-a-checkout").write_bytes(b"x")
+        raise InstallerError("killed before git made .git")
+
+    with pytest.raises(InstallerError):
+        install(rec, server_dir, clone=write_then_die)
+    assert (server_dir / native.STATE_FILE).is_file(), "the folder was not claimed"
+
+    with pytest.raises(InstallerError) as again:
+        install(rec, server_dir, clone=write_then_die)
+    message = str(again.value)
+    assert "has files in it but is not a checkout" in message, message
+    assert "was not created by this app" not in message, (
+        "the ownership record is doing its job; the remaining refusal must not be the one "
+        "that asserts the app did not write these bytes: " + message
+    )

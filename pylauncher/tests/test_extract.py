@@ -2598,6 +2598,57 @@ def test_a_wipe_followed_by_an_unmakeable_folder_still_says_the_mmaps_are_gone(
     )
 
 
+def test_an_optional_generator_that_wrote_nothing_is_refused_and_never_recorded(
+    tmp_path: Path,
+) -> None:
+    """Two safe settings stacked, and the failure they let through together.
+
+    `required: false` means "fewer maps than we hoped is survivable" -- a solo
+    realm does not need every one. `success_codes: [1]` is a measured fact about
+    the Tortoise fork, whose MoveMapGen returns 1 when it FINISHES. Neither is
+    wrong. Stacked, a Tortoise run that dies exits 1, reads as finished, and its
+    empty folder is downgraded to a warning.
+
+    The recording is the damage, not the wording. `produces` for an optional
+    plan is `{mmaps: 0}`, so once an empty run is written into the evidence file
+    every later resume finds the stage satisfied by zero files and says
+    "already extracted" forever. The user's next sight of it is a world server
+    that cannot path.
+
+    This shipped in `102e2dd1` with a comment and no test: deleting the branch
+    outright left the whole suite green.
+    """
+    run(PLAN, Runner(FULL), tmp_path)
+    data_dir = tmp_path / "server" / "data"
+    optional = MmapPlan(
+        argv=("/opt/bin/MoveMapGen", "--silent"), min_files=3, required=False, success_codes=(1,)
+    )
+    runner = Runner({}, fail={"/opt/bin/MoveMapGen": (1, "Movemap build is complete!")})
+
+    with pytest.raises(InstallerError) as caught:
+        mmaps(optional, runner, tmp_path)
+
+    message = str(caught.value)
+    assert "produced no files at all" in message, message
+    assert len(runner.specs) == 1, "the generator should have been run exactly once"
+
+    evidence = extract.read_evidence(data_dir)
+    assert evidence is not None
+    assert evidence.record_for(extract.MMAPS_TOOL) is None, (
+        "an empty run was recorded, so every resume after this one will find the stage "
+        "satisfied by zero files and never generate a movement map again"
+    )
+
+    # And the sibling case that must NOT be refused: the same optional plan,
+    # the same exit 1, but the tool wrote FEWER files than `min_files`. That is
+    # the shortfall `required: false` exists for, and it goes through.
+    short = Runner({"/opt/bin/MoveMapGen": {"mmaps": 1}}, fail={"/opt/bin/MoveMapGen": (1, "ok")})
+    said = mmaps(optional, short, tmp_path)
+    assert any("mmaps: 1 file" in line for line in said), said
+    after = extract.read_evidence(data_dir)
+    assert after is not None and after.record_for(extract.MMAPS_TOOL) is not None
+
+
 def test_a_crash_with_no_output_at_all_is_still_recognised_as_the_crash() -> None:
     """The shape the recipe was written for, and could not see until 2026-09-03.
 
@@ -2655,19 +2706,105 @@ def test_a_recipe_cannot_name_success_or_a_sentinel_as_a_reason_to_retry() -> No
             RetrySpec(when_log_matches="x", when_returncode_in=(bad,), tools=(VMAP.name,))
 
 
-def test_the_shipped_vanilla_recipe_names_the_status_a_crash_actually_reports() -> None:
-    """The value has to be in the catalog, not merely possible in the model.
+def shipped_vanilla_recipe() -> RetrySpec:
+    """The recipe `wow-vanilla` actually ships, read from the catalog.
 
-    139 is 128+SIGSEGV, the status the recipe's own name is about; 134 is
-    128+SIGABRT, which is what a failed assertion in the same tools produces.
-    Read from the shipped entry so a model that grew the field while no entry
-    used it fails here.
+    Both tests below drive THIS object rather than a `RetrySpec` typed into the
+    file, so a catalog edit reaches them. `RETRY` above cannot: it names no
+    statuses at all, which is why every stage-level retry test in this file was
+    blind to the field until now.
     """
     native = load_catalog().get("wow-vanilla").install.native
     assert native is not None and native.cmangos is not None
     recipe = native.cmangos.extract.retry
     assert recipe is not None, "wow-vanilla is the entry this recipe exists for"
-    assert 139 in recipe.when_returncode_in, (
+    return recipe
+
+
+def test_the_shipped_vanilla_recipe_names_the_status_a_crash_actually_reports() -> None:
+    """The value has to be in the catalog, not merely possible in the model.
+
+    139 is 128+SIGSEGV, the status the recipe's own name is about. Read from the
+    shipped entry so a model that grew the field while no entry used it fails
+    here.
+
+    **The tuple is asserted whole, and 134 is the reason.** It shipped for a few
+    hours beside 139 on the theory that a signal death is a signal death, and
+    `37b83d7b` took it out: 128+SIGABRT here is a failed assertion inside the
+    extractor over a particular record of the client's data, and the retry runs
+    the identical container over the identical bytes, so it can only buy a
+    second multi-minute wait before the same failure. A membership check would
+    let it -- or anything else -- come back in silence, which is exactly the
+    move that argument was written against. 139 stays because a stack overflow
+    is resource-dependent and plausibly transient.
+    """
+    assert shipped_vanilla_recipe().when_returncode_in == (139,), (
         "a crashed extractor reports 139 and prints nothing; without it in the recipe the "
-        "retry cannot fire on the failure it was written for"
+        "retry cannot fire on the failure it was written for -- and nothing else belongs "
+        "here without evidence that running the same container again could change it"
     )
+
+
+def test_the_shipped_recipe_fires_the_stage_retry_on_a_crash_that_printed_nothing(
+    tmp_path: Path,
+) -> None:
+    """The wire, end to end: catalog value -> `_retry_applies` -> containers run again.
+
+    Every other stage-level retry test in this file drives the module-level
+    `RETRY`, which carries no `when_returncode_in`, against a fixture whose
+    crash already contains the text the recipe matches on. So all of them pass
+    with the status check removed -- verified: blanking `when_returncode_in` at
+    the call site left the whole suite green while restoring the very defect
+    `247b2c68` was written to fix.
+
+    This one closes that gap the way `test_families_cmangos.py` closed it for
+    `success_codes`. The recipe is the shipped one, the crash is SILENT (139 and
+    a tail of zero lines, which is what a signal-killed PID 1 really leaves),
+    and the transcript is asserted whole. Delete the status from the catalog, or
+    stop passing it down, and the extractor's crash becomes a plain failure
+    hours before anyone finds out the maps are missing.
+    """
+
+    class SilentCrash(Runner):
+        """Crashes `vmap_extractor` once with no output at all, then behaves."""
+
+        def __init__(self) -> None:
+            super().__init__(FULL)
+            self.crashed = False
+
+        def __call__(
+            self,
+            spec: docker.ContainerRun,
+            *,
+            sink: docker.OutputSink,
+            cancel: threading.Event | None,
+        ) -> docker.AttachedRun:
+            if tool_program(spec) == "/opt/bin/vmap_extractor" and not self.crashed:
+                self.crashed = True
+                self.specs.append(spec)
+                return docker.AttachedRun(139, ())
+            return super().__call__(spec, sink=sink, cancel=cancel)
+
+    recipe = shipped_vanilla_recipe()
+    assert recipe.tools == (VMAP.name, ASSEMBLE.name), (
+        "this test drives the shipped recipe against the fixture plan; if the entry renames "
+        "its tools the fixture has to follow, or the retry would be re-running strangers"
+    )
+    plan = ExtractPlan(
+        image="server", tools=(AD, VMAP, ASSEMBLE), ulimit_stack_unlimited=True, retry=recipe
+    )
+    runner = SilentCrash()
+    said = run(plan, runner, tmp_path)
+    assert runner.names() == ["ad", "vmap_extractor", "vmap_extractor", "vmap_assembler"]
+    assert said == [
+        f"{AD.name}: running /opt/bin/ad -i /client -o /out",
+        f"{AD.name}: done (dbc: 3 files, maps: 2 files)",
+        f"{VMAP.name}: running /opt/bin/vmap_extractor -d /client/Data",
+        f"{VMAP.name} crashed the way the retry recipe expects; "
+        f"running {VMAP.name}, {ASSEMBLE.name} again once",
+        f"{VMAP.name}: retrying /opt/bin/vmap_extractor -d /client/Data",
+        f"{VMAP.name}: done (Buildings: 2 files)",
+        f"{ASSEMBLE.name}: retrying /opt/bin/vmap_assembler Buildings vmaps",
+        f"{ASSEMBLE.name}: done (vmaps: 2 files)",
+        f"{ASSEMBLE.name}: already extracted (vmaps: 2 files)",
+    ]

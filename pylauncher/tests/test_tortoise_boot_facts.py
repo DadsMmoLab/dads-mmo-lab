@@ -79,14 +79,21 @@ def test_the_auto_updater_is_pointed_at_the_directory_that_holds_the_migrations(
         Your database structure is not up to date.
 
     With the path corrected the updater applied all 125 and the server reached
-    its main loop. Asserted as the trailing path component rather than the whole
-    string so a future image layout change is a deliberate edit here.
+    its main loop.
+
+    **The whole path, not its last component.** The first version asserted
+    `endswith("database_updates")`, which a review pointed out accepts any
+    parent at all: `/opt/tortoise/database_updates/` -- one directory too HIGH,
+    the same class of mistake in the other direction -- passed it. The path
+    below is where the 125 files were counted in the image that booted, so it
+    is a measurement and it belongs here whole.
     """
     keys = _native().cmangos.conf.files["mangosd.conf"].keys  # type: ignore[union-attr]
     path = keys["Database.AutoUpdate.Path"].strip('"')
-    assert path.rstrip("/").endswith("database_updates"), (
-        f"Database.AutoUpdate.Path is {path!r}; the migrations live in a `database_updates` "
-        "directory and the updater skips a missing one in silence"
+    assert path.rstrip("/") == "/opt/tortoise/sql/database_updates", (
+        f"Database.AutoUpdate.Path is {path!r}; the migrations were counted at "
+        "/opt/tortoise/sql/database_updates/world (125 files) in the image that booted, and "
+        "the updater skips a missing directory in silence"
     )
 
 
@@ -157,10 +164,31 @@ def test_tortoise_imports_the_playerbot_sql_its_own_bots_query() -> None:
     assert "playerbots world" in phases, "the module's world SQL is never imported"
     assert "playerbots characters" in phases, "the module's character SQL is never imported"
 
+    # WHICH DATABASE each phase loads into, which the phase names do not say.
+    # A review moved `playerbots world` to `tw_char` and every assertion above
+    # still held: the module's tables land in the characters schema, the
+    # server's boot query still finds no `tw_world.ai_playerbot_weightscales`,
+    # and the crash quoted in this docstring comes back unchanged.
+    assert phases["playerbots world"].into == "tw_world", (
+        "the bots' boot query names `tw_world.ai_playerbot_weightscales`; a phase that loads "
+        f"into {phases['playerbots world'].into!r} imports the files and still leaves that "
+        "table missing"
+    )
+    assert (
+        phases["playerbots characters"].into == "tw_char"
+    ), "the character-side module tables belong in the characters schema"
+
+    # The exact glob. `"classic" in pattern` was also true of
+    # `.../world/classical/*.sql` -- a directory that does not exist, matching
+    # no file, importing nothing, and passing.
     patterns = phases["playerbots world"].files or ()
-    assert any("classic" in pattern for pattern in patterns), (
+    assert any(pattern.endswith("/sql/world/classic/*.sql") for pattern in patterns), (
         "the `classic` subfolder holds `ai_playerbot_weightscales` and the rest of the "
         f"tables the bots query on boot; the phase lists only {list(patterns)}"
+    )
+    assert any(pattern.endswith("/sql/world/*.sql") for pattern in patterns), (
+        "the module's top-level world SQL is imported alongside the classic subfolder, as "
+        f"wow-vanilla does; the phase lists only {list(patterns)}"
     )
 
     vanilla = load_catalog().get("wow-vanilla").install.native
@@ -188,7 +216,19 @@ def test_the_import_is_verified_by_the_tables_the_bots_need() -> None:
     checks = _native().cmangos.sql.verify  # type: ignore[union-attr]
     bots = [c for c in checks if "ai_playerbot" in c.query]
     assert bots, "nothing verifies that the playerbot tables arrived"
-    assert bots[0].min >= 10, f"a threshold of {bots[0].min} would pass on an empty import"
+    rule = bots[0]
+    assert rule.min >= 10, f"a threshold of {rule.min} would pass on an empty import"
+
+    # WHICH database it counts in. A review pointed the rule at `tw_char`: the
+    # query still mentions `ai_playerbot`, the threshold is still 10, and the
+    # check now passes against the characters schema while the world import it
+    # exists to verify goes unexamined -- the exact failure this docstring is
+    # about, restored by a one-word edit the assertion above cannot see.
+    assert rule.db == "tw_world", f"the rule runs against {rule.db!r}, not the world database"
+    assert "table_schema='tw_world'" in rule.query, (
+        f"the rule counts tables in whichever schema {rule.query!r} names; the bots read "
+        "theirs out of tw_world"
+    )
 
 
 def test_the_ready_budget_covers_a_measured_first_boot_not_a_round_number() -> None:
@@ -341,4 +381,67 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
     assert not unpinned, (
         f"{unpinned} are cloned from a moving ref; this entry's catalog encodes measurements "
         "taken from one commit, and a branch tip is free to invalidate all of them"
+    )
+    # Truthiness is a declaration, and a review noted that any wrong hash
+    # satisfied it. The core's rev is asserted BY VALUE because every other
+    # fact in this file was measured against that tree: moving the pin means
+    # taking those measurements again, and this line is where that decision has
+    # to be written down rather than discovered on a four-hour install. The
+    # rest are held to the SHAPE of a full commit id, because an abbreviation
+    # is a prefix and a prefix can stop being unique.
+    core = next(s for s in sources if s.repo.endswith("tortoise-wow"))
+    assert core.rev == "7c0fb278f3f8966422f219e6f5035cb09b76ada7", (
+        f"the core is pinned to {core.rev!r}; every measurement in this file -- the exit "
+        "status, the migrations path, the ready banner, the bot conf, the SQL globs, the "
+        "harmless log line -- was taken from 7c0fb278. Moving the pin means taking them again"
+    )
+    for source in sources:
+        assert re.fullmatch(
+            r"[0-9a-f]{40}", source.rev or ""
+        ), f"{source.repo} is pinned to {source.rev!r}, which is not a full commit id"
+
+
+def test_both_boot_patterns_are_read_as_regular_expressions_not_literal_text() -> None:
+    """One flag holds up both of the measurements above, and nothing here watched it.
+
+    `ready.regex` is what decides whether the two patterns are compiled or
+    `re.escape`d. Every other test in this file reads the pattern STRINGS, so a
+    review's flip of `regex` to `false` left all of them green while retiring
+    both facts at once:
+
+    * `ready.world` is four alternatives -- three of them from before the banner
+      was measured -- so as literal text it matches a line containing a `|`
+      character, which nothing prints. A healthy server would wait out the full
+      3600 seconds and be reported as never ready, which is the original defect.
+    * `ready.fatal` is an alternation carrying a negative lookahead. Escaped, it
+      stops matching `Correct *.map files not found` at all, so an install with
+      no maps runs its whole timeout instead of failing in seconds -- and the
+      lookahead that keeps a healthy server's 4,854 harmless bot-log lines from
+      reading as fatal becomes literal text too.
+
+    The suite does catch the flip elsewhere (`test_controller_wow_tortoise.py`),
+    which is exactly why it belongs here as well: this file is the one a person
+    edits when they change one of these patterns, and the flag they must not
+    touch while doing it should fail in front of them.
+    """
+    ready = _native().ready
+    assert ready.regex is True, (
+        "both boot patterns are alternations and one carries a negative lookahead; read as "
+        "literal text neither can match anything this server prints"
+    )
+    assert ready.world is not None and ready.fatal is not None
+    assert re.escape(ready.world) != ready.world, (
+        "the ready marker has no regex syntax left in it -- if that is deliberate, this test "
+        "and the `regex` flag both need revisiting"
+    )
+    assert not re.search(re.escape(ready.world), "World server is up and running!"), (
+        "read literally the marker does not match the banner this core prints, which is what "
+        "`regex: false` would do to it"
+    )
+    assert re.search(
+        ready.fatal, "Correct *.map files not found"
+    ), "the no-maps line is the one fatal this entry can hit in its first seconds"
+    assert not re.search(re.escape(ready.fatal), "Correct *.map files not found"), (
+        "read literally the fatal pattern misses the failure it exists for, and the install "
+        "spends its whole 3600-second budget before saying so"
     )

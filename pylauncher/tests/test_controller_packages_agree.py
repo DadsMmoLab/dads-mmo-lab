@@ -93,6 +93,12 @@ def test_the_password_parameter_is_spelled_the_same_in_every_package() -> None:
                     continue
                 first = next(iter(inspect.signature(builder).parameters))
                 leading[game + "." + name] = first
+    # Eight builders: `sql_for` and `mysql_for` in each of four packages. The
+    # count is asserted because the loop SKIPS what it cannot find, so a set of
+    # spellings is equally happy with eight builders and with one -- delete
+    # `sql_for` from every package and `{"db_root_password"}` still holds
+    # (review, 2026-09-03).
+    assert len(leading) == 8, f"expected eight seam builders, found {sorted(leading)}"
     assert set(leading.values()) == {"db_root_password"}, (
         "the password parameter is spelled differently across packages, so a caller "
         "switching games has to switch keywords: " + repr(leading)
@@ -282,6 +288,16 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
     Enumerated from the dataclass rather than listed here, so a sixteenth
     capability added to the view cannot be wired for WotLK and forgotten for
     the rest.
+
+    **This proves COMPLETENESS, not correctness, and the distinction is not
+    pedantry.** `is not None` says a callable was bound; it never says the
+    callable is THIS GAME'S. Swap Tortoise's console, backup and restore for
+    Vanilla's and every assertion below still holds -- what catches that is the
+    per-game work in `test_controller_view.py`, which drives each seam and reads
+    the schema and container it addressed. So the sixteenth capability is
+    required by this test to be present, and required by those tests to be the
+    right one; neither half is the other, and a reader who takes this file for
+    the whole answer will wire a game to its neighbour's database.
     """
     from dataclasses import fields
 
