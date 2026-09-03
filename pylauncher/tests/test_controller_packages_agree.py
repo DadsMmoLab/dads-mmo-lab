@@ -95,16 +95,58 @@ def test_a_generated_password_that_cannot_be_read_is_refused_and_not_guessed(
         assert "Nothing was asked of the database" in message, (game, message)
 
 
-def test_every_cmangos_package_binds_a_database_client_for_backups() -> None:
-    """`mysql_for()` must hand `DockerMysql` the declared client, in every package.
+def test_every_seam_builder_in_every_package_binds_the_declared_client(tmp_path: Path) -> None:
+    """EVERY function that builds a database seam, not the two someone remembered.
 
-    The unbound fallback is `mysql`, and `mariadb:11` ships neither `mysql` nor
-    `mysqldump`. This was true of all four packages until 2026-09-03; asserting
-    it per game in one place is what stops it being true of the fifth.
+    This test was written naming `maintenance.mysql_for` alone, and it passed
+    while `accounts.sql_for` -- one module over, in all four packages -- still
+    built its seam with no client at all. That gap was found by driving the real
+    path rather than reading it: creating an account on the live TBC server on
+    m910q printed `client=None` on the seam it had just built (2026-09-03).
+
+    So the builders are DISCOVERED rather than listed. Every `sql_for` /
+    `sql_for_install` / `mysql_for` in every controller package is called and its
+    seam checked, which is what makes a fifth builder added tomorrow fail here
+    instead of shipping unbound. A test that names its subjects can only prove
+    something about the names its author already thought of.
+
+    Why it matters: `mysql_client()` asks the container `command -v` and believes
+    the answer, so an unbound seam works whenever the probe can run. It falls
+    back to its first candidate when it CANNOT -- no docker CLI, a timeout, an
+    OSError -- and unbound that is `mysql`, which `mariadb:11` does not ship.
     """
-    for game, mod in CMANGOS_MAINTENANCE.items():
-        seam = mod.mysql_for("pw")  # type: ignore[attr-defined]
-        assert seam.client, f"{game} builds a DockerMysql with no declared client"
-        assert (
-            seam.client == "mariadb"
-        ), f"{game} is a CMaNGOS entry on MariaDB but declares {seam.client!r}"
+    from yulon.controller_wow_wotlk import accounts as wotlk_accounts
+    from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
+
+    packages = {
+        "wow-tbc": (tbc_accounts, tbc_maintenance, "mariadb"),
+        "wow-vanilla": (vanilla_accounts, vanilla_maintenance, "mariadb"),
+        "wow-tortoise": (tortoise_accounts, tortoise_maintenance, "mariadb"),
+        "wow-wotlk": (wotlk_accounts, wotlk_maintenance, "mysql"),
+    }
+    checked = 0
+    for game, (accounts_mod, maintenance_mod, expected) in packages.items():
+        for mod in (accounts_mod, maintenance_mod):
+            for name in ("sql_for", "sql_for_install", "mysql_for"):
+                builder = getattr(mod, name, None)
+                if builder is None or not inspect.isfunction(builder):
+                    continue
+                first = next(iter(inspect.signature(builder).parameters))
+                if first == "server_dir":
+                    # A real install directory: `sql_for_install` refuses one
+                    # with no password file, and rightly so -- that refusal has
+                    # its own test above. Here the question is the CLIENT, so
+                    # the password has to be readable for the seam to exist.
+                    install = tmp_path / game
+                    install.mkdir(exist_ok=True)
+                    (install / ".db_password").write_text("hunter2", encoding="utf-8")
+                    seam = builder(install)
+                else:
+                    seam = builder("pw")
+                assert seam.client == expected, (
+                    f"{game}.{mod.__name__.rsplit('.', 1)[-1]}.{name}() built a seam with "
+                    f"client={seam.client!r}; this entry declares {expected!r}, and an unbound "
+                    "seam falls back to `mysql` when the container cannot be asked"
+                )
+                checked += 1
+    assert checked >= 10, f"only {checked} seam builders were found; the discovery is not working"

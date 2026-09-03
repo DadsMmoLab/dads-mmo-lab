@@ -109,6 +109,7 @@ def sql_for(
         db_root_password,
         schemas=game.schemas(),
         wsl_distro=wsl_distro,
+        client=game.db().client,
     )
 
 

@@ -95,6 +95,7 @@ def sql_for(root_password: str, *, wsl_distro: str | None = None) -> DockerSql:
         root_password,
         schemas=docker_ctl.ENTRY.schema_map(),
         wsl_distro=wsl_distro,
+        client=docker_ctl.DB_CLIENT,
     )
 
 
