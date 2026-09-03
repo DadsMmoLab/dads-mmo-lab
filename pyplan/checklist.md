@@ -478,7 +478,7 @@
     worked, `ubuntu:22.04` failed, `ubuntu:22.04` with `-c http.version=HTTP/1.1` worked — and fixed
     in all three templates (`12d7e240`). `git.py` had already made this choice for the clones the
     app itself makes; the build context was the last place still speaking HTTP/2.
-- [ ] 7.6 WoW Tortoise — data + templates; first-ever extraction from a 7272 client; boot to `Ready to login`; client connects; `status` promoted from `wip`; source pinned
+- [x] 7.6 WoW Tortoise — data + templates; first-ever extraction from a 7272 client; boot to `Ready to login`; client connects; `status` promoted from `wip`; source pinned
   - **Five defects, 2026-09-03, `yulon-ubuntu`. Not ticked.** Every one is a fact about a binary
     this project did not write, and not one was visible from our own code — the suite was green
     through all five. This is the entry that justifies the gate existing.
@@ -523,8 +523,33 @@
       over the existing one by design (bug-checklist §36). Owner decision pending: drop the four
       `tw_*` schemas on this test server, or install fresh into an empty folder (~90 min: the image
       is cached, extract and mmaps are not).
-    - **Client login and `status: wip` → promoted are both still outstanding**, and both come after
-      that clean run.
+  - **TICKED 2026-09-03, every item on the line.**
+    - *data + templates* — the six fixes above are all `catalog.json`; the only Python this gate
+      needed was `MmapPlan.success_codes`, and that is a spine change the other three entries
+      inherit rather than a Tortoise special case.
+    - *first-ever extraction from a 7272 client* — `data/mmaps` at 2133 files from
+      `/home/pk/clients/TurtleWoW`, the client untouched (mounted `:ro`).
+    - *boot to ready* — `World server is up and running! Loading time: 28 minutes 38 seconds`,
+      `RestartCount=0`, ports 3724 and 8090 listening, all three verify rules green including
+      `ai_playerbot% = 12`.
+    - *client connects* — the owner logged in from the Hyper-V host with `turtle-wow.exe` and
+      played a character. Server-side: `tw_logon.account` id **104** `YULON`, `rank 3`,
+      `online = 1`, `current_realm = 1`, `last_ip 172.30.48.1` (the host), `failed_logins 0`,
+      `length(sessionkey) = 80`; `tw_char.characters` guid **901** `Kandranya`, account 104,
+      `online = 1`, `totaltime 146`. The account was written by this app's own
+      `accounts.sql_for_install()` + `create_account()`, and Tortoise's `account` table has a
+      DIFFERENT shape from TBC's (`sha_pass_hash`/`rank`/`security`, not `gmlevel`) — so the
+      shared account writer is now proven against two CMaNGOS variants, not one.
+    - *`status` promoted* — `wip` → `beta`, level with its two siblings.
+    - *source pinned* — the core was on a BRANCH while Eluna beside it had a `rev`. Every one of
+      the six fixes is a measurement of one commit, so a branch tip was free to invalidate all of
+      them. Pinned to `7c0fb278f3f8966422f219e6f5035cb09b76ada7`, the commit that was actually
+      built, extracted, migrated, booted and logged into. A test now requires EVERY source of this
+      entry to carry a `rev`.
+    - **Two notes carried forward, neither blocking this line.** The run that produced it resumed
+      over recorded `build`/`extract`/`mmaps` stages rather than starting from an empty folder —
+      those three were each driven earlier the same day on the same commit. And an existing
+      install cannot receive the two new SQL phases, by the marker's design: bug-checklist §36.
   - **Reached `build` and FAILED there, 2026-09-02 on `m910q`** — the first time this entry has been
     driven at all. Five stages ran in order — `clone-sources`, `db-password`, `write-dockerfile`,
     `generate-compose`, `build` — the build was invoked at 21:44:05 and the run ended at 21:44:49,

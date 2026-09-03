@@ -298,3 +298,33 @@ def test_tortoise_is_no_longer_marked_as_work_in_progress() -> None:
         f"the three CMaNGOS entries carry the same class of evidence and should carry the "
         f"same status until one of them earns more: {peers}"
     )
+
+
+def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> None:
+    """A branch is not a pin, and this entry's whole calibration depends on one.
+
+    The core was cloned by BRANCH (`playerbots-integration-gh`) while Eluna
+    beside it carried a `rev`. Six defects were fixed on 2026-09-03 by reading
+    what that tree does -- which exit status MoveMapGen returns, where the
+    migrations live, what the ready banner says, which conf file the bots want,
+    which SQL they read, which log line is harmless. Every one of those answers
+    is a property of a particular commit. With the source on a branch tip, the
+    next install could clone a tree where any of them has changed, and the
+    catalog would still claim the old answers.
+
+    `Source.rev`'s own description already says this ("a pinned server must
+    rebuild the same bytes"); the entry simply had not used it. Pinned to
+    7c0fb278, the commit that was built, extracted, migrated, booted and logged
+    into on `yulon-ubuntu`.
+
+    Asserted over ALL sources rather than the one that was wrong, so a third
+    source added later cannot arrive unpinned.
+    """
+    from yulon.catalog.catalog import load_catalog
+
+    sources = load_catalog().get("wow-tortoise").emulator.sources
+    unpinned = [s.repo for s in sources if not s.rev]
+    assert not unpinned, (
+        f"{unpinned} are cloned from a moving ref; this entry's catalog encodes measurements "
+        "taken from one commit, and a branch tip is free to invalidate all of them"
+    )
