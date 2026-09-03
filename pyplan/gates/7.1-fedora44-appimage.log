@@ -1,0 +1,20 @@
+2026-09-03 20:47:15 INFO [__main__] Yu'lon launcher starting
+2026-09-03 20:47:34 INFO [__main__] Yu'lon launcher starting
+2026-09-03 20:47:35 INFO [__main__] YULON_SMOKE_TEST set: window built, exiting 0
+2026-09-03 20:47:36 INFO [yulon.update] update check: current=0.6.59 latest=v0.6.59Public newer=False
+2026-09-03 20:49:41 INFO [__main__] Yu'lon launcher starting
+2026-09-03 20:49:42 INFO [yulon.update] update check: current=0.6.59 latest=v0.6.59Public newer=False
+2026-09-03 20:58:10 INFO [__main__] Yu'lon launcher starting
+2026-09-03 20:58:11 INFO [yulon.update] update check: current=0.6.59 latest=v0.6.59Public newer=False
+2026-09-03 20:59:13 INFO [__main__] Yu'lon launcher starting
+2026-09-03 20:59:14 INFO [yulon.update] update check: current=0.6.59 latest=v0.6.59Public newer=False
+2026-09-03 21:11:55 INFO [yulon.platform] holding this machine awake for the build: systemd-inhibit --what=idle:sleep --who=Yu'lon --why=installing a server sleep infinity
+2026-09-03 21:11:55 INFO [yulon.git] containerized git: `run --rm -v /home/pk/wow-server-playerbots:/git:z -w /git --user 1000:1000 alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26 -c core.autocrlf=false -c core.eol=lf -c http.version=HTTP/1.1 clone --config core.autocrlf=false --config core.eol=lf --config http.version=HTTP/1.1 --branch Playerbot https://github.com/mod-playerbots/azerothcore-wotlk.git .` into /home/pk/wow-server-playerbots
+2026-09-03 21:17:18 INFO [yulon.git] containerized git: `run --rm -v /home/pk/wow-server-playerbots/modules/mod-playerbots:/git:z -w /git --user 1000:1000 alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26 -c core.autocrlf=false -c core.eol=lf -c http.version=HTTP/1.1 clone --config core.autocrlf=false --config core.eol=lf --config http.version=HTTP/1.1 --depth 1 --branch master https://github.com/mod-playerbots/mod-playerbots.git .` into /home/pk/wow-server-playerbots/modules/mod-playerbots
+2026-09-03 21:17:24 INFO [yulon.git] containerized git: `run --rm --security-opt label:disable --network none --cap-drop ALL --security-opt no-new-privileges --read-only -v /home/pk/wow-server-playerbots:/git:ro -w /git --user 1000:1000 alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26 --no-optional-locks --attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904 -c core.attributesFile=/dev/null -c core.fsmonitor=false -c core.hooksPath=/dev/null -c core.autocrlf=false -c core.eol=lf -c http.version=HTTP/1.1 status --ignore-submodules=all --porcelain -- docker-compose.yml` into /home/pk/wow-server-playerbots
+2026-09-03 21:17:25 INFO [yulon.docker] build_staged(): `docker compose -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.build.yml build --progress plain` in /home/pk/wow-server-playerbots
+2026-09-03 21:54:02 INFO [yulon.docker] start_database(): starting ac-database alone
+2026-09-03 22:00:07 INFO [yulon.docker] ac-db-import finished; the databases now read as imported
+2026-09-03 22:00:07 INFO [yulon.docker] start_staged(): `compose up -d --no-deps ac-database ac-authserver ac-worldserver` in /home/pk/wow-server-playerbots
+2026-09-03 22:04:35 INFO [yulon.catalog.native] install of wow-wotlk finished
+2026-09-03 22:04:35 INFO [yulon.docker] pinned COMPOSE_PROJECT_NAME=yulon-wow-wotlk-056ed20d in /home/pk/wow-server-playerbots/.env
