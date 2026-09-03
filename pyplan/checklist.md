@@ -505,12 +505,30 @@
     `required_z2681_01_mangos_mangos_string`, and every one after it is that same miss inherited.
     Because the phase is `on_error: warn`, the engine logged each as `continuing because 'core
     updates' is on_error: warn` and finished with `WoW Vanilla is installed and running`.
-    **UNVERIFIED, and it is the whole question:** whether the base dump this entry pins already
-    contains those updates — in which case the warnings are noise and the phase is re-running
-    applied work — or whether this realm is genuinely 171 updates behind, in which case a `warn` is
-    covering a broken world. Nobody has asked the database which, so nobody knows. Worth settling
-    before Vanilla is called done, and worth remembering that a run reporting `installed and
-    running` is what it looked like from the outside.
+    **SETTLED 2026-09-03 by asking the database, and the answer is the harmless one: the warnings
+    are noise.** Every schema is at the NEWEST update the checkout ships, so nothing is missing:
+
+    | schema | update files | `*_db_version` column on the live server |
+    |---|---|---|
+    | `mangos` | 137, newest `z2837_01_mangos_gobject_near_link` | `required_z2837_01_mangos_gobject_near_link` |
+    | `characters` | 27, newest `z2819_01_characters_item_instance_text_id_fix` | `required_z2819_01_characters_item_instance_text_id_fix` |
+    | `realmd` | 10, newest `z2820_01_realmd_joindate_datetime` | `required_z2820_01_realmd_joindate_datetime` |
+    | `logs` | 1, `z2778_01_logs_anticheat` | `required_z2778_01_logs_anticheat` |
+
+    The base dump announces itself as `Classic DB version 1.12.1 "Melting Pot v2". For Classic core
+    z2815` and already carried every update but the last, which is why exactly ONE file applied
+    (`z2837`, the only one newer than the dump) and the other 171 could not: each update's first
+    statement RENAMES the previous update's `required_*` column, and the dump had already renamed
+    past all of them. The chain did not fail to start — it was already finished. World content
+    agrees: 10,384 creature templates, 4,245 quests, 17,718 items, 10,744 gameobjects.
+
+    **What is NOT settled is how anybody was supposed to know that from the run.** `on_error: warn`
+    printed 171 `ERROR 1054` lines and then `WoW Vanilla is installed and running`, and the only
+    instrument that separates "already applied" from "171 updates behind" is a query nobody runs.
+    Both readings produce the identical transcript. The phase either has to skip updates the
+    `*_db_version` column says are already in, or the verify step has to assert that column against
+    the newest file in `sql/updates/<schema>/` — which is a rule this catalog can express and does
+    not. Not a defect in this install; a defect in what the install can tell you about itself.
   - **It found the second-worst defect of the day.** The build died at cmake configure, before
     compiling anything: CMaNGOS's `FetchContent_MakeAvailable(zlib)` CLONES madler/zlib at configure
     time, and over HTTP/2 that clone fails (`could not read Username for 'https://github.com'` /
