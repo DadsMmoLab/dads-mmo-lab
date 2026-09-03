@@ -128,3 +128,64 @@ def test_every_cmangos_game_asks_for_the_bot_population_the_owner_set(game: str)
     conf = _native(game).cmangos.conf.files["aiplayerbot.conf"]  # type: ignore[union-attr]
     assert conf.keys.get("AiPlayerbot.MinRandomBots") == "500"
     assert conf.keys.get("AiPlayerbot.MaxRandomBots") == "500"
+
+
+def test_tortoise_imports_the_playerbot_sql_its_own_bots_query() -> None:
+    """Compiled in, configured, and then dead on a missing table.
+
+    Enabling `aiplayerbot.conf` moved the crash rather than removing it: the
+    bots initialise, load their area levels, and then die on
+
+        select id, name, class from ai_playerbot_weightscales
+        [1146] Table 'tw_world.ai_playerbot_weightscales' doesn't exist
+
+    Nothing had ever imported the module's SQL. Vanilla's plan has carried a
+    `playerbots characters` and a `playerbots world` phase all along -- the
+    second listing both `sql/world/*.sql` and `sql/world/classic/*.sql`,
+    because the classic subfolder is where the tables the bots read actually
+    live -- and Tortoise's plan had neither.
+
+    This is the third time on this entry that a thing was shipped and then not
+    switched on: the bots were compiled into the image, then the conf that
+    loads them was not written, then the SQL they read was not imported. Each
+    step revealed the next only by running the server.
+    """
+    from yulon.catalog.catalog import load_catalog
+
+    sql = _native().cmangos.sql  # type: ignore[union-attr]
+    phases = {phase.name: phase for phase in sql.phases}
+    assert "playerbots world" in phases, "the module's world SQL is never imported"
+    assert "playerbots characters" in phases, "the module's character SQL is never imported"
+
+    patterns = phases["playerbots world"].files or ()
+    assert any("classic" in pattern for pattern in patterns), (
+        "the `classic` subfolder holds `ai_playerbot_weightscales` and the rest of the "
+        f"tables the bots query on boot; the phase lists only {list(patterns)}"
+    )
+
+    vanilla = load_catalog().get("wow-vanilla").install.native
+    assert vanilla is not None and vanilla.cmangos is not None
+    sibling = {phase.name for phase in vanilla.cmangos.sql.phases}
+    assert {
+        "playerbots world",
+        "playerbots characters",
+    } <= sibling, "wow-vanilla no longer carries the phases this test compares against"
+
+
+def test_the_import_is_verified_by_the_tables_the_bots_need() -> None:
+    """A table COUNT is not a schema check, and that is how this got through.
+
+    The only world-side verification was `COUNT(*) FROM information_schema.tables
+    >= 150`. The database that crashed the server on boot had 285 tables, so it
+    passed comfortably while missing every table the bots read and 125
+    migrations besides. A count answers "did something get imported", never
+    "did the right things".
+
+    The `ai_playerbot%` count is the same check `wow-vanilla` has carried since
+    its own import was fixed, and it fails on exactly the database this gate
+    produced.
+    """
+    checks = _native().cmangos.sql.verify  # type: ignore[union-attr]
+    bots = [c for c in checks if "ai_playerbot" in c.query]
+    assert bots, "nothing verifies that the playerbot tables arrived"
+    assert bots[0].min >= 10, f"a threshold of {bots[0].min} would pass on an empty import"

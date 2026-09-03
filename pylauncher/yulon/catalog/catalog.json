@@ -978,6 +978,23 @@
                   "on_error": "fail"
                 },
                 {
+                  "name": "playerbots characters",
+                  "into": "tw_char",
+                  "files": [
+                    "src/tortoise-wow/modules/mod-playerbots/sql/characters/*.sql"
+                  ],
+                  "on_error": "warn"
+                },
+                {
+                  "name": "playerbots world",
+                  "into": "tw_world",
+                  "files": [
+                    "src/tortoise-wow/modules/mod-playerbots/sql/world/*.sql",
+                    "src/tortoise-wow/modules/mod-playerbots/sql/world/classic/*.sql"
+                  ],
+                  "on_error": "warn"
+                },
+                {
                   "name": "realm row",
                   "into": "tw_logon",
                   "statements": [
@@ -996,6 +1013,11 @@
                   "db": "tw_logon",
                   "query": "SELECT COUNT(*) FROM realmlist",
                   "min": 1
+                },
+                {
+                  "db": "tw_world",
+                  "query": "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='tw_world' AND table_name LIKE 'ai_playerbot%'",
+                  "min": 10
                 }
               ],
               "player_data": [
