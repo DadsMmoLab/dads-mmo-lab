@@ -293,7 +293,7 @@
     - **Real client login — PROVEN, 2026-08-31, first time on any platform.** The gap matrix built the same evening found this step at zero everywhere and on no run sheet. Account made through `accounts.create_account()`, realm advertised through `networking.plan()`/`apply()`, and the owner logged in from his laptop on a different machine. Server-side: `auth.account` 101 GATETEST `last_login 2026-08-31 20:48:17` `online=1` `failed_logins=0`; `characters` 1001 Gatetest night elf hunter level 1 `online=1`. Two things only a live run could show — the LAN step **refused rather than blocked** when sudo wanted a password, returning all four `firewall-cmd` lines by name in `report.skipped`; and `networking.plan()` cannot see past NAT, filed in `bug-checklist.md`.
     - **Linux console gate — PASS, 2026-08-31**, closing the row the Phase 6 matrix found reading macOS-only (the Linux evidence existed but lived in `console.py`'s docstring, never in this file). `server info` → 9 lines; `account onlinelist` → 504 lines; pid 2991 and `StartedAt` unchanged across both cycles, `RestartCount` unmoved, still running, replies distinct.
     - **Linux port-conflict guard — PASS both halves, 2026-08-31**, proven on Windows and macOS and never gated on Linux. A stranger holding 3724 is found by name (`['yulon-port-hog']`); the install's own containers are also flagged (`['ac-authserver', 'ac-worldserver']`) — the D6 limitation its own docstring admits, now measured rather than asserted.
-  - [ ] Gate: busybox/mariadb:11 primitives live (`-u`, `:ro` refusal, `copy_from_image`, `exec_stdin` + gzip, `mariadb` client name, restart-loop detection)
+  - [x] Gate: busybox/mariadb:11 primitives live — **this box is a duplicate of 7.3's gate below, and was left open beside it while that one was ticked and evidenced.** One gate, one record: `pyplan/gates/7.3-yulon-ubuntu.log` (20 passed / 1 skipped on `yulon-ubuntu`, Docker 29.1.3). Ticked here by pointing at it rather than by running it again; noticed by an audit pass, 2026-09-03.
     - **PASSED on Linux, 2026-09-01** — `yulon-ubuntu`, Docker 29.1.3, cloned from `yulon-phase7` at `79ea63c`: **20 passed / 1 skipped**, `docker ps -aq` and `docker volume ls -q` byte-identical before and after. Also 16 passed / 5 skipped on Windows/Docker Desktop 29.6.2, where four gates are Linux-only.
     - **What only Linux could prove.** `platform.container_user_args()` returns `[]` off Linux, so every `--user` assertion on Docker Desktop is a statement about busybox's default user, not about `ContainerRun` — a review demonstrated that by re-running the gate with `to_argv()`'s `*self.user_args` deleted and watching it still pass. On Linux the argv really carries `--user 1000:1000` and the container reports it back. Measured consequence: with the flag, extracted files land `uid=1000 gid=1000`; without it, `uid=0 gid=0` — a server folder full of root-owned map data on the user's own machine.
     - **A skip can no longer read as a pass.** `YULON_REQUIRE_DOCKER=1` turns an unreachable daemon into a failure; without it the skip reason names what did not run. All three branches exercised. CI is stronger still: the `integration (live Docker)` job runs `docker info` before pytest.
@@ -430,7 +430,11 @@
        cross the floor before it finishes, which is exactly what happened.
 
   - **Still owed:** the interrupted `import` → `partial` → reset → re-run path, which has never
-    been exercised on any entry.
+    been exercised on a CMaNGOS entry. (This read "on any entry" until 2026-09-04 and was
+    over-broad: line 213 of this file records the identical chain live-gated on WotLK on
+    2026-08-23 — `ac-db-import` killed 19 s in, probe reads `partial`, `acore_world` dropped
+    and re-imported in 195 s, back at 316 tables, 10/10 checks. What is unproven is the
+    CMaNGOS family's own `MarkerGate`, a different implementation of the same five branches.)
 
   - **CLIENT LOGIN DONE 2026-09-03.** The owner drove a real 2.4.3 client on the Hyper-V host
     against this server over Tailscale (`100.78.24.50`). The evidence is what the SERVER recorded,
@@ -457,7 +461,7 @@
     took **793s** (container start 15:51:15, first `Avg Diff:` 16:04:28) and told the user
     `The server started but never reported ready.` — while the server was healthy and idle. Raised
     to 1800s in `1b88d49d`; the test pins the floor at the measured 793, not at the shipped number.
-- [ ] 7.5 WoW Vanilla — data + templates only; full install with the 1.12.1 client incl. a forced vmap retry; the change set contains no Python
+- [ ] 7.5 WoW Vanilla — data + templates only; full install with the 1.12.1 client incl. a forced vmap retry (**forced through the injected `Seams.run_container`, which is what "forced" has to mean**: bug §37 established the natural crash is not reproducible, and the harness override the plan imagined never existed. No production change is needed — the seam is already injectable, so a gate harness returns 139 for the first `vmap extract` and delegates afterwards); the change set contains no Python (**already false, and recorded rather than quietly dropped**: `make_out_dirs`, the HTTP/1.1 line in three templates, and since 2026-09-02 five more commits including `assert_update_level`. The honest claim is that no Vanilla-SPECIFIC Python was needed; every line it did take is spine-level and shared by all four games)
   - **Installed and running 2026-09-02 19:17 on `yulon-ubuntu`** (15 cores), against
     `WoW-Client-1.12.1` downloaded to that box and extracted (5.1 GB, `Data/` with 14 MPQs). All
     twelve stages; `WoW Vanilla is installed and running in /home/pk/vanilla-server`.
@@ -542,7 +546,18 @@
     worked, `ubuntu:22.04` failed, `ubuntu:22.04` with `-c http.version=HTTP/1.1` worked — and fixed
     in all three templates (`12d7e240`). `git.py` had already made this choice for the clones the
     app itself makes; the build context was the last place still speaking HTTP/2.
-- [x] 7.6 WoW Tortoise — data + templates; first-ever extraction from a 7272 client; boot to `Ready to login`; client connects; `status` promoted from `wip`; source pinned
+- [x] 7.6 WoW Tortoise — data + templates; first-ever extraction from a 7272 client; boot to the banner this core actually prints (`World server is up and running!` — the line originally read `Ready to login`, which was defect 3 of this very gate: no Tortoise worldserver prints it, and a criterion asking for it could only ever be met by a false reading); client connects; `status` promoted from `wip`; source pinned
+  - **What code produced this tick cannot be recovered, established 2026-09-04.** No commit was
+    recorded for the run, and the 7.3 procedure that requires one (`pyplan/phase7-plans/7.3-cmangos-family.md`,
+    steps 3 and 9) has no 7.4/7.5/7.6 counterpart. Worse than unrecorded: no committed commit
+    can reproduce it. The tick's own commit `9e00f999` is what ADDED the Tortoise `rev` pin, so
+    the run happened on an unpinned catalog; and two of the catalog fixes the entry describes —
+    `5c290188` (ready budget 1800→3600, 12:09:06) and `5e2ea700` (the fatal lookahead, 12:17:20)
+    — landed AFTER the 28-minute boot they are about, six minutes before `25d72ec2` declared the
+    gate closed. The run is traceable to a WINDOW (after `9c93ad6e` 08:44, before `9e00f999`
+    14:08, on core `7c0fb278`) and provably not to a point. It stays ticked because the
+    measurements are real and pinned by `tests/test_tortoise_boot_facts.py`; what it cannot
+    claim is re-runnability.
   - **Five defects, 2026-09-03, `yulon-ubuntu`. Not ticked.** Every one is a fact about a binary
     this project did not write, and not one was visible from our own code — the suite was green
     through all five. This is the entry that justifies the gate existing.
@@ -654,9 +669,26 @@
     volume (`yulon-wow-tbc-1cbfa4ac_db-data`) and three containers (the exited TBC set), checked
     after the fact. **The 428 MB the removal reclaimed was read at the time and cannot be
     re-measured** now that the volumes are deleted; it is recorded as reported, not as re-verified.
-- [ ] 7.7 Native Windows, all four — WotLK first (closes the 6.3 `ac-db-import` blocker), then TBC, Vanilla, Tortoise from `yulon-win11`'s clean checkpoint; 9p extract/mmaps throughput recorded; `platforms` widened per entry
+- [ ] 7.7 Native Windows, all four — WotLK first (closes the 6.3 `ac-db-import` blocker), then TBC, Vanilla, Tortoise from **`yulon-win11-gate`**'s clean checkpoint (this line said `yulon-win11`, which is the working box and has carried an install since 2026-09-03; the clean-checkpoint box is the `-gate` one); 9p extract/mmaps throughput recorded; `platforms` widened per entry
 - [ ] 7.8 macOS, all four — **[blocked]** on hardware
-- [x] 7.9 Controllers — `controller_wow_tbc/`, `controller_wow_vanilla/`, `controller_wow_tortoise/` mirroring `controller_wow_wotlk/`; `mysql` → `db.client` in `apply.py`/`maintenance.py`; CMaNGOS-family account creation (was 7.1–7.3 before the scope change; still owed, now after install)
+- [ ] 7.9 Controllers — `controller_wow_tbc/`, `controller_wow_vanilla/`, `controller_wow_tortoise/` mirroring `controller_wow_wotlk/`; `mysql` → `db.client` in `apply.py`/`maintenance.py`; CMaNGOS-family account creation (was 7.1–7.3 before the scope change; still owed, now after install)
+  - **UNTICKED again 2026-09-04, one day after it was ticked, and the reason is worth more than
+    the box.** `pyplan/phase7-decisions.md` sets this line's bar as "start/stop/logs/accounts/backup
+    on each installed server". What was driven on the three CMaNGOS games is account creation and
+    a real client login — no backup/restore round trip, no `console.send_command()`, no timed
+    `stop_staged`/`start_staged`. The tick was taken on the half that was measured. Narrowing the
+    DoD was the other option and is the wrong one: that bar is what WotLK's own controller was
+    held to and cleared on three platforms, and narrowing it would ship three games a Server tab
+    whose Stop button has never been pressed against a CMaNGOS worldserver. Found by a
+    verification pass over an audit, not by the audit itself.
+  - **A live question is waiting in that gap.** `pyplan/gates/7.9-m910q-tbc-restarts.journal`
+    holds dockerd's own record from m910q: `tbc-mangosd` rejoined its network ALONE at 13:18:57
+    and again at 20:07:07 on 2026-09-03 — the two restarts behind `RestartCount=2` — while
+    `tbc-db` and `tbc-realmd` were untouched. A solo worldserver restart under `unless-stopped`
+    means it exited on its own, twice, on a server nobody was driving. WHY is no longer
+    recoverable: the container and its logs were deleted that night to free the names for the
+    7.4c run, and the journal's one `oom_kill` line belongs to a Tortoise BUILDER container from
+    the previous day, not to this server. The pattern is evidence; the cause is gone.
   - **`mysql` → `db.client` DONE 2026-09-03.** `apply.DockerSql` already carried it; `d157001d`
     threaded it into `maintenance.DockerMysql` and all four `mysql_for()` factories, `f8cacafc`
     into all four `accounts.sql_for()` (found by driving a live server, which printed
