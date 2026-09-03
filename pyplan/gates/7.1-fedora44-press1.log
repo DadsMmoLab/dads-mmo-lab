@@ -1,0 +1,27 @@
+Installing WoW WotLK into /home/pk/wow-server-playerbots
+You can stop this at any time. What an install writes outside the folder below is named here rather than denied: the images this build produces and the volumes holding the database and the server data, which live in Docker's own storage — that is why the checks below look at the space on Docker's disk too; Docker itself, when no daemon answers yet (on Linux: system packages, a service, and the group you are asked about first); and this app's own settings and log, in its config folder. Starting the install again continues from where it stopped: source this app has finished cloning is never fetched, reset or moved, and the build is not run a second time once Docker confirms its images are there. Everything cheap runs again on every attempt — the compose files this app writes are put back the way the catalog says, the server-data download resumes and re-checks itself, and the database and server are started and waited for.
+Checking Docker.
+Docker is not answering yet. Setting it up - this can mean downloading Docker Desktop and waiting for its engine, up to a few minutes with no output. You can stop at any time.
+Yu'lon can add 'pk' to the docker group, so it can use Docker without asking for your password every time.
+
+Heads up: membership in the docker group is effectively full root access on this machine. A docker user can, for example, mount your entire disk inside a container and change any file.
+
+If you say yes: you'll need to log out and back in once before it takes effect, then click Install again.
+If you say no: Yu'lon still installs Docker Engine, but it runs docker directly (never through sudo), so it cannot install or manage a server here until you join the group yourself: sudo usermod -aG docker pk, then log out and back in.
+
+Yu'lon never creates passwordless sudo rules and never changes the docker socket's permissions.
+
+Add 'pk' to the docker group (grants root-equivalent access)? (y/n):  
+[driver] answered: consent -> y
+y
+2026-08-31 17:55:36 INFO [yulon.platform] docker group consent for pk: granted
+Installing Docker needs administrator rights. Enter your sudo password (leave it empty to skip the steps that need it): 
+[driver] answered: sudo password
+
+2026-08-31 17:55:36 INFO [yulon.platform] sudo password accepted (attempt 1)
+Docker setup did: dnf -y install moby-engine docker-compose docker-buildx; systemctl enable --now docker; usermod -aG docker pk
+Still to do: Log out and back in (or run `newgrp docker`) so pk can use Docker without sudo, then click Install again.
+2026-08-31 17:57:10 ERROR [__main__] install failed: Docker is installed and set up. It cannot be used from this session yet: your account was added to the docker group, and a session that was already open does not pick up a new group. Log out and back in (or run `newgrp docker`) so pk can use Docker without sudo, then click Install again.
+install failed: Docker is installed and set up. It cannot be used from this session yet: your account was added to the docker group, and a session that was already open does not pick up a new group. Log out and back in (or run `newgrp docker`) so pk can use Docker without sudo, then click Install again.
+
+[driver] child exited 1

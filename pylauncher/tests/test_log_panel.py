@@ -2,12 +2,29 @@
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from collections.abc import Callable, Iterator
 
 from tests.conftest import process_events
 from yulon.ui.widgets.log_panel import LogPanel
+
+STAMP = re.compile(r"^\[(\d\d:\d\d:\d\d)\] ")
+"""The wall clock `append()` puts on every line. Elapsed is a header field, not a prefix."""
+
+
+def _unstamped(panel: LogPanel) -> list[str]:
+    """The panel's lines with their stamps removed, and the stamp REQUIRED to be there.
+
+    A helper that merely stripped an optional prefix would keep every test
+    below green if stamping stopped happening, which is the failure it would be
+    hiding. `sub(count=1)` so a line whose own text looks like a stamp keeps it.
+    """
+    lines = panel.text().splitlines()
+    for line in lines:
+        assert STAMP.match(line), f"line reached the panel unstamped: {line!r}"
+    return [STAMP.sub("", line, count=1) for line in lines]
 
 
 def _wait_for(panel: LogPanel, timeout: float = 5.0) -> None:
@@ -34,7 +51,7 @@ def test_lines_stream_in_on_a_background_thread_and_finish(qapp: object) -> None
     assert panel.run(source, title="job") is True
     assert panel.run(source) is False  # busy
     _wait_for(panel)
-    assert panel.text().splitlines() == ["line 0", "line 1", "line 2"]
+    assert _unstamped(panel) == ["line 0", "line 1", "line 2"]
     assert seen_threads and ui_thread not in seen_threads
     assert finished == [(True, "done")]
     assert panel.running is False
@@ -51,7 +68,7 @@ def test_job_exception_becomes_a_failed_status_not_a_crash(qapp: object) -> None
 
     panel.run(source)
     _wait_for(panel)
-    assert panel.text().splitlines() == ["before"]
+    assert _unstamped(panel) == ["before"]
     assert finished == [(False, "RuntimeError: boom")]
 
 
@@ -156,7 +173,7 @@ def test_terminal_colour_codes_never_reach_the_panel(qapp: object) -> None:
     panel.append("\x1b[36m[mod-city-bots] completed pending teleport for Ella\x1b[0m")
     panel.append("\x1b[?2004hAC> No gamemasters.")
     panel.append("\x1b(Bplain")
-    assert panel.text().splitlines() == [
+    assert _unstamped(panel) == [
         "[mod-city-bots] completed pending teleport for Ella",
         "AC> No gamemasters.",
         "(Bplain",
@@ -427,3 +444,172 @@ def test_the_status_label_still_says_what_failed(qapp: object) -> None:
     )
     panel._status.setText("FAILED: " + message)
     assert panel.status_text() == "FAILED: " + message
+
+
+# ---------------------------------------------------------------------------
+# The stamp and the stickiness (2026-09-03). Both asked for by the owner while
+# watching a real install: an hour of build output with no clock on it answers
+# neither "when did this step start" nor "how long has it been going", and a
+# panel that stops following makes the newest line the one you cannot see.
+
+
+def test_every_line_carries_a_wall_clock_and_the_elapsed_field_ticks_beside_stop(
+    qapp: object,
+) -> None:
+    """Two fields in two places, and the split is the point.
+
+    The clock goes on the line, because a line is a moment. Elapsed goes in the
+    header beside Stop, because it is a property of the RUN and has to keep
+    moving when nothing is being printed -- an hour of `build` emits lines in
+    bursts, and a per-line elapsed stops exactly when the reader most wants to
+    know the install has not died (owner, 2026-09-03).
+    """
+    panel = LogPanel()
+    assert panel.elapsed_text() == "", "an elapsed time before any run has nothing to elapse from"
+    panel.append("before any job")
+    (early,) = panel.text().splitlines()
+    assert STAMP.match(early), early
+    assert "+" not in early, f"elapsed is still being stamped onto lines: {early}"
+
+    def source() -> Iterator[str]:
+        yield "inside the job"
+
+    panel.run(source)
+    _wait_for(panel)
+    assert panel.elapsed_text().startswith("0:00:"), panel.elapsed_text()
+    during = panel.text().splitlines()[-1]
+    assert STAMP.match(during) and "+" not in during, during
+
+
+def test_the_elapsed_field_stops_counting_when_the_job_ends_but_keeps_its_total(
+    qapp: object,
+) -> None:
+    """The last value is the run's total, which is the number wanted after a long install.
+
+    So the ticker stops -- a finished job must not go on counting -- and the
+    field is written once more on the way out rather than cleared. Asserted by
+    letting real time pass after the job and requiring the text NOT to move.
+    """
+    panel = LogPanel()
+
+    def source() -> Iterator[str]:
+        yield "done bit"
+
+    panel.run(source)
+    _wait_for(panel)
+    settled = panel.elapsed_text()
+    assert settled, "the elapsed field was cleared when the job ended"
+    time.sleep(1.2)
+    process_events(5)
+    assert panel.elapsed_text() == settled, (
+        f"the elapsed field kept counting after the job finished: {settled} -> "
+        f"{panel.elapsed_text()}"
+    )
+
+
+def test_the_elapsed_clock_counts_from_this_run_and_not_from_the_last_one(qapp: object) -> None:
+    """The zero is the RUN's, which is the whole reason it is set in `run()`.
+
+    One panel serves the next install and the console after it. An elapsed
+    field anchored to the widget's construction would tell somebody four hours
+    into a job that started a minute ago -- worse than no field, because it
+    reads as a measurement.
+    """
+    panel = LogPanel()
+
+    def source() -> Iterator[str]:
+        yield "first"
+
+    panel.run(source)
+    _wait_for(panel)
+    first_start = panel._started_at
+    assert first_start is not None
+    time.sleep(0.05)
+
+    def again() -> Iterator[str]:
+        yield "second"
+
+    panel.run(again)
+    _wait_for(panel)
+    assert panel._started_at is not None and panel._started_at > first_start, (
+        "the second run kept the first run's zero, so its elapsed clock is wrong by the gap "
+        "between them"
+    )
+
+
+def test_elapsed_keeps_its_hours_field_from_the_first_second(qapp: object) -> None:
+    """`0:00:04` and `4:31:07`, never `00:04` growing an hours field partway through.
+
+    An install has stages measured in seconds and stages measured in hours, and
+    a field that changes shape at the hour mark stops lining up in the middle of
+    the run that most needs reading.
+    """
+    from yulon.ui.widgets.log_panel import _elapsed
+
+    assert _elapsed(0) == "0:00:00"
+    assert _elapsed(4) == "0:00:04"
+    assert _elapsed(59.9) == "0:00:59"
+    assert _elapsed(600) == "0:10:00"
+    assert _elapsed(3600) == "1:00:00"
+    assert _elapsed(16267) == "4:31:07"
+    # Never negative, whatever the clock does underneath.
+    assert _elapsed(-5) == "0:00:00"
+
+
+def test_the_panel_follows_the_bottom_while_it_is_already_at_the_bottom(qapp: object) -> None:
+    """The default: the newest line is the visible one.
+
+    Asserted through the scrollbar rather than by trusting `appendPlainText`,
+    because the question is not whether the text arrived but whether it can be
+    SEEN -- which is the complaint this was written for.
+    """
+    panel = LogPanel()
+    panel.resize(400, 80)
+    panel.show()
+    process_events(5)
+    for i in range(200):
+        panel.append(f"line {i}")
+    process_events(5)
+    bar = panel._text.verticalScrollBar()
+    assert bar.maximum() > 0, "the panel never filled; this test proves nothing about scrolling"
+    assert (
+        bar.value() >= bar.maximum() - 4
+    ), f"the panel stopped following: at {bar.value()} of {bar.maximum()}"
+
+
+def test_scrolling_up_holds_the_view_still_and_scrolling_back_resumes(qapp: object) -> None:
+    """The other half, and the reason following is conditional rather than absolute.
+
+    A panel that always jumps to the end cannot be read while it is running:
+    scrolling up to look at the error that just went past yanks the reader back
+    on the very next line. So a reader who has scrolled away is left alone --
+    and, crucially, gets to come back without a button, by scrolling to the
+    bottom again.
+    """
+    panel = LogPanel()
+    panel.resize(400, 80)
+    panel.show()
+    process_events(5)
+    for i in range(200):
+        panel.append(f"line {i}")
+    process_events(5)
+    bar = panel._text.verticalScrollBar()
+
+    bar.setValue(0)  # the reader scrolls up to look at something
+    for i in range(20):
+        panel.append(f"later {i}")
+    process_events(5)
+    assert bar.value() == 0, (
+        f"appending yanked the reader back to the bottom (now {bar.value()}); the line they "
+        "scrolled up to read is gone"
+    )
+
+    bar.setValue(bar.maximum())  # and scrolls back down
+    for i in range(20):
+        panel.append(f"newest {i}")
+    process_events(5)
+    assert bar.value() >= bar.maximum() - 4, (
+        "following did not resume when the reader returned to the bottom, so it can only be "
+        "turned off once"
+    )
+    assert panel.text().splitlines()[-1].endswith("newest 19")

@@ -1,0 +1,58 @@
+Installing WoW WotLK into /home/pk/wow-server-playerbots
+You can stop this at any time. What an install writes outside the folder below is named here rather than denied: the images this build produces and the volumes holding the database and the server data, which live in Docker's own storage — that is why the checks below look at the space on Docker's disk too; Docker itself, when no daemon answers yet (on Linux: system packages, a service, and the group you are asked about first); and this app's own settings and log, in its config folder. Starting the install again continues from where it stopped: source this app has finished cloning is never fetched, reset or moved, and the build is not run a second time once Docker confirms its images are there. Everything cheap runs again on every attempt — the compose files this app writes are put back the way the catalog says, the server-data download resumes and re-checks itself, and the database and server are started and waited for.
+Checking Docker.
+[pass] Docker: the daemon answered
+[pass] memory: Docker's VM has 19.5 GB
+[pass] CPU vs memory: 8 CPUs against 9 affordable
+[warn] free space on Docker's disk: 66 GB free; 75 GB is the comfortable figure (the server folder and Docker's disk share one drive, so both needs add up)
+[warn] free space on the server folder: 66 GB free; 75 GB is the comfortable figure (the server folder and Docker's disk share one drive, so both needs add up)
+[pass] the server folder: /home/pk/wow-server-playerbots looks usable
+[pass] sharing the folder with Docker: a container can read /home/pk/wow-server-playerbots
+[pass] SELinux: enforcing; the server folder can carry container labels
+[warn] the server's ports: something on this machine is already listening on 3724, 8085 If the server cannot start, that is the first thing to look at.
+Using /home/pk/wow-server-playerbots (resuming)
+Already finished: clone-core, clone-modules, generate-compose, build, client-data, import
+2026-08-31 19:38:42 INFO [yulon.platform] holding this machine awake for the build: systemd-inhibit --what=idle:sleep --who=Yu'lon --why=installing a server sleep infinity
+--- clone-core
+2026-08-31 19:38:42 INFO [yulon.git] containerized git: `run --rm -v /home/pk/wow-server-playerbots:/git -w /git --user 1000:1000 alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26 -c core.autocrlf=false -c core.eol=lf -c http.version=HTTP/1.1 remote get-url origin` into /home/pk/wow-server-playerbots
+[1;31m==== AUTHENTICATING FOR org.freedesktop.login1.inhibit-block-sleep ====
+[0mAuthentication is required for an application to inhibit system sleep.
+Authenticating as: pk
+Password: mod-playerbots/azerothcore-wotlk is already cloned in /home/pk/wow-server-playerbots; leaving it exactly as it is.
+--- clone-modules
+2026-08-31 19:38:43 INFO [yulon.git] containerized git: `run --rm -v /home/pk/wow-server-playerbots/modules/mod-playerbots:/git -w /git --user 1000:1000 alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26 -c core.autocrlf=false -c core.eol=lf -c http.version=HTTP/1.1 remote get-url origin` into /home/pk/wow-server-playerbots/modules/mod-playerbots
+mod-playerbots/mod-playerbots is already in modules/mod-playerbots; leaving it exactly as it is.
+Modules are in place.
+--- generate-compose
+The compose files are already exactly what this install needs.
+--- build
+Stopping now leaves Docker finishing the build step it is already on, in the background. That is deliberate: the work it has done is kept, and starting this install again picks up from there instead of compiling it all a second time.
+The server is already built; skipping the compile.
+--- client-data
+The part of the download that finished is kept: the fetch resumes from where it stopped.
+Fetching server data (ac-client-data-init). The download resumes if it is interrupted.
+Attaching to ac-client-data-init
+ac-client-data-init  | yulon: client data v20.0 already installed
+
+[Kac-client-data-init exited with code 0
+ Container ac-client-data-init Starting 
+ Container ac-client-data-init Started 
+Server data is in place.
+--- start-db
+Starting the database, which the import writes into.
+The database is up.
+--- import
+Databases left half-written are detected and cleared before the import is run again, so nothing here has to be undone by hand.
+The databases read as populated: 100 rows in acore_auth.account, 1000 rows in acore_characters.characters
+They are already imported; leaving them alone.
+--- up
+Starting the server.
+2026-08-31 19:38:46 INFO [yulon.docker] start_staged(): `compose up -d --no-deps ac-database ac-authserver ac-worldserver` in /home/pk/wow-server-playerbots
+--- ready
+Waiting for the database.
+Waiting for the world server to finish loading (this can take many minutes).
+The server is up.
+2026-08-31 19:38:47 INFO [yulon.catalog.native] install of wow-wotlk finished
+WoW WotLK is installed and running in /home/pk/wow-server-playerbots
+
+[driver] child exited 0

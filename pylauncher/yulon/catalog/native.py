@@ -814,8 +814,26 @@ class StagedInstaller:
             with self._held_awake() as note:
                 if note:
                     yield note
-                for stage in self.stages():
+                stages = self.stages()
+                for number, stage in enumerate(stages, start=1):
                     self._check_cancel(cancel)
+                    # WHERE THE USER IS, on its own line and never folded into
+                    # the `--- <name>` marker. That marker is what gate scripts,
+                    # log captures and the interrupted-import watchers match on
+                    # (`^--- import`), and one run WAS missed on 2026-09-03 by a
+                    # watcher that could not see the stage it was armed for. A
+                    # format everything greps is not a place to add fields.
+                    #
+                    # The percentage is of STAGES BEHIND YOU, not of work done:
+                    # the twelve are wildly unequal -- `conf` is seconds and
+                    # `build` is an hour -- so this says "9 of 12 started",
+                    # which is true, rather than implying three quarters of the
+                    # time is gone, which it is not. A resumed install counts
+                    # the same way, because the stages it skips are done.
+                    yield (
+                        f"Step {number} of {len(stages)} "
+                        f"({number * 100 // len(stages)}%): {stage.name}"
+                    )
                     yield f"--- {stage.name}"
                     if stage.cancel_note:
                         # The spine says it, once, here (A4); no body yields its own.

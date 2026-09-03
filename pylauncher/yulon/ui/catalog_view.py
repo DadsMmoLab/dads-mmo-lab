@@ -95,6 +95,47 @@ def _qt_dir_picker(parent: QWidget, title: str, start: Path | None) -> Path | No
     return Path(chosen) if chosen else None
 
 
+SuggestionAsker = Callable[[QWidget, str, Path], bool]
+"""Offer a folder that does not exist yet: True to take it, False to open the picker."""
+
+
+def _qt_suggestion_asker(parent: QWidget, game: str, suggested: Path) -> bool:
+    """ "Install into this folder?" - Yes takes it, No opens the picker.
+
+    **This exists because a file picker cannot say "make this one".** The
+    suggestion is a folder that by definition does not exist on a first install,
+    and `QFileDialog.getExistingDirectory()` returns only directories that do.
+    `_existing_ancestor()` therefore walks up and opens on the PARENT with
+    nothing filled in, and the name the user has to create was put in the
+    dialog's TITLE - the one place in a window that cannot be clicked and, at 91
+    characters for `wow-server-playerbots`, is truncated by the window manager
+    before it reaches the name (owner, on Fedora 44, 2026-09-03). The app told
+    the user what to make in the one place they could neither read nor act on.
+
+    Asking first turns both symptoms off at once: the folder is named in body
+    text that wraps, and taking it is one button. Nothing is created here -
+    `_existing_ancestor()`'s rule stands, and for its original reason: a picker
+    that makes a directory as a side effect leaves an empty one behind when the
+    user cancels, and this runs before anything has been agreed to. The path is
+    created by the install itself, which is also what claims it (`native.py`,
+    `_claim_before_writing`).
+
+    Default is Yes. The suggestion is right for nearly every install, and the
+    one it is wrong for - a second install of the same game - is a folder the
+    user is already thinking about.
+    """
+    answer = QMessageBox.question(
+        parent,
+        f"Install {game}",
+        f"Install {game} into this new folder?\n\n{suggested}\n\n"
+        "It will be created when the install starts. Choose another folder if "
+        "you would rather put it somewhere else.",
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.Yes,
+    )
+    return answer is QMessageBox.StandardButton.Yes
+
+
 def _pin_compose_project(server_dir: Path) -> None:
     """Freeze the compose project name so the folder can be moved later.
 
@@ -248,6 +289,7 @@ class CatalogView(QWidget):
         log_panel: LogPanel,
         *,
         pick_dir: DirPicker = _qt_dir_picker,
+        ask_suggestion: SuggestionAsker = _qt_suggestion_asker,
         home: Path | None = None,
         platform_id: Callable[[], str] = platform.detect,
         pick_wsl_server: WslServerPicker = _qt_wsl_server_picker,
@@ -262,6 +304,7 @@ class CatalogView(QWidget):
         self._make_installer = installer_factory
         self._log = log_panel
         self._pick_dir = pick_dir
+        self._ask_suggestion = ask_suggestion
         self._pick_wsl_server = pick_wsl_server
         self._wsl_distros = wsl_distros
         self._adopt_buttons: dict[str, QPushButton] = {}
@@ -594,15 +637,21 @@ class CatalogView(QWidget):
             QMessageBox.information(self, "Not available on this platform", message)
             self.install_finished.emit(entry.id, False, message)
             return False
-        server_dir = self._pick_dir(
-            self,
-            # The suggested name moved into the title when the picker stopped
-            # opening on a path that does not exist - the dialog can no longer
-            # pre-fill it, so this is where the user is told what to make.
-            f"Where should {entry.name} be installed? "
-            f"(suggested: a new folder called {entry.install.default_server_dir})",
-            self._home / entry.install.default_server_dir,
-        )
+        # Offered BEFORE the picker, because the picker cannot offer it. The
+        # suggestion does not exist yet on a first install and
+        # `getExistingDirectory()` returns only folders that do, so the name
+        # used to live in the dialog's title - unclickable, and truncated by the
+        # window manager at 91 characters before it reached the name itself
+        # (owner, Fedora 44, 2026-09-03). Here it is body text and one button.
+        suggested = self._home / entry.install.default_server_dir
+        if self._ask_suggestion(self, entry.name, suggested):
+            server_dir: Path | None = suggested
+        else:
+            server_dir = self._pick_dir(
+                self,
+                f"Where should {entry.name} be installed?",
+                suggested,
+            )
         if server_dir is None:
             return False
         client_dir: Path | None = None

@@ -165,7 +165,14 @@ def test_install_asks_for_folders_then_streams_the_installer(qapp: object, tmp_p
     assert len(prompts) == 1 and "client" not in prompts[0]
     assert view.button_for("wow-tbc").isEnabled() is False  # buttons locked while running
     _wait(panel)
-    assert panel.text().splitlines() == ["cloning", "building", "done"]
+    # The panel stamps every line with a clock (and an elapsed field while a
+    # run is on), so what it holds is not what the engine yielded. Compared
+    # after the stamp, which is where this test's subject lives.
+    assert [line.split("] ", 1)[1] for line in panel.text().splitlines()] == [
+        "cloning",
+        "building",
+        "done",
+    ]
     assert made[0].ran_with[0].server_dir == tmp_path / "server"
     assert events[0] == ("started", "wow-wotlk")
     assert events[1] == ("finished", "wow-wotlk", "True", "done")
@@ -1582,3 +1589,142 @@ def test_every_install_button_is_inside_the_default_window(qapp: object) -> None
     assert scroll.horizontalScrollBar().maximum() == 0
     grid = scroll.widget()
     assert grid is not None and grid.minimumSizeHint().width() <= viewport.width()
+
+
+# ---------------------------------------------------------------------------
+# The suggested folder (2026-09-03). Two symptoms of one cause, both reported by
+# the owner from a real Fedora 44 desktop while driving the packaged AppImage:
+# the suggested folder could not be accepted with a click, and the sentence
+# naming it could not be read.
+#
+# The cause: `QFileDialog.getExistingDirectory()` returns only folders that
+# already exist, and the suggestion by definition does not on a first install.
+# So the name was put in the dialog's TITLE -- the one place in a window that
+# cannot be clicked, and which the window manager truncates. For WotLK that
+# title was 91 characters and the folder name was at the end of it.
+
+
+def _view(tmp_path: Path, *, take_suggestion: bool, picked: Path | None):
+    """A CatalogView whose two folder questions are both answered by the test."""
+    asked: list[tuple[str, Path]] = []
+    titles: list[str] = []
+
+    def ask(_parent: object, game: str, suggested: Path) -> bool:
+        asked.append((game, suggested))
+        return take_suggestion
+
+    def pick(_parent: object, title: str, _start: object) -> Path | None:
+        titles.append(title)
+        return picked
+
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        LogPanel(),
+        pick_dir=pick,
+        ask_suggestion=ask,
+        home=tmp_path,
+    )
+    return view, asked, titles
+
+
+def test_the_suggested_folder_is_offered_by_name_before_any_picker_opens(
+    qapp: object, tmp_path: Path
+) -> None:
+    """Yes takes the suggestion, and the picker is never opened at all.
+
+    The value asserted is the PATH the user was offered, not that a question
+    happened: the whole complaint was that the app knew the folder it wanted
+    and could not hand it over. It is the entry's own `default_server_dir`
+    under home, which is exactly what the old title spelled out.
+    """
+    entry = CATALOG.get("wow-wotlk")
+    view, asked, titles = _view(tmp_path, take_suggestion=True, picked=None)
+    assert view.start_install(entry) is True
+    assert asked == [(entry.name, tmp_path / entry.install.default_server_dir)]
+    assert titles == [], "the picker opened even though the suggestion was accepted"
+
+
+def test_saying_no_opens_the_picker_and_that_answer_is_what_installs(
+    qapp: object, tmp_path: Path
+) -> None:
+    """No is a real second path, not a decoration: the chosen folder is the one used.
+
+    Without this, an implementation that offered the suggestion and then used
+    it whatever the user answered would pass the test above.
+    """
+    entry = CATALOG.get("wow-wotlk")
+    elsewhere = tmp_path / "somewhere-else"
+    elsewhere.mkdir()
+    view, asked, titles = _view(tmp_path, take_suggestion=False, picked=elsewhere)
+    started: list[tuple[str, object, object]] = []
+    view.installed.connect(lambda g, s, c: started.append((g, s, c)))
+    assert view.start_install(entry) is True
+    assert asked, "the suggestion was never offered"
+    assert len(titles) == 1, "the picker did not open after the suggestion was declined"
+
+
+def test_the_picker_title_no_longer_carries_the_instruction_the_user_must_act_on(
+    qapp: object, tmp_path: Path
+) -> None:
+    """A title bar is not a place to put a name somebody has to type.
+
+    Measured, not guessed: the old title was
+    `Where should WoW WotLK be installed? (suggested: a new folder called
+    wow-server-playerbots)` -- 91 characters, with the folder name in the last
+    21 of them, which is the part a window manager drops first. The owner
+    reported it unreadable on Fedora 44 while driving the packaged AppImage.
+
+    The bound is 60 rather than 91 so that re-adding a shorter version of the
+    same sentence still fails; and the folder name is required to be ABSENT,
+    because a title that still names it is a title someone will rely on again.
+    """
+    entry = CATALOG.get("wow-wotlk")
+    view, _asked, titles = _view(tmp_path, take_suggestion=False, picked=tmp_path)
+    assert view.start_install(entry) is True
+    (title,) = titles
+    assert len(title) <= 60, f"the picker title is {len(title)} characters: {title!r}"
+    assert entry.install.default_server_dir not in title, (
+        "the folder name is back in the title, where it cannot be clicked and gets truncated: "
+        + title
+    )
+
+
+def test_cancelling_the_picker_after_declining_the_suggestion_installs_nothing(
+    qapp: object, tmp_path: Path
+) -> None:
+    """Both ways out have to stay ways out.
+
+    Declining the suggestion and then closing the picker is the shape most
+    likely to be mishandled by a two-question flow -- an implementation that
+    fell back to the suggestion on a cancelled picker would install into a
+    folder the user twice refused.
+    """
+    entry = CATALOG.get("wow-wotlk")
+    view, _asked, _titles = _view(tmp_path, take_suggestion=False, picked=None)
+    started: list[str] = []
+    view.installed.connect(lambda g, _s, _c: started.append(g))
+    assert view.start_install(entry) is False
+    assert started == []
+    assert not (
+        tmp_path / entry.install.default_server_dir
+    ).exists(), "a folder the user declined was created anyway"
+
+
+def test_the_suggestion_is_never_created_by_asking_about_it(qapp: object, tmp_path: Path) -> None:
+    """The rule `_existing_ancestor()` was written to keep, kept at the new site.
+
+    Its docstring: a picker that makes a folder as a side effect leaves an empty
+    one behind when the user cancels. Asking is earlier still -- before anything
+    has been agreed to -- so it must create even less. The install itself makes
+    the directory, and `native._claim_before_writing()` is what records that it
+    is ours.
+    """
+    entry = CATALOG.get("wow-wotlk")
+    suggested = tmp_path / entry.install.default_server_dir
+    view, asked, _titles = _view(tmp_path, take_suggestion=True, picked=None)
+    assert view.start_install(entry) is True
+    assert asked[0][1] == suggested
+    # `_FakeInstaller` runs no stages, so nothing downstream can have made it
+    # either: whatever exists here was made by the question.
+    assert not suggested.exists(), "asking about the folder created it"
