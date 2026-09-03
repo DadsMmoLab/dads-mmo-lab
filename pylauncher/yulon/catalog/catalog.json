@@ -838,7 +838,7 @@
           "ready": {
             "world": "World server is up and running|World initialized|MaNGOS.*started up successfully|Ready to login",
             "auth": null,
-            "fatal": "Correct \\*.map files not found|Could not open|Database .* not found",
+            "fatal": "Correct \\*.map files not found|Could not open (?!bot log file)|Database .* not found",
             "regex": true,
             "timeout_s": 3600,
             "restart_loop": 4

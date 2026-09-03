@@ -227,3 +227,45 @@ def test_the_ready_budget_covers_a_measured_first_boot_not_a_round_number() -> N
         assert (
             _native(game).ready.timeout_s < ready.timeout_s
         ), f"{game} does not pay Tortoise's equip-cache cost and should not carry its budget"
+
+
+def test_the_fatal_pattern_does_not_fire_on_a_line_that_says_it_is_harmless() -> None:
+    r"""`Could not open` matched 4,854 lines that end "Logging to it is off for this run."
+
+    `ready.fatal` exists to end the wait early instead of burning the whole
+    timeout on a server that will never be ready. Tortoise is the only entry
+    that declares one, and as written it read
+
+        Correct \*.map files not found|Could not open|Database .* not found
+
+    A booted, healthy Tortoise worldserver prints, thousands of times:
+
+        Could not open bot log file ../logs/bot_events.csv (No such file or
+        directory). Logging to it is off for this run.
+
+    The line explains in its own second sentence that nothing is wrong. The
+    install read the first three words, declared the server dead, and gave up
+    about a hundred seconds in -- on a server that went on to report itself up.
+    Every "Could not open" in that log, all 4,854 of them, was this one form,
+    which is why the exclusion can be this specific rather than a guess.
+
+    Both directions are asserted. A pattern narrowed until it matches nothing
+    would pass the first half and quietly retire the fast-fail this field is
+    for.
+    """
+    fatal = _native().ready.fatal
+    assert fatal is not None
+    benign = (
+        "Could not open bot log file ../logs/bot_events.csv (No such file or directory). "
+        "Logging to it is off for this run."
+    )
+    assert not re.search(fatal, benign), (
+        f"the fatal pattern {fatal!r} fires on a line whose own text says logging was simply "
+        "turned off; the install then reports a healthy server as dead"
+    )
+    for real in (
+        "Could not open the configuration file",
+        "Correct *.map files not found",
+        "Database tw_world not found",
+    ):
+        assert re.search(fatal, real), f"the pattern no longer catches a real failure: {real!r}"
