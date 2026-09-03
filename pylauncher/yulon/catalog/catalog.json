@@ -787,7 +787,7 @@
     {
       "id": "wow-tortoise",
       "name": "WoW Tortoise",
-      "status": "wip",
+      "status": "beta",
       "description": "Tortoise (the Turtle-WoW solo fork on MaNGOS Zero) with the cmangos playerbots AI, source-compiled in Docker. This is the tree the Turtle WoW V2 servers are built from. Installer is work-in-progress and unverified with a real client.",
       "emulator": {
         "name": "Shyalya/tortoise-wow (Turtle-WoW V2 + cmangos playerbots)",

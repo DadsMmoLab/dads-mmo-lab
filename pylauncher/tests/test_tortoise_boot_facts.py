@@ -269,3 +269,32 @@ def test_the_fatal_pattern_does_not_fire_on_a_line_that_says_it_is_harmless() ->
         "Database tw_world not found",
     ):
         assert re.search(fatal, real), f"the pattern no longer catches a real failure: {real!r}"
+
+
+def test_tortoise_is_no_longer_marked_as_work_in_progress() -> None:
+    """`wip` outlived its evidence, and the peer level is the honest one.
+
+    The entry sat at `wip` because its installer had never been driven with a
+    real client. On 2026-09-03 it was, on `yulon-ubuntu`: 2133 mmap files, a
+    clean import into empty schemas with all three verify rules green, 125
+    migrations applied by the core, `World server is up and running!`, ports
+    3724 and 8090 listening, and an account created through the app's own
+    `sql_for_install()` + `create_account()`.
+
+    `beta` and not `stable`, deliberately: what is proven is that the app can
+    install and start this server, and its two CMaNGOS siblings are at `beta`
+    on exactly that evidence. What is NOT yet proven for any of the three is a
+    human logging in with a game client. Promoting past `beta` is the owner's
+    call and wants that first.
+    """
+    from yulon.catalog.catalog import load_catalog
+
+    catalog = load_catalog()
+    assert (
+        catalog.get("wow-tortoise").status != "wip"
+    ), "the Tortoise installer has been driven end to end; `wip` now understates it"
+    peers = {game: catalog.get(game).status for game in ("wow-tbc", "wow-vanilla", "wow-tortoise")}
+    assert len(set(peers.values())) == 1, (
+        f"the three CMaNGOS entries carry the same class of evidence and should carry the "
+        f"same status until one of them earns more: {peers}"
+    )
