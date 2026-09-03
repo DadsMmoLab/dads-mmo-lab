@@ -251,21 +251,23 @@ def test_a_finished_job_leaves_a_live_worker_not_a_dangling_wrapper(qapp: object
 def _pump_until(qapp: object, done: Callable[[], bool], timeout: float = 10.0) -> None:
     """Pump the GUI event loop until `done()`, or `timeout` seconds - whichever first.
 
-    A WALL CLOCK, not a number of turns, and the difference is not cosmetic.
-    This counted iterations until 2026-09-03 and pumped with a bare
-    `processEvents()`, which returns immediately when the queue is empty -- so
-    the loop became a tight spin on the GUI thread that burned its whole budget
-    competing for CPU with the very worker thread it was waiting for. On an idle
-    box the worker got scheduled and the test passed; under load it did not, and
-    `test_a_runner_dropped_before_its_thread_runs_does_not_leave_the_worker_dead`
-    failed. Measured three times on yulon-ubuntu: load 13.16 fail, load 0.26
-    pass, load 15.24 fail, with no code change between them.
+    A WALL CLOCK, not a number of turns. This counted iterations until
+    2026-09-03 and pumped with a bare `processEvents()`, so it burned its whole
+    budget in milliseconds and then gave up while the worker thread had simply
+    not been scheduled yet. Measured on yulon-ubuntu with no code change
+    between the runs: load 13.16 fail, load 0.26 pass, load 15.24 fail.
 
-    `process_events(20)` is `test_job.py`'s shape, which had this right all
-    along -- it BLOCKS for up to 20ms inside Qt, so a thread that needs the CPU
-    can have it. What the test asks is "does the thread ever exit", and a
-    deadline answers exactly that: a thread that never exits still fails, on
-    every box, while one that is merely slow to be scheduled no longer does.
+    `time.sleep` between pumps, and that part is the correction to a claim this
+    docstring made when the deadline was added. It said `process_events(20)`
+    "BLOCKS for up to 20ms inside Qt, so a thread that needs the CPU can have
+    it". It does not. `conftest.process_events` loops on
+    `processEvents(AllEvents, 10)`, and `AllEvents` WITHOUT `WaitForMoreEvents`
+    returns immediately on an empty queue -- a review measured the loop at
+    11109 spins in 20ms, CPU/wall 0.78, which is a busy wait bounded into
+    slices, not a yield. The deadline alone did fix the test, so the fix was
+    real and the reason written beside it was not; the next person under load
+    would have acted on the reason. `sleep` is the thing that actually hands
+    the CPU to the worker this loop is waiting for.
     """
     deadline = time.monotonic() + timeout
     while True:
@@ -273,7 +275,8 @@ def _pump_until(qapp: object, done: Callable[[], bool], timeout: float = 10.0) -
             return
         if time.monotonic() >= deadline:
             return
-        process_events(20)
+        process_events(5)
+        time.sleep(0.005)
 
 
 def test_a_panel_dropped_before_its_thread_runs_does_not_leave_the_worker_dead(

@@ -107,8 +107,18 @@ def import_gate_for(
     from yulon.controller_wow_wotlk import repair as wotlk_repair
 
     password = fixed_db_password(entry)
-    sql = DockerSql(spec.db, password, schemas=entry.schema_map(), wsl_distro=wsl_distro)
-    mysql = wotlk_maintenance.DockerMysql(spec.db, password, wsl_distro=wsl_distro)
+    # `client=` on BOTH. This function is entry-driven -- it builds the import
+    # gate for whichever game is being installed, not for WotLK -- so an
+    # unbound seam here falls back to `mysql` on the three CMaNGOS games, which
+    # run MariaDB and ship no such binary, whenever the container cannot be
+    # probed. Found by an audit of every construction site after the same
+    # defect had been fixed in the controller packages and then again in the UI
+    # (review, 2026-09-03).
+    client = native.db.client if (native := entry.install.native) is not None else None
+    sql = DockerSql(
+        spec.db, password, schemas=entry.schema_map(), wsl_distro=wsl_distro, client=client
+    )
+    mysql = wotlk_maintenance.DockerMysql(spec.db, password, wsl_distro=wsl_distro, client=client)
 
     def probe() -> docker.ImportState:
         return wotlk_repair.import_state(sql, mysql)

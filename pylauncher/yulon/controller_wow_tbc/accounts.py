@@ -82,7 +82,7 @@ CONSOLE_COMMAND = docker_ctl.ENTRY.accounts.console_command
 """What to type at the `mangos>` prompt when the SQL path is not available."""
 
 
-def sql_for(root_password: str, *, wsl_distro: str | None = None) -> DockerSql:
+def sql_for(db_root_password: str, *, wsl_distro: str | None = None) -> DockerSql:
     """A `SqlSeam` over this install's database container, with its own schema names.
 
     `schemas=` is the load-bearing argument. `DockerSql` defaults to
@@ -92,7 +92,7 @@ def sql_for(root_password: str, *, wsl_distro: str | None = None) -> DockerSql:
     """
     return DockerSql(
         docker_ctl.SPEC.db,
-        root_password,
+        db_root_password,
         schemas=docker_ctl.ENTRY.schema_map(),
         wsl_distro=wsl_distro,
         client=docker_ctl.DB_CLIENT,

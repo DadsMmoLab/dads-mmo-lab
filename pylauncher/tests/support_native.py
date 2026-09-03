@@ -165,6 +165,18 @@ class Recorder:
     """Named volumes that EXIST on this machine (`docker volume inspect` answers)."""
 
     run_result: docker.AttachedRun = docker.AttachedRun(0, ("extracted",))
+    success_returncodes: tuple[int, ...] = (0,)
+    """Which statuses this double treats as "the tool did its work and wrote output".
+
+    A field rather than a literal `== 0`, because this double used to encode the
+    exact assumption the code under test stopped making. `MmapPlan.success_codes`
+    exists because MoveMapGen's convention differs by upstream tree -- the
+    Tortoise fork returns 1 when it finishes -- and a double that writes files
+    only on 0 cannot represent that tool at all: a test driving a Tortoise
+    generator through the real stage got an empty output folder and an error
+    about it, which is the double disagreeing with reality rather than the code
+    being wrong (2026-09-03).
+    """
     produce: dict[str, int] = field(
         default_factory=lambda: {
             "dbc": 100,
@@ -286,7 +298,7 @@ class Recorder:
         self.container_runs.append(spec)
         sink(f"{spec.argv[0]} ran")
         out = next((m.host for m in spec.mounts if m.guest == "/out"), None)
-        if out is not None and self.run_result.returncode == 0:
+        if out is not None and self.run_result.returncode in self.success_returncodes:
             for name, count in self.produce.items():
                 folder = out / name
                 folder.mkdir(parents=True, exist_ok=True)

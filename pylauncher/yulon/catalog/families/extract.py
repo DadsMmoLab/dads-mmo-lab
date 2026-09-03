@@ -9,7 +9,8 @@ client and nothing is `chown`ed afterwards — the two things the TBC script's
 
 Evidence lives in `data/.yulon-extract.json` and a tool is skipped only when
 three things agree: a completion record for THAT tool (name + argv hash,
-written only after exit 0), every `produces` directory holding at least its
+written only after an exit status the plan calls success), every `produces` directory
+holding at least its
 threshold of files, and the stage-level facts (plan hash, client path, the
 required file's size and mtime) matching what this run would write. The
 record is what makes the cancel note true: `ad` killed after 100 of ~700 dbc
@@ -65,7 +66,12 @@ HASH_LENGTH = 16
 
 @dataclass(frozen=True)
 class ToolRecord:
-    """One tool finished with exit 0, running exactly this argv, at this time."""
+    """One tool finished, running exactly this argv, at this time.
+
+    "Finished" is the plan's word, not POSIX's: `MmapPlan.success_codes` names
+    which statuses count, because MoveMapGen's convention differs between the
+    upstream trees this app installs (2026-09-03).
+    """
 
     name: str
     argv_hash: str
@@ -404,7 +410,8 @@ def satisfied(
        client passes every count and every record, because the counts are about
        `data/` and the records are about tools — neither of them looks at the
        client. This is the part that does.
-    2. **The record for THIS tool.** Written only after exit 0, and only for
+    2. **The record for THIS tool.** Written only after an exit status the
+       plan calls success, and only for
        the argv that produced it. `ad` killed after 100 of ~700 dbc files has
        already passed its threshold of 3, so without the record the count gate
        would skip it and the install would finish with a partial set. An edited
@@ -1189,6 +1196,30 @@ def run_mmaps(
             raise InstallerError(
                 f"{message}.{cleared} Creatures would not move properly, so nothing was "
                 "recorded. Check the extracted maps and vmaps, then try again."
+            )
+        if seen.get(MMAPS_DIR, 0) == 0:
+            # NOTHING is not a shortfall, whatever `required` says. `required:
+            # false` means "fewer than we hoped is survivable" -- a solo realm
+            # does not need every map -- and it must not be stretched to cover
+            # a tool that wrote no file at all, because that is a failed run
+            # wearing an optional stage's clothes.
+            #
+            # The stakes are the recording, not the message. Below this branch
+            # the run is written into the evidence file, and for an optional
+            # plan `produces` is `{MMAPS_DIR: 0}` (see the top of this
+            # function), so the skip test afterwards is satisfied by ANY number
+            # of files including none: an empty folder recorded once is an
+            # empty folder for every resume that follows, in silence.
+            #
+            # Reachable in practice only since success codes became data: a
+            # Tortoise run that fails exits 1, which now reads as finished, and
+            # `required: false` then downgrades its emptiness to a warning.
+            # Neither half is wrong alone; stacked they let a failure be
+            # recorded as a success (review, 2026-09-03).
+            raise InstallerError(
+                f"map generation produced no files at all.{cleared} This server treats movement "
+                "maps as optional, but an empty folder is a failed run rather than a small one, "
+                "so nothing was recorded. Check the extracted maps and vmaps, then try again."
             )
         yield f"warning: {message}; this server treats movement maps as optional, continuing"
     record = ToolRecord(MMAPS_TOOL, argv_hash(plan.argv), int(time.time()))

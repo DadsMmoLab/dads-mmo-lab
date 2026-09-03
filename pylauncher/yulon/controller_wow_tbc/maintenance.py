@@ -101,7 +101,7 @@ takes every schema the server has rather than a list.
 """
 
 
-def mysql_for(root_password: str, *, wsl_distro: str | None = None) -> DockerMysql:
+def mysql_for(db_root_password: str, *, wsl_distro: str | None = None) -> DockerMysql:
     """A `DockerMysql` bound to this install's database container (`tbc-db`).
 
     `wsl_distro` travels with the password: `docker exec -e MYSQL_PWD` forwards
@@ -111,7 +111,7 @@ def mysql_for(root_password: str, *, wsl_distro: str | None = None) -> DockerMys
     """
     return DockerMysql(
         docker_ctl.SPEC.db,
-        root_password,
+        db_root_password,
         wsl_distro=wsl_distro,
         client=docker_ctl.DB_CLIENT,
     )

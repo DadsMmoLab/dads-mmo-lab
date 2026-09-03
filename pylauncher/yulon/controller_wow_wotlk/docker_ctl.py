@@ -15,7 +15,11 @@ from yulon import docker
 from yulon.catalog.catalog import load_catalog
 
 # WotLK AzerothCore containers (mirrors dml-start.sh constants).
-DB_CLIENT: Final[str] = load_catalog().get("wow-wotlk").install.native.db.client  # type: ignore[union-attr]
+_NATIVE = load_catalog().get("wow-wotlk").install.native
+if _NATIVE is None:  # pragma: no cover - a catalog this broken fails everywhere
+    raise RuntimeError("wow-wotlk has no install.native block, so nothing can install or manage it")
+
+DB_CLIENT: Final[str] = _NATIVE.db.client
 """`mysql`, taken from `install.native.db.client` rather than written here.
 
 This package spells its container names as literals (see the TBC module's

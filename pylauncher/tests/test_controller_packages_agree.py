@@ -18,6 +18,7 @@ rather than being allowed to widen quietly.
 from __future__ import annotations
 
 import inspect
+import io
 from pathlib import Path
 
 import pytest
@@ -54,6 +55,48 @@ def test_every_cmangos_package_offers_the_same_account_functions(name: str) -> N
     assert (
         not missing
     ), f"{name}() is missing from {missing} but present in the other CMaNGOS packages"
+
+
+def test_the_password_parameter_is_spelled_the_same_in_every_package() -> None:
+    """The leading parameter of every seam builder, which nothing checked.
+
+    The sibling test below asserted "same shape everywhere" about
+    `sql_for_install` -- the one function that was already uniform -- while
+    `sql_for` had three shapes at once (review, 2026-09-03):
+
+        tbc       (root_password, wsl_distro)
+        vanilla   (db_root_password, wsl_distro)
+        tortoise  (db_root_password, wsl_distro, container)
+
+    A test that picks the uniform member of a family and reports the family
+    uniform is worse than no test, because it retires the question. TBC was
+    renamed to match the other three rather than the assertion widened.
+
+    Trailing parameters are allowed to differ -- Tortoise's `container` is a
+    capability the others do not offer, and a caller that ignores it is
+    unaffected. What may not differ is the parameter a caller must pass.
+    """
+    from yulon.controller_wow_wotlk import accounts as wotlk_accounts
+    from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
+
+    leading: dict[str, str] = {}
+    for game, mods in {
+        "wow-tbc": (tbc_accounts, tbc_maintenance),
+        "wow-vanilla": (vanilla_accounts, vanilla_maintenance),
+        "wow-tortoise": (tortoise_accounts, tortoise_maintenance),
+        "wow-wotlk": (wotlk_accounts, wotlk_maintenance),
+    }.items():
+        for mod in mods:
+            for name in ("sql_for", "mysql_for"):
+                builder = getattr(mod, name, None)
+                if builder is None or not inspect.isfunction(builder):
+                    continue
+                first = next(iter(inspect.signature(builder).parameters))
+                leading[game + "." + name] = first
+    assert set(leading.values()) == {"db_root_password"}, (
+        "the password parameter is spelled differently across packages, so a caller "
+        "switching games has to switch keywords: " + repr(leading)
+    )
 
 
 def test_sql_for_install_takes_the_server_dir_the_same_way_everywhere() -> None:
@@ -96,57 +139,123 @@ def test_a_generated_password_that_cannot_be_read_is_refused_and_not_guessed(
 
 
 def test_every_seam_builder_in_every_package_binds_the_declared_client(tmp_path: Path) -> None:
-    """EVERY function that builds a database seam, not the two someone remembered.
+    """The four packages' own factories, with `expected` READ rather than typed.
 
-    This test was written naming `maintenance.mysql_for` alone, and it passed
-    while `accounts.sql_for` -- one module over, in all four packages -- still
-    built its seam with no client at all. That gap was found by driving the real
-    path rather than reading it: creating an account on the live TBC server on
-    m910q printed `client=None` on the seam it had just built (2026-09-03).
+    This claimed to "discover" builders when it was written. It did not: three
+    hand-written lists -- the packages, the function names, and the expected
+    client per game -- behind a `checked >= 10` floor over an actual count of
+    11. Slack of exactly one, so deleting a builder would still have passed. A
+    review measured all of that (2026-09-03).
 
-    So the builders are DISCOVERED rather than listed. Every `sql_for` /
-    `sql_for_install` / `mysql_for` in every controller package is called and its
-    seam checked, which is what makes a fifth builder added tomorrow fail here
-    instead of shipping unbound. A test that names its subjects can only prove
-    something about the names its author already thought of.
+    Two things changed. `expected` now comes off the catalog entry instead of
+    being a literal typed beside it, so this cannot pass with a seam bound to a
+    value the catalog no longer declares. And the package list is checked
+    against the catalog's own games, so a fifth game cannot be added without
+    appearing here.
 
-    Why it matters: `mysql_client()` asks the container `command -v` and believes
-    the answer, so an unbound seam works whenever the probe can run. It falls
-    back to its first candidate when it CANNOT -- no docker CLI, a timeout, an
-    OSError -- and unbound that is `mysql`, which `mariadb:11` does not ship.
+    What this no longer pretends to be is the general audit. That is
+    `test_every_db_seam_binds_its_client.py`, which parses the source and finds
+    every construction site anywhere -- including the ones in `ui/` and
+    `install_wiring.py` that this test's "discovery" could never reach, because
+    it only ever imported the controller packages. This file stays because it
+    drives the factories FOR REAL and checks the seam they return, which an AST
+    audit cannot do.
     """
+    from yulon.catalog.catalog import load_catalog
     from yulon.controller_wow_wotlk import accounts as wotlk_accounts
     from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
 
     packages = {
-        "wow-tbc": (tbc_accounts, tbc_maintenance, "mariadb"),
-        "wow-vanilla": (vanilla_accounts, vanilla_maintenance, "mariadb"),
-        "wow-tortoise": (tortoise_accounts, tortoise_maintenance, "mariadb"),
-        "wow-wotlk": (wotlk_accounts, wotlk_maintenance, "mysql"),
+        "wow-tbc": (tbc_accounts, tbc_maintenance),
+        "wow-vanilla": (vanilla_accounts, vanilla_maintenance),
+        "wow-tortoise": (tortoise_accounts, tortoise_maintenance),
+        "wow-wotlk": (wotlk_accounts, wotlk_maintenance),
     }
+    catalog = load_catalog()
+    assert set(packages) == {
+        game.id for game in catalog.games
+    }, "a game was added to the catalog with no controller package listed here"
+
     checked = 0
-    for game, (accounts_mod, maintenance_mod, expected) in packages.items():
-        for mod in (accounts_mod, maintenance_mod):
+    for game, mods in packages.items():
+        native = catalog.get(game).install.native
+        assert native is not None
+        expected = native.db.client
+        for mod in mods:
             for name in ("sql_for", "sql_for_install", "mysql_for"):
                 builder = getattr(mod, name, None)
                 if builder is None or not inspect.isfunction(builder):
                     continue
                 first = next(iter(inspect.signature(builder).parameters))
                 if first == "server_dir":
-                    # A real install directory: `sql_for_install` refuses one
-                    # with no password file, and rightly so -- that refusal has
-                    # its own test above. Here the question is the CLIENT, so
-                    # the password has to be readable for the seam to exist.
-                    install = tmp_path / game
+                    install = tmp_path / (game + "-" + name)
                     install.mkdir(exist_ok=True)
                     (install / ".db_password").write_text("hunter2", encoding="utf-8")
                     seam = builder(install)
                 else:
                     seam = builder("pw")
                 assert seam.client == expected, (
-                    f"{game}.{mod.__name__.rsplit('.', 1)[-1]}.{name}() built a seam with "
-                    f"client={seam.client!r}; this entry declares {expected!r}, and an unbound "
-                    "seam falls back to `mysql` when the container cannot be asked"
+                    game
+                    + " "
+                    + name
+                    + " built a seam with client="
+                    + repr(seam.client)
+                    + "; the catalog declares "
+                    + repr(expected)
                 )
                 checked += 1
-    assert checked >= 10, f"only {checked} seam builders were found; the discovery is not working"
+    assert checked == 11, (
+        str(checked) + " builders were exercised, not 11. An exact count, not a floor: the "
+        "floor this replaced had slack of one, so a deleted builder still passed it."
+    )
+
+
+def test_the_dump_the_restore_and_the_listing_all_use_the_declared_client() -> None:
+    """All THREE argv-building paths of `DockerMysql`, not only the dump.
+
+    The mutation review found that `client=self.client` could be dropped from
+    `load_from()` (restore) or `databases()` (`SHOW DATABASES`) and survive the
+    entire suite, because every test that checked argv went through
+    `_dump_argv()`. Restore is where it hurts most: a backup that was taken
+    fine and then cannot be put back.
+
+    The probe is disabled through the real mechanism -- `docker_program()`
+    returning None is what makes `_probe_client` give up -- so what gets
+    measured is the fallback, which is the only case the binding decides.
+    """
+    from yulon.apply import _client_cache
+    from yulon.catalog.catalog import load_catalog
+
+    monkey = pytest.MonkeyPatch()
+    try:
+        monkey.setattr("yulon.platform.docker_program", lambda: None)
+        native = load_catalog().get("wow-tbc").install.native
+        assert native is not None
+        expected = native.db.client
+        _client_cache.clear()
+        seam = tbc_maintenance.mysql_for("pw")
+
+        assert seam._dump_argv("realmd")[0] == expected + "-dump"
+
+        seen = []
+
+        def record(self, argv, **kwargs):
+            seen.append(list(argv))
+            raise RuntimeError("argv captured")
+
+        monkey.setattr(type(seam), "_exec", record)
+        for call in (lambda: seam.databases(), lambda: seam.load_from(io.BytesIO(b""))):
+            try:
+                call()
+            except RuntimeError:
+                pass
+        assert len(seen) == 2, "one of the two methods never built an argv"
+        assert all(argv[0] == expected for argv in seen), (
+            "a DockerMysql method reached for "
+            + repr([a[0] for a in seen])
+            + " where the catalog declares "
+            + repr(expected)
+            + "; mariadb:11 ships no `mysql` binary"
+        )
+    finally:
+        monkey.undo()

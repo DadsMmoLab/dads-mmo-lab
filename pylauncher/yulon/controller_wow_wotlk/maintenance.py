@@ -394,14 +394,14 @@ def _stderr(proc: subprocess.CompletedProcess[bytes]) -> str:
     return (proc.stderr or b"").decode("utf-8", "replace").strip() or "no error output"
 
 
-def mysql_for(root_password: str) -> DockerMysql:
+def mysql_for(db_root_password: str) -> DockerMysql:
     """A `DockerMysql` bound to the WotLK database container (`docker_ctl.SPEC.db`).
 
     The per-game binding, in the package that owns the per-game facts — the same
     shape as `docker_ctl.wait_db_healthy_ready()`. The client spelling is part
     of that binding: see `DockerMysql.client`.
     """
-    return DockerMysql(docker_ctl.SPEC.db, root_password, client=docker_ctl.DB_CLIENT)
+    return DockerMysql(docker_ctl.SPEC.db, db_root_password, client=docker_ctl.DB_CLIENT)
 
 
 # ------------------------------------------------------------------ backup

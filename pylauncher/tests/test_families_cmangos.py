@@ -3442,3 +3442,59 @@ def test_the_compose_scalar_set_is_the_only_guard_on_the_tortoise_password(tmp_p
     assert "cannot be written into a compose file safely" in said
     assert "into SQL safely" not in said, "that is sqlplan's refusal, not the one under test"
     assert repr("'") in said, "the refusal must name the character it refused"
+
+
+def test_the_stage_hands_the_generator_the_success_codes_the_entry_declares(
+    tmp_path: Path,
+) -> None:
+    """The WIRE between the catalog and the stage, which nothing else asserts.
+
+    `9c93ad6e` gave `MmapPlan` a `success_codes` field, set `[1]` on
+    `wow-tortoise` because that fork's MoveMapGen returns 1 when it finishes,
+    and made `run_mmaps` consult it. It shipped with four mutations killed and a
+    gap none of them touched: every one of those tests either called
+    `run_mmaps` DIRECTLY with a plan built in the test, or read the field off
+    the catalog without executing anything. `_mmaps()` below passes `data.mmaps`
+    whole, and a mutant that narrowed it there --
+
+        extract.run_mmaps(replace(data.mmaps, success_codes=(0,)), ...)
+
+    -- restores the original four-hour-Tortoise-failure end to end while every
+    one of those tests stays green. Value proven present in the catalog, value
+    proven honoured by the function, and the wire between them unasserted. A
+    review named it (2026-09-03).
+
+    So this drives the real Tortoise entry through the real stage with a
+    generator that exits 1, and requires the stage to call that a success. The
+    extraction ahead of it exits 0, because `run_mmaps` refuses without
+    extraction evidence and this test is not about that refusal.
+    """
+    entry = installable(load_catalog().get("wow-tortoise"))
+    native = entry.install.native
+    assert native is not None and native.cmangos is not None
+    assert native.cmangos.mmaps.success_codes == (
+        1,
+    ), "this test is only meaningful while wow-tortoise declares a non-zero success code"
+
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    eng = engine_for(entry, rec)
+    list(eng._extract(context(server_dir, client_folder(tmp_path))))
+    extracted = len(rec.container_runs)
+
+    # The generator finishes and says so the way its own source does. The
+    # double is told 1 means "it worked" for the same reason the catalog is:
+    # otherwise it writes no output and this test measures the fixture's
+    # assumption rather than the stage's behaviour.
+    rec.run_result = docker.AttachedRun(1, ("Movemap build is complete!",))
+    rec.success_returncodes = (1,)
+    said = list(eng._mmaps(context(server_dir)))
+
+    assert len(rec.container_runs) == extracted + 1, "the generator did not run"
+    assert any("Map generation finished" in line for line in said), said
+    evidence = extract.read_evidence(server_dir / "data")
+    assert evidence is not None and evidence.record_for(extract.MMAPS_TOOL) is not None, (
+        "a Tortoise generator that reported the status its own source calls success was "
+        "treated as a failure by the stage"
+    )

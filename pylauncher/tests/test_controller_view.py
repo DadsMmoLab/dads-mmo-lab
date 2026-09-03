@@ -1407,7 +1407,7 @@ def test_the_seam_guard_sees_a_seam_reached_through_a_re_exporting_module(
 def test_the_seam_guard_still_exempts_networkings_own_apply() -> None:
     """The 7.3 false positive, pinned by line so the fix above cannot revive it.
 
-    `networking.apply(plan, sql=sql)` at controller_view.py:308 is a different
+    `networking.apply(plan, sql=sql)` at controller_view.py:323 is a different
     `apply` from `sqlplan.apply(..., wsl_distro=...)`; it reaches no daemon.
     Asserted here rather than left implicit in the guard's `not missing`, so a
     regression names the call instead of just reddening the guard - and pinned
@@ -1421,11 +1421,11 @@ def test_the_seam_guard_still_exempts_networkings_own_apply() -> None:
         for n in ast.walk(ast.parse(view.read_text(encoding="utf-8")))
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
     }
-    assert "networking.apply:308" in calls, "the call this test pins has moved; re-pin it"
+    assert "networking.apply:323" in calls, "the call this test pins has moved; re-pin it"
 
     accepts, missing = _scan_for_seams_without_a_distro(view.parent.parent, view)
     assert "apply" in accepts, "the scan no longer knows `apply` can take a distro"
-    assert "apply() at controller_view.py:308" not in missing, missing
+    assert "apply() at controller_view.py:323" not in missing, missing
 
 
 def test_for_wotlk_defaults_to_no_distro(qapp: object, tmp_path: Path) -> None:

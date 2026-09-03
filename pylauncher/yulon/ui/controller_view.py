@@ -252,8 +252,23 @@ def _mysql_for(
     it), and it is built from the entry rather than from the package's
     `mysql_for()` for the reason above: `docker_ctl.SPEC.db` is the catalog's
     answer for the game, and the entry is the catalog's answer for THIS install.
+
+    `client=` for the same reason `_sql_for()` directly above passes it, and
+    this function is why that reason is worth repeating: it sat one function
+    below a correct sibling, without it, through two commits that fixed exactly
+    this in the controller packages. It is the seam the SERVER TAB uses -- the
+    real backup and restore buttons for TBC, Vanilla and Tortoise, all three on
+    MariaDB -- so unbound it fell back to `mysql`, which `mariadb:11` does not
+    ship, whenever the container could not be probed. Found by a review that
+    asked "which OTHER builders were missed", after the same defect had already
+    been fixed twice (2026-09-03).
     """
-    return wotlk_maintenance.DockerMysql(entry.container_spec().db, password, wsl_distro=wsl_distro)
+    return wotlk_maintenance.DockerMysql(
+        entry.container_spec().db,
+        password,
+        wsl_distro=wsl_distro,
+        client=_db_client(entry),
+    )
 
 
 def _no_manifest_store(entry: CatalogEntry) -> ManifestStore | None:

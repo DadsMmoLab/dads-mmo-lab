@@ -1952,7 +1952,13 @@ def test_the_wipe_target_is_built_from_the_data_dir_and_a_constant_no_catalog_na
     assert folder.parts == (extract.MMAPS_DIR,)
     assert not folder.is_absolute() and folder.anchor == "" and ".." not in folder.parts
     assert set(MmapPlan.model_fields) == {"argv", "min_files", "required", "success_codes"}
-    assert all(isinstance(code, int) for code in MmapPlan(argv=("x",)).success_codes)
+    # NOT `all(isinstance(code, int) ...)`, which was here until a review
+    # pointed out that `isinstance(True, int)` is True and the assertion pinned
+    # nothing about the value. The default itself is what matters, and it is
+    # also pinned indirectly by the shipped-catalog test: TBC and Vanilla
+    # declare no `success_codes` at all, so a default of `(0, 1)` would fail
+    # there.
+    assert MmapPlan(argv=("x",)).success_codes == (0,)
 
 
 def test_the_run_hands_rmtree_the_mmaps_folder_and_a_skip_hands_it_nothing(
