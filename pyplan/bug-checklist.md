@@ -2006,9 +2006,11 @@ internet play with a LAN one, while printing that other machines could now reach
 **Live evidence, and what is still owed.** VERIFIED on WotLK/AzerothCore: the Windows gate on
 `yulon-win11` (2026-09-03 02:16) printed "The realm now advertises 172.30.52.116" and the server
 came up — so the AzerothCore half, which this entry marked UNVERIFIED, is now driven. The
-original TBC reproduction stands. Vanilla's install on `yulon-ubuntu` finished at 19:17 on
-2026-09-02, three hours BEFORE the stage existed, so its log says nothing either way and it has
-not been re-driven. Tortoise is mid-install as of 2026-09-03 and will exercise it.
+original TBC reproduction stands. Tortoise, on the run that closed 7.6: `172.30.55.119`.
+And Vanilla — whose install finished three hours BEFORE the stage existed, so its log said nothing
+either way — was resumed on 2026-09-03 and moved from `127.0.0.1` to `172.30.55.119`, read back
+out of `realmd.realmlist` rather than off the log. **All four entries are now driven**, and the
+UNVERIFIED note this section carried is spent.
 ### 36. A shipped SQL-plan fix never reaches an install that already has a marker — 2026-09-03, OPEN
 
 `MarkerGate` reads a marker row as `imported` **whatever the plan hash says** — `cmangos._import()`

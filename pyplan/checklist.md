@@ -671,8 +671,13 @@
       rest. The one exception is required to be REAL both ways — the three must report `store`
       and `applier` as None and nothing else, because a non-None store there would mean a game
       was handed somebody else's manifests.
-  - **Still owed:** Vanilla's own account creation and client login (TBC and Tortoise are both
-    done live; Vanilla uses the same shared writer and scheme and has not been driven).
+  - **Vanilla's account creation DONE 2026-09-03**, through the same two functions on the live
+    server: `accounts.sql_for_install()` + `create_account()` on `yulon-ubuntu`, account id 105,
+    `gmlevel 3`, `length(v) = length(s) = 64` — an SRP6 verifier and salt, not a password hash.
+    The seam printed `client='mariadb'`, the `f8cacafc` binding in the field again. All three
+    CMaNGOS account paths have now been driven against a real server.
+  - **Still owed:** Vanilla's client login. The server is up (`Avg Diff: 50. Sessions online: 0`)
+    and the client is staged on the Hyper-V host with its own `Start-Server.cmd`.
 - [ ] 7.10 Cross-server regression pass — re-run WotLK's 6.5 coverage gate after 7.1–7.9 land to confirm shared layers (`docker.py`, base `Controller`, `runner.py`, `platform.py`, `networking.py`) weren't regressed (was 7.4)
 - [ ] **Phase 7 exit criteria met** — all four v1 servers install through one Python engine with zero shell interaction and are managed by the app on Linux and native Windows, and on macOS once a machine exists; no `install-*.sh` remains. **Phase 8 does not start until this is fully met.**
 
