@@ -458,6 +458,52 @@
     in all three templates (`12d7e240`). `git.py` had already made this choice for the clones the
     app itself makes; the build context was the last place still speaking HTTP/2.
 - [ ] 7.6 WoW Tortoise — data + templates; first-ever extraction from a 7272 client; boot to `Ready to login`; client connects; `status` promoted from `wip`; source pinned
+  - **Five defects, 2026-09-03, `yulon-ubuntu`. Not ticked.** Every one is a fact about a binary
+    this project did not write, and not one was visible from our own code — the suite was green
+    through all five. This is the entry that justifies the gate existing.
+    1. **MoveMapGen returns 1 when it SUCCEEDS.** `tools/mmap/src/generator.cpp:352` ends
+       `return silent ? 1 : finish("Movemap build is complete!", 1)`; CMaNGOS ends `return 0`. The
+       stage hard-coded 0, so a finished run — 58 maps, 2075 tiles, 2.5 GB, about four hours — was
+       thrown away as a failure while quoting the tool's own line saying it had just written a
+       file. Fixed by `MmapPlan.success_codes` (`9c93ad6e`); re-run reached
+       `mmaps: done (mmaps: 2133 files)`.
+    2. **The DB auto-updater was pointed one directory too high.** `Database.AutoUpdate.Path` said
+       `/opt/tortoise/sql/`; the migrations are at `/opt/tortoise/sql/database_updates/world` (125
+       files). `ProcessTargetUpdates` skips a missing directory in SILENCE, so the only symptom was
+       the worldserver crash-looping later on `Unknown column 'script_name' in 'SELECT'`. Corrected:
+       the updater applied all 125 and wrote 125 rows to `migrations`; `script_name` verified
+       present in the database, not inferred from the log.
+    3. **The ready marker named three lines this core never prints.** It looked for
+       `World initialized|MaNGOS.*started up successfully|Ready to login`. A booted, ticking
+       Tortoise worldserver prints none of them; it prints
+       `World server is up and running! Loading time: 0 minutes 32 seconds`. Its two siblings are
+       no guide — Vanilla and TBC match `Avg Diff:`, and `grep -c` for that over this core's whole
+       log returns **0**. Every Tortoise install would have waited out 1800 s and then reported a
+       healthy server as never ready.
+    4. **The bots it is named for were compiled in and switched off.** `8176a2ec` built playerbots
+       into the image; the conf table then materialised `mangosd.conf` and `realmd.conf` and not
+       `aiplayerbot.conf`, though the image ships `aiplayerbot.conf.dist` beside them —
+       `AI Playerbot is Disabled. No configuration file at /opt/tortoise/etc/aiplayerbot.conf`.
+    5. **And their SQL was never imported.** With the conf written, the bots initialise, load 680
+       area levels, and die on `Table 'tw_world.ai_playerbot_weightscales' doesn't exist`. Vanilla
+       has carried `playerbots characters` / `playerbots world` phases all along (the second
+       listing `sql/world/*.sql` AND `sql/world/classic/*.sql`); Tortoise's plan had neither.
+    - **The verify is why 2, 4 and 5 all got through.** The only world-side check was
+      `COUNT(*) FROM information_schema.tables >= 150`. The database that crash-looped the server
+      had **285** tables, so it passed comfortably while missing every table the bots query and 125
+      migrations besides. A count answers "did something get imported", never "did the right
+      things". Now also counts `ai_playerbot% >= 10`.
+    - **STILL OWED, and the reason it is not ticked.** The five fixes have not been proved by ONE
+      uninterrupted run. Each was verified where it was found — the mmaps fix on the real path, the
+      updater against the `migrations` table and the `script_name` column, the conf by
+      `Bot configuration read from /opt/tortoise/etc/aiplayerbot.conf` — but the install that
+      currently exists was corrected in place across several resumes, which proves the diagnoses
+      and not the fixed catalog. A clean run needs an empty database, and `import` will not re-run
+      over the existing one by design (bug-checklist §36). Owner decision pending: drop the four
+      `tw_*` schemas on this test server, or install fresh into an empty folder (~90 min: the image
+      is cached, extract and mmaps are not).
+    - **Client login and `status: wip` → promoted are both still outstanding**, and both come after
+      that clean run.
   - **Reached `build` and FAILED there, 2026-09-02 on `m910q`** — the first time this entry has been
     driven at all. Five stages ran in order — `clone-sources`, `db-password`, `write-dockerfile`,
     `generate-compose`, `build` — the build was invoked at 21:44:05 and the run ended at 21:44:49,

@@ -2009,3 +2009,36 @@ came up — so the AzerothCore half, which this entry marked UNVERIFIED, is now 
 original TBC reproduction stands. Vanilla's install on `yulon-ubuntu` finished at 19:17 on
 2026-09-02, three hours BEFORE the stage existed, so its log says nothing either way and it has
 not been re-driven. Tortoise is mid-install as of 2026-09-03 and will exercise it.
+### 36. A shipped SQL-plan fix never reaches an install that already has a marker — 2026-09-03, OPEN
+
+`MarkerGate` reads a marker row as `imported` **whatever the plan hash says** — `cmangos._import()`
+says so in as many words, and it is a deliberate decision with a good reason behind it: a marker is
+written only after `verify()` passes, so it means "these databases were imported and checked", and
+re-importing over somebody's live world to chase a catalog edit would be far worse than not.
+
+**What it costs, found while driving 7.6.** Two SQL phases were added to `wow-tortoise` today
+(`playerbots characters`, `playerbots world`) because the bots crash the worldserver on boot
+without their tables. Re-running the installer over the existing install printed
+
+    --- import
+    They are already imported; leaving them alone.
+
+and the new phases never ran. That is correct by the rule above and useless to the user: every
+Tortoise install made before this fix stays broken, and the only route to the fix is a new install
+into an empty folder. The same will be true of the next SQL correction, and of every one after it.
+
+**Why the obvious fix is wrong.** Comparing the stored plan hash and re-importing when it moves
+would re-run `world base` — 285 table dumps — over a database that may hold characters somebody
+played. The five-branch table refuses `populated` for exactly that reason, so the honest shape is
+probably a *migration* notion: phases marked as safe to re-apply, applied by name, recorded
+individually — which is what the Tortoise core itself does with its `migrations` table, and what
+`sqlplan` does not have.
+
+**Not urgent, and not nothing.** No shipped install is affected yet because Tortoise has never been
+released. It becomes urgent the moment one is, and the decision (accept a re-install, or build the
+migration notion) is the owner's rather than one to make quietly inside a phase.
+
+**Where to start.** `yulon/catalog/families/cmangos.py::_import` (the ordering argument),
+`yulon/catalog/families/sqlplan.py` (the marker and `verify`), and `native.stage_import`'s
+five-branch table. `SqlPlan.marker` already hashes the canonical plan, so the value needed to
+detect the change is stored — nothing reads it back.
