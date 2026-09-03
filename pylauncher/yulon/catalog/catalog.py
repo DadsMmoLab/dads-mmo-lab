@@ -292,10 +292,40 @@ class ExtractTool(_Strict):
 
 
 class RetrySpec(_Strict):
-    """Re-run named tools once when their log matches (Vanilla's vmap extractor segfaults)."""
+    """Re-run named tools once when the ending matches — by exit status, or by log text."""
 
     when_log_matches: str = Field(min_length=1)
+    when_returncode_in: tuple[int, ...] = Field(
+        default=(),
+        description=(
+            "Exit statuses that mean 'the failure this recipe is for', checked BEFORE the log "
+            "pattern. Added 2026-09-03 because the log pattern alone could not fire on the "
+            "failure it names: `Segmentation fault (core dumped)` is printed by a SHELL's job "
+            "control, and these tools are exec'd as the container's PID 1 with no shell in "
+            "between, so a crashed tool's output does not contain it. A signal death is "
+            "128+N — 139 for SIGSEGV, 134 for SIGABRT — and that number is the only thing the "
+            "container reliably reports. The log pattern is kept because a tool that prints a "
+            "crash and exits non-zero on its own is a different, real case."
+        ),
+    )
     tools: tuple[str, ...] = Field(min_length=1)
+
+    @field_validator("when_returncode_in")
+    @classmethod
+    def _real_failing_statuses(cls, value: tuple[int, ...]) -> tuple[int, ...]:
+        """1-255 only: 0 is success and a negative is a sentinel, and both must never retry.
+
+        `_retry_matches()` already refuses `0` and `CANCELLED_RETURNCODE` before
+        it looks at anything, so a recipe naming either would be dead text that
+        reads as if it did something.
+        """
+        bad = [code for code in value if not 1 <= code <= 255]
+        if bad:
+            raise ValueError(
+                f"when_returncode_in must be failing exit statuses (1-255), got {bad}; 0 is "
+                "success and a negative is a cancel or signal sentinel"
+            )
+        return value
 
 
 class ExtractPlan(_Strict):

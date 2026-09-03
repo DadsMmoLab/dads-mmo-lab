@@ -2596,3 +2596,78 @@ def test_a_wipe_followed_by_an_unmakeable_folder_still_says_the_mmaps_are_gone(
     assert extract.MMAPS_CLEARED_NOTE in message, (
         "the folder was wiped and the refusal did not say so: " + message
     )
+
+
+def test_a_crash_with_no_output_at_all_is_still_recognised_as_the_crash() -> None:
+    """The shape the recipe was written for, and could not see until 2026-09-03.
+
+    `test_retry_matches_answers_every_ending_and_not_just_the_regex` builds its
+    crash as `AttachedRun(139, ("Segmentation fault (core dumped)",))` -- exit
+    status AND the words. That is the fixture answering itself: it hands the
+    matcher the very text it looks for, so it never asked whether a crashed
+    tool produces that text.
+
+    It does not. `Segmentation fault (core dumped)` is printed by a SHELL's job
+    control, and these tools are exec'd as the container's PID 1 with no shell
+    in between. Probed on yulon-ubuntu (2026-09-03): every signal-killed
+    container returned ZERO bytes of output and zero matches for the pattern.
+    A recipe with only `when_log_matches` therefore could not fire on the
+    failure it names.
+
+    So the ending here carries the status and NOTHING else, which is what a
+    crashed extractor really leaves behind.
+    """
+    silent_crash = docker.AttachedRun(139, ())
+    with_codes = RetrySpec(
+        when_log_matches="Segmentation fault|core dumped",
+        when_returncode_in=(139, 134),
+        tools=(VMAP.name,),
+    )
+    assert extract._retry_matches(with_codes, silent_crash, None) is True
+
+    # And the codes are what did it: the same silent crash against a recipe
+    # that names only the text is still no retry. Without this half, a matcher
+    # that ignored `when_returncode_in` entirely would pass the first assertion
+    # on any implementation that simply retried every non-zero exit.
+    text_only = RetrySpec(when_log_matches="Segmentation fault|core dumped", tools=(VMAP.name,))
+    assert extract._retry_matches(text_only, silent_crash, None) is False
+
+    # A status the recipe does not name is still not this recipe's failure.
+    assert extract._retry_matches(with_codes, docker.AttachedRun(1, ()), None) is False
+
+    # The refusals ahead of the status check still win over it.
+    stopped = threading.Event()
+    stopped.set()
+    assert extract._retry_matches(with_codes, silent_crash, stopped) is False
+    cancelled = docker.AttachedRun(docker.CANCELLED_RETURNCODE, ())
+    assert extract._retry_matches(with_codes, cancelled, None) is False
+
+
+def test_a_recipe_cannot_name_success_or_a_sentinel_as_a_reason_to_retry() -> None:
+    """0 and the negatives are refused before `_retry_matches` ever looks at them.
+
+    A recipe listing either would be dead text that reads as if it did
+    something: `_retry_matches` returns False for exit 0 and for
+    `CANCELLED_RETURNCODE` in its first line, whatever the recipe says.
+    """
+    for bad in (0, -1, -11, 256):
+        with pytest.raises(ValidationError):
+            RetrySpec(when_log_matches="x", when_returncode_in=(bad,), tools=(VMAP.name,))
+
+
+def test_the_shipped_vanilla_recipe_names_the_status_a_crash_actually_reports() -> None:
+    """The value has to be in the catalog, not merely possible in the model.
+
+    139 is 128+SIGSEGV, the status the recipe's own name is about; 134 is
+    128+SIGABRT, which is what a failed assertion in the same tools produces.
+    Read from the shipped entry so a model that grew the field while no entry
+    used it fails here.
+    """
+    native = load_catalog().get("wow-vanilla").install.native
+    assert native is not None and native.cmangos is not None
+    recipe = native.cmangos.extract.retry
+    assert recipe is not None, "wow-vanilla is the entry this recipe exists for"
+    assert 139 in recipe.when_returncode_in, (
+        "a crashed extractor reports 139 and prints nothing; without it in the recipe the "
+        "retry cannot fire on the failure it was written for"
+    )

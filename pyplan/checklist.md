@@ -467,8 +467,23 @@
     smaller than TBC's 279.81 MB, because this entry's `.dockerignore` keeps the already-cloned
     sources out and the sources are COPYed rather than shipped in the context. Data counts:
     **dbc 158, maps 2429, Buildings 5076, vmaps 5667, mmaps 2008**.
-  - **NOT ticked, on two counts.** The line requires a **forced vmap retry**, which this run never
-    triggered — `plan.retry` exists and no tool crashed, so the path is unexercised. And the line
+  - **The forced vmap retry, attempted 2026-09-03, and what it found instead.** The line asks for
+    one. It could not be produced, and the attempt was worth more than the tick — see
+    bug-checklist §37.
+    - `ulimit_stack_unlimited` is documented as existing because the vanilla vmap extractor
+      "overflows the default stack on some maps and segfaults", so dropping it should reproduce
+      the crash the recipe matches. It does not, measured three ways against the real client:
+      flag off, `stack=1048576`, and `stack=65536` all completed (Buildings 5076, vmaps 5667 —
+      the shipped counts). The flag's own justification is unreproducible here.
+    - Chasing that turned up why it would not have mattered: **the recipe could not fire on a real
+      crash anyway.** `Segmentation fault (core dumped)` is a SHELL's job-control message and
+      these tools are PID 1 with no shell, so a crashed tool prints nothing — every signal-killed
+      container probed returned zero bytes. `RetrySpec.when_returncode_in` now carries
+      `[139, 134]` and is checked before the text.
+    - **The line stays open on its own terms**: the recipe is now reachable and unit-tested, and
+      it has still never fired on a live crash, because no live crash can be produced here.
+  - **NOT ticked, on two further counts.** The line requires a **forced vmap retry**, which no run
+    has triggered. And the line
     says **"the change set contains no Python"**: it does not. Reaching a running Vanilla needed
     `make_out_dirs()` in `extract.py` and the HTTP/1.1 line in all three Dockerfile templates.
     That is not a failure of the run; it is the line's premise being wrong, and the premise is what

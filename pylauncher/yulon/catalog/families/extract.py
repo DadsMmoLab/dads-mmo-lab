@@ -689,7 +689,8 @@ def _retry_matches(
       exists to prevent.
     * **Nothing was started at all** — no docker CLI. Running a program that is
       not there a second time is not a recipe for anything.
-    * **The tail does not match.** The ordinary "this is a different failure".
+    * **Neither the exit status nor the tail matches.** The ordinary "this is a
+      different failure".
     * **The pattern is not a usable regular expression.** A bug in our catalog,
       not in the user's machine: it is logged once, loudly, and answered "no
       retry", so what reaches the user is the tool's own failure — which is
@@ -702,6 +703,15 @@ def _retry_matches(
         return False
     if docker.cli_missing_run(run):
         return False
+    if run.returncode in retry.when_returncode_in:
+        # The status, before the text, because for the failure this recipe was
+        # written for the text does not exist. `Segmentation fault (core
+        # dumped)` is a SHELL's job-control message; these tools are exec'd as
+        # the container's PID 1 with no shell in between, so a tool that dies of
+        # SIGSEGV writes nothing and the container reports only 139. Measured on
+        # yulon-ubuntu, 2026-09-03: every probe of a signal-killed container
+        # returned zero bytes of output and zero matches for this pattern.
+        return True
     try:
         return re.search(retry.when_log_matches, "\n".join(run.tail)) is not None
     except re.error as exc:

@@ -2042,3 +2042,44 @@ migration notion) is the owner's rather than one to make quietly inside a phase.
 `yulon/catalog/families/sqlplan.py` (the marker and `verify`), and `native.stage_import`'s
 five-branch table. `SqlPlan.marker` already hashes the canonical plan, so the value needed to
 detect the change is stored — nothing reads it back.
+### 37. The vmap retry recipe could not fire on the failure it names — 2026-09-03, FIXED
+
+`wow-vanilla`'s `ExtractPlan.retry` is `when_log_matches: "Segmentation fault|core dumped"` over
+`vmap extract` / `vmap assemble`. `_retry_matches()` searched the tool's own output for that text.
+
+**A crashed tool does not print it.** `Segmentation fault (core dumped)` is a message a SHELL's job
+control writes about a child it reaped. These tools are `exec`'d as the container's PID 1 with no
+shell in between, so a tool that dies of SIGSEGV writes nothing at all and the container reports
+only the status. Probed on `yulon-ubuntu`: every signal-killed container returned **zero bytes** of
+output and **zero** matches for the pattern.
+
+**Why the test suite agreed with it.** `test_retry_matches_answers_every_ending_and_not_just_the_regex`
+built its crash as `AttachedRun(139, ("Segmentation fault (core dumped)",))` — the status AND the
+words. The fixture handed the matcher the text it was looking for, so nothing ever asked whether a
+real crash produces that text. One line of a fixture stood between a green suite and a guard that
+could not fire.
+
+**Fixed** by `RetrySpec.when_returncode_in`, checked BEFORE the pattern, with `[139, 134]` on the
+Vanilla entry (128+SIGSEGV and 128+SIGABRT). The text match is kept, because a tool that prints a
+crash and exits non-zero on its own is a different and real case. A validator refuses `0` and the
+negatives, which `_retry_matches` already answers before it looks at anything.
+
+**What is still NOT proven, and is the reason 7.5 stays unticked.** The recipe has never fired on a
+real crash, because the crash cannot be produced. `ulimit_stack_unlimited` is documented as existing
+because "the vanilla vmap extractor overflows the default stack on some maps and segfaults"; that is
+**unreproducible on this box and this client**, measured three ways against the real 1.12.1 client:
+
+| forced condition | result |
+| --- | --- |
+| flag off (default 8 MB stack) | both tools completed — Buildings 5076, vmaps 5667 |
+| `--ulimit stack=1048576` (1 MB) | both tools completed |
+| `--ulimit stack=65536` (64 KB) | `vmap_extractor` completed, exit 0, 67 KB of output |
+
+So the flag's own justification is now measured false here. It is NOT removed: one box and one
+client cannot refute a crash reported on others, and the flag costs nothing. But the comment
+claiming the behaviour should say where it came from rather than assert it as fact.
+
+**One more thing the probing turned up, worth knowing before anyone tries this again.** A container's
+PID 1 does not receive an unhandled signal sent from outside — `docker kill --signal=SEGV` on a
+`sleep` left it `Status=running`. A crash has to come from INSIDE the process. That is why the
+probes above squeeze the stack rather than signalling the container.

@@ -556,6 +556,7 @@
               ],
               "retry": {
                 "when_log_matches": "Segmentation fault|core dumped",
+                "when_returncode_in": [139, 134],
                 "tools": [
                   "vmap extract",
                   "vmap assemble"
