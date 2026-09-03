@@ -399,8 +399,29 @@
   - **Second press: 70s**, from a state where only `up` and `ready` remained.
   - **Still owed, and each is a real gap rather than a formality:** the three preflight `warn`
     phases (CPU-vs-memory, and free space twice) are not yet justified or flipped; the interrupted
-    `import` → `partial` → reset → re-run path was never exercised; and **the client login needs the
-    owner at a WoW client**, which is the same item 7.1's Ubuntu gate waits on.
+    `import` → `partial` → reset → re-run path was never exercised.
+
+  - **CLIENT LOGIN DONE 2026-09-03.** The owner drove a real 2.4.3 client on the Hyper-V host
+    against this server over Tailscale (`100.78.24.50`). The evidence is what the SERVER recorded,
+    not what appeared on screen:
+    - `realmd.account` id **105**, `YULON`, `gmlevel 3`, `active_realm_id 1`, `expansion 1`,
+      `failed_logins 0`, and **`length(sessionkey) = 80`** — a session key exists only after a
+      completed SRP6 exchange, so this is authentication and not merely a TCP connection.
+    - `characters.characters` guid **903**, name `Ggkki`, **account 105**, race 2 / class 1,
+      `online = 1` — a character created on that account, in the world.
+    - `tbc-mangosd` logging `Avg Diff: 68. Sessions online: 1.`
+    - **The account was written by this app**, through `controller_wow_tbc.accounts.sql_for_install()`
+      + `create_account()` with the `mangos_srp6` scheme — so this run also proves the CMaNGOS SRP6
+      encoding (salt byte-reversed before hashing, verifier stored big-endian, g=7) against a real
+      client rather than against our own re-implementation of it. That is 7.9's
+      CMaNGOS-family account-creation item, closed by the same act.
+    - **One trap worth recording for whoever repeats this.** The 2.4.3 archive is a StormForge
+      repack: it carries its own `realmlist.wtf` at the client root saying `logon.stormforge.gg`,
+      and a background extraction that finished AFTER the realmlist had been set restored it,
+      so the first attempt failed with "unable to connect" against a client that looked configured.
+      Both `realmlist.wtf` (root) and `Data/enGB/realmlist.wtf` had to be written, and the locale
+      is **enGB**, not enUS. Preflight's "the client's origin ... which is how a repack looks"
+      warning was pointing at exactly this.
   - **This gate caught the worst defect of the day.** `ready` gave up after 600s on a boot that
     took **793s** (container start 15:51:15, first `Avg Diff:` 16:04:28) and told the user
     `The server started but never reported ready.` — while the server was healthy and idle. Raised
@@ -547,6 +568,25 @@
 - [ ] 7.7 Native Windows, all four — WotLK first (closes the 6.3 `ac-db-import` blocker), then TBC, Vanilla, Tortoise from `yulon-win11`'s clean checkpoint; 9p extract/mmaps throughput recorded; `platforms` widened per entry
 - [ ] 7.8 macOS, all four — **[blocked]** on hardware
 - [ ] 7.9 Controllers — `controller_wow_tbc/`, `controller_wow_vanilla/`, `controller_wow_tortoise/` mirroring `controller_wow_wotlk/`; `mysql` → `db.client` in `apply.py`/`maintenance.py`; CMaNGOS-family account creation (was 7.1–7.3 before the scope change; still owed, now after install)
+  - **`mysql` → `db.client` DONE 2026-09-03.** `apply.DockerSql` already carried it; `d157001d`
+    threaded it into `maintenance.DockerMysql` and all four `mysql_for()` factories, `f8cacafc`
+    into all four `accounts.sql_for()` (found by driving a live server, which printed
+    `client=None` on the seam it had just built), and `102e2dd1` into
+    `ui/controller_view._mysql_for()` — the Server tab's own backup/restore seam — plus
+    `install_wiring.py` and `modules.py`. Audited now by
+    `tests/test_every_db_seam_binds_its_client.py`, which parses the source and finds every
+    `DockerSql(...)`/`DockerMysql(...)` construction anywhere under `yulon/` rather than naming
+    the ones somebody remembered; the three misses above are why it is an AST audit and not a list.
+  - **CMaNGOS account creation DONE 2026-09-03**, on two of the three entries and by driving the
+    real servers, not the tests. TBC: account `YULON` (id 105) created through
+    `accounts.sql_for_install()` + `create_account()` on `m910q`, then logged into by the owner's
+    2.4.3 client — `sessionkey` present, character `Ggkki` online (see 7.4c for the full chain).
+    Tortoise: the same two functions against `yulon-ubuntu`, account id 104, and the seam printed
+    `client='mariadb'`, which is the `f8cacafc` fix visible in the field. Vanilla uses the same
+    shared `create_account()` and scheme and is UNVERIFIED against a client.
+  - **Still owed:** the three packages' remaining feature surface beyond accounts and backup —
+    console, modules, networking — measured against `controller_wow_wotlk/`'s, and Vanilla's own
+    account/client run.
 - [ ] 7.10 Cross-server regression pass — re-run WotLK's 6.5 coverage gate after 7.1–7.9 land to confirm shared layers (`docker.py`, base `Controller`, `runner.py`, `platform.py`, `networking.py`) weren't regressed (was 7.4)
 - [ ] **Phase 7 exit criteria met** — all four v1 servers install through one Python engine with zero shell interaction and are managed by the app on Linux and native Windows, and on macOS once a machine exists; no `install-*.sh` remains. **Phase 8 does not start until this is fully met.**
 
