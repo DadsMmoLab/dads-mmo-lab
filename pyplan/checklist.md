@@ -632,7 +632,7 @@
     re-measured** now that the volumes are deleted; it is recorded as reported, not as re-verified.
 - [ ] 7.7 Native Windows, all four — WotLK first (closes the 6.3 `ac-db-import` blocker), then TBC, Vanilla, Tortoise from `yulon-win11`'s clean checkpoint; 9p extract/mmaps throughput recorded; `platforms` widened per entry
 - [ ] 7.8 macOS, all four — **[blocked]** on hardware
-- [ ] 7.9 Controllers — `controller_wow_tbc/`, `controller_wow_vanilla/`, `controller_wow_tortoise/` mirroring `controller_wow_wotlk/`; `mysql` → `db.client` in `apply.py`/`maintenance.py`; CMaNGOS-family account creation (was 7.1–7.3 before the scope change; still owed, now after install)
+- [x] 7.9 Controllers — `controller_wow_tbc/`, `controller_wow_vanilla/`, `controller_wow_tortoise/` mirroring `controller_wow_wotlk/`; `mysql` → `db.client` in `apply.py`/`maintenance.py`; CMaNGOS-family account creation (was 7.1–7.3 before the scope change; still owed, now after install)
   - **`mysql` → `db.client` DONE 2026-09-03.** `apply.DockerSql` already carried it; `d157001d`
     threaded it into `maintenance.DockerMysql` and all four `mysql_for()` factories, `f8cacafc`
     into all four `accounts.sql_for()` (found by driving a live server, which printed
@@ -676,8 +676,29 @@
     `gmlevel 3`, `length(v) = length(s) = 64` — an SRP6 verifier and salt, not a password hash.
     The seam printed `client='mariadb'`, the `f8cacafc` binding in the field again. All three
     CMaNGOS account paths have now been driven against a real server.
-  - **Still owed:** Vanilla's client login. The server is up (`Avg Diff: 50. Sessions online: 0`)
-    and the client is staged on the Hyper-V host with its own `Start-Server.cmd`.
+  - **VANILLA CLIENT LOGIN DONE 2026-09-03 — 7.9 closed.** The owner drove a real 1.12.1 client
+    from the LAPTOP (not the Hyper-V host) against `yulon-ubuntu`, and reached a character in the
+    world. Server-side evidence, read after he said he was in: `realmd.account` row 106 `PERZI`
+    with `length(sessionkey) = 80` and `active_realm_id = 1` — an SRP6 session negotiated by the
+    core, not a row we wrote; `characters.characters` guid 901 `Perzi`, race 5, class 1, level 1,
+    **`online = 1`**; and the world log's own `Avg Diff: 57. Sessions online: 1.` All three
+    CMaNGOS games have now been logged into with a real client.
+  - **The account had to be a NEW one, and the reason is a deliberate design choice.**
+    `create_account()` never rewrites an existing account's salt and verifier — its docstring:
+    "a second call with a different password does not lock the owner out" — so the password of
+    the `YULON` account made earlier could not be reset through the app, and nothing had recorded
+    it. `PERZI` (id 106) was created through the same `accounts.sql_for_install()` +
+    `create_account()` path, which exercised the Vanilla account seam a second time; the seam
+    printed `container='vanilla-db'`. `YULON`'s `sessionkey` is still NULL, which is the
+    independent confirmation that it was never logged into and the password really was lost.
+  - **The realm row now advertises the Tailscale address, and that is a real finding for 7.7/8.**
+    It was `172.30.55.119` (Hyper-V Default Switch), which only the VM HOST can reach: a client
+    on any other machine authenticates on 3724 and is then handed a world address that does not
+    resolve for it. Set to `100.101.205.6`, which both the laptop and the host reach, and the
+    login above went through from the laptop. The realm address a fresh install writes is
+    whatever `detect_lan_ip()` returned on the server's own box, so an install on a machine with
+    more than one network path can hand out the wrong one — worth an explicit choice rather than
+    a detection, whenever networking is revisited.
 - [ ] 7.10 Cross-server regression pass — re-run WotLK's 6.5 coverage gate after 7.1–7.9 land to confirm shared layers (`docker.py`, base `Controller`, `runner.py`, `platform.py`, `networking.py`) weren't regressed (was 7.4)
 - [ ] **Phase 7 exit criteria met** — all four v1 servers install through one Python engine with zero shell interaction and are managed by the app on Linux and native Windows, and on macOS once a machine exists; no `install-*.sh` remains. **Phase 8 does not start until this is fully met.**
 
