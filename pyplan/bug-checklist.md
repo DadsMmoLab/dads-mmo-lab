@@ -1959,7 +1959,7 @@ The pattern: *check whether the thing you are about to make true is guarded by s
 only safe while it is false.*
 
 
-### 35. Every CMaNGOS install is unreachable from any other machine — 2026-09-02, OPEN
+### 35. Every CMaNGOS install is unreachable from any other machine — 2026-09-02, FIXED 2026-09-02
 
 `realmd.realmlist.address` is left at `127.0.0.1`. A client on another machine authenticates
 FINE — realmd answers on 3724, the account is accepted, the realm list arrives — and then the
@@ -1973,18 +1973,39 @@ One `update realmd.realmlist set address='100.78.24.50'` later, the same client 
 character screen, created `Administrato` (guid 901, account 1, Troll warrior) and the world
 server logged `Sessions online: 1`.
 
-**Why it is worth an entry rather than a one-line fix.** The value that belongs there is not
-knowable from inside the container: it is whichever address the PLAYER can reach, and that is a
-LAN address, a Tailscale address, a public IP or a DNS name depending on how the owner intends
-to play. The installer cannot guess it, and guessing wrong is worse than `127.0.0.1` because it
-looks configured. Phase 7.1's gate line already names "the LAN step" as a separate act; nothing
-performs it, and nothing tells the user it is owed.
+**The cause stated here when it was filed was WRONG, and the correction is the useful part.**
+This entry said the installer "cannot guess" the address and that the work was therefore owed to
+a future phase. That was not true when it was written. `yulon/networking.py` already held every
+piece: `lan_ip()` to detect this machine's address on the network, `advertisable()` to decide
+whether a value is reachable from anywhere else, and `realmlist_sql()` to write the row for
+either family. The 6.5 networking work had built all of it. Nothing was missing except a CALL:
+no install stage ever invoked any of it, so a complete set of working machinery sat one line
+away from the defect it was built to prevent, and the entry blamed the problem for being hard.
+
+Worth keeping as a lesson rather than editing away. "The installer cannot know this" is a
+comfortable thing to write, it reads as analysis, and it stopped anyone looking for the module
+that already knew. The check that would have caught it costs nothing: before recording that a
+value is unknowable, grep for the thing that would compute it.
+
+What IS true from the original paragraph: the address is whichever one the PLAYER can reach, and
+guessing wrong is worse than `127.0.0.1` because it looks configured. That is why the fix writes
+only a detected LAN address, says in plain words what it wrote, and — after a second review —
+leaves ANY already-reachable row alone rather than any row merely equal to the LAN address. See
+`native._advertise_realm()`.
 
 **Not the same as the networking work in 6.5.** That line is about firewalls, port-forwarding
 and a realmlist WRITER for the client side. This is the SERVER side — one row in the server's
 own database — and a launcher that installs a server nobody outside the box can join has not
 finished installing it.
 
-**Only demonstrated on TBC.** Vanilla and Tortoise share the family and almost certainly share
-the row; WotLK/AzerothCore keeps the same fact in `acore_auth.realmlist` and was NOT checked.
-UNVERIFIED for the other three.
+**Fixed in `40fa2e76`, corrected in `f90d3e55`.** The first commit added the stage; the review
+of it found that the guard compared the row against the LAN address instead of asking whether
+the row was REACHABLE, so an ordinary resume overwrote a public address somebody had set for
+internet play with a LAN one, while printing that other machines could now reach the server.
+
+**Live evidence, and what is still owed.** VERIFIED on WotLK/AzerothCore: the Windows gate on
+`yulon-win11` (2026-09-03 02:16) printed "The realm now advertises 172.30.52.116" and the server
+came up — so the AzerothCore half, which this entry marked UNVERIFIED, is now driven. The
+original TBC reproduction stands. Vanilla's install on `yulon-ubuntu` finished at 19:17 on
+2026-09-02, three hours BEFORE the stage existed, so its log says nothing either way and it has
+not been re-driven. Tortoise is mid-install as of 2026-09-03 and will exercise it.
