@@ -63,6 +63,22 @@ class AppState(BaseModel):
         ]
         self.installs.append(install)
 
+    def installed_dirs(self) -> dict[str, Path]:
+        """One folder per game — what the Catalog tab greys its Install button on.
+
+        A dict and not the list, because the tile is per GAME while an install
+        is per (game, folder): the tile has one button and one thing to say, so
+        the shape it needs is the shape it gets rather than a comprehension
+        written out at the one call site.
+
+        Last remembered wins where a game has two. `remember()` appends, so that
+        is the most recent one — and the tooltip built from this exists to answer
+        "which install is this tile talking about", so the newest is the least
+        surprising answer. Nothing is dropped from `installs`; both keep their
+        tabs.
+        """
+        return {install.game: install.server_dir for install in self.installs}
+
     def forget(self, game: str, server_dir: Path) -> None:
         """Drop an install (does not touch the server files)."""
         self.installs = [

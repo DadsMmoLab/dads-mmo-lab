@@ -609,7 +609,11 @@ def test_unlocking_after_a_job_never_re_enables_a_gated_tile(qapp: object, tmp_p
     _wait(panel)
     process_events(50)
 
-    assert view.button_for("wow-wotlk").isEnabled() is True  # unlocked after the job
+    # Disabled now for the OTHER reason, and the text is what tells them apart:
+    # this one installed, so its tile reads "Installed" (2026-09-04). The gate is
+    # what this test is about, and the gate is asserted on tbc below.
+    assert view.button_for("wow-wotlk").text() == "Installed"
+    assert view.button_for("wow-tbc").text() == "Install"
     assert view.button_for("wow-tbc").isEnabled() is False  # STILL gated
     assert view.existing_button_for("wow-tbc").isEnabled() is True  # never gated
 
@@ -1728,3 +1732,105 @@ def test_the_suggestion_is_never_created_by_asking_about_it(qapp: object, tmp_pa
     # `_FakeInstaller` runs no stages, so nothing downstream can have made it
     # either: whatever exists here was made by the question.
     assert not suggested.exists(), "asking about the folder created it"
+
+
+# -- "Installed" on a tile whose server the app already knows (owner, 2026-09-04)
+
+
+def test_a_game_already_installed_opens_greyed_and_says_so(qapp: object, tmp_path: Path) -> None:
+    """The state the app starts in after a restart: the tile must not offer again.
+
+    The folder is in the tooltip, not just "already installed", because two
+    installs of one game on one machine is a real case here and then the useful
+    question is which one this tile means.
+    """
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        pick_dir=lambda *_: None,
+        installed_games={"wow-wotlk": tmp_path / "wotlk"},
+    )
+    installed = view.button_for("wow-wotlk")
+    assert installed.text() == "Installed"
+    assert installed.isEnabled() is False
+    assert str(tmp_path / "wotlk") in installed.toolTip()
+    # Every other tile is untouched: this is per game, not a mode the view is in.
+    assert view.button_for("wow-tbc").text() == "Install"
+    # And "Use existing..." stays live \u2014 pointing the app at a second copy of a
+    # game it already knows is a thing people do, and it is not an install.
+    assert view.existing_button_for("wow-wotlk").isEnabled() is True
+
+
+def test_a_finished_install_greys_its_own_button_and_leaves_the_others(
+    qapp: object, tmp_path: Path
+) -> None:
+    """Ordering test as much as a feature test.
+
+    `_on_run_finished` calls `_set_buttons_enabled(True)` to unlock the tiles
+    the job locked, and THEN greys the one that just installed. Written the
+    other way round the unlock silently undoes it, and nothing else in the suite
+    would have failed.
+    """
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, ["done"]),
+        panel,
+        platform_id=lambda: "linux",
+        pick_dir=lambda *_: tmp_path / "server",
+        home=tmp_path,
+    )
+    assert view.start_install(CATALOG.get("wow-wotlk")) is True
+    _wait(panel)
+    assert view.button_for("wow-wotlk").text() == "Installed"
+    assert view.button_for("wow-wotlk").isEnabled() is False
+    assert view.button_for("wow-tbc").isEnabled() is True, "the unlock must still reach the rest"
+
+
+def test_an_install_that_failed_leaves_its_button_offering_a_retry(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Greying is for installs that HAPPENED. A clean exit is not one of them.
+
+    `installs=False` is the engine that returns 0 without writing a compose
+    file, which `_on_run_finished` already refuses to remember. The button must
+    refuse it too, or a failed attempt costs the user their only way to try
+    again.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
+    monkeypatch.setattr(catalog_view.platform, "docker_group_reexec", lambda: None)
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, ["done"], installs=False),
+        panel,
+        platform_id=lambda: "linux",
+        pick_dir=lambda *_: tmp_path / "server",
+        home=tmp_path,
+    )
+    assert view.start_install(CATALOG.get("wow-wotlk")) is True
+    _wait(panel)
+    assert view.button_for("wow-wotlk").text() == "Install"
+    assert view.button_for("wow-wotlk").isEnabled() is True
+
+
+def test_using_an_existing_install_greys_the_tile_too(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Three paths produce an install; the tile cannot be told which one it was."""
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        pick_dir=lambda *_: tmp_path,
+        home=tmp_path,
+    )
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    assert view.attach_existing(CATALOG.get("wow-wotlk")) is True
+    assert view.button_for("wow-wotlk").text() == "Installed"
+    assert view.button_for("wow-wotlk").isEnabled() is False

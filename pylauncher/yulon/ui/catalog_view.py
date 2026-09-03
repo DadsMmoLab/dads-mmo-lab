@@ -11,7 +11,7 @@ into the `LogPanel`. No Docker, no subprocess, no business logic here
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from enum import Enum
 from pathlib import Path
 
@@ -290,6 +290,7 @@ class CatalogView(QWidget):
         *,
         pick_dir: DirPicker = _qt_dir_picker,
         ask_suggestion: SuggestionAsker = _qt_suggestion_asker,
+        installed_games: Mapping[str, Path] | None = None,
         home: Path | None = None,
         platform_id: Callable[[], str] = platform.detect,
         pick_wsl_server: WslServerPicker = _qt_wsl_server_picker,
@@ -312,6 +313,7 @@ class CatalogView(QWidget):
         self._buttons: dict[str, QPushButton] = {}
         self._gated: set[str] = set()  # ids the platform gate disabled (roadmap 6.1)
         self._existing_buttons: dict[str, QPushButton] = {}
+        self._installed_dirs: dict[str, Path] = dict(installed_games or {})
         self._current: tuple[str, Path, Path | None] | None = None
         self._prompter: InputPrompter | None = None
 
@@ -380,6 +382,7 @@ class CatalogView(QWidget):
             button.setEnabled(False)
             button.setToolTip(unsupported_platform_message(entry, self._platform_id()))
             self._gated.add(entry.id)
+        self._show_installed(entry.id)
         existing = QPushButton("Use existing…", frame)
         existing.setObjectName(f"existing-{entry.id}")
         existing.setToolTip(
@@ -405,6 +408,40 @@ class CatalogView(QWidget):
             box.addWidget(adopt)
             self._adopt_buttons[entry.id] = adopt
         return frame
+
+    def _show_installed(self, game_id: str) -> None:
+        """Say "Installed" and go grey on a tile whose server the app already knows.
+
+        Owner-asked, 2026-09-04. An Install button that still looks pressable on
+        a game that is already installed is an offer the app does not mean: the
+        second press asks for a folder, and then either `_guard()` refuses the
+        first install’s folder for being non-empty, or a SECOND server is built
+        for the same game — which cannot run beside the first, because container
+        names are global per game and `_refuse_foreign_containers` refuses
+        exactly that. Both outcomes are a minutes-long detour to reach a no.
+
+        The tooltip names the FOLDER rather than saying only "already
+        installed", because two boxes of the same game on one machine is a real
+        case here, and then the useful question is which one this tile is
+        remembering.
+
+        Called once per tile at build time and again at each of the three points
+        that produce an install, so one function decides how an installed tile
+        looks instead of four places that have to agree.
+        """
+        if game_id not in self._installed_dirs:
+            return
+        button = self._buttons[game_id]
+        button.setText("Installed")
+        button.setEnabled(False)
+        button.setToolTip(
+            f"Already installed in {self._installed_dirs[game_id]} — its own tab manages it."
+        )
+
+    def _remember_installed(self, game_id: str, server_dir: Path) -> None:
+        """Record an install this view just produced, and grey its button."""
+        self._installed_dirs[game_id] = server_dir
+        self._show_installed(game_id)
 
     def button_for(self, game_id: str) -> QPushButton:
         """The Install button of a tile (tests / accessibility)."""
@@ -479,6 +516,7 @@ class CatalogView(QWidget):
         # database volume beside the real one. Only `_on_run_finished()` may
         # pin: there the basename provably is what the containers were just
         # created under (review, 2026-08-22).
+        self._remember_installed(entry.id, server_dir)
         self.installed.emit(entry.id, server_dir, client_dir)
         return True
 
@@ -619,6 +657,7 @@ class CatalogView(QWidget):
             f"adopting {entry.id} from WSL distro {chosen.distro}: "
             f"project {chosen.project} at {chosen.server_dir}"
         )
+        self._remember_installed(entry.id, chosen.server_dir)
         self.adopted.emit(entry.id, chosen.server_dir, client_dir, chosen.distro)
         return True
 
@@ -742,6 +781,10 @@ class CatalogView(QWidget):
         self.install_finished.emit(game_id, ok, message)
         if ok:
             _pin_compose_project(server_dir)
+            # AFTER `_set_buttons_enabled(True)` ran above: that pass re-enables
+            # every ungated tile, so greying this one has to come second or the
+            # unlock undoes it. Asserted, not just stated.
+            self._remember_installed(game_id, server_dir)
             self.installed.emit(game_id, server_dir, client_dir)
 
     def _offer_a_restart_instead(self, message: str) -> bool:
@@ -807,12 +850,19 @@ class CatalogView(QWidget):
 
         Unlocking must never re-enable an Install button the platform gate
         disabled (roadmap 6.1) — the tile's own note says it cannot be installed
-        here. Latent while every catalog entry is Linux-only; armed the moment
-        6.2 widens WotLK and leaves the other three. "Use existing…" is
-        deliberately platform-independent: managing a server someone else
-        installed works everywhere.
+        here — nor one that already reads "Installed" (owner, 2026-09-04). Same
+        shape of bug in both: those are standing facts about the TILE, and this
+        function knows only whether a job is running. The gate half was latent
+        while every catalog entry was Linux-only and armed the moment 6.2
+        widened WotLK; the installed half is armed immediately, because
+        `_on_run_finished` calls this and then greys the tile that just
+        installed. "Use existing…" is deliberately outside both rules: managing
+        a server someone else installed works on every platform, and pointing
+        the app at a second copy of a known game is not an install.
         """
         for game_id, button in self._buttons.items():
-            button.setEnabled(enabled and game_id not in self._gated)
+            button.setEnabled(
+                enabled and game_id not in self._gated and game_id not in self._installed_dirs
+            )
         for button in self._existing_buttons.values():
             button.setEnabled(enabled)

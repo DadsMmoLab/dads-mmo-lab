@@ -153,7 +153,17 @@ def build_window() -> object:
     # copy that stood here hand-wrote the same probe pair and the same
     # fixed-password fallback, and `catalog/` may not import a controller
     # package to do it itself (style-guide §3).
-    catalog_view = CatalogView(catalog, installer_for_app, log_panel)
+    catalog_view = CatalogView(
+        catalog,
+        installer_for_app,
+        log_panel,
+        # The tiles for games already in `state.json` open reading "Installed"
+        # and greyed, not "Install" (owner, 2026-09-04). Seeded from state
+        # rather than discovered by the view, because `state.json` is the only
+        # thing that knows: the view cannot look at a folder it was never told
+        # about. Same list `add_controller()` just built the tabs from.
+        installed_games=state.installed_dirs(),
+    )
     splitter = QSplitter()
     splitter.addWidget(catalog_view)
     splitter.addWidget(log_panel)

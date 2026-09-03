@@ -71,3 +71,32 @@ def test_state_written_before_wsl_support_still_loads() -> None:
     """The field is optional, so no user's state.json is invalidated by adding it."""
     parsed = KnownInstall.model_validate({"game": "wow-wotlk", "server_dir": "C:/srv/wow"})
     assert parsed.wsl_distro is None
+
+
+def test_installed_dirs_answers_one_folder_per_game() -> None:
+    """The Catalog tab greys a tile per GAME, so this collapses per game."""
+    app_state = AppState(
+        installs=[
+            KnownInstall(game="wow-wotlk", server_dir=Path("C:/srv/wotlk")),
+            KnownInstall(game="wow-tbc", server_dir=Path("C:/srv/tbc")),
+        ]
+    )
+    assert app_state.installed_dirs() == {
+        "wow-wotlk": Path("C:/srv/wotlk"),
+        "wow-tbc": Path("C:/srv/tbc"),
+    }
+
+
+def test_a_game_installed_twice_reports_the_one_remembered_last() -> None:
+    """Two folders, one tile, one tooltip \u2014 and the newest is the least surprising.
+
+    `remember()` appends, so the last entry is the most recent install. Asserted
+    rather than left to the dict comprehension, because the opposite choice is
+    equally easy to write and nothing else would notice: both installs keep
+    their tabs either way, and only the tooltip changes.
+    """
+    app_state = AppState()
+    app_state.remember(KnownInstall(game="wow-tbc", server_dir=Path("C:/srv/old")))
+    app_state.remember(KnownInstall(game="wow-tbc", server_dir=Path("C:/srv/kept")))
+    assert app_state.installed_dirs() == {"wow-tbc": Path("C:/srv/kept")}
+    assert len(app_state.installs) == 2, "collapsing the tile must not forget an install"
