@@ -397,9 +397,34 @@
     catalog sets `ready.auth: null` for TBC, so the engine does not wait on the auth log at all —
     this line is evidence, not a marker in use.
   - **Second press: 70s**, from a state where only `up` and `ready` remained.
-  - **Still owed, and each is a real gap rather than a formality:** the three preflight `warn`
-    phases (CPU-vs-memory, and free space twice) are not yet justified or flipped; the interrupted
-    `import` → `partial` → reset → re-run path was never exercised.
+  - **The three preflight `warn` phases are answered, 2026-09-03 — one flipped, two justified.**
+    What that run printed, and what the same code prints now:
+
+    1. `[warn] CPU vs memory: 15 CPUs means 16 parallel compilers at about 2 GB each, and 19.5 GB
+       affords about 9. Either raise the memory, or set Docker Desktop to 8 CPUs — the job count
+       comes from the CPU count and cannot be set any other way.` **FLIPPED, because it was
+       wrong on both halves.** TBC compiles with `make -j2`, fixed in `catalog.json`
+       (`cmangos.dockerfile.make_jobs`), so the "16 parallel compilers" it named were nobody's
+       build — the CPU count is not one of the two things being compared on any CMaNGOS entry.
+       And the remedy named a Docker Desktop pane on a box running Docker Engine, which has no
+       such setting. Both fixed on 2026-09-02 (`_build_jobs`, `_cpu_check`, and the rename to
+       `compiler jobs vs memory`). The same code on the same box now prints
+       `[pass] compiler jobs vs memory: 2 parallel jobs against about 5 the memory affords`.
+    2. and 3. `[warn] free space on Docker's disk: 51 GB free; 60 GB is the comfortable figure`
+       and the identical row again for the server folder. **JUSTIFIED as a warning, and the
+       duplicate is gone.** They were two rows saying one thing because both paths were the same
+       drive; the check now emits a single
+       `free space on Docker's disk and the server folder` row that says so.
+
+       The band itself (refuse below 40 GB, warn below 60, from `min_data_root_gb` 20 +
+       `min_server_dir_gb` 20 and their warn twins) earned its keep the same day, on Tortoise:
+       the install warned at **42 GB free**, and a later attempt on the same box **refused at
+       33 GB** and could not proceed until about 9 GB was freed. So the warn band is not
+       decoration — it is the interval in which an install that has not started yet is likely to
+       cross the floor before it finishes, which is exactly what happened.
+
+  - **Still owed:** the interrupted `import` → `partial` → reset → re-run path, which has never
+    been exercised on any entry.
 
   - **CLIENT LOGIN DONE 2026-09-03.** The owner drove a real 2.4.3 client on the Hyper-V host
     against this server over Tailscale (`100.78.24.50`). The evidence is what the SERVER recorded,
