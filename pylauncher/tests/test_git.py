@@ -1220,3 +1220,52 @@ def test_a_bad_pin_on_an_existing_clone_is_not_blamed_on_the_container(
     assert "falling back to host git" not in logged, "a bad pin is not an environment problem"
     assert not any(argv[0] == "git" for argv in seen_argv), "host git must not be tried"
     assert sum(1 for argv in seen_argv if BAD_PIN in argv) == 1, "the pin is attempted once"
+
+
+def test_a_source_pinned_on_a_named_branch_clones_the_branch_and_still_pins_by_hash(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """`branch` AND `rev` on one source — the combination `wow-tortoise` ships.
+
+    Every other `rev` test here pins a source with no `branch`, so this pairing
+    was asserted and never exercised (review, 2026-09-03). It is not obviously
+    safe: `git clone --branch X` implies `--single-branch`, which narrows the
+    remote's fetch refspec to `refs/heads/X`, and the pin then asks for a commit
+    BY HASH rather than through that refspec.
+
+    Driven against the real repository before this test was written, because a
+    unit test over a fake runner can only prove the argv, never that git accepts
+    it. On yulon-ubuntu, in the same containerised git the installer uses:
+
+        clone --depth 1 --branch playerbots-integration-gh   -> tip 7266affc
+        fetch --depth=1 origin 7c0fb278…                     -> FETCH_HEAD, exit 0
+        checkout --detach 7c0fb278…                          -> HEAD is 7c0fb278…
+
+    The tip had already moved off the pinned commit by then, which is the whole
+    reason the entry carries a `rev`: an unpinned install would now build a tree
+    other than the one Tortoise's six catalog facts were measured against.
+
+    What this test adds is the ORDER and the shape: the branch reaches the
+    clone, and the pin still happens afterwards, by hash, detached.
+    """
+    git.RunnerGit().clone(
+        git.CloneSpec(
+            url="https://example/repo.git",
+            dest=tmp_path / "core",
+            branch="playerbots-integration-gh",
+            rev=PIN,
+        )
+    )
+    clone = next(argv for argv in seen if "clone" in argv)
+    assert "--branch" in clone and clone[clone.index("--branch") + 1] == "playerbots-integration-gh"
+
+    fetch = next(argv for argv in seen if "fetch" in argv)
+    assert fetch[fetch.index("fetch") :] == [
+        "fetch",
+        "--depth=1",
+        "origin",
+        PIN,
+    ], "the pin must be fetched by hash; a --single-branch clone cannot reach it any other way"
+    checkout = next(argv for argv in seen if "checkout" in argv)
+    assert checkout[-3:] == ["checkout", "--detach", PIN]
+    assert seen.index(clone) < seen.index(fetch) < seen.index(checkout)

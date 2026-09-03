@@ -259,6 +259,20 @@ def test_the_fatal_pattern_does_not_fire_on_a_line_that_says_it_is_harmless() ->
         "Could not open bot log file ../logs/bot_events.csv (No such file or directory). "
         "Logging to it is off for this run."
     )
+    # The exclusion is anchored on the sentence that says the line is harmless,
+    # not on the filename in it. The first version keyed on "bot log file",
+    # which is the phrase this one boot happened to print; a review pointed out
+    # that the playerbots module writes a family of optional logs and any
+    # sibling message would have gone straight back to declaring a healthy
+    # server dead. This one is the same shape with a different subject, and it
+    # must be excluded too.
+    sibling = (
+        "Could not open combat log ../logs/other.csv (No such file or directory). "
+        "Logging to it is off for this run."
+    )
+    assert not re.search(
+        fatal, sibling
+    ), f"{fatal!r} fires on an optional log this particular boot did not happen to print"
     assert not re.search(fatal, benign), (
         f"the fatal pattern {fatal!r} fires on a line whose own text says logging was simply "
         "turned off; the install then reports a healthy server as dead"

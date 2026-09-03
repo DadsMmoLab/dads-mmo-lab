@@ -303,8 +303,15 @@ class RetrySpec(_Strict):
             "failure it names: `Segmentation fault (core dumped)` is printed by a SHELL's job "
             "control, and these tools are exec'd as the container's PID 1 with no shell in "
             "between, so a crashed tool's output does not contain it. A signal death is "
-            "128+N — 139 for SIGSEGV, 134 for SIGABRT — and that number is the only thing the "
-            "container reliably reports. The log pattern is kept because a tool that prints a "
+            "128+N, and that number is the only thing the container reliably reports. 139 "
+            "(SIGSEGV) is the one this ships: the recipe is named for a stack overflow, which "
+            "is resource-dependent and so plausibly transient. 134 (SIGABRT) was in this list "
+            "for a day on the theory that it is the same shape, and was removed — an abort in "
+            "these tools is a failed assertion on a particular record of the client's data, and "
+            "the retry re-runs the identical container over the identical data, so it cannot "
+            "change the outcome. Adding it bought a second multi-minute run before the same "
+            "failure. Nothing measured said an abort here is ever transient (review, "
+            "2026-09-03). The log pattern is kept because a tool that prints a "
             "crash and exits non-zero on its own is a different, real case."
         ),
     )
