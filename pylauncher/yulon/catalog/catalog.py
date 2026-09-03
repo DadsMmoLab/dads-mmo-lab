@@ -462,9 +462,28 @@ class SqlPhase(_Strict):
             "`2>/dev/null`, made visible."
         ),
     )
+    assert_update_level: bool = Field(
+        default=False,
+        description=(
+            "After this phase, require each target schema to carry a `required_<stem>` "
+            "column naming the LAST file this phase applied to it. CMaNGOS core updates "
+            "are a chain — every file's first statement renames the previous file's column "
+            "— so that column is the schema's update level, and it is the only thing that "
+            "separates a `warn` phase that skipped already-applied work from one that "
+            "covered a broken world. Both print the same transcript (2026-09-03)."
+        ),
+    )
 
     @model_validator(mode="after")
     def _one_source_one_target(self) -> SqlPhase:
+        if self.assert_update_level and self.statements:
+            # The check reads the LAST FILE this phase applied and turns its name
+            # into a column. A literal statement has no name to read, so the flag
+            # would be dead text on such a phase rather than a weaker check.
+            raise ValueError(
+                f"phase {self.name!r}: `assert_update_level` reads the name of the last file "
+                "applied, so it cannot be set on a `statements` phase"
+            )
         if self.into is not None and self.into_each is not None:
             raise ValueError(f"phase {self.name!r}: `into` and `into_each` are alternatives")
         if self.into_each is not None:

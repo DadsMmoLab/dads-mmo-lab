@@ -3498,3 +3498,167 @@ def test_the_stage_hands_the_generator_the_success_codes_the_entry_declares(
         "a Tortoise generator that reported the status its own source calls success was "
         "treated as a failure by the stage"
     )
+
+
+# ---------------------------------------------------------------------------
+# The update-level check (2026-09-03).
+#
+# The `core updates` phase is `on_error: warn`. On the live Vanilla gate 171 of
+# its 172 files failed with `ERROR 1054 Unknown column 'required_<previous>'`
+# and the install ended "WoW Vanilla is installed and running". Asked afterwards,
+# the database turned out to be at the NEWEST update of all four schemas -- the
+# base dump already contained them, and each file's first statement renames the
+# previous file's column, so a dump already past them cannot apply them again.
+#
+# The defect is not that run. It is that the harmless reading and the
+# catastrophic one -- a realm genuinely 171 updates behind, with `warn` covering
+# a broken world -- print the SAME transcript, and nothing asked the question
+# that separates them.
+
+
+def test_the_import_asks_every_flagged_schema_what_update_level_it_reached(
+    tmp_path: Path,
+) -> None:
+    """One question per schema, naming the column the LAST file applied leaves behind.
+
+    The expectation is read off the runs `apply()` streamed, not off a second
+    evaluation of the plan's globs: a glob resolved twice can disagree with
+    itself (a file added between the two, a different working directory) and
+    the check would then be about a file nobody imported. `lay_sql` writes
+    `0001.sql` and `0002.sql` per glob, so `0002` is what the phase ended on
+    and `required_0002` is what the schema must carry.
+    """
+    rec = ready_to_import(ABSENT)
+    list(engine(rec)._import(context(server_with_sql(tmp_path))))
+
+    flagged = [p for p in SQL.phases if p.assert_update_level]
+    assert flagged, "wow-tbc carries the flag on its core updates phase; this test is about it"
+    # `into_each`'s keys are manifest names where the entry declares one and the
+    # physical schema otherwise, which is exactly what `_schema()` resolves at
+    # import time -- `mangos`, `realmd`, `characters` and `logs` are their own
+    # names on this entry. Resolved the same way here rather than assumed either way.
+    resolve = ENTRY.schema_map()
+    schemas = sorted(
+        resolve.get(name, name) for phase in flagged for name in (phase.into_each or {})
+    )
+    asked = [s for s in rec.sql_calls if "information_schema.columns" in s]
+    assert len(asked) == len(schemas), f"{len(asked)} questions for {len(schemas)} schemas: {asked}"
+    for schema in schemas:
+        assert any(
+            f"table_schema='{schema}'" in s for s in asked
+        ), f"{schema} was never asked what update level it is at: {asked}"
+    assert all(
+        "column_name='required_0002'" in s for s in asked
+    ), "the column asked for is not the one the phase's LAST file leaves behind: " + str(asked)
+
+
+def test_a_schema_that_never_reached_its_update_level_refuses_and_writes_no_marker(
+    tmp_path: Path,
+) -> None:
+    """The failure the 171 warnings could have been, told as a refusal instead of a success line.
+
+    Everything else about this run passes -- every `VerifyRule` count is met,
+    every file "applied" -- and the only thing wrong is the one thing the old
+    instruments could not see. The refusal names the column and the file it came
+    from, because "which update did it stop at" is the actionable half: a user
+    reading it can look in `sql/updates/` and see how far behind they are.
+    """
+    rec = ready_to_import(ABSENT)
+    rec.column_answer = "0\n"
+    with pytest.raises(InstallerError) as refusal:
+        list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    said = str(refusal.value)
+    assert "required_0002" in said, said
+    assert "is not at the update level" in said, said
+    assert "No completion marker was written" in said, said
+    assert not any(sqlplan.MARKER_TABLE in s for s in rec.sql_calls), (
+        "the marker was written over a schema that never finished its update chain, which "
+        "makes every later install press skip the import entirely"
+    )
+
+
+def test_an_update_level_that_could_not_be_asked_is_a_refusal_not_a_pass(tmp_path: Path) -> None:
+    """Same rule as `verify()`: unanswerable is never satisfied.
+
+    This runs immediately before the marker that makes the import skippable
+    forever, so a question that could not be put is the one answer that must
+    not be read as yes.
+    """
+    rec = ready_to_import(ABSENT)
+    rec.column_answer = ""
+    with pytest.raises(InstallerError) as refusal:
+        list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    assert "0 rows" in str(refusal.value), str(refusal.value)
+    assert not any(sqlplan.MARKER_TABLE in s for s in rec.sql_calls)
+
+
+def test_a_phase_without_the_flag_is_never_asked_about_its_update_level(tmp_path: Path) -> None:
+    """The check is opt-in per phase, and the opt-out has to be real.
+
+    `content updates` is also `on_error: warn` and also a pile of numbered
+    files, but its dump carries its own `content_*` column rather than the
+    `required_*` chain, so the same question asked of it would be a wrong
+    question confidently answered. The flag is what keeps them apart.
+    """
+    unflagged = [p for p in SQL.phases if not p.assert_update_level and (p.files or p.into_each)]
+    assert unflagged, "the plan has phases without the flag; this test compares against them"
+    rec = ready_to_import(ABSENT)
+    list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    asked = [s for s in rec.sql_calls if "information_schema.columns" in s]
+    resolve = ENTRY.schema_map()
+    flagged_schemas = {
+        resolve.get(name, name)
+        for phase in SQL.phases
+        if phase.assert_update_level
+        for name in (phase.into_each or {})
+    }
+    for statement in asked:
+        assert any(f"table_schema='{schema}'" in statement for schema in flagged_schemas), (
+            "a schema no flagged phase targets was asked about its update level: " + statement
+        )
+
+
+def test_the_flag_cannot_be_set_on_a_phase_that_applies_no_files() -> None:
+    """A `statements` phase has no filename to read a level off, so the flag is refused.
+
+    Allowing it would make the flag dead text on such a phase -- present,
+    meaning nothing, and reading as a check that had been made.
+    """
+    from pydantic import ValidationError
+
+    from yulon.catalog.catalog import SqlPhase
+
+    with pytest.raises(ValidationError, match="last file applied"):
+        SqlPhase(
+            name="realm row",
+            into="realmd",
+            statements=("DELETE FROM realmlist;",),
+            assert_update_level=True,
+        )
+
+
+def test_the_shipped_cmangos_entries_assert_the_update_level_of_their_core_updates() -> None:
+    """The flag has to be in the catalog, not merely available in the model.
+
+    `wow-tortoise` is deliberately absent: it has no `core updates` phase at
+    all -- its core applies its own migrations through
+    `Database.AutoUpdate.Path`, which is a different mechanism with a different
+    table -- so requiring the flag of every CMaNGOS entry would be requiring it
+    of a phase that does not exist.
+    """
+    from yulon.catalog.catalog import load_catalog
+
+    for game in ("wow-tbc", "wow-vanilla"):
+        native_block = load_catalog().get(game).install.native
+        assert native_block is not None and native_block.cmangos is not None
+        phases = {phase.name: phase for phase in native_block.cmangos.sql.phases}
+        core = phases.get("core updates")
+        assert core is not None, f"{game} no longer has the phase this test is about"
+        assert core.on_error == "warn", (
+            f"{game} core updates is no longer `warn`; if it now fails on the first error "
+            "the update-level check is belt and braces rather than the only instrument"
+        )
+        assert core.assert_update_level, (
+            f"{game} core updates can fail 171 of 172 files and still report the install "
+            "finished; without this flag nothing asks the database which reading it was"
+        )

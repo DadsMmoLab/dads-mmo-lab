@@ -326,6 +326,7 @@
                 },
                 {
                   "name": "core updates",
+                  "assert_update_level": true,
                   "into_each": {
                     "mangos": "src/mangos-tbc/sql/updates/mangos/*.sql",
                     "realmd": "src/mangos-tbc/sql/updates/realmd/*.sql",
@@ -679,6 +680,7 @@
                 },
                 {
                   "name": "core updates",
+                  "assert_update_level": true,
                   "into_each": {
                     "mangos": "src/mangos-classic/sql/updates/mangos/*.sql",
                     "realmd": "src/mangos-classic/sql/updates/realmd/*.sql",

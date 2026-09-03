@@ -777,6 +777,152 @@ def create_schemas(
     )
 
 
+@dataclass(frozen=True)
+class UpdateLevel:
+    """One schema's expected update level: the column the last file applied should have left.
+
+    `phase` and `rel` are carried so a failure can name the file it read the
+    expectation off, rather than only the column it went looking for.
+    """
+
+    phase: str
+    schema: str
+    rel: str
+    column: str
+
+
+def update_levels(runs: Sequence[PhaseRun]) -> tuple[UpdateLevel, ...]:
+    """What each `assert_update_level` phase says its schemas should be at, after it ran.
+
+    Read off the RUNS rather than off the plan's globs, and that is the whole
+    point: `expand()` has already resolved the patterns against this server dir
+    and sorted them by the phase's own `sort`, so the file named here is
+    necessarily the last file `apply()` actually streamed into that schema.
+    A second glob evaluated here could disagree with the import — different
+    working directory, a file added between the two — and then the check would
+    be about something nobody imported.
+
+    The column name is CMaNGOS's own convention, verified against the shipped
+    trees on 2026-09-03: every core update's first statement is
+    `ALTER TABLE <version table> CHANGE COLUMN required_<previous> required_<this> bit`,
+    so a schema that has applied `z2837_01_mangos_gobject_near_link.sql` carries
+    `required_z2837_01_mangos_gobject_near_link` and nothing else does.
+
+    A run with no schema, or no file, is skipped rather than guessed at: the
+    model already refuses the flag on a `statements` phase, and a schema-less
+    run has no database to ask.
+    """
+    last: dict[tuple[str, str], PhaseRun] = {}
+    for run in runs:
+        if not run.phase.assert_update_level or run.schema is None or run.path is None:
+            continue
+        last[(run.phase.name, run.schema)] = run
+    return tuple(
+        UpdateLevel(
+            phase=phase_name,
+            schema=schema,
+            rel=run.rel,
+            column=f"required_{_stem(run.path.name if run.path else '')}",
+        )
+        for (phase_name, schema), run in last.items()
+    )
+
+
+def _stem(filename: str) -> str:
+    """`z2837_01_mangos_gobject_near_link.sql` -> `z2837_01_mangos_gobject_near_link`.
+
+    `Path.stem` drops only the LAST suffix, which is right here and would not be
+    for a `.sql.gz`; these phases are plain `.sql` and the model refuses the flag
+    where there is no file at all. Spelled out so the assumption is visible.
+    """
+    return filename[: -len(".sql")] if filename.endswith(".sql") else filename
+
+
+def check_update_levels(
+    runs: Sequence[PhaseRun],
+    *,
+    container: str,
+    client: str,
+    password: str,
+    sql_query: SqlQuery,
+    wsl_distro: str | None = None,
+) -> tuple[str, ...]:
+    """Ask each schema whether it really reached the update level its phase applied.
+
+    The failure this exists for: `wow-vanilla`'s `core updates` phase is
+    `on_error: warn`, 171 of its 172 files failed with
+    `ERROR 1054 Unknown column 'required_<previous>' in 'db_version'`, and the
+    install ended `WoW Vanilla is installed and running`. Both readings of that
+    transcript — the dump already contained those updates (true, as it turned
+    out), or the realm is 171 updates behind and `warn` is covering a broken
+    world — produce the IDENTICAL log. The only instrument that separates them
+    is this question, and nothing asked it (2026-09-03).
+
+    Asked of `information_schema.columns` rather than the version table by name,
+    because the table differs per schema (`db_version`, `character_db_version`,
+    `realmd_db_version`, `logs_db_version`) and naming all four in the catalog
+    would be four more things to keep true. The column is unique to the update
+    that created it, so finding it anywhere in the schema is the answer.
+
+    Returns one sentence per schema that is NOT where it should be; empty when
+    every schema checks out. A query that cannot be answered is a failure and
+    never a pass — same rule as `verify()`, and for the same reason: this runs
+    immediately before the marker that makes the whole import skippable.
+    """
+    failed: list[str] = []
+    for level in update_levels(runs):
+        query = (
+            "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema="
+            f"{_quoted(level.schema)} AND column_name={_quoted(level.column)}"
+        )
+        try:
+            answer = sql_query(
+                container, client, password, level.schema, query, wsl_distro=wsl_distro
+            )
+        except docker.DockerCommandError as exc:
+            failed.append(
+                f"{level.schema}: could not be asked what update level it is at "
+                f"({_redact(str(exc), password)})"
+            )
+            continue
+        rows = answer.splitlines()
+        if len(rows) != 1:
+            failed.append(
+                f"{level.schema}: the update-level question came back with {len(rows)} rows, "
+                "which is not a count"
+            )
+            continue
+        try:
+            found = int(rows[0].strip())
+        except ValueError:
+            failed.append(
+                f"{level.schema}: the update-level question answered {rows[0]!r}, not a count"
+            )
+            continue
+        if found < 1:
+            failed.append(
+                f"{level.schema} is not at the update level '{level.phase}' applied: it has no "
+                f"`{level.column}` column, which {level.rel} leaves behind. Every file in that "
+                "phase renames the previous file's column, so a schema missing this one stopped "
+                "somewhere in the chain and the warnings above were real"
+            )
+            continue
+        logger.info(f"{level.schema} is at {level.column} (from {level.rel})")
+    return tuple(failed)
+
+
+def _quoted(value: str) -> str:
+    """A single-quoted SQL literal for a name this module controls.
+
+    `_refuse_unquotable()` already refuses schema names carrying a quote or a
+    backslash before any of this runs, and a column name here is built from a
+    filename in the checkout. Kept as one function anyway so the quoting is in
+    one place rather than in two f-strings.
+    """
+    _refuse_unquotable(value, "a name in the update-level check")
+    return f"'{value}'"
+
+
 def verify(
     plan: SqlPlan,
     *,

@@ -758,6 +758,21 @@ class CmangosInstaller(StagedInstaller):
                 password=password,
                 sql_query=self._query_seam(),
             )
+            # Asked in the same `try` as the rules above, and BEFORE the marker,
+            # because it answers the question the rules cannot. A COUNT rule
+            # says a schema has enough tables; this says it reached the update
+            # level its own phase applied. `wow-vanilla` passed every count
+            # while 171 of its 172 core updates had failed, and the transcript
+            # of that is byte-identical to the transcript of a broken world
+            # (2026-09-03; the world turned out to be fine, which nobody could
+            # have known from the run).
+            failing += sqlplan.check_update_levels(
+                runs,
+                container=container,
+                client=db.client,
+                password=password,
+                sql_query=self._query_seam(),
+            )
         except InstallerError:
             raise
         except (RuntimeError, OSError) as exc:
@@ -775,7 +790,16 @@ class CmangosInstaller(StagedInstaller):
                 f"are {rules}. No completion marker was written, so the next install press "
                 "imports again rather than starting a server with an empty world."
             )
+        levels = sqlplan.update_levels(runs)
         yield f"Checked {len(plan.verify)} database rule(s); every one holds."
+        if levels:
+            yield (
+                "Update level confirmed for "
+                + ", ".join(
+                    f"{level.schema} ({level.column})"
+                    for level in sorted(levels, key=lambda x: x.schema)
+                )
+            )
         try:
             sqlplan.write_marker(
                 plan,

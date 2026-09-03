@@ -224,6 +224,17 @@ class Recorder:
     at. Set it to `""` or to `"\\n"` to drive those two apart.
     """
 
+    column_answer: str | None = None
+    """What an `information_schema.columns` question answers; None falls through to `query_answer`.
+
+    Kept apart from `query_answer` for the same reason `realm_row` is: one canned
+    string for every question is a fixture answering itself. `check_update_levels()`
+    asks whether a schema carries the column its last applied update leaves behind,
+    and with a single answer of `"20000"` every schema is always at every level, so
+    the branch that refuses one that is not could never be reached. Set this to
+    `"0\n"` to drive a schema that stopped part-way through the chain.
+    """
+
     on_clone: Callable[[Path], None] | None = None
     """Called with the dest after each clone — the CMaNGOS tests lay SQL fixtures with it."""
 
@@ -357,6 +368,8 @@ class Recorder:
         # The realm row is answered separately; see `realm_row`.
         if "realmlist" in statement:
             return self.realm_row
+        if self.column_answer is not None and "information_schema.columns" in statement:
+            return self.column_answer
         return self.query_answer
 
     def volume_exists(self, name: str) -> bool:
