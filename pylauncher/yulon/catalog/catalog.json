@@ -840,7 +840,7 @@
             "auth": null,
             "fatal": "Correct \\*.map files not found|Could not open|Database .* not found",
             "regex": true,
-            "timeout_s": 1800,
+            "timeout_s": 3600,
             "restart_loop": 4
           },
           "cmangos": {

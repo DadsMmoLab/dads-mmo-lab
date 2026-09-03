@@ -189,3 +189,41 @@ def test_the_import_is_verified_by_the_tables_the_bots_need() -> None:
     bots = [c for c in checks if "ai_playerbot" in c.query]
     assert bots, "nothing verifies that the playerbot tables arrived"
     assert bots[0].min >= 10, f"a threshold of {bots[0].min} would pass on an empty import"
+
+
+def test_the_ready_budget_covers_a_measured_first_boot_not_a_round_number() -> None:
+    """1718 seconds of loading, and a budget that missed it by about two minutes.
+
+    Tortoise's first boot builds `ai_playerbot_equip_cache` -- one row per
+    class/spec/level/slot/quality/item -- and it settled at **1,334,079 rows**
+    at roughly a thousand inserts a second. The worldserver then printed
+
+        World server is up and running! Loading time: 28 minutes 38 seconds
+
+    with `RestartCount=0`: nothing was wrong, it was simply slow. The install
+    had already given up. The budget was 1800 s and the load took 1718 s, which
+    sounds like it fits and does not: the `ready` stage's clock starts when the
+    stage does, and the world container started 213 s later -- compose recreate,
+    then the database health wait -- so the stage needed about 1931 s.
+
+    The floor asserted here is the MEASUREMENT plus that gap, not the number
+    that happens to be shipped. `1b88d49d` set the same precedent for TBC after
+    a 793 s boot timed out at 600 s: a test that pins the shipped value only
+    records what someone typed, and goes green on a value chosen carelessly.
+
+    Its siblings stay at 1800 s and that is not an oversight -- Vanilla reached
+    ready in about nine minutes with the same 500 bots, because its Bots module
+    builds no such cache. This is a per-fork cost, like the exit code and the
+    banner.
+    """
+    ready = _native().ready
+    measured_load = 28 * 60 + 38
+    container_start_gap = 213
+    assert ready.timeout_s >= measured_load + container_start_gap, (
+        f"the ready budget is {ready.timeout_s}s; a first boot measured {measured_load}s of "
+        f"loading and the stage's clock starts ~{container_start_gap}s before the container's"
+    )
+    for game in ("wow-vanilla", "wow-tbc"):
+        assert (
+            _native(game).ready.timeout_s < ready.timeout_s
+        ), f"{game} does not pay Tortoise's equip-cache cost and should not carry its budget"
