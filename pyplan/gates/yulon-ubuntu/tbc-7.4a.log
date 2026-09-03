@@ -1,0 +1,19 @@
+Installing WoW TBC into /home/pk/tbc-server
+You can stop this at any time. What an install writes outside the folder below is named here rather than denied: the images this build produces and the volumes holding the database and the server data, which live in Docker's own storage — that is why the checks below look at the space on Docker's disk too; Docker itself, when no daemon answers yet (on Linux: system packages, a service, and the group you are asked about first); and this app's own settings and log, in its config folder. Starting the install again continues from where it stopped: source this app has finished cloning is never fetched, reset or moved, and the build is not run a second time once Docker confirms its images are there. Everything cheap runs again on every attempt — the compose files this app writes are put back the way the catalog says, the server-data download resumes and re-checks itself, and the database and server are started and waited for.
+Checking Docker.
+[pass] Docker: the daemon answered
+[pass] memory: Docker's VM has 19.5 GB
+[warn] CPU vs memory: 15 CPUs means 16 parallel compilers at about 2 GB each, and 19.5 GB affords about 9 Either raise the memory, or set Docker Desktop to 8 CPUs — the job count comes from the CPU count and cannot be set any other way.
+[warn] free space on Docker's disk: 51 GB free; 60 GB is the comfortable figure (the server folder and Docker's disk share one drive, so both needs add up)
+[warn] free space on the server folder: 51 GB free; 60 GB is the comfortable figure (the server folder and Docker's disk share one drive, so both needs add up)
+[pass] the server folder: /home/pk/tbc-server looks usable
+[pass] sharing the folder with Docker: a container can read /home/pk/tbc-server
+[pass] SELinux: not enforcing
+[refuse] the server's ports: ac-authserver, ac-worldserver already publish the ports this server needs Stop that server first (or remove its containers), then try again.
+[refuse] the client folder: no client folder was chosen, and this server's maps are extracted from one Pick the game folder that holds the Data directory, then try again.
+2026-09-02 15:30:42 ERROR [__main__] install failed: This machine cannot install the server yet:
+the server's ports: ac-authserver, ac-worldserver already publish the ports this server needs Stop that server first (or remove its containers), then try again.
+the client folder: no client folder was chosen, and this server's maps are extracted from one Pick the game folder that holds the Data directory, then try again.
+install failed: This machine cannot install the server yet:
+the server's ports: ac-authserver, ac-worldserver already publish the ports this server needs Stop that server first (or remove its containers), then try again.
+the client folder: no client folder was chosen, and this server's maps are extracted from one Pick the game folder that holds the Data directory, then try again.

@@ -1,0 +1,18 @@
+recipe: 'Segmentation fault|core dumped' over ['vmap extract', 'vmap assemble']
+cleared Buildings and vmaps so the extractor will start
+evidence set aside -> /home/pk/vanilla-evidence.backup.json
+dbc and maps: running /opt/mangos/bin/tools/ad -i /client -o /out
+2026-09-03 14:25:43 INFO [yulon.docker] run_container(): `docker run --rm --user 1000:1000 --network none --security-opt no-new-privileges --ulimit stack=-1 -v /home/pk/clients/WoW-Client-1.12.1:/client:ro -v /home/pk/vanilla-server/data:/out -w /out yulon.local/cmangos-vanilla-server:native-71584d7e /opt/mangos/bin/tools/ad -i /client -o /out`
+dbc and maps: done (dbc: 158 files, maps: 2429 files)
+vmap extract: running /opt/mangos/bin/tools/vmap_extractor -d /client/Data
+2026-09-03 14:26:06 INFO [yulon.docker] run_container(): `docker run --rm --user 1000:1000 --network none --security-opt no-new-privileges --ulimit stack=1048576 -v /home/pk/clients/WoW-Client-1.12.1:/client:ro -v /home/pk/vanilla-server/data:/out -w /out yulon.local/cmangos-vanilla-server:native-71584d7e /opt/mangos/bin/tools/vmap_extractor -d /client/Data`
+  forcing stack=1048576 on vmap_extractor
+vmap extract: done (Buildings: 5076 files)
+vmap assemble: running /opt/mangos/bin/tools/vmap_assembler Buildings vmaps
+2026-09-03 14:26:45 INFO [yulon.docker] run_container(): `docker run --rm --user 1000:1000 --network none --security-opt no-new-privileges --ulimit stack=1048576 -v /home/pk/clients/WoW-Client-1.12.1:/client:ro -v /home/pk/vanilla-server/data:/out -w /out yulon.local/cmangos-vanilla-server:native-71584d7e /opt/mangos/bin/tools/vmap_assembler Buildings vmaps`
+  forcing stack=1048576 on vmap_assembler
+vmap assemble: done (vmaps: 5667 files)
+
+REAL SEGFAULT LINES SEEN: 0
+RETRY LINES: []
+VERDICT real_crash=False retry_fired=False
