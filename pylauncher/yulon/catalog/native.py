@@ -848,15 +848,30 @@ class StagedInstaller:
     def _claim_if_ours(self, server_dir: Path, state: InstallState, started_empty: bool) -> None:
         """After a failure, record the state IF everything in the folder is ours.
 
-        The gap this closes. `_run_one()` writes the state file only after a
-        stage FINISHES, so anything that ended the process during stage one --
-        a crash, a power cut, a killed terminal -- left a folder holding `src/`
-        and no record, and `_guard()` refused it on the next attempt with "is
-        not empty and was not created by this app". That sentence was false:
-        this app had written every byte in it, and the user's only route was to
-        delete a part-finished clone by hand. Driven rather than reasoned: the
-        TBC-on-Windows gate was killed mid-clone on `yulon-win11` and then
-        refused its own 162 MB checkout (2026-09-03).
+        The gap this NARROWS -- and read the limitation below before trusting
+        it. `_run_one()` writes the state file only after a stage FINISHES, so a
+        stage-one failure left a folder holding `src/` and no record, and
+        `_guard()` refused it on the next attempt with "is not empty and was
+        not created by this app". That sentence was false: this app had written
+        every byte in it, and the user's only route was to delete a
+        part-finished clone by hand.
+
+        **WHAT IT DOES NOT COVER, which is the failure that produced it.** This
+        runs from `except InstallerError`. A process that is SIGKILLed, loses
+        power, or dies on an unhandled exception never reaches it, so those
+        still leave an unclaimed folder -- and a kill is exactly how the bug was
+        found: the TBC-on-Windows gate was killed mid-clone on `yulon-win11`
+        and then refused its own 162 MB checkout (2026-09-03). An adversarial
+        review named this the day it shipped and was right; the test below
+        drives a cooperative `InstallerError`, not process death.
+
+        The whole answer is an install-intent claim written BEFORE the first
+        mutating stage. `yulon/ownership.py` already has the vocabulary --
+        UNCLAIMED / OWNED / UNKNOWN -- and what it needs is the "is this
+        somebody's own checkout" question moved ahead of the first write, so
+        the claim can be made without marking a folder that turns out not to be
+        ours. That is a design change rather than a patch; bug-checklist §38
+        carries it, with the two other findings from the same review.
 
         WHY THIS IS NOT "WRITE THE STATE BEFORE STAGE ONE", which is the
         obvious fix and breaks three deliberate guards at once. Two of them

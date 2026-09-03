@@ -2085,3 +2085,45 @@ claiming the behaviour should say where it came from rather than assert it as fa
 PID 1 does not receive an unhandled signal sent from outside — `docker kill --signal=SEGV` on a
 `sleep` left it `Status=running`. A crash has to come from INSIDE the process. That is why the
 probes above squeeze the stack rather than signalling the container.
+### 38. An interrupted first stage still leaves a folder the app disowns — 2026-09-03, OPEN
+
+`_run_one()` writes `.yulon-install.json` only after a stage FINISHES. A stage-one failure
+therefore leaves `src/` and no record, and `_guard()` refuses the retry with "is not empty and was
+not created by this app" — a sentence that is false, and whose only remedy is deleting a
+part-finished clone by hand.
+
+`5eef8d9f` added `_claim_if_ours()`, which records the state on the `except InstallerError` path
+when the folder started empty. **An adversarial review the same day returned "do not ship", and
+its central point is correct:**
+
+**1. It does not cover the failure that produced it.** The bug was found by a KILL — the
+TBC-on-Windows gate died with its ssh session mid-clone and then refused its own 162 MB checkout.
+SIGKILL, power loss and unhandled exceptions never reach an `except` block, so the harshest
+failures still leave an unclaimed folder. The test that shipped with the fix drives a cooperative
+`InstallerError`, which is a different thing from process death — the fix is real for clean stage
+failures (a network error mid-clone) and absent for the case that motivated it.
+
+**2. `started_empty` is a stale observation.** It is read once at the top of `run()`, with no lock
+and no directory identity check. Between that read and the failure handler, a second install can
+start in the same folder, the user can drop a file in, or the path can be replaced or remounted —
+and the handler then writes an ownership record covering all of it. Ownership changes what later
+runs are willing to do to a directory, so a wrong claim is not merely untidy.
+
+**3. A failed claim is silent.** `_listing()` refuses on an unreadable directory and the handler
+swallows it; `write_state()` only logs its own `OSError`. Either way the user is told the stage
+error and not that the incomplete install could not be claimed, which is the fact that decides
+whether their retry will work.
+
+**The shape of the real fix, and why it was not done in that commit.** An install-intent claim
+written BEFORE the first mutating stage, created atomically, carrying the run id.
+`yulon/ownership.py` already has the vocabulary — `UNCLAIMED` / `OWNED` / `UNKNOWN` — so this is
+not a new concept, it is one the install path does not yet use early enough. The obstacle is
+real: three tests forbid an early write, two because an install into the USER'S OWN git checkout
+must leave it untouched, and `_guard()` deliberately defers that judgement to the clone stage so
+the refusal can name whose fork it is. The review's answer is to move that non-mutating checkout
+question AHEAD of the claim. That is a design change across the spine and the families, not a
+patch, and it is the owner's call.
+
+**Also worth doing whatever is decided:** reword the refusal to state only what is observable —
+no valid Yu'lon ownership record exists — rather than asserting who created the contents. That
+sentence is wrong in exactly the case a user is most likely to hit it.
