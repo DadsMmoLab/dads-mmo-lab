@@ -788,6 +788,16 @@ class StagedInstaller:
         self._check_cancel(cancel)
 
         state = self._guard(server_dir)
+        # Whether this folder was OURS TO FILL when the guard accepted it, which
+        # is the only fact that distinguishes the two ways a failed first stage
+        # can leave a non-empty directory. See `_claim_if_ours()`.
+        # `is_dir()` first: on a fresh install the folder the user chose may not
+        # exist at all yet, and `_listing()` turns that `FileNotFoundError` into
+        # an `InstallerError` — a refusal, from a line that is only gathering a
+        # fact. A folder that is not there is as ours-to-fill as an empty one.
+        started_empty = not (server_dir / STATE_FILE).is_file() and (
+            not server_dir.is_dir() or not _listing(server_dir, ignoring=STATE_FILE)
+        )
         yield f"Using {server_dir} ({'resuming' if state.completed else 'a fresh install'})"
         if state.completed:
             yield f"Already finished: {', '.join(state.completed)}"
@@ -815,6 +825,7 @@ class StagedInstaller:
             # to hold an error would make the state file itself the content
             # that stops `guard` calling this directory empty — so the retry
             # would be refused by the record of the failure it is retrying.
+            self._claim_if_ours(server_dir, state, started_empty)
             self._record_error(server_dir, state, str(exc))
             raise
         # OUTSIDE the `try`, and after the last stage, on purpose. Outside,
@@ -833,6 +844,68 @@ class StagedInstaller:
         logger.info(f"install of {self.entry.id} finished")
         self._clear_error(server_dir, state)
         yield f"{self.entry.name} is installed and running in {server_dir}"
+
+    def _claim_if_ours(self, server_dir: Path, state: InstallState, started_empty: bool) -> None:
+        """After a failure, record the state IF everything in the folder is ours.
+
+        The gap this closes. `_run_one()` writes the state file only after a
+        stage FINISHES, so anything that ended the process during stage one --
+        a crash, a power cut, a killed terminal -- left a folder holding `src/`
+        and no record, and `_guard()` refused it on the next attempt with "is
+        not empty and was not created by this app". That sentence was false:
+        this app had written every byte in it, and the user's only route was to
+        delete a part-finished clone by hand. Driven rather than reasoned: the
+        TBC-on-Windows gate was killed mid-clone on `yulon-win11` and then
+        refused its own 162 MB checkout (2026-09-03).
+
+        WHY THIS IS NOT "WRITE THE STATE BEFORE STAGE ONE", which is the
+        obvious fix and breaks three deliberate guards at once. Two of them
+        require an install into the USER'S OWN git checkout to leave that
+        checkout untouched -- `_guard()` deliberately does not judge a `.git`
+        directory, so the refusal comes later, from the clone stage, by which
+        time an early write has already littered somebody's repository. The
+        third, `test_a_failure_before_anything_was_written_leaves_no_state_file`,
+        names the trap in its docstring: "or the record of the failure becomes
+        the non-empty directory that blocks the retry".
+
+        So the question is not "is this folder non-empty" but "did WE fill it",
+        and `started_empty` is the only moment that can be answered: a folder
+        the guard accepted while empty is ours to fill, and one it accepted
+        because it held a `.git` is not. Nothing is written when the folder is
+        still empty either — a failure that wrote nothing leaves nothing, which
+        is the promise that third test protects.
+
+        SILENT BY DESIGN, and the first version was not. This runs while an
+        `InstallerError` is in flight, so anything it raises REPLACES the
+        sentence the user is about to be shown. The first version asked
+        `_listing()` whether the folder had anything in it -- and `_listing()`
+        refuses rather than returning, so on a run that failed before the
+        folder existed it turned "the databases could not be asked what state
+        they are in" into "the folder could not be listed", about a folder
+        nobody had asked about. Caught by
+        `test_stage_import_without_a_service_still_refuses_an_unreadable_database`,
+        which is a test about a database and was reporting a directory.
+
+        So the check here cannot raise. It still goes through `_listing()` --
+        that helper is deliberately the ONLY place this engine lists a
+        directory, and `test_no_folder_in_the_install_spine_is_listed_outside_the_helper`
+        enforces it, so reaching for `iterdir()` to dodge the refusal traded
+        one rule for another. The refusal is CAUGHT here instead: a folder that
+        cannot be read is simply not claimed, and the error already travelling
+        keeps the floor. `write_state()` logs its own `OSError` and returns.
+        """
+        if not started_empty or (server_dir / STATE_FILE).is_file():
+            return
+        try:
+            wrote_something = bool(_listing(server_dir, ignoring=STATE_FILE))
+        except InstallerError:
+            # No folder, or one that cannot be listed. Either way there is
+            # nothing of ours to claim, and this is not the moment to start a
+            # new complaint about it.
+            return
+        if not wrote_something:
+            return
+        write_state(server_dir, state)
 
     def _clear_error(self, server_dir: Path, state: InstallState) -> None:
         """Drop a previous run's failure sentence once this run has finished.

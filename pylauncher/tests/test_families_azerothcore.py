@@ -1644,3 +1644,52 @@ def test_wotlk_stage_names_are_the_historical_tuple() -> None:
     )
     assert engine(Recorder()).stage_names() == AzerothCoreInstaller.STAGE_NAMES
     assert len(set(AzerothCoreInstaller.STAGE_NAMES)) == len(AzerothCoreInstaller.STAGE_NAMES)
+
+
+def test_a_folder_this_app_filled_and_then_failed_in_is_still_its_own_on_the_retry(
+    tmp_path: Path,
+) -> None:
+    """The retry after a crash during stage one, which used to be refused outright.
+
+    `_run_one()` writes the state file only after a stage FINISHES, so anything
+    that ends the process mid-stage-one — a crash, a power cut, a killed
+    terminal — left a folder holding `src/` and no record. `_guard()` then
+    refused it with "is not empty and was not created by this app", which was
+    false: this app had written every byte in it, and the only route out was to
+    delete a part-finished multi-gigabyte clone by hand.
+
+    Driven, not reasoned: the TBC-on-Windows gate was killed mid-clone on
+    `yulon-win11` (2026-09-03) and refused its own 162 MB checkout on the next
+    attempt.
+
+    Two halves, and the second is what makes the fix narrow rather than
+    convenient. `_claim_if_ours()` records the state only when the guard
+    accepted the folder EMPTY, because that is the one moment "did we fill
+    this" can be answered — and the neighbouring tests require an install into
+    the user's own checkout to leave that checkout untouched.
+    """
+    server_dir = tmp_path / "wow"
+    rec = Recorder()
+
+    # Stage one writes into the folder and then the run fails, exactly as an
+    # interrupted clone leaves things.
+    def clone_then_die(*_args: object, **_kwargs: object) -> object:
+        (server_dir / "src").mkdir(parents=True, exist_ok=True)
+        (server_dir / "src" / "half-a-checkout").write_bytes(b"x")
+        raise InstallerError("killed mid-clone")
+
+    with pytest.raises(InstallerError):
+        install(rec, server_dir, clone=clone_then_die)
+
+    assert (server_dir / "src" / "half-a-checkout").is_file(), "the fixture wrote nothing"
+    assert (server_dir / native.STATE_FILE).is_file(), (
+        "the folder this app filled was left with no record of the install, so the retry is "
+        "refused as somebody else's directory"
+    )
+
+    # And the retry gets past the guard rather than being told the folder is
+    # foreign. It still fails — the fixture always dies — but the refusal must
+    # be about the clone, never about the folder.
+    with pytest.raises(InstallerError) as again:
+        install(rec, server_dir, clone=clone_then_die)
+    assert "was not created by this app" not in str(again.value), str(again.value)
