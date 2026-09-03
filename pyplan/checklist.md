@@ -348,10 +348,31 @@
       `tests/data/wotlk-compose-config.json`, 7.1's fixture. **Do not tick this from a unit suite** — the
       integration tests self-skip without a daemon, so a green `pytest` says nothing about the half that
       matters. Same trap as the 7.3 primitives gate, recorded above.
-    - **Also still owed by 7.3:** its primitives gate, written by K.8 and likewise not run. And note the
-      correction filed there — the 2026-09-01 record under 7.1 **cannot** stand in for it, because
-      `test_sqlplan_live.py` postdates that run entirely (21 test functions then, 23 now).
-- [ ] 7.3 CMaNGOS data model + pure stage kinds — catalog 7.3 models (`Source.rev`, `dockerfile_dir`, `CmangosData`: `ClientSpec`, `DockerfileSpec`, `ExtractPlan`, `MmapPlan`, `ConfPatchTable`, `SqlPlan`); `families/cmangos.py`; `clientdir`/`dockerfile`/`extract`/`conf`/`sqlplan`; `docker.run_container`/`copy_from_image`/`exec_stdin`; all four entries validate; WotLK templates byte-identical; static catalog invariants test
+    - **7.3's primitives gate WAS still owed when this was written, and was run on 2026-09-02** —
+      22 passed / 1 skipped, `pyplan/gates/7.3-yulon-ubuntu.log`. The correction filed there stands
+      and is what made a fresh run necessary: the 2026-09-01 record under 7.1 could not stand in,
+      because `test_sqlplan_live.py` postdates it entirely (21 test functions then, 23 now).
+- [x] 7.3 CMaNGOS data model + pure stage kinds — catalog 7.3 models (`Source.rev`, `dockerfile_dir`, `CmangosData`: `ClientSpec`, `DockerfileSpec`, `ExtractPlan`, `MmapPlan`, `ConfPatchTable`, `SqlPlan`); `families/cmangos.py`; `clientdir`/`dockerfile`/`extract`/`conf`/`sqlplan`; `docker.run_container`/`copy_from_image`/`exec_stdin`; all four entries validate; WotLK templates byte-identical; static catalog invariants test
+  - **TICKED 2026-09-04, by auditing the parent line's own five claims rather than by running
+    anything new.** The box had been left open with nothing written about why, while its only
+    sub-gate was already ticked on a real run. Each claim, and the artefact that answers it:
+
+    | the line says | what answers it |
+    |---|---|
+    | catalog 7.3 models | `catalog.py`: `ClientSpec` :222, `DockerfileSpec` :261, `ExtractPlan` :338, `MmapPlan` :365, `ConfPatchTable` :426, `SqlPlan` :523, `CmangosData` :552, `dockerfile_dir` :611; `Source.rev` in `manifest.py:71`. Validated by six tests in `test_catalog.py` (:622, :639, :663, :677, :703, :716) |
+    | `families/cmangos.py` and the five stage kinds | registered at `families/__init__.py:25-27`; dispatch proved end-to-end, enumerated off `catalog.json`, by `test_families_cmangos.py:279` and `test_spine.py:571`; the stage tuple pinned at `test_families_cmangos.py:209,235` |
+    | `docker.run_container`/`copy_from_image`/`exec_stdin` | `docker.py` :3025, :3097, :3201 (and `sql_query` :3397), each live-gated by the sub-gate below |
+    | all four entries validate | `load_catalog()` is a strict `model_validate` (`catalog.py:1005-1013`); `test_catalog.py:32` pins the four ids, :203 and :731 walk them |
+    | WotLK templates byte-identical | `test_composegen.py:991` renders WotLK and asserts `text == expected` against the three committed files in `tests/data/wotlk-rendered/` (`SNAPSHOT_DIR` :966); backed by `test_compose_fixture.py:83` |
+    | static catalog invariants test | `test_catalog_invariants.py`, `ENTRIES = list(load_catalog().games)` — all four — across fifteen invariants (:292 through :958) |
+
+    Nothing the line names is missing, and the static suite was green on record at `0e394d9b`
+    (1974 passed / 3 skipped, mypy, ruff and black clean).
+  - **What kept it open was its own prose, not a missing gate.** The three bullets below were
+    written BEFORE the 2026-09-02 run and were never revised when `08e098bc` ticked the sub-box,
+    so the tail of this block argued the gate was still owed while its own heading said PASSED.
+    They are past-tensed in place rather than deleted, because what they predicted is the reason
+    the run happened. Same for the 7.2 bullet above.
   - [x] Gate: busybox/mariadb:11 primitives live (`-u`, `:ro` refusal, `copy_from_image`, `exec_stdin` + gzip, `mariadb` client name, restart-loop detection)
     - **PASSED 2026-09-02 on `yulon-ubuntu`** — Linux 7.0.0-30-generic, Docker 29.1.3, Python 3.12.3,
       `yulon-phase7` at `5a1098d9`. **22 passed, 1 skipped in 149.33s.** Full log:
@@ -377,9 +398,9 @@
       two tests that carry the `mariadb` client-name item and the live `sqlplan.apply` proof — did not
       exist at `79ea63c`. Measured: 21 test functions in `tests/integration/` then, 23 now. The earlier
       run was real and was a different gate.
- The eleven steps are in `pyplan/phase7-plans/7.3-cmangos-family.md`, Task K.8 step 7: hand the box over with `yulon-use.ps1 ubuntu`, announce through `claude-say`, sync the checkout, run the unit suite, pull `busybox:1.36` and `mariadb:11`, run `pytest -m integration tests/integration`, copy the log to `pyplan/gates/7.3-yulon-ubuntu.log` (that directory does not exist yet), record the five numbers here, shut the box down. K.8 landed the code half only — the family registered, the stage tuple pinned, dispatch proved for all three CMaNGOS entries — because this gate starts containers and pulls images and the standing rule is that the owner starts a run himself. Nothing is blocked; it needs the VM powered on and someone to press go. **Do not tick from a unit suite alone:** a `SKIPPED` in the integration run means the daemon was never reached, which is the failure a gate this shape exists to catch.
+ The eleven steps are in `pyplan/phase7-plans/7.3-cmangos-family.md`, Task K.8 step 7: hand the box over with `yulon-use.ps1 ubuntu`, announce through `claude-say`, sync the checkout, run the unit suite, pull `busybox:1.36` and `mariadb:11`, run `pytest -m integration tests/integration`, copy the log to `pyplan/gates/7.3-yulon-ubuntu.log` (which did not exist when this was written and does now), record the five numbers here, shut the box down. K.8 landed the code half only — the family registered, the stage tuple pinned, dispatch proved for all three CMaNGOS entries — because this gate starts containers and pulls images and the standing rule is that the owner starts a run himself. Nothing was blocked; it needed the VM powered on and someone to press go, and on 2026-09-02 that happened. **Do not tick from a unit suite alone:** a `SKIPPED` in the integration run means the daemon was never reached, which is the failure a gate this shape exists to catch. The run's one `SKIPPED` is not that failure — `test_wotlk_live.py::test_wotlk_controller_start_ready_stop` skipped on `YULON_WOTLK_SERVER_DIR not set`, an environment-variable skip on a 7.4 fixture, and the 22 passes beside it are the proof the daemon was reached.
     - **This gate's text is duplicated verbatim under 7.1 above, where it is recorded as PASSED on 2026-09-01** (`yulon-ubuntu`, Docker 29.1.3, `yulon-phase7` at `79ea63c`, 20 passed / 1 skipped). **It is one gate written twice, mis-filed** — `79ea63c` is *"Task H.6: the Group H primitives get gates that run them for real"*, which is a 7.3 task recorded under 7.1.
-    - **But the 7.3 line still needs its own run, and an earlier draft of this note said otherwise.** It claimed "same suite, same two images, so the substance of the run below already exists". Measured 2026-09-02: `git diff --stat 79ea63c HEAD -- pylauncher/tests/integration/` is `conftest.py +10/-…`, `test_docker_live.py +101/-…`, and **`test_sqlplan_live.py` +160, which did not exist at all**. At `79ea63c` the integration suite held exactly **21** test functions (4 + 16 + 1) — precisely the 20 passed / 1 skipped on that record. Today it holds **23**. The live `sqlplan.apply` / `exec_stdin` + gzip proof against a real `mariadb:11` is two of the six things this gate line names, and it **postdates the recorded run**. So the 2026-09-01 numbers cannot stand for this gate; whoever runs it runs it fresh, and the 7.1 copy should be moved here rather than counted twice.
+    - **The 7.3 line still needed its own run when this was written, and an earlier draft of this note said otherwise. It got one on 2026-09-02.** It claimed "same suite, same two images, so the substance of the run below already exists". Measured 2026-09-02: `git diff --stat 79ea63c HEAD -- pylauncher/tests/integration/` is `conftest.py +10/-…`, `test_docker_live.py +101/-…`, and **`test_sqlplan_live.py` +160, which did not exist at all**. At `79ea63c` the integration suite held exactly **21** test functions (4 + 16 + 1) — precisely the 20 passed / 1 skipped on that record. Today it holds **23**. The live `sqlplan.apply` / `exec_stdin` + gzip proof against a real `mariadb:11` is two of the six things this gate line names, and it **postdates the recorded run**. So the 2026-09-01 numbers cannot stand for this gate; it was run fresh on 2026-09-02 (22 passed / 1 skipped, against that run's 20 / 1), and the 7.1 copy should be moved here rather than counted twice.
 - [x] 7.4a WoW TBC through `build` — build time and context-transfer time recorded; kill + resume skips the build
   - **PASSED 2026-09-02 on `m910q`**, not on `yulon-ubuntu` as the line says. TBC has
     `requires_client_dir: true` and its preflight REFUSES without one, so "through build" cannot be
