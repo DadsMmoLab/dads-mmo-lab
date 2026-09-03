@@ -19,13 +19,16 @@ Those two facts are what this module supplies, from data:
   `acore_*`, which is how a Tortoise backup reported all three missing on a
   dump that had taken everything (`CatalogEntry.core_databases` records it).
 
-What is NOT bound here is the database client binary. `DockerMysql` resolves
-`mysql` vs `mariadb` by asking the container (`apply.mysql_client()`), which is
-a different mechanism in a file this package does not own; the entry's declared
-client (`mariadb`) is what this package's own argv-building path uses, in
-`repair.py`. This entry pins `mariadb:10.6`, which still ships the `mysql*`
-symlinks, so the two answers agree today and the probe is what would notice if
-the image were bumped to a MariaDB that dropped them.
+The database client binary IS bound here, as of 2026-09-03. It was not, and
+the paragraph that stood here argued it did not need to be: the probe asks the
+container, and this entry pins `mariadb:10.6`, which still ships the `mysql*`
+symlinks. Both halves were true and the conclusion did not follow. The probe
+answers only when it can RUN; with no docker CLI, a timeout or an OSError,
+`mysql_client()` returns its first candidate, and unbound that is `mysql` --
+a binary no MariaDB 11 image has. `apply.DockerSql` had carried the declared
+client since 7.9, so the same question had two answers in one codebase, and
+this side's answer was the one that broke on the image bump the old paragraph
+named as the thing to watch for (review).
 """
 
 from __future__ import annotations
@@ -87,7 +90,12 @@ from yulon.controller_wow_wotlk.maintenance import (
 
 def mysql_for(db_root_password: str, *, wsl_distro: str | None = None) -> DockerMysql:
     """A `MysqlDocker` bound to this install's database container."""
-    return DockerMysql(docker_ctl.SPEC.db, db_root_password, wsl_distro=wsl_distro)
+    return DockerMysql(
+        docker_ctl.SPEC.db,
+        db_root_password,
+        wsl_distro=wsl_distro,
+        client=game.db().client,
+    )
 
 
 def backup(

@@ -1122,3 +1122,61 @@ def test_a_cmangos_backup_still_raises_the_alarm_for_its_own_missing_schema(
         core_databases=("tw_logon", "tw_char", "tw_world"),
     )
     assert report.missing_core == ("tw_char",)
+
+
+def test_every_game_hands_its_declared_client_to_the_dump_when_the_probe_cannot_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fallback path, for all four games, enumerated rather than spot-checked.
+
+    `mysql_client()` normally asks the container `command -v` and believes the
+    answer, which is why an unbound client looked harmless for so long. It falls
+    back to the first candidate only when it cannot ask AT ALL -- no docker CLI,
+    a timeout, an OSError -- and unbound that first candidate is `mysql`.
+    `mariadb:11` ships neither `mysql` nor `mysqldump`, and three of the four
+    games this app installs run MariaDB, so the one path left to a guess guessed
+    the AzerothCore answer on a MariaDB server and the backup died with
+    `executable file not found`.
+
+    The probe is disabled here by removing the docker program, which is the real
+    mechanism (`_probe_client` returns None the moment `docker_program()` does)
+    and not a monkeypatched stand-in for it.
+
+    Enumerated from the shipped catalog rather than written out: a fifth game
+    added with a MariaDB image and no `client` in its entry has to fail here
+    rather than be discovered on somebody's backup. The `mysql_for` factories
+    are called for real, so this asserts the value ARRIVES -- a version where
+    `DockerMysql` grew the field and no factory passed it would satisfy any test
+    that only checked the dataclass.
+    """
+    from yulon.apply import _client_cache
+    from yulon.catalog.catalog import load_catalog
+    from yulon.controller_wow_tbc import maintenance as tbc
+    from yulon.controller_wow_tortoise import maintenance as tortoise
+    from yulon.controller_wow_vanilla import maintenance as vanilla
+
+    monkeypatch.setattr("yulon.platform.docker_program", lambda: None)
+    _client_cache.clear()
+
+    factories = {
+        "wow-wotlk": maintenance.mysql_for,
+        "wow-tbc": tbc.mysql_for,
+        "wow-vanilla": vanilla.mysql_for,
+        "wow-tortoise": tortoise.mysql_for,
+    }
+    catalog = load_catalog()
+    assert set(factories) == {
+        game.id for game in catalog.games
+    }, "a game was added to the catalog without a backup client binding"
+
+    for game_id, mysql_for in factories.items():
+        native = catalog.get(game_id).install.native
+        assert native is not None
+        declared = native.db.client
+        _client_cache.clear()
+        argv = mysql_for("pw")._dump_argv("some_db")
+        expected = "mysqldump" if declared == "mysql" else f"{declared}-dump"
+        assert argv[0] == expected, (
+            f"{game_id} declares {declared!r} but fell back to {argv[0]!r} with no probe; "
+            f"on a MariaDB image that binary does not exist"
+        )

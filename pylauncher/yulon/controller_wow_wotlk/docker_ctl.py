@@ -9,9 +9,24 @@ style-guide §4). What belongs *here* is exclusively the WotLK-specific
 
 from __future__ import annotations
 
+from typing import Final
+
 from yulon import docker
+from yulon.catalog.catalog import load_catalog
 
 # WotLK AzerothCore containers (mirrors dml-start.sh constants).
+DB_CLIENT: Final[str] = load_catalog().get("wow-wotlk").install.native.db.client  # type: ignore[union-attr]
+"""`mysql`, taken from `install.native.db.client` rather than written here.
+
+This package spells its container names as literals (see the TBC module's
+docstring, which contrasts the two) and that stays as it is -- this is the one
+fact that had to come from data. `maintenance.DockerMysql` needs it for the
+case where the container cannot be asked what client it has: the unbound
+fallback is `mysql`, which is RIGHT for AzerothCore and wrong for all three
+CMaNGOS games, and a value that is only ever correct by luck is the kind that
+survives being copied to a game where it is wrong.
+"""
+
 SPEC = docker.ContainerSpec(
     db="ac-database",
     auth="ac-authserver",

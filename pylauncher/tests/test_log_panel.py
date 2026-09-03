@@ -248,12 +248,32 @@ def test_a_finished_job_leaves_a_live_worker_not_a_dangling_wrapper(qapp: object
     assert shiboken6.isValid(panel._worker), "the worker's C++ side was deleted out from under it"
 
 
-def _pump_until(qapp: object, done: Callable[[], bool], tries: int = 50) -> None:
-    """Pump the GUI event loop until `done()` - queued slots need a running loop."""
-    for _ in range(tries):
-        qapp.processEvents()  # type: ignore[attr-defined]
+def _pump_until(qapp: object, done: Callable[[], bool], timeout: float = 10.0) -> None:
+    """Pump the GUI event loop until `done()`, or `timeout` seconds - whichever first.
+
+    A WALL CLOCK, not a number of turns, and the difference is not cosmetic.
+    This counted iterations until 2026-09-03 and pumped with a bare
+    `processEvents()`, which returns immediately when the queue is empty -- so
+    the loop became a tight spin on the GUI thread that burned its whole budget
+    competing for CPU with the very worker thread it was waiting for. On an idle
+    box the worker got scheduled and the test passed; under load it did not, and
+    `test_a_runner_dropped_before_its_thread_runs_does_not_leave_the_worker_dead`
+    failed. Measured three times on yulon-ubuntu: load 13.16 fail, load 0.26
+    pass, load 15.24 fail, with no code change between them.
+
+    `process_events(20)` is `test_job.py`'s shape, which had this right all
+    along -- it BLOCKS for up to 20ms inside Qt, so a thread that needs the CPU
+    can have it. What the test asks is "does the thread ever exit", and a
+    deadline answers exactly that: a thread that never exits still fails, on
+    every box, while one that is merely slow to be scheduled no longer does.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
         if done():
             return
+        if time.monotonic() >= deadline:
+            return
+        process_events(20)
 
 
 def test_a_panel_dropped_before_its_thread_runs_does_not_leave_the_worker_dead(
@@ -335,7 +355,7 @@ def test_a_runner_dropped_before_its_thread_runs_does_not_leave_the_worker_dead(
     # on the GUI thread, so the loop must be pumped for the thread to exit at
     # all - which is what the app does, and what `ThreadedJobRunner.wait()`
     # sidesteps by quitting explicitly. A bare `thread.wait()` here just times out.
-    _pump_until(qapp, lambda: not thread.isRunning(), tries=500)
+    _pump_until(qapp, lambda: not thread.isRunning())
     assert not thread.isRunning(), "the job thread never exited"
     _pump_until(qapp, lambda: worker_ref() is None)
     assert worker_ref() is None

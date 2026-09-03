@@ -20,12 +20,16 @@ Two of those arguments are what this module exists to supply:
   it had (Discord report, 2026-08-26). The alarm is only worth having if it
   names schemas this install could plausibly have.
 
-The database CLIENT is the third CMaNGOS difference and needs no argument:
-`DockerMysql` resolves it through `apply.mysql_client()`, which asks the
-container `command -v mysqldump || command -v mariadb-dump` and caches the
-answer. That is what makes a dump work against `mariadb:11`, which ships
-neither `mysql` nor `mysqldump` — `docker_ctl.DB_CLIENT` records what the entry
-DECLARES the client is, and this path uses what the container actually has.
+The database CLIENT is the third CMaNGOS difference, and it takes BOTH
+answers. `DockerMysql` resolves it through `apply.mysql_client()`, which asks
+the container `command -v mysqldump || command -v mariadb-dump` and caches what
+it says; that is what makes a dump work against `mariadb:11`, which ships
+neither `mysql` nor `mysqldump`. `mysql_for()` also passes
+`docker_ctl.DB_CLIENT`, what the entry DECLARES — which changes nothing while
+the container can be asked, and decides it when it cannot. This said "needs no
+argument" until 2026-09-03, on the strength of the probe alone; the unbound
+fallback was `mysql`, so the one path that was left to a guess guessed the
+AzerothCore answer on a MariaDB server (review).
 
 `verify_dump()`'s banner check already admits MariaDB's sandbox directive
 (`/*M!999999\\- enable the sandbox mode */`), measured on a live Tortoise server
@@ -114,7 +118,12 @@ def mysql_for(db_root_password: str, *, wsl_distro: str | None = None) -> Docker
     were once answered by different daemons — a Console tab that streamed while
     Back up now said "Docker could not be found on this machine".
     """
-    return DockerMysql(docker_ctl.SPEC.db, db_root_password, wsl_distro=wsl_distro)
+    return DockerMysql(
+        docker_ctl.SPEC.db,
+        db_root_password,
+        wsl_distro=wsl_distro,
+        client=docker_ctl.DB_CLIENT,
+    )
 
 
 def backup(

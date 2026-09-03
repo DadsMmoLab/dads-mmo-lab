@@ -17,11 +17,15 @@ reach the engine without them.
 **The dump client.** `DockerMysql` resolves `mysql`/`mysqldump` by asking the
 container which name it answers to, which lands on `mariadb`/`mariadb-dump` for
 the `mariadb:11` image this entry names — and `mariadb:11` ships neither of the
-`mysql*` symlinks, so the answer matters. That resolution is a probe, not data;
-`install.native.db.client` says `mariadb` independently and is what
-`repair.py` passes where it picks a client itself. UNVERIFIED here: whether the
-probe's own fallback (the first candidate, `mysql`) is ever reached on this
-image — `apply.mysql_client()` falls back only when it cannot ask at all.
+`mysql*` symlinks, so the answer matters. That resolution is a probe, not data,
+so `mysql_for()` now also hands it `docker_ctl.DB_CLIENT` and the probe still
+wins where it can answer.
+
+The UNVERIFIED note that stood here asked whether the probe's fallback (the
+first candidate) is ever reached on this image. It no longer decides anything:
+the fallback used to be `mysql` and is now the declared `mariadb`, so the two
+paths agree and the question is closed by construction rather than by
+measurement (review, 2026-09-03).
 """
 
 from __future__ import annotations
@@ -105,7 +109,12 @@ def mysql_for(root_password: str, *, wsl_distro: str | None = None) -> DockerMys
     the client then reports an authentication failure against a healthy
     database.
     """
-    return DockerMysql(docker_ctl.SPEC.db, root_password, wsl_distro=wsl_distro)
+    return DockerMysql(
+        docker_ctl.SPEC.db,
+        root_password,
+        wsl_distro=wsl_distro,
+        client=docker_ctl.DB_CLIENT,
+    )
 
 
 def backup(
