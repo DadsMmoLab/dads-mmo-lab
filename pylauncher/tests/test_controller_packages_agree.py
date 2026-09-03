@@ -259,3 +259,64 @@ def test_the_dump_the_restore_and_the_listing_all_use_the_declared_client() -> N
         )
     finally:
         monkey.undo()
+
+
+def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Path) -> None:
+    """7.9's "mirroring `controller_wow_wotlk`", asked of the OBJECT the view uses.
+
+    The tempting comparison is the call sites -- diff the keyword arguments each
+    `_for_<game>()` passes -- and it answers the wrong question. `prompt`,
+    `prompt_precedes_answer` and `scheme` are bound INSIDE each package's own
+    `console`/`accounts` module, so the UI does not pass them; `import_probe`
+    and `reset_unfinished` are AzerothCore-only, because a CMaNGOS install has
+    no one-shot import service to re-run. A spelling diff reports all five as
+    missing features. They are not.
+
+    What the view actually depends on is `ControllerServices`: one field per
+    operation the Server tab can perform. So every field is required to arrive
+    for every game, with exactly one documented exception -- `store` and
+    `applier` are the module surface, and `manifests/` holds `wow-wotlk` alone,
+    so for the other three they are legitimately None and `_no_manifest_store()`
+    warns if the catalog ever says otherwise.
+
+    Enumerated from the dataclass rather than listed here, so a sixteenth
+    capability added to the view cannot be wired for WotLK and forgotten for
+    the rest.
+    """
+    from dataclasses import fields
+
+    from yulon.catalog.catalog import load_catalog
+    from yulon.ui.controller_view import ControllerServices
+
+    module_surface = {"store", "applier"}
+    every_field = {f.name for f in fields(ControllerServices)}
+    assert module_surface < every_field, "the module fields are no longer called store/applier"
+
+    catalog = load_catalog()
+    for game in sorted(g.id for g in catalog.games):
+        entry = catalog.get(game)
+        server_dir = tmp_path / game
+        server_dir.mkdir()
+        password_file = entry.install.password.file
+        if password_file:
+            (server_dir / password_file).write_text("hunter2", encoding="utf-8")
+
+        services = ControllerServices.for_entry(entry, server_dir)
+        absent = sorted(name for name in every_field if getattr(services, name, None) is None)
+        if game == "wow-wotlk":
+            assert absent == [], f"wow-wotlk is the reference and is missing {absent}"
+        else:
+            assert set(absent) <= module_surface, (
+                f"{game} is missing {sorted(set(absent) - module_surface)}, which is not the "
+                "module surface and so is a real gap against wow-wotlk"
+            )
+            # And the exception has to be REAL. Without this the test would
+            # pass just as happily on an implementation where nothing is ever
+            # None -- including one that handed the three games WotLK's own
+            # manifest store, which is the mistake `_no_manifest_store()`
+            # exists to prevent.
+            assert set(absent) == module_surface, (
+                f"{game} reports {absent} rather than the module surface; `manifests/` holds "
+                "wow-wotlk alone, so a non-None store here means this game was handed "
+                "somebody else's manifests"
+            )

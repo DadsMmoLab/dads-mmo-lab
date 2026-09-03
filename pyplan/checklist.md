@@ -649,9 +649,30 @@
     Tortoise: the same two functions against `yulon-ubuntu`, account id 104, and the seam printed
     `client='mariadb'`, which is the `f8cacafc` fix visible in the field. Vanilla uses the same
     shared `create_account()` and scheme and is UNVERIFIED against a client.
-  - **Still owed:** the three packages' remaining feature surface beyond accounts and backup —
-    console, modules, networking — measured against `controller_wow_wotlk/`'s, and Vanilla's own
-    account/client run.
+  - **Console, modules and networking measured 2026-09-03 — nothing owed on any of the three.**
+    The tempting instrument was the wrong one: diffing the keyword arguments each
+    `_for_<game>()` passes reports `prompt`, `prompt_precedes_answer`, `scheme`, `import_probe`
+    and `reset_unfinished` as missing from all three. They are not. The first three are bound
+    INSIDE each package's own `console`/`accounts` module, and the last two are AzerothCore-only —
+    a CMaNGOS install has no one-shot import service to re-run. That diff compares spellings at a
+    call site, not capabilities.
+    - **Console** — each package binds its own `PROMPT`, `prompt_precedes_answer` and container
+      and calls the shared `send_command()`. The lower def-count in those files is WotLK holding
+      the shared implementation, not a smaller surface.
+    - **Modules** — WotLK-only, and correctly so: `manifests/` contains `wow-wotlk` and the schema
+      and nothing else, so there is nothing for the other three to port yet (7.1 step 2 says "if
+      any exist"). `_no_manifest_store()` returns None and warns if the catalog ever says
+      otherwise.
+    - **Networking** — entry-driven rather than per-package: one shared `networking.apply()`,
+      wired for all four in the view.
+    - **Asserted rather than read**, by `test_every_game_offers_the_whole_controller_surface_wotlk_does`:
+      `ControllerServices` is enumerated with `dataclasses.fields()` and every field must arrive
+      for every game, so a sixteenth capability cannot be wired for WotLK and forgotten for the
+      rest. The one exception is required to be REAL both ways — the three must report `store`
+      and `applier` as None and nothing else, because a non-None store there would mean a game
+      was handed somebody else's manifests.
+  - **Still owed:** Vanilla's own account creation and client login (TBC and Tortoise are both
+    done live; Vanilla uses the same shared writer and scheme and has not been driven).
 - [ ] 7.10 Cross-server regression pass — re-run WotLK's 6.5 coverage gate after 7.1–7.9 land to confirm shared layers (`docker.py`, base `Controller`, `runner.py`, `platform.py`, `networking.py`) weren't regressed (was 7.4)
 - [ ] **Phase 7 exit criteria met** — all four v1 servers install through one Python engine with zero shell interaction and are managed by the app on Linux and native Windows, and on macOS once a machine exists; no `install-*.sh` remains. **Phase 8 does not start until this is fully met.**
 
