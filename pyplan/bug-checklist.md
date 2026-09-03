@@ -729,6 +729,11 @@ list across every round and that has to include the rounds other people ran.
   `platform.keep_awake()` spawns `caffeinate -dims -w <pid>` on macOS; verified proper process
   lifecycle termination upon context exit.
   *Verified with unit tests in `test_platform.py`.*
+  **Scope of that word, added 2026-09-03.** The unit tests DID run on Darwin (1039 passed on the
+  M4 Pro, checklist 6.4), which is more than most of this list can say -- but they drive a fake
+  `spawn`, so what is verified is the argv and the cleanup call, not a `caffeinate` process
+  existing. `platform.py:3746` says it plainly: "neither claim has been executed on a Mac by this
+  project." Nobody has yet watched a real install hold a Mac awake.
 
 The same commit added `WotlkController` tests for `STOP_GRACE_SECONDS` teardown and for the
 port-conflict guard on 3724 and 8085. Those tests and the port work in

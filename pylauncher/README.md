@@ -10,12 +10,23 @@ to guess. The plan for the rest is in [`../pyplan/`](../pyplan/README.md).
 
 | | Linux | Windows 10/11 | macOS |
 |---|---|---|---|
-| Install a server from the Catalog | run live | no | no |
+| Install a server from the Catalog | run live | no | run live¹ |
 | Attach to a server that already exists | run live | run live | never run |
-| Start and stop it | run live | run live | never run |
+| Start and stop it | run live | run live | run live¹ |
 | Follow the worldserver log | run live | run live | never run |
-| GM console (type a command at the server) | built | no — no `os.openpty` | never run |
-| The packaged download | AppImage, opens | .exe, opens | .dmg, never opened |
+| GM console (type a command at the server) | built | no — no `os.openpty` | run live¹ |
+| The packaged download | AppImage, opens | .exe, opens | .dmg, opened² |
+
+¹ Through the module or the CLI harness on a real Apple M4 Pro with Docker Desktop 4.87.0
+(2026-08-29), not through the Catalog button — a cold start to a running WotLK server, plus
+`stop_staged`/`start_staged` (13.8 s / 5.8 s) and `console.send_command()` twice against the live
+worldserver. The button itself has never been pressed on a Mac.
+
+² Baerthe opened the 0.6.53 `.dmg` from Finder on 2026-08-25 — that run is how the launchd-PATH
+bug was found. What is still unrecorded is the Gatekeeper path an unsigned `.dmg` puts a new user
+through, which is a shipping decision rather than a test result. The `.dmg` is also **arm64 only**:
+`release.yml` builds on `macos-latest` and has no Intel job, so Intel Macs get no artifact at
+all.
 
 Three values, deliberately:
 
@@ -25,8 +36,9 @@ Three values, deliberately:
   That is not the same claim and this file will not make it.
 - **never run** — nobody has started the app on this operating system at all.
 
-There is no Mac on this side of the project, so nothing in the macOS column is a claim. The code
-is real and has tests; nobody has started the app on a Mac.
+There is no Mac on THIS side of the project — Baerthe has the only one, and the macOS rows above
+are his runs, not ours. That is why they are footnoted rather than plain: what he drove was the
+engine and the modules, and the Catalog button on a Mac remains unpressed.
 
 "Opens" is also the weaker word it looks like. The evidence for the AppImage and the `.exe` is a
 `YULON_SMOKE_TEST=1` run that builds the window and exits; a person has used the app on Linux and
@@ -46,8 +58,9 @@ Desktop and reached a working daemon (2026-08-23), asking for nothing but a rebo
 Windows and Docker Desktop put in front of a person themselves. The install path that would sit on
 top of that is not built, and `--provision` is a diagnostic flag, not a button in the app.
 
-**macOS** has neither. The `.dmg` is built by CI and has never been launched by anyone, so whether
-it even opens past Gatekeeper is unknown.
+**macOS** has neither. The `.dmg` opens — Baerthe ran 0.6.53 from Finder on 2026-08-25 — but
+nobody has written down what Gatekeeper asks of a user who has never seen it before, and it is
+built for Apple silicon only.
 
 ## Managing a server you already have
 
