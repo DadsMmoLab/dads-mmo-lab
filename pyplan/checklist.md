@@ -766,12 +766,30 @@
     /home/pk/clients/WoW-Client-1.12.1 and there is no locale folder, which is how a repack
     looks`. The extraction still produced the shipped counts, so nothing came up short.
 
-  - **NOT ticked, on two further counts — and the first has MOVED rather than closed.** The line
-    requires a **forced vmap retry**. One was triggered on 2026-09-04 (above), so "no run has
-    triggered it", which this bullet said until then, is no longer why the box is open. It is open
-    because the retry that fired could not complete: the recipe is proven reachable and proven
-    unable to recover. And the line
-    says **"the change set contains no Python"**: it does not. Reaching a running Vanilla needed
+  - **THE RETRY COMPLETED 2026-09-04, after the fix, and that closes the first of the two counts.**
+    `pyplan/gates/7.5-m910q/vmap75-postfix-retry-completed.log`, a fresh install into
+    `/home/pk/vanilla-75b`. The whole chain, in the engine's own words:
+
+    ```
+    vmap extract crashed the way the retry recipe expects; running vmap extract, vmap assemble again once
+    vmap extract: emptying Buildings before the retry, so it regenerates what the crashed attempt left rather than adding to it
+    vmap extract: retrying /opt/mangos/bin/tools/vmap_extractor -d /client/Data
+    vmap extract: done (Buildings: 5076 files)
+    vmap assemble: emptying vmaps before the retry, ...
+    vmap assemble: done (vmaps: 5667 files)
+    mmaps: done (mmaps: 2008 files)
+    WoW Vanilla is installed and running in /home/pk/vanilla-75b
+    ```
+
+    **5076 / 5667 / 2008 — the shipped counts, to the file.** The retry does not merely survive now,
+    it produces the same data a clean run does.
+    **The extractor was emptied and re-run rather than skipped, and that is the designed answer:**
+    the retry branch is taken before `_conclude()`, so a crashed tool has no record, is not
+    `satisfied`, and is redone. The `leaving it alone` branch — for a tool that finished earlier in
+    the outer loop, which is the ASSEMBLER-crash case — is still unexercised by any live run, and
+    that is written down rather than glossed: this harness hard-codes the crash onto the extractor.
+  - **NOT ticked on one remaining count, and it is the line's own premise rather than missing work.**
+    The line says **"the change set contains no Python"**: it does not. Reaching a running Vanilla needed
     `make_out_dirs()` in `extract.py` and the HTTP/1.1 line in all three Dockerfile templates.
     That is not a failure of the run; it is the line's premise being wrong, and the premise is what
     7.5 was for — it predicted Vanilla would be data-only and it was not.
