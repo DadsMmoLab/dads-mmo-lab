@@ -2207,3 +2207,73 @@ code a signal would have skipped. Three mutants, three kills.
 unreachable for our own interrupted installs, but it is still the sentence a user meets when they
 point the app at a folder holding something else, and it still asserts who created the contents
 rather than what is observable — that no valid Yu'lon ownership record exists.
+
+---
+
+### 39. The LAN step locks you out of a remote Linux box — 2026-09-04, OPEN
+
+Found by 7.1's own gate, the hard way: the lane that pressed it lost its ssh session and had to
+recover by driving the guest's GNOME desktop through the Hyper-V synthetic keyboard. Evidence and
+the whole recovery are in `pyplan/gates/7.1-ubuntu-2026-09-04/ufw-lockout.txt`.
+
+**What it does.** `networking.apply()` on a Linux box with `ufw` emits three commands and runs all
+three:
+
+```
+[['ufw','allow','3724/tcp'], ['ufw','allow','8085/tcp'], ['ufw','--force','enable']]
+```
+
+`ufw enable` brings up ufw's default policy, which is **deny incoming**. The two game ports are
+allowed. Port 22 is not. So on any box you reach over the network — which is every headless server
+this app is for — the LAN step is a remote lockout with no warning:
+
+```
+report.done         = ['ufw allow 3724/tcp', 'ufw allow 8085/tcp', 'ufw --force enable', ...]
+report.skipped      = []
+report.manual_steps = []
+```
+
+Nothing warned, nothing was skipped, and no manual step mentioned SSH. The session that runs the
+step SURVIVES — conntrack keeps an established flow alive — so the operator gets no signal at all
+until the next connection:
+
+```
+Connection closed by UNKNOWN port 65535
+Connection timed out during banner exchange
+```
+
+**Why it is worse than it looks.** The three-command plan is the same on a laptop and on a remote
+server, and the app has no way to tell those apart today. On the laptop it is correct and useful.
+On the server it costs the user their access, and the only recovery is physical or out-of-band —
+here it took the hypervisor's synthetic keyboard, and `Msvm_Keyboard.TypeText` was unusable on that
+guest (17 characters arrived as `dddmm`, twice), so the fix had to be typed as virtual key codes.
+A user with a rented VPS and no console has no equivalent.
+
+**Not a hypothetical severity.** Phase 6's privilege-transparency line already forbids the app from
+quietly taking root-equivalent access; taking away the operator's only route back in is the same
+class of harm and is not covered by that rule's wording.
+
+**What a fix has to decide, and none of it is obvious:**
+
+* whether to allow SSH before enabling. `ufw allow 22/tcp` is not right either — sshd may be on
+  another port, and reading `sshd_config` to find out is a new dependency on a file we do not own.
+  The honest version reads the port from the ACTIVE listener rather than from config.
+* whether to enable ufw at all when the app did not find it already enabled. Turning a firewall ON
+  is a change to the machine's posture that the user did not ask for; the ports could be opened and
+  the enable left to them.
+* whether "am I connected over the network right now?" is even answerable. `SSH_CONNECTION` in the
+  environment answers it for the common case and is absent under a GUI, which is exactly the split
+  that matters.
+
+Until it is decided, the step should refuse on a box where `SSH_CONNECTION` is set, and say why.
+
+### 40. Abandoning `logs_source()` aborts the interpreter at exit — 2026-09-04, OPEN
+
+Found by 7.10's sweep. A `logs_source()` generator that is dropped without being closed makes the
+interpreter abort at shutdown — SIGABRT, exit 134 — from inside `runner.stream()`'s `finally`.
+Pre-existing and not Phase 7's doing: both functions are byte-identical to their 6.x versions.
+Evidence in `pyplan/gates/7.10-ubuntu-2026-09-04/`.
+
+It matters because the Server tab's log panel is exactly a caller that starts a stream and may stop
+caring about it, and an abort at exit is the kind of thing that looks like "the app crashed on
+close" in a bug report and gets attributed to whatever the user did last.

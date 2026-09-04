@@ -1037,11 +1037,41 @@
       **5,076 files** right now, produced from that same hash-verified client.
 
     So: same archive, same commit, same Dockerfile, **5,076 `Buildings` on Linux and 3,913 on
-    Windows**. Whatever the cause, it is on the Windows side of the line, and 7.7 cannot tick its
-    Vanilla half until somebody knows what it is. Two candidates worth trying first, neither
-    tested: the extractor writing through the 9p mount and losing entries it does not check for,
-    and a path-length or case-collision limit in the container's view of that mount — 1,163 missing
-    of 5,076 is 23%, which is a large enough share to be a class of name rather than a stray.
+    Windows**.
+  - **AND THE CONCLUSION THAT FOLLOWED THAT SENTENCE WAS BACKWARDS. Corrected 2026-09-04, hours
+    later, by diffing the two file lists instead of comparing their counts.** This line said the
+    shortfall was "on the Windows side"; it is not a shortfall at all, and the run that loses data
+    is the LINUX one. Evidence: `pyplan/gates/7.7-win11-gate/buildings-shortfall-measurements.txt`
+    and the lists beside it.
+    * **Nothing is missing on Windows.** `comm` over the two sorted lists: 1,163 names in Linux and
+      not Windows, **0** in Windows and not Linux. All 1,163 are `.m2`; the 814 `.wmo` and 1,464
+      `.M2` are identical on both sides. Every one of the 1,163 has a case-insensitive twin present
+      on Windows — **1,163 of 1,163** — and md5 + size of all 1,163 pairs, computed on m910q where
+      both spellings exist, is **SAME 1,163 / DIFF 0**. Unique case-insensitive names in the Linux
+      list: **3,913**, which is the Windows file count to the file. NTFS folded byte-identical
+      duplicates onto their twin. **Zero unique bytes lost.**
+    * **The Windows run is the MORE complete one**, and this is the part worth the entry.
+      `Buildings/dir_bin` — the placement index — is **36,635,438 bytes on Windows against
+      31,072,203 on Linux**. Distinct model names in it: **3,348 against 2,981**. Placements:
+      **503,722 against 429,016 — Linux is missing 74,706**. Not a truncation: 284 of the 367
+      Windows-only names first appear below Linux's own end-of-file offset.
+    * **The cause is upstream, in CMaNGOS at `8ec338a1`.**
+      `vmap_extractor/vmapextract/gameobject_extract.cpp:9` `ExtractSingleModel()` writes the file
+      under the RAW name from the WMO `MODN` chunk (`INNBED.MDX` → `INNBED.M2`), applying neither
+      `fixnamen()` nor `fixname2()`. `model.cpp:242` `Doodad::ExtractSet()` then looks the model up
+      under the FIXED spelling (`Innbed.m2`) and does `if (!input) continue;` — **a silent drop of
+      the placement**. On a case-sensitive filesystem that lookup misses and the doodad is
+      discarded; on NTFS it hits. Witness on m910q: `ls Innbed.m2` → no such file, `ls INNBED.M2`
+      → 840 bytes. Verified independently by this session, not taken from the lane.
+    * **So the count check is the thing that is wrong, not the extraction.** Any comparison of
+      `produces` counts across platforms has to fold case, and a Windows count BELOW a Linux one is
+      the expected reading rather than a defect. 7.7's Vanilla half is not blocked by this.
+    * **What a fix would be, and whose.** `ExtractSingleModel()` should apply the same
+      `fixnamen()`/`fixname2()` its reader uses, so the write and the later `fopen()` agree; and
+      `Doodad::ExtractSet()`'s `continue` should count what it drops rather than dropping silently.
+      Both are upstream CMaNGOS, not ours. Ours is the count check — and the knowledge that **every
+      Linux install this project has ever made is missing about 74,706 doodad placements**, which
+      is a thing players would see.
   - **THE 9p FIGURE 7.7 ASKS FOR, measured 2026-09-04.** Everything a container writes into the
     server folder on Windows crosses Docker Desktop's 9p mount, and that is the whole of the
     Windows tax. Sampled once a minute into `pyplan/gates/7.7-win11-gate/ninep.csv` by
