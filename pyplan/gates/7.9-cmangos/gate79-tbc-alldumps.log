@@ -1,0 +1,181 @@
+game=wow-tbc server_dir=/home/pk/tbc-7.4c
+containers: world=tbc-mangosd auth=tbc-realmd db=tbc-db auth_port=3724
+
+====================== baseline ======================
+status: db=True auth=True world=True
+running: {'tbc-mangosd': True, 'tbc-realmd': True, 'tbc-db': True}
+
+====================== console.send_command() -- and what the attach did to the server ======================
+tbc-mangosd before: {'pid': 950719, 'restarts': 5, 'started_at': '2026-09-04T01:02:49.258934395Z'}
+2026-09-04 03:02:53 INFO [yulon.controller_wow_wotlk.console] console → tbc-mangosd: ['server', 'info']
+reply.command : 'server info'
+reply.prompted: False
+  | Starting BattleGround System
+  | >> Loaded 8 battlegrounds
+  | Deleting expired bans...
+  | Calculate next daily quest reset time...
+  | Calculate next weekly quest reset time...
+  | Calculate next monthly quest reset time...
+  | Loading Spam records...
+  | Starting Game Event system...
+  | GameEvent 13 "Elemental Invasion: Fire" started.
+  | GameEvent 15 "Elemental Invasion: Earth" started.
+  | GameEvent 38 "Elemental Invasion: Water" started.
+  | GameEvent 56 "Arena PvP Season 4" started.
+  | GameEvent 72 "Brew of the Month - September" started.
+  | Next game event check in 3427 seconds.
+  | Game Event system initialized.
+  | Loading Quest Group chosen quests...
+  | GameEvent 1005 "Random Daily Dungeon - Wanted: Sunseeker Channelers" started.
+  | GameEvent 1020 "Random Daily Heroic - Wanted: The Heart of Quagmirran" started.
+  | GameEvent 1026 "Random Daily PVP - Call to Arms: Alterac Valley" started.
+  | GameEvent 1130 "Cooking - Random Daily - Soup for the Soul" started.
+  | GameEvent 1132 "Fishing - Random Daily - Bait Bandits" started.
+  | Player::DeleteOldChars: Deleting all characters which have been deleted 30 days before...
+  | Loading anticheat library
+  | [Anticheat] Could not find configuration file ../etc/anticheat.conf.
+  | Loading antispam system...
+  | >> 211 blacklist entries loaded and normalized
+  | >> 13 ASCII string replacements loaded
+  | >> 42 unicode character replacements loaded
+  | Loading Warden scan database...
+  | >> 81 Warden scans loaded from world database
+  | Loading scripted Warden scans...
+  | >> 11 scripted Warden scans loaded from anticheat module
+  | Initialize AuctionHouseBot...
+  | AHBot using configuration file ../etc/ahbot.conf
+  | AHBot selling items: Enabled
+  | AHBot buying items: Enabled
+  | AHBot Static max required level set to 60
+  | Loading WorldState
+  | GameEvent 301 "Suns Reach Reclamation Phase 1" started.
+  | GameEvent 319 "SWP - All Gates Open" started.
+  | Initializing AI Playerbot by ike3, based on the original Playerbot by blueboy
+  | Loading Race/Class probabilities
+  | LLM default prompts file 'llm_character_card.txt' not found or unreadable.
+  | Loading free bots.
+  | Loading area levels.
+  | [                                                  ] 0%[[*                                                 ] 2%  [[**                                                ] 4%  [[***                                               ] 6%  [[****                                              ] 8%  [[*****                                             ] 10%  [[******                                            ] 12%  [[*******                                           ] 14%  [[********                                          ] 16%  [[*********                                         ] 18%  [[**********                                        ] 20%  [[***********                                       ] 22%  [[************                                      ] 24%  [[*************                                     ] 26%  [[**************                                    ] 28%  [[***************                                   ] 30%  [[****************                                  ] 32%  [[*****************                                 ] 34%  [[******************                                ] 36%  [[*******************                               ] 38%  [[********************                              ] 40%  [[*********************                             ] 42%  [[**********************                            ] 44%  [[***********************                           ] 46%  [[************************                          ] 48%  [[*************************                         ] 50%  [[**************************                        ] 52%  [[***************************                       ] 54%  [[****************************                      ] 56%  [[*****************************                     ] 57%  [[******************************                    ] 60%  [[*******************************                   ] 62%  [[********************************                  ] 64%  [[*********************************                 ] 66%  [[**********************************                ] 68%  [[***********************************               ] 70%  [[************************************              ] 72%  [[*************************************             ] 74%  [[**************************************            ] 76%  [[***************************************           ] 78%  [[****************************************          ] 80%  [[*****************************************         ] 82%  [[******************************************        ] 84%  [[*******************************************       ] 86%  [[********************************************      ] 88%  [[*********************************************     ] 90%  [[**********************************************    ] 92%  [[***********************************************   ] 94%  [[************************************************  ] 96%  [[************************************************* ] 98%  [[**************************************************] 100%  [>> Loaded 2659 area levels.
+  | [                                                  ] 0%[[*                                                 ] 2%  [[**                                                ] 4%  [[***                                               ] 6%  [[****                                              ] 8%  [[*****                                             ] 10%  [[******                                            ] 12%  [[*******                                           ] 14%  [[********                                          ] 16%  [[*********                                         ] 18%  [[**********                                        ] 20%  [[***********                                       ] 22%  [[************                                      ] 24%  [[*************                                     ] 26%  [[**************                                    ] 28%  [[***************                                   ] 30%  [[****************                                  ] 32%  [[*****************                                 ] 34%  [[******************                                ] 36%  [[*******************                               ] 38%  [[********************                              ] 40%  [[*********************                             ] 42%  [[**********************                            ] 44%  [[***********************                           ] 46%  [[************************                          ] 48%  [[*************************                         ] 50%  [[**************************                        ] 52%  [[***************************                       ] 54%  [[****************************                      ] 56%  [[*****************************                     ] 57%  [[******************************                    ] 60%  [[*******************************                   ] 62%  [[********************************                  ] 64%  [[*********************************                 ] 66%  [[**********************************                ] 68%  [[***********************************               ] 70%  [[************************************              ] 72%  [[*************************************             ] 74%  [[**************************************            ] 76%  [[***************************************           ] 78%  [[****************************************          ] 80%  [[*****************************************         ] 82%  [[******************************************        ] 84%  [[*******************************************       ] 86%  [[********************************************      ] 88%  [[*********************************************     ] 90%  [[**********************************************    ] 92%  [[***********************************************   ] 94%  [[************************************************  ] 96%  [[************************************************* ] 98%  [[**************************************************] 100%  [
+  | Loading spellIds.
+  | [                                                  ] 0%[[*                                                 ] 2%  [[**                                                ] 4%  [[***                                               ] 6%  [[****                                              ] 8%  [[*****                                             ] 10%  [[******                                            ] 12%  [[*******                                           ] 14%  [[********                                          ] 16%  [[*********                                         ] 18%  [[**********                                        ] 20%  [[***********                                       ] 22%  [[************                                      ] 24%  [[*************                                     ] 26%  [[**************                                    ] 28%  [[***************                                   ] 30%  [[****************                                  ] 32%  [[*****************                                 ] 34%  [[******************                                ] 36%  [[*******************                               ] 38%  [[********************                              ] 40%  [[*********************                             ] 42%  [[**********************                            ] 44%  [[***********************                           ] 46%  [[************************                          ] 48%  [[*************************                         ] 50%  [[**************************                        ] 52%  [[***************************                       ] 54%  [[****************************                      ] 56%  [[*****************************                     ] 57%  [[******************************                    ] 60%  [[*******************************                   ] 62%  [[********************************                  ] 64%  [[*********************************                 ] 66%  [[**********************************                ] 68%  [[***********************************               ] 70%  [[************************************              ] 72%  [[*************************************             ] 74%  [[**************************************            ] 76%  [[***************************************           ] 78%  [[****************************************          ] 80%  [[*****************************************         ] 82%  [[******************************************        ] 84%  [[*******************************************       ] 86%  [[********************************************      ] 88%  [[*********************************************     ] 90%  [[**********************************************    ] 92%  [[***********************************************   ] 94%  [[************************************************  ] 96%  [[************************************************* ] 98%  [[**************************************************] 100%  [
+  | [                                                  ] 0%[[*                                                 ] 2%  [[**                                                ] 4%  [[***                                               ] 6%  [[****                                              ] 8%  [[*****                                             ] 10%  [[******                                            ] 12%  [[*******                                           ] 14%  [[********                                          ] 16%  [[*********                                         ] 18%  [[**********                                        ] 20%  [[***********                                       ] 22%  [[************                                      ] 24%  [[*************                                     ] 26%  [[**************                                    ] 28%  [[***************                                   ] 30%  [[****************                                  ] 32%  [[*****************                                 ] 34%  [[******************                                ] 36%  [[*******************                               ] 38%  [[********************                              ] 40%  [[*********************                             ] 42%  [[**********************                            ] 44%  [[***********************                           ] 46%  [[************************                          ] 48%  [[*************************                         ] 50%  [[**************************                        ] 52%  [[***************************                       ] 54%  [[****************************                      ] 56%  [[*****************************                     ] 57%  [[******************************                    ] 60%  [[*******************************                   ] 62%  [[********************************                  ] 64%  [[*********************************                 ] 66%  [[**********************************                ] 68%  [[***********************************               ] 70%  [[************************************              ] 72%  [[*************************************             ] 74%  [[**************************************            ] 76%  [[***************************************           ] 78%  [[****************************************          ] 80%  [[*****************************************         ] 82%  [[******************************************        ] 84%  [[*******************************************       ] 86%  [[********************************************      ] 88%  [[*********************************************     ] 90%  [[**********************************************    ] 92%  [[***********************************************   ] 94%  [[************************************************  ] 96%  [[************************************************* ] 98%  [[**************************************************] 100%  [
+  | Initializing random bot names...
+  | >> Initialized names for 18 race/gender combinations
+  | Deleting temporary empty bot accounts
+  | Creating random bot accounts...
+  | [                                                  ] 0%[[                                                  ] 0%[Using shared freeNames from cache...
+  | >> Updated names for 18 race/gender combinations.
+  | Creating random bot characters...
+  | [                                                  ] 0%[No new random bots needed. Accounts: 100, bots: 900.
+  | Loading weightscales info
+  | Loaded 32 weightscale class specs
+  | Loaded 269 weightscale stat weights
+  | Loading vendor item list...
+  | [                                                  ] 0%[[*                                                 ] 2%  [[**                                                ] 4%  [[***                                               ] 6%  [[****                                              ] 8%  [[*****                                             ] 10%  [[******                                            ] 12%  [[*******                                           ] 14%  [[********                                          ] 16%  [[*********                                         ] 18%  [[**********                                        ] 20%  [[***********                                       ] 22%  [[************                                      ] 24%  [[*************                                     ] 26%  [[**************                                    ] 28%  [[***************                                   ] 30%  [[****************                                  ] 32%  [[*****************                                 ] 34%  [[******************                                ] 36%  [[*******************                               ] 38%  [[********************                              ] 40%  [[*********************                             ] 42%  [[**********************                            ] 44%  [[***********************                           ] 46%  [[************************                          ] 48%  [[*************************                         ] 50%  [[**************************                        ] 52%  [[***************************                       ] 54%  [[****************************                      ] 56%  [[*****************************                     ] 57%  [[******************************                    ] 60%  [[*******************************                   ] 62%  [[********************************                  ] 64%  [[*********************************                 ] 66%  [[**********************************                ] 68%  [[***********************************               ] 70%  [[************************************              ] 72%  [[*************************************             ] 74%  [[**************************************            ] 76%  [[***************************************           ] 78%  [[****************************************          ] 80%  [[*****************************************         ] 82%  [[******************************************        ] 84%  [[*******************************************       ] 86%  [[********************************************      ] 88%  [[*********************************************     ] 90%  [[**********************************************    ] 92%  [[***********************************************   ] 94%  [[************************************************  ] 96%  [[************************************************* ] 98%  [[**************************************************] 100%  [
+  | Loaded 6444 vendor items...
+  | Loaded 0 alliance only vendor items...
+  | Loaded 0 horde only vendor items...
+  | Loading loot templates...
+  | Loaded 179585 loot templates...
+  | Calculating stat weights for 39657 items...
+  | [                                                  ] 0%[[*                                                 ] 2%  [[**                                                ] 4%  [[***                                               ] 6%  [[****                                              ] 8%  [[*****                                             ] 10%  [[******                                            ] 12%  [[*******                                           ] 14%  [[********                                          ] 16%  [[*********                                         ] 18%  [[**********                                        ] 20%  [[***********                                       ] 22%  [[************                                      ] 24%  [[*************                                     ] 26%  [[**************                                    ] 28%  [[***************                                   ] 30%  [[****************                                  ] 32%  [[*****************                                 ] 34%  [[******************                                ] 36%  [[*******************                               ] 38%  [[********************                              ] 40%  [[*********************                             ] 42%  [[**********************                            ] 44%  [
+tbc-mangosd after:  {'pid': 950719, 'restarts': 5, 'started_at': '2026-09-04T01:02:49.258934395Z'}
+[OK] send_command('server info') answered in 3.61s and left pid/RestartCount/StartedAt unchanged (pid 950719, RestartCount 5)
+[FAIL] the console prompt never appeared in the window; the reply was not delimited
+
+====================== backup() -- live, with the server running ======================
+2026-09-04 03:03:02 INFO [yulon.controller_wow_wotlk.maintenance] backed up 4 database(s) into /home/pk/tbc-7.4c/sql_scripts/backups: characters (68009546 bytes), logs (4648 bytes), mangos (158550486 bytes), realmd (44865 bytes)
+  dump: characters /home/pk/tbc-7.4c/sql_scripts/backups/20260904_030257_characters.sql 68009546 bytes
+  dump: logs /home/pk/tbc-7.4c/sql_scripts/backups/20260904_030257_logs.sql 4648 bytes
+  dump: mangos /home/pk/tbc-7.4c/sql_scripts/backups/20260904_030257_mangos.sql 158550486 bytes
+  dump: realmd /home/pk/tbc-7.4c/sql_scripts/backups/20260904_030257_realmd.sql 44865 bytes
+  missing_core: ()
+[OK] backup() -> 4 dump(s) (characters, logs, mangos, realmd) in /home/pk/tbc-7.4c/sql_scripts/backups in 5.1s, server_was_running=True
+
+====================== verify_dump() on every dump ======================
+  verify_dump(20260904_030257_characters.sql) -> 68009546 bytes
+  verify_dump(20260904_030257_logs.sql) -> 4648 bytes
+  verify_dump(20260904_030257_mangos.sql) -> 158550486 bytes
+  verify_dump(20260904_030257_realmd.sql) -> 44865 bytes
+[OK] verify_dump() passed for all 4 dump(s)
+
+====================== plan_restore() while the server is up -- it must REFUSE ======================
+2026-09-04 03:03:04 INFO [yulon.controller_wow_wotlk.maintenance] restore of 20260904_030257_characters.sql refused: tbc-mangosd, tbc-realmd are running. A restore has to happen with the game servers stopped: the worldserver keeps characters in memory and saves them back, so it would overwrite the restored data within minutes. Stop the server and try again.
+refusals: ('tbc-mangosd, tbc-realmd are running. A restore has to happen with the game servers stopped: the worldserver keeps characters in memory and saves them back, so it would overwrite the restored data within minutes. Stop the server and try again.',)
+[OK] plan_restore() refused while running: ('tbc-mangosd, tbc-realmd are running. A restore has to happen with the game servers stopped: the worldserver keeps characters in memory and saves them back, so it would overwrite the restored data within minutes. Stop the server and try again.',)
+
+====================== Controller.stop() -- the Stop button, which calls stop_staged() ======================
+2026-09-04 03:08:05 INFO [yulon.docker] stop_staged(): stopped; containers kept for a fast restart
+running after stop: {'tbc-mangosd': False, 'tbc-realmd': False, 'tbc-db': False}
+[OK] stop_staged() took 301.2s and returned True; db, auth and world all down
+
+====================== Controller.start() -- the Start button, which calls start_staged() ======================
+2026-09-04 03:08:05 INFO [yulon.docker] start_staged(): `compose up -d --no-deps tbc-db tbc-realmd tbc-mangosd` in /home/pk/tbc-7.4c
+running after start: {'tbc-mangosd': True, 'tbc-realmd': True, 'tbc-db': True}
+[OK] start_staged() returned in 6.1s; all three up
+
+====================== time from start_staged() to this game's own ready marker ======================
+[OK] reached ready 75.8s after start_staged() returned
+
+====================== restore round trip: db up, world+auth down -- EVERY dump, not just the first ======================
+tbc-mangosd
+tbc-realmd
+
+-- characters (68009546 bytes)
+   refusals: ()
+   databases: ('characters',)  size_bytes: 68009546
+   interrupted: None
+2026-09-04 03:09:38 INFO [yulon.controller_wow_wotlk.maintenance] backed up 1 database(s) into /home/pk/tbc-7.4c/sql_scripts/backups: characters (69144646 bytes)
+2026-09-04 03:09:38 WARNING [yulon.controller_wow_wotlk.maintenance] restoring characters from /home/pk/tbc-7.4c/sql_scripts/backups/20260904_030257_characters.sql
+2026-09-04 03:09:50 INFO [yulon.controller_wow_wotlk.maintenance] restored characters from /home/pk/tbc-7.4c/sql_scripts/backups/20260904_030257_characters.sql
+   restored ('characters',) in 15.7s (safety: ['20260904_030937_pre-restore_characters.sql'])
+
+-- logs (4648 bytes)
+   refusals: ()
+   databases: ('logs',)  size_bytes: 4648
+   interrupted: None
+2026-09-04 03:09:50 INFO [yulon.controller_wow_wotlk.maintenance] backed up 1 database(s) into /home/pk/tbc-7.4c/sql_scripts/backups: logs (4648 bytes)
+2026-09-04 03:09:50 WARNING [yulon.controller_wow_wotlk.maintenance] restoring logs from /home/pk/tbc-7.4c/sql_scripts/backups/20260904_030257_logs.sql
+2026-09-04 03:09:51 INFO [yulon.controller_wow_wotlk.maintenance] restored logs from /home/pk/tbc-7.4c/sql_scripts/backups/20260904_030257_logs.sql
+   restored ('logs',) in 0.5s (safety: ['20260904_030950_pre-restore_logs.sql'])
+
+-- mangos (158550486 bytes)
+   refusals: ()
+   databases: ('mangos',)  size_bytes: 158550486
+   interrupted: None
+2026-09-04 03:10:04 INFO [yulon.controller_wow_wotlk.maintenance] backed up 1 database(s) into /home/pk/tbc-7.4c/sql_scripts/backups: mangos (158550486 bytes)
+2026-09-04 03:10:04 WARNING [yulon.controller_wow_wotlk.maintenance] restoring mangos from /home/pk/tbc-7.4c/sql_scripts/backups/20260904_030257_mangos.sql
+2026-09-04 03:10:27 INFO [yulon.controller_wow_wotlk.maintenance] restored mangos from /home/pk/tbc-7.4c/sql_scripts/backups/20260904_030257_mangos.sql
+   restored ('mangos',) in 31.4s (safety: ['20260904_031001_pre-restore_mangos.sql'])
+
+-- realmd (44865 bytes)
+   refusals: ()
+   databases: ('realmd',)  size_bytes: 44865
+   interrupted: None
+2026-09-04 03:10:28 INFO [yulon.controller_wow_wotlk.maintenance] backed up 1 database(s) into /home/pk/tbc-7.4c/sql_scripts/backups: realmd (44907 bytes)
+2026-09-04 03:10:28 WARNING [yulon.controller_wow_wotlk.maintenance] restoring realmd from /home/pk/tbc-7.4c/sql_scripts/backups/20260904_030257_realmd.sql
+2026-09-04 03:10:28 INFO [yulon.controller_wow_wotlk.maintenance] restored realmd from /home/pk/tbc-7.4c/sql_scripts/backups/20260904_030257_realmd.sql
+   restored ('realmd',) in 0.7s (safety: ['20260904_031027_pre-restore_realmd.sql'])
+[OK] restore() put back all 4 databases (characters, logs, mangos, realmd) in 48.4s total
+
+====================== start again, and confirm the restored server comes back ready ======================
+2026-09-04 03:10:28 INFO [yulon.docker] start_staged(): `compose up -d --no-deps tbc-db tbc-realmd tbc-mangosd` in /home/pk/tbc-7.4c
+running: {'tbc-mangosd': True, 'tbc-realmd': True, 'tbc-db': True}
+[OK] the restored server reached ready again in 75.9s
+
+====================== SUMMARY ======================
+OK send_command('server info') answered in 3.61s and left pid/RestartCount/StartedAt unchanged (pid 950719, RestartCount 5)
+FAIL the console prompt never appeared in the window; the reply was not delimited
+OK backup() -> 4 dump(s) (characters, logs, mangos, realmd) in /home/pk/tbc-7.4c/sql_scripts/backups in 5.1s, server_was_running=True
+OK verify_dump() passed for all 4 dump(s)
+OK plan_restore() refused while running: ('tbc-mangosd, tbc-realmd are running. A restore has to happen with the game servers stopped: the worldserver keeps characters in memory and saves them back, so it would overwrite the restored data within minutes. Stop the server and try again.',)
+OK stop_staged() took 301.2s and returned True; db, auth and world all down
+OK start_staged() returned in 6.1s; all three up
+OK reached ready 75.8s after start_staged() returned
+OK restore() put back all 4 databases (characters, logs, mangos, realmd) in 48.4s total
+OK the restored server reached ready again in 75.9s
+
+TIMES {"console_seconds": 3.607690686942078, "backup_seconds": 5.0861018899595365, "stop_staged_seconds": 301.22169819893315, "start_staged_seconds": 6.092407369054854, "ready_seconds": 75.76547812705394, "restore_seconds": 48.38884977204725, "ready_after_restore_seconds": 75.91569022391923}
+
+9 passed, 1 failed

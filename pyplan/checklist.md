@@ -902,7 +902,7 @@
     | `console.send_command()` | 3.61 s | 3.60 s | 3.61 s |
     | `backup()` | 4.4 s, 4 dumps | 6.3 s, 5 dumps | 6.4 s, 4 dumps |
     | `verify_dump()` | 4/4 | 5/5 | 4/4 |
-    | `stop_staged()` | **3.1 s** | **23.2 s** | **6.2 s** |
+    | `stop_staged()` | **3.1 s** (and **301.2 s** on a second run — see below) | **23.2 s** | **6.2 s** |
     | `start_staged()` | 6.1 s | 6.6 s | 6.8 s |
     | to ready | 73.0 s | 45.8 s | 111.6 s |
     | `restore()` | 15.5 s | 29.6 s | **98.2 s, all 4 databases** |
@@ -923,10 +923,46 @@
       first version restored `report.dumps[0]`, which is always the alphabetically first database,
       so the world database was backed up and byte-verified and never restored. Fixed, and
       re-run on the one server that was free.
-    * **`stop_staged()` ranges from 3.1 s to 23.2 s** across three servers of the same family. The
-      spread is not noise and is worth someone's attention before a Stop button gets a spinner
-      with a timeout on it.
+    * **`stop_staged()` ranges from 3.1 s to 301.2 s**, and the top of that range came from
+      running the SAME call against the SAME TBC install an hour later. The compose template allows
+      it: `stop_grace_period: 5m`. Anyone putting a spinner on the Stop button should size it for
+      five minutes, not for the 3.1 s this table opens with.
 
+  - **A SECOND TBC run, 03:02–03:12, and it disagrees with the first about the number that matters.**
+    `pyplan/gates/7.9-cmangos/gate79-tbc-alldumps.log`. Run with the `core_databases` fix deployed
+    and with the harness that restores every dump. **9 passed, 1 failed.**
+    * **`restore()` put back all four databases — including the 158 MB `mangos` — in 48.4 s.**
+      That is the full round trip the first run only did for `characters`, and it is now proven on
+      two games (TBC here, Tortoise at 98.2 s for four).
+    * **The `acore_*` warning is gone from a live server**: `grep -c 'this install has no acore'`
+      over this run's log is **0**, against 1 on the Vanilla run and 4 on Tortoise's before the fix.
+      Verified where it was found, not only in the test that reproduces it.
+    * **`stop_staged()` took 301.2 s here and 3.1 s in the first run — same function, same install,
+      same day.** The compose template sets `stop_grace_period: 5m`, so 301 s is that window almost
+      exactly; the container still exited **0**, so it shut down on its own rather than being
+      killed. Both readings are real and the range is the finding: **a Stop button on a CMaNGOS
+      worldserver has to tolerate five minutes**, and the 3.1 s in the table above is the lucky end
+      of that range, not a typical figure.
+    * **The one FAIL is the harness's fault and is recorded as such**: `the console prompt never
+      appeared in the window; the reply was not delimited`. This run found all three containers
+      already up — because a person had just `docker start`ed them — so it skipped its own
+      wait-for-ready and attached to a worldserver that was still loading. The attach itself was
+      clean (pid and StartedAt unchanged). A gate that consoles a server it did not wait for is
+      asking a question the server cannot answer yet; the harness should wait for ready even when
+      it did not do the starting.
+  - **The worldserver-exits-alone mechanism now has THREE independent reproductions, and the third
+    is the cleanest.** `docker start tbc-db tbc-realmd tbc-mangosd` — all three at once — put
+    `tbc-mangosd` at **`RestartCount=5`** before it settled, with twelve `Could not connect to
+    MySQL database at tbc-db: Can't connect to MySQL server on 'tbc-db:3306' (111)` lines and a
+    `Cannot connect to world database` before each restart
+    (`pyplan/gates/7.9-cmangos/79-tbc-restart-evidence.log`). The database container was simply not
+    accepting connections yet.
+    **That is precisely what `start_staged()` exists to prevent** — it waits for the database
+    before starting the servers, which a bare `docker start` does not — and it is the mirror of
+    the `stop_staged()` argument. Three triggers, one mechanism: **this core exits when its
+    database is not there, and `restart: unless-stopped` brings it back alone.** The 2026-09-03
+    journal's solo restarts are no longer a mystery about what could possibly cause them; they are
+    a question about which of these three happened, and the containers that would say were deleted.
   - **What the run found, and what it means for the Server tab.**
     * **A restore on ANY CMaNGOS server announced three missing AzerothCore databases.** Once on
       Vanilla, four times on Tortoise, once on TBC: `this install has no acore_auth,
