@@ -1,0 +1,42 @@
+=== mid-build SIGKILL of press 2 -- corrected record, written 2026-09-04T11:38:49+02:00
+# HOW IT WAS DONE, including the mistake, because the transcript above shows it.
+# The first attempt built its pid list with pgrep -f "yulon.install_wiring wow-wotlk"
+# and pgrep -f "docker.*compose.*build". Both patterns appear VERBATIM in the argv of
+# the ssh shell running them, so pgrep matched that shell as well and the kill -9
+# killed the recorder along with its targets -- which is why kill-record.txt ends at
+# the words "--- kill -9" with nothing after it. The kill itself was correct and
+# complete: press2.service is inactive and no install_wiring or buildx process is
+# left. This is the projects own "audit by argv, not by string" trap, fired.
+
+--- press2.service state
+inactive
+--- survivors (self-proof pattern, bracketed so it cannot match this shell)
+1314371 bash -c { echo "=== mid-build SIGKILL of press 2 -- corrected record, written $(date -Is)"; echo '# HOW IT WAS DONE, including the mistake, because the transcript above shows it.'; echo '# The first attempt built its pid list with pgrep -f "yulon.install_wiring wow-wotlk"'; echo '# and pgrep -f "docker.*compose.*build". Both patterns appear VERBATIM in the argv of'; echo '# the ssh shell running them, so pgrep matched that shell as well and the kill -9'; echo '# killed the recorder along with its targets -- which is why kill-record.txt ends at'; echo '# the words "--- kill -9" with nothing after it. The kill itself was correct and'; echo '# complete: press2.service is inactive and no install_wiring or buildx process is'; echo '# left. This is the projects own "audit by argv, not by string" trap, fired.'; echo; echo '--- press2.service state'; systemctl --user is-active press2; echo '--- survivors (self-proof pattern, bracketed so it cannot match this shell)'; pgrep -af '[y]ulon.install_wiring' || echo 'no install_wiring process'; pgrep -af '[b]uildx bake' || echo 'no buildx bake process'; pgrep -af '[s]ystemd-inhibit' || echo 'no systemd-inhibit left behind'; echo '--- the edge the build died at'; grep -oE '#25 [0-9.]+ \[[0-9]+/1829\] (Building|Linking)[^$]*' ~/gate0904/press2.log | tail -1; echo '--- total edges reported in press2'; grep -cE '\[[0-9]+/1829\] Building' ~/gate0904/press2.log; echo '--- last line of press2.log'; tail -1 ~/gate0904/press2.log; echo '--- install state file after the kill'; cat ~/wowserver/.yulon-install.json; echo '--- docker ps'; docker ps -a; } > ~/gate0904/kill-record.txt 2>&1; cat ~/gate0904/kill-record.txt
+1314371 bash -c { echo "=== mid-build SIGKILL of press 2 -- corrected record, written $(date -Is)"; echo '# HOW IT WAS DONE, including the mistake, because the transcript above shows it.'; echo '# The first attempt built its pid list with pgrep -f "yulon.install_wiring wow-wotlk"'; echo '# and pgrep -f "docker.*compose.*build". Both patterns appear VERBATIM in the argv of'; echo '# the ssh shell running them, so pgrep matched that shell as well and the kill -9'; echo '# killed the recorder along with its targets -- which is why kill-record.txt ends at'; echo '# the words "--- kill -9" with nothing after it. The kill itself was correct and'; echo '# complete: press2.service is inactive and no install_wiring or buildx process is'; echo '# left. This is the projects own "audit by argv, not by string" trap, fired.'; echo; echo '--- press2.service state'; systemctl --user is-active press2; echo '--- survivors (self-proof pattern, bracketed so it cannot match this shell)'; pgrep -af '[y]ulon.install_wiring' || echo 'no install_wiring process'; pgrep -af '[b]uildx bake' || echo 'no buildx bake process'; pgrep -af '[s]ystemd-inhibit' || echo 'no systemd-inhibit left behind'; echo '--- the edge the build died at'; grep -oE '#25 [0-9.]+ \[[0-9]+/1829\] (Building|Linking)[^$]*' ~/gate0904/press2.log | tail -1; echo '--- total edges reported in press2'; grep -cE '\[[0-9]+/1829\] Building' ~/gate0904/press2.log; echo '--- last line of press2.log'; tail -1 ~/gate0904/press2.log; echo '--- install state file after the kill'; cat ~/wowserver/.yulon-install.json; echo '--- docker ps'; docker ps -a; } > ~/gate0904/kill-record.txt 2>&1; cat ~/gate0904/kill-record.txt
+1314371 bash -c { echo "=== mid-build SIGKILL of press 2 -- corrected record, written $(date -Is)"; echo '# HOW IT WAS DONE, including the mistake, because the transcript above shows it.'; echo '# The first attempt built its pid list with pgrep -f "yulon.install_wiring wow-wotlk"'; echo '# and pgrep -f "docker.*compose.*build". Both patterns appear VERBATIM in the argv of'; echo '# the ssh shell running them, so pgrep matched that shell as well and the kill -9'; echo '# killed the recorder along with its targets -- which is why kill-record.txt ends at'; echo '# the words "--- kill -9" with nothing after it. The kill itself was correct and'; echo '# complete: press2.service is inactive and no install_wiring or buildx process is'; echo '# left. This is the projects own "audit by argv, not by string" trap, fired.'; echo; echo '--- press2.service state'; systemctl --user is-active press2; echo '--- survivors (self-proof pattern, bracketed so it cannot match this shell)'; pgrep -af '[y]ulon.install_wiring' || echo 'no install_wiring process'; pgrep -af '[b]uildx bake' || echo 'no buildx bake process'; pgrep -af '[s]ystemd-inhibit' || echo 'no systemd-inhibit left behind'; echo '--- the edge the build died at'; grep -oE '#25 [0-9.]+ \[[0-9]+/1829\] (Building|Linking)[^$]*' ~/gate0904/press2.log | tail -1; echo '--- total edges reported in press2'; grep -cE '\[[0-9]+/1829\] Building' ~/gate0904/press2.log; echo '--- last line of press2.log'; tail -1 ~/gate0904/press2.log; echo '--- install state file after the kill'; cat ~/wowserver/.yulon-install.json; echo '--- docker ps'; docker ps -a; } > ~/gate0904/kill-record.txt 2>&1; cat ~/gate0904/kill-record.txt
+--- the edge the build died at
+#25 243.2 [896/1829] Building CXX object src/server/scripts/CMakeFiles/scripts.dir/Northrend/CrusadersColiseum/TrialOfTheCrusader/boss_twin_valkyr.cpp.o
+--- total edges reported in press2
+880
+--- last line of press2.log
+#25 243.2 [896/1829] Building CXX object src/server/scripts/CMakeFiles/scripts.dir/Northrend/CrusadersColiseum/TrialOfTheCrusader/boss_twin_valkyr.cpp.o
+--- install state file after the kill
+{
+  "version": 1,
+  "game_id": "wow-wotlk",
+  "family": "azerothcore",
+  "install_id": "243c46e3",
+  "completed": [
+    "clone-core",
+    "clone-modules",
+    "generate-compose"
+  ],
+  "last_error": "",
+  "updated_unix": 1788514241
+}
+--- docker ps
+CONTAINER ID   IMAGE     COMMAND   CREATED   STATUS    PORTS     NAMES
+
+--- survivors, re-checked with a pattern this shell does not contain
+NONE: no install, no builder, no inhibitor left behind
+(the block above listed only this recorder: its own argv quotes the pattern it searched for -- the same trap, twice)

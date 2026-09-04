@@ -1,0 +1,261 @@
+{
+  "networks": {
+    "ac-network": {
+      "name": "yulon-wow-wotlk-243c46e3_ac-network"
+    },
+    "default": {
+      "name": "yulon-wow-wotlk-243c46e3_default"
+    }
+  },
+  "services": {
+    "ac-authserver": {
+      "container_name": "ac-authserver",
+      "depends_on": {
+        "ac-database": {
+          "condition": "service_healthy",
+          "required": true
+        },
+        "ac-db-import": {
+          "condition": "service_completed_successfully",
+          "required": true
+        }
+      },
+      "environment": {
+        "AC_LOGIN_DATABASE_INFO": "ac-database;3306;root;password;acore_auth",
+        "AC_LOGS_DIR": "/azerothcore/env/dist/logs",
+        "AC_TEMP_DIR": "/azerothcore/env/dist/temp"
+      },
+      "image": "yulon.local/ac-wotlk-authserver:native-243c46e3",
+      "networks": {
+        "ac-network": null
+      },
+      "ports": [
+        {
+          "mode": "ingress",
+          "protocol": "tcp",
+          "published": "3724",
+          "target": 3724
+        }
+      ],
+      "restart": "unless-stopped",
+      "tty": true,
+      "volumes": [
+        {
+          "bind": {
+            "create_host_path": true
+          },
+          "source": "./env/dist/etc",
+          "target": "/azerothcore/env/dist/etc",
+          "type": "bind"
+        },
+        {
+          "bind": {
+            "create_host_path": true
+          },
+          "source": "./env/dist/logs",
+          "target": "/azerothcore/env/dist/logs",
+          "type": "bind"
+        }
+      ]
+    },
+    "ac-client-data-init": {
+      "command": [
+        "set -eu\ndata=/azerothcore/env/dist/data\nfns=/azerothcore/apps/installer/includes/functions.sh\nver=$$(sed -n 's/^[[:space:]]*local VERSION=//p' \"$$fns\" 2>/dev/null | head -1 | tr -d \"\\\"' \")\ncase \"$${ver:-}\" in\n  v[0-9]*) ;;\n  *)\n    echo \"yulon: cannot read client-data VERSION from $$fns \u2014 using upstream downloader\"\n    . \"$$fns\"\n    inst_download_client_data\n    exit $$?\n    ;;\nesac\nmkdir -p \"$$data\"\nif [ -f \"$$data/data-version\" ] && grep -qx \"INSTALLED_VERSION=$$ver\" \"$$data/data-version\"; then\n  echo \"yulon: client data $$ver already installed\"\n  exit 0\nfi\n# Version-keyed name: a partial left by an OLDER version must never be\n# resumed into a newer one \u2014 that would splice two archives together.\nzip=\"$$data/data-$$ver.zip\"\nretry_all=--retry-all-errors\ncurl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all=\necho \"yulon: downloading client data $$ver (resumable)\"\nif ! curl -L --fail --retry 30 --retry-delay 10 $$retry_all --continue-at - \\\n     -o \"$$zip\" \"https://github.com/wowgaming/client-data/releases/download/$$ver/data.zip\"; then\n  # A COMPLETE file makes the server answer 416, which --fail reports as\n  # an error. \"Already finished\" must not read as \"failed\".\n  echo \"yulon: fetch returned non-zero \u2014 testing whether the archive is complete\"\n  unzip -t \"$$zip\" >/dev/null 2>&1 || { echo \"yulon: client-data download FAILED\"; exit 1; }\nfi\n# Refuse to extract a truncated archive: a half-unzipped data dir boots\n# a silently wrong server, which every check we have would call healthy.\nunzip -t \"$$zip\" >/dev/null\necho \"yulon: extracting client data $$ver\"\nunzip -q -o \"$$zip\" -d \"$$data/\"\nrm -f \"$$zip\"\necho \"INSTALLED_VERSION=$$ver\" > \"$$data/data-version\"\necho \"yulon: client data $$ver installed\"\n"
+      ],
+      "container_name": "ac-client-data-init",
+      "entrypoint": [
+        "/bin/bash",
+        "-c"
+      ],
+      "image": "yulon.local/ac-wotlk-client-data:native-243c46e3",
+      "networks": {
+        "default": null
+      },
+      "volumes": [
+        {
+          "source": "client-data",
+          "target": "/azerothcore/env/dist/data",
+          "type": "volume",
+          "volume": {}
+        }
+      ]
+    },
+    "ac-database": {
+      "container_name": "ac-database",
+      "environment": {
+        "MYSQL_ROOT_PASSWORD": "password"
+      },
+      "healthcheck": {
+        "interval": "5s",
+        "retries": 40,
+        "test": [
+          "CMD-SHELL",
+          "/usr/bin/mysql -h ac-database --protocol=TCP --user=root --password=$$MYSQL_ROOT_PASSWORD --execute \"SHOW DATABASES;\""
+        ],
+        "timeout": "10s"
+      },
+      "image": "mysql:8.4",
+      "networks": {
+        "ac-network": null
+      },
+      "ports": [
+        {
+          "host_ip": "127.0.0.1",
+          "mode": "ingress",
+          "protocol": "tcp",
+          "published": "3306",
+          "target": 3306
+        }
+      ],
+      "restart": "unless-stopped",
+      "volumes": [
+        {
+          "source": "db-data",
+          "target": "/var/lib/mysql",
+          "type": "volume",
+          "volume": {}
+        }
+      ]
+    },
+    "ac-db-import": {
+      "container_name": "ac-db-import",
+      "depends_on": {
+        "ac-database": {
+          "condition": "service_healthy",
+          "required": true
+        }
+      },
+      "environment": {
+        "AC_CHARACTER_DATABASE_INFO": "ac-database;3306;root;password;acore_characters",
+        "AC_DATA_DIR": "/azerothcore/env/dist/data",
+        "AC_LOGIN_DATABASE_INFO": "ac-database;3306;root;password;acore_auth",
+        "AC_LOGS_DIR": "/azerothcore/env/dist/logs",
+        "AC_PLAYERBOTS_DATABASE_INFO": "ac-database;3306;root;password;acore_playerbots",
+        "AC_WORLD_DATABASE_INFO": "ac-database;3306;root;password;acore_world"
+      },
+      "image": "yulon.local/ac-wotlk-db-import:native-243c46e3",
+      "networks": {
+        "ac-network": null
+      },
+      "volumes": [
+        {
+          "bind": {
+            "create_host_path": true
+          },
+          "source": "./env/dist/etc",
+          "target": "/azerothcore/env/dist/etc",
+          "type": "bind"
+        },
+        {
+          "bind": {
+            "create_host_path": true
+          },
+          "source": "./env/dist/logs",
+          "target": "/azerothcore/env/dist/logs",
+          "type": "bind"
+        },
+        {
+          "bind": {
+            "create_host_path": true
+          },
+          "source": "./modules",
+          "target": "/azerothcore/modules",
+          "type": "bind"
+        }
+      ]
+    },
+    "ac-worldserver": {
+      "container_name": "ac-worldserver",
+      "depends_on": {
+        "ac-client-data-init": {
+          "condition": "service_completed_successfully",
+          "required": true
+        },
+        "ac-database": {
+          "condition": "service_healthy",
+          "required": true
+        },
+        "ac-db-import": {
+          "condition": "service_completed_successfully",
+          "required": true
+        }
+      },
+      "environment": {
+        "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS": "500",
+        "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS": "500",
+        "AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN": "1",
+        "AC_CHARACTER_DATABASE_INFO": "ac-database;3306;root;password;acore_characters",
+        "AC_DATA_DIR": "/azerothcore/env/dist/data",
+        "AC_LOGIN_DATABASE_INFO": "ac-database;3306;root;password;acore_auth",
+        "AC_LOGS_DIR": "/azerothcore/env/dist/logs",
+        "AC_PLAYERBOTS_DATABASE_INFO": "ac-database;3306;root;password;acore_playerbots",
+        "AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES": "1",
+        "AC_WORLD_DATABASE_INFO": "ac-database;3306;root;password;acore_world"
+      },
+      "image": "yulon.local/ac-wotlk-worldserver:native-243c46e3",
+      "networks": {
+        "ac-network": null
+      },
+      "ports": [
+        {
+          "mode": "ingress",
+          "protocol": "tcp",
+          "published": "8085",
+          "target": 8085
+        },
+        {
+          "host_ip": "127.0.0.1",
+          "mode": "ingress",
+          "protocol": "tcp",
+          "published": "7878",
+          "target": 7878
+        }
+      ],
+      "restart": "unless-stopped",
+      "stdin_open": true,
+      "stop_grace_period": "5m0s",
+      "tty": true,
+      "volumes": [
+        {
+          "bind": {
+            "create_host_path": true
+          },
+          "source": "./env/dist/etc",
+          "target": "/azerothcore/env/dist/etc",
+          "type": "bind"
+        },
+        {
+          "bind": {
+            "create_host_path": true
+          },
+          "source": "./env/dist/logs",
+          "target": "/azerothcore/env/dist/logs",
+          "type": "bind"
+        },
+        {
+          "read_only": true,
+          "source": "client-data",
+          "target": "/azerothcore/env/dist/data",
+          "type": "volume",
+          "volume": {}
+        },
+        {
+          "bind": {
+            "create_host_path": true
+          },
+          "source": "./modules",
+          "target": "/azerothcore/modules",
+          "type": "bind"
+        }
+      ]
+    }
+  },
+  "volumes": {
+    "client-data": {
+      "name": "yulon-wow-wotlk-243c46e3_client-data"
+    },
+    "db-data": {
+      "name": "yulon-wow-wotlk-243c46e3_db-data"
+    }
+  }
+}

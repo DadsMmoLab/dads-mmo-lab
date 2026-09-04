@@ -1,0 +1,45 @@
+=== as-restored state of checkpoint pre-7.2-gate-2026-09-02, captured 2026-09-04T11:19:01+02:00 before ANY change
+--- docker --version
+Docker version 29.1.3, build 29.1.3-0ubuntu3~24.04.2
+--- systemctl is-active docker
+active
+--- id -Gn
+pk adm cdrom sudo dip plugdev users lpadmin docker
+--- ls -ld ~/wowserver
+drwxrwxr-x 19 pk pk 4096 Aug 31 15:16 /home/pk/wowserver
+--- du -sh ~/wowserver
+2.3G	/home/pk/wowserver
+--- df -h ~
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda2        97G   50G   43G  55% /
+--- free -g
+               total        used        free      shared  buff/cache   available
+Mem:              19           8           2           0           9          11
+Swap:              7           0           7
+--- nproc
+15
+--- docker ps -a
+CONTAINER ID   IMAGE                                              COMMAND                  CREATED      STATUS                  PORTS                                                                   NAMES
+87d2fd9e2cd8   yulon.local/ac-wotlk-worldserver:native-243c46e3   "/usr/bin/env bash /…"   3 days ago   Up 2 days               127.0.0.1:7878->7878/tcp, 0.0.0.0:8085->8085/tcp, [::]:8085->8085/tcp   ac-worldserver
+e4bcaea0ca8c   yulon.local/ac-wotlk-authserver:native-243c46e3    "/usr/bin/env bash /…"   3 days ago   Up 2 days               0.0.0.0:3724->3724/tcp, [::]:3724->3724/tcp                             ac-authserver
+4fc4d82e285e   yulon.local/ac-wotlk-db-import:native-243c46e3     "/usr/bin/env bash /…"   3 days ago   Exited (0) 3 days ago                                                                           ac-db-import
+87a486490951   mysql:8.4                                          "docker-entrypoint.s…"   3 days ago   Up 2 days (healthy)     127.0.0.1:3306->3306/tcp, 33060/tcp                                     ac-database
+2068ac4f883f   yulon.local/ac-wotlk-client-data:native-243c46e3   "/bin/bash -c 'set -…"   3 days ago   Exited (0) 3 days ago                                                                           ac-client-data-init
+--- git HEAD of ~/wowserver
+47960183b Merge pull request #240 from mod-playerbots/test-staging
+--- install state file
+/home/pk/wowserver/acore.json
+/home/pk/wowserver/.vscode/launch.json
+/home/pk/wowserver/.vscode/settings.json
+/home/pk/wowserver/.vscode/extensions.json
+/home/pk/wowserver/.vscode/tasks.json
+/home/pk/wowserver/.yulon-install.json
+/home/pk/wowserver/.devcontainer/devcontainer.json
+{
+    "name":  "azerothcore-wotlk",
+    "version":  "17.0.0-dev",
+    "license":  "GPL2"
+}
+--- uname
+Linux yulon-ubuntu 7.0.0-30-generic #30~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Fri Aug  7 13:27:52 UTC 2 x86_64 x86_64 x86_64 GNU/Linux
+Ubuntu 24.04.4 LTS

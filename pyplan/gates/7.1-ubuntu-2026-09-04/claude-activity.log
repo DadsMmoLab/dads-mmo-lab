@@ -1,0 +1,9 @@
+2026-09-04T11:17:43+02:00 lane 7.1 gate rerun start
+2026-09-04T11:21:57+02:00 lane 7.1: stopping the 08-31 stack and moving ~/wowserver aside for a fresh install
+2026-09-04T11:23:25+02:00 lane 7.1: PRESS 1 starting (fresh install, /home/pk/wowserver)
+2026-09-04T11:24:53+02:00 lane 7.1: PRESS 2 starting (fresh install after disk reclaim; will be killed mid-build)
+2026-09-04T11:38:03+02:00 lane 7.1: SIGKILL of press 2 mid-build
+2026-09-04T11:39:30+02:00 lane 7.1: PRESS 3 -- resume after the mid-build kill
+2026-09-04T12:09:45+02:00 lane 7.1: press 3 reached ready, exit 0; collecting artifacts
+2026-09-04T12:13:18+02:00 lane 7.1: creating a gate account and running the LAN step through ControllerServices
+2026-09-04T12:22:54+02:00 lane 7.1: restarting ac-authserver so it re-reads the realmlist after the LAN step

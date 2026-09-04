@@ -1,0 +1,98 @@
+catalog entry: wow-wotlk / WoW WotLK
+services wired from ControllerServices.for_entry -- the GUI's own object
+
+=== ACCOUNT, through svc.create_account (the Accounts tile's callable)
+2026-09-04 12:13:27 INFO [yulon.controller_wow_wotlk.accounts] creating account GATE0904
+2026-09-04 12:13:28 INFO [yulon.controller_wow_wotlk.accounts] granting GM level 3 to account 101
+AccountResult: AccountResult(username='GATE0904', account_id=101, created=True, gm_level=3)
+
+=== the row that proves it (read by a different route: docker exec mysql)
+exit 0
+101	GATE0904	32	32
+mysql: [Warning] Using a password on the command line interface can be insecure.
+
+--- account_access (the GM grant)
+exit 0
+101	3	-1
+mysql: [Warning] Using a password on the command line interface can be insecure.
+
+--- realmcharacters
+exit 0
+1	101	0
+mysql: [Warning] Using a password on the command line interface can be insecure.
+
+
+=== the SAME call again -- convergence, not a second account
+2026-09-04 12:13:28 INFO [yulon.controller_wow_wotlk.accounts] account GATE0904 already exists (id 101), keeping its password
+AccountResult: AccountResult(username='GATE0904', account_id=101, created=False, gm_level=3)
+exit 0
+1
+mysql: [Warning] Using a password on the command line interface can be insecure.
+
+
+=== realm address BEFORE the LAN step
+exit 0
+172.30.55.119	172.30.55.119
+mysql: [Warning] Using a password on the command line interface can be insecure.
+
+
+=== LAN STEP: svc.network_plan('lan') (the Networking tile's plan)
+{
+  "mode": "lan",
+  "game_id": "wow-wotlk",
+  "lan_ip": "172.30.55.119",
+  "public_ip": null,
+  "ports": [
+    3724,
+    8085
+  ],
+  "firewall": "ufw",
+  "firewall_commands": [
+    [
+      "ufw",
+      "allow",
+      "3724/tcp"
+    ],
+    [
+      "ufw",
+      "allow",
+      "8085/tcp"
+    ],
+    [
+      "ufw",
+      "--force",
+      "enable"
+    ]
+  ],
+  "portproxy_commands": [],
+  "realmlist_sql": "UPDATE acore_auth.realmlist SET address='172.30.55.119', localAddress='172.30.55.119' WHERE id=1;",
+  "client_realmlist": "172.30.55.119",
+  "manual_steps": [],
+  "warnings": [],
+  "ready": true
+}
+
+=== svc.network_apply(plan) (the Networking tile's apply)
+2026-09-04 12:13:30 INFO [yulon.networking] networking lan for wow-wotlk: 4 done, 0 skipped, 0 manual
+{
+  "done": [
+    "ufw allow 3724/tcp",
+    "ufw allow 8085/tcp",
+    "ufw --force enable",
+    "realmlist \u2192 172.30.55.119"
+  ],
+  "skipped": [],
+  "restart_required": true,
+  "manual_steps": []
+}
+
+=== realm address AFTER the LAN step
+exit 0
+172.30.55.119	172.30.55.119
+mysql: [Warning] Using a password on the command line interface can be insecure.
+
+--- the whole realmlist row
+exit 0
+1	AzerothCore	172.30.55.119	172.30.55.119	8085
+mysql: [Warning] Using a password on the command line interface can be insecure.
+

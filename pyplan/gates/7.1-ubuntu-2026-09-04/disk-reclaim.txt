@@ -1,0 +1,44 @@
+=== disk reclaim by lane 7.1, 2026-09-04T11:24:32+02:00
+# Press 1 REFUSED: "41 GB free, and the install needs 48 GB" (press1.log). The checkpoint
+# is carrying the 08-31 install: its two volumes (5.34 GB), its four yulon.local
+# images (243c46e3), and 12.91 GB of BuildKit cache. All three are removed here.
+# The builder cache is pruned DELIBERATELY, not incidentally: it holds the ccache
+# mount from 08-31, and leaving it would let the ccache-recovery clause be
+# satisfied by a two-day-old cache instead of by this run. Pruning reproduces the
+# 08-31 shape exactly -- a cold first build populates ccache, the kill interrupts
+# it, and the resume recovers from what THIS run wrote.
+--- before
+TYPE            TOTAL     ACTIVE    SIZE      RECLAIMABLE
+Images          9         0         16.22GB   12.29GB (75%)
+Containers      0         0         0B        0B
+Local Volumes   2         0         5.342GB   5.342GB (100%)
+Build Cache     32        0         12.91GB   10.6GB
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda2        97G   51G   42G  56% /
+--- docker volume rm
+yulon-wow-wotlk-243c46e3_client-data
+yulon-wow-wotlk-243c46e3_db-data
+--- docker image rm (yulon.local 243c46e3 only; base images kept)
+Untagged: yulon.local/ac-wotlk-worldserver:native-243c46e3
+Deleted: sha256:5c4b72d9b6543a91977ac728af500a7a91a3119aae45a840549703bd9b3beea1
+Untagged: yulon.local/ac-wotlk-authserver:native-243c46e3
+Deleted: sha256:bd388c70163d78eb0c8907a622bc1aa20d44a0f41c646e1776862a779350e9c7
+Untagged: yulon.local/ac-wotlk-client-data:native-243c46e3
+Deleted: sha256:d45b2b2208e37a9427e18286caa149600bc187049fa814c95f777cc8a460e845
+--- docker builder prune -af
+06o2bwc7bhz56v4l84qkwa5op               	true 	82.28kB   	Less than a second ago
+wer7plzn31ifqm5x7zxfj8c0f               	true 	117.4MB   	Less than a second ago
+Total:	12.91GB
+--- after
+TYPE            TOTAL     ACTIVE    SIZE      RECLAIMABLE
+Images          5         0         1.726GB   57.89MB (3%)
+Containers      0         0         0B        0B
+Local Volumes   0         0         0B        0B
+Build Cache     0         0         0B        0B
+mariadb:11 458MB
+ubuntu:24.04 119MB
+mysql:8.4 1.12GB
+alpine/git:<none> 138MB
+busybox:1.36 6.76MB
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda2        97G   33G   60G  35% /

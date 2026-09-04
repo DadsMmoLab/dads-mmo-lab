@@ -1,0 +1,61 @@
+=== CCACHE RECOVERY on the resume (press 3), measured 2026-09-04T11:40:30+02:00
+# The clause asks whether the resume RECOVERS the finished objects from the ccache
+# mount rather than compiling them again. It does NOT skip the build: press 3
+# re-enters the build step and ninja re-issues every edge from 1. What ccache buys
+# is the wall-clock of the first N of them. The #25 column is docker BuildKit own
+# seconds-since-the-stage-started clock, so the two numbers below are directly
+# comparable between press 2 (cold ccache) and press 3 (881 objects in it).
+
+--- press 3: first edge
+#25 7.470 [1/1829] Building C object deps/SFMT/CMakeFiles/sfmt.dir/SFMT.c.o
+--- press 3: every 100th edge, with BuildKit own clock
+#25 7.581 [100/1829]
+#25 8.658 [200/1829]
+#25 11.10 [300/1829]
+#25 12.00 [400/1829]
+#25 12.68 [500/1829]
+#25 13.53 [600/1829]
+#25 15.07 [700/1829]
+#25 15.72 [800/1829]
+#25 24.17 [900/1829]
+#25 49.01 [1000/1829]
+--- press 3: the edge where the replay ends (last edge under 60s)
+awk: line 1: syntax error at or near ,
+--- press 2 for comparison: edge 100/500/896 on the cold ccache
+#25 16.81 [100/1829] Building C object deps/libmpq/CMakeFiles/mpq.dir/libmpq/common.c.o
+#25 143.2 [500/1829] Building CXX object src/server/game/CMakeFiles/game.dir/Scripting/ScriptDefines/ServerScript.cpp.o
+#25 243.2 [896/1829] Building CXX object src/server/scripts/CMakeFiles/scripts.dir/Northrend/CrusadersColiseum/TrialOfTheCrusader/boss_twin_valkyr.cpp.o
+
+--- the KNEE: per-edge BuildKit clock across edges 860-960 on the resume
+# ccache held 881 objects (ccache-stats.txt T1). The replay is flat to ~edge 880
+# and turns into real compilation right there.
+#25 16.04 [860/1829]
+#25 16.07 [865/1829]
+#25 16.10 [870/1829]
+#25 16.13 [875/1829]
+#25 16.15 [880/1829]
+#25 16.19 [885/1829]
+#25 20.04 [890/1829]
+#25 23.52 [895/1829]
+#25 24.17 [900/1829]
+#25 26.40 [905/1829]
+#25 26.75 [910/1829]
+#25 27.97 [915/1829]
+#25 29.39 [920/1829]
+#25 31.38 [925/1829]
+#25 32.77 [930/1829]
+#25 34.40 [935/1829]
+#25 35.89 [940/1829]
+#25 36.63 [945/1829]
+#25 38.15 [950/1829]
+#25 38.76 [955/1829]
+#25 39.80 [960/1829]
+#25 41.09 [965/1829]
+
+--- side by side, same edge, two presses
+edge 1 : press2(cold) #25 6.588 [1/1829] | press3(resume) #25 7.470 [1/1829]
+edge 100 : press2(cold) #25 16.81 [100/1829] | press3(resume) #25 7.581 [100/1829]
+edge 500 : press2(cold) #25 143.2 [500/1829] | press3(resume) #25 12.68 [500/1829]
+edge 800 : press2(cold) #25 220.8 [800/1829] | press3(resume) #25 15.72 [800/1829]
+edge 880 : press2(cold) #25 239.6 [880/1829] | press3(resume) #25 16.15 [880/1829]
+edge 896 : press2(cold) #25 243.2 [896/1829] | press3(resume) #25 23.63 [896/1829]

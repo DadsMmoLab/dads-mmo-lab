@@ -1,0 +1,57 @@
+=== authserver container log, clause analysis, 2026-09-04T12:10:27+02:00
+# Source: cd ~/wowserver && docker compose logs ac-authserver > gate-auth.log
+# 42 lines. This is the artifact the 08-31 run never captured: press 3 there started
+# the stack detached, so no container output was ever kept (AUDIT clause 11).
+
+--- clause: 127.0.0.1:8085 present
+grep -c "127.0.0.1:8085" : 1
+the line it matched:
+42:ac-authserver  | [0m[36mAdded realm "AzerothCore" at 127.0.0.1:8085.
+any IPv4 at all, grep -cE "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" : 1
+
+--- clause: no UPDATE. THE NAIVE COUNT IS NOT ZERO, and saying zero here would be wrong.
+grep -c "UPDATE" (case-sensitive substring) : 2
+what it matched:
+27:ac-authserver  | [0m[36m> Config: Found config value 'Updates.EnableDatabases' from environment variable 'AC_UPDATES_ENABLE_DATABASES'.
+28:ac-authserver  | [0m[33m> AUTOUPDATER: Automatic database updates are disabled for all databases in the config! This is not recommended!
+# The two hits are the substring inside 'Updates.EnableDatabases' and inside AUTOUPDATER.
+# Neither is an SQL UPDATE; the second is the opposite -- automatic DB updates are OFF.
+word-boundary SQL UPDATE, grep -cEw "UPDATE" : 0
+an actual SQL statement, grep -ciE "^.*update +[a-z_]+ +set " : 0
+case-insensitive "update" anywhere : 4
+those lines:
+1:ac-authserver  | cp: warning: behavior of -n is non-portable and may change in future; use --update=none instead
+2:ac-authserver  | cp: warning: behavior of -n is non-portable and may change in future; use --update=none instead
+27:ac-authserver  | [0m[36m> Config: Found config value 'Updates.EnableDatabases' from environment variable 'AC_UPDATES_ENABLE_DATABASES'.
+28:ac-authserver  | [0m[33m> AUTOUPDATER: Automatic database updates are disabled for all databases in the config! This is not recommended!
+
+# NOT VACUOUS: this file demonstrably contains realm/SQL-adjacent text -- the
+# Added realm line, three Updates.* config lines -- so a zero for an SQL UPDATE is a
+# statement about the server, not about an empty file. That was the audit complaint
+# (clause 12): the 08-31 zero came from press logs holding no SQL text at all.
+
+=== THE PAIR, which is stronger than either half
+gate-auth.log            captured at 'ready', before the Networking tile ran
+                         line 42: Added realm "AzerothCore" at 127.0.0.1:8085.
+gate-auth-after-lan.log  captured after the LAN step and an ac-authserver restart
+                         line 45: Added realm "AzerothCore" at 172.30.55.119:8085.
+
+Counts in the post-LAN capture: '127.0.0.1:8085' 0, '172.30.55.119:8085' 1,
+word-boundary UPDATE 0.
+
+Two things fall out of the pair that neither file settles alone:
+
+1. The clause's '127.0.0.1:8085' is a statement about the moment of capture, not
+   about the install. This build's install ALREADY advertises the LAN address by
+   the time it says ready -- press3.log line 3326: 'The realm now advertises
+   172.30.55.119, so players on other machines can reach this server'. The auth
+   log still says 127.0.0.1 there because the authserver reads the realmlist at
+   startup and had started before that write. So a gate that captures the auth
+   log at ready gets 127.0.0.1:8085, and one that captures it after a restart
+   gets the LAN address; both are correct and the clause needs to say which.
+
+2. The realm-address change reaches the client only after the authserver is
+   restarted, which is exactly what networking.apply() reported:
+   restart_required = True (account-lan.log). The pair is the receipt for that
+   flag: same server, same realmlist row, two different advertised addresses,
+   the restart in between.

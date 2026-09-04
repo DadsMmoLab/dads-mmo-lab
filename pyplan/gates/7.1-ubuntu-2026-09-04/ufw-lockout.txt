@@ -1,0 +1,76 @@
+=== DEFECT FOUND BY THIS GATE: the LAN step locks the operator out of a remote box
+=== yulon-ubuntu, 2026-09-04, found at 12:13:30 and recovered at 12:21
+
+WHAT HAPPENED, in one sentence: pressing the Networking tile's LAN step on a
+headless/remote Linux box runs 'ufw --force enable' with ufw's default-deny
+incoming policy and only the two GAME ports allowed, so every SSH session into
+that box dies and no new one can be made.
+
+THE EXACT CALL. account-lan.log records the plan and the report:
+  plan.firewall            = 'ufw'
+  plan.firewall_commands   = [['ufw','allow','3724/tcp'],
+                              ['ufw','allow','8085/tcp'],
+                              ['ufw','--force','enable']]
+  report.done              = ['ufw allow 3724/tcp', 'ufw allow 8085/tcp',
+                              'ufw --force enable', 'realmlist -> 172.30.55.119']
+  report.skipped           = []
+  report.manual_steps      = []
+Nothing warned, nothing was skipped, and no manual step mentioned SSH.
+
+WHAT IT COST. The ssh session that ran the step survived (conntrack keeps an
+established flow); the next one did not:
+    Connection closed by UNKNOWN port 65535
+    Connection timed out during banner exchange
+Recovery took the Hyper-V synthetic keyboard (Msvm_Keyboard on the host) driving
+the guest's GNOME session by hand. Msvm_Keyboard.TypeText is unusable on this
+guest -- 'sudo ufw allow 22' (17 characters) arrived as 'dddmm', the same five on
+a retry, and one-character-per-call changed nothing -- so the fix had to be typed
+as VIRTUAL KEY CODES via TypeKey, which lands every character. Ctrl+Alt+T,
+Alt+Tab and Escape had already proved the key-code path works. Screenshots of
+each step were taken with vmshot.ps1.
+
+THE PROOF, read back over the restored ssh:
+    Status: active
+    Default: deny (incoming), allow (outgoing), deny (routed)
+    To                         Action      From
+    3724/tcp                   ALLOW IN    Anywhere
+    8085/tcp                   ALLOW IN    Anywhere
+    22                         ALLOW IN    Anywhere      <-- added BY HAND at 12:21
+    3724/tcp (v6)              ALLOW IN    Anywhere (v6)
+    8085/tcp (v6)              ALLOW IN    Anywhere (v6)
+    22 (v6)                    ALLOW IN    Anywhere (v6)
+The two game rules are the LAN step's. Port 22 is in that table only because a
+human put it there from the VM console; the step did not add it and did not say
+it needed adding.
+
+WHY THIS IS NOT A LOCAL-DESKTOP-ONLY CONCERN. platform.firewall_commands()
+composes the same three commands for every ufw box, and networking.apply() runs
+them under sudo -n. The launcher's own supported story includes running the
+server on a spare machine; a user who does that over SSH loses the machine at
+the exact moment the feature is supposed to make it reachable.
+
+THE SHAPE OF A FIX is not obvious and is not proposed here as if it were: adding
+'ufw allow OpenSSH' unconditionally opens a port on a desktop that never wanted
+one. What the evidence supports is that the step must at minimum SAY what
+enabling the firewall will cut, and that plan.warnings -- which was [] here --
+is where that sentence belongs, since the plan already knows the backend is ufw
+and already knows it is about to enable it.
+
+ALSO NOTE, for whoever re-runs this gate: docker's published ports are NOT
+affected. 3724 and 8085 stayed reachable from the Hyper-V host throughout,
+because docker's iptables rules sit in FORWARD/nat and bypass ufw's INPUT chain.
+So the realm stayed up the whole time the operator was locked out.
+Status: active
+Logging: on (low)
+Default: deny (incoming), allow (outgoing), deny (routed)
+New profiles: skip
+
+To                         Action      From
+--                         ------      ----
+3724/tcp                   ALLOW IN    Anywhere                  
+8085/tcp                   ALLOW IN    Anywhere                  
+22                         ALLOW IN    Anywhere                  
+3724/tcp (v6)              ALLOW IN    Anywhere (v6)             
+8085/tcp (v6)              ALLOW IN    Anywhere (v6)             
+22 (v6)                    ALLOW IN    Anywhere (v6)             
+

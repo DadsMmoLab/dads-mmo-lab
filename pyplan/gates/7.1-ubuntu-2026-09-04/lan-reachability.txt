@@ -1,0 +1,27 @@
+=== the realm address after the LAN step, probed from OFF the box, 2026-09-04
+Run from the Hyper-V host DESKTOP-FP27AUV, source address 172.30.48.1 -- a
+different machine from the server.
+
+    PS> Test-NetConnection 172.30.55.119 -Port 3724
+        TcpTestSucceeded : True     SourceAddress : 172.30.48.1
+    PS> Test-NetConnection 172.30.55.119 -Port 8085
+        TcpTestSucceeded : True
+
+THIS IS NOT A CLIENT LOGIN and is not offered as one. yulon-ubuntu carries no
+WoW client: 'find / -maxdepth 4 -iname Wow.exe' returns nothing and ~/clients
+does not exist. The 3.3.5a client-login clause could not be exercised in this
+lane and is reported MISSING, not passed. What these two probes do establish is
+the half the 08-31 run could not claim at all -- that the address the realm now
+advertises accepts TCP from another machine on both ports -- because that run's
+realm never left loopback (its own report concedes it).
+
+--- listeners on the server box
+LISTEN 0      4096         0.0.0.0:3724       0.0.0.0:*          
+LISTEN 0      4096         0.0.0.0:22         0.0.0.0:*          
+LISTEN 0      4096         0.0.0.0:8085       0.0.0.0:*          
+LISTEN 0      4096            [::]:3724          [::]:*          
+LISTEN 0      4096            [::]:22            [::]:*          
+LISTEN 0      4096            [::]:8085          [::]:*          
+
+--- what the realm advertises, read from the DB
+1	AzerothCore	172.30.55.119	172.30.55.119	8085
