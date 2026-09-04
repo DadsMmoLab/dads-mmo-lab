@@ -1019,12 +1019,29 @@
     * our own preflight warned about this client on BOTH platforms — `the client's origin:
       realmlist.wtf sits at the root ... which is how a repack looks`, whose remedy reads "use a
       clean client of this expansion **if extraction comes up short**";
-    * the two boxes' clients have never been compared. 7.4b established the method for exactly this
-      question — a content hash of the client tree, which it used to prove TBC's client was
-      untouched — and neither side has one for 1.12.1. **That is the next measurement**, and it is
-      cheap: hash `~/clients/WoW-Client-1.12.1` on the Linux box and `C:\gate\client\WoW-Client-1.12.1`
-      on the Windows one and compare. Until it is done, "Windows extracts differently" and "the two
-      boxes hold different clients" are indistinguishable.
+  - **SETTLED 2026-09-04: THE DIFFERENCE IS THE PLATFORM.** The measurement above was taken, and
+    every variable anyone could hold has been held.
+    * **The client is identical.** All 20 files under `Data/` match byte for byte in size across
+      the two boxes, including the 1.9 GB `patch.MPQ`; and `wmo.MPQ` — the archive
+      `vmap_extractor` reads to produce `Buildings` — hashes
+      `9933d9ca23d481647880c9798dc7c225cd926f51026d148f09cd5251fc56edb7` on both. 149 files each,
+      24 under `Data/`.
+    * **The CMaNGOS source is the same commit**, `8ec338a1704e7dcb1c0213eb7ed58f9231ade40f`, read
+      out of each box's own clone rather than assumed from the catalog pin.
+    * **The differing image tags are a red herring**, and worth writing down so nobody else spends
+      time on them. `native-0baff6f3` and `native-d61e7711` differ because `image_tag()` is
+      `native-` plus `install_id()`, and `install_id()` is a hash of the install DIRECTORY PATH —
+      `/home/pk/vanilla-75` against `C:/gate/vanilla-server`. It carries nothing about source or
+      tools.
+    * **And the Linux number is not a memory**: `/home/pk/vanilla-75/data/Buildings` on m910q holds
+      **5,076 files** right now, produced from that same hash-verified client.
+
+    So: same archive, same commit, same Dockerfile, **5,076 `Buildings` on Linux and 3,913 on
+    Windows**. Whatever the cause, it is on the Windows side of the line, and 7.7 cannot tick its
+    Vanilla half until somebody knows what it is. Two candidates worth trying first, neither
+    tested: the extractor writing through the 9p mount and losing entries it does not check for,
+    and a path-length or case-collision limit in the container's view of that mount — 1,163 missing
+    of 5,076 is 23%, which is a large enough share to be a class of name rather than a stray.
   - **THE 9p FIGURE 7.7 ASKS FOR, measured 2026-09-04.** Everything a container writes into the
     server folder on Windows crosses Docker Desktop's 9p mount, and that is the whole of the
     Windows tax. Sampled once a minute into `pyplan/gates/7.7-win11-gate/ninep.csv` by
