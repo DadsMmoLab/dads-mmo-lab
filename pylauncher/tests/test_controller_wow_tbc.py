@@ -25,7 +25,7 @@ from typing import IO, BinaryIO
 
 import pytest
 
-from tests.test_maintenance import FakeMysql
+from tests.test_maintenance import FakeMysql, good_dump
 from yulon import docker
 from yulon.apply import ApplyError
 from yulon.catalog.catalog import load_catalog
@@ -626,3 +626,47 @@ def test_the_backup_engine_is_the_shared_one(tmp_path: Path) -> None:
     assert Watching.seen == ["mangos"]
     dump = report.dumps[0]
     assert wotlk_maintenance.verify_dump(dump.path, "mangos") == dump.size_bytes
+
+
+def test_a_restores_safety_dump_reports_missing_in_this_cores_spelling(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The restore path has to carry this game's core names, not AzerothCore's.
+
+    The gap this closes was found by a live run, not by a test, and the shape of
+    it is why: `backup()` was bound correctly in every per-game wrapper, so a
+    Backup button on TBC reported nothing missing. But `restore()` takes a
+    safety dump of its own before it overwrites anything, and THAT call reached
+    the shared `backup()` with no `core_databases`, so it fell back to
+    `acore_auth, acore_characters, acore_world` and announced that a healthy
+    CMaNGOS server was missing all three. Measured on m910q, 2026-09-04:
+
+        WARNING [yulon.controller_wow_wotlk.maintenance] this install has no
+        acore_auth, acore_characters, acore_world; backing up what it does
+
+    It could not be fixed at the wrapper, which is the interesting part:
+    `restore()` had no `core_databases` parameter at all, so there was nothing
+    for a per-game wrapper to bind. The names had to be threaded through
+    `restore()` and `_safety_backup()` first.
+
+    Asserted on `missing_core` reaching a log, because that warning is the whole
+    user-visible symptom: no dump is lost either way, and a person reading
+    "this install has no acore_auth" on a TBC server has been told their server
+    is broken when it is not.
+    """
+    server_dir = tmp_path
+    backup_file = server_dir / "20260904_000000_characters.sql"
+    backup_file.parent.mkdir(parents=True, exist_ok=True)
+    backup_file.write_bytes(good_dump("characters"))
+    mysql = FakeMysql(("realmd", "characters", "mangos", "logs"))
+    plan = maintenance.plan_restore(
+        backup_file, server_dir, running=lambda: [ENTRY.containers.db]
+    )
+    assert plan.refusals == (), plan.refusals
+    with caplog.at_level("WARNING"):
+        maintenance.restore(plan, mysql, confirm=plan.token, running=lambda: [ENTRY.containers.db])
+    complaints = [r.getMessage() for r in caplog.records if "this install has no" in r.getMessage()]
+    assert complaints == [], (
+        "the safety dump announced a missing core database using AzerothCore's names on a "
+        f"CMaNGOS install: {complaints}"
+    )

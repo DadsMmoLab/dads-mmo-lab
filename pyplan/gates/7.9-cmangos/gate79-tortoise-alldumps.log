@@ -1,0 +1,149 @@
+game=wow-tortoise server_dir=/home/pk/tortoise-server
+containers: world=tortoise-mangosd auth=tortoise-realmd db=tortoise-db auth_port=3724
+
+====================== baseline ======================
+status: db=True auth=True world=True
+running: {'tortoise-mangosd': True, 'tortoise-realmd': True, 'tortoise-db': True}
+
+====================== console.send_command() -- and what the attach did to the server ======================
+tortoise-mangosd before: {'pid': 19841, 'restarts': 0, 'started_at': '2026-09-04T00:04:40.079744749Z'}
+2026-09-04 02:16:02 INFO [yulon.controller_wow_wotlk.console] console → tortoise-mangosd: ['server', 'info']
+reply.command : 'server info'
+reply.prompted: True
+  | [0 ms] SQL: SELECT id FROM character_pet WHERE owner = '466'
+  | Could not open bot log file ../logs/bot_events.csv (No such file or directory). Logging to it is off for this run.
+  | [0 ms] SQL: SELECT id FROM character_pet WHERE owner = '784'
+  | [1 ms] SQL: SELECT id FROM character_pet WHERE owner = '277'
+  | [0 ms] SQL: SELECT id FROM character_pet WHERE owner = '501'
+  | [0 ms] SQL: SELECT id FROM character_pet WHERE owner = '77'
+  | [0 ms] SQL: SELECT id FROM character_pet WHERE owner = '630'
+  | [1 ms] SQL: SELECT id FROM character_pet WHERE owner = '890'
+  | [1 ms] SQL: SELECT id FROM character_pet WHERE owner = '327'
+  | [0 ms] SQL: REPLACE INTO `character_pvp_currency` (`guid`, `honor`, `conquest`, `weekly_honor`, `week_begin_day`) VALUES (802, 0, 0, 0, 20698)
+  | [0 ms] SQL: UPDATE `characters` SET `honorRankPoints` = 0.0, `honorStanding` = 0, `honorHighestRank` = 0, `honorLastWeekHK` = 0, `honorLastWeekCP` = 0.0, `honorStoredHK` = 0, `honorStoredDK` = 0 WHERE `guid` = 802
+  | [0 ms] SQL: SELECT id FROM character_pet WHERE owner = '409'
+  | [1 ms] SQL: SELECT id FROM character_pet WHERE owner = '60'
+  | [0 ms] SQL: SELECT id FROM character_pet WHERE owner = '884'
+  | [1 ms] SQL: SELECT id FROM character_pet WHERE owner = '358'
+  | [0 ms] SQL: REPLACE INTO `character_pvp_currency` (`guid`, `honor`, `conquest`, `weekly_honor`, `week_begin_day`) VALUES (5, 0, 0, 0, 20698)
+  | [0 ms] SQL: UPDATE `characters` SET `honorRankPoints` = 0.0, `honorStanding` = 0, `honorHighestRank` = 0, `honorLastWeekHK` = 0, `honorLastWeekCP` = 0.0, `honorStoredHK` = 0, `honorStoredDK` = 0 WHERE `guid` = 5
+  | [0 ms] SQL: REPLACE INTO `character_pvp_currency` (`guid`, `honor`, `conquest`, `weekly_honor`, `week_begin_day`) VALUES (507, 0, 0, 0, 20698)
+  | [0 ms] SQL: UPDATE `characters` SET `honorRankPoints` = 0.0, `honorStanding` = 0, `honorHighestRank` = 0, `honorLastWeekHK` = 0, `honorLastWeekCP` = 0.0, `honorStoredHK` = 0, `honorStoredDK` = 0 WHERE `guid` = 507
+  | [0 ms] SQL: REPLACE INTO `character_pvp_currency` (`guid`, `honor`, `conquest`, `weekly_honor`, `week_begin_day`) VALUES (600, 0, 0, 0, 20698)
+  | [0 ms] SQL: REPLACE INTO `character_pvp_currency` (`guid`, `honor`, `conquest`, `weekly_honor`, `week_begin_day`) VALUES (709, 0, 0, 0, 20698)
+  | [1 ms] SQL: UPDATE `characters` SET `honorRankPoints` = 0.0, `honorStanding` = 0, `honorHighestRank` = 0, `honorLastWeekHK` = 0, `honorLastWeekCP` = 0.0, `honorStoredHK` = 0, `honorStoredDK` = 0 WHERE `guid` = 600
+  | [1 ms] SQL: UPDATE `characters` SET `honorRankPoints` = 0.0, `honorStanding` = 0, `honorHighestRank` = 0, `honorLastWeekHK` = 0, `honorLastWeekCP` = 0.0, `honorStoredHK` = 0, `honorStoredDK` = 0 WHERE `guid` = 709
+  | [0 ms] SQL: SELECT id FROM character_pet WHERE owner = '77'
+  | [0 ms] SQL: SELECT id FROM character_pet WHERE owner = '112'
+  | [0 ms] SQL: SELECT id FROM character_pet WHERE owner = '409'
+  | Could not open bot log file ../logs/bot_events.csv (No such file or directory). Logging to it is off for this run.
+  | [0 ms] SQL: REPLACE INTO `character_pvp_currency` (`guid`, `honor`, `conquest`, `weekly_honor`, `week_begin_day`) VALUES (611, 0, 0, 0, 20698)
+  | [1 ms] SQL: UPDATE `characters` SET `honorRankPoints` = 0.0, `honorStanding` = 0, `honorHighestRank` = 0, `honorLastWeekHK` = 0, `honorLastWeekCP` = 0.0, `honorStoredHK` = 0, `honorStoredDK` = 0 WHERE `guid` = 611
+  | Could not open bot log file ../logs/bot_events.csv (No such file or directory). Logging to it is off for this run.
+  | Core revision: unknown / 1970-01-01 00:00:00 +0000 / Linux_x64 (little-endian)
+  | Players online: 0. Max online: 0.
+  | Server uptime: 11 Minutes 16 Seconds.
+  | Server Time: Fri, 04.09.2026 00:16:03
+tortoise-mangosd after:  {'pid': 19841, 'restarts': 0, 'started_at': '2026-09-04T00:04:40.079744749Z'}
+[OK] send_command('server info') answered in 3.61s and left pid/RestartCount/StartedAt unchanged (pid 19841, RestartCount 0)
+[OK] the reply carries 34 line(s) cut on this core's own prompt
+
+====================== backup() -- live, with the server running ======================
+2026-09-04 02:16:12 INFO [yulon.controller_wow_wotlk.maintenance] backed up 4 database(s) into /home/pk/tortoise-server/sql_scripts/backups: tw_char (59477288 bytes), tw_logon (108092 bytes), tw_logs (3177 bytes), tw_world (170786943 bytes)
+  dump: tw_char /home/pk/tortoise-server/sql_scripts/backups/20260904_021606_tw_char.sql 59477288 bytes
+  dump: tw_logon /home/pk/tortoise-server/sql_scripts/backups/20260904_021606_tw_logon.sql 108092 bytes
+  dump: tw_logs /home/pk/tortoise-server/sql_scripts/backups/20260904_021606_tw_logs.sql 3177 bytes
+  dump: tw_world /home/pk/tortoise-server/sql_scripts/backups/20260904_021606_tw_world.sql 170786943 bytes
+  missing_core: ()
+[OK] backup() -> 4 dump(s) (tw_char, tw_logon, tw_logs, tw_world) in /home/pk/tortoise-server/sql_scripts/backups in 6.4s, server_was_running=True
+
+====================== verify_dump() on every dump ======================
+  verify_dump(20260904_021606_tw_char.sql) -> 59477288 bytes
+  verify_dump(20260904_021606_tw_logon.sql) -> 108092 bytes
+  verify_dump(20260904_021606_tw_logs.sql) -> 3177 bytes
+  verify_dump(20260904_021606_tw_world.sql) -> 170786943 bytes
+[OK] verify_dump() passed for all 4 dump(s)
+
+====================== plan_restore() while the server is up -- it must REFUSE ======================
+2026-09-04 02:16:15 INFO [yulon.controller_wow_wotlk.maintenance] restore of 20260904_021606_tw_char.sql refused: tortoise-mangosd, tortoise-realmd are running. A restore has to happen with the game servers stopped: the worldserver keeps characters in memory and saves them back, so it would overwrite the restored data within minutes. Stop the server and try again.
+refusals: ('tortoise-mangosd, tortoise-realmd are running. A restore has to happen with the game servers stopped: the worldserver keeps characters in memory and saves them back, so it would overwrite the restored data within minutes. Stop the server and try again.',)
+[OK] plan_restore() refused while running: ('tortoise-mangosd, tortoise-realmd are running. A restore has to happen with the game servers stopped: the worldserver keeps characters in memory and saves them back, so it would overwrite the restored data within minutes. Stop the server and try again.',)
+
+====================== Controller.stop() -- the Stop button, which calls stop_staged() ======================
+2026-09-04 02:16:21 INFO [yulon.docker] stop_staged(): stopped; containers kept for a fast restart
+running after stop: {'tortoise-mangosd': False, 'tortoise-realmd': False, 'tortoise-db': False}
+[OK] stop_staged() took 6.2s and returned True; db, auth and world all down
+
+====================== Controller.start() -- the Start button, which calls start_staged() ======================
+2026-09-04 02:16:21 INFO [yulon.docker] start_staged(): `compose up -d --no-deps tortoise-db tortoise-realmd tortoise-mangosd` in /home/pk/tortoise-server
+running after start: {'tortoise-mangosd': True, 'tortoise-realmd': True, 'tortoise-db': True}
+[OK] start_staged() returned in 6.8s; all three up
+
+====================== time from start_staged() to this game's own ready marker ======================
+[OK] reached ready 111.6s after start_staged() returned
+
+====================== restore round trip: db up, world+auth down -- EVERY dump, not just the first ======================
+tortoise-mangosd
+tortoise-realmd
+
+-- tw_char (59477288 bytes)
+   refusals: ()
+   databases: ('tw_char',)  size_bytes: 59477288
+   interrupted: None
+2026-09-04 02:18:41 WARNING [yulon.controller_wow_wotlk.maintenance] this install has no acore_auth, acore_characters, acore_world; backing up what it does
+2026-09-04 02:18:43 INFO [yulon.controller_wow_wotlk.maintenance] backed up 1 database(s) into /home/pk/tortoise-server/sql_scripts/backups: tw_char (59473699 bytes)
+2026-09-04 02:18:43 WARNING [yulon.controller_wow_wotlk.maintenance] restoring tw_char from /home/pk/tortoise-server/sql_scripts/backups/20260904_021606_tw_char.sql
+2026-09-04 02:19:08 INFO [yulon.controller_wow_wotlk.maintenance] restored tw_char from /home/pk/tortoise-server/sql_scripts/backups/20260904_021606_tw_char.sql
+   restored ('tw_char',) in 29.5s (safety: ['20260904_021841_pre-restore_tw_char.sql'])
+
+-- tw_logon (108092 bytes)
+   refusals: ()
+   databases: ('tw_logon',)  size_bytes: 108092
+   interrupted: None
+2026-09-04 02:19:08 WARNING [yulon.controller_wow_wotlk.maintenance] this install has no acore_auth, acore_characters, acore_world; backing up what it does
+2026-09-04 02:19:09 INFO [yulon.controller_wow_wotlk.maintenance] backed up 1 database(s) into /home/pk/tortoise-server/sql_scripts/backups: tw_logon (108149 bytes)
+2026-09-04 02:19:09 WARNING [yulon.controller_wow_wotlk.maintenance] restoring tw_logon from /home/pk/tortoise-server/sql_scripts/backups/20260904_021606_tw_logon.sql
+2026-09-04 02:19:13 INFO [yulon.controller_wow_wotlk.maintenance] restored tw_logon from /home/pk/tortoise-server/sql_scripts/backups/20260904_021606_tw_logon.sql
+   restored ('tw_logon',) in 5.0s (safety: ['20260904_021908_pre-restore_tw_logon.sql'])
+
+-- tw_logs (3177 bytes)
+   refusals: ()
+   databases: ('tw_logs',)  size_bytes: 3177
+   interrupted: None
+2026-09-04 02:19:13 WARNING [yulon.controller_wow_wotlk.maintenance] this install has no acore_auth, acore_characters, acore_world; backing up what it does
+2026-09-04 02:19:14 INFO [yulon.controller_wow_wotlk.maintenance] backed up 1 database(s) into /home/pk/tortoise-server/sql_scripts/backups: tw_logs (3177 bytes)
+2026-09-04 02:19:14 WARNING [yulon.controller_wow_wotlk.maintenance] restoring tw_logs from /home/pk/tortoise-server/sql_scripts/backups/20260904_021606_tw_logs.sql
+2026-09-04 02:19:14 INFO [yulon.controller_wow_wotlk.maintenance] restored tw_logs from /home/pk/tortoise-server/sql_scripts/backups/20260904_021606_tw_logs.sql
+   restored ('tw_logs',) in 1.1s (safety: ['20260904_021913_pre-restore_tw_logs.sql'])
+
+-- tw_world (170786943 bytes)
+   refusals: ()
+   databases: ('tw_world',)  size_bytes: 170786943
+   interrupted: None
+2026-09-04 02:19:28 WARNING [yulon.controller_wow_wotlk.maintenance] this install has no acore_auth, acore_characters, acore_world; backing up what it does
+2026-09-04 02:19:33 INFO [yulon.controller_wow_wotlk.maintenance] backed up 1 database(s) into /home/pk/tortoise-server/sql_scripts/backups: tw_world (170786943 bytes)
+2026-09-04 02:19:33 WARNING [yulon.controller_wow_wotlk.maintenance] restoring tw_world from /home/pk/tortoise-server/sql_scripts/backups/20260904_021606_tw_world.sql
+2026-09-04 02:20:24 INFO [yulon.controller_wow_wotlk.maintenance] restored tw_world from /home/pk/tortoise-server/sql_scripts/backups/20260904_021606_tw_world.sql
+   restored ('tw_world',) in 62.6s (safety: ['20260904_021928_pre-restore_tw_world.sql'])
+[OK] restore() put back all 4 databases (tw_char, tw_logon, tw_logs, tw_world) in 98.2s total
+
+====================== start again, and confirm the restored server comes back ready ======================
+2026-09-04 02:20:24 INFO [yulon.docker] start_staged(): `compose up -d --no-deps tortoise-db tortoise-realmd tortoise-mangosd` in /home/pk/tortoise-server
+running: {'tortoise-mangosd': True, 'tortoise-realmd': True, 'tortoise-db': True}
+[OK] the restored server reached ready again in 100.0s
+
+====================== SUMMARY ======================
+OK send_command('server info') answered in 3.61s and left pid/RestartCount/StartedAt unchanged (pid 19841, RestartCount 0)
+OK the reply carries 34 line(s) cut on this core's own prompt
+OK backup() -> 4 dump(s) (tw_char, tw_logon, tw_logs, tw_world) in /home/pk/tortoise-server/sql_scripts/backups in 6.4s, server_was_running=True
+OK verify_dump() passed for all 4 dump(s)
+OK plan_restore() refused while running: ('tortoise-mangosd, tortoise-realmd are running. A restore has to happen with the game servers stopped: the worldserver keeps characters in memory and saves them back, so it would overwrite the restored data within minutes. Stop the server and try again.',)
+OK stop_staged() took 6.2s and returned True; db, auth and world all down
+OK start_staged() returned in 6.8s; all three up
+OK reached ready 111.6s after start_staged() returned
+OK restore() put back all 4 databases (tw_char, tw_logon, tw_logs, tw_world) in 98.2s total
+OK the restored server reached ready again in 100.0s
+
+TIMES {"console_seconds": 3.606524069000443, "backup_seconds": 6.408412363000025, "stop_staged_seconds": 6.1849356519996945, "start_staged_seconds": 6.781096977999368, "ready_seconds": 111.61837015099991, "restore_seconds": 98.20947017200069, "ready_after_restore_seconds": 99.9878084560005}
+
+10 passed, 0 failed

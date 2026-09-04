@@ -952,6 +952,7 @@ def restore(
     *,
     confirm: str,
     spec: docker.ContainerSpec = docker_ctl.SPEC,
+    core_databases: Sequence[str] = CORE_DATABASES,
     running: RunningNames | None = None,
     wsl_distro: str | None = None,
     now: datetime | None = None,
@@ -1024,7 +1025,14 @@ def restore(
         )
     kept = _usable_copies(earlier)
     safety = _safety_backup(
-        plan, mysql, kept, spec=spec, running=running, wsl_distro=wsl_distro, now=now
+        plan,
+        mysql,
+        kept,
+        spec=spec,
+        core_databases=core_databases,
+        running=running,
+        wsl_distro=wsl_distro,
+        now=now,
     )
     unresolved = _still_unresolved(earlier, plan, kept)
 
@@ -1134,6 +1142,7 @@ def _safety_backup(
     kept: dict[str, Path],
     *,
     spec: docker.ContainerSpec,
+    core_databases: Sequence[str],
     running: RunningNames | None,
     wsl_distro: str | None,
     now: datetime | None,
@@ -1176,6 +1185,16 @@ def _safety_backup(
             only=to_dump,
             label="pre-restore",
             spec=spec,
+            # THREADED, and it was not until 2026-09-04. Without it this one
+            # call fell back to AzerothCore's `CORE_DATABASES` default, so a
+            # restore on any CMaNGOS server announced "this install has no
+            # acore_auth, acore_characters, acore_world" while dumping a
+            # perfectly healthy `characters`. It is the only call of `backup()`
+            # in this package that omitted it, and it could not be fixed at the
+            # per-game wrapper, because `restore()` had no such parameter for a
+            # wrapper to bind -- which is why the fix runs three functions deep
+            # rather than one line wide.
+            core_databases=core_databases,
             running=running,
             wsl_distro=wsl_distro,
             now=now,

@@ -178,6 +178,7 @@ def restore(
         mysql,
         confirm=confirm,
         spec=docker_ctl.SPEC,
+        core_databases=CORE_DATABASES,
         running=running,
         wsl_distro=wsl_distro,
         now=now,
