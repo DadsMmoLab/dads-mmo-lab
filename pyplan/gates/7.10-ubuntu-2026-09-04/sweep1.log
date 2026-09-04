@@ -1,0 +1,27 @@
+=== sweep_driver.py ===
+started (local): 2026-09-04T12:38:51+02:00
+command: /home/pk/gate0904/venv/bin/python /home/pk/gate710/drivers/sweep_driver.py
+---
+
+==================== Loading catalog entry + building ControllerServices.for_wotlk (real GUI wiring) ====================
+entry: wow-wotlk WoW WotLK
+services built OK: ControllerServices(controller=<yulon.controller.Controller object at 0x7470b67914c0>, logs_source=<function _assemble.<locals>.<lambda> at 0x7470b67a1f80>, send_console=<function _for_wotlk.<locals>.<lambda> at 0x7470b67a1c60>, store=<yulon.manifest_store.ManifestStore object at 0x7470b67914f0>, applier=<yulon.apply.Applier object at 0x7470b6791490>, network_plan=<function _assemble.<locals>.<lambda> at 0x7470b67a2020>, network_apply=<function _assemble.<locals>.<lambda> at 0x7470b67a20c0>, create_account=<function _for_wotlk.<locals>.<lambda> at 0x7470b67a1d00>, backup=<function _for_wotlk.<locals>.<lambda> at 0x7470b67a1da0>, backups_dir=<function _assemble.<locals>.<lambda> at 0x7470b67a2160>, plan_restore=<function _for_wotlk.<locals>.<lambda> at 0x7470b67a1e40>, restore=<function _for_wotlk.<locals>.<lambda> at 0x7470b67a1ee0>, interrupted_restore=<function _assemble.<locals>.<lambda> at 0x7470b67a2200>, forget_interrupted=<function _assemble.<locals>.<lambda> at 0x7470b67a22a0>)
+
+==================== Controller status() ====================
+status: InstallStatus(db=True, auth=True, world=True)
+[OK] status() -> db=True auth=True world=True
+
+==================== Controller import_state() ====================
+import_state: ImportState(state='populated', detail='101 rows in acore_auth.account, 1000 rows in acore_characters.characters', complete=True)
+[OK] import_state() -> ImportState(state='populated', detail='101 rows in acore_auth.account, 1000 rows in acore_characters.characters', complete=True)
+
+==================== Controller port_conflicts() ====================
+port_conflicts: []
+[OK] port_conflicts() -> []
+
+
+=== SUMMARY SO FAR ===
+OK status() -> db=True auth=True world=True
+OK import_state() -> ImportState(state='populated', detail='101 rows in acore_auth.account, 1000 rows in acore_characters.characters', complete=True)
+OK port_conflicts() -> []
+--- exit code: 0   elapsed: 1s   finished: 2026-09-04T12:38:52+02:00

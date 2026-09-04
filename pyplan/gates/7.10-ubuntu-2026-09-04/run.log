@@ -1,0 +1,10 @@
+=== 7.10 sweep started 2026-09-04T12:38:50+02:00 ===
+code under test : /home/pk/gate0904/checkout at 81d7311e803745c1659f27aea6610e663aadd891
+interpreter     : /home/pk/gate0904/venv/bin/python  (Python 3.12.3)
+server dir      : /home/pk/wowserver
+drivers         : /home/pk/gate710/drivers (2026-08-28 originals, two path constants changed - see drivers.diff)
+sweep_driver.py exit 0  1s
+sweep_driver2.py exit 134  8s
+sweep_driver3.py exit 0  75s
+sweep_driver4.py exit 0  2s
+=== 7.10 sweep finished 2026-09-04T12:43:18+02:00 ===

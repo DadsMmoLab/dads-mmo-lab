@@ -1,0 +1,40 @@
+=== sweep_driver.py ===
+13c13
+< sys.path.insert(0, str(Path.home() / "yulon-run" / "pylauncher"))
+---
+> sys.path.insert(0, str(Path.home() / "gate0904" / "checkout" / "pylauncher"))
+15c15
+< SERVER_DIR = Path.home() / "wow-server-playerbots"
+---
+> SERVER_DIR = Path.home() / "wowserver"
+=== sweep_driver2.py ===
+11c11
+< sys.path.insert(0, str(Path.home() / "yulon-run" / "pylauncher"))
+---
+> sys.path.insert(0, str(Path.home() / "gate0904" / "checkout" / "pylauncher"))
+13c13
+< SERVER_DIR = Path.home() / "wow-server-playerbots"
+---
+> SERVER_DIR = Path.home() / "wowserver"
+=== sweep_driver3.py ===
+15c15
+< sys.path.insert(0, str(Path.home() / "yulon-run" / "pylauncher"))
+---
+> sys.path.insert(0, str(Path.home() / "gate0904" / "checkout" / "pylauncher"))
+17c17
+< SERVER_DIR = Path.home() / "wow-server-playerbots"
+---
+> SERVER_DIR = Path.home() / "wowserver"
+=== sweep_driver4.py ===
+5c5
+< sys.path.insert(0, str(Path.home() / "yulon-run" / "pylauncher"))
+---
+> sys.path.insert(0, str(Path.home() / "gate0904" / "checkout" / "pylauncher"))
+7c7
+< SERVER_DIR = Path.home() / "wow-server-playerbots"
+---
+> SERVER_DIR = Path.home() / "wowserver"
+54c54
+<     fake_client = Path.home() / "yulon-run" / "sweep_fake_client"
+---
+>     fake_client = Path.home() / "gate0904" / "sweep_fake_client"
