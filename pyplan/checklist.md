@@ -853,6 +853,38 @@
     after the fact. **The 428 MB the removal reclaimed was read at the time and cannot be
     re-measured** now that the volumes are deleted; it is recorded as reported, not as re-verified.
 - [ ] 7.7 Native Windows, all four — WotLK first (closes the 6.3 `ac-db-import` blocker), then TBC, Vanilla, Tortoise from **`yulon-win11-gate`**'s clean checkpoint (this line said `yulon-win11`, which is the working box and has carried an install since 2026-09-03; the clean-checkpoint box is the `-gate` one); 9p extract/mmaps throughput recorded; `platforms` widened per entry
+  - **A WotLK server is ALREADY installed and running on `yulon-win11-gate`, and its schemas match
+    every other platform byte for byte** (found 2026-09-04, not by a fresh run). `C:\gate\wotlk-server`,
+    all three containers up, `ac-db-import` **Exited (0)** and `ac-client-data-init` Exited (0) —
+    which is the 6.3 blocker cleared on native Windows. Schemas: `acore_auth` **22**,
+    `acore_characters` **111**, `acore_world` **315**, `acore_playerbots` **30**, identical to the
+    Ubuntu, Fedora and macOS records.
+    **What is missing is its transcript, and that is why this does not tick the WotLK half.** The
+    box's own evidence folder (`pyplan/gates/7.7-win11-gate/`) turns out to record a FAILED attempt
+    — `20-install.exitcode` is **1**, and `20-install.log` ends with the Docker Desktop engine
+    never answering after four minutes of retries. The install that is actually running there was
+    made afterwards and nothing captured it. Worth keeping precisely because the filename says
+    "install" and the contents say the opposite.
+  - **The first thing 7.7 hits is its own `platforms` line, and it is a chicken-and-egg** (measured
+    2026-09-04). A Vanilla install on `yulon-win11-gate` refuses before preflight:
+    `WoW Vanilla cannot be installed on Windows yet: its installer needs Linux. Nothing was
+    started.` That is `Install.supports()` reading `platforms: ["linux"]`, which `catalog.json`
+    still carries for all three CMaNGOS entries. So "platforms widened per entry" is not a step
+    that happens after the installs — it is a step that has to happen before one can be attempted
+    at all, and the widening is the thing the run is supposed to justify.
+    **Resolved for the gate by widening the catalog ON THAT BOX ONLY**, never in the repo: the
+    three entries there now read `["linux", "windows"]`, the engine accepts, and preflight passes
+    with two warnings (55 GB free against the 60 GB comfort line; the same repack-shaped client
+    warning Linux gives). Whoever ticks this line commits the widening on the strength of the run,
+    not ahead of it.
+  - **Windows Vanilla, started 2026-09-04 04:20** into `C:\gate\vanilla-server` against the 5.14 GB
+    1.12.1 client at `C:\gate\client`. Numbers already in hand from setting it up, since 7.7 asks
+    for throughput: the client zip came down from `wow.baerthe.com` at about **13 MB/s** (5.33 GB,
+    and its size matches the server's ETag exactly), and unpacking it needed `tar -xf` rather than
+    `Expand-Archive` — **91 MB/s against under 1 MB/s**, a 100-fold difference on the same file and
+    the same box. Anyone scripting a Windows gate should not use `Expand-Archive` on a client.
+    Docker's VM there has **11.7 GB and builds with 2 jobs**. The 9p extract/mmaps figures this
+    line asks for come later in that run.
 - [ ] 7.8 macOS, all four — **[blocked]** on hardware
 - [x] 7.9 Controllers — `controller_wow_tbc/`, `controller_wow_vanilla/`, `controller_wow_tortoise/` mirroring `controller_wow_wotlk/`; `mysql` → `db.client` in `apply.py`/`maintenance.py`; CMaNGOS-family account creation (was 7.1–7.3 before the scope change; still owed, now after install)
   - **TICKED 2026-09-04. The three unmeasured criteria were driven against all three live CMaNGOS
