@@ -612,8 +612,71 @@
       `[139, 134]` and is checked before the text.
     - **The line stays open on its own terms**: the recipe is now reachable and unit-tested, and
       it has still never fired on a live crash, because no live crash can be produced here.
-  - **NOT ticked, on two further counts.** The line requires a **forced vmap retry**, which no run
-    has triggered. And the line
+  - **THE FORCED RETRY WAS RUN 2026-09-04 on `m910q`, it FIRED, and then it could not succeed.**
+    Evidence: `pyplan/gates/7.5-m910q/vmap75-full.log` (7,876 lines), driven by
+    `pyplan/gates/force-vmap-retry.py` against the real engine, real containers and the real
+    1.12.1 client. A full `wow-vanilla` install ran from an empty folder; the harness replaced
+    only the STATUS of the first `vmap extract`, with 139 and an empty tail, which is exactly
+    what `docker.run_container` hands back for a signal-killed PID 1.
+
+    **The recipe is reachable, which is what the line asked for.** The four lines, in order:
+
+    ```
+    shipped recipe: statuses=(139,) tools=('vmap extract', 'vmap assemble')
+    vmap extract: running /opt/mangos/bin/tools/vmap_extractor -d /client/Data
+    [harness] reporting 139 for /opt/mangos/bin/tools/vmap_extractor
+    vmap extract crashed the way the retry recipe expects; running vmap extract, vmap assemble again once
+    vmap extract: retrying /opt/mangos/bin/tools/vmap_extractor -d /client/Data
+    ```
+
+    `when_returncode_in` works: a status with no log text behind it was matched, which is the
+    whole of what bug §37 added it for, and no run had ever put it to the question.
+
+    **And then the retry died on its first breath:**
+
+    ```
+    Your output directory seems to be polluted, please use an empty directory!
+    install failed: vmap extract failed (exit 1), and that was already the one retry the
+    plan's recipe asks for.
+    ```
+
+    **`vmap_extractor` refuses to start unless its output directory is EMPTY, and nothing empties
+    it between the two attempts.** `make_out_dirs()` creates the folders a tool writes into and
+    has never removed anything — its docstring is explicit that "creating a folder cannot make a
+    tool look finished", which was the right property for the bug it was written for and is the
+    wrong one here. `run_mmaps` is the contrast: it WIPES `mmaps/` before it runs, which is
+    precisely the step `vmap extract` lacks.
+
+    **So the one retry the recipe exists for cannot survive the crash it names.** At the moment
+    of the refusal `data/Buildings` held **5,076 files** — the shipped Vanilla count — and the
+    log shows the tool writing them one at a time, thousands of `Extracting World\wmo\…` lines.
+    A crash at any point after the first file leaves a directory the tool calls polluted, so the
+    only crash this recipe could recover from is one that happened before the tool wrote anything.
+
+    **Stated against itself, because the harness is not a real crash.** The injected 139 arrived
+    AFTER the first attempt had finished its work, so the pollution observed here is total where
+    a real crash's would be partial. That difference does not rescue the recipe: the tool's own
+    sentence asks for an empty directory, not a complete one. What has NOT been observed is a
+    real mid-extract crash, and nobody has made a CMaNGOS extractor segfault on this client — §37
+    says nobody should expect to.
+
+    **The fix is not obvious and is deliberately not applied here.** Clearing the re-run tools'
+    output before a retry is what the tool's message asks for, and it is also a change that
+    DELETES a user's extracted data on a path that fires automatically. The recipe re-runs
+    `vmap extract` AND `vmap assemble`, so a crash in the assembler would clear a perfectly good
+    `Buildings/` and spend the whole extraction again. That trade wants the owner's eye rather
+    than an unattended commit.
+
+  - **The client this ran against is flagged by our own preflight**, recorded because it bears on
+    every count above: `[warn] the client's origin: realmlist.wtf sits at the root of
+    /home/pk/clients/WoW-Client-1.12.1 and there is no locale folder, which is how a repack
+    looks`. The extraction still produced the shipped counts, so nothing came up short.
+
+  - **NOT ticked, on two further counts — and the first has MOVED rather than closed.** The line
+    requires a **forced vmap retry**. One was triggered on 2026-09-04 (above), so "no run has
+    triggered it", which this bullet said until then, is no longer why the box is open. It is open
+    because the retry that fired could not complete: the recipe is proven reachable and proven
+    unable to recover. And the line
     says **"the change set contains no Python"**: it does not. Reaching a running Vanilla needed
     `make_out_dirs()` in `extract.py` and the HTTP/1.1 line in all three Dockerfile templates.
     That is not a failure of the run; it is the line's premise being wrong, and the premise is what
