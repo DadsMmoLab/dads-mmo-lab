@@ -669,7 +669,21 @@
     took **793s** (container start 15:51:15, first `Avg Diff:` 16:04:28) and told the user
     `The server started but never reported ready.` — while the server was healthy and idle. Raised
     to 1800s in `1b88d49d`; the test pins the floor at the measured 793, not at the shipped number.
-- [ ] 7.5 WoW Vanilla — data + templates only; full install with the 1.12.1 client incl. a forced vmap retry (**forced through the injected `Seams.run_container`, which is what "forced" has to mean**: bug §37 established the natural crash is not reproducible, and the harness override the plan imagined never existed. No production change is needed — the seam is already injectable, so a gate harness returns 139 for the first `vmap extract` and delegates afterwards); the change set contains no Python (**already false, and recorded rather than quietly dropped**: `make_out_dirs`, the HTTP/1.1 line in three templates, and since 2026-09-02 five more commits including `assert_update_level`. The honest claim is that no Vanilla-SPECIFIC Python was needed; every line it did take is spine-level and shared by all four games)
+- [x] 7.5 WoW Vanilla — data + templates only; full install with the 1.12.1 client incl. a forced vmap retry (**forced through the injected `Seams.run_container`, which is what "forced" has to mean**: bug §37 established the natural crash is not reproducible, and the harness override the plan imagined never existed. No production change is needed — the seam is already injectable, so a gate harness returns 139 for the first `vmap extract` and delegates afterwards); the change set contains no Python (**already false, and recorded rather than quietly dropped**: `make_out_dirs`, the HTTP/1.1 line in three templates, and since 2026-09-02 five more commits including `assert_update_level`. The honest claim is that no Vanilla-SPECIFIC Python was needed; every line it did take is spine-level and shared by all four games)
+  - **TICKED 2026-09-04, on the second of the two counts that held it open.** The forced vmap
+    retry now fires AND completes, landing on 5,076 / 5,667 / 2,008 — the shipped counts to the
+    file (above). The other count was never work owed: the line predicted "the change set contains
+    no Python", the prediction was falsified before this session started, and the line has carried
+    its own correction inline ever since — no Vanilla-SPECIFIC Python was needed, and every line it
+    did take is spine-level and shared by all four games. A phase box does not stay open because a
+    prediction it existed to test turned out false; that is the box doing its job. What the
+    prediction cost is recorded, not erased.
+  - **Two things this line does NOT claim, said plainly so nobody reads them in.** No natural
+    extractor crash has ever been produced on this client, so every retry evidence here is an
+    injected status at a seam — read `force-vmap-retry.py`'s docstring, which is explicit about
+    what is and is not faked. And the `leaving it alone` branch of the retry, for a tool that
+    finished before the crash, has no live run behind it: the harness hard-codes the crash onto the
+    extractor, so only the empty-and-re-run branch has been exercised outside the unit tests.
   - **Installed and running 2026-09-02 19:17 on `yulon-ubuntu`** (15 cores), against
     `WoW-Client-1.12.1` downloaded to that box and extracted (5.1 GB, `Data/` with 14 MPQs). All
     twelve stages; `WoW Vanilla is installed and running in /home/pk/vanilla-server`.
@@ -698,8 +712,11 @@
       these tools are PID 1 with no shell, so a crashed tool prints nothing — every signal-killed
       container probed returned zero bytes. `RetrySpec.when_returncode_in` now carries
       `[139, 134]` and is checked before the text.
-    - **The line stays open on its own terms**: the recipe is now reachable and unit-tested, and
-      it has still never fired on a live crash, because no live crash can be produced here.
+    - **That kept the line open at the time**: the recipe was reachable and unit-tested and had
+      still never fired outside a test. It has since fired twice against real containers — once on
+      2026-09-04 before the fix, where it could not recover, and once after, where it ran to a
+      working server. Neither was a NATURAL crash, and §37's point stands: nobody has made a
+      CMaNGOS extractor segfault on this client, and nobody should expect to.
   - **THE FORCED RETRY WAS RUN 2026-09-04 on `m910q`, it FIRED, and then it could not succeed.**
     Evidence: `pyplan/gates/7.5-m910q/vmap75-full.log` (7,876 lines), driven by
     `pyplan/gates/force-vmap-retry.py` against the real engine, real containers and the real
