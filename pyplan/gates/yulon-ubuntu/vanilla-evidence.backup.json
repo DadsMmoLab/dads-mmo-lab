@@ -1,0 +1,24 @@
+{
+  "plan_hash": "ee99c17378b82ac8",
+  "client_path": "/home/pk/clients/WoW-Client-1.12.1",
+  "required_file_size": null,
+  "required_file_mtime": null,
+  "tools": [
+    {
+      "name": "dbc and maps",
+      "argv_hash": "ec258f299b1abbbd",
+      "finished_unix": 1788438186
+    },
+    {
+      "name": "vmap extract",
+      "argv_hash": "d47b70e0870c96b3",
+      "finished_unix": 1788438227
+    },
+    {
+      "name": "vmap assemble",
+      "argv_hash": "6afb2350d1f1a19f",
+      "finished_unix": 1788438235
+    }
+  ],
+  "client_facts_complete": true
+}
