@@ -979,6 +979,52 @@
     the same box. Anyone scripting a Windows gate should not use `Expand-Archive` on a client.
     Docker's VM there has **11.7 GB and builds with 2 jobs**; the compile took **68 minutes**
     (18:01 clone start → 19:22 extract start, box-local Pacific stamps).
+  - **WoW VANILLA IS INSTALLED AND RUNNING ON NATIVE WINDOWS, 2026-09-04.** All twelve stages, from
+    an empty folder, ending `WoW Vanilla is installed and running in C:\gate\vanilla-server`. Three
+    containers up; schemas `mangos` 207, `characters` 72, `realmd` 13, `logs` 3. Transcript:
+    `pyplan/gates/7.7-win11-gate/vanilla77.log` (27,488 lines), throughput
+    `ninep.csv`. **This is the first CMaNGOS install on Windows.**
+
+    | stage | box-local (PST) | elapsed |
+    |---|---|---|
+    | clone-sources → build | 18:01:02 → 19:22:21 | **1h21m** |
+    | extract (`ad`, `vmap extract`, `vmap assemble`) | 19:22:21 → 21:48:52 | **2h27m** |
+    | mmaps | 21:48:52 → 23:05:58 | **1h17m** |
+    | conf + start-db | 23:05:58 → 23:11:02 | 5m |
+    | import | 23:11:02 → 23:12:31 | **1m29s** |
+    | up → ready | 23:12:31 → 23:37:24 | 25m |
+    | **total** | | **5h36m** |
+
+    Read that table against the 9p figures above and the shape is unmistakable: **extract and mmaps
+    are 3h44m of the 5h36m**, and they are the two stages that write thousands of files through the
+    bind mount. The import, which writes one big stream into a Docker volume rather than the mount,
+    took **89 seconds**.
+
+  - **THREE OF THE FIVE EXTRACTION COUNTS DIFFER FROM LINUX, AND THE SERVER CAME UP ANYWAY.**
+    This is the open question 7.7 must answer before its Windows half is ticked.
+
+    | | Linux (7.5) | Windows | |
+    |---|---|---|---|
+    | dbc | 158 | 158 | same |
+    | maps | 2429 | 2429 | same |
+    | Buildings | 5076 | **3913** | 1,163 fewer |
+    | vmaps | 5667 | **6077** | 410 more |
+    | mmaps | 2008 | **2009** | one more |
+
+    The two `ad` outputs match exactly. Everything downstream of `vmap_extractor` does not, and the
+    `mmaps` figure is off by exactly one, which is the kind of difference that usually means a
+    boundary rather than a fault. **No cause is established here and none should be guessed at.**
+    What is worth writing down:
+    * the server reached `ready` and is serving, so whatever the difference is, it is not fatal;
+    * our own preflight warned about this client on BOTH platforms — `the client's origin:
+      realmlist.wtf sits at the root ... which is how a repack looks`, whose remedy reads "use a
+      clean client of this expansion **if extraction comes up short**";
+    * the two boxes' clients have never been compared. 7.4b established the method for exactly this
+      question — a content hash of the client tree, which it used to prove TBC's client was
+      untouched — and neither side has one for 1.12.1. **That is the next measurement**, and it is
+      cheap: hash `~/clients/WoW-Client-1.12.1` on the Linux box and `C:\gate\client\WoW-Client-1.12.1`
+      on the Windows one and compare. Until it is done, "Windows extracts differently" and "the two
+      boxes hold different clients" are indistinguishable.
   - **THE 9p FIGURE 7.7 ASKS FOR, measured 2026-09-04.** Everything a container writes into the
     server folder on Windows crosses Docker Desktop's 9p mount, and that is the whole of the
     Windows tax. Sampled once a minute into `pyplan/gates/7.7-win11-gate/ninep.csv` by
