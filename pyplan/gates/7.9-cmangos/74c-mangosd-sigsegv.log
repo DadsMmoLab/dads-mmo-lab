@@ -1,0 +1,25 @@
+Avg Diff: 50. Sessions online: 0.
+Max Diff: 1594.
+Player::AddCooldown> Spell(20765) try to add and already existing cooldown 0?
+Avg Diff: 50. Sessions online: 0.
+Max Diff: 1594.
+Avg Diff: 50. Sessions online: 0.
+Max Diff: 1594.
+SQL: START TRANSACTION
+SQL ERROR: Lost connection to MySQL server during query
+SQL: cannot execute 'DELETE FROM characters WHERE guid = ?'
+SQL ERROR: Lost connection to MySQL server during query
+SQL: ROLLBACK
+SQL ERROR: Lost connection to MySQL server during query
+SQL: START TRANSACTION
+SQL ERROR: Lost connection to MySQL server during query
+SQL: cannot execute 'DELETE FROM characters WHERE guid = ?'
+SQL ERROR: Lost connection to MySQL server during query
+SQL: ROLLBACK
+SQL ERROR: Lost connection to MySQL server during query
+SQL: mysql_stmt_prepare() failed for 'UPDATE characters SET online = 0 WHERE guid = ?'
+SQL ERROR: Lost connection to MySQL server during query
+Critical Error: A condition which must never be false was found to be false. Server was shut down to protect data integrity.
+If this error is occurring frequently, please recompile the software in debug mode to get more details.
+
+GetStmt(): false && "Unable to prepare SQL statement"

@@ -33,8 +33,17 @@ three signatures genuinely differ: TBC takes neither `realm_host` nor
 to invent arguments for two of the three, so the dispatch is explicit.
 
 THE RESTORE IS A ROUND TRIP, deliberately. It backs up the CURRENT databases and
-restores THAT dump back over them, so the server ends holding exactly what it
+restores THOSE dumps back over them, so the server ends holding exactly what it
 held before. There is no separate "known good" state to lose.
+
+AND IT RESTORES EVERY DUMP, which the first version of this script did not. It
+restored `report.dumps[0]`, and because `backup()` writes one file per database
+in sorted order, that is always the alphabetically first one -- `characters`.
+The world database, by far the largest and the one anybody actually restores a
+server for, was backed up and byte-verified and then never handed to `restore()`
+at all. `plan_restore()` genuinely does take one file at a time, so covering
+them all means a loop; that is what a person restoring a whole server would do,
+and it is what this now does. Found by a review of the first run, not by the run.
 
 RUN IT:
     python gate-79-controller-surface.py <game-id> <server-dir>
@@ -180,13 +189,22 @@ def main() -> int:
         for dump in report.dumps:
             print(f"  dump: {dump.database} {dump.path} {dump.size_bytes} bytes", flush=True)
         print(f"  missing_core: {report.missing_core}", flush=True)
-        ok(
-            f"backup() -> {len(report.dumps)} dump(s) ({', '.join(report.databases)}) in "
-            f"{report.directory} in {TIMES['backup_seconds']:.1f}s, "
-            f"server_was_running={report.server_was_running}"
-        )
+        # Either/or, not both. The first draft called `ok()` unconditionally and
+        # THEN `fail()` on `missing_core`, so a backup that had lost a core
+        # database would have printed a pass line and a failure line for the
+        # same operation -- and a reader scanning for `[OK]` would have seen the
+        # pass sitting next to the failure it contradicts.
         if report.missing_core:
-            fail(f"the server was missing core databases: {report.missing_core}")
+            fail(
+                f"backup() ran but the server was missing core databases: {report.missing_core}; "
+                f"it wrote {len(report.dumps)} dump(s) ({', '.join(report.databases)})"
+            )
+        else:
+            ok(
+                f"backup() -> {len(report.dumps)} dump(s) ({', '.join(report.databases)}) in "
+                f"{report.directory} in {TIMES['backup_seconds']:.1f}s, "
+                f"server_was_running={report.server_was_running}"
+            )
     except Exception as exc:  # noqa: BLE001
         fail("backup()", exc)
 
@@ -268,26 +286,54 @@ def main() -> int:
         fail("wait_server_ready()", exc)
 
     # ------------------------------------- 8. the real restore round trip
-    section("restore round trip: db up, world+auth down")
+    section("restore round trip: db up, world+auth down -- EVERY dump, not just the first")
     try:
-        if pick is None:
-            raise RuntimeError("no dump to restore")
+        if report is None or not report.dumps:
+            raise RuntimeError("no dumps to restore")
+        # `docker stop`, NOT `Controller.stop()`, and NOT the database: a restore
+        # needs the db container up and the two servers down, which is a state
+        # the Stop button does not have. The order matters and is why this is
+        # spelled out rather than left to a bare `docker stop` of all three --
+        # see the note this gate produced about a worldserver that segfaults
+        # when its database disappears underneath it.
         subprocess.run(["docker", "stop", world, auth], check=True)
         time.sleep(3)
-        plan = services.plan_restore(pick)
-        print("refusals now:", plan.refusals, flush=True)
-        print(f"databases: {plan.databases}  size_bytes: {plan.size_bytes}", flush=True)
-        print(f"interrupted: {plan.interrupted}", flush=True)
-        if plan.refusals:
-            fail(f"plan_restore() still refused with world+auth down: {plan.refusals}")
-        else:
+        # EVERY dump. The first draft restored `report.dumps[0]` alone, which is
+        # always the alphabetically-first database, so the world database -- by
+        # far the largest and the one a restore exists for -- was backed up and
+        # verified but its restore path was never run. `plan_restore()` really
+        # does take one file at a time, so the loop is the honest way to cover
+        # them: it is what a user restoring a whole server would press.
+        TIMES["restore_seconds"] = 0.0
+        restored_names: list[str] = []
+        for dump in report.dumps:
+            plan = services.plan_restore(dump.path)
+            print(f"\n-- {dump.database} ({dump.size_bytes} bytes)", flush=True)
+            print("   refusals:", plan.refusals, flush=True)
+            print(f"   databases: {plan.databases}  size_bytes: {plan.size_bytes}", flush=True)
+            print(f"   interrupted: {plan.interrupted}", flush=True)
+            if plan.refusals:
+                fail(f"plan_restore({dump.database}) refused with world+auth down: {plan.refusals}")
+                continue
             t0 = time.monotonic()
             restored = services.restore(plan)
-            TIMES["restore_seconds"] = time.monotonic() - t0
+            took = time.monotonic() - t0
+            TIMES["restore_seconds"] += took
+            restored_names.extend(restored.databases)
+            print(
+                f"   restored {restored.databases} in {took:.1f}s "
+                f"(safety: {[p.name for p in restored.safety_backup]})",
+                flush=True,
+            )
+        if len(restored_names) == len(report.dumps):
             ok(
-                f"restore() put back {restored.databases} from {restored.backup.name} in "
-                f"{TIMES['restore_seconds']:.1f}s (safety backup: "
-                f"{[p.name for p in restored.safety_backup]})"
+                f"restore() put back all {len(restored_names)} databases "
+                f"({', '.join(restored_names)}) in {TIMES['restore_seconds']:.1f}s total"
+            )
+        else:
+            fail(
+                f"restore() put back {len(restored_names)} of {len(report.dumps)} databases: "
+                f"{restored_names}"
             )
     except Exception as exc:  # noqa: BLE001
         fail("restore()", exc)
