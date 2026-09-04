@@ -42,3 +42,8 @@ launcher/.svelte-kit/
 # `git log --all -- 'pylauncher/build/gate-*.json'` before adding: never tracked
 # on any branch.
 pylauncher/build/gate-*.json
+
+# Byte-code from running a gate harness in place. `pylauncher/.gitignore` has
+# covered its own tree since the start; `pyplan/gates/` holds runnable scripts
+# too, and importing one leaves a `__pycache__` beside it (2026-09-04).
+__pycache__/

@@ -27,10 +27,24 @@ under test is worth less -- and the gate is that all three are unchanged. A
 reply with a restarted server behind it is a failure that looks like a pass.
 
 READINESS IS TIMED THROUGH EACH PACKAGE'S OWN `wait_server_ready()`, and the
-three signatures genuinely differ: TBC takes neither `realm_host` nor
+four signatures genuinely differ: TBC takes neither `realm_host` nor
 `realm_port` because that entry has no auth marker to spell, Vanilla defaults
-`realm_host`, and Tortoise requires both. A single spelling here would have had
-to invent arguments for two of the three, so the dispatch is explicit.
+`realm_host` and accepts no port, and Tortoise and WotLK require both. A single
+spelling here would have had to invent arguments for two of the four, so the
+dispatch is a table keyed by catalog id (`_READY_CALLS`) and an id that is not
+in it stops the run.
+
+AND THE READY WAIT HAPPENS WHETHER OR NOT THIS RUN DID THE STARTING. On the
+2026-09-04 TBC re-run the baseline found all three containers already up -- a
+person had `docker start`ed them a minute earlier -- so the harness took the
+"nothing to do" path, skipped its own wait, and attached the console to a
+worldserver that was still printing its load progress. It recorded
+`FAIL the console prompt never appeared in the window; the reply was not
+delimited`, which is a fact about this harness's timing and says nothing about
+`send_command()`. That wait is now unconditional, and it is booked as
+`baseline_ready_seconds` rather than `ready_seconds`: the latter names the time
+from a `start_staged()` this run performed, and waiting out the tail of
+somebody else's start is not that number.
 
 THE RESTORE IS A ROUND TRIP, deliberately. It backs up the CURRENT databases and
 restores THOSE dumps back over them, so the server ends holding exactly what it
@@ -59,7 +73,9 @@ import subprocess
 import sys
 import time
 import traceback
+from collections.abc import Callable
 from pathlib import Path
+from types import ModuleType
 
 from yulon.catalog.catalog import load_catalog
 from yulon.log import use_utf8_streams
@@ -112,23 +128,63 @@ def running(names: list[str]) -> dict[str, bool]:
     return {name: name in out for name in names}
 
 
+class UnknownGameError(Exception):
+    """A catalog id this harness has no `wait_server_ready()` spelling wired for."""
+
+
+# How each game's `wait_server_ready()` is called, keyed by catalog id. A table
+# and not a chain of `if`s: the chain this replaced ended in an `else` whose
+# comment said "Tortoise", and `wow-wotlk` -- a game that has shipped in the
+# catalog the whole time -- was landing in it. That went unnoticed only because
+# WotLK happens to take the same two arguments Tortoise does. The next id added
+# would have been handed `("127.0.0.1", auth_port)` on the strength of an
+# `else`, and whatever came back would have been printed as that game's
+# readiness.
+_READY_CALLS: dict[str, Callable[[ModuleType, int], bool]] = {
+    # No realm arguments: this entry has no auth marker to spell, and its
+    # `wait_server_ready()` raises `TypeError` on anything but timeout/interval.
+    "wow-tbc": lambda module, auth_port: bool(module.wait_server_ready()),
+    # `realm_host` defaults and no port is accepted -- `ready.auth` is null.
+    "wow-vanilla": lambda module, auth_port: bool(module.wait_server_ready()),
+    "wow-tortoise": lambda module, auth_port: bool(
+        module.wait_server_ready("127.0.0.1", auth_port)
+    ),
+    "wow-wotlk": lambda module, auth_port: bool(module.wait_server_ready("127.0.0.1", auth_port)),
+}
+
+
+def unknown_game_error(game: str) -> UnknownGameError:
+    """The refusal for an id with no `_READY_CALLS` entry, worded once."""
+    return UnknownGameError(
+        f"this harness has no wait_server_ready() spelling wired for {game!r}, so it cannot "
+        f"tell whether that game's server is up and must not report on one. The ids it is "
+        f"wired for are: {', '.join(sorted(_READY_CALLS))}. To add {game!r}, give it its own "
+        f"_READY_CALLS entry with the arguments that game's own wait_server_ready() takes; "
+        f"borrowing another game's spelling is what this replaced."
+    )
+
+
 def wait_ready_for_game(game: str, auth_port: int) -> bool:
     """That game's own `wait_server_ready()`, with the arguments it actually takes.
 
-    Not one spelling for all three: TBC's takes no realm arguments at all and
-    raises `TypeError` on anything but `timeout`/`interval`, so passing a host
-    to be uniform would fail on the one entry that is already ticked.
+    Raises:
+        UnknownGameError: `game` has no entry in `_READY_CALLS`.
     """
+    call = _READY_CALLS.get(game)
+    if call is None:
+        raise unknown_game_error(game)
     module = importlib.import_module(f"yulon.controller_{game.replace('-', '_')}.docker_ctl")
-    if game == "wow-tbc":
-        return bool(module.wait_server_ready())
-    if game == "wow-vanilla":
-        return bool(module.wait_server_ready())
-    return bool(module.wait_server_ready("127.0.0.1", auth_port))
+    return call(module, auth_port)
 
 
 def main() -> int:
     game, server_dir = sys.argv[1], Path(sys.argv[2])
+    if game not in _READY_CALLS:
+        # Checked before docker is touched. Every section below asks a server a
+        # question, and a run that cannot establish that the server is up cannot
+        # honestly report the answers -- half a gate reads like a whole one.
+        print(f"[FAIL] {unknown_game_error(game)}", flush=True)
+        return 2
     entry = load_catalog().get(game)
     services = ControllerServices.for_entry(entry, server_dir)
     spec = entry.container_spec()
@@ -142,11 +198,45 @@ def main() -> int:
     status = services.controller.status()
     print(f"status: db={status.db} auth={status.auth} world={status.world}", flush=True)
     print("running:", running([world, auth, db]), flush=True)
-    if not status.all_running:
+    started_here = not status.all_running
+    if started_here:
         print("not all up; starting first so the console and backup have a server", flush=True)
+        t0 = time.monotonic()
         services.controller.start()
-        wait_ready_for_game(game, auth_port)
+        TIMES["baseline_start_staged_seconds"] = time.monotonic() - t0
         print("running now:", running([world, auth, db]), flush=True)
+    else:
+        print("all three already up; this run did not start them", flush=True)
+
+    # The wait is unconditional, and that is the fix for the 2026-09-04 TBC
+    # re-run: containers found up were taken for containers found ready, the
+    # console attached to a worldserver still loading its area levels, and the
+    # gate recorded a console failure that was really a scheduling failure. A
+    # server this run did not start still has to be ready before it is asked a
+    # question -- `docker start` returns long before mangosd is listening.
+    try:
+        t0 = time.monotonic()
+        baseline_ready = wait_ready_for_game(game, auth_port)
+        # Not `ready_seconds`. That key belongs to section 7, which times a
+        # `start_staged()` this run performed; a wait spent on the tail of
+        # somebody else's start is a different measurement and gets a different
+        # name, so no reader can quote one as the other.
+        TIMES["baseline_ready_seconds"] = time.monotonic() - t0
+        if baseline_ready:
+            ok(
+                f"the server reached this game's ready marker before the console step "
+                f"({TIMES['baseline_ready_seconds']:.1f}s waited, "
+                f"started_by_this_run={started_here})"
+            )
+        else:
+            fail(
+                f"the server never reached this game's ready marker "
+                f"({TIMES['baseline_ready_seconds']:.0f}s waited, "
+                f"started_by_this_run={started_here}); every step below is questioning a "
+                f"server that is not up yet"
+            )
+    except Exception as exc:  # noqa: BLE001
+        fail("wait_server_ready() at baseline", exc)
 
     # ------------------------------------------------- 1. console.send_command
     section("console.send_command() -- and what the attach did to the server")
@@ -162,7 +252,17 @@ def main() -> int:
             print(f"  | {line}", flush=True)
         after = inspect(world)
         print(f"{world} after:  {after}", flush=True)
-        if after == before:
+        if before["pid"] == 0:
+            # `docker inspect` reports State.Pid 0 for a container that is not
+            # running, and 0 stays 0 across the attach, so the "unchanged"
+            # comparison below is satisfied by a worldserver that was never up
+            # to be disturbed. The whole point of this step is that attaching to
+            # a LIVE server does not kill it.
+            fail(
+                f"{world} reported State.Pid 0, so it was not running and the attach had "
+                f"nothing to disturb: {before}"
+            )
+        elif after == before:
             ok(
                 f"send_command('server info') answered in {TIMES['console_seconds']:.2f}s and left "
                 f"pid/RestartCount/StartedAt unchanged (pid {before['pid']}, "
@@ -194,7 +294,17 @@ def main() -> int:
         # database would have printed a pass line and a failure line for the
         # same operation -- and a reader scanning for `[OK]` would have seen the
         # pass sitting next to the failure it contradicts.
-        if report.missing_core:
+        if not report.dumps:
+            # `missing_core` only names the databases the catalog entry calls
+            # core, so an entry that declares none would come back with an empty
+            # `missing_core` and an empty `dumps`, and the branch below would
+            # have printed "backup() -> 0 dump(s) ()" as a pass. A backup that
+            # wrote nothing is the failure this step exists to catch.
+            fail(
+                f"backup() returned no dumps at all; it reported directory {report.directory} "
+                f"and missing_core={report.missing_core}"
+            )
+        elif report.missing_core:
             fail(
                 f"backup() ran but the server was missing core databases: {report.missing_core}; "
                 f"it wrote {len(report.dumps)} dump(s) ({', '.join(report.databases)})"
@@ -213,6 +323,11 @@ def main() -> int:
     try:
         if report is None:
             raise RuntimeError("no report from backup()")
+        # An empty loop leaves nothing to say. Without this the line below read
+        # "verify_dump() passed for all 0 dump(s)" -- a pass for a function that
+        # was never called.
+        if not report.dumps:
+            raise RuntimeError("backup() wrote no dumps, so verify_dump() was never called")
         maintenance = importlib.import_module(
             f"yulon.controller_{game.replace('-', '_')}.maintenance"
         )
@@ -230,10 +345,30 @@ def main() -> int:
         if report is None:
             raise RuntimeError("no report from backup()")
         pick = report.dumps[0].path
+        state = running([world, auth, db])
+        print("running when asked:", state, flush=True)
         plan = services.plan_restore(pick)
         print("refusals:", plan.refusals, flush=True)
-        if plan.refusals:
-            ok(f"plan_restore() refused while running: {plan.refusals}")
+        # `plan_restore()` collects every reason at once -- a truncated dump, a
+        # missing file, a stopped db container -- and the old check passed on any
+        # of them. It would have printed "refused while running" for a plan that
+        # was refused because the file was unreadable, which proves nothing about
+        # the live-server guard. The guard's own refusal names the containers it
+        # found up (`maintenance.py`: "<names> are running. A restore has to
+        # happen with the game servers stopped"), so that is what is looked for.
+        blocked_on_world = [reason for reason in plan.refusals if world in reason]
+        if not state[world]:
+            fail(
+                f"{world} was not running, so this step never put plan_restore() in front of "
+                f"the situation it is named for; its refusals were {plan.refusals}"
+            )
+        elif blocked_on_world:
+            ok(f"plan_restore() refused while running: {blocked_on_world}")
+        elif plan.refusals:
+            fail(
+                f"plan_restore() refused, but no refusal names {world}, so something other than "
+                f"the live-server guard stopped it: {plan.refusals}"
+            )
         else:
             fail("plan_restore() allowed a restore over a RUNNING server")
     except Exception as exc:  # noqa: BLE001
@@ -325,15 +460,21 @@ def main() -> int:
                 f"(safety: {[p.name for p in restored.safety_backup]})",
                 flush=True,
             )
-        if len(restored_names) == len(report.dumps):
+        # By name, not by count. `restored.databases` is a tuple per dump and
+        # nothing promises it holds exactly one, so `len(restored_names) ==
+        # len(report.dumps)` -- the old check -- is satisfied by one dump that
+        # restored two databases next to one that restored none, and it would
+        # then have named all of them in a pass line. Comparing the sorted names
+        # against what the backup actually held is the claim being made.
+        if sorted(restored_names) == sorted(report.databases):
             ok(
                 f"restore() put back all {len(restored_names)} databases "
                 f"({', '.join(restored_names)}) in {TIMES['restore_seconds']:.1f}s total"
             )
         else:
             fail(
-                f"restore() put back {len(restored_names)} of {len(report.dumps)} databases: "
-                f"{restored_names}"
+                f"restore() put back {sorted(restored_names)}, but the backup held "
+                f"{sorted(report.databases)}"
             )
     except Exception as exc:  # noqa: BLE001
         fail("restore()", exc)

@@ -1220,8 +1220,12 @@ def test_a_matching_crash_re_runs_the_named_tools_once_and_continues(tmp_path: P
         f"{VMAP.name}: running /opt/bin/vmap_extractor -d /client/Data",
         f"{VMAP.name} crashed the way the retry recipe expects; "
         f"running {VMAP.name}, {ASSEMBLE.name} again once",
+        f"{VMAP.name}: emptying Buildings before the retry, so it regenerates what the crashed "
+        "attempt left rather than adding to it",
         f"{VMAP.name}: retrying /opt/bin/vmap_extractor -d /client/Data",
         f"{VMAP.name}: done (Buildings: 2 files)",
+        f"{ASSEMBLE.name}: emptying vmaps before the retry, so it regenerates what the crashed "
+        "attempt left rather than adding to it",
         f"{ASSEMBLE.name}: retrying /opt/bin/vmap_assembler Buildings vmaps",
         f"{ASSEMBLE.name}: done (vmaps: 2 files)",
         f"{ASSEMBLE.name}: already extracted (vmaps: 2 files)",
@@ -1439,6 +1443,167 @@ def test_the_retry_walks_each_output_folder_once_and_never_the_crashed_attempt(
     data = tmp_path / "server" / "data"
     assert walked[:4] == [data / "dbc", data / "maps", data / "Buildings", data / "vmaps"]
     assert walked.count(data / "Buildings") == 1
+
+
+# --- what the retry removes, and what it must not -----------------------------------------
+#
+# The 7.5 gate on m910q, 2026-09-04, forced the crash the recipe is written for
+# and proved the recipe reachable; the retry then died on its first breath with
+# `Your output directory seems to be polluted, please use an empty directory!`
+# and `data/Buildings` holding the crashed attempt's 5,076 files
+# (`pyplan/gates/7.5-m910q/vmap75-full.log`). So the retry has to empty what it
+# is about to regenerate — and that is a deletion of somebody's extracted data on
+# a path that fires with no question, which is why three of the four tests below
+# are about what is NOT removed.
+
+
+def _files_under(data_dir: Path) -> set[str]:
+    """Every file under `data/`, by posix-relative name — one snapshot of the folder."""
+    return {path.relative_to(data_dir).as_posix() for path in data_dir.rglob("*") if path.is_file()}
+
+
+def _emptying(tool: ExtractTool) -> str:
+    """The line the engine yields before it removes anything, spelled once for four tests."""
+    return (
+        f"{tool.name}: emptying {', '.join(tool.produces)} before the retry, so it regenerates "
+        "what the crashed attempt left rather than adding to it"
+    )
+
+
+def _stale(data_dir: Path, folder: str, name: str) -> None:
+    """A file no tool in these tests ever writes, so its survival answers "was this cleared?"."""
+    (data_dir / folder).mkdir(parents=True, exist_ok=True)
+    (data_dir / folder / name).write_bytes(b"x")
+
+
+class Watching(Runner):
+    """A `Runner` that snapshots `data/` as each container starts, before that container writes.
+
+    What `data/` held at the MOMENT a tool re-ran is the only thing that tells
+    "emptied just before the tool that regenerates it" apart from "emptied the
+    whole recipe's output up front". Both end with the same folders on disk, and
+    only the first leaves a folder alone when the pass dies before reaching the
+    tool that would rewrite it.
+    """
+
+    def __init__(
+        self,
+        writes: Mapping[str, Mapping[str, int]],
+        *,
+        fail: Mapping[str, tuple[int, str]] | None = None,
+    ) -> None:
+        super().__init__(writes, fail=fail)
+        self.before: list[set[str]] = []
+
+    def __call__(
+        self, spec: docker.ContainerRun, *, sink: docker.OutputSink, cancel: threading.Event | None
+    ) -> docker.AttachedRun:
+        out = next(mount.host for mount in spec.mounts if mount.guest == "/out")
+        self.before.append(_files_under(out))
+        return super().__call__(spec, sink=sink, cancel=cancel)
+
+
+def test_the_retry_empties_the_folder_it_is_about_to_regenerate_and_says_so_first(
+    tmp_path: Path,
+) -> None:
+    """The defect the 7.5 gate found: the recipe fired and then could not possibly succeed.
+
+    `stale.wmo` stands for the 5,076 files that were actually there — the tool
+    asks for an empty directory, not a complete one, so one file is the same
+    refusal as five thousand.
+
+    The order of the two log lines is asserted rather than their presence. The
+    sentence is the only warning a user gets that a folder of theirs is about to
+    go, and a warning printed after the removal is a receipt.
+    """
+    data = tmp_path / "server" / "data"
+    _stale(data, "Buildings", "stale.wmo")
+    runner = Runner(FULL, fail={"/opt/bin/vmap_extractor": SEGFAULT})
+    said = run(RETRY_PLAN, runner, tmp_path)
+    assert "Buildings/stale.wmo" not in _files_under(data)
+    assert said.index(_emptying(VMAP)) < said.index(
+        f"{VMAP.name}: retrying /opt/bin/vmap_extractor -d /client/Data"
+    )
+
+
+def test_a_first_run_empties_nothing_and_never_says_it_did(tmp_path: Path) -> None:
+    """Only the retry path removes. A plan that HAS a recipe, and no crash to fire it.
+
+    The plan is `RETRY_PLAN` on purpose: "there is no recipe" would pass this
+    test with a clear that ran on every install. What must be left alone is
+    `data/` as the user handed it over — an extraction copied from another
+    machine, or one this installer wrote before somebody edited the catalog —
+    and no crash means no licence to touch it.
+    """
+    data = tmp_path / "server" / "data"
+    _stale(data, "Buildings", "stale.wmo")
+    said = run(RETRY_PLAN, Runner(FULL), tmp_path)
+    assert "Buildings/stale.wmo" in _files_under(data)
+    assert not any("emptying" in line for line in said)
+
+
+def test_when_the_assembler_crashed_the_extractor_is_left_exactly_as_it_was(
+    tmp_path: Path,
+) -> None:
+    """The case that decides the shape: the crash is in the tool that CONSUMES the other's output.
+
+    `wow-vanilla`'s recipe names `vmap extract` and `vmap assemble`, and the
+    assembler reads `Buildings` and writes `vmaps`. So a pass that simply "runs
+    the named tools again" reaches the EXTRACTOR first, and would empty a
+    `Buildings` that is complete and correct and spend half an hour rebuilding
+    it byte for byte.
+
+    It is not a free trade, and an earlier draft of this test said it was. That
+    draft argued the recipe re-ran the extractor anyway so the removal cost
+    nothing extra -- which is false, and the run on m910q is what shows it: the
+    re-run did not spend half an hour, it died in seconds on
+    `Your output directory seems to be polluted`. Before any of this existed the
+    assembler case failed FAST and healed on the next launch, because a fresh
+    press finds `Buildings` satisfied and skips straight to the assembler.
+
+    So the retry pass skips a tool the evidence already vouches for. That keeps
+    the fast path fast and still empties what a genuine crash left, because the
+    two are told apart by a RECORD: `_conclude()` writes one, and the retry
+    branch is taken before it -- so a crashed tool never has one and is always
+    re-run, while a tool that finished earlier in the outer loop does.
+    """
+    data = tmp_path / "server" / "data"
+    _stale(data, "vmaps", "stale.vmtree")
+    runner = Watching(FULL, fail={"/opt/bin/vmap_assembler": SEGFAULT})
+    said = run(RETRY_PLAN, runner, tmp_path)
+    # Four runs, not five: the extractor is not re-run at all.
+    assert runner.names() == ["ad", "vmap_extractor", "vmap_assembler", "vmap_assembler"]
+    # What the extractor wrote is still there, and was never emptied.
+    assert "Buildings/f0" in runner.before[3]
+    # Only the assembler's own output went, and only as the assembler re-ran.
+    assert "vmaps/stale.vmtree" not in runner.before[3]
+    assert _files_under(data) >= {"Buildings/f0", "vmaps/f0"}
+    assert _emptying(ASSEMBLE) in said
+    assert _emptying(VMAP) not in said
+    left_alone = [line for line in said if "leaving it alone" in line]
+    assert len(left_alone) == 1 and left_alone[0].startswith(VMAP.name)
+
+
+def test_a_folder_that_will_not_empty_refuses_and_the_tool_is_never_re_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two answers kept apart: "the removal did not happen" is not "there was nothing there".
+
+    `_remove_tree()` keeps them apart already; this is the caller honouring it.
+    Carrying on would run the tool over exactly what the removal exists to take
+    away, which is the gate's own failure with an extra hour spent reaching it —
+    and the install would end on the tool's sentence rather than on the folder's.
+    """
+
+    def refuse(path: Path) -> bool:
+        raise PermissionError(13, "in use")
+
+    monkeypatch.setattr(extract, "_remove_tree", refuse)
+    runner = Runner(FULL, fail={"/opt/bin/vmap_extractor": SEGFAULT})
+    with pytest.raises(InstallerError, match="could not be emptied") as caught:
+        run(RETRY_PLAN, runner, tmp_path)
+    assert "Nothing was re-run" in str(caught.value)
+    assert runner.names() == ["ad", "vmap_extractor"]
 
 
 def _stopped_on_the_first_tool() -> Runner:
@@ -2802,9 +2967,51 @@ def test_the_shipped_recipe_fires_the_stage_retry_on_a_crash_that_printed_nothin
         f"{VMAP.name}: running /opt/bin/vmap_extractor -d /client/Data",
         f"{VMAP.name} crashed the way the retry recipe expects; "
         f"running {VMAP.name}, {ASSEMBLE.name} again once",
+        f"{VMAP.name}: emptying Buildings before the retry, so it regenerates what the crashed "
+        "attempt left rather than adding to it",
         f"{VMAP.name}: retrying /opt/bin/vmap_extractor -d /client/Data",
         f"{VMAP.name}: done (Buildings: 2 files)",
+        f"{ASSEMBLE.name}: emptying vmaps before the retry, so it regenerates what the crashed "
+        "attempt left rather than adding to it",
         f"{ASSEMBLE.name}: retrying /opt/bin/vmap_assembler Buildings vmaps",
         f"{ASSEMBLE.name}: done (vmaps: 2 files)",
         f"{ASSEMBLE.name}: already extracted (vmaps: 2 files)",
     ]
+
+
+def test_a_produces_name_that_lands_outside_the_data_dir_is_refused_before_anything_is_removed(
+    tmp_path: Path,
+) -> None:
+    """`empty_out_dirs()` is the one call in this module that deletes a tree, so it checks first.
+
+    `ExtractTool.produces` validates the COUNTS and nothing about the names, and
+    `Path.__truediv__` lets an absolute segment replace the left side outright --
+    `Path("/srv/data") / "/etc"` is `/etc`. `make_out_dirs()` has always joined
+    the same keys and was harmless doing it, because the worst a bad key bought
+    there was a directory in an odd place. The worst it buys here is an `rmtree`
+    of a folder this install does not own.
+
+    Added 2026-09-04 after a review of the removal this function was written for.
+    The keys that ship are all plain relative names, which is why this refuses
+    rather than sanitising: a key that reaches here and is not under `data_dir`
+    is a `catalog.json` defect, and saying so is more use than quietly repairing
+    it.
+    """
+    data_dir = tmp_path / "server" / "data"
+    data_dir.mkdir(parents=True)
+    outside = tmp_path / "not-ours"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("somebody else's", encoding="utf-8")
+
+    with pytest.raises(extract.InstallerError) as caught:
+        extract.empty_out_dirs({str(outside): 1}, data_dir)
+
+    assert "outside" in str(caught.value)
+    assert "Nothing was removed" in str(caught.value)
+    assert (outside / "keep.txt").exists(), "the refusal has to come before the removal"
+
+    # The same refusal for a key that climbs out with `..` rather than by being
+    # absolute -- the other spelling of the same defect.
+    with pytest.raises(extract.InstallerError):
+        extract.empty_out_dirs({"../not-ours": 1}, data_dir)
+    assert (outside / "keep.txt").exists()

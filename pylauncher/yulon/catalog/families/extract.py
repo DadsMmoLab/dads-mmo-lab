@@ -328,6 +328,30 @@ def counts(produces: Mapping[str, int], data_dir: Path) -> dict[str, int]:
     return {folder: file_count(data_dir / folder) for folder in produces}
 
 
+def _remove_tree(path: Path) -> bool:
+    """Remove `path` and everything under it; False when there was nothing to remove.
+
+    One fallible call answers both questions. `is_dir()` and then `rmtree()` is
+    two reads of one filesystem and therefore two answers that can disagree —
+    the I.3 incident — and here the disagreement decides whether a folder that
+    is still on disk gets generated over.
+
+    `FileNotFoundError` IS the "nothing there" answer, so the first install
+    costs no extra `stat`. Anything else (a `mmaps` that is a file, a folder
+    held open, a permission that says no) is raised for the caller to turn into
+    a refusal, because "the removal did not happen" and "there was nothing to
+    remove" must not arrive at the same place.
+
+    Two callers now, and they are the two removals in this module:
+    `empty_out_dirs()` below, and `run_mmaps()`'s wipe at the foot of the file.
+    """
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def make_out_dirs(produces: Iterable[str], data_dir: Path) -> None:
     """Create the folders a tool writes into. Not every tool creates its own.
 
@@ -366,6 +390,75 @@ def make_out_dirs(produces: Iterable[str], data_dir: Path) -> None:
                 f"{target} could not be created ({exc}), and the tool that writes into it does "
                 "not create it either. Nothing was run. Free up the folder above, or pick a "
                 "different server folder, then try again."
+            ) from exc
+
+
+def empty_out_dirs(produces: Iterable[str], data_dir: Path) -> None:
+    """Remove the folders a tool is about to regenerate. The retry path only, never a first run.
+
+    `make_out_dirs()`'s counterpart, and both exist because of the same sentence
+    read from opposite ends. That one creates and has never removed, deliberately
+    -- "creating a folder cannot make a tool look finished" -- which was the
+    right property for the bug it was written for and is the wrong one for a
+    second attempt at a tool that already wrote into the folder.
+
+    Measured on m910q, 2026-09-04 (`pyplan/gates/7.5-m910q/vmap75-full.log`, and
+    the 7.5 entry in `pyplan/checklist.md`): a forced crash matched
+    `wow-vanilla`'s recipe, `vmap extract` was re-run exactly as the recipe
+    promises, and the re-run died on its first breath --
+
+        Your output directory seems to be polluted, please use an empty directory!
+
+    -- with `data/Buildings` holding the 5,076 files the crashed attempt had
+    written. Nothing emptied them between the two attempts, so the one retry the
+    recipe exists for could not survive the crash it names. The tool asks for an
+    EMPTY directory, not a complete one, so this is not a question of how far the
+    crashed attempt got.
+
+    Deleting somebody's extracted data on a path that fires with no question is
+    not free, and two rules are what keep the price honest. It is called only
+    from the retry pass in `run_plan()`, so a first run that finds files under
+    `data/` leaves them exactly as it found them. And it is called with ONE
+    tool's `produces` immediately before that tool runs, never with the whole
+    recipe's up front: every folder that goes is one the pass is about to write
+    again, and a recipe that dies on its first re-run has then taken one folder
+    rather than all of them.
+
+    Raises:
+        InstallerError: a folder that is there and would not go. Re-running the
+            tool over what this call exists to remove is the gate's own failure
+            with another hour spent reaching it.
+    """
+    for folder in produces:
+        target = data_dir / folder
+        # BEFORE the removal, because this is the one call in this module that
+        # deletes a tree rather than creating one. `produces` keys are free
+        # strings on `ExtractTool` -- the model validates the COUNTS (>= 1) and
+        # nothing about the names -- and `Path.__truediv__` lets an absolute
+        # segment REPLACE the left side outright, so `data_dir / "/etc"` is
+        # `/etc`. `make_out_dirs()` has always joined the same keys and was
+        # harmless doing it, because the worst a bad key bought there was a
+        # directory in the wrong place; the worst it buys here is an `rmtree` of
+        # somebody else's. Catalog data is ours and none of the shipped keys is
+        # anything but a plain relative name, which is exactly why this refuses
+        # instead of sanitising: a key that reaches here and is not under
+        # `data_dir` is a `catalog.json` defect, and the useful thing to do with
+        # it is say so.
+        if data_dir.resolve() not in target.resolve().parents:
+            raise InstallerError(
+                f"the extract plan says a tool produces {folder!r}, which lands at {target} -- "
+                f"outside {data_dir}. Nothing was removed. A produces name is a plain folder "
+                "under the data directory; this one is not, and emptying it would delete "
+                "something this install does not own."
+            )
+        try:
+            _remove_tree(target)
+        except OSError as exc:
+            raise InstallerError(
+                f"{target} could not be emptied ({exc}), and the tool that writes it is being "
+                "run again. An extractor that refuses a folder it did not start empty would "
+                "fail the same way a second time. Nothing was re-run. Close whatever is "
+                "using that folder, or remove it by hand, then try again."
             ) from exc
 
 
@@ -804,7 +897,12 @@ def run_plan(
       NAMES run again, once for the whole plan, and the log says which and why.
       A second matching crash is not retried again: it falls through to the
       refusal, which says it was already the retry. A crash that does not match
-      is never retried and nothing in the log mentions one.
+      is never retried and nothing in the log mentions one. Each re-run tool's
+      output folders are EMPTIED immediately before it runs and said out loud
+      first (`empty_out_dirs`), because the vanilla vmap extractor refuses to
+      start unless its output folder is empty and the crashed attempt had filled
+      it — measured on m910q, 2026-09-04, where that was the whole of why the
+      retry could not survive the crash it exists for.
     * **`stage_client`** — `tool_run` wraps the tool in `STAGE_SCRIPT`. The
       wrapper is per-tool and invisible here, except that a farm that could not
       be built is reported as "the tool never ran" rather than as a status the
@@ -884,6 +982,52 @@ def run_plan(
                 # vmaps/000.vmtree` this function was changed to prevent, on the
                 # one recipe that ships, reachable by the one crash it exists
                 # for (two independent reviews, 2026-09-02).
+                #
+                # Said BEFORE the removal, not after: this line is the only
+                # warning a user gets that a folder of theirs is about to go, and
+                # one printed afterwards is a receipt. It also survives a removal
+                # that fails, which is how the log names the folder the refusal
+                # below is about.
+                # A tool the evidence already vouches for is left exactly as it
+                # is -- not emptied, not re-run. The case that forces this rule
+                # is the ASSEMBLER crashing rather than the extractor:
+                # `wow-vanilla`'s recipe names both, so the pass reaches `vmap
+                # extract` first, and without this it would delete a `Buildings/`
+                # that was complete and re-extract it for half an hour to arrive
+                # back where it started.
+                #
+                # The three cases come out right for the same reason, which is
+                # that `satisfied()` wants a RECORD for this argv and the counts
+                # to pass, and `_conclude()` is what writes a record:
+                #
+                #   * assembler crashed -- the extractor finished in the outer
+                #     loop and was concluded, so it is satisfied here and is
+                #     skipped, and only `vmaps/` goes;
+                #   * extractor crashed -- the retry branch is taken BEFORE
+                #     `_conclude()`, so there is no record for it, so it is not
+                #     satisfied and its folder is emptied and re-run. That is the
+                #     crash this recipe exists for and it still works;
+                #   * a tool the outer loop has not reached yet -- no record
+                #     either, so it runs, which is the `vmaps/` case the comment
+                #     above was written for.
+                #
+                # `retried` still bounds this to one pass on its own, so skipping
+                # a tool here cannot let a later crash back in.
+                if tool_satisfied(again, data_dir, current, expected):
+                    seen = counts(again.produces, data_dir)
+                    yield (
+                        f"{again.name}: already finished before the crash "
+                        f"({_counts_text(seen)}); leaving it alone"
+                    )
+                    continue
+                yield (
+                    f"{again.name}: emptying {', '.join(again.produces)} before the retry, so it "
+                    "regenerates what the crashed attempt left rather than adding to it"
+                )
+                # One tool's folders, immediately before that tool runs -- see
+                # `empty_out_dirs()` for what was measured and why the whole
+                # recipe's output is NOT taken here in one go.
+                empty_out_dirs(again.produces, data_dir)
                 make_out_dirs(again.produces, data_dir)
                 yield f"{again.name}: retrying {' '.join(again.argv)}"
                 run = run_container(spec_for(again), sink=sink, cancel=cancel)
@@ -1036,27 +1180,6 @@ somebody's disk. "map generation failed (exit 139)" is true of both and complete
 about neither: after a wipe the machine is a folder poorer than the sentence
 implies, and the user needs to know that the next attempt is not optional.
 """
-
-
-def _remove_tree(path: Path) -> bool:
-    """Remove `path` and everything under it; False when there was nothing to remove.
-
-    One fallible call answers both questions. `is_dir()` and then `rmtree()` is
-    two reads of one filesystem and therefore two answers that can disagree —
-    the I.3 incident — and here the disagreement decides whether a folder that
-    is still on disk gets generated over.
-
-    `FileNotFoundError` IS the "nothing there" answer, so the first install
-    costs no extra `stat`. Anything else (a `mmaps` that is a file, a folder
-    held open, a permission that says no) is raised for the caller to turn into
-    a refusal, because "the removal did not happen" and "there was nothing to
-    remove" must not arrive at the same place.
-    """
-    try:
-        shutil.rmtree(path)
-    except FileNotFoundError:
-        return False
-    return True
 
 
 def run_mmaps(

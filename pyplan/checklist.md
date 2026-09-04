@@ -1125,6 +1125,12 @@
     | ready again after it | 75.3 s | 45.9 s | 100.0 s |
 
     Ten checks each, **10 passed / 0 failed on all three**.
+    **Those counts are the instrument as it stood on 2026-09-04.** The harness gained an
+    eleventh check that afternoon — an unconditional wait for this game's ready marker before
+    the console step, added because the run below consoled a server it had not waited for —
+    so a re-run of the same scenario now reports 11, not 10. The numbers above are not
+    reproducible against today's file, and are kept as what the run said rather than
+    re-stated as what a re-run would say.
 
     * **The console step asks the harder question.** `send_command()` attaches to the worldserver's
       tty and detaches again, and a detach that forwards a signal kills the server — so
@@ -1146,7 +1152,10 @@
 
   - **A SECOND TBC run, 03:02–03:12, and it disagrees with the first about the number that matters.**
     `pyplan/gates/7.9-cmangos/gate79-tbc-alldumps.log`. Run with the `core_databases` fix deployed
-    and with the harness that restores every dump. **9 passed, 1 failed.**
+    and with the harness that restores every dump. **9 passed, 1 failed** — against the
+    ten-check instrument of that morning; the same scenario reads 11 passed / 0 failed on the
+    harness as it stands after the fix below, because the check that failed was the one the
+    fix removes the cause of.
     * **`restore()` put back all four databases — including the 158 MB `mangos` — in 48.4 s.**
       That is the full round trip the first run only did for `characters`, and it is now proven on
       two games (TBC here, Tortoise at 98.2 s for four).

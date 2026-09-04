@@ -15,7 +15,7 @@ to guess. The plan for the rest is in [`../pyplan/`](../pyplan/README.md).
 | Start and stop it | run live | run live | run live¹ |
 | Follow the worldserver log | run live | run live | never run |
 | GM console (type a command at the server) | built | no — no `os.openpty` | run live¹ |
-| The packaged download | AppImage, opens | .exe, opens | .dmg, opened² |
+| The packaged download | AppImage³ or `.tar.gz`, opens | .exe, opens | .dmg, opened² |
 
 ¹ Through the module or the CLI harness on a real Apple M4 Pro with Docker Desktop 4.87.0
 (2026-08-29), not through the Catalog button — a cold start to a running WotLK server, plus
@@ -27,6 +27,11 @@ bug was found. What is still unrecorded is the Gatekeeper path an unsigned `.dmg
 through, which is a shipping decision rather than a test result. The `.dmg` is also **arm64 only**:
 `release.yml` builds on `macos-latest` and has no Intel job, so Intel Macs get no artifact at
 all.
+
+³ **The AppImage needs FUSE, and whether a distribution ships it is not something we control.**
+On clean Fedora 44 it opened (2026-09-04); on clean Arch, the same file, same sha256, was refused
+before any of our code ran. The `.tar.gz` published beside it needs nothing. Which file to take,
+and what the refusal looks like, is under [Odds and ends](#odds-and-ends).
 
 Three values, deliberately:
 
@@ -132,6 +137,43 @@ later phase and are listed, not vouched for.
 ## Odds and ends
 
 - The builds are not code-signed. Windows SmartScreen and macOS Gatekeeper will warn on first run.
+- **Two Linux downloads, and on some distributions only one of them starts.** An AppImage mounts
+  itself with FUSE, so it needs a `fusermount` helper on the machine, and which distributions
+  ship one by default is their decision rather than ours. Fedora 44 has it and the AppImage
+  opened there. Arch installs neither `fuse2` nor `fuse3` by default -- both are in its
+  repositories, which is why the remedy below can name one -- and there the AppImage is
+  refused before a line of Yu'lon runs (measured on clean Arch, kernel 7.1.8, 2026-09-04):
+
+  ```
+  Error: No suitable fusermount binary found on the $PATH
+  Cannot mount AppImage, please check your FUSE setup.
+  ```
+
+  That message names no package and links a wiki, so here is the sentence instead. **Take the
+  `.tar.gz` rather than the AppImage** — it is the same PyInstaller build the AppImage wraps, it
+  needs no FUSE, and it is the artifact that was actually run on a clean Arch box (2026-08-25):
+
+  ```bash
+  tar -xzf Yulon-*-x86_64.tar.gz && ./yulon/yulon
+  ```
+
+  Two other ways out, if you would rather keep the AppImage. Running it with
+  `--appimage-extract-and-run` bypasses the mount — measured on clean Arch on 2026-09-04, it
+  starts and reaches its update check — at the cost of extracting the whole 79 MB image to a
+  temporary directory on every launch. Or install the helper: on Arch that is
+  `sudo pacman -S fuse2`, which is the conventional answer for a type-2 AppImage and is the one
+  route here **nobody has run** — the Arch gate stopped at the refusal rather than installing
+  anything, so which of `fuse2` and `fuse3` this particular runtime wants is unverified. The
+  error names only `fusermount` and `$FUSERMOUNT_PROG`, and both packages provide a helper of
+  that family. Installing one on the Arch box and re-launching settles it in a minute.
+
+  Nothing in the app can catch this for you: the AppImage's runtime gives up before the
+  interpreter exists. The build side has been looked at twice and neither route removes it. A
+  statically linked runtime was tried and measured not to work (2026-08-25) — static linking drops
+  the libfuse *library* and mounting still shells out to the setuid `fusermount3` binary. A
+  third-party runtime that falls back to extraction (`uruntime`) exists, but its fallback is
+  switched on by an environment variable on the user's machine, which is the same problem one step
+  along. Hence the second artifact rather than a cleverer first one.
 - **You need your own copy of the game.** Yu'lon never bundles, sells or distributes a game client,
   and it cannot get you one. Two details worth stating plainly, because the short version of this
   sentence is misleading: WoW TBC, Vanilla and Tortoise ask you to point at a client folder you
