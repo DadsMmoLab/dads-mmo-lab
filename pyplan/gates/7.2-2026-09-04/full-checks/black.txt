@@ -1,0 +1,17 @@
+﻿=== black ===
+host          : YULON-WIN11-GAT
+tree          : C:\gate\checks-badee625\pylauncher (git archive of badee6255965f2ba8e05ad2306dcdc6126e5880b)
+interpreter   : C:/Users/pk/co/dads-mmo-lab-yulon-phase7/pylauncher/.venv/Scripts/python.exe
+CI spells it  : python -m black --check .
+argv here     : python -m black --check .
+started UTC   : 2026-09-04T11:00:27.6486797Z
+---
+python.exe : All done! \u2728 \U0001f370 \u2728
+At C:\gate\checks-badee625\run-checks2.ps1:47 char:3
++   & $py $step.a 2>&1 | Out-File -FilePath $f -Append -Encoding utf8
++   ~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (All done! \u2728 \U0001f370 \u2728:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+136 files would be left unchanged.
+--- exit code: 0   elapsed: 1.3s   finished UTC: 2026-09-04T11:00:28.9031022Z

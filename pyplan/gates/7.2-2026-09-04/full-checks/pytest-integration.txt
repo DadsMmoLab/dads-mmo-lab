@@ -1,0 +1,307 @@
+﻿=== pytest-integration ===
+host          : YULON-WIN11-GAT
+tree          : C:\gate\checks-badee625\pylauncher (git archive of badee6255965f2ba8e05ad2306dcdc6126e5880b)
+interpreter   : C:/Users/pk/co/dads-mmo-lab-yulon-phase7/pylauncher/.venv/Scripts/python.exe
+CI spells it  : python -m pytest -v --durations=0 -m integration  (CI runs this as a SEPARATE job, on a runner whose only Docker workload is the test)
+argv here     : python -m pytest -q -m integration --basetemp C:\gate\checks-badee625\pytesttmp2
+note          : --basetemp added because under schtasks the default basetemp
+                'C:\Users\pk\AppData\Local\Temp\pytest-of-pk' is not readable by the
+                task (PermissionError WinError 5). Harness accommodation, nothing else.
+started UTC   : 2026-09-04T11:04:16.6291978Z
+---
+ssss..FFFF.....F......s                                                  [100%]
+================================== FAILURES ===================================
+_________________ test_compose_up_reruns_the_one_shot_import __________________
+
+staged_project = WindowsPath('C:/gate/checks-badee625/pytesttmp2/test_compose_up_reruns_the_one0/yulon-it-16e0')
+
+    def test_compose_up_reruns_the_one_shot_import(staged_project: Path) -> None:
+        """Why `start_staged()` exists: a bare `compose up -d` runs the import again.
+    
+        This is the failure `dml-start.sh` documents in as many words. Asserting it
+        against a real daemon keeps the reason for the staged path from decaying
+        into a comment nobody can check.
+        """
+        docker.start(staged_project)
+>       assert import_runs(staged_project) == 1
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\integration\test_docker_live.py:111: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tests\integration\conftest.py:350: in import_runs
+    return len([line for line in marker.read_text(encoding="utf-8").splitlines() if line.strip()])
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Program Files\Python312\Lib\pathlib.py:1027: in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = WindowsPath('C:/gate/checks-badee625/pytesttmp2/test_compose_up_reruns_the_one0/yulon-it-16e0/marker/import.log')
+mode = 'r', buffering = -1, encoding = 'utf-8', errors = None, newline = None
+
+    def open(self, mode='r', buffering=-1, encoding=None,
+             errors=None, newline=None):
+        """
+        Open the file pointed to by this path and return a file object, as
+        the built-in open() function does.
+        """
+        if "b" not in mode:
+            encoding = io.text_encoding(encoding)
+>       return io.open(self, mode, buffering, encoding, errors, newline)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       PermissionError: [Errno 13] Permission denied: 'C:\\gate\\checks-badee625\\pytesttmp2\\test_compose_up_reruns_the_one0\\yulon-it-16e0\\marker\\import.log'
+
+C:\Program Files\Python312\Lib\pathlib.py:1013: PermissionError
+___________ test_launcher_restart_never_reruns_the_one_shot_import ____________
+
+staged_project = WindowsPath('C:/gate/checks-badee625/pytesttmp2/test_launcher_restart_never_re0/yulon-it-16e0')
+
+    def test_launcher_restart_never_reruns_the_one_shot_import(staged_project: Path) -> None:
+        """The launcher's own stop \u2192 start cycle must not re-run the import.
+    
+        `start_staged()` alone is not enough: it takes the staged path only while
+        the containers still exist, so a `stop()` that *removes* them puts the next
+        start straight back on `compose up -d`. Driving `Controller` here rather
+        than `yulon.docker` is the point ù this is the pair of buttons a user
+        presses, and the pair has to hold the invariant together.
+        """
+        ctl = Controller(THROWAWAY_SPEC, staged_project)
+    
+        # The INSTALLER brings the project up the first time (the bash script runs
+        # `compose up -d --build`), and that is when the one-shot import runs. The
+        # launcher's Start button is for an already-installed server and never
+        # imports ù so the install is simulated here rather than pressed.
+        docker.start(staged_project)
+        assert ctl.wait_db_healthy(timeout=_DB_TIMEOUT, interval=_INTERVAL) is True
+>       assert import_runs(staged_project) == 1
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\integration\test_docker_live.py:134: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tests\integration\conftest.py:350: in import_runs
+    return len([line for line in marker.read_text(encoding="utf-8").splitlines() if line.strip()])
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Program Files\Python312\Lib\pathlib.py:1027: in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = WindowsPath('C:/gate/checks-badee625/pytesttmp2/test_launcher_restart_never_re0/yulon-it-16e0/marker/import.log')
+mode = 'r', buffering = -1, encoding = 'utf-8', errors = None, newline = None
+
+    def open(self, mode='r', buffering=-1, encoding=None,
+             errors=None, newline=None):
+        """
+        Open the file pointed to by this path and return a file object, as
+        the built-in open() function does.
+        """
+        if "b" not in mode:
+            encoding = io.text_encoding(encoding)
+>       return io.open(self, mode, buffering, encoding, errors, newline)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       PermissionError: [Errno 13] Permission denied: 'C:\\gate\\checks-badee625\\pytesttmp2\\test_launcher_restart_never_re0\\yulon-it-16e0\\marker\\import.log'
+
+C:\Program Files\Python312\Lib\pathlib.py:1013: PermissionError
+____ test_a_changed_compose_file_is_applied_without_re_running_the_import _____
+
+staged_project = WindowsPath('C:/gate/checks-badee625/pytesttmp2/test_a_changed_compose_file_is0/yulon-it-16e0')
+
+    def test_a_changed_compose_file_is_applied_without_re_running_the_import(
+        staged_project: Path,
+    ) -> None:
+        """The case that used to force the destructive path, now proven harmless.
+    
+        Editing a compose file must actually take effect ù `docker start` would
+        replay the container as created and the setting would silently do nothing.
+        The old implementation achieved that by falling back to a bare
+        `compose up -d`, which re-ran the one-shot import: the user changed a port
+        and lost their characters. Naming the services means compose recreates the
+        one that changed and never selects the import at all.
+        """
+        compose = staged_project / "docker-compose.yml"
+        docker.start(staged_project)
+>       assert import_runs(staged_project) == 1
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\integration\test_docker_live.py:158: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tests\integration\conftest.py:350: in import_runs
+    return len([line for line in marker.read_text(encoding="utf-8").splitlines() if line.strip()])
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Program Files\Python312\Lib\pathlib.py:1027: in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = WindowsPath('C:/gate/checks-badee625/pytesttmp2/test_a_changed_compose_file_is0/yulon-it-16e0/marker/import.log')
+mode = 'r', buffering = -1, encoding = 'utf-8', errors = None, newline = None
+
+    def open(self, mode='r', buffering=-1, encoding=None,
+             errors=None, newline=None):
+        """
+        Open the file pointed to by this path and return a file object, as
+        the built-in open() function does.
+        """
+        if "b" not in mode:
+            encoding = io.text_encoding(encoding)
+>       return io.open(self, mode, buffering, encoding, errors, newline)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       PermissionError: [Errno 13] Permission denied: 'C:\\gate\\checks-badee625\\pytesttmp2\\test_a_changed_compose_file_is0\\yulon-it-16e0\\marker\\import.log'
+
+C:\Program Files\Python312\Lib\pathlib.py:1013: PermissionError
+_____ test_a_missing_container_is_recreated_without_re_running_the_import _____
+
+staged_project = WindowsPath('C:/gate/checks-badee625/pytesttmp2/test_a_missing_container_is_re0/yulon-it-16e0')
+
+    def test_a_missing_container_is_recreated_without_re_running_the_import(
+        staged_project: Path,
+    ) -> None:
+        """A container removed by hand is not evidence that the server was never installed.
+    
+        The old implementation equated "one of the three is missing" with "first
+        install" and ran `compose up -d`, taking the database with it ù while the
+        persistent volume was sitting there intact.
+        """
+        docker.start(staged_project)
+>       assert import_runs(staged_project) == 1
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\integration\test_docker_live.py:183: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tests\integration\conftest.py:350: in import_runs
+    return len([line for line in marker.read_text(encoding="utf-8").splitlines() if line.strip()])
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Program Files\Python312\Lib\pathlib.py:1027: in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = WindowsPath('C:/gate/checks-badee625/pytesttmp2/test_a_missing_container_is_re0/yulon-it-16e0/marker/import.log')
+mode = 'r', buffering = -1, encoding = 'utf-8', errors = None, newline = None
+
+    def open(self, mode='r', buffering=-1, encoding=None,
+             errors=None, newline=None):
+        """
+        Open the file pointed to by this path and return a file object, as
+        the built-in open() function does.
+        """
+        if "b" not in mode:
+            encoding = io.text_encoding(encoding)
+>       return io.open(self, mode, buffering, encoding, errors, newline)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       PermissionError: [Errno 13] Permission denied: 'C:\\gate\\checks-badee625\\pytesttmp2\\test_a_missing_container_is_re0\\yulon-it-16e0\\marker\\import.log'
+
+C:\Program Files\Python312\Lib\pathlib.py:1013: PermissionError
+__ test_run_container_reads_the_client_read_only_and_writes_out_as_this_user __
+
+tmp_path = WindowsPath('C:/gate/checks-badee625/pytesttmp2/test_run_container_reads_the_c0')
+require_docker = None
+
+    def test_run_container_reads_the_client_read_only_and_writes_out_as_this_user(
+        tmp_path: Path, require_docker: None
+    ) -> None:
+        """The extraction model, live: `/client` `:ro`, `/out` rw, cwd `/out`, `-u uid:gid`.
+    
+        The relative `copy.txt` proves the workdir ù drop `-w` and it lands in the
+        image's own cwd and `out/` stays empty ù and the owner check proves no
+        `sudo chown` will ever be needed. The client listing is a statement about
+        THIS argv, which only reads `/client`: it would hold with the `:ro` gone
+        too, so it is not what gates the mount. The test below it is, by asking a
+        container to write there and being refused.
+    
+        The container is ASKED who it is (`id -u` / `id -g`) rather than trusting
+        that a `--user` in the argv arrived. Two separate things want that question,
+        and the first version of this test conflated them into one that gated
+        neither on this machine:
+    
+        * **`to_argv()` splicing `user_args` into the argv at all.** That is what
+          the `4242:4242` probe is for, and it is the same number the mutation
+          control used. It runs on EVERY platform, because it names the uid itself
+          rather than asking `platform` for one ù busybox's default user is root, so
+          a probe that passes no `--user` and a `to_argv()` that drops the one it
+          was given produce the same `0 0`, and the assertion would be a fact about
+          the image rather than about this module. That is exactly what the first
+          version asserted on Docker Desktop: reran with `*self.user_args` deleted
+          from `to_argv()`, it still passed (review, 2026-09-01).
+        * **`platform.container_user_args()`'s policy**, which is what the second
+          run gates and which genuinely differs per platform: `--user uid:gid` on
+          Linux, deliberately none on Docker Desktop, where the image's own root is
+          right and the file still arrives owned by the logged-in user. On Docker
+          Desktop the `0 0` there is a statement about the policy being empty ù it
+          is TRUE of a broken `to_argv()` too, and no longer has to carry that
+          weight now that the probe above does.
+    
+        A host-side `st_uid` check cannot stand in for either: `os.getuid` exists
+        only on Linux, so on Docker Desktop it does not run.
+        """
+        asked = ("--user", "4242:4242")
+        probe_heard: list[str] = []
+        probe = docker.run_container(
+            docker.ContainerRun(
+                image=BUSYBOX_IMAGE, argv=("sh", "-c", "id -u; id -g"), user_args=asked
+            ),
+            sink=probe_heard.append,
+        )
+        assert probe.returncode == 0, probe.tail
+        probe_reported = [line.strip() for line in probe_heard if line.strip().isdigit()]
+        assert probe_reported[-2:] == ["4242", "4242"], (
+            f"asked for {asked[1]} and the container reported {probe_reported[-2:]} ù to_argv() is "
+            f"not putting user_args in the argv: {probe_heard}"
+        )
+    
+        client = tmp_path / "client"
+        client.mkdir()
+        (client / "a.txt").write_text("alpha\n", encoding="utf-8")
+        out = tmp_path / "out"
+        out.mkdir()
+        user_args = tuple(platform.container_user_args())
+        spec = docker.ContainerRun(
+            image=BUSYBOX_IMAGE,
+            argv=("sh", "-c", "cat /client/a.txt > copy.txt; id -u; id -g"),
+            mounts=(docker.Mount(client, "/client", read_only=True), docker.Mount(out, "/out")),
+            workdir="/out",
+            user_args=user_args,
+        )
+        heard: list[str] = []
+        run = docker.run_container(spec, sink=heard.append)
+        assert run.returncode == 0, run.tail
+>       assert (out / "copy.txt").read_text(encoding="utf-8") == "alpha\n"
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\integration\test_docker_live.py:426: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+C:\Program Files\Python312\Lib\pathlib.py:1027: in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = WindowsPath('C:/gate/checks-badee625/pytesttmp2/test_run_container_reads_the_c0/out/copy.txt')
+mode = 'r', buffering = -1, encoding = 'utf-8', errors = None, newline = None
+
+    def open(self, mode='r', buffering=-1, encoding=None,
+             errors=None, newline=None):
+        """
+        Open the file pointed to by this path and return a file object, as
+        the built-in open() function does.
+        """
+        if "b" not in mode:
+            encoding = io.text_encoding(encoding)
+>       return io.open(self, mode, buffering, encoding, errors, newline)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       PermissionError: [Errno 13] Permission denied: 'C:\\gate\\checks-badee625\\pytesttmp2\\test_run_container_reads_the_c0\\out\\copy.txt'
+
+C:\Program Files\Python312\Lib\pathlib.py:1013: PermissionError
+---------------------------- Captured stderr call -----------------------------
+2026-09-04 04:06:39 INFO [yulon.docker] run_container(): `docker run --rm --user 4242:4242 busybox:1.36 sh -c id -u; id -g`
+2026-09-04 04:06:41 INFO [yulon.docker] run_container(): `docker run --rm -v C:\gate\checks-badee625\pytesttmp2\test_run_container_reads_the_c0\client:/client:ro -v C:\gate\checks-badee625\pytesttmp2\test_run_container_reads_the_c0\out:/out -w /out busybox:1.36 sh -c cat /client/a.txt > copy.txt; id -u; id -g`
+------------------------------ Captured log call ------------------------------
+INFO     yulon.docker:docker.py:3077 run_container(): `docker run --rm --user 4242:4242 busybox:1.36 sh -c id -u; id -g`
+INFO     yulon.docker:docker.py:3077 run_container(): `docker run --rm -v C:\gate\checks-badee625\pytesttmp2\test_run_container_reads_the_c0\client:/client:ro -v C:\gate\checks-badee625\pytesttmp2\test_run_container_reads_the_c0\out:/out -w /out busybox:1.36 sh -c cat /client/a.txt > copy.txt; id -u; id -g`
+=========================== short test summary info ===========================
+FAILED tests/integration/test_docker_live.py::test_compose_up_reruns_the_one_shot_import
+FAILED tests/integration/test_docker_live.py::test_launcher_restart_never_reruns_the_one_shot_import
+FAILED tests/integration/test_docker_live.py::test_a_changed_compose_file_is_applied_without_re_running_the_import
+FAILED tests/integration/test_docker_live.py::test_a_missing_container_is_recreated_without_re_running_the_import
+FAILED tests/integration/test_docker_live.py::test_run_container_reads_the_client_read_only_and_writes_out_as_this_user
+5 failed, 13 passed, 5 skipped, 2317 deselected in 269.47s (0:04:29)
+--- exit code: 1   elapsed: 271.1s   finished UTC: 2026-09-04T11:08:47.7257458Z

@@ -1,0 +1,89 @@
+=== 7.2 change-set audit, taken 2026-09-04T12:52:50+02:00 on the laptop against badee625 ===
+tree: C:/Users/perzi/dml-phase7 at badee6255965f2ba8e05ad2306dcdc6126e5880b, working tree clean: NO
+
+--- 1. the eight bash files (six install-*.sh, dml-start.sh, wow-manage.sh) ---
+under pylauncher/ (the product):
+  (count: 0)
+still present anywhere outside archive/:
+the deletion commit:
+  2fddaa0e chore: delete the six bash installers, dml-start.sh and wow-manage.sh
+
+--- 2. installer.Installer / PROMPT_RULES / make_responder / bash_available ---
+  'class Installer': 1 hit(s) in .py
+      pylauncher/yulon/catalog/installer.py:92:class InstallerError(RuntimeError):
+  'PROMPT_RULES': 7 hit(s) in .py
+      pylauncher/tests/test_installer.py:149:# `ASK_THE_USER`, `PromptRule`, `PROMPT_RULES`, `make_responder`,
+      pylauncher/tests/test_installer.py:199:    `ScriptInstaller` or `_PROMPT_RULES`. This enumerates instead: every
+      pylauncher/tests/test_installer.py:206:    it reads: a review put `PROMPT_RULES` and `make_responder` back as members
+      pylauncher/tests/test_installer.py:232:        "PROMPT_RULES",
+      pylauncher/tests/test_prompt.py:619:    The rule is spelled inline since 7.2: it is the catch-all `PROMPT_RULES`
+      pylauncher/tests/test_prompt.py:625:        """The old `PROMPT_RULES` catch-all: an unanchored search for `(y/n)`."""
+      pylauncher/yulon/catalog/installer.py:286:    and start fresh? (y/n):" — and `PROMPT_RULES` answered "n", because
+  'make_responder': 5 hit(s) in .py
+      pylauncher/tests/test_installer.py:69:    Spelled inline since 7.2 rather than built by `installer.make_responder()`:
+      pylauncher/tests/test_installer.py:149:# `ASK_THE_USER`, `PromptRule`, `PROMPT_RULES`, `make_responder`,
+      pylauncher/tests/test_installer.py:206:    it reads: a review put `PROMPT_RULES` and `make_responder` back as members
+      pylauncher/tests/test_installer.py:209:    rule table and a working `make_responder` were back, and this test passed).
+      pylauncher/tests/test_installer.py:233:        "make_responder",
+  'bash_available': 22 hit(s) in .py
+      pylauncher/tests/support_bash.py:24:def bash_available(run: Callable[..., subprocess.CompletedProcess[str]] | None = None) -> bool:
+      pylauncher/tests/test_installer.py:24:from tests.support_bash import bash_available
+      pylauncher/tests/test_installer.py:43:# `installer.bash_available()` answered this until 7.2 deleted it with the engine
+      pylauncher/tests/test_installer.py:47:    not bash_available(), reason="no bash that can run a script on this machine"
+      pylauncher/tests/test_installer.py:150:# `bash_available`, `host_package_manager`, `NO_BASH_HELP`, `DEFAULT_TERM`,
+      pylauncher/tests/test_installer.py:235:        "bash_available",
+      pylauncher/tests/test_prompt.py:261:    from tests.support_bash import bash_available
+      pylauncher/tests/test_prompt.py:264:        return bash_available()
+      pylauncher/tests/test_runner.py:13:from tests.support_bash import bash_available
+      pylauncher/tests/test_runner.py:20:    not bash_available(), reason="no bash that can run a script on this machine"
+      pylauncher/tests/test_steam_deck_script.py:36:from tests.support_bash import bash_available
+      pylauncher/tests/test_steam_deck_script.py:42:    not bash_available(), reason="no bash that can run a script on this machine"
+      pylauncher/tests/test_support_bash.py:18:from tests.support_bash import bash_available
+      pylauncher/tests/test_support_bash.py:21:def test_bash_available_probes_that_bash_actually_runs() -> None:
+      pylauncher/tests/test_support_bash.py:34:        assert bash_available(ok) is False  # nothing to probe
+      pylauncher/tests/test_support_bash.py:36:    assert bash_available(ok) is True
+      pylauncher/tests/test_support_bash.py:38:    assert bash_available(broken) is False
+      pylauncher/tests/test_support_bash.py:41:def test_bash_available_is_false_when_nothing_is_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
+      pylauncher/tests/test_support_bash.py:48:    assert bash_available(never) is False
+      pylauncher/tests/test_support_bash.py:51:def test_bash_available_is_false_when_the_probe_cannot_be_launched() -> None:
+      pylauncher/tests/test_support_bash.py:59:    assert bash_available(unlaunchable) is False
+      pylauncher/yulon/runner.py:102:    bash died outright, so `installer.bash_available()` - which ran
+
+--- 3. Install.script* fields ---
+  pylauncher/yulon/catalog/catalog.py:690:    where the entry could be installed at all while `script_platforms` said
+  (count: 1)
+
+--- 4. gaming mode script ---
+  total 12
+  -rwxr-xr-x 1 perzi 197609 9641 Sep  2 00:23 setup-gaming-mode.sh
+
+--- NOTE on 'working tree clean: NO' above: the only untracked paths are the two gate
+    directories this lane is creating (pyplan/gates/7.2-2026-09-04, 7.10-ubuntu-2026-09-04).
+    ?? pyplan/gates/7.10-ubuntu-2026-09-04/
+    ?? pyplan/gates/7.2-2026-09-04/
+
+--- 5. the three CMaNGOS entries: platforms ---
+  Traceback (most recent call last):
+    File "<string>", line 3, in <module>
+      c=json.load(open('pylauncher/catalog/catalog.json'))
+                  ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  FileNotFoundError: [Errno 2] No such file or directory: 'pylauncher/catalog/catalog.json'
+
+--- 6. contribution.md harness paragraph ---
+  mentions of install-*.sh / Installer / PROMPT_RULES in pyplan/contribution.md:
+
+--- 7. style-guide S3 rows ---
+    102:| `catalog/catalog.py` | Typed models for `catalog.json` — the emulator sources and where each is cloned to, the password plan, the `native` block a family engine reads (its family, images, DB facts, ready markers, preflight floors, template dir), container names, the port table, DB names, the client the user supplies — and `load_catalog()` | Hardcode per-game values (they are `catalog.json` data); name a shell, a package manager or a file to execute; drive an install |
+    103:| `catalog/installer.py` | `InstallOptions`, the install error types, `compose_file()`, the `InstallEngine` protocol, and `installer_for()` — the one dispatch from a catalog entry to its family engine, on `install.native.family` alone — plus the refusal copy the engine and the view share (off-platform, Docker unavailable, provisioning, cancelled). It never runs a subprocess and never prompts | Prompt, stream, or know a stage; consult the platform to pick an engine (the engine's preflight refuses an unsupported one, from the one place that words it); import a `controller_*` package |
+    104:| `catalog/native.py` | The install engine's spine (`StagedInstaller`, `Stage`, the state file): named, resumable stages behind the `InstallEngine` protocol's `run()` contract, which `catalog/installer.py` declares and every family engine implements. Since 7.2 this is the only kind of engine there is — the bash `Installer` it used to be contrasted with is deleted | Prompt for anything; hardcode a game's compose text, floors or URLs |
+
+--- 5. (retaken; catalog.json lives at pylauncher/yulon/catalog/catalog.json) ---
+Traceback (most recent call last):
+  File "<stdin>", line 8, in <module>
+AttributeError: 'int' object has no attribute 'get'
+
+--- 5b. games (schema_version 1) ---
+   wow-wotlk      platforms=['linux', 'macos', 'windows']  status=stable script keys=none
+   wow-tbc        platforms=['linux']                      status=beta   script keys=none
+   wow-vanilla    platforms=['linux']                      status=beta   script keys=none
+   wow-tortoise   platforms=['linux']                      status=beta   script keys=none
