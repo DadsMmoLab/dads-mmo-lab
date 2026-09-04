@@ -280,6 +280,63 @@
 
 - [ ] 7.1 Spine + `AzerothCoreInstaller`, Linux native — `StagedInstaller`/`Stage` extracted from `native.py`, WotLK stage names unchanged and pinned; the 7.1 catalog models (`EmulatorSource.dest`, `PasswordPlan`, `DbFacts`, `ReadyMarkers`, `NativeInstall.family/images/image_prefix/azerothcore`); `ask` forwarded to `ensure_docker`; once-only sudo password (`SudoSession`, `sudo -S`) in provisioning; `docker-buildx` on the dnf and pacman lists; SELinux facts + `{{BIND_LABEL}}` on every host bind line + relabel; `systemd-inhibit`; `install_wiring.py` (probe wiring + the CLI harness); `wait_ready(ReadySpec)`; the proven install's `docker compose config` committed as `tests/data/wotlk-compose-config.json`; wow-wotlk dispatches native on Linux
   - [ ] Gate: yulon-ubuntu clean checkpoint, **two presses** — press 1: consent dialog + sudo dialog once + re-login report; re-login; press 2: `ready`; kill mid-build, resume skips the compile; `docker compose config` matches the fixture; auth log `127.0.0.1:8085` with no `UPDATE`; account + client login from the host after the LAN step
+    - **A WHOLE GATE RUN WAS RECOVERED FROM INSIDE A CHECKPOINT ON 2026-09-04, AND AUDITING IT SAYS
+      DO NOT TICK.** `pyplan/gates/7.1-ubuntu-2026-08-31/` — an E3 report headed `Verdict: PASSED`,
+      four press logs, a compose-config capture. It had never been in the repo; restoring
+      `pre-7.2-gate-2026-09-02` to run this gate is what surfaced it, one command before the restore
+      would have destroyed it. Full audit beside it in `AUDIT-2026-09-04.md`; every count there was
+      re-derived against the committed files rather than taken from the report.
+      **Tally against this line's fifteen clauses: 3 satisfied, 1 unsatisfiable on this box, 11 not
+      — of which 5 are contradicted by the logs and 6 have no artifact at all.**
+      * **Genuinely earned, and worth keeping:** the consent dialog (`gate-press1.log:15-16`, asked
+        exactly once across all four presses); the re-login report (`:17-18`, whose sentence is
+        appended only when the group join actually succeeded, so it doubles as proof of that); and
+        **kill mid-build** — SIGKILL at ninja edge **1314 of 1829** (`gate-press2.log:4103-4105`,
+        exit 137).
+      * **`ready` was not press 2.** Four presses ran, not two: exit 1, 137, 0, 0. Press 2 was the
+        one that got killed; `ready` first came at `gate-press3.log:3334`.
+      * **"resume skips the compile" is mis-worded, and the truth is better.** Press 3 re-entered
+        the build and re-issued every one of the 1829 edges from edge 1. What it actually did is
+        recover ~1315 of them from the BuildKit ccache mount in **13.9 s** and finish in **610.7 s**
+        instead of hours. The engine's own `The server is already built; skipping the compile.`
+        occurs exactly ONCE in the whole set, at `gate-press4.log:36` — a re-press of a COMPLETE
+        install, not a resume after a kill. Reword the clause to what press 3 proves, and note the
+        mechanism is evictable build cache: a `docker builder prune` between kill and resume would
+        have cost a full compile.
+      * **The compose-fixture clause is circular for this run.** Applying the documented transform
+        to `gate-compose-config.yml` reproduces `tests/data/wotlk-compose-config.json`
+        **byte-identical, 8658 bytes both**, same install id `243c46e3` — and the fixture was
+        committed at `aa50d2ad`, **2h31m after** the capture. The fixture IS this capture. That is
+        fine for what the fixture is FOR (it is meant to be a proven install's output); it means
+        only that this run cannot also be the run that CHECKS against it. A comparison here could
+        not have failed. `compose config` is mentioned in zero press logs.
+      * **Six clauses have no artifact at all:** the `127.0.0.1:8085` auth line (zero IPv4 addresses
+        in any log; press 3 started the stack detached so no container log was captured), the "no
+        `UPDATE`" count (its zero is vacuous — the press logs hold no SQL text, and the same grep
+        case-insensitively returns 289 and 315 hits, all `apt-get update` and `DBUpdater.cpp.o`),
+        the account, the client login, the LAN step (the realm stayed on loopback, which the report
+        itself concedes), and the starting state.
+      * **"Clean checkpoint" is unfalsifiable from these files.** The only support is
+        `Docker is not answering yet` — a daemon-REACHABILITY probe that reads identically for
+        "installed, but `pk` is outside the docker group", which we know independently was the case.
+        The strings `clean-ssh` and `checkpoint` appear in no log. One line before press 1 would fix
+        this forever: `docker --version; systemctl is-active docker; id -Gn; ls -d ~/wowserver`.
+      * **The report marks a criterion PASSED that it did not test.** `gate-e3-report.md:334` lists
+        "No sudo password dialog on a passwordless box" under PASSED, for a clause that asks the
+        dialog to APPEAR.
+    - **The sudo clause needs re-scoping, not re-running, and that is an owner decision.**
+      `pk` on `yulon-ubuntu` has `NOPASSWD: ALL`, so `SudoSession.verify()` is unreachable —
+      `_needs_password()` only fires on sudo's own "password is required" after a `sudo -n` step.
+      Either move the clause to a password-sudo box (`SudoSession`'s docstring names clean Fedora
+      and Arch, and Fedora already exercised it on 2026-08-31), or stage this box as the E.3 brief
+      actually specified — move `/etc/sudoers.d/pk` aside and re-press — which is minutes of work.
+      Leaving it as written means the clause can never be ticked on the box the line names.
+    - **7.2 cannot be ticked from this evidence either, and for a reason worth stating.** Its line
+      asks for 7.1's gate "re-run from the same checkpoint with no other change" — a reproducibility
+      clause, so one run cannot satisfy both lines. Presses 2/3/4 are not re-runs from a checkpoint;
+      they are continuations of one accumulating install, with free disk falling 75 → 67 → 53 GB
+      across them. One useful consequence: a proper 7.2 re-run would naturally produce the second,
+      independent compose capture that removes the circularity above. Sequence it that way.
   - [ ] Gate: packaged artifact on clean Fedora 44 (SELinux, password sudo, moby-engine + buildx) and clean Arch (pacman + buildx)
     - **ARCH, 2026-09-04: the artifact does not start on a clean Arch box, and the app underneath it
       is fine.** Evidence: `pyplan/gates/7.1-arch/71-arch-appimage.log`. Same artifact as the Fedora
