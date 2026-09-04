@@ -80,9 +80,16 @@ def test_the_citation_guard_widens_to_a_plan_the_moment_its_phase_is_ticked(tmp_
 
 
 GONE = re.compile(r"\bdeletes?\b|\bdeleted\b|never written", re.I)
-"""How a page says that a name it spells is not supposed to resolve.
+"""How a page says that a name it spells is not supposed to resolve."""
 
-Deliberately literal and deliberately narrow; see `_cited_as_live()`.
+_GONE_WINDOW = 60
+"""How far back from a name to look for one of those words.
+
+Wide enough to cover the two spellings this repo actually uses -- a DELETE
+immediately before the name, and `delete the whole function <name>` -- and
+narrow enough that a deletion mentioned about a DIFFERENT name earlier in the
+same sentence does not reach this one. Sixty characters is a judgement rather
+than a measurement, and it is a named constant so it can be argued with.
 """
 
 
@@ -108,16 +115,26 @@ def _cited_as_live(text: str) -> set[str]:
 
     WHAT THIS GIVES UP, said here rather than discovered later: a page can now
     write "F.4 deletes `test_x`" about a test that is alive, and this guard will
-    not catch it. That hole is real, and it is narrow — the claim has to sit on
-    the same line as the name and has to be a claim of removal. The alternative
-    was a guard that a phase tick converts into an instruction to rewrite
-    history, which is the worse failure.
+    not catch it. That hole is real, and it is narrow: the claim has to sit within
+    `_GONE_WINDOW` characters of the name -- not merely somewhere on the same
+    line, which is what this said until a review pointed out that two citations
+    can share a line -- and it has to be a claim of removal. The alternative was a
+    guard that a phase tick converts into an instruction to rewrite history,
+    which is the worse failure.
     """
     live: set[str] = set()
     for line in text.splitlines():
-        names = set(re.findall(r"\btest_[a-z0-9_]+\b", line))
-        if names and not GONE.search(line):
-            live |= names
+        for match in re.finditer(r"\btest_[a-z0-9_]+\b", line):
+            # A window around the name, not the whole line, and not one side of
+            # it either. Both spellings occur here: `DELETE <name>` puts the word
+            # before, and "`tests/test_native.py` DELETED after the move" puts it
+            # after. What the window buys is the case a line-wide test got wrong --
+            # "(DELETE `a` -- its replacement is this task's `b`)", where `b` is a
+            # live citation sitting 88 characters from a DELETE that was about `a`,
+            # and stays live because that is further than this reaches.
+            near = line[max(0, match.start() - _GONE_WINDOW) : match.end() + _GONE_WINDOW]
+            if not GONE.search(near):
+                live.add(match.group())
     return live
 
 

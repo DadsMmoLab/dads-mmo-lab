@@ -1,3 +1,7 @@
+# tbc-mangosd: every startup that could not reach the database, captured in full 2026-09-04.
+# The first capture of this file used head -14 on a grep and held 4 of the 5. Recaptured whole.
+# RestartCount at the time of the gate run: 5 (gate79-tbc-alldumps.log).
+
 5376:SQL ERROR: Lost connection to MySQL server during query
 5378:SQL ERROR: Lost connection to MySQL server during query
 5380:SQL ERROR: Lost connection to MySQL server during query
@@ -12,16 +16,11 @@
 5456:Could not connect to MySQL database at tbc-db: Can't connect to MySQL server on 'tbc-db:3306' (111)
 5458:Cannot connect to world database tbc-db;3306;mangos;tbc-faf2e5c45f363783;mangos
 5478:Could not connect to MySQL database at tbc-db: Can't connect to MySQL server on 'tbc-db:3306' (111)
---- context ---
+5480:Cannot connect to world database tbc-db;3306;mangos;tbc-faf2e5c45f363783;mangos
+5500:Could not connect to MySQL database at tbc-db: Can't connect to MySQL server on 'tbc-db:3306' (111)
+5502:Cannot connect to world database tbc-db;3306;mangos;tbc-faf2e5c45f363783;mangos
 
-Cannot connect to world database tbc-db;3306;mangos;tbc-faf2e5c45f363783;mangos
-[CMaNGOS TBC World server v0.18] id(1) port(8085)
---
-
-Cannot connect to world database tbc-db;3306;mangos;tbc-faf2e5c45f363783;mangos
-[CMaNGOS TBC World server v0.18] id(1) port(8085)
---
-
-Cannot connect to world database tbc-db;3306;mangos;tbc-faf2e5c45f363783;mangos
-[CMaNGOS TBC World server v0.18] id(1) port(8085)
---
+# counts
+Could not connect to MySQL database at tbc-db: 5
+Cannot connect to world database: 5
+Lost connection to MySQL server: 7

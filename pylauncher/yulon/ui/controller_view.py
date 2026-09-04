@@ -415,7 +415,20 @@ def _for_wotlk(
         # confirmation is the dialog the view puts in front of this call. What
         # the token buys is that no confirmation can be spelled `True`.
         restore=lambda plan: wotlk_maintenance.restore(
-            plan, mysql, confirm=plan.token, spec=spec, wsl_distro=wsl_distro
+            plan,
+            mysql,
+            confirm=plan.token,
+            spec=spec,
+            # Bound here for the same reason `backup` binds it four lines up, and
+            # missed when the CMaNGOS wrappers were fixed on 2026-09-04. WotLK has
+            # no per-game maintenance wrapper -- this lambda IS its call site -- so
+            # `restore()`'s new `core_databases` default applied here unbound. It
+            # was harmless only by coincidence: this entry's databases happen to be
+            # the three the default names. An AzerothCore-family entry that spelled
+            # them differently would have reproduced the exact bug that fix removed,
+            # on the tab whose Backup button was already correct.
+            core_databases=entry.core_databases(),
+            wsl_distro=wsl_distro,
         ),
     )
 

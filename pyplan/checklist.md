@@ -619,7 +619,8 @@
     only the STATUS of the first `vmap extract`, with 139 and an empty tail, which is exactly
     what `docker.run_container` hands back for a signal-killed PID 1.
 
-    **The recipe is reachable, which is what the line asked for.** The four lines, in order:
+    **The recipe is reachable, which is what the line asked for.** The transcript, in order (five
+    lines; this said "four" until a review counted them too):
 
     ```
     shipped recipe: statuses=(139,) tools=('vmap extract', 'vmap assemble')
@@ -650,8 +651,13 @@
     **So the one retry the recipe exists for cannot survive the crash it names.** At the moment
     of the refusal `data/Buildings` held **5,076 files** — the shipped Vanilla count — and the
     log shows the tool writing them one at a time, thousands of `Extracting World\wmo\…` lines.
-    A crash at any point after the first file leaves a directory the tool calls polluted, so the
-    only crash this recipe could recover from is one that happened before the tool wrote anything.
+    So a crash at any point after the first file should leave a directory the tool calls polluted,
+    which would mean the only crash this recipe could recover from is one that happened before the
+    tool wrote anything. **That last step is an inference, not a measurement**, and it is the one
+    sentence on this line that was not observed: the run only ever produced TOTAL pollution. It
+    rests on the tool's own wording — it asks for an empty directory, not a complete one — and on
+    the log showing the files written one at a time. It would be settled by deleting half of
+    `Buildings/` and re-running the tool, which nobody has done.
 
     **Stated against itself, because the harness is not a real crash.** The injected 139 arrived
     AFTER the first attempt had finished its work, so the pollution observed here is total where
@@ -952,11 +958,17 @@
       it did not do the starting.
   - **The worldserver-exits-alone mechanism now has THREE independent reproductions, and the third
     is the cleanest.** `docker start tbc-db tbc-realmd tbc-mangosd` — all three at once — put
-    `tbc-mangosd` at **`RestartCount=5`** before it settled, with twelve `Could not connect to
-    MySQL database at tbc-db: Can't connect to MySQL server on 'tbc-db:3306' (111)` lines and a
-    `Cannot connect to world database` before each restart
-    (`pyplan/gates/7.9-cmangos/79-tbc-restart-evidence.log`). The database container was simply not
-    accepting connections yet.
+    `tbc-mangosd` at **`RestartCount=5`** before it settled, with **five** `Could not connect to
+    MySQL database at tbc-db: Can't connect to MySQL server on 'tbc-db:3306' (111)` lines and five
+    `Cannot connect to world database` — one of each per restart
+    (`pyplan/gates/7.9-cmangos/79-tbc-restart-evidence.log`, which now carries its own counts). The
+    database container was simply not accepting connections yet.
+    **This line said "twelve" until a review counted them.** Twelve was the answer to a different
+    question — a `grep -c` over TWO patterns at once across the whole container log — and the
+    evidence file first committed beside it held only four, because the capture had `head -14` on
+    the end of a pipe. Both are the same mistake in different clothes, and it is the one this
+    checklist recorded a lesson about eight hours earlier: capture the whole thing, and make the
+    artifact carry the count so nobody has to trust the prose. The file now does.
     **That is precisely what `start_staged()` exists to prevent** — it waits for the database
     before starting the servers, which a bare `docker start` does not — and it is the mirror of
     the `stop_staged()` argument. Three triggers, one mechanism: **this core exits when its
