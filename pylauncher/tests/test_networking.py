@@ -164,6 +164,13 @@ def test_realmlist_sql_per_core() -> None:
 
 
 def test_lan_plan_is_fully_automatable() -> None:
+    """Everything this plan proposes, `apply()` can do — and it proposes no enable.
+
+    `warnings` carries exactly one sentence since bug-checklist §39: the
+    disclosure that `ufw enable` was withheld. That is a statement about a
+    command NOT run, not work handed to the user, so `manual_steps` is still
+    empty and every command in the plan is still one the app executes itself.
+    """
     p = networking.plan(
         WOTLK,
         "lan",
@@ -173,7 +180,8 @@ def test_lan_plan_is_fully_automatable() -> None:
         wsl=False,
         bindings={3724: "0.0.0.0", 8085: "0.0.0.0"},
     )
-    assert p.ready and p.warnings == () and p.manual_steps == ()
+    assert p.ready and p.manual_steps == ()
+    assert p.warnings == (networking.UFW_ENABLE_WITHHELD,)
     assert p.realmlist_sql is not None and "192.168.1.25" in p.realmlist_sql
     assert p.client_realmlist == "192.168.1.25"
     assert p.firewall_commands[0] == ("ufw", "allow", "3724/tcp")
@@ -283,8 +291,22 @@ class _RecordingSql:
 
 
 def test_apply_runs_firewall_under_sudo_n_updates_realmlist_and_reports_skips() -> None:
+    """The enable path, on the box where enabling is safe: nothing listens for SSH.
+
+    Asked for explicitly since bug-checklist §39, because a plan no longer
+    proposes `ufw --force enable` on its own — and this test is about what
+    `apply()` does with a command that needs a password sudo -n cannot give,
+    which needs a command that can fail that way.
+    """
     p = networking.plan(
-        WOTLK, "lan", lan_ip="192.168.1.25", firewall="ufw", steamos=False, wsl=False
+        WOTLK,
+        "lan",
+        lan_ip="192.168.1.25",
+        firewall="ufw",
+        steamos=False,
+        wsl=False,
+        enable_firewall=True,
+        detect_ssh=networking.SshRoute,
     )
     seen: list[list[str]] = []
 
@@ -666,3 +688,310 @@ def test_the_row_is_read_on_every_column_the_update_writes() -> None:
         written = networking.realmlist_sql(entry, "10.0.0.9", "10.0.0.9")
         for column in networking.realmlist_columns(entry):
             assert f"{column}='10.0.0.9'" in written, (entry.id, column)
+
+
+# ------------------------------------------ the firewall and the way back in
+# bug-checklist §39, found by 7.1's own gate on 2026-09-04: `plan()` emitted
+# `ufw allow 3724/tcp`, `ufw allow 8085/tcp`, `ufw --force enable` on every ufw
+# box, and `ufw enable` brings up a default-DENY-incoming policy. On the
+# headless server this feature exists for, that is the operator's SSH gone —
+# with `report.skipped` and `report.manual_steps` both EMPTY, so nothing said
+# so. Recovery took the hypervisor's synthetic keyboard.
+#
+# Every test here drives the SSH seam explicitly, because the whole defect was
+# a plan that never asked.
+
+_SS_LISTENING = (
+    'LISTEN 0 4096   0.0.0.0:3724  0.0.0.0:*  users:(("docker-proxy",pid=9,fd=4))\n'
+    'LISTEN 0 128    0.0.0.0:2022  0.0.0.0:*  users:(("sshd",pid=830,fd=3))\n'
+    'LISTEN 0 128       [::]:2022     [::]:*  users:(("sshd",pid=830,fd=4))\n'
+)
+"""What `ss -H --listening --tcp --numeric --processes` prints on a box whose
+sshd was moved off 22 — the case `ufw allow 22/tcp` would have got wrong."""
+
+
+def _no_ss(argv: list[str]) -> subprocess.CompletedProcess[str]:
+    """A machine with no `ss` at all: the probe cannot answer, and must say so."""
+    raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+
+def _unprivileged_ss(argv: list[str]) -> subprocess.CompletedProcess[str]:
+    """`ss --processes` as a normal user: the socket is listed, its owner is not."""
+    return subprocess.CompletedProcess(argv, 0, "LISTEN 0 128 0.0.0.0:22 *:*\n", "")
+
+
+def _ok(argv: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(argv, 0, "", "")
+
+
+def _ufw_plan(
+    *,
+    enable_firewall: bool = False,
+    route: networking.SshRoute | None = None,
+    steamos: bool = False,
+) -> networking.NetworkPlan:
+    """A LAN plan on a ufw box with only the SSH decision left to the caller."""
+    answer = route if route is not None else networking.SshRoute()
+    return networking.plan(
+        WOTLK,
+        "lan",
+        lan_ip="192.168.1.25",
+        firewall="ufw",
+        steamos=steamos,
+        wsl=False,
+        enable_firewall=enable_firewall,
+        detect_ssh=lambda: answer,
+    )
+
+
+def test_the_lan_step_does_not_turn_the_firewall_on_by_itself() -> None:
+    """The command that caused the lockout is not in the default plan at all.
+
+    Opening the ports is what the user asked for; `ufw --force enable` is the
+    one command in that block that can only SUBTRACT reachability, and it is
+    not needed for the request either way — `ufw allow` applies immediately on
+    an already-active ufw and is staged on an inactive one. So it is withheld,
+    and the withholding is SAID, on both objects: the gate that found this read
+    `report.skipped` and `report.manual_steps` and both were empty.
+    """
+    p = _ufw_plan()
+    assert list(p.firewall_commands) == [
+        ("ufw", "allow", "3724/tcp"),
+        ("ufw", "allow", "8085/tcp"),
+    ]
+    assert p.refusals and any("enable" in r for r in p.refusals)
+    assert any("enable" in w for w in p.warnings), "the GUI renders warnings, not refusals"
+    report = networking.apply(p, sql=None, run=_ok)
+    assert report.refusals == p.refusals
+    assert all(r in report.skipped for r in p.refusals)
+
+
+def test_the_default_plan_never_asks_the_machine_about_ssh() -> None:
+    """No enable, no probe: nothing to guard, so no subprocess and no seam call."""
+
+    def never() -> networking.SshRoute:
+        raise AssertionError("probed the listener table for a plan that enables nothing")
+
+    p = networking.plan(
+        WOTLK,
+        "lan",
+        lan_ip="192.168.1.25",
+        firewall="ufw",
+        steamos=False,
+        wsl=False,
+        detect_ssh=never,
+    )
+    assert p.firewall_commands and p.ssh_ports == ()
+
+
+def test_enabling_over_ssh_allows_the_port_that_session_arrived_on() -> None:
+    """The other reachable path: enable, but never without the way back in.
+
+    2222, not 22 — the port comes from the running system, so a moved sshd is
+    covered and `sshd_config` (a file we do not own, with Match blocks and
+    includes) never has to be parsed.
+    """
+    p = _ufw_plan(enable_firewall=True, route=networking.SshRoute(connected=True, ports=(2222,)))
+    cmds = list(p.firewall_commands)
+    assert ("ufw", "allow", "2222/tcp") in cmds
+    assert cmds.index(("ufw", "allow", "2222/tcp")) < cmds.index(("ufw", "--force", "enable"))
+    assert p.ssh_ports == (2222,)
+    assert p.refusals == ()
+    assert any("2222" in w for w in p.warnings), "a port opened for you is a thing to be told"
+
+
+@pytest.mark.parametrize(
+    ("route", "because"),
+    [
+        (networking.SshRoute(connected=True, ports=()), "SSH_CONNECTION"),
+        (networking.SshRoute(listeners_readable=False), "listening"),
+    ],
+    ids=["remote session, port unknown", "listener table unreadable"],
+)
+def test_an_ssh_port_that_cannot_be_established_refuses_the_enable(
+    route: networking.SshRoute, because: str
+) -> None:
+    """A port that cannot be established is a refusal, never a shrug-and-enable.
+
+    The second case is the one an artifact would lie about: an `ss` that could
+    not be read answers with no sshd ports, which looks exactly like a box that
+    has no sshd — so the probe reports WHETHER it could see, and an unreadable
+    table is not an empty one.
+    """
+    p = _ufw_plan(enable_firewall=True, route=route)
+    assert all("enable" not in c for cmd in p.firewall_commands for c in cmd)
+    assert p.refusals and because in " ".join(p.refusals)
+    assert all(r in p.warnings for r in p.refusals)
+    seen: list[list[str]] = []
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    report = networking.apply(p, sql=None, run=run)
+    assert all("enable" not in a for argv in seen for a in argv)
+    assert all(r in report.skipped for r in p.refusals)
+
+
+def test_a_box_with_no_ssh_at_all_enables_exactly_what_the_guide_says() -> None:
+    """A box that looks local is unchanged: the three commands, no advice.
+
+    Nothing listens for SSH and nothing arrived over it, so there is no route
+    to preserve and no sentence worth printing — inventing one for a machine
+    that is fine is how a networking screen teaches people to ignore it.
+    """
+    p = _ufw_plan(enable_firewall=True, route=networking.SshRoute())
+    assert list(p.firewall_commands) == [
+        ("ufw", "allow", "3724/tcp"),
+        ("ufw", "allow", "8085/tcp"),
+        ("ufw", "--force", "enable"),
+    ]
+    assert p.refusals == () and p.warnings == () and p.manual_steps == ()
+
+
+def test_the_boot_time_enable_is_withheld_with_the_live_one() -> None:
+    """SteamOS's `systemctl enable ufw` arms the same lockout one reboot later."""
+    flat = [" ".join(c) for c in _ufw_plan(steamos=True).firewall_commands]
+    assert "steamos-readonly disable" in flat and "steamos-readonly enable" in flat
+    assert "ufw allow 3724/tcp" in flat
+    assert "ufw --force enable" not in flat
+    assert "systemctl enable ufw" not in flat
+
+
+@pytest.mark.parametrize(
+    ("command", "turns_it_on"),
+    [
+        (["ufw", "--force", "enable"], True),
+        (["ufw", "enable"], True),
+        (["systemctl", "enable", "ufw"], True),
+        (["systemctl", "enable", "ufw.service"], True),
+        (["systemctl", "enable", "--now", "ufw"], True),
+        (["systemctl", "enable", "--now", "firewalld"], False),
+        (["ufw", "allow", "3724/tcp"], False),
+        (["steamos-readonly", "enable"], False),
+        (["pacman", "-Sy", "--noconfirm", "ufw"], False),
+        ([], False),
+    ],
+)
+def test_what_counts_as_turning_the_firewall_on(command: list[str], turns_it_on: bool) -> None:
+    """Enumerated rather than read off the one command that caused the outage.
+
+    Three of the False rows are the ones a looser predicate gets wrong and each
+    breaks something real: matching bare "enable" would swallow
+    `steamos-readonly enable` and leave a SteamOS box read-only forever;
+    matching any argv containing "ufw" would drop the pacman line that installs
+    it; and matching `systemctl enable` without reading the unit would withhold
+    firewalld's start, after which `firewall-cmd --reload` has no daemon to
+    talk to.
+    """
+    assert networking._turns_ufw_on(command) is turns_it_on
+
+
+def test_firewalld_is_not_the_same_bug_and_is_left_alone() -> None:
+    """Scope, argued rather than assumed: firewalld's default zone admits ssh.
+
+    `systemctl enable --now firewalld` starts a firewall whose `public` zone
+    ships the `ssh` service allowed, and `firewall-cmd --reload` needs the
+    daemon running — so withholding the start here would break a working path
+    to prevent a lockout this backend does not cause.
+    """
+    p = networking.plan(
+        WOTLK, "lan", lan_ip="192.168.1.25", firewall="firewalld", steamos=False, wsl=False
+    )
+    assert p.firewall_commands[0] == ("systemctl", "enable", "--now", "firewalld")
+    assert p.refusals == () and p.ssh_ports == ()
+
+
+def test_the_ssh_port_comes_from_the_running_system_not_from_a_config_file() -> None:
+    """`ss`, not `sshd_config`: the answer is what is LISTENING right now."""
+    calls: list[list[str]] = []
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, _SS_LISTENING, "")
+
+    route = networking.detect_ssh_route(environ={}, run=run)
+    assert route == networking.SshRoute(connected=False, ports=(2022,), listeners_readable=True)
+    assert calls and calls[0][0] == "ss"
+
+
+def test_ssh_connection_names_the_port_this_session_actually_arrived_on() -> None:
+    """Field four of `SSH_CONNECTION` is the server-side port sshd accepted us on.
+
+    Which is the one port that provably admits the operator standing here, so
+    it joins whatever the listener table said rather than replacing it.
+    """
+    route = networking.detect_ssh_route(
+        environ={"SSH_CONNECTION": "10.0.0.5 51234 10.0.0.9 2200"},
+        run=lambda argv: subprocess.CompletedProcess(argv, 0, _SS_LISTENING, ""),
+    )
+    assert route.connected is True
+    assert route.ports == (2022, 2200)
+
+
+def test_a_session_over_ssh_still_names_its_port_when_ss_is_missing() -> None:
+    """The environment answers even when the probe cannot, and that is enough to proceed."""
+    route = networking.detect_ssh_route(
+        environ={"SSH_CONNECTION": "10.0.0.5 51234 10.0.0.9 2200"}, run=_no_ss
+    )
+    assert route.ports == (2200,) and route.connected is True
+    assert route.listeners_readable is False
+
+
+@pytest.mark.parametrize(
+    "run", [_no_ss, _unprivileged_ss], ids=["no ss on the box", "ss ran unprivileged"]
+)
+def test_a_listener_table_we_could_not_read_is_not_an_empty_one(run: networking.Runner) -> None:
+    """Both of these used to look like "no sshd here", which is how a guess becomes a lockout.
+
+    The second is the ordinary case, not an exotic one: `ss --processes` can
+    only name the owner of a socket it is allowed to read, and sshd runs as
+    root — so an unprivileged probe sees the socket and no name at all.
+    """
+    route = networking.detect_ssh_route(environ={}, run=run)
+    assert route.ports == () and route.listeners_readable is False
+
+
+@pytest.mark.parametrize(
+    ("value", "connected"),
+    [
+        ("", False),
+        ("garbage", True),
+        ("10.0.0.5 51234 10.0.0.9", True),
+        ("10.0.0.5 51234 10.0.0.9 not-a-port", True),
+    ],
+)
+def test_a_malformed_ssh_connection_is_still_a_session_over_ssh(
+    value: str, connected: bool
+) -> None:
+    """No port from it, but the remoteness it declares is not thrown away.
+
+    That split is the whole safety property: connected-with-no-port is exactly
+    the case that must REFUSE, so a parser that raised, or that answered "not
+    remote" on a shape it did not recognise, would enable ufw on the one box
+    with the most to lose.
+    """
+    route = networking.detect_ssh_route(environ={"SSH_CONNECTION": value}, run=_no_ss)
+    assert route.connected is connected
+    assert route.ports == ()
+
+
+def test_apply_does_not_enable_ufw_when_the_ssh_rule_did_not_land() -> None:
+    """The guard has to prove the rule ARRIVED, not that the plan declared it.
+
+    `sudo -n ufw allow 2222/tcp` can fail on its own — a bad port, a ufw that
+    refuses the rule — while the enable that follows it succeeds, and the plan
+    would have been right about everything except the outcome.
+    """
+    p = _ufw_plan(enable_firewall=True, route=networking.SshRoute(connected=True, ports=(2222,)))
+    seen: list[list[str]] = []
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        rc = 1 if "2222/tcp" in argv else 0
+        return subprocess.CompletedProcess(argv, rc, "", "ERROR: Bad port")
+
+    report = networking.apply(p, sql=None, run=run)
+    assert ["sudo", "-n", "ufw", "--force", "enable"] not in seen
+    assert any("2222" in s for s in report.skipped)
+    assert any("SSH" in r and "enable" in r for r in report.refusals)

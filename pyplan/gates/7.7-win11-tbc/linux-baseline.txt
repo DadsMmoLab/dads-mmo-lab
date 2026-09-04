@@ -1,0 +1,32 @@
+THE LINUX TBC BASELINE THIS RUN IS COMPARED AGAINST — re-measured live on m910q 2026-09-04,
+not copied out of the checklist. Source: /home/pk/tbc-7.4c/data (the 7.4b/7.4c install).
+The checklist's figures (dbc 185, maps 3586, Buildings 7171, vmaps 8099, mmaps 2819) reproduced
+exactly, so the record is sound.
+
+  dir         files   casefold-unique   collisions   bytes
+  dbc           185               185            0   50,056,986
+  maps         3586              3586            0  205,784,097
+  Buildings    7171              5431         1740  214,253,321
+  vmaps        8099              8099            0  406,971,047
+  mmaps        2819              2819            0  2,528,883,260
+  Cameras        13                13            0       51,328
+
+  extension split
+  dbc        185 .dbc
+  maps      3586 .map
+  Buildings 3921 .m2   2044 .M2   1204 .wmo   + dir_bin + temp_gameobject_models  = 7171
+  vmaps     4949 .vmo  1790 .vmtile  72 .vmtree  1287 .m2  + temp_gameobject_models = 8099
+  mmaps     2747 .mmtile  72 .mmap = 2819
+  Cameras     13 .m2
+
+  Buildings/dir_bin                  50,938,121 bytes
+  Buildings/temp_gameobject_models       41,308 bytes
+
+  dir_bin parsed the same way the Vanilla lane parsed it (printable runs ending .m2/.M2/.wmo):
+      placements (name occurrences) : 699,970
+      distinct names                :   4,263
+      distinct case-folded names    :   4,263   <- dir_bin carries only the FIXED spelling,
+                                                   so it has no case duplicates of its own
+  Names list: linux-tbc-dirbin-names.txt (name|count)
+
+  Source commit of that install: f82e7d679c283b66bc2adc1b751aa1275e655673 (see source-identity.txt)

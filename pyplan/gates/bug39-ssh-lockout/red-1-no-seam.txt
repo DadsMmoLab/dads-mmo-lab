@@ -1,0 +1,12 @@
+=== RED 1: the seam does not exist at all === 
+
+=================================== ERRORS ====================================
+__________________ ERROR collecting tests/test_networking.py __________________
+tests\test_networking.py:784: in <module>
+    (networking.SshRoute(connected=True, ports=()), "SSH_CONNECTION"),
+     ^^^^^^^^^^^^^^^^^^^
+E   AttributeError: module 'yulon.networking' has no attribute 'SshRoute'
+=========================== short test summary info ===========================
+ERROR tests/test_networking.py - AttributeError: module 'yulon.networking' ha...
+!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error in 0.41s

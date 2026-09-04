@@ -1,0 +1,151 @@
+=== Lane C, 2026-09-04 -- 7.1 clause 14: where a 3.3.5a client is, and why it could not be run
+Every line below was read off a machine at the time stated, not recalled.
+
+--------------------------------------------------------------------------------
+1. THE CLIENT EXISTS. It is on this laptop (PKGAME-LAPTOP), at C:\wow335ahd.
+--------------------------------------------------------------------------------
+    PS> (Get-Item C:\wow335ahd\Wow.exe).VersionInfo
+        FileVersion     : 3, 3, 5, 12340        <- 3.3.5a, build 12340
+        ProductVersion  : Version 3.3
+        FileDescription : World of Warcraft Retail
+    C:\wow335ahd\readme.txt line 1: "World of Warcraft 3.3.5a HD client"
+                          line 2: "+DXVK Version 2.4.1 (d3d9.dll)"
+    Data set: 27,186 MB in C:\wow335ahd\data
+        common 2747.7 MB  common-2 1726.6  expansion 1832.2  lichking 2458.5
+        patch 3819.2  patch-2 1336.8  patch-3 611.4  + 16 HD patch MPQs
+        data\enus: base/locale/patch-enus + speech, 2,398 MB
+    It has logged in before, from this same laptop: C:\wow335ahd\Logs\connection.log
+        8/31 22:48:20  COP_AUTHENTICATE  code=AUTH_OK result=TRUE
+        8/31 22:48:26  COP_CREATE_CHARACTER code=47 result=TRUE
+        8/31 22:48:34  COP_LOGIN_CHARACTER  code=77 result=TRUE
+    So the client is not merely present, it is known-good on this hardware.
+
+    The other two machines with clients hold NO 3.3.5a:
+      vmhost (DESKTOP-FP27AUV) C:\clients -> TurtleWoW, WoW-TBC-2.4.3, WoW-Vanilla-1.12.1
+      m910q  ~/clients         -> WoW-Client-1.12.1, WoW-Client-2.4.3 (+ ~/TurtleWoW)
+      yulon-ubuntu             -> none (the 7.1 lane already recorded this)
+
+--------------------------------------------------------------------------------
+2. IT WILL NOT START. The laptop has NO DISPLAY ATTACHED TO THE DESKTOP.
+--------------------------------------------------------------------------------
+    Launched C:\wow335ahd\wow.exe twice (pids 218224, 217260). Both times the only
+    visible window it created was a 338x130 dialog, dead centre of the screen:
+
+        hwnd 789460  class #32770  title 'World of Warcraft'  794,478-1132,608
+          child [Static] 'Failed to find a suitable display device.  Exiting program.'
+          child [Button] 'OK'
+
+    Logs\gx.log was created and stayed 0 bytes both times -- the renderer never
+    initialised. This is the D3D9 adapter enumeration returning zero adapters.
+
+    The cause, read from the OS (user32!EnumDisplayDevices, all six entries):
+        \\.\DISPLAY1 | AMD Radeon(TM) 610M          | attachedToDesktop=False
+        \\.\DISPLAY2 | AMD Radeon(TM) 610M          | attachedToDesktop=False
+        \\.\DISPLAY3..6 | NVIDIA GeForce RTX 4070   | attachedToDesktop=False
+    Not one display is attached. Consistent with a closed lid and no external
+    monitor. Corroborating readings taken at the same time:
+      * every screen capture is uniformly black -- 0 of 6,720 sampled pixels
+        above RGB-sum 24, with the game minimised, i.e. the DESKTOP is black,
+        not the game window (control-desktop-wow-minimized.png,
+        control3-desktop-after-monitorpower.png, control4-unsandboxed.png);
+      * Screen.PrimaryScreen.Bounds reports the headless fallback 1920x1080
+        while Win32_VideoController still reports the panel's last mode 2560x1600;
+      * the session is NOT locked and IS the console session:
+            quser -> perzi  console  1  Active
+            LogonUI not running; OpenInputDesktop name = "Default"
+        so this is not a window-station or lock-screen problem.
+
+    Three different attempts, all the same dialog / same black desktop:
+      (1) as shipped, DXVK 2.4.1 d3d9.dll present            -> no display device
+      (2) DXVK disabled (d3d9.dll renamed aside), native D3D9 -> no display device
+      (3) outside the tool sandbox (dangerouslyDisableSandbox) -> desktop still black
+    Plus two attempts to bring a display back, both no-ops because there is no
+    panel to bring back:
+        SendMessage(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, -1)  (monitor on)
+        SetDisplayConfig(SDC_APPLY|SDC_TOPOLOGY_INTERNAL) -> returned 0 (SUCCESS)
+        SetDisplayConfig(SDC_APPLY|SDC_TOPOLOGY_EXTEND)   -> returned 0 (SUCCESS)
+        EnumDisplayDevices after both: still attachedToDesktop=False on all six.
+    A success return with no display attached is the OS saying there is nothing
+    to attach. This needs a human to open the lid or plug a monitor in.
+
+--------------------------------------------------------------------------------
+3. MOVING THE CLIENT TO A MACHINE THAT HAS A SCREEN WAS MEASURED, NOT GUESSED.
+--------------------------------------------------------------------------------
+    vmhost (DESKTOP-FP27AUV) is the one box with both a real display and a route
+    to the server:
+        quser -> pk console 1 Active
+        Win32_VideoController -> NVIDIA GeForce GTX 1080 Ti, 1920x1080 (a MODE IS SET)
+        C: free 149,602,246,656 bytes (139 GB) -- room for the 27 GB client
+        and 7.1's lan-reachability.txt already proves it reaches 172.30.55.119:3724/8085.
+    So the only question was transfer time. Measured, not assumed:
+        scp C:\wow335ahd\data\patch-3.mpq (611.4 MB)  laptop -> vmhost
+        killed at 600 s having moved 502,394,880 bytes = 0.84 MB/s
+    A minimum bootable 3.3.5a set (common, common-2, expansion, lichking, patch,
+    patch-2, patch-3 = 14,533 MB, plus the enUS base/locale/patch MPQs = 846 MB)
+    is 15.4 GB, i.e. ~5.1 hours at the measured rate. The full 27 GB is ~9 hours.
+    (The partial file was deleted from vmhost afterwards; the sftp-server holding
+    it had to be killed first. C:\clients\WoW-3.3.5a no longer exists.)
+
+    m910q was the other candidate -- it is physical, has a display and is the
+    fast link (memory: ~17 MB/s, so 15.4 GB in ~15 min) -- but:
+        command -v wine wine64 -> NO_WINE
+        df -h ~ -> 37 G available (enough, but with no margin)
+    Installing and configuring Wine to run a DXVK'd 3.3.5a HD client is a new
+    project with its own failure modes, not a step in this gate. Not attempted.
+
+--------------------------------------------------------------------------------
+4. WHAT WAS STAGED, AND HOW TO FINISH IN FIVE MINUTES ONCE A SCREEN EXISTS
+--------------------------------------------------------------------------------
+    Credentials. The brief said the password is in account-lan.log; it is not --
+    that log records only "keeping its password". It is in the driver that made
+    the account, on the box: /home/pk/gate0904/gate-account-lan.py
+        USERNAME = "gate0904"      -> the row is GATE0904, account_id 101
+        PASSWORD = "gate0904pw"
+        GM_LEVEL = 3
+    Transport. The laptop cannot route 172.30.55.119 (Test-NetConnection -Port 3724
+    -> False); that address is the Hyper-V internal network. An ssh tunnel closes
+    that, and it was built and PROVEN before the client was launched:
+        ssh -N -L 3724:127.0.0.1:3724 -L 8085:127.0.0.1:8085 yulon-ubuntu
+        Test-NetConnection 127.0.0.1 -Port 3724 -> True
+        Test-NetConnection 127.0.0.1 -Port 8085 -> True
+    Realm hand-off. A tunnelled client arrives at the authserver as 127.0.0.1, and
+    src/server/shared/Realms/Realm.cpp:28-41 on this very box says:
+        if (clientAddr.is_loopback())
+            if (LocalAddress->is_loopback() || ExternalAddress->is_loopback())
+                realmIp = clientAddr;            // <- what we want
+            else realmIp = *LocalAddress;        // 172.30.55.119, unroutable here
+    so the realm must advertise a loopback LOCAL address for the duration:
+        UPDATE acore_auth.realmlist SET localAddress='127.0.0.1' WHERE id=1;
+    This was applied and then PUT BACK; the row is 172.30.55.119 / 172.30.55.119
+    again (see server-side-after-attempt.txt, last line). `address` was never
+    touched, so clause 15's "advertises 172.30.55.119" still reads as the 7.1 lane
+    left it.
+    Client config. WTF\Config.wtf `SET realmList` overrides data\enus\realmlist.wtf
+    on this client -- both were pointed at 127.0.0.1 and both have been RESTORED
+    (100.99.204.5 and 100.99.161.102 respectively). Backups kept as *.lanec-bak.
+    DXVK's d3d9.dll was renamed aside for attempt (2) and is back in place.
+    NOTE: data\enus\realmlist.wtf.bak-127 already existed before this lane -- an
+    earlier run did the same 127.0.0.1 substitution here.
+
+    To finish: open the lid (or plug a monitor in), then
+      1. ssh yulon-ubuntu "docker exec ac-database mysql -uroot -ppassword -e \
+           \"update acore_auth.realmlist set localAddress='127.0.0.1' where id=1;\""
+      2. ssh -N -L 3724:127.0.0.1:3724 -L 8085:127.0.0.1:8085 yulon-ubuntu
+      3. set WTF\Config.wtf  SET realmList "127.0.0.1"
+      4. run C:\wow335ahd\wow.exe, log in GATE0904 / gate0904pw, create a character
+      5. read the three witnesses below, then put localAddress back to 172.30.55.119
+
+--------------------------------------------------------------------------------
+5. WHAT THE SERVER RECORDS -- AND IT RECORDS NOTHING, WHICH IS THE POINT
+--------------------------------------------------------------------------------
+    server-side-after-attempt.txt, taken after the attempt was abandoned:
+        account 101 GATE0904 : LENGTH(session_key) = NULL, last_login = NULL, online = 0
+        SELECT COUNT(*) FROM acore_auth.account WHERE session_key IS NOT NULL -> 0
+        SELECT COUNT(*) FROM acore_characters.characters WHERE account=101   -> 0
+        characters with online=1 -> 500  (the playerbot roster; server-side bot
+                                          sessions, NOT client logins)
+        authserver log ends at 'Added realm "AzerothCore" at 172.30.55.119:8085.'
+                               -- no connection attempt was ever made to it.
+    Zero of the 101 accounts on this realm has ever completed an SRP6 exchange.
+    Clause 14 is NOT MET, by the same standard the 08-31 and 09-04 runs used, and
+    nothing here is offered as a substitute for it.

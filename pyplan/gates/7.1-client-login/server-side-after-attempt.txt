@@ -1,0 +1,37 @@
+=== taken 2026-09-04T14:22:37+02:00 on yulon-ubuntu, by Lane C, AFTER the client attempt
+--- acore_auth.account for the gate account (session_key is the SRP6 witness)
+101	GATE0904	NULL	NULL	127.0.0.1	NULL	0
+--- how many accounts on this realm have EVER completed SRP6 (non-null session_key)
+0
+--- characters belonging to account 101
+0
+--- characters.online=1 count (playerbots included)
+500
+--- authserver log, last 25 lines
+[0m[36m                                ╚██████╗╚██████╔╝██║  ██║███████╗
+[0m[36m                                 ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝
+
+[0m[36m     AzerothCore 3.3.5a  -  www.azerothcore.org
+
+[0m[36m> Using configuration file       /azerothcore/env/dist/etc/authserver.conf
+[0m[36m> Using SSL version:             OpenSSL 3.0.13 30 Jan 2024 (library: OpenSSL 3.0.13 30 Jan 2024)
+[0m[36m> Using Boost version:           1.83.0
+[0m[36m 
+[0m[36m> Config: Found config value 'Updates.EnableDatabases' from environment variable 'AC_UPDATES_ENABLE_DATABASES'.
+[0m[33m> AUTOUPDATER: Automatic database updates are disabled for all databases in the config! This is not recommended!
+[0m[36m> Config: Found config value 'LoginDatabaseInfo' from environment variable 'AC_LOGIN_DATABASE_INFO'.
+[0m[36mOpening DatabasePool 'acore_auth'. Asynchronous connections: 1, synchronous connections: 1.
+[0m[36mMySQL client library: 8.0.46
+[0m[36mMySQL server ver: 8.4.11 
+[0m[36mConnected to MySQL database at ac-database
+[0m[36mMySQL client library: 8.0.46
+[0m[36mMySQL server ver: 8.4.11 
+[0m[36mConnected to MySQL database at ac-database
+[0m[36mDatabasePool 'acore_auth' opened successfully. 2 total connections running.
+[0m[36m 
+[0m[36mStarted auth database connection pool.
+[0m[36mLoading IP Location Database...
+[0m[36m 
+[0m[36mAdded realm "AzerothCore" at 172.30.55.119:8085.
+--- realmlist row as left
+1	AzerothCore	172.30.55.119	172.30.55.119	255.255.255.0	8085

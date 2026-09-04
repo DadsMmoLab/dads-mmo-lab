@@ -1,0 +1,68 @@
+=== yulon-ubuntu as restored from checkpoint clean-ssh (2026-08-28), probed 2026-09-04T14:36:18+02:00
+# The same questions state-as-restored.txt asked of pre-7.2-gate-2026-09-02.
+
+--- uptime / boot
+ 14:36:18 up 0 min,  2 users,  load average: 1.11, 0.26, 0.08
+
+--- is there a server install?
+ls: cannot access '/home/pk/wowserver': No such file or directory
+--- install state file
+cat: /home/pk/wowserver/.yulon-install.json: No such file or directory
+--- any other server-shaped folders in $HOME
+ls: cannot access '/home/pk/wowserver*': No such file or directory
+ls: cannot access '/home/pk/gate*': No such file or directory
+ls: cannot access '/home/pk/*server*': No such file or directory
+
+--- docker containers (all)
+bash: line 1: docker: command not found
+--- docker images
+bash: line 1: docker: command not found
+--- docker volumes
+bash: line 1: docker: command not found
+--- docker builder cache
+bash: line 1: docker: command not found
+
+--- listening ports
+State  Recv-Q Send-Q Local Address:Port Peer Address:PortProcess
+LISTEN 0      4096         0.0.0.0:22        0.0.0.0:*          
+LISTEN 0      4096       127.0.0.1:631       0.0.0.0:*          
+LISTEN 0      4096      127.0.0.54:53        0.0.0.0:*          
+LISTEN 0      4096   127.0.0.53%lo:53        0.0.0.0:*          
+LISTEN 0      4096            [::]:22           [::]:*          
+LISTEN 0      4096           [::1]:631          [::]:*          
+
+--- disk
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda2        97G   15G   78G  16% /
+/dev/sda2        97G   15G   78G  16% /
+
+--- ufw
+Status: inactive
+
+--- memory
+               total        used        free      shared  buff/cache   available
+Mem:              19           1          17           0           1          18
+Swap:              7           0           7
+
+--- what a 7.1/7.2 press would find on this checkpoint
+git              /usr/bin/git
+python3          /usr/bin/python3
+curl             /usr/bin/curl
+ufw              /usr/sbin/ufw
+systemd-inhibit  /usr/bin/systemd-inhibit
+ccache           NOT INSTALLED
+docker           NOT INSTALLED
+--- python
+Python 3.12.3
+--- the announce helper
+claude-say NOT INSTALLED
+ls: cannot access '/home/pk/claude-activity.log': No such file or directory
+--- os
+Ubuntu 24.04.4 LTS  kernel 7.0.0-30-generic
+--- cpus
+15
+--- the docker group (7.1 clause 3 consent needs this to be ABSENT for pk)
+uid=1000(pk) gid=1000(pk) groups=1000(pk),4(adm),24(cdrom),27(sudo),30(dip),46(plugdev),100(users),114(lpadmin)
+no docker group
+--- sudo
+passwordless sudo: yes

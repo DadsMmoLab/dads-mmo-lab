@@ -1,0 +1,315 @@
+...............................................F.FFF.F.FFFFF.FFFF        [100%]
+================================== FAILURES ===================================
+__________ test_the_lan_step_does_not_turn_the_firewall_on_by_itself __________
+
+    def test_the_lan_step_does_not_turn_the_firewall_on_by_itself() -> None:
+        """The command that caused the lockout is not in the default plan at all.
+    
+        Opening the ports is what the user asked for; `ufw --force enable` is the
+        one command in that block that can only SUBTRACT reachability, and it is
+        an already-active ufw and is staged on an inactive one. So it is withheld,
+        and the withholding is SAID, on both objects: the gate that found this read
+        `report.skipped` and `report.manual_steps` and both were empty.
+        """
+        p = _ufw_plan()
+>       assert list(p.firewall_commands) == [
+            ("ufw", "allow", "3724/tcp"),
+            ("ufw", "allow", "8085/tcp"),
+        ]
+E       AssertionError: assert [('ufw', 'all...e', 'enable')] == [('ufw', 'all..., '8085/tcp')]
+E         
+E         Left contains one more item: ('ufw', '--force', 'enable')
+E         Use -v to get more diff
+
+tests\test_networking.py:736: AssertionError
+_______ test_enabling_over_ssh_allows_the_port_that_session_arrived_on ________
+
+    def test_enabling_over_ssh_allows_the_port_that_session_arrived_on() -> None:
+        """The other reachable path: enable, but never without the way back in.
+    
+        covered and `sshd_config` (a file we do not own, with Match blocks and
+        includes) never has to be parsed.
+        """
+        p = _ufw_plan(enable_firewall=True, route=networking.SshRoute(connected=True, ports=(2222,)))
+        cmds = list(p.firewall_commands)
+>       assert ("ufw", "allow", "2222/tcp") in cmds
+E       AssertionError: assert ('ufw', 'allow', '2222/tcp') in [('ufw', 'allow', '3724/tcp'), ('ufw', 'allow', '8085/tcp'), ('ufw', '--force', 'enable')]
+
+tests\test_networking.py:774: AssertionError
+_ test_an_ssh_port_that_cannot_be_established_refuses_the_enable[remote session, port unknown] _
+
+route = SshRoute(connected=True, ports=(), listeners_readable=True)
+because = 'SSH_CONNECTION'
+
+    @pytest.mark.parametrize(
+        ("route", "because"),
+        [
+            (networking.SshRoute(connected=True, ports=()), "SSH_CONNECTION"),
+            (networking.SshRoute(listeners_readable=False), "listening"),
+        ],
+        ids=["remote session, port unknown", "listener table unreadable"],
+    )
+    def test_an_ssh_port_that_cannot_be_established_refuses_the_enable(
+        route: networking.SshRoute, because: str
+    ) -> None:
+        """A port that cannot be established is a refusal, never a shrug-and-enable.
+    
+        The second case is the one an artifact would lie about: an `ss` that could
+        not be read answers with no sshd ports, which looks exactly like a box that
+        table is not an empty one.
+        """
+        p = _ufw_plan(enable_firewall=True, route=route)
+>       assert all("enable" not in c for cmd in p.firewall_commands for c in cmd)
+E       assert False
+E        +  where False = all(<generator object test_an_ssh_port_that_cannot_be_established_refuses_the_enable.<locals>.<genexpr> at 0x000001F791BCDA80>)
+
+tests\test_networking.py:800: AssertionError
+_ test_an_ssh_port_that_cannot_be_established_refuses_the_enable[listener table unreadable] _
+
+route = SshRoute(connected=False, ports=(), listeners_readable=False)
+because = 'listening'
+
+    @pytest.mark.parametrize(
+        ("route", "because"),
+        [
+            (networking.SshRoute(connected=True, ports=()), "SSH_CONNECTION"),
+            (networking.SshRoute(listeners_readable=False), "listening"),
+        ],
+        ids=["remote session, port unknown", "listener table unreadable"],
+    )
+    def test_an_ssh_port_that_cannot_be_established_refuses_the_enable(
+        route: networking.SshRoute, because: str
+    ) -> None:
+        """A port that cannot be established is a refusal, never a shrug-and-enable.
+    
+        The second case is the one an artifact would lie about: an `ss` that could
+        not be read answers with no sshd ports, which looks exactly like a box that
+        table is not an empty one.
+        """
+        p = _ufw_plan(enable_firewall=True, route=route)
+>       assert all("enable" not in c for cmd in p.firewall_commands for c in cmd)
+E       assert False
+E        +  where False = all(<generator object test_an_ssh_port_that_cannot_be_established_refuses_the_enable.<locals>.<genexpr> at 0x000001F792124660>)
+
+tests\test_networking.py:800: AssertionError
+___________ test_the_boot_time_enable_is_withheld_with_the_live_one ___________
+
+    def test_the_boot_time_enable_is_withheld_with_the_live_one() -> None:
+        """SteamOS's `systemctl enable ufw` arms the same lockout one reboot later."""
+        flat = [" ".join(c) for c in _ufw_plan(steamos=True).firewall_commands]
+        assert "steamos-readonly disable" in flat and "steamos-readonly enable" in flat
+        assert "ufw allow 3724/tcp" in flat
+>       assert "ufw --force enable" not in flat
+E       AssertionError: assert 'ufw --force enable' not in ['steamos-readonly disable', 'pacman -Sy --noconfirm ufw', 'ufw allow 3724/tcp', 'ufw allow 8085/tcp', 'ufw --force enable', 'systemctl enable ufw', ...]
+
+tests\test_networking.py:835: AssertionError
+___ test_the_ssh_port_comes_from_the_running_system_not_from_a_config_file ____
+
+    def test_the_ssh_port_comes_from_the_running_system_not_from_a_config_file() -> None:
+        """`ss`, not `sshd_config`: the answer is what is LISTENING right now."""
+        calls: list[list[str]] = []
+    
+        def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, _SS_LISTENING, "")
+    
+        route = networking.detect_ssh_route(environ={}, run=run)
+>       assert route == networking.SshRoute(connected=False, ports=(2022,), listeners_readable=True)
+E       AssertionError: assert SshRoute(conn...readable=True) == SshRoute(conn...readable=True)
+E         
+E         Omitting 2 identical items, use -vv to show
+E         Differing attributes:
+E         ['ports']
+E         
+E         Drill down into differing attribute ports:
+E           ports: () != (2022,)
+E           Right contains one more item: 2022
+E           Use -v to get more diff
+
+tests\test_networking.py:863: AssertionError
+_____ test_ssh_connection_names_the_port_this_session_actually_arrived_on _____
+
+    def test_ssh_connection_names_the_port_this_session_actually_arrived_on() -> None:
+        """Field four of `SSH_CONNECTION` is the server-side port sshd accepted us on.
+    
+        Which is the one port that provably admits the operator standing here, so
+        it joins whatever the listener table said rather than replacing it.
+        """
+        route = networking.detect_ssh_route(
+            environ={"SSH_CONNECTION": "10.0.0.5 51234 10.0.0.9 2200"},
+            run=lambda argv: subprocess.CompletedProcess(argv, 0, _SS_LISTENING, ""),
+        )
+>       assert route.connected is True
+E       assert False is True
+E        +  where False = SshRoute(connected=False, ports=(), listeners_readable=True).connected
+
+tests\test_networking.py:877: AssertionError
+_______ test_a_session_over_ssh_still_names_its_port_when_ss_is_missing _______
+
+    def test_a_session_over_ssh_still_names_its_port_when_ss_is_missing() -> None:
+        """The environment answers even when the probe cannot, and that is enough to proceed."""
+        route = networking.detect_ssh_route(
+            environ={"SSH_CONNECTION": "10.0.0.5 51234 10.0.0.9 2200"}, run=_no_ss
+        )
+>       assert route.ports == (2200,) and route.connected is True
+E       assert (() == (2200,)
+E         
+E         Right contains one more item: 2200
+E         Use -v to get more diff)
+
+tests\test_networking.py:886: AssertionError
+_ test_a_listener_table_we_could_not_read_is_not_an_empty_one[no ss on the box] _
+
+run = <function _no_ss at 0x000001F791CF9580>
+
+    @pytest.mark.parametrize(
+        "run", [_no_ss, _unprivileged_ss], ids=["no ss on the box", "ss ran unprivileged"]
+    )
+    def test_a_listener_table_we_could_not_read_is_not_an_empty_one(run: networking.Runner) -> None:
+        """Both of these used to look like "no sshd here", which is how a guess becomes a lockout.
+    
+        The second is the ordinary case, not an exotic one: `ss --processes` can
+        only name the owner of a socket it is allowed to read, and sshd runs as
+        """
+        route = networking.detect_ssh_route(environ={}, run=run)
+>       assert route.ports == () and route.listeners_readable is False
+E       assert (() == ()
+E         
+E         Use -v to get more diff and True is False)
+E        +  where True = SshRoute(connected=False, ports=(), listeners_readable=True).listeners_readable
+
+tests\test_networking.py:901: AssertionError
+_ test_a_listener_table_we_could_not_read_is_not_an_empty_one[ss ran unprivileged] _
+
+run = <function _unprivileged_ss at 0x000001F791CF9620>
+
+    @pytest.mark.parametrize(
+        "run", [_no_ss, _unprivileged_ss], ids=["no ss on the box", "ss ran unprivileged"]
+    )
+    def test_a_listener_table_we_could_not_read_is_not_an_empty_one(run: networking.Runner) -> None:
+        """Both of these used to look like "no sshd here", which is how a guess becomes a lockout.
+    
+        The second is the ordinary case, not an exotic one: `ss --processes` can
+        only name the owner of a socket it is allowed to read, and sshd runs as
+        """
+        route = networking.detect_ssh_route(environ={}, run=run)
+>       assert route.ports == () and route.listeners_readable is False
+E       assert (() == ()
+E         
+E         Use -v to get more diff and True is False)
+E        +  where True = SshRoute(connected=False, ports=(), listeners_readable=True).listeners_readable
+
+tests\test_networking.py:901: AssertionError
+__ test_a_malformed_ssh_connection_is_still_a_session_over_ssh[garbage-True] __
+
+value = 'garbage', connected = True
+
+    @pytest.mark.parametrize(
+        ("value", "connected"),
+        [
+            ("", False),
+            ("garbage", True),
+            ("10.0.0.5 51234 10.0.0.9", True),
+            ("10.0.0.5 51234 10.0.0.9 not-a-port", True),
+        ],
+    )
+    def test_a_malformed_ssh_connection_is_still_a_session_over_ssh(
+        value: str, connected: bool
+    ) -> None:
+        """No port from it, but the remoteness it declares is not thrown away.
+    
+        That split is the whole safety property: connected-with-no-port is exactly
+        the case that must REFUSE, so a parser that raised, or that answered "not
+        remote" on a shape it did not recognise, would enable ufw on the one box
+        with the most to lose.
+        """
+        route = networking.detect_ssh_route(environ={"SSH_CONNECTION": value}, run=_no_ss)
+>       assert route.connected is connected
+E       assert False is True
+E        +  where False = SshRoute(connected=False, ports=(), listeners_readable=True).connected
+
+tests\test_networking.py:924: AssertionError
+_ test_a_malformed_ssh_connection_is_still_a_session_over_ssh[10.0.0.5 51234 10.0.0.9-True] _
+
+value = '10.0.0.5 51234 10.0.0.9', connected = True
+
+    @pytest.mark.parametrize(
+        ("value", "connected"),
+        [
+            ("", False),
+            ("garbage", True),
+            ("10.0.0.5 51234 10.0.0.9", True),
+            ("10.0.0.5 51234 10.0.0.9 not-a-port", True),
+        ],
+    )
+    def test_a_malformed_ssh_connection_is_still_a_session_over_ssh(
+        value: str, connected: bool
+    ) -> None:
+        """No port from it, but the remoteness it declares is not thrown away.
+    
+        That split is the whole safety property: connected-with-no-port is exactly
+        the case that must REFUSE, so a parser that raised, or that answered "not
+        remote" on a shape it did not recognise, would enable ufw on the one box
+        with the most to lose.
+        """
+        route = networking.detect_ssh_route(environ={"SSH_CONNECTION": value}, run=_no_ss)
+>       assert route.connected is connected
+E       assert False is True
+E        +  where False = SshRoute(connected=False, ports=(), listeners_readable=True).connected
+
+tests\test_networking.py:924: AssertionError
+_ test_a_malformed_ssh_connection_is_still_a_session_over_ssh[10.0.0.5 51234 10.0.0.9 not-a-port-True] _
+
+value = '10.0.0.5 51234 10.0.0.9 not-a-port', connected = True
+
+    @pytest.mark.parametrize(
+        ("value", "connected"),
+        [
+            ("", False),
+            ("garbage", True),
+            ("10.0.0.5 51234 10.0.0.9", True),
+            ("10.0.0.5 51234 10.0.0.9 not-a-port", True),
+        ],
+    )
+    def test_a_malformed_ssh_connection_is_still_a_session_over_ssh(
+        value: str, connected: bool
+    ) -> None:
+        """No port from it, but the remoteness it declares is not thrown away.
+    
+        That split is the whole safety property: connected-with-no-port is exactly
+        the case that must REFUSE, so a parser that raised, or that answered "not
+        remote" on a shape it did not recognise, would enable ufw on the one box
+        with the most to lose.
+        """
+        route = networking.detect_ssh_route(environ={"SSH_CONNECTION": value}, run=_no_ss)
+>       assert route.connected is connected
+E       assert False is True
+E        +  where False = SshRoute(connected=False, ports=(), listeners_readable=True).connected
+
+tests\test_networking.py:924: AssertionError
+________ test_apply_does_not_enable_ufw_when_the_ssh_rule_did_not_land ________
+
+    def test_apply_does_not_enable_ufw_when_the_ssh_rule_did_not_land() -> None:
+        """The guard has to prove the rule ARRIVED, not that the plan declared it.
+    
+        would have been right about everything except the outcome.
+        """
+        p = _ufw_plan(enable_firewall=True, route=networking.SshRoute(connected=True, ports=(2222,)))
+        seen: list[list[str]] = []
+    
+        def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+            seen.append(argv)
+            rc = 1 if "2222/tcp" in argv else 0
+            return subprocess.CompletedProcess(argv, rc, "", "ERROR: Bad port")
+    
+        report = networking.apply(p, sql=None, run=run)
+>       assert ["sudo", "-n", "ufw", "--force", "enable"] not in seen
+E       AssertionError: assert ['sudo', '-n', 'ufw', '--force', 'enable'] not in [['sudo', '-n', 'ufw', 'allow', '3724/tcp'], ['sudo', '-n', 'ufw', 'allow', '8085/tcp'], ['sudo', '-n', 'ufw', '--force', 'enable']]
+
+tests\test_networking.py:944: AssertionError
+---------------------------- Captured stderr call -----------------------------
+2026-09-04 05:11:25 INFO [yulon.networking] networking lan for wow-wotlk: 3 done, 1 skipped, 0 manual
+------------------------------ Captured log call ------------------------------
+INFO     yulon.networking:networking.py:461 networking lan for wow-wotlk: 3 done, 1 skipped, 0 manual
+14 failed, 51 passed in 1.23s
+Binary file (standard input) matches

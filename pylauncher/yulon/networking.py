@@ -11,12 +11,24 @@ DB through the server's DB container. Every step that could not be done is
 reported by name, with the exact commands to paste, instead of failing
 silently (style-guide §3: this module holds behavior, `catalog.json` holds
 the numbers).
+
+One command in that set is not like the others and is treated as such:
+`ufw enable` brings up a default-DENY-incoming policy, so on the headless
+server this feature exists for it ends the operator's SSH session and every
+one after it. Nothing here turns a firewall on unless asked to
+(`plan(enable_firewall=True)`), and when asked it either keeps SSH reachable
+on the port the RUNNING system says sshd is using or refuses and says so —
+on `NetworkPlan.refusals`, in `warnings`, and in `NetworkReport.skipped`,
+because the gate that found this read two of those and both were empty
+(bug-checklist §39).
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -30,7 +42,251 @@ logger = get_logger(__name__)
 
 Mode = Literal["lan", "internet"]
 
+Runner = Callable[[list[str]], subprocess.CompletedProcess[str]]
+
 _DUCKDNS = "https://www.duckdns.org/"
+
+
+@dataclass(frozen=True)
+class SshRoute:
+    """What the RUNNING system says about SSH being a way into this machine.
+
+    Three fields, because the question has three answers and collapsing any two
+    of them is how bug-checklist §39 happened:
+
+    * `connected` — this process's session arrived over SSH. True is proof of a
+      remote operator. False is NOT proof of a local one: `sudo` resets the
+      environment, a systemd unit never had it, and a `tmux` session started at
+      the console keeps none of it while its owner attaches over SSH from a
+      beach. So False is used to allow nothing on its own.
+    * `ports` — every port that has to keep admitting SSH.
+    * `listeners_readable` — whether the listener probe could actually see. An
+      empty `ports` from a probe that read the socket table and an empty
+      `ports` from a probe that was not allowed to read it are the same tuple
+      and opposite facts, and only the first one means "there is no SSH here to
+      lock out". Keeping them apart is the difference between a decision and a
+      guess.
+    """
+
+    connected: bool = False
+    ports: tuple[int, ...] = ()
+    listeners_readable: bool = True
+
+
+_SS_ARGV = ("ss", "--no-header", "--listening", "--tcp", "--numeric", "--processes")
+"""Ask the kernel which TCP sockets are listening, and who owns them.
+
+Deliberately NOT `sshd_config`. That file is not ours to parse — one sshd can
+carry several `Port` lines, `Match` blocks and `Include`s — and, worse, it
+records what sshd was ASKED to do rather than what it is doing: an admin who
+edited it without reloading, a distro that overrides the port in a systemd
+socket unit, or a second sshd on another port all make the file and the machine
+disagree. The socket table is the machine's own answer and cannot disagree with
+itself. `--processes` is what turns "something listens on 2022" into "sshd
+listens on 2022"; it is also the part that needs privilege, which is why the
+probe reports whether it could see anything at all.
+"""
+
+_SS_TIMEOUT_SECONDS = 5.0
+"""`ss` answers in milliseconds; a bound only exists so a wedged probe cannot
+hang a plan the user is watching."""
+
+
+def detect_ssh_route(
+    environ: Mapping[str, str] | None = None, run: Runner | None = None
+) -> SshRoute:
+    """Which ports must keep admitting SSH, and whether this session came in over it.
+
+    Two sources, unioned rather than ranked, because they answer slightly
+    different questions:
+
+    * `SSH_CONNECTION` (and `SSH_CLIENT`, which some setups still export) names
+      the port THIS session arrived on — field four is the server-side port
+      sshd accepted us on. That is the one port provably admitting the operator
+      standing here, and it is free: no subprocess, no privilege.
+    * `ss` names every port sshd is listening on, which covers the operator who
+      is not here yet — a firewall that cuts tomorrow's login is the same bug
+      one day later — and the case where the environment was stripped.
+
+    Neither is sufficient alone: the environment is gone under `sudo`, in a
+    systemd unit and inside a `tmux` session that predates the login, and the
+    socket table is unreadable to a probe that is not root.
+    """
+    env = os.environ if environ is None else environ
+    do = run if run is not None else (lambda argv: runner.run(argv, timeout=_SS_TIMEOUT_SECONDS))
+    # `SSH_CONNECTION` = "client-ip client-port server-ip server-port";
+    # `SSH_CLIENT` = "client-ip client-port server-port". Both end with the
+    # port on THIS machine, which is the one that has to stay open.
+    ports: set[int] = set()
+    connected = False
+    for name, field in (("SSH_CONNECTION", 3), ("SSH_CLIENT", 2)):
+        said = (env.get(name) or "").split()
+        connected = connected or bool(said)
+        if len(said) > field:
+            with suppress(ValueError):
+                ports.add(int(said[field]))
+    listening, readable = _sshd_listening_ports(do)
+    return SshRoute(
+        connected=connected,
+        ports=tuple(sorted(ports | listening)),
+        listeners_readable=readable,
+    )
+
+
+def _sshd_listening_ports(run: Runner) -> tuple[set[int], bool]:
+    """(ports sshd is listening on, whether the socket table could be read at all).
+
+    The second half is the load-bearing one. `ss --processes` can only name the
+    owner of a socket it is allowed to read, and sshd runs as root — so an
+    unprivileged probe on a perfectly ordinary server lists the socket with no
+    owner and finds no sshd, which is indistinguishable from a box that has no
+    sshd unless somebody says so. "No line carried an owner" is that somebody.
+    """
+    try:
+        proc = run(list(_SS_ARGV))
+    except OSError:
+        # No `ss` on this box (or no permission to execute it): not an answer.
+        return set(), False
+    if proc.returncode != 0:
+        return set(), False
+    ports: set[int] = set()
+    attributed = False
+    for line in proc.stdout.splitlines():
+        socket, _, owners = line.partition("users:(")
+        if not owners:
+            continue
+        attributed = True
+        # `"sshd` rather than `sshd`: it matches OpenSSH 9.8's split listener
+        # (`sshd-session`) and does not match a process merely called `xsshd`.
+        if '"sshd' not in owners:
+            continue
+        fields = socket.split()
+        if len(fields) < 4:
+            continue
+        # State Recv-Q Send-Q Local:Port Peer:Port — and `[::]:22` for v6, so
+        # the port is what follows the LAST colon.
+        with suppress(ValueError):
+            ports.add(int(fields[3].rsplit(":", 1)[-1]))
+    return ports, attributed
+
+
+def _turns_ufw_on(command: Iterable[str]) -> bool:
+    """True for a command that puts ufw's default-deny policy into effect.
+
+    Both spellings, because withholding one and running the other only moves
+    the lockout: `ufw enable` does it now, `systemctl enable ufw` does it at the
+    next boot — which is worse, since by then nobody connects the outage to
+    this button. `systemctl enable --now firewalld` is deliberately NOT matched;
+    see `_guard_the_way_back_in()` for why firewalld is not this bug.
+    """
+    argv = list(command)
+    if not argv:
+        return False
+    rest = argv[1:]
+    if argv[0] == "ufw" and "enable" in rest:
+        return True
+    # `ufw.service` as well as `ufw`: systemd accepts both names for the same
+    # unit, and a predicate that recognises only the spelling in use today is
+    # one edit away from waving the lockout through.
+    names_ufw = any(argument.split(".")[0] == "ufw" for argument in rest)
+    return argv[0] == "systemctl" and "enable" in rest and names_ufw
+
+
+UFW_ENABLE_WITHHELD = (
+    "Yu'lon opened the game ports in ufw's rule list but did NOT run `ufw enable`: turning a "
+    "firewall on can only take reachability away, it is no part of making a server reachable, "
+    "and on a machine you reach over SSH it takes away your own way in — which is exactly what "
+    "it did to the box that found this (bug-checklist §39). ufw is left as you had it. To turn "
+    "it on yourself, allow your SSH port FIRST: `sudo ufw allow <your ssh port>/tcp`, then "
+    "`sudo ufw enable`."
+)
+"""Said on every ufw plan, because a command in the guide's block was not run.
+
+A withheld enable is not a failure and is not the user's homework, so it is a
+warning and a refusal rather than a `manual_steps` entry — `manual_steps` is
+the list of things that MUST happen for players to connect, and this is not one
+of them. It is on `warnings` as well as `refusals` because `warnings` is what
+the controller view renders today, and a refusal nobody can see is the shape of
+the original defect: `report.skipped` and `report.manual_steps` were both empty
+while the machine was being locked.
+"""
+
+
+def _guard_the_way_back_in(
+    commands: list[list[str]], *, enable_firewall: bool, route: SshRoute | None
+) -> tuple[list[list[str]], tuple[int, ...], list[str], list[str]]:
+    """Make `commands` safe to run on a box whose only route in is SSH.
+
+    Returns `(commands, ssh_ports, refusals, warnings)`, where `ssh_ports` are
+    the ports opened solely to keep SSH reachable — `apply()` needs them by
+    number so it can check the rules ARRIVED before it enables anything.
+
+    Two decisions live here, and the second is the reason the first is cheap:
+
+    **The enable is opt-in.** `ufw allow` takes effect immediately on an active
+    ufw and is staged on an inactive one, so the rules the user asked for land
+    either way and `ufw enable` is never needed for the request. What it does
+    do is change the machine's security posture — and, on the headless server
+    this feature exists for, end the operator's session. A step should not run
+    a command that cannot advance its goal and can destroy access. So the
+    default withholds it and says so, and `enable_firewall=True` is the path
+    for a caller that really is asking to turn the firewall on.
+
+    **When it IS asked for, SSH is preserved or the enable is refused.** Never
+    a bare `ufw allow 22/tcp`: sshd may be anywhere, so the port comes from
+    `SshRoute` — the running system. If no port can be established the enable
+    is dropped, because refusing costs the user nothing they had a second ago
+    and enabling wrongly costs them the machine.
+
+    firewalld is not routed through here at all, and that is a decision rather
+    than an oversight: its `public` zone ships the `ssh` service allowed, so
+    `systemctl enable --now firewalld` does not cut SSH, and `firewall-cmd
+    --reload` needs the daemon running — withholding that start would break a
+    path that works to prevent a lockout this backend does not cause.
+    """
+    if not enable_firewall:
+        return (
+            [c for c in commands if not _turns_ufw_on(c)],
+            (),
+            [UFW_ENABLE_WITHHELD],
+            [UFW_ENABLE_WITHHELD],
+        )
+    asked = route if route is not None else SshRoute(listeners_readable=False)
+    if not asked.ports:
+        if not asked.connected and asked.listeners_readable:
+            # The socket table was read and nothing is listening for SSH: there
+            # is no way in to preserve, so the guide's three commands run
+            # exactly as they always did — and a machine that is fine is told
+            # nothing at all.
+            return commands, (), [], []
+        why = (
+            "this session arrived over SSH (SSH_CONNECTION is set) and the port sshd is "
+            "listening on could not be established"
+            if asked.connected
+            else "this machine's listening sockets could not be read, so Yu'lon cannot tell "
+            "whether enabling ufw would cut an SSH login"
+        )
+        refusal = (
+            f"REFUSED to enable ufw: {why}. The game ports are in ufw's rule list and nothing "
+            "was enabled. Allow your SSH port and enable it yourself: `sudo ufw allow <your "
+            "ssh port>/tcp`, then `sudo ufw enable`."
+        )
+        return [c for c in commands if not _turns_ufw_on(c)], (), [refusal], [refusal]
+    wanted = [["ufw", "allow", f"{port}/tcp"] for port in asked.ports]
+    new = [c for c in wanted if c not in commands]
+    first_enable = next(i for i, c in enumerate(commands) if _turns_ufw_on(c))
+    guarded = commands[:first_enable] + new + commands[first_enable:]
+    said = ", ".join(str(port) for port in asked.ports)
+    return (
+        guarded,
+        asked.ports,
+        [],
+        [
+            f"ufw is being turned ON, and SSH (port {said}) is allowed through it so this "
+            "machine stays reachable. That port was read from the running system, not from "
+            "sshd_config. Every other inbound connection will be blocked."
+        ],
+    )
 
 
 @dataclass(frozen=True)
@@ -56,6 +312,24 @@ class NetworkPlan:
     list is the firewall's actual state — see `platform.AlfState`. Defaulted,
     so every existing construction and test is untouched.
     """
+    refusals: tuple[str, ...] = ()
+    """What this plan DECLINED to do, and why, in a sentence a person can act on.
+
+    Its own field rather than a flavour of `warnings` because a refusal is a
+    fact about the plan — a command from the backend's block is missing from
+    `firewall_commands` — and a caller that wants to know whether anything was
+    held back should not have to grep prose. Every entry is also copied into
+    `warnings` (which the controller view renders) and into
+    `NetworkReport.skipped`, since an invisible refusal is what bug-checklist
+    §39 actually was.
+    """
+    ssh_ports: tuple[int, ...] = ()
+    """Ports in `firewall_commands` that are there only to keep SSH reachable.
+
+    By number, so `apply()` can check the rule ARRIVED before it runs anything
+    that turns the firewall on. Empty unless an enable was both requested and
+    guarded.
+    """
 
     @property
     def ready(self) -> bool:
@@ -73,6 +347,13 @@ class NetworkReport:
     done: tuple[str, ...] = ()
     skipped: tuple[str, ...] = ()
     restart_required: bool = False
+    refusals: tuple[str, ...] = ()
+    """The plan's refusals, plus anything `apply()` refused once it saw the machine.
+
+    Also present in `skipped`, deliberately: this field is for a caller that
+    wants the refusals apart from the failures, and `skipped` is for the caller
+    that only ever reads one list.
+    """
 
     @property
     def manual_steps(self) -> tuple[str, ...]:
@@ -250,11 +531,20 @@ def plan(
     steamos: bool | None = None,
     wsl: bool | None = None,
     rule_prefix: str = "Yulon",
+    enable_firewall: bool = False,
+    detect_ssh: Callable[[], SshRoute] = detect_ssh_route,
     detect_lan: Callable[[], str | None] = platform.detect_lan_ip,
     detect_public: Callable[[], platform.PublicIpResult] = platform.detect_public_ip,
     detect_alf: Callable[[], platform.AlfState] = platform.detect_alf_state,
 ) -> NetworkPlan:
-    """Compute the plan for `mode`. Detection seams default to the real platform probes."""
+    """Compute the plan for `mode`. Detection seams default to the real platform probes.
+
+    `enable_firewall` is the one knob that can turn a firewall ON, and it is off
+    by default — see `_guard_the_way_back_in()` for the argument. A caller that
+    passes True gets the enable only if SSH survives it, and `detect_ssh` is the
+    seam that decides: it is consulted ONLY when an enable is on the table, so
+    an ordinary plan spawns no probe and asks the environment nothing.
+    """
     ports = (entry.ports.auth, entry.ports.world)
     backend = firewall if firewall is not None else platform.detect_firewall()
     on_steamos = steamos if steamos is not None else platform.is_steamos()
@@ -268,10 +558,22 @@ def plan(
 
     warnings: list[str] = []
     manual: list[str] = []
+    refusals: list[str] = []
+    ssh_ports: tuple[int, ...] = ()
 
     fw_cmds = platform.firewall_commands(
         backend, ports, rule_prefix=rule_prefix, steamos=on_steamos
     )
+    if any(_turns_ufw_on(c) for c in fw_cmds):
+        # The machine is asked about SSH only when there is an enable to guard;
+        # a plan that turns nothing on has nothing to lock anybody out of.
+        fw_cmds, ssh_ports, ufw_refusals, ufw_warnings = _guard_the_way_back_in(
+            fw_cmds,
+            enable_firewall=enable_firewall,
+            route=detect_ssh() if enable_firewall else None,
+        )
+        refusals.extend(ufw_refusals)
+        warnings.extend(ufw_warnings)
     alf_state: platform.AlfState | None = None
     if backend == "alf":
         # macOS gets a state, not a command list: its firewall is
@@ -373,10 +675,9 @@ def plan(
         manual_steps=tuple(manual),
         warnings=tuple(warnings),
         firewall_state=alf_state,
+        refusals=tuple(refusals),
+        ssh_ports=ssh_ports,
     )
-
-
-Runner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 
 
 def apply(
@@ -392,10 +693,16 @@ def apply(
     needs a password the step is SKIPPED with the exact command to paste, never
     blocked on an invisible prompt. The realmlist UPDATE needs a `SqlRunner`
     for the server's auth DB; without one it is skipped and reported.
+
+    Anything the plan REFUSED to do arrives here already decided, and is copied
+    into `skipped` as well as `refusals`: a reader that only knows about
+    `skipped` — which is what the gate that found bug-checklist §39 read — must
+    not see an empty list while a command from the block went unrun.
     """
     do = run if run is not None else (lambda argv: runner.run(argv))
     done: list[str] = []
-    skipped: list[str] = []
+    refusals: list[str] = list(network_plan.refusals)
+    skipped: list[str] = list(network_plan.refusals)
     # Per-backend rather than a linux/not-linux boolean: the else-branch of that
     # boolean told everyone who was not on ufw or firewalld to retry "in an
     # Administrator PowerShell", which a Mac user would have been handed the
@@ -403,6 +710,21 @@ def apply(
     policy = platform.elevation_policy(network_plan.firewall)
 
     for cmd in network_plan.firewall_commands + network_plan.portproxy_commands:
+        missing = _ssh_rules_still_missing(network_plan, done) if _turns_ufw_on(cmd) else ()
+        if missing:
+            # The plan can only DECLARE that SSH stays reachable; whether the
+            # rule arrived is a fact about this machine, and `sudo -n ufw allow
+            # 2222/tcp` can fail on its own while the enable behind it would
+            # have succeeded. A guard that trusts the declaration is the same
+            # lockout with a paper trail.
+            refusal = (
+                f"REFUSED to run `{' '.join(cmd)}`: the rule that keeps SSH reachable "
+                f"(ufw allow {', '.join(f'{p}/tcp' for p in missing)}) did not apply, so "
+                "enabling ufw would have cut the way back into this machine."
+            )
+            refusals.append(refusal)
+            skipped.append(refusal)
+            continue
         argv = list(cmd)
         if policy.prefix and elevate:
             argv = [*policy.prefix, *argv]
@@ -439,12 +761,22 @@ def apply(
                 restart = True
 
     logger.info(
-        f"networking {network_plan.mode} for {network_plan.game_id}: "
-        f"{len(done)} done, {len(skipped)} skipped, {len(network_plan.manual_steps)} manual"
+        f"networking {network_plan.mode} for {network_plan.game_id}: {len(done)} done, "
+        f"{len(skipped)} skipped ({len(refusals)} refused), "
+        f"{len(network_plan.manual_steps)} manual"
     )
     return NetworkReport(
-        plan=network_plan, done=tuple(done), skipped=tuple(skipped), restart_required=restart
+        plan=network_plan,
+        done=tuple(done),
+        skipped=tuple(skipped),
+        restart_required=restart,
+        refusals=tuple(refusals),
     )
+
+
+def _ssh_rules_still_missing(network_plan: NetworkPlan, done: list[str]) -> tuple[int, ...]:
+    """The SSH ports this plan promised to open that have not actually been opened yet."""
+    return tuple(port for port in network_plan.ssh_ports if f"ufw allow {port}/tcp" not in done)
 
 
 def write_client_realmlist(

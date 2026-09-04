@@ -1,0 +1,396 @@
+=== poll 0 2026-09-04T12:37:27Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+#12 547.7 [ 17%] Building CXX object src/modules/PlayerBots/CMakeFiles/playerbots.dir/playerbot/strategy/CustomStrategy.cpp.o
+#12 559.9 [ 17%] Building CXX object src/modules/PlayerBots/CMakeFiles/playerbots.dir/playerbot/strategy/Engine.cpp.o
+exit: 
+freeGiB 40.58
+=== poll 1 2026-09-04T12:42:33Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+#12 864.4 [ 22%] Building CXX object src/modules/PlayerBots/CMakeFiles/playerbots.dir/playerbot/strategy/actions/GlyphAction.cpp.o
+#12 865.1 [ 22%] Building CXX object src/modules/PlayerBots/CMakeFiles/playerbots.dir/playerbot/strategy/actions/GoAction.cpp.o
+exit: 
+freeGiB 40.55
+=== poll 2 2026-09-04T12:47:38Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+#12 1169.4 [ 27%] Building CXX object src/modules/PlayerBots/CMakeFiles/playerbots.dir/playerbot/strategy/actions/ShareQuestAction.cpp.o
+#12 1173.7 [ 27%] Building CXX object src/modules/PlayerBots/CMakeFiles/playerbots.dir/playerbot/strategy/actions/SkillAction.cpp.o
+exit: 
+freeGiB 40.55
+=== poll 3 2026-09-04T12:52:45Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+#12 1472.1 [ 35%] Building CXX object src/modules/PlayerBots/CMakeFiles/playerbots.dir/playerbot/strategy/triggers/CureTriggers.cpp.o
+#12 1476.8 [ 35%] Building CXX object src/modules/PlayerBots/CMakeFiles/playerbots.dir/playerbot/strategy/triggers/DungeonTriggers.cpp.o
+exit: 
+freeGiB 40.55
+=== poll 4 2026-09-04T12:57:51Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+#12 1780.5 [ 41%] Building CXX object src/modules/PlayerBots/CMakeFiles/playerbots.dir/playerbot/strategy/values/PositionValue.cpp.o
+#12 1782.6 [ 41%] Building CXX object src/modules/PlayerBots/CMakeFiles/playerbots.dir/playerbot/strategy/values/PossibleAttackTargetsValue.cpp.o
+exit: 
+freeGiB 40.52
+=== poll 5 2026-09-04T13:02:57Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+#12 2086.3 [ 46%] Building CXX object src/modules/PlayerBots/CMakeFiles/playerbots.dir/playerbot/strategy/priest/PriestMultipliers.cpp.o
+#12 2093.4 [ 46%] Building CXX object src/modules/PlayerBots/CMakeFiles/playerbots.dir/playerbot/strategy/priest/PriestStrategy.cpp.o
+exit: 
+freeGiB 40.52
+=== poll 6 2026-09-04T13:08:05Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+#12 2398.8 [ 52%] Built target playerbots
+#12 2398.9 [ 52%] Building CXX object src/game/CMakeFiles/game.dir/cmake_pch.hxx.gch
+exit: 
+freeGiB 40.33
+=== poll 7 2026-09-04T13:13:11Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+#12 2703.1 [ 61%] Building CXX object src/game/CMakeFiles/game.dir/AI/ScriptDevAI/scripts/eastern_kingdoms/naxxramas/boss_patchwerk.cpp.o
+#12 2704.4 [ 61%] Building CXX object src/game/CMakeFiles/game.dir/AI/ScriptDevAI/scripts/eastern_kingdoms/naxxramas/boss_razuvious.cpp.o
+exit: 
+freeGiB 39.86
+=== poll 8 2026-09-04T13:18:16Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+#12 3010.5 [ 71%] Building CXX object src/game/CMakeFiles/game.dir/AI/ScriptDevAI/scripts/kalimdor/temple_of_ahnqiraj/boss_ouro.cpp.o
+#12 3011.0 [ 71%] Building CXX object src/game/CMakeFiles/game.dir/AI/ScriptDevAI/scripts/kalimdor/temple_of_ahnqiraj/boss_sartura.cpp.o
+exit: 
+freeGiB 39.86
+=== poll 9 2026-09-04T13:23:23Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+#12 3313.4 [ 81%] Building CXX object src/game/CMakeFiles/game.dir/AI/ScriptDevAI/scripts/world/mob_generic_creature.cpp.o
+#12 3316.7 [ 81%] Building CXX object src/game/CMakeFiles/game.dir/AI/ScriptDevAI/scripts/world/npc_professions.cpp.o
+exit: 
+freeGiB 39.86
+=== poll 10 2026-09-04T13:28:28Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+#12 3612.9 [ 88%] Building CXX object src/game/CMakeFiles/game.dir/Entities/Relations.cpp.o
+#12 3618.8 [ 88%] Building CXX object src/game/CMakeFiles/game.dir/Entities/SkillHandler.cpp.o
+exit: 
+freeGiB 39.86
+=== poll 11 2026-09-04T13:33:33Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+#12 3919.1 [ 95%] Building CXX object src/game/CMakeFiles/game.dir/Server/WorldSocket.cpp.o
+#12 3929.3 [ 95%] Building CXX object src/game/CMakeFiles/game.dir/Skills/SkillDiscovery.cpp.o
+exit: 
+freeGiB 39.86
+=== poll 12 2026-09-04T13:38:42Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+2026-09-04 06:37:09 INFO [yulon.docker] run_container(): `docker run --rm --network none --security-opt no-new-privileges -v C:\gate\client\WoW-Client-2.4.3:/client:ro -v C:\gate\tbc-server\data:/out -w /out yulon.local/cmangos-tbc-server:native-8cce6242 /opt/mangos/bin/tools/ad -i /client -o /out`
+dbc and maps: running /opt/mangos/bin/tools/ad -i /client -o /out
+exit: 
+freeGiB 39.33
+=== poll 13 2026-09-04T13:43:47Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+Processing........................20%
+Processing........................21%
+exit: 
+freeGiB 39.25
+=== poll 14 2026-09-04T13:48:53Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+Extracting World\wmo\PvP\Buildings\Lordaeron\Pvp_Lordaeron_Arena.wmo
+Extracting World\wmo\Azeroth\Buildings\Duskwood_Barracks\Duskwood_Barracks.wmo
+exit: 
+freeGiB 39.15
+=== poll 15 2026-09-04T13:53:58Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+Extracting World\wmo\Dungeon\KL_AhnQiraj\40Manssilithidhall.wmo
+Extracting World\wmo\Dungeon\KL_AhnQiraj\Ahn_Qiraj.wmo
+exit: 
+freeGiB 39.05
+=== poll 16 2026-09-04T13:59:04Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+Map - Sunwell5Man
+Processing Map 0
+exit: 
+freeGiB 38.99
+=== poll 17 2026-09-04T14:04:10Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+Map - Sunwell5Man
+Processing Map 0
+exit: 
+freeGiB 38.99
+=== poll 18 2026-09-04T14:09:18Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+Map - Sunwell5Man
+Processing Map 0
+exit: 
+freeGiB 38.98
+=== poll 19 2026-09-04T14:14:24Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+Map - Sunwell5Man
+Processing Map 0
+exit: 
+freeGiB 38.98
+=== poll 20 2026-09-04T14:19:29Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+Map - Sunwell5Man
+Processing Map 0
+exit: 
+freeGiB 38.98
+=== poll 21 2026-09-04T14:24:37Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+Map - Sunwell5Man
+Processing Map 0
+exit: 
+freeGiB 38.97
+=== poll 22 2026-09-04T14:29:42Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+[################################################################]
+Processing Map 1
+exit: 
+freeGiB 38.97
+=== poll 23 2026-09-04T14:34:48Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+[################################################################]
+Processing Map 1
+exit: 
+freeGiB 38.97
+=== poll 24 2026-09-04T14:39:55Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+[################################################################]
+Processing Map 1
+exit: 
+freeGiB 38.96
+=== poll 25 2026-09-04T14:45:01Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+[################################################################]
+Processing Map 1
+exit: 
+freeGiB 38.96
+=== poll 26 2026-09-04T14:50:06Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+[################################################################]
+Processing Map 1
+exit: 
+freeGiB 38.96
+=== poll 27 2026-09-04T14:55:14Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+[################################################################]
+Processing Map 33
+exit: 
+freeGiB 38.95
+=== poll 28 2026-09-04T15:00:20Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+[################################################################]
+Processing Map 289
+exit: 
+freeGiB 38.95
+=== poll 29 2026-09-04T15:05:25Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+[################################################################]
+Processing Map 530
+exit: 
+freeGiB 38.95
+=== poll 30 2026-09-04T15:10:33Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+[################################################################]
+Processing Map 530
+exit: 
+freeGiB 38.94
+=== poll 31 2026-09-04T15:15:38Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+[################################################################]
+Processing Map 530
+exit: 
+freeGiB 38.94
+=== poll 32 2026-09-04T15:20:43Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+[################################################################]
+Processing Map 530
+exit: 
+freeGiB 38.94
+=== poll 33 2026-09-04T15:25:52Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+[################################################################]
+Processing Map 530
+exit: 
+freeGiB 38.93
+=== poll 34 2026-09-04T15:30:57Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+[################################################################]
+Processing Map 530
+exit: 
+freeGiB 38.93
+=== poll 35 2026-09-04T15:36:02Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+[################################################################]
+Processing Map 532
+exit: 
+freeGiB 38.93
+=== poll 36 2026-09-04T15:41:11Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+[################################################################]
+Processing Map 543
+exit: 
+freeGiB 38.93
+=== poll 37 2026-09-04T15:46:16Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+[################################################################]
+Processing Map 564
+exit: 
+freeGiB 38.92
+=== poll 38 2026-09-04T15:51:20Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+[################################################################]
+Processing Map 585
+exit: 
+freeGiB 38.92
+=== poll 39 2026-09-04T15:56:28Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+2026-09-04 08:51:54 INFO [yulon.docker] run_container(): `docker run --rm --network none --security-opt no-new-privileges -v C:\gate\client\WoW-Client-2.4.3:/client:ro -v C:\gate\tbc-server\data:/out -w /out yulon.local/cmangos-tbc-server:native-8cce6242 /opt/mangos/bin/tools/vmap_assembler Buildings vmaps`
+using Buildings as source directory and writing output to vmaps
+exit: 
+freeGiB 38.92
+=== poll 40 2026-09-04T16:01:33Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+2026-09-04 08:51:54 INFO [yulon.docker] run_container(): `docker run --rm --network none --security-opt no-new-privileges -v C:\gate\client\WoW-Client-2.4.3:/client:ro -v C:\gate\tbc-server\data:/out -w /out yulon.local/cmangos-tbc-server:native-8cce6242 /opt/mangos/bin/tools/vmap_assembler Buildings vmaps`
+using Buildings as source directory and writing output to vmaps
+exit: 
+freeGiB 38.92
+=== poll 41 2026-09-04T16:06:38Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+2026-09-04 08:51:54 INFO [yulon.docker] run_container(): `docker run --rm --network none --security-opt no-new-privileges -v C:\gate\client\WoW-Client-2.4.3:/client:ro -v C:\gate\tbc-server\data:/out -w /out yulon.local/cmangos-tbc-server:native-8cce6242 /opt/mangos/bin/tools/vmap_assembler Buildings vmaps`
+using Buildings as source directory and writing output to vmaps
+exit: 
+freeGiB 38.92
+=== poll 42 2026-09-04T16:11:47Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+2026-09-04 08:51:54 INFO [yulon.docker] run_container(): `docker run --rm --network none --security-opt no-new-privileges -v C:\gate\client\WoW-Client-2.4.3:/client:ro -v C:\gate\tbc-server\data:/out -w /out yulon.local/cmangos-tbc-server:native-8cce6242 /opt/mangos/bin/tools/vmap_assembler Buildings vmaps`
+using Buildings as source directory and writing output to vmaps
+exit: 
+freeGiB 38.89
+=== poll 43 2026-09-04T16:16:52Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+2026-09-04 08:51:54 INFO [yulon.docker] run_container(): `docker run --rm --network none --security-opt no-new-privileges -v C:\gate\client\WoW-Client-2.4.3:/client:ro -v C:\gate\tbc-server\data:/out -w /out yulon.local/cmangos-tbc-server:native-8cce6242 /opt/mangos/bin/tools/vmap_assembler Buildings vmaps`
+using Buildings as source directory and writing output to vmaps
+exit: 
+freeGiB 38.89
+=== poll 44 2026-09-04T16:21:57Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+2026-09-04 08:51:54 INFO [yulon.docker] run_container(): `docker run --rm --network none --security-opt no-new-privileges -v C:\gate\client\WoW-Client-2.4.3:/client:ro -v C:\gate\tbc-server\data:/out -w /out yulon.local/cmangos-tbc-server:native-8cce6242 /opt/mangos/bin/tools/vmap_assembler Buildings vmaps`
+using Buildings as source directory and writing output to vmaps
+exit: 
+freeGiB 38.89
+=== poll 45 2026-09-04T16:27:05Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+2026-09-04 08:51:54 INFO [yulon.docker] run_container(): `docker run --rm --network none --security-opt no-new-privileges -v C:\gate\client\WoW-Client-2.4.3:/client:ro -v C:\gate\tbc-server\data:/out -w /out yulon.local/cmangos-tbc-server:native-8cce6242 /opt/mangos/bin/tools/vmap_assembler Buildings vmaps`
+using Buildings as source directory and writing output to vmaps
+exit: 
+freeGiB 38.89
+=== poll 46 2026-09-04T16:32:11Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+2026-09-04 08:51:54 INFO [yulon.docker] run_container(): `docker run --rm --network none --security-opt no-new-privileges -v C:\gate\client\WoW-Client-2.4.3:/client:ro -v C:\gate\tbc-server\data:/out -w /out yulon.local/cmangos-tbc-server:native-8cce6242 /opt/mangos/bin/tools/vmap_assembler Buildings vmaps`
+using Buildings as source directory and writing output to vmaps
+exit: 
+freeGiB 38.87
+=== poll 47 2026-09-04T16:37:16Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+Map 409 global objects 117Calculating model bounds for map 429...
+Creating map tree...
+exit: 
+freeGiB 38.87
+=== poll 48 2026-09-04T16:42:24Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+Map 409 global objects 117Calculating model bounds for map 429...
+Creating map tree...
+exit: 
+freeGiB 38.87
+=== poll 49 2026-09-04T16:47:29Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+Map 409 global objects 117Calculating model bounds for map 429...
+Creating map tree...
+exit: 
+freeGiB 38.87
+=== poll 50 2026-09-04T16:52:34Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+Map 409 global objects 117Calculating model bounds for map 429...
+Creating map tree...
+exit: 
+freeGiB 38.86

@@ -1,0 +1,34 @@
+=== The one assumption behind the SSH-port probe, checked against a live ss ===
+dml-arch (WSL2, Arch, iproute2), 2026-09-04. Read-only; nothing was changed.
+
+--- as a normal user: ss --no-header --listening --tcp --numeric --processes
+LISTEN 0      4096       127.0.0.54:53    0.0.0.0:*
+LISTEN 0      4096    127.0.0.53%lo:53    0.0.0.0:*
+LISTEN 0      1000   10.255.255.254:53    0.0.0.0:*
+LISTEN 0      4096        127.0.0.1:35361 0.0.0.0:*
+LISTEN 0      4096          0.0.0.0:5355  0.0.0.0:*
+LISTEN 0      4096             [::]:5355     [::]:*
+
+--- as root, same command
+LISTEN 0      4096       127.0.0.54:53    0.0.0.0:* users:(("systemd-resolve",pid=78,fd=26))
+LISTEN 0      4096    127.0.0.53%lo:53    0.0.0.0:* users:(("systemd-resolve",pid=78,fd=24))
+LISTEN 0      1000   10.255.255.254:53    0.0.0.0:*
+LISTEN 0      4096        127.0.0.1:35361 0.0.0.0:* users:(("containerd",pid=165,fd=15))
+LISTEN 0      4096          0.0.0.0:5355  0.0.0.0:* users:(("systemd-resolve",pid=78,fd=14))
+LISTEN 0      4096             [::]:5355     [::]:* users:(("systemd-resolve",pid=78,fd=16))
+
+WHAT THIS SETTLES:
+1. The long flags exist and are accepted (no usage error on either run).
+2. Column layout is State Recv-Q Send-Q Local:Port Peer:Port, so fields[3] is
+   the local address and the port is what follows its LAST colon - which also
+   covers [::]:5355 and 127.0.0.53%lo:53.
+3. The owner column is literally users:(("name",pid=N,fd=N)), which is what
+   _sshd_listening_ports() partitions on and what '"sshd' matches inside.
+4. THE IMPORTANT ONE: as a normal user there is NO users:(( column at all.
+   That is the case the code calls listeners_readable=False. Measured, not
+   assumed: an unprivileged probe on an ordinary box cannot see who owns a
+   socket, so 'no sshd found' from it is not evidence that no sshd exists.
+STILL UNVERIFIED: that a real sshd listener prints as "sshd" (or "sshd-session"
+on OpenSSH >= 9.8) in that column - this distro has no sshd. If that token is
+ever wrong the probe finds no port, which lands on the REFUSE branch, not on a
+silent enable.

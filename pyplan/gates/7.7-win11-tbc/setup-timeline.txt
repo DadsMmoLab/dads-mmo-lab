@@ -1,0 +1,78 @@
+LANE B / 7.7 — getting native-Windows TBC to the point where an install could start.
+Box: yulon-win11-gate (Windows 11 Pro 26200, Docker Desktop, WSL2, Linux containers).
+All box-local stamps are PDT; CEST is +9.
+
+1. THE VANILLA SERVER WAS STOPPED, NOT DELETED (it is 7.7 evidence and collides on 3724/8085).
+   `docker stop vanilla-mangosd vanilla-realmd vanilla-db` at 05:18 PDT — all three
+   **Exited (0)**, containers, volumes and C:\gate\vanilla-server left in place. The WotLK
+   containers were already Exited before this lane touched anything.
+   To put it back: `docker start vanilla-db vanilla-realmd vanilla-mangosd` (after stopping TBC's,
+   which take the same two ports).
+
+2. THE 2.4.3 CLIENT WAS DOWNLOADED ON THE BOX, not copied from the laptop.
+   curl -L -C - (resumable; the server answers `Accept-Ranges: bytes`), under scheduled task
+   `dml-tbc-dl`, logging to tbc-dl.log.
+     05:00:03 -> 05:08:45 PDT, **8m42s**, exit 0
+     8,413,169,393 bytes, exactly the Content-Length the server advertised
+     **16.1 MB/s** (curl's own %{speed_download}); free space checked first: 54.7 GB
+   For comparison the 1.12.1 client came down at about 13 MB/s on the same box on 2026-09-03.
+
+3. UNPACKED WITH `tar -xf`, and the 2026-09-04 measurement holds up.
+   Scheduled task `dml-tbc-unzip`, `cd C:\gate\client && tar -xf ...zip`.
+     05:09:57 -> 05:15:53 PDT, **5m56s**, exit 0, 8,490,012,296 bytes / 200 files
+     = **23.9 MB/s** onto the same NTFS volume the zip was read from.
+   That is slower than the 91 MB/s the Vanilla lane measured, and still 20-30x what
+   Expand-Archive manages. **A caution for the next person: for the first 90 seconds the
+   unpacked tree held 2 files and 1 MB**, because tar was inside the 3.8 GB common.MPQ and had
+   not flushed it. A watcher that samples once and concludes "hung" would be wrong — which is
+   precisely how Expand-Archive's slowness presents.
+
+4. THE ZIP WAS DELETED AFTER A VERIFIED UNPACK, and it had to be.
+   Free space arithmetic on this box: 54.7 GB at the start, 46.9 after the zip, **37.8 after the
+   unpacked client — which is BELOW the installer's own 40 GB refusal line** (min_data_root_gb 20
+   + min_server_dir_gb 20, both on the one drive). Deleting the zip returned it to 46.2 GB and
+   preflight then warned rather than refused. Nothing else was deleted. The zip is re-fetchable
+   from the same URL in nine minutes.
+   Held in reserve and NOT deleted: C:\gate\WoW-Client-1.12.1.zip (4.97 GB), fully redundant with
+   the unpacked C:\gate\client\WoW-Client-1.12.1, if the install runs the drive down.
+
+5. THE CATALOG WIDENING, ON THE BOX ONLY.
+   `wow-tbc`'s `install.platforms` is `["linux"]`, and `Install.supports()` refuses before
+   preflight on Windows, so this is a step that has to happen BEFORE the run it exists to justify.
+   Widened to `["linux", "windows"]` in a checkout made for this lane —
+   **C:\gate\tbc-src\pylauncher**, robocopied from C:\Users\pk\co\dads-mmo-lab-yulon-phase7
+   (the box's phase7 checkout, which is also the prepared pytest env and was therefore left
+   untouched: a widened catalog there would fail another lane's test run).
+   Only `wow-tbc` was widened; wow-vanilla and wow-tortoise still read `["linux"]` on that box.
+   NOTHING WAS COMMITTED, in this repo or any other.
+
+   **One trap worth the entry.** The first attempt edited the JSON with PowerShell's
+   `Set-Content -Encoding utf8`, which on Windows PowerShell 5.1 writes a **UTF-8 BOM** and CRLF.
+   The file still looked right in every line-based check; `json.load()` on it died at the first
+   byte. Caught by reading the first four bytes of both files
+   (`239,187,191,123` against `123,10,32,32`) and redone in Python, writing bytes: the file is now
+   BOM-free, LF-only, and `json.loads()` parses it. Do not edit a JSON the engine reads with
+   `Set-Content -Encoding utf8`.
+
+6. INSTALL STARTED 2026-09-04 05:19:50 PDT under scheduled task `dml-tbc-install`:
+     cd C:\gate\tbc-src\pylauncher
+     ...\dads-mmo-lab-yulon-phase7\pylauncher\.venv\Scripts\python.exe -u -m yulon.install_wiring \
+        wow-tbc --server-dir C:\gate\tbc-server --client-dir C:\gate\client\WoW-Client-2.4.3
+   (`python -m` puts the cwd first on sys.path, so `yulon` resolves to C:\gate\tbc-src —
+   verified by printing `yulon.__file__` before the run, not assumed.)
+   Instruments running alongside: `dml-tbc-ninep` (ninep-sampler.ps1 -> ninep-tbc.csv, once a
+   minute) and `dml-tbc-stages` (stagewatch.ps1 -> tbc77-stages.csv, stamps every
+   "Step N of 12" transition, because the installer prints those without a clock).
+
+   PREFLIGHT, in full, one warning:
+     [pass] Docker: the daemon answered
+     [pass] memory: Docker's VM has 11.7 GB
+     [pass] compiler jobs vs memory: 2 parallel jobs against about 5 the memory affords
+     [warn] free space ...: 43 GB free; 60 GB is the comfortable figure
+     [pass] the server folder / sharing it with Docker / SELinux n/a / the server's ports
+     [pass] the client folder, expansion data (Data/expansion.MPQ), 12 MPQ archives, locale enGB
+     [pass] **the client's origin: nothing suggests a repack**
+     [pass] free space next to the client, sharing the client with Docker
+   Note the last one: the 1.12.1 client warned "realmlist.wtf sits at the root ... which is how a
+   repack looks" on BOTH platforms. The 2.4.3 client does not. Whatever the extraction counts turn
+   out to be, "it is a repack" is not available as an explanation for this run.

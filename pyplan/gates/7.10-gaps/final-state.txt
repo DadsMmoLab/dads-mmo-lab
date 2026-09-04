@@ -1,0 +1,36 @@
+=== Lane C cleanup and final state, 2026-09-04T14:31:30+02:00
+--- account count BEFORE removing the widget-created account
+102
+--- the account the widget created
+103	WIDGET0904
+--- account count AFTER (must be 101, as 7.1 and 7.10 recorded)
+101
+--- the 7.1 gate account is untouched
+101	GATE0904
+--- the two throwaway folders the install click used
+/home/pk/gate710c-doomed-install:
+total 8
+drwxrwxr-x  2 pk pk 4096 Sep  4 14:29 .
+drwxr-x--- 30 pk pk 4096 Sep  4 14:29 ..
+
+/home/pk/gate710c-empty:
+total 8
+drwxrwxr-x  2 pk pk 4096 Sep  4 14:29 .
+drwxr-x--- 30 pk pk 4096 Sep  4 14:29 ..
+removed:
+ls: cannot access '/home/pk/gate710c-*': No such file or directory
+--- realmlist as left
+1	AzerothCore	172.30.55.119	172.30.55.119	8085
+--- containers
+ac-worldserver Up 2 hours
+ac-authserver Up 2 hours
+ac-database Up 3 hours (healthy)
+--- ufw
+Status: active
+
+To                         Action      From
+--                         ------      ----
+3724/tcp                   ALLOW       Anywhere                  
+8085/tcp                   ALLOW       Anywhere                  
+22                         ALLOW       Anywhere                  
+3724/tcp (v6)              ALLOW       Anywhere (v6)             
