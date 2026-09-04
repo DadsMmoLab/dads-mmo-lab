@@ -933,8 +933,19 @@
     maps 2429, Buildings 5076, vmaps 5667 — about 13,300 files before mmaps — so at five files a
     second the extract stage alone is over an hour of pure mount overhead. On Linux the same stage
     runs at disk speed.
+    **One sub-stage finished and its counts match Linux exactly.**
+    `dbc and maps: done (dbc: 158 files, maps: 2429 files)` — the same 158 and 2429 that 7.5
+    records from the Linux run, so the Windows extraction is producing the same data, only slowly.
+    It wrote **170 MB / 2,598 files in at most 9.3 minutes**: **0.305 MB/s, 4.66 files/s**.
+    "At most" because the sampler's first row already had 321 files in it, so the true start is
+    inside that first minute.
+    **And the phase after it is not write-bound at all.** Once `vmap extract` began, the write rate
+    fell to **0.008 MB/s and 0.63 files/s** while the tool kept working — it is reading the client
+    over the read-only mount and computing, not writing. So "9p throughput" is not one number for
+    the extract stage: `ad` is write-heavy and pays the per-operation cost, `vmap_extractor` is
+    read- and CPU-heavy and does not.
     **The CSV committed here is a snapshot taken while the run was still going**, which the file's
-    own timestamps show; it is evidence of the rate, not of a finished install.
+    own timestamps show; it is evidence of a rate, not of a finished install.
 - [ ] 7.8 macOS, all four — **[blocked]** on hardware
 - [x] 7.9 Controllers — `controller_wow_tbc/`, `controller_wow_vanilla/`, `controller_wow_tortoise/` mirroring `controller_wow_wotlk/`; `mysql` → `db.client` in `apply.py`/`maintenance.py`; CMaNGOS-family account creation (was 7.1–7.3 before the scope change; still owed, now after install)
   - **TICKED 2026-09-04. The three unmeasured criteria were driven against all three live CMaNGOS
