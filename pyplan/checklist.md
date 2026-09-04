@@ -854,7 +854,83 @@
     re-measured** now that the volumes are deleted; it is recorded as reported, not as re-verified.
 - [ ] 7.7 Native Windows, all four — WotLK first (closes the 6.3 `ac-db-import` blocker), then TBC, Vanilla, Tortoise from **`yulon-win11-gate`**'s clean checkpoint (this line said `yulon-win11`, which is the working box and has carried an install since 2026-09-03; the clean-checkpoint box is the `-gate` one); 9p extract/mmaps throughput recorded; `platforms` widened per entry
 - [ ] 7.8 macOS, all four — **[blocked]** on hardware
-- [ ] 7.9 Controllers — `controller_wow_tbc/`, `controller_wow_vanilla/`, `controller_wow_tortoise/` mirroring `controller_wow_wotlk/`; `mysql` → `db.client` in `apply.py`/`maintenance.py`; CMaNGOS-family account creation (was 7.1–7.3 before the scope change; still owed, now after install)
+- [x] 7.9 Controllers — `controller_wow_tbc/`, `controller_wow_vanilla/`, `controller_wow_tortoise/` mirroring `controller_wow_wotlk/`; `mysql` → `db.client` in `apply.py`/`maintenance.py`; CMaNGOS-family account creation (was 7.1–7.3 before the scope change; still owed, now after install)
+  - **TICKED 2026-09-04. The three unmeasured criteria were driven against all three live CMaNGOS
+    servers, and the run found a defect on every one of them, which is why the bar was the right
+    one to keep.** Harness: `pyplan/gates/gate-79-controller-surface.py`. Logs:
+    `pyplan/gates/7.9-cmangos/`.
+
+    It drives `ControllerServices` rather than `docker`, deliberately. Timing `docker.stop_staged()`
+    would have timed a function the Server tab does not call; `Controller.stop()` is what the Stop
+    button calls and what calls `stop_staged()` in turn (`controller.py:291`), so the button's own
+    path is what was measured.
+
+    | | TBC (m910q) | Vanilla (yulon-ubuntu) | Tortoise (yulon-ubuntu) |
+    |---|---|---|---|
+    | `console.send_command()` | 3.61 s | 3.60 s | 3.61 s |
+    | `backup()` | 4.4 s, 4 dumps | 6.3 s, 5 dumps | 6.4 s, 4 dumps |
+    | `verify_dump()` | 4/4 | 5/5 | 4/4 |
+    | `stop_staged()` | **3.1 s** | **23.2 s** | **6.2 s** |
+    | `start_staged()` | 6.1 s | 6.6 s | 6.8 s |
+    | to ready | 73.0 s | 45.8 s | 111.6 s |
+    | `restore()` | 15.5 s | 29.6 s | **98.2 s, all 4 databases** |
+    | ready again after it | 75.3 s | 45.9 s | 100.0 s |
+
+    Ten checks each, **10 passed / 0 failed on all three**.
+
+    * **The console step asks the harder question.** `send_command()` attaches to the worldserver's
+      tty and detaches again, and a detach that forwards a signal kills the server — so
+      `State.Pid`, `RestartCount` and `StartedAt` are read before and after **through the docker
+      CLI**, not through the code under test. All three unchanged on all three games. TBC's five
+      reply lines are cut on `mangos>`, which this core prints AFTER the answer rather than before
+      it, and they name the world DB and the client build.
+    * **`plan_restore()` refused over a running server on all three**, in its own words: the
+      worldserver keeps characters in memory and would overwrite a restore within minutes.
+    * **Tortoise's restore covers every database**; TBC's and Vanilla's cover one. That is a
+      property of the HARNESS, not of the app, and it is recorded rather than smoothed over: the
+      first version restored `report.dumps[0]`, which is always the alphabetically first database,
+      so the world database was backed up and byte-verified and never restored. Fixed, and
+      re-run on the one server that was free.
+    * **`stop_staged()` ranges from 3.1 s to 23.2 s** across three servers of the same family. The
+      spread is not noise and is worth someone's attention before a Stop button gets a spinner
+      with a timeout on it.
+
+  - **What the run found, and what it means for the Server tab.**
+    * **A restore on ANY CMaNGOS server announced three missing AzerothCore databases.** Once on
+      Vanilla, four times on Tortoise, once on TBC: `this install has no acore_auth,
+      acore_characters, acore_world; backing up what it does`, on servers with every database
+      present. **Fixed**: `restore()` had no `core_databases` parameter at all, so its internal
+      safety dump fell back to AzerothCore's names and no per-game wrapper could correct it. The
+      names are now threaded through `restore()` → `_safety_backup()` → `backup()` and bound in
+      all three wrappers. No data was ever at risk; the safety dump always took the right
+      database. What was wrong was a message telling a user their healthy server was broken.
+    * **A CMaNGOS worldserver exits non-zero when its database goes away, and `unless-stopped`
+      then restarts it alone — which is the signature 7.9's open question describes.** Two
+      mechanisms, both captured tonight:
+      1. `tbc-mangosd` **exited 139** when `docker stop tbc-mangosd tbc-realmd tbc-db` took the
+         database out from under it mid-shutdown. Its last words:
+         `SQL ERROR: Lost connection to MySQL server during query` on
+         `UPDATE characters SET online = 0`, then `Critical Error: A condition which must never be
+         false was found to be false. Server was shut down to protect data integrity.` and
+         `GetStmt(): false && "Unable to prepare SQL statement"`.
+         `pyplan/gates/7.9-cmangos/74c-mangosd-sigsegv.log`.
+      2. `vanilla-mangosd` reached **`RestartCount=8`** in a restart loop, exiting 1 within a
+         second each time on `Could not connect to MySQL database at vanilla-db: Unknown MySQL
+         server host 'vanilla-db' (-3)`, because its database container was down and DNS for the
+         name no longer resolved. `pyplan/gates/7.9-cmangos/79-vanilla-restart-loop.log`.
+    * **This is exactly what `stop_staged()` exists to prevent, and it does.** Its docstring says
+      `compose stop` "walks the project's own `depends_on` graph, so the servers close their
+      connections before the database goes away" — and every `stop_staged()` in these three runs
+      stopped all three containers cleanly. Mechanism 1 was produced by a hand-typed
+      `docker stop` of all three by name, which is precisely the un-ordered stop the staged one
+      replaces.
+    * **What this does NOT prove.** The 2026-09-03 journal shows `tbc-mangosd` restarting alone
+      while `tbc-db` and `tbc-realmd` were untouched — no container was stopped. Mechanism 1 needs
+      only a dropped CONNECTION, not a stopped container, so it remains a sufficient explanation
+      of that signature; it is not proof of it, and the containers that would have proved it were
+      deleted. What has changed is that "why would a worldserver exit on its own?" is no longer
+      unanswerable: on this core, losing the database mid-statement is an abort, by design.
+
   - **UNTICKED again 2026-09-04, one day after it was ticked, and the reason is worth more than
     the box.** `pyplan/phase7-decisions.md` sets this line's bar as "start/stop/logs/accounts/backup
     on each installed server". What was driven on the three CMaNGOS games is account creation and
