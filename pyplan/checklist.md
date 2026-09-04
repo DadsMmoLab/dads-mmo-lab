@@ -933,9 +933,27 @@
     maps 2429, Buildings 5076, vmaps 5667 — about 13,300 files before mmaps — so at five files a
     second the extract stage alone is over an hour of pure mount overhead. On Linux the same stage
     runs at disk speed.
-    **One sub-stage finished and its counts match Linux exactly.**
-    `dbc and maps: done (dbc: 158 files, maps: 2429 files)` — the same 158 and 2429 that 7.5
-    records from the Linux run, so the Windows extraction is producing the same data, only slowly.
+    **THE EXTRACT STAGE FINISHED AT 06:49, AND TWO OF ITS FOUR COUNTS DO NOT MATCH LINUX.**
+    This is the most important thing on this line and it needs answering before any Windows tick.
+
+    | tool | Linux (7.5) | Windows | |
+    |---|---|---|---|
+    | `ad` — dbc | 158 | **158** | same |
+    | `ad` — maps | 2429 | **2429** | same |
+    | `vmap extract` — Buildings | 5076 | **3913** | **1,163 FEWER** |
+    | `vmap assemble` — vmaps | 5667 | **6077** | **410 MORE** |
+
+    Fewer Buildings and more vmaps, from the same tools against a client fetched from the same URL.
+    **No cause is established and none should be guessed at here.** What is worth writing down is
+    that our own preflight warned about this client on both platforms — `the client's origin:
+    realmlist.wtf sits at the root ... which is how a repack looks`, whose remedy line reads
+    "use a clean client of this expansion **if extraction comes up short**" — and on Windows the
+    extraction did come up short on the count that feeds the assembler. Whether the two boxes hold
+    byte-identical clients has NOT been checked; 7.4b's method for exactly this question is a
+    content hash of the client tree, and neither side has one here.
+    **Until that is settled, "Windows produces the same data" is not a claim this line may make.**
+    An earlier draft of this entry made it on the strength of dbc and maps alone, an hour before the
+    vmap tools finished and disagreed.
     It wrote **170 MB / 2,598 files in at most 9.3 minutes**: **0.305 MB/s, 4.66 files/s**.
     "At most" because the sampler's first row already had 321 files in it, so the true start is
     inside that first minute.
