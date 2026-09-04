@@ -914,8 +914,27 @@
     and its size matches the server's ETag exactly), and unpacking it needed `tar -xf` rather than
     `Expand-Archive` — **91 MB/s against under 1 MB/s**, a 100-fold difference on the same file and
     the same box. Anyone scripting a Windows gate should not use `Expand-Archive` on a client.
-    Docker's VM there has **11.7 GB and builds with 2 jobs**. The 9p extract/mmaps figures this
-    line asks for come later in that run.
+    Docker's VM there has **11.7 GB and builds with 2 jobs**; the compile took **68 minutes**
+    (18:01 clone start → 19:22 extract start, box-local Pacific stamps).
+  - **THE 9p FIGURE 7.7 ASKS FOR, measured 2026-09-04.** Everything a container writes into the
+    server folder on Windows crosses Docker Desktop's 9p mount, and that is the whole of the
+    Windows tax. Sampled once a minute into `pyplan/gates/7.7-win11-gate/ninep.csv` by
+    `pyplan/gates/ninep-sampler.ps1` — into a FILE, because the lesson from 7.4c's review is that a
+    number read off a live box during a gate is gone the moment the gate changes the box.
+
+    | phase | MB/s | files/s | what it wrote |
+    |---|---|---|---|
+    | `clone-sources` (git, into `src/`) | **~1.4** | ~8 | 415 MB, 5,294 files, about 5 min |
+    | `extract` (`ad` then `vmap extract`, into `data/`) | **0.253 mean** (0.197–0.330) | **4.97 mean** (2.80–8.77) | 151.8 MB / 3,060 files in the 11-minute window |
+
+    **Extract is four to five times slower than the clone**, and the reason is visible in the two
+    columns: the rate per FILE barely moves while the rate per BYTE collapses, because 9p charges
+    per operation and the extractors write many small files. Vanilla's shipped counts are dbc 158,
+    maps 2429, Buildings 5076, vmaps 5667 — about 13,300 files before mmaps — so at five files a
+    second the extract stage alone is over an hour of pure mount overhead. On Linux the same stage
+    runs at disk speed.
+    **The CSV committed here is a snapshot taken while the run was still going**, which the file's
+    own timestamps show; it is evidence of the rate, not of a finished install.
 - [ ] 7.8 macOS, all four — **[blocked]** on hardware
 - [x] 7.9 Controllers — `controller_wow_tbc/`, `controller_wow_vanilla/`, `controller_wow_tortoise/` mirroring `controller_wow_wotlk/`; `mysql` → `db.client` in `apply.py`/`maintenance.py`; CMaNGOS-family account creation (was 7.1–7.3 before the scope change; still owed, now after install)
   - **TICKED 2026-09-04. The three unmeasured criteria were driven against all three live CMaNGOS
