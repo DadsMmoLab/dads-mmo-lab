@@ -1,0 +1,20 @@
+shipped recipe: statuses=(139,) tools=('vmap extract', 'vmap assemble')
+Installing WoW Vanilla into /home/pk/vanilla-75b
+You can stop this at any time. What an install writes outside the folder below is named here rather than denied: the images this build produces and the volumes holding the database and the server data, which live in Docker's own storage — that is why the checks below look at the space on Docker's disk too; Docker itself, when no daemon answers yet (on Linux: system packages, a service, and the group you are asked about first); and this app's own settings and log, in its config folder. Starting the install again continues from where it stopped: source this app has finished cloning is never fetched, reset or moved, and the build is not run a second time once Docker confirms its images are there. Everything cheap runs again on every attempt — the compose files this app writes are put back the way the catalog says, the server-data download resumes and re-checks itself, and the database and server are started and waited for.
+Checking Docker.
+[pass] Docker: the daemon answered
+[pass] memory: Docker's VM has 15.5 GB
+[pass] compiler jobs vs memory: 2 parallel jobs against about 7 the memory affords
+[warn] free space on Docker's disk and the server folder: 41 GB free; 60 GB is the comfortable figure (the server folder and Docker's disk share one drive, so both needs add up)
+[pass] the server folder: /home/pk/vanilla-75b looks usable
+[pass] sharing the folder with Docker: a container can read /home/pk/vanilla-75b
+[pass] SELinux: not enforcing
+[refuse] the server's ports: tbc-mangosd, tbc-realmd already publish the ports this server needs Stop that server first (or remove its containers), then try again.
+[pass] the client folder: /home/pk/clients/WoW-Client-1.12.1 has a Data directory
+[pass] the client's expansion data: Data/dbc.MPQ is there
+[pass] the client's archives: 14 MPQ archives directly in /home/pk/clients/WoW-Client-1.12.1/Data
+[warn] the client's origin: realmlist.wtf sits at the root of /home/pk/clients/WoW-Client-1.12.1 and there is no locale folder, which is how a repack looks Use a clean client of this expansion if extraction comes up short — repacks have rearranged archives and often extract incompletely.
+[pass] free space next to the client: 41 GB free on the drive holding the client
+[pass] sharing the client with Docker: a container can read the client folder
+install failed: This machine cannot install the server yet:
+the server's ports: tbc-mangosd, tbc-realmd already publish the ports this server needs Stop that server first (or remove its containers), then try again.

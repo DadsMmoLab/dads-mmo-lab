@@ -1,0 +1,7 @@
+== 2026-09-04T11:20:58+02:00 checkout before ==
+801f1d6 TBC alone could not read its own generated database password
+== 2026-09-04T11:21:06+02:00 checkout after ==
+81d7311 Same archive, same commit: the Windows extraction shortfall is the platform
+== fix present? ==
+1
+bb829810ef114542502a6a35f4c2853b  pyplan/gates/force-vmap-retry.py

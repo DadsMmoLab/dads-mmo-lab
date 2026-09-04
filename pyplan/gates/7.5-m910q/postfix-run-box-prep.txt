@@ -1,0 +1,40 @@
+== 2026-09-04T11:16:37+02:00 pre-cleanup ==
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/nvme0n1p3  117G   76G   35G  69% /
+== containers ==
+tbc-mangosd	yulon.local/cmangos-tbc-server:native-37f13213	Up 7 hours
+tbc-realmd	yulon.local/cmangos-tbc-server:native-37f13213	Up 8 hours
+tbc-db	mariadb:11	Up 8 hours (healthy)
+== volumes ==
+DRIVER    VOLUME NAME
+local     yulon-wow-tbc-37f13213_db-data
+== sizes ==
+2,4G	/home/pk/tortoise-wow-hunt
+2,6G	/home/pk/tortoise-wow-server
+== 2026-09-04T11:16:39+02:00 post-cleanup ==
+ls: cannot access '/home/pk/tortoise-wow-hunt': No such file or directory
+ls: cannot access '/home/pk/tortoise-wow-server': No such file or directory
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/nvme0n1p3  117G   72G   40G  65% /
+== 2026-09-04T11:20:37+02:00 reclaiming rebuildable caches (need >40 GiB for the wow-vanilla preflight floor; docker image removal was not permitted) ==
+590M	/home/pk/.cache/pip
+Vacuuming done, freed 344.0M of archived journals from /var/log/journal/7d1e56a669464b50bf7ba59f064c448d.
+Vacuuming done, freed 0B of archived journals from /var/log/journal.
+free GiB after: 40.58
+== 2026-09-04T11:23:44+02:00 preflight refused on ports; stopped the leftover TBC stack (docker stop, containers kept) ==
+tbc-mangosd	Exited (139) 17 seconds ago
+tbc-realmd	Exited (0) 21 seconds ago
+tbc-db	Exited (0) 20 seconds ago
+               total        used        free      shared  buff/cache   available
+Mem:           15882        1729        9166         169        4985       13531
+Swap:           2047         645        1402
+== 2026-09-04T11:23 (recorded 12:23) the preflight refused on ports; the leftover TBC stack was stopped with docker stop (containers and volume kept), which is what the refusal asked for ==
+-- after the run, the vanilla stack holds those ports; the TBC containers are still stopped:
+vanilla-realmd	Up 7 minutes
+vanilla-mangosd	Up 7 minutes
+vanilla-db	Up 9 minutes (healthy)
+tbc-mangosd	Exited (139) 59 minutes ago
+tbc-realmd	Exited (0) 59 minutes ago
+tbc-db	Exited (0) 59 minutes ago
+== free space at the end ==
+36.87 GiB
