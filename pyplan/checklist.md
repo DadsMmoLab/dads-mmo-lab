@@ -509,8 +509,16 @@
       `Cleared mangos, realmd, characters, logs.` → `Importing 232 SQL steps over 12 phases.`
       → `The databases are imported and marked complete.`
     * **It finished: `WoW TBC is installed and running`, `INSTALL RETURNED CLEANLY`, 01:38:48.**
-      Whole re-press **13m40s** (01:25:08 → 01:38:48), of which reset + the full 232-step import
-      was **65 s** (01:25:08 → 01:26:13); the rest is the world server loading.
+      Whole re-press **13m40s**; the rest after the import is the world server loading.
+      **The import figure is a BOUND, not a measurement, and the first draft of this line got that
+      wrong.** It said "65 s (01:25:08 → 01:26:13)", which summed a start time narrated into
+      `claude-activity.log` when the run was launched with a completion time stamped by the
+      install log itself — two different clocks, one of them uninstrumented. The install log
+      stamps only its logger lines, never the per-step `X -> Y` stdout lines, so what it can
+      actually support is `01:25:13` (the last `dropping <db>` warning, immediately before
+      `Importing 232 SQL steps`) to `01:26:13` (`verified mangos: … item_template = 30396`):
+      **drop + 232-step import + verify inside 60 s**, ±1 s for second-resolution stamps. Corrected
+      by a review that grepped the committed logs instead of trusting the prose.
     * **The marker names this run and no other.** `mangos.yulon_install` holds
       `plan_hash 7936812f10440345`, `finished_unix 1788477973` = **2026-09-03 23:26:13 UTC** =
       01:26:13 local — the re-press's own import minute. There was no marker before it.
@@ -518,6 +526,26 @@
       **259 → 426 MB**, `characters` 68 → 82. Content on the finished server: **18,799 creature
       templates, 6,599 quests, 30,396 items, 14,215 gameobjects**. Every one of those rows was
       written after a `DROP DATABASE`, which is the point.
+    * **Which of those numbers a reader can re-derive, and which they cannot.** A review checked
+      every figure on this line against the committed logs, and the honest split is:
+      - **In the evidence.** The 22 and the 232 (`grep -cE '^\S+.* -> \w+\s*$'` over each log),
+        the kill line, the 12 phases, `item_template = 30396` and the 12 `ai_playerbot%` tables
+        (`tbc-74c-repress.log:1574-1575`), the 42 GB warn row (`:7`), and the 60 s bracket above.
+      - **Captured afterwards, on 2026-09-04, into `pyplan/gates/7.4c-m910q/74c-db-after.txt`**:
+        the finished server's table and size counts, the four content counts, and the marker row
+        `7936812f10440345 / 1788477973 / 2026-09-03 23:26:13`. These were read live off the
+        server when the line was first written and were in no artifact at all; the file exists
+        because a review said so.
+      - **NOT recoverable, and stated as such rather than quietly kept.** The BEFORE half —
+        `mangos` at 184 tables / 259 MB, `characters` at 68 — was read from databases that this
+        very run then dropped, and no probe output was captured at the time. The same goes for
+        `probe_74c.py`'s stdout and the preflight refusal at 39 GB: both were read off a terminal.
+        They are reported here as measurements taken, not as artifacts a reader can open. The
+        `partial` reading itself is independently in the evidence, because `stage_import()`
+        printed its own copy of it into `tbc-74c-repress.log:59`.
+      - **The lesson, since it will recur:** a number read off a live server during a gate is
+        gone the moment the gate changes that server. Capture it into a file in the same breath
+        as reading it.
     * `realmd` again logged **`Added realm id 1, name 'MaNGOS'`** and `tbc-mangosd` reached
       **`CMANGOS: World initialized`**; all three containers up.
   - **What the earlier note said was still owed** — the same chain, which until this run had never

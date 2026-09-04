@@ -23,6 +23,18 @@ claim and these are what it was read off.
 | `modules-ownership-report.md` | the review behind `fix/modules-tab-ownership` (that branch is still open) |
 | `drivers/` | the harnesses that produced the above |
 
+## One correction to the commit that added this directory
+
+That commit says the sweep "left 19 findings". **Do not rely on that number.** A review tried to
+re-derive it and could not: the round-1 files alone already total about 20 `## Finding N` headers
+once Arch's self-labelled "a pass, not a finding" is excluded, and the round-2 and round-3 files
+reuse some numbers to refine or refute earlier ones while introducing others that read as new. The
+numbering is per-file and per-round, so there is no single sequence to count.
+
+What is true and checkable is the file list below. If somebody needs a count, it has to come from
+deciding first what counts as one finding across three rounds that argue with each other — which
+is a judgement, not a `grep`.
+
 ## The drivers, and why they are worth keeping
 
 `sweep_driver*.py` drive the **production wiring** — `ControllerServices.for_wotlk`, the same
