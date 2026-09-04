@@ -1,0 +1,24 @@
+# 7.1 Arch half: the packaged AppImage on a clean Arch box, 2026-09-04.
+# uname: 7.1.8-arch1-3   docker: not installed
+# artifact: Yulon-yulon-phase7-x86_64.AppImage  79153656 bytes
+# sha256:  cb7c1b7e751da93ffd81569bd8acc671a9f81832296f6509356765074bb1bf1b
+# fuse packages: error: package 'fuse2' was not found error: package 'fuse3' was not found 
+
+## 1. Plain launch -- REFUSED
+Error: No suitable fusermount binary found on the $PATH
+Error: $FUSERMOUNT_PROG not set
+
+Cannot mount AppImage, please check your FUSE setup.
+You might still be able to extract the contents of this AppImage 
+if you run it with the --appimage-extract option. 
+See https://github.com/AppImage/AppImageKit/wiki/FUSE 
+for more information
+open dir error: No such file or directory
+
+## 2. Same artifact with --appimage-extract-and-run (bypasses FUSE) -- STARTS
+Detected locale "C" with character encoding "ANSI_X3.4-1968", which is not UTF-8.
+Qt depends on a UTF-8 locale, and has switched to "C.UTF-8" instead.
+If this causes problems, reconfigure your locale. See the locale(1) manual
+for more information.
+This plugin does not support propagateSizeHints()
+2026-09-04 01:44:29 INFO [yulon.update] update check: current=0.6.59 latest=v0.6.59Public newer=False

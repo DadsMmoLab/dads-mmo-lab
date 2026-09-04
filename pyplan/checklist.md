@@ -281,6 +281,31 @@
 - [ ] 7.1 Spine + `AzerothCoreInstaller`, Linux native — `StagedInstaller`/`Stage` extracted from `native.py`, WotLK stage names unchanged and pinned; the 7.1 catalog models (`EmulatorSource.dest`, `PasswordPlan`, `DbFacts`, `ReadyMarkers`, `NativeInstall.family/images/image_prefix/azerothcore`); `ask` forwarded to `ensure_docker`; once-only sudo password (`SudoSession`, `sudo -S`) in provisioning; `docker-buildx` on the dnf and pacman lists; SELinux facts + `{{BIND_LABEL}}` on every host bind line + relabel; `systemd-inhibit`; `install_wiring.py` (probe wiring + the CLI harness); `wait_ready(ReadySpec)`; the proven install's `docker compose config` committed as `tests/data/wotlk-compose-config.json`; wow-wotlk dispatches native on Linux
   - [ ] Gate: yulon-ubuntu clean checkpoint, **two presses** — press 1: consent dialog + sudo dialog once + re-login report; re-login; press 2: `ready`; kill mid-build, resume skips the compile; `docker compose config` matches the fixture; auth log `127.0.0.1:8085` with no `UPDATE`; account + client login from the host after the LAN step
   - [ ] Gate: packaged artifact on clean Fedora 44 (SELinux, password sudo, moby-engine + buildx) and clean Arch (pacman + buildx)
+    - **ARCH, 2026-09-04: the artifact does not start on a clean Arch box, and the app underneath it
+      is fine.** Evidence: `pyplan/gates/7.1-arch/71-arch-appimage.log`. Same artifact as the Fedora
+      run — sha256 `cb7c1b7e751da93ffd81569bd8acc671a9f81832296f6509356765074bb1bf1b`, verified on
+      the box, so this is not a different build. `yulon-arch`, kernel 7.1.8-arch1-3, **no docker
+      installed**, which is what makes it a clean box for this line.
+      * **Plain launch is refused before any of our code runs:**
+        `Error: No suitable fusermount binary found on the $PATH` / `Cannot mount AppImage, please
+        check your FUSE setup.` Neither `fuse2` nor `fuse3` is installed — Arch ships neither by
+        default, and an AppImage's own runtime mounts itself with FUSE.
+      * **The same artifact with `--appimage-extract-and-run`, which bypasses FUSE, starts**: Qt
+        loads (offscreen), and the app reaches its own update check —
+        `INFO [yulon.update] update check: current=0.6.59 latest=v0.6.59Public newer=False`.
+      * **So the 6.5-era failure class does not recur.** That entry records the shipped tarball
+        aborting on Arch because `libqxcb.so` could not resolve `libxkbcommon-x11.so.0`, and notes
+        that "a CI check that runs the built binary headless, or asserts a soname list, would catch
+        the class rather than the instance". Run headless here, the bundle resolves everything it
+        needs. What stops it is one package outside the bundle.
+      * **What a user is told, and why it is not enough.** The message says "check your FUSE setup"
+        and links a wiki. On Arch the actual remedy is `pacman -S fuse2`. A launcher whose whole
+        premise is that a person should not have to know this ought to say the sentence rather than
+        link the concept — and it can, because the runtime's failure is detectable.
+      * **NOT ticked by this.** The line asks for a packaged artifact installing a server on clean
+        Arch, and nothing was installed: the run stops at launch, and the extract-and-run path was
+        used to establish that the bundle is sound, not to do a gate. The Arch half needs
+        `fuse2` present (or a launcher that says so), then a real install.
     - **Fedora 44 progress, 2026-08-31 — the ENGINE passed; the line stays open because it asks for the packaged ARTIFACT.** Run on `yulon-fedora-gate`, a clean box cloned from `yulon-fedora`'s `clean-desktop` (the owner's own Fedora box could not be restored — it carries his TBC and Tortoise servers with containers running). Driven headlessly over ssh through a pty driver, because the harness declines every question when stdin is not a tty and hangs forever on a pty fed by a heredoc. Press 1: consent once, **sudo password asked once — the first time `SudoSession` has ever been exercised**, both other Linux boxes being passwordless; `dnf -y install moby-engine docker-compose docker-buildx` installed 29.7.2 / 5.5.0 / 0.36.1; group joined; correct re-login refusal; no state file. Press 2: build 1829/1829, client data 1140 MB in 1m58s, **`ac-db-import` exit 0 under SELinux Enforcing** — the 2026-08-25 failure does not recur and this is the first proof of it under the Python engine. Schemas 22 / 111 / 30 / 315, byte-identical to the macOS, Ubuntu and Windows records. `:z` counts 7 + 1 as predicted; `env/dist/etc`, `env/dist/logs`, `modules` and the root all `container_file_t`; `relabel_for_containers()` proven in isolation (`user_home_t` → `container_file_t`, recursive, no sudo) because a successful relabel logs nothing and `:z` on the clone mount would have covered for it either way. Compose diff PASS (57 passed). Re-press on a finished install: **7 s**, compile skipped. Ports: 3306 and 7878 on `127.0.0.1`, 3724/8085 open as clients need. `ls ~/dads-mmo-lab-install-*.log` → 0: zero bash. **The plan's compose-diff command is stale** — it names `YULON_COMPOSE_ROOT`, but E.2 changed the mechanism and BOTH `YULON_COMPOSE_CONFIG` and `YULON_COMPOSE_ROOT` are needed; with only the root set the test SKIPS silently and reads exactly like a pass.
     - **THE APPIMAGE RUN IS DONE, 2026-09-04 — the half this line was actually asking for.**
       `Yulon-yulon-phase7-x86_64.AppImage` from release run 33803191903 (built at `6a8afb07`),
