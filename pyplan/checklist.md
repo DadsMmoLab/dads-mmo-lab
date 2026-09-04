@@ -944,6 +944,34 @@
     over the read-only mount and computing, not writing. So "9p throughput" is not one number for
     the extract stage: `ad` is write-heavy and pays the per-operation cost, `vmap_extractor` is
     read- and CPU-heavy and does not.
+    **The rate over the whole extract stage, in ten-minute windows** (from the same CSV, minutes
+    counted from the stage's first sample):
+
+    | minutes | MB/s | files/s | files written |
+    |---|---|---|---|
+    | 0–10 | 0.238 | 4.45 | 2,756 |
+    | 10–21 | 0.149 | 3.17 | 1,980 |
+    | 21–31 | 0.008 | 0.31 | 194 |
+    | 31–42 | 0.008 | 0.48 | 298 |
+    | 42–52 | 0.008 | 0.37 | 233 |
+    | 52–63 | 0.008 | 0.30 | 190 |
+    | 63–73 | 0.008 | 0.25 | 157 |
+    | 73–83 | 0.007 | 0.09 | 57 |
+
+    The break at minute 21 is `ad` finishing and `vmap_extractor` starting. After it the BYTE rate
+    is flat at eight kilobytes a second while the FILE rate decays by an order of magnitude, which
+    is the shape of a tool that is reading and computing more per output file as it goes, not of a
+    mount getting slower.
+
+    **No completion estimate is given here on purpose.** A rate that falls from 0.31 to 0.09
+    files/s across four windows cannot be extrapolated honestly, and the two projections this line
+    could have carried (25 minutes, then 2.4 hours) were both made during the run and both wrong
+    within the hour. What can be said is measured: the install started at 04:20 CEST, and **90
+    minutes later it was still inside its FIRST of the two vmap tools**, with roughly 3,600 of
+    Vanilla's 5,076 `Buildings` files written. A CMaNGOS install on Windows is not "Linux but
+    slower" — the extract stage is on a different scale, and 7.7 should budget for it rather than
+    discover it.
+
     **The CSV committed here is a snapshot taken while the run was still going**, which the file's
     own timestamps show; it is evidence of a rate, not of a finished install.
 - [ ] 7.8 macOS, all four — **[blocked]** on hardware
