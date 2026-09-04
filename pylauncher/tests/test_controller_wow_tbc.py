@@ -659,9 +659,7 @@ def test_a_restores_safety_dump_reports_missing_in_this_cores_spelling(
     backup_file.parent.mkdir(parents=True, exist_ok=True)
     backup_file.write_bytes(good_dump("characters"))
     mysql = FakeMysql(("realmd", "characters", "mangos", "logs"))
-    plan = maintenance.plan_restore(
-        backup_file, server_dir, running=lambda: [ENTRY.containers.db]
-    )
+    plan = maintenance.plan_restore(backup_file, server_dir, running=lambda: [ENTRY.containers.db])
     assert plan.refusals == (), plan.refusals
     with caplog.at_level("WARNING"):
         maintenance.restore(plan, mysql, confirm=plan.token, running=lambda: [ENTRY.containers.db])
