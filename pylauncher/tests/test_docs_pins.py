@@ -79,6 +79,48 @@ def test_the_citation_guard_widens_to_a_plan_the_moment_its_phase_is_ticked(tmp_
     ]
 
 
+GONE = re.compile(r"\bdeletes?\b|\bdeleted\b|never written", re.I)
+"""How a page says that a name it spells is not supposed to resolve.
+
+Deliberately literal and deliberately narrow; see `_cited_as_live()`.
+"""
+
+
+def _cited_as_live(text: str) -> set[str]:
+    """Every test name a page presents as EXISTING — which is not every name it spells.
+
+    The rule this guard enforces is "a reader who follows this citation finds the
+    test". A page that says a test was deleted is not making that promise: it is
+    recording history, and the reader who follows it finds exactly what the page
+    told them to expect.
+
+    Holding those to the same rule turns this guard into the opposite of what it
+    is for. 7.3's plan instructs a task to DELETE two named tests, records a
+    deleted module, and carries one code block for a test that was specified and
+    never written. Under a blind scan the only way to make a ticked phase pass is
+    to repoint those names at live tests — which would make the plan say that
+    F.4 deleted a test that is alive today. A guard whose remedy is to falsify
+    the record is a guard that gets deleted.
+
+    So a name is exempt when the LINE THAT SPELLS IT also says it is gone. Line
+    scope and not paragraph, because a paragraph that mentions a deletion
+    anywhere would exempt every name in it.
+
+    WHAT THIS GIVES UP, said here rather than discovered later: a page can now
+    write "F.4 deletes `test_x`" about a test that is alive, and this guard will
+    not catch it. That hole is real, and it is narrow — the claim has to sit on
+    the same line as the name and has to be a claim of removal. The alternative
+    was a guard that a phase tick converts into an instruction to rewrite
+    history, which is the worse failure.
+    """
+    live: set[str] = set()
+    for line in text.splitlines():
+        names = set(re.findall(r"\btest_[a-z0-9_]+\b", line))
+        if names and not GONE.search(line):
+            live |= names
+    return live
+
+
 def test_every_test_these_pages_name_by_hand_actually_exists() -> None:
     """A document that cites a test by name acquires a dependency nothing enforced.
 
@@ -119,7 +161,7 @@ def test_every_test_these_pages_name_by_hand_actually_exists() -> None:
     pages += _plans_whose_phase_the_checklist_ticks()
     named: dict[str, set[str]] = {}
     for path in pages:
-        found = set(re.findall(r"\btest_[a-z0-9_]+\b", path.read_text(encoding="utf-8")))
+        found = _cited_as_live(path.read_text(encoding="utf-8"))
         if found:
             named[path.name] = found
     assert named, "no page cites a test by name; this guard has gone vacuous"
