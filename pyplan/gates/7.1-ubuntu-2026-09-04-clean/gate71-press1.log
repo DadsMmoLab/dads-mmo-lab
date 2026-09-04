@@ -1,0 +1,72 @@
+[driver] running: /home/pk/gate71/pylauncher/.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/wowserver
+[driver] sudo password: NOT SET
+[driver] state-before: 5 read-only probes, install dir /home/pk/wowserver
+[driver] state-before: docker --version: NOT INSTALLED (no such executable)
+[driver] state-before: systemctl is-active docker: exit 4
+[driver] state-before: systemctl is-active docker: | inactive
+[driver] state-before: id -Gn: exit 0
+[driver] state-before: id -Gn: | pk adm cdrom sudo dip plugdev users lpadmin
+[driver] state-before: ls -ld /home/pk/wowserver: exit 2
+[driver] state-before: ls -ld /home/pk/wowserver: | ls: cannot access '/home/pk/wowserver': No such file or directory
+[driver] state-before: df -h /home/pk: exit 0
+[driver] state-before: df -h /home/pk: | Filesystem      Size  Used Avail Use% Mounted on
+[driver] state-before: df -h /home/pk: | /dev/sda2        97G   18G   75G  20% /
+/home/pk/gate71/pylauncher/.venv/bin/python: Error while finding module specification for 'yulon.install_wiring' (ModuleNotFoundError: No module named 'yulon')
+[driver] exit status 1; answered group x0, sudo x0
+[driver] state-after: 5 read-only probes, install dir /home/pk/wowserver
+[driver] state-after: docker --version: NOT INSTALLED (no such executable)
+[driver] state-after: systemctl is-active docker: exit 4
+[driver] state-after: systemctl is-active docker: | inactive
+[driver] state-after: id -Gn: exit 0
+[driver] state-after: id -Gn: | pk adm cdrom sudo dip plugdev users lpadmin
+[driver] state-after: ls -ld /home/pk/wowserver: exit 2
+[driver] state-after: ls -ld /home/pk/wowserver: | ls: cannot access '/home/pk/wowserver': No such file or directory
+[driver] state-after: df -h /home/pk: exit 0
+[driver] state-after: df -h /home/pk: | Filesystem      Size  Used Avail Use% Mounted on
+[driver] state-after: df -h /home/pk: | /dev/sda2        97G   18G   75G  20% /
+[driver] running: ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/wowserver
+[driver] sudo password: NOT SET
+[driver] state-before: 5 read-only probes, install dir /home/pk/wowserver
+[driver] state-before: docker --version: NOT INSTALLED (no such executable)
+[driver] state-before: systemctl is-active docker: exit 4
+[driver] state-before: systemctl is-active docker: | inactive
+[driver] state-before: id -Gn: exit 0
+[driver] state-before: id -Gn: | pk adm cdrom sudo dip plugdev users lpadmin
+[driver] state-before: ls -ld /home/pk/wowserver: exit 2
+[driver] state-before: ls -ld /home/pk/wowserver: | ls: cannot access '/home/pk/wowserver': No such file or directory
+[driver] state-before: df -h /home/pk: exit 0
+[driver] state-before: df -h /home/pk: | Filesystem      Size  Used Avail Use% Mounted on
+[driver] state-before: df -h /home/pk: | /dev/sda2        97G   18G   75G  20% /
+Installing WoW WotLK into /home/pk/wowserver
+You can stop this at any time. What an install writes outside the folder below is named here rather than denied: the images this build produces and the volumes holding the database and the server data, which live in Docker's own storage — that is why the checks below look at the space on Docker's disk too; Docker itself, when no daemon answers yet (on Linux: system packages, a service, and the group you are asked about first); and this app's own settings and log, in its config folder. Starting the install again continues from where it stopped: source this app has finished cloning is never fetched, reset or moved, and the build is not run a second time once Docker confirms its images are there. Everything cheap runs again on every attempt — the compose files this app writes are put back the way the catalog says, the server-data download resumes and re-checks itself, and the database and server are started and waited for.
+Checking Docker.
+Docker is not answering yet. Setting it up - this can mean downloading Docker Desktop and waiting for its engine, up to a few minutes with no output. You can stop at any time.
+Yu'lon can add 'pk' to the docker group, so it can use Docker without asking for your password every time.
+
+Heads up: membership in the docker group is effectively full root access on this machine. A docker user can, for example, mount your entire disk inside a container and change any file.
+
+If you say yes: you'll need to log out and back in once before it takes effect, then click Install again.
+If you say no: Yu'lon still installs Docker Engine, but it runs docker directly (never through sudo), so it cannot install or manage a server here until you join the group yourself: sudo usermod -aG docker pk, then log out and back in.
+
+Yu'lon never creates passwordless sudo rules and never changes the docker socket's permissions.
+
+Add 'pk' to the docker group (grants root-equivalent access)? (y/n):  [driver] saw the docker-group consent question; answering y
+y
+2026-09-04 19:29:56 INFO [yulon.platform] docker group consent for pk: granted
+Docker setup did: apt-get update; apt-get install -y docker.io docker-compose-v2 docker-buildx; systemctl enable --now docker; usermod -aG docker pk
+Still to do: Restart Yu'lon so pk can use Docker without sudo, then click Install again. Log out and back in if a restart is not enough.
+2026-09-04 19:30:49 ERROR [__main__] install failed: Docker is installed and set up. It cannot be used from this session yet: your account was added to the docker group, and a session that was already open does not pick up a new group. Restart Yu'lon so pk can use Docker without sudo, then click Install again. Log out and back in if a restart is not enough.
+install failed: Docker is installed and set up. It cannot be used from this session yet: your account was added to the docker group, and a session that was already open does not pick up a new group. Restart Yu'lon so pk can use Docker without sudo, then click Install again. Log out and back in if a restart is not enough.
+[driver] exit status 1; answered group x1, sudo x0
+[driver] state-after: 5 read-only probes, install dir /home/pk/wowserver
+[driver] state-after: docker --version: exit 0
+[driver] state-after: docker --version: | Docker version 29.1.3, build 29.1.3-0ubuntu3~24.04.2
+[driver] state-after: systemctl is-active docker: exit 0
+[driver] state-after: systemctl is-active docker: | active
+[driver] state-after: id -Gn: exit 0
+[driver] state-after: id -Gn: | pk adm cdrom sudo dip plugdev users lpadmin
+[driver] state-after: ls -ld /home/pk/wowserver: exit 2
+[driver] state-after: ls -ld /home/pk/wowserver: | ls: cannot access '/home/pk/wowserver': No such file or directory
+[driver] state-after: df -h /home/pk: exit 0
+[driver] state-after: df -h /home/pk: | Filesystem      Size  Used Avail Use% Mounted on
+[driver] state-after: df -h /home/pk: | /dev/sda2        97G   19G   74G  20% /

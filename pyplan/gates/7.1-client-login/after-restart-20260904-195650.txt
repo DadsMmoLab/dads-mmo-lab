@@ -1,0 +1,142 @@
+=== 7.1 clause 14 -- CAN THE CLIENT START AFTER THE RESTART?  ANSWER: YES ===
+Captured on PKGAME-LAPTOP, 2026-09-04 19:53:59 -> 19:56:50 (+02:00).
+Every line below was read off the machine at the time stated. Nothing here is recalled.
+
+Machine LastBootUpTime: 2026-09-04 19:46:24 (Win32_OperatingSystem) -- the restart.
+
+--------------------------------------------------------------------------------
+1. THE DISPLAY IS BACK. A panel is attached to the desktop and a real mode is set.
+--------------------------------------------------------------------------------
+EnumDisplayDevices (user32), 19:54, all six adapter entries:
+    \\.\DISPLAY1 | AMD Radeon(TM) 610M          | flags=0x80005 attachedToDesktop=True  primary=True
+        monitor: \\.\DISPLAY1\Monitor0 | Lenovo DisplayHDR | flags=0x3 active=True
+    \\.\DISPLAY2 | AMD Radeon(TM) 610M          | flags=0x80000 attachedToDesktop=False
+    \\.\DISPLAY3 | NVIDIA GeForce RTX 4070      | flags=0x0     attachedToDesktop=False
+    \\.\DISPLAY4 | NVIDIA GeForce RTX 4070      | flags=0x0     attachedToDesktop=False
+    \\.\DISPLAY5 | NVIDIA GeForce RTX 4070      | flags=0x0     attachedToDesktop=False
+    \\.\DISPLAY6 | NVIDIA GeForce RTX 4070      | flags=0x0     attachedToDesktop=False
+
+  BEFORE the restart this read attachedToDesktop=False on ALL SIX. It now reads True
+  on DISPLAY1, with a named, active monitor child (Lenovo DisplayHDR). That single
+  flag is the whole difference.
+
+Desktop geometry -- it is the REAL PANEL, not the headless fallback:
+    GetSystemMetrics SM_CXSCREEN x SM_CYSCREEN (process DPI-aware)  = 2560 x 1600
+    GetSystemMetrics SM_CMONITORS                                    = 1
+    Screen.PrimaryScreen.Bounds (process NOT DPI-aware)              = 1707 x 1067
+    Screen.AllScreens -> \\.\DISPLAY1 primary=True {X=0,Y=0,W=2560,H=1600}
+  1707x1067 is 2560x1600 at 150% scaling -- the panel's own geometry. It is NOT the
+  1920x1080 headless fallback that was read before the restart.
+
+Win32_VideoController, 19:53:59:
+    NVIDIA GeForce RTX 4070 Laptop GPU : CurrentH/VResolution = (blank), Status OK
+    AMD Radeon(TM) 610M                : 2560 x 1600 x 4294967296 colors, Status OK
+
+  *** WMI Win32_DesktopMonitor STILL READS Availability = 8 ON BOTH ENTRIES. ***
+    Name 'Default Monitor'   DeviceID DesktopMonitor1  Availability 8  Status OK
+    Name 'Lenovo DisplayHDR' DeviceID DesktopMonitor2  Availability 8  Status OK
+  This is the one reading that did NOT change, and it is WRONG. A panel is demonstrably
+  attached (EnumDisplayDevices True, a 2560x1600 mode set, a non-black screen capture,
+  and D3D9 now enumerating an adapter). Win32_DesktopMonitor.Availability=8 on this box
+  is stale and must NOT be used as the display witness again -- EnumDisplayDevices'
+  DISPLAY_DEVICE_ATTACHED_TO_DESKTOP bit is the reading that tells the truth.
+
+Screen capture of the bare desktop before any launch (19:54):
+    sampled 4644 pixels on a 20px grid over 1707x1067 -> 4644 of 4644 above RGB-sum 24.
+    file: after-restart-desktop-before-launch.png (192,951 bytes)
+  BEFORE the restart the same probe gave 0 of 6720 above RGB-sum 24, and the PNG was
+  10,143 bytes -- a solid-black frame -- five times running.
+
+--------------------------------------------------------------------------------
+2. A RUN THAT PREDATES MINE ALREADY SUCCEEDED. The 18:47 logs were left on disk.
+--------------------------------------------------------------------------------
+Logs\ as found at 19:55, before I touched anything:
+    gx.log        1137 bytes  2026-09-04 18:48:36   <- NOT 0 bytes any more
+    GlueXML.log   2367 bytes  2026-09-04 18:47:54
+    cpu.log        441 bytes  2026-09-04 18:47:42
+    SESound.log   2440 bytes  2026-09-04 18:48:36
+That gx.log (copied aside before truncation) opens with the exact line whose absence
+was the whole failure before:
+    9/4 18:47:42.791  CGxDevice::DeviceAdapterID(): RET: 1, VID: 1002, DID: 164e, DVER: 0.0
+    9/4 18:47:44.652  CGxDevice::DeviceAdapterInfer(): RET: 1, DID: 3
+    9/4 18:47:52.616  ValidateFormatMonitor(): unable to find monitor refresh
+    9/4 18:47:52.616  ValidateFormatMonitor(): invalid refresh rate 60, set to 60
+    9/4 18:47:52.668  CGxDeviceD3d::DeviceSetFormat():
+    9/4 18:47:52.668      Format: 1024 x 768 Window, Ds24X, multisample 1
+    9/4 18:47:52.960  Caps: numTmus 8 / ps_3_0 / vs_3_0 / numStreams 16 / NVAPI 1
+VID 1002 DID 164e is the AMD Radeon 610M -- D3D9 enumerated an adapter and created a
+device. Before the restart it enumerated zero and printed nothing at all.
+(cpu.log from that run: AMD Ryzen 9 7945HX, 32 cores/32 processors.)
+
+--------------------------------------------------------------------------------
+3. MY OWN CONTROLLED RUN. Launched 19:55:41 with gx.log and GlueXML.log truncated to 0.
+--------------------------------------------------------------------------------
+    Clear-Content C:\wow335ahd\Logs\gx.log       -> verified 0 bytes
+    Clear-Content C:\wow335ahd\Logs\GlueXML.log  -> verified 0 bytes
+    Start-Process C:\wow335ahd\Wow.exe -WorkingDirectory C:\wow335ahd  -> pid 4292 at 19:55:41
+
+At 19:55:58 (17 s in):
+    ALIVE pid=4292 name=wow WS=398MB threads=53 Responding=True
+    MainWindowTitle='World of Warcraft'  MainWindowHandle=1311836
+    Logs: GlueXML.log 2367 bytes @19:55:45, cpu.log 441 @19:55:41, SESound.log 2320 @19:55:45
+    GlueXML.log tail @19:55:45.773 -> "++ Loading file Interface\GlueXML\ServerList.xml"
+    (the login/realm-list UI, i.e. the glue screens, loaded)
+
+Window enumeration of pid 4292 (EnumWindows + EnumChildWindows), 19:56:
+    TOP hwnd=1311836 class='GxWindowClassD3d' title='World of Warcraft' visible=True
+                     rect=505,235-1202,784
+    TOP hwnd=262170  class='NVOpenGLPbuffer' title='__wglDummyWindowFodder' visible=False
+    TOP hwnd=132780  class='MSCTFIME UI'  visible=False
+    TOP hwnd=38863456 / 196836  class='IME' 'Default IME'  visible=False
+
+  *** THERE IS NO #32770 WINDOW. *** Before the restart this same enumeration returned
+  hwnd 789460 class '#32770' title 'World of Warcraft' with the child
+  [Static] 'Failed to find a suitable display device.  Exiting program.' and an [OK]
+  button, and NO GxWindowClassD3d at all. It is now the exact inverse: a real D3D9
+  render window, visible, and no dialog.
+
+Screenshot at 19:56:27 -- after-restart-login-screen.png (1,553,664 bytes):
+  the WoW login screen is rendered on screen. Visible in the frame: the
+  "WORLD OF WARCRAFT / WRATH OF THE LICH KING HD" logo, the Battle.net Account Name
+  field, the Password field, the Login button, "Manage Account", "Community Site",
+  "Show Launcher", "Remember Account Name" / "Fast Login" checkboxes, and the realm
+  string at the bottom-right.
+  Brightness probe on the same frame: 4424 of 4644 sampled pixels above RGB-sum 24.
+
+--------------------------------------------------------------------------------
+4. ONE CAVEAT ABOUT gx.log AS A SIGNAL -- it flushes at EXIT, not live.
+--------------------------------------------------------------------------------
+At 19:56:27, 46 s after launch and with the login screen plainly on screen, gx.log was
+STILL 0 bytes / LastWriteTime 19:55:41. The renderer is up regardless -- the window
+class, the rendered login screen and GlueXML.log prove it.
+The 18:47 run shows why: its gx.log CONTENT is timestamped 18:47:42 - 18:47:52, but the
+FILE's LastWriteTime is 18:48:36 -- about 44 s later, when that process exited. The
+client buffers gx.log and flushes it on shutdown.
+Consequence for future runs: "gx.log is 0 bytes" is only meaningful AFTER the process
+has exited. While the client is alive, use the window class (GxWindowClassD3d vs
+#32770) and GlueXML.log instead. Before the restart the 0-byte reading was decisive
+only because the process had already exited, with the #32770 dialog to go with it.
+
+--------------------------------------------------------------------------------
+5. STATE LEFT BEHIND -- READ THIS BEFORE THE NEXT STEP
+--------------------------------------------------------------------------------
+* pid 4292 is STILL RUNNING and is SITTING AT THE LOGIN SCREEN. Nothing was typed into
+  it: no account name, no password, no Login click. Killing it is not necessary and was
+  not done.
+* Logs\gx.log and Logs\GlueXML.log were truncated by me at 19:55:41 (deliberately, as
+  the fresh signal). The pre-truncation 18:47 gx.log was copied aside first; its full
+  contents are quoted in section 2 above, which is now its only surviving copy.
+* Nothing else was modified. Config.wtf was read, not written; it currently holds
+  SET realmList "100.99.161.102" and SET gxWindow "1". The realm/tunnel work described
+  in client-and-display-facts.txt section 4 has NOT been redone -- this capture answers
+  only "can the client start", not "can it log in".
+
+--------------------------------------------------------------------------------
+VERDICT
+--------------------------------------------------------------------------------
+YES. The client starts. The single thing that changed across the restart is that a
+display is attached to the desktop again (EnumDisplayDevices attachedToDesktop True on
+\\.\DISPLAY1, real 2560x1600 panel mode, non-black desktop), which lets D3D9 enumerate
+the AMD 610M and create a device. The blocker recorded in client-and-display-facts.txt
+section 2 is gone. WMI Win32_DesktopMonitor.Availability still says 8 and is simply
+wrong on this box.

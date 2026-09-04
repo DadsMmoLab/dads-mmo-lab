@@ -466,3 +466,57 @@ freeGiB 37.75
 [Map 001] [33,31]:  Adding tile to navmesh...                          
 exit: 
 freeGiB 37.60
+=== poll 60 2026-09-04T17:43:39Z
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+2026-09-04T17:05:51Z,2026-09-04T10:05:51,Step 7 of 12 (58%): mmaps
+[Map 001] Building tile [36,36] (603 / 1018)    
+ loadOffMeshConnections:: input file offmesh.txt not found!
+exit: 
+freeGiB 37.45
+
+=== manual poll (subagent) 2026-09-04T17:56:43Z / 2026-09-04 10:56:43 -07:00 box local
+   (timestamp read from yulon-win11-gate via Get-Date, not from the laptop)
+STILL RUNNING. Tasks on the box: dml-tbc-install Running (Last Result 267009 =
+0x41301 "task is currently running", started 2026-09-04 05:19:34 local, one run
+only per C:\gate\evidence\tbc77-wrapper.log), dml-tbc-stages Running,
+dml-tbc-heartbeat Running, dml-tbc-ninep Running.
+Container: admiring_dijkstra Up 50 minutes, yulon.local/cmangos-tbc-server:native-8cce6242
+
+Stage: Step 7 of 12 (58%): mmaps, entered 2026-09-04T17:05:51Z (10:05:51 local).
+First mmaps file written 10:06:00 local.
+
+COUNTS ON DISK at 10:54-10:56 local (counted with C:\gate\counts.ps1, i.e.
+Get-ChildItem -File, NOT read from a progress file):
+  dbc        185   (casefold-unique 185)   == Linux m910q 185
+  maps      3586   (casefold-unique 3586)  == Linux m910q 3586
+  Buildings 5431   (casefold-unique 5431)  == the predicted case-folded count
+  vmaps     8607   (casefold-unique 8607)  vs Linux 8099  (delta +508, unchanged)
+  mmaps     1276   (casefold-unique 1241 at the 10:54 sample; growing)  target ~2819
+  (Cameras  13, not part of the five)
+  dir_bin 58298617 bytes; temp_gameobject_models 41308 bytes
+mmaps breakdown at 10:56: 2 x .mmap + 1263 x .mmtile, only two maps touched so far:
+  map 000 = 514 files (finished), map 001 = 751 files (in progress).
+
+RATE (measured from LastWriteTime of the files in data\mmaps, at 10:56:23 local):
+  last  5 min: 133 files -> 26.6 files/min
+  last 15 min: 347 files -> 23.13 files/min
+  last 10 min (10:55 sample): 234 files -> 23.4 files/min
+  last 30 min (10:55 sample): 753 files -> 25.1 files/min
+  since mmaps start (10:06:00): 1276 files over 50.4 min -> 25.32 files/min
+Log tail (C:\gate\evidence\tbc77.log, 1271394 bytes) at 10:55: "[Map 001] Building
+tile [43,45] (917 / 1018)". No errors; the only repeated stderr line is the benign
+" loadOffMeshConnections:: input file offmesh.txt not found!".
+
+ESTIMATE: 2819 - 1276 = 1543 files remaining.
+  at 23.1 files/min -> 67 min -> done ~12:03 local (19:03Z)
+  at 26.6 files/min -> 58 min -> done ~11:54 local (18:54Z)
+  ETA band 11:54-12:03 local (18:54-19:03Z).
+BASIS AND CAVEAT: this is a straight linear extrapolation of the measured
+file-creation rate against the Linux total of 2819. It assumes the remaining maps
+cost the same per file as maps 000/001 do. They may not: 000 (EK) and 001
+(Kalimdor) are the two big continents and are nearly done, but map 530 (Outland)
+has not started and is also large, while the dozens of instance maps are small.
+Treat the band as indicative, not as a deadline.
+freeGiB 37.17
+=== end manual poll
