@@ -115,7 +115,8 @@
       },
       "install": {
         "platforms": [
-          "linux"
+          "linux",
+          "windows"
         ],
         "default_server_dir": "wow-tbc-server",
         "requires_client_dir": true,
@@ -466,7 +467,8 @@
       },
       "install": {
         "platforms": [
-          "linux"
+          "linux",
+          "windows"
         ],
         "default_server_dir": "wow-vanilla-server",
         "requires_client_dir": true,

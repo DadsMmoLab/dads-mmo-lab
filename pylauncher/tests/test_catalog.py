@@ -726,6 +726,24 @@ def test_mpq_depth_is_a_positive_int_or_recursive() -> None:
 
 CMANGOS_GAMES = ("wow-tbc", "wow-vanilla", "wow-tortoise")
 
+CMANGOS_PLATFORMS = {
+    "wow-tbc": ("linux", "windows"),
+    "wow-vanilla": ("linux", "windows"),
+    "wow-tortoise": ("linux",),
+}
+"""Where each CMaNGOS entry is installable, and every widening was earned by a run.
+
+All three said `("linux",)` until 2026-09-04. Vanilla completed all twelve stages on
+native Windows that morning -- the first CMaNGOS install on Windows -- and TBC finished
+the same evening with `tbc-realmd`, `tbc-mangosd` and `tbc-db` up on `yulon-win11-gate`.
+Tortoise has not been attempted there, so it keeps Linux alone.
+
+The order is the awkward part and is worth knowing before anyone edits this: 7.7 measured
+that a Windows install refuses BEFORE preflight while `platforms` is Linux-only
+(`Install.supports()` is `platform_id in platforms`), so the widening cannot follow the
+install that justifies it. It has to go first, and the run is what earns it afterwards.
+"""
+
 
 @pytest.mark.parametrize("game_id", CMANGOS_GAMES)
 def test_the_cmangos_entries_carry_a_full_family_block(game_id: str) -> None:
@@ -733,9 +751,11 @@ def test_the_cmangos_entries_carry_a_full_family_block(game_id: str) -> None:
 
     G.4 landed this data while `FAMILIES` still had no `cmangos` engine, so the
     entries kept their bash `script` and this test asserted it. K.8 registered the
-    engine and F.4 deleted the field: the same three entries now install through
-    `CmangosInstaller` on Linux and nothing else, which is what `supports("linux")`
-    below stands for. What installs the game is asserted in
+    engine and F.4 deleted the field: the same three entries install through
+    `CmangosInstaller`, which is what `supports("linux")` below stands for. It said
+    "on Linux and nothing else" until 2026-09-04, when Vanilla and then TBC were
+    installed on native Windows and `platforms` was widened for both -- see
+    `CMANGOS_PLATFORMS`. What installs the game is asserted in
     `test_families_cmangos.py`, on the dispatcher.
 
     THIS DOCSTRING IS LOAD-BEARING, which is why it has been corrected twice in a
@@ -763,9 +783,11 @@ def test_the_cmangos_entries_carry_a_full_family_block(game_id: str) -> None:
     assert native.db.client == "mariadb"
     assert entry.install.password.mode == "generated"
     assert entry.install.password.file == ".db_password"
-    assert entry.install.platforms == ("linux",)
+    assert entry.install.platforms == CMANGOS_PLATFORMS[game_id]
     assert entry.install.supports("linux") is True
-    assert entry.install.supports("windows") is False
+    assert entry.install.supports("windows") is ("windows" in CMANGOS_PLATFORMS[game_id])
+    # macOS is not widened for any of them: no CMaNGOS entry has been installed there.
+    assert entry.install.supports("macos") is False
     assert entry.install.requires_client_dir is True
     for source in entry.emulator.sources:
         assert source.dest.startswith("src/")
