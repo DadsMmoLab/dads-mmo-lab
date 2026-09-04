@@ -30,7 +30,8 @@ from typing import BinaryIO
 
 from yulon import docker, git, platform, resources
 from yulon.catalog import composegen, native, preflight
-from yulon.catalog.catalog import load_catalog
+from yulon.catalog.catalog import CatalogEntry, load_catalog
+from yulon.catalog.families import patch
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.installer import InstallOptions
 
@@ -54,6 +55,38 @@ whole mechanism (write only an override, then `compose up -d --build`) only
 works because it is. A clone double that made only `.git` hid a blocker that
 refused every install.
 """
+
+
+VMAP_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "cmangos-vmap-8ec338a1"
+"""`contrib/vmap_extractor/vmapextract/` of `mangos-classic` at `8ec338a1`; see `test_patch.py`."""
+
+
+def lay_patch_sources(entry: CatalogEntry) -> Callable[[Path], None]:
+    """An `on_clone` hook laying the pre-image of every patch `entry` carries under its source.
+
+    A clone double leaves `.git` and nothing else, and since 2026-09-05
+    `patch-sources` runs right after the clone and refuses a checkout that
+    lacks the file it edits — so every install driven through a Recorder has
+    to lay the tree the patch was written against, or it stops one stage in.
+    Laid by BASENAME at the path each hunk names, and only under the dest the
+    catalog says the patch applies to; the dest is recognised by its tail so
+    the hook needs no server dir. An entry with no patches gets a hook that
+    does nothing.
+    """
+    block = entry.install.native.cmangos if entry.install.native is not None else None
+    patches = block.patches if block is not None else ()
+    root = resources.installers_dir()
+
+    def on_clone(dest: Path) -> None:
+        for spec in patches:
+            if not dest.as_posix().endswith("/" + spec.source):
+                continue
+            for hunk in patch.parse((root / spec.file).read_text(encoding="utf-8")):
+                target = dest.joinpath(*hunk.path.split("/"))
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes((VMAP_FIXTURE / hunk.path.rsplit("/", 1)[-1]).read_bytes())
+
+    return on_clone
 
 
 @dataclass

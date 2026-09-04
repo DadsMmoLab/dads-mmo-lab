@@ -1141,6 +1141,135 @@ def _counts_text(seen: Mapping[str, int]) -> str:
     return ", ".join(f"{folder}: {have} files" for folder, have in seen.items())
 
 
+# ------------------------------------------ the doodad placement check (option C, 2026-09-05)
+
+BUILDINGS_DIR = "Buildings"
+"""Where CMaNGOS-lineage `vmap_extractor`s write model files and the placement index.
+
+A fact about the extractor lineage, not about a game: every shipped CMaNGOS
+entry's `vmap extract` tool produces it (the catalog's `produces` keys say so)
+and `vmap_assembler` reads it by this name. Held here beside `MMAPS_DIR` for the
+same reason: it names a folder this module reads, and a folder name that is
+data is one edit from being somewhere else.
+"""
+
+DIR_BIN = "dir_bin"
+"""The placement index inside `Buildings/`: one record per placed model, its file name inside."""
+
+_MODEL_NAME = re.compile(rb"[A-Za-z0-9_.\-]+\.(?:m2|M2)")
+
+
+@dataclass(frozen=True)
+class DoodadCheck:
+    """What `Buildings/` says about itself: models on disk against models the index places.
+
+    The counts are case-folded on purpose: the defect this exists for is a
+    writer and a reader that disagree about CASE (`pyplan/upstream-cmangos-doodad-drop.md`
+    §4), so a model present as both `INNBED.M2` and `Innbed.m2` is one model.
+    `misspelt` is the sharp signal — files whose name is not what the reader
+    would ask for — and `unplaced` the blunt one the write-up's option C
+    named. Measured on m910q 2026-09-05 against the 1.12.1 client, same
+    extractor commit `8ec338a1`: unpatched 1,464 misspelt / 802 unplaced;
+    patched 0 misspelt / 434 unplaced. So 434 models with no placement is what
+    a CORRECT extraction looks like (GameObjectDisplayInfo models go to
+    `temp_gameobject_models`, not the index), and a warning keyed on
+    `unplaced > 0` would fire on every install for ever. The warning is keyed
+    on `misspelt`, which reads zero after the fix on both filesystems, and the
+    unplaced count rides along as information.
+    """
+
+    extracted: int
+    placed: int
+    unplaced: int
+    misspelt: int
+
+    def line(self) -> str:
+        """One log line: a warning when the reader would miss a file, plain counts otherwise.
+
+        A warning and not a refusal, deliberately. The extraction is not wrong
+        by shape — the server boots, the assembler runs, terrain and building
+        shells are complete — it is short of interior collision geometry, and a
+        refusal here would take a working install away from a user over a
+        defect only a rebuild can mend. What the warning is FOR is the day the
+        `patch-sources` stage silently stops applying (a resume over a state
+        file that lies, an image built from a checkout somebody reset); it says
+        which stage to look at, and it is the only check that would have caught
+        the original defect.
+        """
+        if self.misspelt:
+            return (
+                f"warning: {self.misspelt} of the {self.extracted} models extracted into "
+                f"{BUILDINGS_DIR}/ are spelled in a way the placement index never looks up "
+                f"({self.unplaced} have no placement in {DIR_BIN} at all). On a case-sensitive "
+                "filesystem those placements were dropped silently, which means the source "
+                "patch the patch-sources stage carries did not reach this build. The server "
+                "will run, short of interior collision geometry."
+            )
+        return (
+            f"{BUILDINGS_DIR}/: {self.extracted} models, {self.placed} placed in {DIR_BIN}, "
+            f"{self.unplaced} with no placement; every model file is spelled the way the "
+            "placement index asks for it."
+        )
+
+
+def reader_spelling(name: str) -> str:
+    """`fixnamen()` then `fixname2()` from the extractor's `adtfile.cpp`, ported byte for byte.
+
+    Title-case each alphabetic run, lower-case the last three characters, then
+    underscore every space before them; names under three characters pass
+    through. This is what `Doodad::ExtractSet()` applies to a MODN name before
+    it opens the file, so a file on disk whose name is not a fixed point of it
+    is a file that reader will never open.
+    """
+    raw = bytearray(name.encode("utf-8", errors="surrogateescape"))
+    n = len(raw)
+    if n < 3:
+        return name
+    for i in range(n - 3):
+        prev_alpha = i > 0 and chr(raw[i - 1]).isalpha()
+        if i > 0 and 65 <= raw[i] <= 90 and prev_alpha:
+            raw[i] |= 0x20
+        elif (i == 0 or not prev_alpha) and 97 <= raw[i] <= 122:
+            raw[i] &= ~0x20
+    for i in range(n - 3, n):
+        raw[i] |= 0x20
+    for i in range(n - 3):
+        if raw[i] == 0x20:
+            raw[i] = 0x5F
+    return raw.decode("utf-8", errors="surrogateescape")
+
+
+def doodad_placements(buildings: Path) -> DoodadCheck | None:
+    """Read `Buildings/` and its index; None when there is nothing to compare.
+
+    Names are pulled out of the index's bytes by pattern rather than by parsing
+    its records, because the record layout differs between the WMO writer and
+    the doodad writer and neither is documented; the write-up's own count
+    (§7) was taken the same way, and the numbers this module was measured
+    against are that count's. An index that will not read is logged and is no
+    check — a warning about a folder nobody could open would accuse the
+    extraction of something the disk did.
+    """
+    index = buildings / DIR_BIN
+    try:
+        names = [p.name for p in buildings.iterdir() if p.name.lower().endswith(".m2")]
+        if not index.is_file() or not names:
+            return None
+        raw = index.read_bytes()
+    except OSError as exc:
+        logger.warning(f"{buildings} could not be read for the placement check, skipping it: {exc}")
+        return None
+    on_disk = {name.lower() for name in names}
+    placed = {m.decode("ascii", errors="replace").lower() for m in _MODEL_NAME.findall(raw)}
+    misspelt = sum(1 for name in names if reader_spelling(name) != name)
+    return DoodadCheck(
+        extracted=len(on_disk),
+        placed=len(on_disk & placed),
+        unplaced=len(on_disk - placed),
+        misspelt=misspelt,
+    )
+
+
 # ------------------------------------------------ the mmaps stage: one tool, and one wipe
 
 MMAPS_TOOL = "mmaps"

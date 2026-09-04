@@ -38,12 +38,21 @@ import pytest
 
 import yulon
 from tests.conftest import spelled_bounds
-from tests.support_native import ABSENT, IMPORTED, PARTIAL, POPULATED_HALF, Recorder
+from tests.support_native import (
+    ABSENT,
+    IMPORTED,
+    PARTIAL,
+    POPULATED_HALF,
+    VMAP_FIXTURE,
+    Recorder,
+    lay_patch_sources,
+)
 from yulon import docker, platform, resources
 from yulon.catalog import composegen, native
 from yulon.catalog.catalog import (
     CatalogEntry,
     PasswordPlan,
+    SourcePatch,
     SqlPhase,
     SqlPlan,
     load_catalog,
@@ -207,8 +216,32 @@ def engine(rec: Recorder, **overrides: object) -> CmangosInstaller:
     return eng
 
 
+def lay_sources(server_dir: Path) -> Callable[[Path], None]:
+    """`support_native.lay_patch_sources` for `ENTRY`: the extractor files the patch stage edits.
+
+    Laid only under the dest the catalog says the patch applies to, for the
+    same reason `lay_sql` lays under the owning source: the spine refuses a
+    nested dest with files in it before that dest's own clone. `server_dir`
+    is kept in the signature so a caller reads which tree it is about.
+    """
+    hook = lay_patch_sources(ENTRY)
+
+    def on_clone(dest: Path) -> None:
+        assert dest.is_relative_to(server_dir), dest
+        hook(dest)
+
+    return on_clone
+
+
 def install(rec: Recorder, server_dir: Path, client_dir: Path, **overrides: object) -> list[str]:
-    rec.on_clone = lay_sql(server_dir, SQL)
+    sql = lay_sql(server_dir, SQL)
+    sources = lay_sources(server_dir)
+
+    def on_clone(dest: Path) -> None:
+        sql(dest)
+        sources(dest)
+
+    rec.on_clone = on_clone
     return list(
         engine(rec, **overrides).run(InstallOptions(server_dir=server_dir, client_dir=client_dir))
     )
@@ -255,6 +288,7 @@ def test_family_and_stage_names_are_the_contract_tuple() -> None:
     assert CmangosInstaller.family == "cmangos"
     assert CmangosInstaller.STAGE_NAMES == (
         "clone-sources",
+        "patch-sources",
         "db-password",
         "write-dockerfile",
         "generate-compose",
@@ -1266,6 +1300,11 @@ def test_the_family_s_catalog_refusals_end_in_one_tail_and_not_two(
         volume_exists=refuse_to_answer,
     )
     said["_password_origin_note"] = fixed._password_origin_note(context(server_dir))
+    ghost = SourcePatch(file="shared/cmangos/patches/no-such.patch", source=CORE_DEST, reason="x")
+    with pytest.raises(InstallerError) as from_patch:
+        eng = engine_for(without_patches((ghost,)), Recorder(), volume_exists=refuse_to_answer)
+        list(eng._patch_sources(context(server_dir)))
+    said["_patch_sources"] = str(from_patch.value)
 
     assert set(said) == functions_spending("CATALOG_ERROR_TAIL"), (
         "a function spends the catalog tail that this test does not drive, or drives one "
@@ -1812,6 +1851,7 @@ def test_the_bound_stages_run_in_order_and_record_the_recorded_ones(
     said = install(rec, server_dir, client)
     assert [line for line in said if line.startswith("--- ")] == [
         "--- clone-sources",
+        "--- patch-sources",
         "--- db-password",
         "--- write-dockerfile",
         "--- generate-compose",
@@ -1828,6 +1868,7 @@ def test_the_bound_stages_run_in_order_and_record_the_recorded_ones(
     assert state is not None
     assert state.completed == (
         "clone-sources",
+        "patch-sources",
         "write-dockerfile",
         "generate-compose",
         "build",
@@ -1888,6 +1929,174 @@ def test_clone_sources_consults_the_record_under_its_own_stage_name(
     assert first == 3
     assert again.clones == [], "\n".join(said)
     assert any("already in src/mangos-tbc" in line for line in said)
+
+
+# -- patch-sources ------------------------------------------------------------
+
+VMAP_SUBDIR = PurePosixPath("contrib/vmap_extractor/vmapextract")
+CORE_DEST = CMANGOS.patches[0].source if CMANGOS.patches else "src/mangos-tbc"
+EXTRACTOR_FILES = ("gameobject_extract.cpp", "model.cpp", "vmapexport.cpp", "vmapexport.h")
+
+
+def extractor_file(server_dir: Path, name: str) -> Path:
+    return server_dir / CORE_DEST / VMAP_SUBDIR / name
+
+
+def without_patches(patches: tuple[SourcePatch, ...]) -> CatalogEntry:
+    """`ENTRY` with its `cmangos.patches` replaced."""
+    assert ENTRY.install.native is not None and CMANGOS is not None
+    return ENTRY.model_copy(
+        update={
+            "install": ENTRY.install.model_copy(
+                update={
+                    "native": ENTRY.install.native.model_copy(
+                        update={"cmangos": CMANGOS.model_copy(update={"patches": patches})}
+                    )
+                }
+            )
+        }
+    )
+
+
+def test_patch_sources_edits_the_core_checkout_the_clone_made_and_is_recorded(
+    tmp_path: Path,
+) -> None:
+    """Through `run()`: the checkout ends up byte-for-byte what `git apply` produced on m910q."""
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    said = install(rec, server_dir, client_folder(tmp_path))
+    for name in EXTRACTOR_FILES:
+        assert (
+            extractor_file(server_dir, name).read_bytes()
+            == (VMAP_FIXTURE / "patched" / name).read_bytes()
+        ), name
+    state = native.read_state(server_dir, valid=engine(rec).stage_names())
+    assert state is not None and "patch-sources" in state.completed
+    block = said[said.index("--- patch-sources") : said.index("--- db-password")]
+    assert any("Patched" in line and "gameobject_extract.cpp" in line for line in block), block
+    assert any(CMANGOS.patches[0].reason in line for line in block), block
+
+
+def test_a_second_press_finds_the_fix_present_and_rewrites_nothing(tmp_path: Path) -> None:
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    client = client_folder(tmp_path)
+    install(rec, server_dir, client)
+    stamps = {n: extractor_file(server_dir, n).stat().st_mtime_ns for n in EXTRACTOR_FILES}
+    again = Recorder()
+    again.remotes = dict(rec.remotes)
+    said = install(again, server_dir, client)
+    assert any("already carries" in line for line in said), said
+    assert not any("Patched" in line for line in said)
+    assert {n: extractor_file(server_dir, n).stat().st_mtime_ns for n in EXTRACTOR_FILES} == stamps
+
+
+def test_the_record_is_not_what_skips_the_patch(tmp_path: Path) -> None:
+    """A deleted checkout is re-cloned by `clone-sources` on its own disk evidence, and the
+    record of THIS stage survives that; consulting it would leave the fresh clone unpatched
+    with a state file saying otherwise. So the body reads the file, never the record."""
+    server_dir = tmp_path / "srv"
+    rec = Recorder()
+    (server_dir / CORE_DEST / ".git").mkdir(parents=True)
+    lay_sources(server_dir)(server_dir / CORE_DEST)
+    ctx = context(server_dir, completed=("clone-sources", "patch-sources"))
+    said = list(engine(rec)._patch_sources(ctx))
+    assert any("Patched" in line for line in said), said
+    assert (
+        extractor_file(server_dir, "gameobject_extract.cpp").read_bytes()
+        == (VMAP_FIXTURE / "patched" / "gameobject_extract.cpp").read_bytes()
+    )
+
+
+def test_a_moved_upstream_refuses_by_file_and_line_before_anything_is_built(
+    tmp_path: Path,
+) -> None:
+    """The refusal names the file and the line, is the sentence the user reads, and stops the
+    install at this stage: no Dockerfile, no build, no record of the stage."""
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    client = client_folder(tmp_path)
+    sources = lay_sources(server_dir)
+    sql = lay_sql(server_dir, SQL)
+
+    def on_clone(dest: Path) -> None:
+        sql(dest)
+        sources(dest)
+        moved = extractor_file(server_dir, "gameobject_extract.cpp")
+        if moved.is_file():
+            body = moved.read_text(encoding="utf-8")
+            moved.write_text(
+                body.replace("fixedName = GetPlainName(origPath.c_str());", "fixedName = X();"),
+                encoding="utf-8",
+            )
+
+    rec.on_clone = on_clone
+    with pytest.raises(InstallerError) as caught:
+        list(engine(rec).run(InstallOptions(server_dir=server_dir, client_dir=client)))
+    message = str(caught.value)
+    assert "contrib/vmap_extractor/vmapextract/gameobject_extract.cpp" in message
+    assert "line 24" in message
+    assert "nothing was changed" in message
+    assert "build" not in rec.calls
+    assert not (server_dir / "Dockerfile").exists()
+    state = native.read_state(server_dir, valid=engine(rec).stage_names())
+    assert state is not None
+    assert "clone-sources" in state.completed and "patch-sources" not in state.completed
+    # Atomic across the patch: the model.cpp hunks would have applied and were not written.
+    assert (
+        extractor_file(server_dir, "model.cpp").read_bytes()
+        == (VMAP_FIXTURE / "model.cpp").read_bytes()
+    )
+
+
+def test_an_entry_with_no_patches_says_so_and_touches_nothing(tmp_path: Path) -> None:
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    eng = CmangosInstaller(without_patches(()), seams=Recorder().seams(platform_id=lambda: "linux"))
+    said = list(eng._patch_sources(context(server_dir)))
+    assert said == ["This server carries no source patches."]
+    assert sorted(p.name for p in server_dir.iterdir()) == []
+
+
+def test_a_patch_file_the_catalog_names_but_the_tree_lacks_is_a_catalog_error(
+    tmp_path: Path,
+) -> None:
+    server_dir = tmp_path / "srv"
+    (server_dir / CORE_DEST).mkdir(parents=True)
+    ghost = SourcePatch(
+        file="shared/cmangos/patches/nothing-here.patch", source=CORE_DEST, reason="x"
+    )
+    eng = CmangosInstaller(
+        without_patches((ghost,)), seams=Recorder().seams(platform_id=lambda: "linux")
+    )
+    with pytest.raises(InstallerError) as caught:
+        list(eng._patch_sources(context(server_dir)))
+    assert "nothing-here.patch" in str(caught.value)
+    assert str(caught.value).endswith(cmangos.CATALOG_ERROR_TAIL)
+
+
+def test_the_extraction_stage_reports_the_doodad_placement_check_after_the_vmap_tools(
+    tmp_path: Path,
+) -> None:
+    """Option C of the write-up, as the gate that proves the patch took: one line after the
+    tools have run, a warning when a model file is spelled in a way the reader never asks
+    for, and nothing at all when there is no `dir_bin` to read."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    client = client_folder(tmp_path)
+    rec = Recorder()
+    ctx = context(server_dir, client)
+    said = list(engine(rec)._extract(ctx))
+    assert not any("dir_bin" in line or line.startswith("warning:") for line in said), said
+    buildings = server_dir / cmangos.DATA_DIR / extract.BUILDINGS_DIR
+    assert buildings.is_dir(), "the double filled Buildings/ and the check still had nothing"
+    (buildings / "Model001.m2").write_bytes(b"VMAP")
+    (buildings / "INNBED.M2").write_bytes(b"VMAP")
+    (buildings / extract.DIR_BIN).write_bytes(b"\x00Model001.m2\x00Model001.m2\x00")
+    said = list(engine(rec)._extract(ctx))
+    warning = next(line for line in said if line.startswith("warning:"))
+    assert "1 of the 2" in warning and "case-sensitive" in warning
+    assert said.index(warning) < said.index("Extraction finished.")
 
 
 # -- the copy a Stop reads ---------------------------------------------------
@@ -2350,11 +2559,19 @@ def test_db_password_calls_a_generated_plan_with_no_file_a_catalog_error(
     assert list(server_dir.iterdir()) == []
 
 
-def test_db_password_is_a_stage_that_is_never_recorded_and_follows_clone_sources() -> None:
-    """Never recorded because the FILE is the evidence; a state file must not claim a secret."""
+def test_db_password_is_a_stage_that_is_never_recorded_and_follows_patch_sources() -> None:
+    """Never recorded because the FILE is the evidence; a state file must not claim a secret.
+
+    It followed `clone-sources` directly until 2026-09-05, when `patch-sources`
+    went in between: the patch edits the checkout the clone just made and
+    nothing else, so it belongs before the first stage that reads anything
+    off this machine's state, and a secret must not be minted on a run that
+    is about to refuse over a moved upstream.
+    """
     stages = engine(Recorder()).stages()
     names = [stage.name for stage in stages]
-    assert names.index("db-password") == names.index("clone-sources") + 1
+    assert names.index("patch-sources") == names.index("clone-sources") + 1
+    assert names.index("db-password") == names.index("patch-sources") + 1
     stage = next(s for s in stages if s.name == "db-password")
     assert stage.recorded is False
 

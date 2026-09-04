@@ -3015,3 +3015,96 @@ def test_a_produces_name_that_lands_outside_the_data_dir_is_refused_before_anyth
     with pytest.raises(extract.InstallerError):
         extract.empty_out_dirs({"../not-ours": 1}, data_dir)
     assert (outside / "keep.txt").exists()
+
+
+# ------------------------------------------------ the doodad placement check (option C)
+
+
+def buildings(root: Path, files: tuple[str, ...], placed: tuple[str, ...] | None) -> Path:
+    """A `Buildings/` with model files by name and a `dir_bin` naming `placed` (None: no index)."""
+    folder = root / "data" / extract.BUILDINGS_DIR
+    folder.mkdir(parents=True)
+    for name in files:
+        (folder / name).write_bytes(b"VMAP")
+    if placed is not None:
+        # The real index is binary records with a length-prefixed name inside each;
+        # the check reads names out of the bytes and never parses the records.
+        body = b"".join(b"\x00\x01\x02" + n.encode() + b"\xff" * 3 for n in placed)
+        (folder / extract.DIR_BIN).write_bytes(body)
+    return folder
+
+
+def test_the_reader_spelling_port_matches_fixnamen_and_fixname2_on_the_shapes_that_matter() -> None:
+    """The C the extractor applies before its lookup, ported; the witnesses are §4 and §8's.
+
+    `INNBED.MDX` is the raw MODN name the write-up watched being written; the
+    reader asks for `Innbed.mdx` (then `.m2`). `Razorfen Leanto03.m2` is the one
+    model whose plain name carries a space, which `fixname2` underscores. And a
+    name already in that form is a fixed point — the assumption §8 says a
+    maintainer should test first, tested here for the port at least.
+    """
+    assert extract.reader_spelling("INNBED.MDX") == "Innbed.mdx"
+    assert extract.reader_spelling("INNBED.M2") == "Innbed.m2"
+    assert extract.reader_spelling("Razorfen Leanto03.m2") == "Razorfen_Leanto03.m2"
+    assert extract.reader_spelling("Scholme_Bookshelf.m2") == "Scholme_Bookshelf.m2"
+    assert extract.reader_spelling("ahnqirajdoor01.m2") == "Ahnqirajdoor01.m2"
+    for name in ("Innbed.m2", "Razorfen_Leanto03.m2", "Wc_Cairn.m2", "40Mancourtyard.wmo"):
+        assert extract.reader_spelling(name) == name, name
+    assert extract.reader_spelling("ab") == "ab"
+
+
+def test_the_check_counts_models_placed_unplaced_and_misspelt_case_folded(tmp_path: Path) -> None:
+    folder = buildings(
+        tmp_path,
+        files=("Innbed.m2", "INNBED.M2", "Abbeyshelf01.m2", "SCHOLME_BOOKSHELF.M2", "Abbey.wmo"),
+        placed=("Innbed.m2", "Abbey.wmo", "Innbed.m2"),
+    )
+    check = extract.doodad_placements(folder)
+    assert check is not None
+    assert check.extracted == 3, "case-folded: the two Innbed spellings are one model"
+    assert check.placed == 1
+    assert check.unplaced == 2
+    assert check.misspelt == 2, "INNBED.M2 and SCHOLME_BOOKSHELF.M2 are not the reader's spelling"
+    line = check.line()
+    assert line.startswith("warning:")
+    assert "2 of the 3" in line and "2 " in line
+    assert "case-sensitive" in line
+
+
+def test_a_clean_extraction_is_one_line_of_counts_and_not_a_warning(tmp_path: Path) -> None:
+    """Models with no placement are ordinary — 434 of them on the patched m910q run — so
+    that number alone never warns; only a spelling the reader would miss does."""
+    folder = buildings(
+        tmp_path,
+        files=("Innbed.m2", "Auctioneercollision.m2", "Abbey.wmo"),
+        placed=("Innbed.m2", "Abbey.wmo"),
+    )
+    check = extract.doodad_placements(folder)
+    assert check is not None
+    assert (check.extracted, check.placed, check.unplaced, check.misspelt) == (2, 1, 1, 0)
+    line = check.line()
+    assert not line.startswith("warning")
+    assert "2 models" in line and "1 placed" in line and "1 with no placement" in line
+
+
+def test_no_index_or_no_folder_is_no_check_rather_than_a_warning_about_nothing(
+    tmp_path: Path,
+) -> None:
+    assert extract.doodad_placements(tmp_path / "data" / "Buildings") is None
+    folder = buildings(tmp_path, files=("Innbed.m2",), placed=None)
+    assert extract.doodad_placements(folder) is None
+
+
+def test_an_index_that_will_not_read_is_no_check_and_is_logged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = buildings(tmp_path, files=("Innbed.m2",), placed=("Innbed.m2",))
+    real = Path.read_bytes
+
+    def refuse(self: Path) -> bytes:
+        if self.name == extract.DIR_BIN:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real(self)
+
+    monkeypatch.setattr(Path, "read_bytes", refuse)
+    assert extract.doodad_placements(folder) is None

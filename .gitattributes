@@ -28,3 +28,13 @@
 # "byte for byte" in `test_composegen.py` would be resting on Python's
 # universal-newline translation rather than on the bytes.
 pylauncher/tests/data/wotlk-rendered/*.yml  text eol=lf
+
+# The source patch `patch-sources` applies to a CMaNGOS checkout, and the
+# pre-/post-image fixtures `test_patch.py` proves it against. The upstream
+# files are LF, `git.py` clones with core.autocrlf=false so the checkout is LF
+# on every platform, and the tests assert the applier's output equals the
+# bytes `git apply` produced on Linux -- a CRLF checkout of either side would
+# turn that byte equality into a line-ending coincidence, and a CRLF patch is
+# not the file the upstream report attaches.
+pylauncher/catalog/installers/shared/cmangos/patches/*.patch  text eol=lf
+pylauncher/tests/fixtures/cmangos-vmap-8ec338a1/**            text eol=lf

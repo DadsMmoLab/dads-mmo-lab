@@ -1,0 +1,74 @@
+diff --git a/contrib/vmap_extractor/vmapextract/gameobject_extract.cpp b/contrib/vmap_extractor/vmapextract/gameobject_extract.cpp
+index 41bb38249..b8b4b8b0a 100644
+--- a/contrib/vmap_extractor/vmapextract/gameobject_extract.cpp
++++ b/contrib/vmap_extractor/vmapextract/gameobject_extract.cpp
+@@ -24,6 +24,15 @@ bool ExtractSingleModel(std::string& origPath, std::string& fixedName, StringSet
+     // nothing do
+ 
+     fixedName = GetPlainName(origPath.c_str());
++    // Spell the output file the way Doodad::ExtractSet() (model.cpp) will later
++    // ask for it. wmo.cpp's MODN handler hands over the RAW path from the chunk,
++    // so without this a WMO doodad is written as INNBED.M2 and looked up as
++    // Innbed.m2 -- a miss on every case-sensitive filesystem, and the placement
++    // is dropped without a word. Both functions are idempotent, so the ADT and
++    // GameObjectDisplayInfo callers, which already pass a cleaned name, see no
++    // change.
++    fixnamen(&fixedName[0], fixedName.length());
++    fixname2(&fixedName[0], fixedName.length());
+ 
+     std::string output(szWorkDirWmo);                       // Stores output filename (possible changed)
+     output += "/";
+diff --git a/contrib/vmap_extractor/vmapextract/model.cpp b/contrib/vmap_extractor/vmapextract/model.cpp
+index a1d110b01..24d194418 100644
+--- a/contrib/vmap_extractor/vmapextract/model.cpp
++++ b/contrib/vmap_extractor/vmapextract/model.cpp
+@@ -257,7 +257,16 @@ void Doodad::ExtractSet(WMODoodadData const& doodadData, ADT::MODF const& wmo, u
+         sprintf(tempname, "%s/%s", szWorkDirWmo, ModelInstName);
+         FILE* input = fopen(tempname, "r+b");
+         if (!input)
++        {
++            // The placement is lost when the model is not where the writer put
++            // it. Say so once per model and count every drop: a run that lost
++            // 74,706 placements used to end with "Work complete. No errors."
++            static std::set<std::string> missing;
++            ++DroppedDoodadPlacements;
++            if (missing.insert(ModelInstName).second)
++                printf("Doodad model %s is not in %s; its placements are being dropped\n", ModelInstName, szWorkDirWmo);
+             continue;
++        }
+ 
+         fseek(input, 8, SEEK_SET); // get the correct no of vertices
+         int nVertices;
+diff --git a/contrib/vmap_extractor/vmapextract/vmapexport.cpp b/contrib/vmap_extractor/vmapextract/vmapexport.cpp
+index 84ca525e2..299e7f64c 100644
+--- a/contrib/vmap_extractor/vmapextract/vmapexport.cpp
++++ b/contrib/vmap_extractor/vmapextract/vmapexport.cpp
+@@ -72,6 +72,7 @@ bool hasInputPathParam = false;
+ bool hasOutputPathParam = false;
+ bool preciseVectorData = false;
+ std::unordered_map<std::string, WMODoodadData> WmoDoodads;
++uint32 DroppedDoodadPlacements = 0;
+ 
+ // Constants
+ 
+@@ -549,6 +550,8 @@ int main(int argc, char** argv)
+         getchar();
+     }
+ 
++    if (DroppedDoodadPlacements)
++        printf("WARNING: %u WMO doodad placements were dropped because their model file was not found under %s (the models are named above).\n", DroppedDoodadPlacements, szWorkDirWmo);
+     printf("Extract for %s. Work complete. No errors.\n", szRawVMAPMagic);
+     delete [] LiqType;
+     return 0;
+diff --git a/contrib/vmap_extractor/vmapextract/vmapexport.h b/contrib/vmap_extractor/vmapextract/vmapexport.h
+index 815d9160e..26549e5af 100644
+--- a/contrib/vmap_extractor/vmapextract/vmapexport.h
++++ b/contrib/vmap_extractor/vmapextract/vmapexport.h
+@@ -42,6 +42,7 @@ const int path_l = 1024;
+ extern char szWorkDirWmo[path_l + 512];
+ extern const char* szRawVMAPMagic;                          // vmap magic string for extracted raw vmap data
+ extern std::unordered_map<std::string, WMODoodadData> WmoDoodads;
++extern uint32 DroppedDoodadPlacements;                     // Doodad::ExtractSet() placements whose model file was missing
+ 
+ uint32 GenerateUniqueObjectId(uint32 clientId, uint16 clientDoodadId);
+ 

@@ -25,8 +25,12 @@ says run.
 a file and not the state file: a state file must never be the thing that
 claims a secret exists.
 
-`STAGE_NAMES` and `stages()` name the same twelve stages in the same order as
-of K.7, which bound `import` — the last one outstanding. They were allowed to
+`STAGE_NAMES` and `stages()` name the same stages in the same order — twelve
+as of K.7, which bound `import`, the last one then outstanding; thirteen since
+2026-09-05, when `patch-sources` went in after `clone-sources` to carry the
+`vmap_extractor` fix `pyplan/upstream-cmangos-doodad-drop.md` §10 argued for
+(the stage kind is `families/patch.py`; the data is `CmangosData.patches`).
+They were allowed to
 disagree while the family was being built, because nothing in the app reads
 `STAGE_NAMES` — `stage_names()`, derived from `stages()`, is what the spine
 validates a resume against — and because this class was not in `FAMILIES` until
@@ -39,7 +43,7 @@ DIRECTIONS are held by different ones. Measured 2026-09-02 at `f6ed1b9a`, whole
 suite each time against a 1974-passed/3-skipped baseline, by deleting `import`
 from each side in turn. Take the `Stage` out of `stages()` and FIVE fail:
 `test_the_bound_stages_run_in_order_and_record_the_recorded_ones`, which
-restates all twelve `--- <name>` lines one whole install said,
+restates every `--- <name>` line one whole install said,
 `test_the_import_cancel_note_is_said_at_the_import_and_nowhere_else`,
 `test_import_is_recorded_and_sits_between_start_db_and_up`, and the two
 equality tests below. Take the name out of `STAGE_NAMES` and FOUR fail:
@@ -70,7 +74,7 @@ from typing import ClassVar, cast
 from yulon import docker, platform
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CmangosData, NativeInstall
-from yulon.catalog.families import conf, dockerfile, extract, sqlplan
+from yulon.catalog.families import conf, dockerfile, extract, patch, sqlplan
 from yulon.catalog.installer import InstallerError
 from yulon.catalog.native import (
     BUILD_CANCEL_NOTE,
@@ -199,6 +203,7 @@ class CmangosInstaller(StagedInstaller):
     family = "cmangos"
     STAGE_NAMES: ClassVar[tuple[str, ...]] = (
         "clone-sources",
+        "patch-sources",
         "db-password",
         "write-dockerfile",
         "generate-compose",
@@ -216,6 +221,7 @@ class CmangosInstaller(StagedInstaller):
         """The family's stage tuple, in `STAGE_NAMES` order."""
         return (
             Stage("clone-sources", self._clone_sources),
+            Stage("patch-sources", self._patch_sources),
             Stage("db-password", self._db_password, recorded=False),
             Stage("write-dockerfile", self._write_dockerfile),
             Stage("generate-compose", self.stage_generate_compose),
@@ -242,6 +248,75 @@ class CmangosInstaller(StagedInstaller):
         yield from self.stage_clone_sources(
             ctx, self.entry.emulator.sources, recorded_as="clone-sources"
         )
+
+    def _patch_sources(self, ctx: StageContext) -> Iterator[str]:
+        """Apply every `SourcePatch` the entry carries to the checkout it names; say what happened.
+
+        The stage `pyplan/upstream-cmangos-doodad-drop.md` §10 asked for, in
+        the shape it asked for: a new stage after `clone-sources` rather than a
+        step inside its loop (that loop's one job is "clone what the manifest
+        names"), a patch file committed as data beside the family's templates,
+        a record in the state file, and a TOLERANT apply — `patch.apply()`
+        skips a hunk whose fix is already present and refuses, naming the file
+        and the line, when upstream has moved under it. The pins on
+        `Source.rev` came first (`test_catalog.py`, `GATE_PINS`), because a
+        patch against a moving tip breaks the day upstream touches those lines,
+        including the day they fix the defect themselves.
+
+        **The record is not what skips this stage.** `ctx.state` is not read
+        here at all, and a resume carrying `patch-sources` in `completed`
+        reaches this body exactly like a first run — the same rule
+        `_write_dockerfile` and `_conf` are written against, and here for a
+        sharper reason: `clone-sources` re-clones a checkout that was DELETED
+        on the strength of its own disk evidence (`already_cloned()`'s
+        `remote is None` case) while this stage's record survives, so a body
+        that trusted the record would leave a fresh clone unpatched under a
+        state file saying otherwise. The file is the evidence; a second press
+        reads "already carries" off the bytes, and costs one read per file.
+
+        What the record buys instead is the `Already finished:` line and the
+        progress count, and the refusal's position: a refusal here raises
+        before `db-password`, so no secret is minted for an install that is
+        about to stop, and before `write-dockerfile`, so no build context
+        exists for a tree that is not the one the patch was measured against.
+
+        Two refusals, two tails. A patch file the catalog names and the tree
+        does not ship is a catalog error (`CATALOG_ERROR_TAIL`); a patch that
+        does not apply is `patch.PatchError`'s own sentence, which already
+        names the file and the line and says nothing was changed — a class
+        name in front of it would be noise, as `_write_dockerfile` says of
+        `DockerfileError`.
+        """
+        data = self._data()
+        if not data.patches:
+            yield "This server carries no source patches."
+            return
+        for spec in data.patches:
+            path = self.installers_root / spec.file
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise InstallerError(
+                    f"{self.entry.name}'s catalog names a source patch {spec.file} that this "
+                    f"build does not ship ({exc}). {CATALOG_ERROR_TAIL}"
+                ) from exc
+            root = ctx.server_dir / spec.source
+            yield f"Applying {spec.file} inside {spec.source}: {spec.reason}"
+            try:
+                results = patch.apply(text, root, name=spec.file)
+            except patch.PatchError as exc:
+                raise InstallerError(str(exc)) from exc
+            for result in results:
+                if result.applied and result.present:
+                    yield (
+                        f"Patched {result.path} ({result.applied} of "
+                        f"{result.applied + result.present} hunks; the rest were already there)."
+                    )
+                elif result.applied:
+                    yield f"Patched {result.path}."
+                else:
+                    yield f"{result.path} already carries the fix in {spec.file}; leaving it."
+        yield "Source patches are in place."
 
     def _db_password(self, ctx: StageContext) -> Iterator[str]:
         """Persist the generated secret, or refuse to replace one the database already has.
@@ -594,6 +669,12 @@ class CmangosInstaller(StagedInstaller):
             cancel=ctx.cancel,
         )
         self._check_cancel(ctx.cancel)
+        # Option C of `pyplan/upstream-cmangos-doodad-drop.md`, built as the
+        # gate that proves `patch-sources` took rather than as a shipped
+        # remedy: `DoodadCheck.line()` says why it warns and never refuses.
+        check = extract.doodad_placements(data_dir / extract.BUILDINGS_DIR)
+        if check is not None:
+            yield check.line()
         yield "Extraction finished."
 
     def _mmaps(self, ctx: StageContext) -> Iterator[str]:
@@ -639,7 +720,8 @@ class CmangosInstaller(StagedInstaller):
         container's confinement to buy nothing.
 
         That argument holds only while `generate-compose` runs BEFORE this
-        stage. It does — `stages()` and `STAGE_NAMES` both put it at index 3
+        stage. It does — `stages()` and `STAGE_NAMES` both put it at index 4
+        (index 3 until `patch-sources` went in on 2026-09-05)
         against 5 and 6 — and
         `test_the_relabel_that_lets_mmaps_run_confined_happens_before_the_first_extraction`
         asserts the order over a live install, because a guard whose
@@ -1097,8 +1179,10 @@ class CmangosInstaller(StagedInstaller):
         `"ROOT_PASSWORD"` and rendered `ENV ROOT_PASSWORD=tbc-0123456789abcdef`
         into a Dockerfile, with the suite at 1889 passed, 3 skipped (2026-09-02,
         recorded at `e176af17`) and mypy, ruff and black clean. That route needs
-        `.env` to be on disk already: `generate-compose` is index 3 and this
-        method's only build-context caller, `_write_dockerfile`, is index 2 — so
+        `.env` to be on disk already: `generate-compose` was index 3 and this
+        method's only build-context caller, `_write_dockerfile`, index 2 (as
+        measured; `patch-sources` moved every index below up by one on
+        2026-09-05, and the ORDER, which is the argument, did not change) — so
         it reads an empty hand on a FIRST install and the real password on any
         run where a previous attempt reached `generate-compose`. A price, still,
         just not one paid on the first press.
@@ -1135,10 +1219,12 @@ class CmangosInstaller(StagedInstaller):
         `STAGE_NAMES` and each verified on 2026-09-02 by running the stage and
         reading the file it left:
 
-        * `db-password` (index 1) writes the plaintext password to the file
-          `install.password` names, at the ROOT of the server dir.
-        * `generate-compose` (index 3 — the stage IMMEDIATELY before `build` at
-          index 4) merges `DB_ROOT_PASSWORD=<that same plaintext>` into
+        * `db-password` (index 1 when measured; 2 since 2026-09-05) writes the
+          plaintext password to the file `install.password` names, at the ROOT
+          of the server dir.
+        * `generate-compose` (index 3 when measured, 4 since 2026-09-05 — either
+          way the stage IMMEDIATELY before `build`) merges
+          `DB_ROOT_PASSWORD=<that same plaintext>` into
           `<server_dir>/.env` for every generated-password entry, which is all
           three CMaNGOS games. This is the one the earlier draft's "two stages"
           left out, and it is the one M-R2 read.

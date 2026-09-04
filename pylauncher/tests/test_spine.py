@@ -26,7 +26,15 @@ import pytest
 
 import yulon
 from tests.conftest import spelled_bounds
-from tests.support_native import ENTRY, IMPORTED, PARTIAL, TBC, Recorder, install
+from tests.support_native import (
+    ENTRY,
+    IMPORTED,
+    PARTIAL,
+    TBC,
+    Recorder,
+    install,
+    lay_patch_sources,
+)
 from yulon import docker, install_wiring, networking, platform, resources, runner
 from yulon.apply import ApplyError
 from yulon.catalog import composegen, native, preflight
@@ -1931,6 +1939,11 @@ def _cli_engine_over(rec: Recorder, monkeypatch: pytest.MonkeyPatch) -> None:
         linux = entry.model_copy(
             update={"install": entry.install.model_copy(update={"platforms": ("linux",)})}
         )
+        # `patch-sources` (2026-09-05) edits the checkout the clone left behind,
+        # and this double's clone leaves only `.git`; without the tree the patch
+        # was written against, every CMaNGOS run here stops one stage after the
+        # clone and never reaches the stage under test.
+        rec.on_clone = lay_patch_sources(linux)
         return family_for(linux)(
             linux,
             installers_root=root,
