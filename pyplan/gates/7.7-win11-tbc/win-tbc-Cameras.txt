@@ -1,0 +1,13 @@
+FlyByBloodElf.m2
+FlybyDraenei.m2
+FlyByDwarf.m2
+FlyByGnome.m2
+FlyByHuman.m2
+FlybyNightElf.m2
+FlybyOrc.m2
+FlyBySunwell5Man.m2
+FlyByTauren.m2
+FlyByTroll.m2
+FlybyUndead.m2
+PalantirOfAzora.m2
+Scry_cam.m2

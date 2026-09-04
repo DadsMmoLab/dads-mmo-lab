@@ -394,3 +394,75 @@ Map 409 global objects 117Calculating model bounds for map 429...
 Creating map tree...
 exit: 
 freeGiB 38.86
+=== poll 51 2026-09-04T16:57:42Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+Map 409 global objects 117Calculating model bounds for map 429...
+Creating map tree...
+exit: 
+freeGiB 38.84
+=== poll 52 2026-09-04T17:02:47Z
+utc,local,step
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+Converting Bladesedgecliffrock02.m2
+Converting Bladesedgecliffrock03.m2
+exit: 
+freeGiB 38.79
+=== poll 53 2026-09-04T17:07:52Z
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+2026-09-04T17:05:51Z,2026-09-04T10:05:51,Step 7 of 12 (58%): mmaps
+ loadOffMeshConnections:: input file offmesh.txt not found!
+[Map 000] [29,33]:  Building movemap tiles...                          
+exit: 
+freeGiB 38.46
+=== poll 54 2026-09-04T17:13:00Z
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+2026-09-04T17:05:51Z,2026-09-04T10:05:51,Step 7 of 12 (58%): mmaps
+[Map 000] [32,41]:  Adding tile to navmesh...                          
+[Map 000] [32,41]:  Writing to file...                                 
+exit: 
+freeGiB 38.36
+=== poll 55 2026-09-04T17:18:06Z
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+2026-09-04T17:05:51Z,2026-09-04T10:05:51,Step 7 of 12 (58%): mmaps
+ loadOffMeshConnections:: input file offmesh.txt not found!
+[Map 000] [35,44]:  Building movemap tiles...                          
+exit: 
+freeGiB 38.20
+=== poll 56 2026-09-04T17:23:11Z
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+2026-09-04T17:05:51Z,2026-09-04T10:05:51,Step 7 of 12 (58%): mmaps
+[Map 000] Building tile [39,40] (552 / 687)    
+ loadOffMeshConnections:: input file offmesh.txt not found!
+exit: 
+freeGiB 38.02
+=== poll 57 2026-09-04T17:28:19Z
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+2026-09-04T17:05:51Z,2026-09-04T10:05:51,Step 7 of 12 (58%): mmaps
+[Map 001] [27,15]:  Building navmesh tile...                           
+[Map 001] [27,15]:  Adding tile to navmesh...                          
+exit: 
+freeGiB 37.90
+=== poll 58 2026-09-04T17:33:25Z
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+2026-09-04T17:05:51Z,2026-09-04T10:05:51,Step 7 of 12 (58%): mmaps
+[Map 001] [30,28]:  Writing to file...                                 
+[Map 001] Building tile [30,30] (324 / 1018)    
+exit: 
+freeGiB 37.75
+=== poll 59 2026-09-04T17:38:30Z
+2026-09-04T12:26:29Z,2026-09-04T05:26:29,Step 5 of 12 (41%): build
+2026-09-04T13:37:14Z,2026-09-04T06:37:14,Step 6 of 12 (50%): extract
+2026-09-04T17:05:51Z,2026-09-04T10:05:51,Step 7 of 12 (58%): mmaps
+[Map 001] [33,31]:  Building navmesh tile...                           
+[Map 001] [33,31]:  Adding tile to navmesh...                          
+exit: 
+freeGiB 37.60

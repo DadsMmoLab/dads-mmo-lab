@@ -1,0 +1,83 @@
+NATIVE-WINDOWS TBC EXTRACTION vs THE LINUX 7.4b RUN — every number below came from the command
+shown, on 2026-09-04. Windows: yulon-win11-gate, C:\gate\tbc-server\data. Linux: m910q,
+/home/pk/tbc-7.4c/data, re-counted live rather than quoted from the checklist.
+
+PER-TOOL COUNTS
+
+  tool            output      Linux (7.4b)   Windows        reading
+  ad              dbc                 185       185         same
+  ad              maps               3586      3586         same
+  ad              Cameras              13        13         same
+  vmap extract    Buildings          7171      5431         1,740 FEWER — case-folding, expected
+  vmap assemble   vmaps              8099      8607           508 MORE
+  MoveMapGen      mmaps              2819      ####         (filled in when mmaps finishes)
+
+  A count is not a diff, so the name sets were diffed as well (`comm` over sorted lists):
+    dbc        0 only-Linux,   0 only-Windows
+    maps       0 only-Linux,   0 only-Windows
+    Buildings  1,740 only-Linux, **0 only-Windows**
+    vmaps      **0 only-Linux**, 508 only-Windows
+  Windows is a strict superset in vmaps and loses no NAME in Buildings that is not present under
+  another spelling. Lists: win-tbc-*.txt / linux-tbc-*.txt, diffs in only-linux-buildings.txt
+  (1,740 lines) and only-windows-vmaps.txt (508 lines); only-windows-buildings.txt is EMPTY.
+
+THE TOOLS WERE INVOKED IDENTICALLY, which is worth stating because it is checkable rather than
+assumed: `data/.yulon-extract.json` records an argv hash per tool, and all three match across the
+two platforms — dbc and maps `ec258f299b1abbbd`, vmap extract `d47b70e0870c96b3`, vmap assemble
+`6afb2350d1f1a19f`.
+
+BUILDINGS: THE 1,740 ARE CASE-FOLDING, AND THEY COST NOTHING
+  * all 1,740 only-Linux names are `.m2`; the `.M2` and `.wmo` sets are identical on both sides
+  * 1,740 of 1,740 have a case-insensitive twin present on Windows (mapping:
+    collision-pairs-tbc.txt, e.g. `Abbeyshelf01.m2 -> ABBEYSHELF01.M2`)
+  * md5 + size of all 1,740 pairs, computed on m910q where both spellings exist:
+        **SAME 1740, DIFF 0, MISSING 0**
+  * unique case-folded names in the Linux list: 5,431 = the Windows file count, to the file
+  => the Windows extraction loses ZERO unique bytes. This was PREDICTED before the tool ran
+     (PREDICTION-before-the-run.txt) rather than explained afterwards.
+
+AND AGAIN THE WINDOWS RUN IS THE MORE COMPLETE ONE — dir_bin, the placement index
+  Buildings/dir_bin                 Windows 58,298,617 B    Linux 50,938,121 B  (+7,360,496)
+  Buildings/temp_gameobject_models      41,308 B on BOTH — identical
+  Model names parsed out of each dir_bin (printable runs ending .m2/.M2/.wmo, the Vanilla
+  lane's method):
+      placements (name occurrences)   Windows **798,812**   Linux **699,970**   (+98,842, +14.1%)
+      distinct names                  Windows     4,679     Linux     4,263    (+416)
+      names in Windows not in Linux : 416   (all .m2)  -> dirbin-win-only-names-tbc.txt
+      names in Linux not in Windows :   0
+  Of the 416 Windows-only names, **298 exist in the Linux Buildings/ directory ONLY as ALL-CAPS**
+  (e.g. no `Innbed.m2`, only `INNBED.M2`) and 118 exist there in mixed case too
+  -> dirbin-win-only-capsonly-tbc.txt.
+
+  ONE THING THE VANILLA ANALYSIS DID NOT SEPARATE, and this run can:
+      placements carried by the 416 Windows-only names : 51,520
+      placements on names PRESENT IN BOTH             : Windows 747,292  vs  Linux 699,970
+  i.e. **47,322 of the 98,842 extra placements are on models Linux did write**. The Linux loss is
+  therefore not only "a model file that was never findable" — the same model gets its placements
+  dropped in some WMOs and kept in others, which is what a per-`fopen()` `continue` in
+  `Doodad::ExtractSet()` produces when the raw spelling varies between WMO MODN chunks. The
+  upstream cause is the one the Vanilla lane established in CMaNGOS
+  (`gameobject_extract.cpp` writes the RAW name, `model.cpp:242` looks up the FIXED one and
+  `continue`s silently); TBC reproduces it at a larger scale.
+
+VMAPS: 508 MORE ON WINDOWS, ALL `.m2`, NONE OF THEM A CASE VARIANT
+  The 508 Windows-only entries are all `.m2`, and **not one of them exists in the Linux vmaps
+  list under any spelling** (case-folded check: 0 of 508). So this is not the folding effect in
+  another dress: the assembler on Windows produced 508 model outputs the Linux assembler never
+  produced at all, which is consistent with the same `fopen()` miss one stage upstream.
+  THIS IS THE COMPARISON THE VANILLA RUN COULD NOT MAKE — its Linux side never reached
+  `vmap assemble`, so the checklist's "410 more vmaps on Windows" had no Linux baseline to stand
+  on. Here both sides completed, and the direction is confirmed with a name-level diff.
+
+STAGE DURATIONS (box-local PDT; CEST is +9)
+
+  stage                          from       to         elapsed
+  steps 1-4 (clone-sources ...)  05:19:50   05:26:29   6m39s
+  build                          05:26:29   06:37:14   1h10m45s
+  extract                        06:37:14   10:05:51   **3h28m37s**
+    - ad (dbc, maps, Cameras)    06:37:14   06:48:43   11m29s
+    - vmap extract               06:48:43   08:51:54   **2h03m11s**
+    - vmap assemble              08:51:54   10:05:46   **1h13m52s**
+  mmaps                          10:05:51   ...
+  (the three sub-stage boundaries are `finished_unix` out of data/.yulon-extract.json, not a
+  reading off a terminal)
