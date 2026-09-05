@@ -11,17 +11,182 @@ four and left three verbatim. One helper, one docstring, one report.
 from __future__ import annotations
 
 import ast
+import logging
 import os
 import time
 from collections.abc import Callable, Iterator
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import pytest
 
 from yulon import apply as apply_module
+from yulon import log as log_module
 from yulon import platform
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+THE_USERS_OWN_CONFIG_DIR = platform.config_dir()
+"""Where a REAL run of this app would put `yulon.log`, resolved once at import.
+
+Read before any fixture has redirected anything, because the whole point is to
+compare against the answer the user's own machine gives.
+"""
+
+UNGUARDED_OPEN_LOG = log_module._open_log
+"""`log._open_log` as the app ships it, kept so the guard below can call through to it."""
+
+
+def is_the_users_own_config_dir(directory: Path | str) -> bool:
+    """Is `directory` the user's own app-state directory, or somewhere inside it?"""
+    try:
+        resolved = Path(directory).resolve()
+    except OSError:  # pragma: no cover - a path the OS refuses to resolve is not the real one
+        return False
+    real = THE_USERS_OWN_CONFIG_DIR.resolve()
+    return resolved == real or real in resolved.parents
+
+
+def _guarded_open_log(directory: Path, max_bytes: int, backup_count: int) -> RotatingFileHandler:
+    """`log._open_log`, refusing the user's own directory before it creates anything.
+
+    `AssertionError`, deliberately, and not `OSError`: `configure()` catches
+    `OSError` and falls back to the temp dir, so an `OSError` here would be
+    handled, logged as a "could not write its log" notice and swallowed. An
+    `AssertionError` comes out through `configure()` and fails whatever asked.
+    """
+    assert not is_the_users_own_config_dir(directory), (
+        f"a test asked to open the user's own log under {directory}. That file is what a "
+        "user sends to support; the suite may not append to it. Point this test's "
+        "`platform.config_dir()` at a tmp_path instead."
+    )
+    return UNGUARDED_OPEN_LOG(directory, max_bytes, backup_count)
+
+
+log_module._open_log = _guarded_open_log
+"""Installed HERE, at conftest import, and not inside the autouse fixture below.
+
+A fixture's `monkeypatch` covers a test and nothing else, and a log file can be
+opened outside every such window: module-scope code runs at COLLECTION, before
+any fixture exists, and a background thread outlives the `monkeypatch` undo of
+the test that started it.
+
+Measured on m910q 2026-09-05 against a one-line test module whose BODY called
+`configure(config_dir=platform.config_dir())`, same command both ways:
+
+    guard installed by the autouse fixture   1 passed                +98 bytes
+    guard installed here, at import          1 error during collection   +0
+
+and the 98 bytes were `INFO [tests.test_zzz_import_time] a module body wrote
+this at collection time`, in `/home/pk/.local/share/yulon/yulon.log`. The
+redirect below stays per-test, because it hands out a FRESH directory and a
+session-wide one would let each test read the last one's log.
+"""
+
+
+def root_handler_levels() -> dict[logging.Handler, int]:
+    """The level of every handler currently on the root logger, keyed by the handler itself."""
+    return {handler: handler.level for handler in logging.getLogger().handlers}
+
+
+def restore_root_logging(levels: dict[logging.Handler, int]) -> None:
+    """Undo what a test's `configure()` did to the process-global root logger.
+
+    Two separate leaks, measured on m910q 2026-09-05 by a probe test run after
+    `tests/test_spine.py` in the same process:
+
+    * `stderr handler pinned at WARNING`. `configure(stderr_level=...)` applies
+      a level to the handler module-scope `get_logger()` built at import, which
+      is the point of it — and nothing ever takes that level off again, so one
+      `install_wiring.main()` in a test silences INFO on stderr for the rest of
+      the process. Every handler that was there before the test gets its level
+      back.
+    * `leaked file handlers:
+      ['/home/pk/.local/share/yulon/yulon.log']`. A `RotatingFileHandler` a
+      test opened stays on the root logger, writing every record the remaining
+      ~2,450 tests emit into a directory that is usually deleted underneath
+      it. Those are removed and closed, and `_file_configured` goes back to
+      False with them so the module's idea of "done" matches the handlers that
+      exist.
+
+    A handler that is NEITHER in `levels` NOR a file handler is left exactly
+    alone: pytest puts its own `LogCaptureHandler` on the root logger per
+    phase, and a teardown that removed everything it did not recognise would
+    take `caplog`'s with it.
+
+    `_file_configured` is CLEARED rather than restored, and that is the half
+    that decides whether the NEXT test gets a log at all: `configure()` opens
+    the file at most once per process, so a run that left the flag True hands
+    every test after it a `configure(config_dir=...)` that quietly does
+    nothing. Measured on m910q 2026-09-05 before this moved here, as
+    `test_install_wiring.py`'s own fixture: green serially (i sorts before s)
+    and two failures under `-n auto --dist loadfile`, on gw3. `_file_problem`
+    goes with it, so one test's unwritable directory is never another test's
+    diagnosis.
+    """
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        if handler in levels:
+            handler.setLevel(levels[handler])
+        elif isinstance(handler, RotatingFileHandler):
+            root.removeHandler(handler)
+            handler.close()
+    log_module._file_configured = any(
+        isinstance(handler, RotatingFileHandler) for handler in root.handlers
+    )
+    log_module._file_problem = None
+
+
+@pytest.fixture(autouse=True)
+def _the_users_own_log_is_out_of_reach(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
+    """No test may write `~/.local/share/yulon/yulon.log`, nor leave logging changed behind it.
+
+    Measured on m910q 2026-09-05, `pytest -q tests/test_spine.py`, same command
+    both ways: at `6546b190` the user's own log grew by 0 bytes; one commit
+    later, with the CLI harness configuring file logging the way every other
+    entry point does, it grew by **54,500 bytes** — 2,876,987 to 2,931,487 —
+    and its last two lines were a fabricated `install of wow-wotlk finished`
+    and the warning from a worker the fixture abandoned. That file is what a
+    user sends to support. A suite that appends invented installs to it has
+    destroyed the evidence it exists to preserve, and neither the fix nor the
+    tests were wrong about anything else: nothing in the suite had ever said
+    where a test's `config_dir()` may point.
+
+    Three things, in the order they matter:
+
+    * **The redirect.** `platform.config_dir()` answers a scratch directory
+      whenever the real function would have answered the user's own. Only
+      then, so the five `test_platform.py` tests that drive `config_dir()`
+      against a made-up `$HOME`/`%APPDATA%` still see their own answer, and so
+      a test that sets up its own directory keeps it. This is what makes
+      `test_spine.py`'s four `install_wiring.main()` sites harmless without
+      any of them knowing about logging at all.
+    * **The guard**, `_guarded_open_log` above, which is not part of this
+      fixture at all: it is installed once at import, so that collection and a
+      background thread are covered too. The redirect is the fix; the guard is
+      what makes the fix provable, and it fails loudly in whatever asked.
+      `test_log.py` drives it directly.
+    * **The restore.** `install_wiring.main()` calls
+      `configure(stderr_level=WARNING)`, which pins a process-global handler
+      for good, and leaves a file handler on the root logger behind it. Both
+      are undone by `restore_root_logging()`, which carries the measurements
+      and the reasoning; `test_log.py` drives it directly, because a fixture
+      cannot assert on its own teardown.
+    """
+    scratch = tmp_path / "config-dir"
+    real_config_dir = platform.config_dir
+
+    def redirected() -> Path:
+        wanted = real_config_dir()
+        return scratch if is_the_users_own_config_dir(wanted) else wanted
+
+    monkeypatch.setattr(platform, "config_dir", redirected)
+
+    levels = root_handler_levels()
+    yield
+    restore_root_logging(levels)
 
 
 @pytest.fixture(autouse=True)

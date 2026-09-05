@@ -234,12 +234,26 @@ def main(argv: list[str] | None = None) -> int:
     # affordable: they are on stdout already, a gate runs this as
     # `> log 2>&1`, and an INFO record through the stderr handler would print
     # every line of a 30-minute install twice. The file takes the run, the
-    # terminal takes what went wrong — including `configure()`'s own
-    # `file_log_problem()` warning, which is why this harness needs no
-    # equivalent of `main.py`'s `_warn_about_the_log_file()` dialog.
+    # terminal takes what went wrong.
+    #
+    # REJECTED — and this is an argument for NOT adding something, not for the
+    # level above: a reporter of this harness's own, the CLI's answer to
+    # `main.py`'s `_warn_about_the_log_file()` dialog. `main.py` needs one
+    # because the frozen build is `console=False` and its stderr reaches
+    # nobody, so a dialog is the only channel that survives packaging. This
+    # harness already HAS the channel: `configure()` logs its own
+    # `file_log_problem()` at WARNING, which is exactly the level named here,
+    # so the sentence is on the terminal without another line of code. A
+    # second reporter would be a duplicate of a message that is not even about
+    # the install, on the one entry point whose output a gate reads line by
+    # line. `test_a_harness_run_that_could_not_open_its_log_says_so_rather_
+    # than_dying` is what holds the channel open.
     #
     # AFTER `parse_args`, so `--help` and a bad flag stay pure: they exit
-    # without creating a config dir on a box that only asked for usage.
+    # without creating a config dir on a box that only asked for usage. Held
+    # by `test_usage_and_a_bad_flag_leave_no_config_dir_behind`, which was
+    # written 2026-09-05 after a review pointed out that moving this call up
+    # three lines as a tidy would have broken it in silence.
     configure(config_dir=platform.config_dir(), stderr_level=logging.WARNING)
     logger.info(
         "install harness: game=%s server_dir=%s client_dir=%s",

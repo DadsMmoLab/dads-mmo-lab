@@ -9,6 +9,7 @@ and these tests pin them by the seams they call, not by grepping source.
 from __future__ import annotations
 
 import ast
+import io
 import logging
 import os
 import subprocess
@@ -16,7 +17,6 @@ import sys
 import threading
 import traceback
 from collections.abc import Iterator
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import pytest
@@ -32,63 +32,20 @@ from yulon.controller_wow_wotlk.maintenance import DockerMysql
 WOTLK = load_catalog().get("wow-wotlk")
 
 
-@pytest.fixture(autouse=True)
-def _the_log_this_module_opens_goes_to_a_scratch_dir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> Iterator[None]:
-    """No test here may write the real `yulon.log`, nor leave its handler behind.
-
-    `main()` has called `configure(config_dir=platform.config_dir())` since
-    2026-09-05, so every test that drives the harness would otherwise open
-    `~/.local/share/yulon/yulon.log` on the box running the suite and leave a
-    `RotatingFileHandler` on the ROOT logger for the 2500 tests that follow it.
-
-    Deliberately NOT `log._reset_for_tests()`, which is what `test_log.py`
-    uses: that removes every `StreamHandler` on the root logger, and pytest's
-    own `caplog` handler is a `StreamHandler` subclass installed around the
-    whole item -- `test_the_wiring_never_renders_the_password_it_carries`
-    reads it. So this snapshots and restores instead, LEVELS as well as
-    membership, because `configure(stderr_level=...)` changes a handler that
-    already exists rather than adding one.
-
-    It also has to CLEAR `_file_configured` on the way in, not only restore it
-    on the way out, because this module is not the first thing to run in its
-    process. `test_spine.py` drives the real `install_wiring.main()` at four
-    sites, so in a worker that took that file first, file logging was already
-    marked done and these tests got no log at all. Measured on m910q
-    2026-09-05: green serially (i sorts before s) and two failures under
-    `-n auto --dist loadfile`, on gw3 -- the shape of a test that passes
-    because of what ran before it.
-    """
-    monkeypatch.setattr(platform, "config_dir", lambda: tmp_path / "config-dir")
-    root = logging.getLogger()
-    levels = {handler: handler.level for handler in root.handlers}
-    displaced = [h for h in root.handlers if isinstance(h, RotatingFileHandler)]
-    for handler in displaced:
-        root.removeHandler(handler)  # not closed: it belongs to whoever opened it
-    flags = (
-        log_module._stderr_configured,
-        log_module._file_configured,
-        log_module._file_problem,
-        log_module._stderr_handler,
-    )
-    log_module._file_configured = False
-    log_module._file_problem = None
-    yield
-    for handler in list(root.handlers):
-        if handler in levels:
-            handler.setLevel(levels[handler])
-        else:
-            root.removeHandler(handler)
-            handler.close()
-    for handler in displaced:
-        root.addHandler(handler)
-    (
-        log_module._stderr_configured,
-        log_module._file_configured,
-        log_module._file_problem,
-        log_module._stderr_handler,
-    ) = flags
+# This module had a fixture of its own until 2026-09-05: a scratch
+# `config_dir()`, a snapshot of the root logger's handlers and levels, and a
+# `_file_configured = False` on the way in so that a worker which had already
+# run `test_spine.py` did not leave these tests reading a log nobody opened.
+# Every line of it is now in `conftest._the_users_own_log_is_out_of_reach`,
+# where it covers `test_spine.py` too -- which drives the same
+# `install_wiring.main()` at four sites, knows nothing about logging, and was
+# the file actually appending to the user's own `~/.local/share/yulon/
+# yulon.log` (54,500 bytes in one run, measured on m910q 2026-09-05) while
+# this one was being careful on its own behalf. Deleted rather than kept as a
+# belt: with the conftest fixture in place, removing this whole fixture left
+# `pytest tests/test_spine.py tests/test_install_wiring.py` at `117 passed`
+# (m910q, same day) -- it had nothing left to do, and a fixture that cannot be
+# shown to matter is a story rather than a guard.
 
 
 def _without_import_service(entry: CatalogEntry) -> CatalogEntry:
@@ -743,16 +700,7 @@ def test_the_harness_makes_its_streams_utf8_before_it_prints_anything(
 # call: one entry point logging and the other not is the defect, and a test that
 # only pinned `install_wiring` would let the next entry point repeat it.
 
-_DRIVERS = {
-    # Both drivers exit early on purpose -- after logging is configured, before
-    # anything is installed or provisioned for real.
-    "yulon.install_wiring": """\
-import sys
-sys.argv = ["yulon.install_wiring", "wow-nonesuch"]
-from yulon import install_wiring
-raise SystemExit(install_wiring.main())
-""",
-    "main": """\
+_PROVISION_STUBS = """\
 import sys
 sys.argv = ["yulon", "--provision"]
 import main
@@ -760,8 +708,30 @@ from yulon import platform
 main._regain_docker_group = lambda: None
 main.platform.ensure_docker = lambda **kwargs: platform.ProvisionReport(platform="linux")
 main.platform.docker_program = lambda: None
-raise SystemExit(main.main())
+"""
+"""What `main()`'s `--provision` path needs stubbed to return without touching Docker.
+
+Shared by the two rows that reach it, so `python -m yulon` is driven with the
+same stubs as `python main.py` and any difference between them is the entry
+point's own.
+"""
+
+_DRIVERS = {
+    # Every driver exits early on purpose -- after logging is configured, before
+    # anything is installed or provisioned for real.
+    "yulon.install_wiring": """\
+import sys
+sys.argv = ["yulon.install_wiring", "wow-nonesuch"]
+from yulon import install_wiring
+raise SystemExit(install_wiring.main())
 """,
+    "main": _PROVISION_STUBS + "raise SystemExit(main.main())\n",
+    # The redirect, RUN rather than described. It has no `if __name__` block and
+    # no `configure()` call of its own; whether `python -m yulon` keeps a log is
+    # therefore a claim about what it delegates to, and this is the row that
+    # settles it (review, 2026-09-05).
+    "yulon.__main__": _PROVISION_STUBS
+    + 'import runpy\nrunpy.run_module("yulon", run_name="__main__")\n',
 }
 
 _NOT_A_USER_ENTRY_POINT = {
@@ -773,15 +743,33 @@ _NOT_A_USER_ENTRY_POINT = {
 }
 
 
-def _modules_with_a_main_block() -> set[str]:
+def _modules_python_can_be_pointed_at() -> set[str]:
     """Every module in the app that can be run as a program, found by parsing, not by list.
 
     A hand-kept list is exactly what let the two known entry points drift:
     `main.py` grew file logging and nothing said the harness had to keep up.
+
+    TWO shapes, because the tree has both and a search for one cannot see the
+    other:
+
+    * a module with an `if __name__ == "__main__"` block, which is what
+      `python path.py` and `python -m module` run;
+    * a `__main__.py`, which is what `python -m <package>` runs and which needs
+      no such block at all -- the body executes on import, and
+      `yulon/__main__.py`'s body is `raise SystemExit(main())`.
+
+    Until 2026-09-05 only the first was looked for, and `yulon/__main__.py`'s
+    absence from the answer was explained in a PROSE sentence in the docstring
+    of the test below -- inside the one test whose whole thesis is that a
+    sentence about an entry point is not enough (review). It is a row now.
     """
     root = Path(__file__).resolve().parents[1]
     found: set[str] = set()
     for path in [root / "main.py", *sorted((root / "yulon").rglob("*.py"))]:
+        dotted = ".".join(path.relative_to(root).with_suffix("").parts)
+        if path.name == "__main__.py":
+            found.add(dotted)
+            continue
         for node in ast.parse(path.read_text(encoding="utf-8")).body:
             if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
                 continue
@@ -792,18 +780,27 @@ def _modules_with_a_main_block() -> set[str]:
                 isinstance(other, ast.Constant) and other.value == "__main__"
                 for other in node.test.comparators
             ):
-                found.add(".".join(path.relative_to(root).with_suffix("").parts))
+                found.add(dotted)
     return found
 
 
 def test_every_way_to_run_this_app_is_classified_as_logging_or_not() -> None:
-    """A new entry point fails here until someone says which kind it is.
+    """A new entry point fails here until someone says which kind it is."""
+    assert _modules_python_can_be_pointed_at() == set(_DRIVERS) | set(_NOT_A_USER_ENTRY_POINT)
 
-    `yulon/__main__.py` is absent on purpose and not an omission: it has no
-    `if __name__` block because it is a redirect -- it imports `main.main` and
-    raises `SystemExit(main())`, so `python -m yulon` IS the `main` row below.
+
+def test_the_enumeration_can_see_a_module_with_no_main_block() -> None:
+    """`yulon/__main__.py` is found by SHAPE, and it really has no `if __name__` block.
+
+    The pair to the row above. If `__main__.py` grew a block one day the
+    enumeration would still find it, and if the shape rule were dropped the
+    module would silently leave the classified set -- so both halves are
+    asserted, and the second is what makes the first non-trivial.
     """
-    assert _modules_with_a_main_block() == set(_DRIVERS) | set(_NOT_A_USER_ENTRY_POINT)
+    redirect = Path(__file__).resolve().parents[1] / "yulon" / "__main__.py"
+    source = redirect.read_text(encoding="utf-8")
+    assert 'if __name__ == "__main__"' not in source
+    assert "yulon.__main__" in _modules_python_can_be_pointed_at()
 
 
 @pytest.mark.skipif(
@@ -813,7 +810,7 @@ def test_every_way_to_run_this_app_is_classified_as_logging_or_not() -> None:
 def test_every_entry_point_that_runs_for_a_user_leaves_the_same_log_behind(
     tmp_path: Path,
 ) -> None:
-    """Both entry points, one assertion: whichever writes no `yulon.log` names itself.
+    """Every entry point, one assertion: whichever writes no `yulon.log` names itself.
 
     Run as real child processes because that is the only honest reproduction --
     the call under test is the first thing each `main()` does, before this
@@ -851,6 +848,50 @@ def test_every_entry_point_that_runs_for_a_user_leaves_the_same_log_behind(
     )
 
 
+def test_usage_and_a_bad_flag_leave_no_config_dir_behind(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`configure()` runs AFTER `parse_args`, and a box that only asked for usage stays clean.
+
+    The reason the call sits three lines below `parse_args` instead of at the
+    top of `main()` beside `use_utf8_streams()`. `--help` and a typo are the
+    two ways this harness is run by someone who is not installing anything --
+    on a gate box, from a script, inside a `--help` sweep over every tool --
+    and creating `~/.local/share/yulon/` for them is a side effect nobody
+    asked for.
+
+    Until 2026-09-05 that was a sentence in a comment and nothing else: moving
+    the call up as a tidy, so that all the setup happens together, would have
+    broken it silently, and nothing in the suite would have gone red (review).
+
+    The last two lines are the CONTROL, and the test is worthless without
+    them. `configure()` opens the file at most once per process, so a
+    `_file_configured` left True by an earlier test would make the first three
+    assertions pass with the call anywhere at all -- passing because of what
+    ran before, which is the shape this file's own module fixture exists to
+    prevent. Asserting the flag first and the log LAST is what makes the empty
+    directory mean "not yet" rather than "never".
+    """
+    assert (
+        log_module._file_configured is False
+    ), "file logging was already marked done, so an empty config dir proves nothing here"
+    config_dir = platform.config_dir()
+    assert not config_dir.exists()
+
+    for argv, code in ((["--help"], 0), (["--bogus"], 2)):
+        with pytest.raises(SystemExit) as exit_info:
+            install_wiring.main(argv)
+        assert exit_info.value.code == code, argv
+        capsys.readouterr()
+        assert not config_dir.exists(), f"{argv} created {config_dir} on its way out"
+
+    assert install_wiring.main(["not-a-game"]) == 2
+    assert (config_dir / "yulon.log").is_file(), (
+        "the control failed: a run that gets past parse_args writes no log either, so the "
+        "empty directory above says nothing about WHERE configure() is called"
+    )
+
+
 def test_the_harness_puts_the_stage_lines_it_streamed_into_the_log(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
@@ -883,20 +924,42 @@ def test_the_harness_puts_the_stage_lines_it_streamed_into_the_log(
 def test_a_harness_run_that_could_not_open_its_log_says_so_rather_than_dying(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A missing log is worth a sentence, and the CLI has a stream the GUI does not.
+    """The channel that lets the harness NOT have a reporter of its own.
 
-    `main.py` needs `_warn_about_the_log_file()` because a frozen `console=False`
-    build has nowhere else to say it. The harness does not: `configure()` logs
-    its own `file_log_problem()` at WARNING, which is exactly the level its
-    stderr handler keeps, so the sentence reaches the terminal without a second
-    reporter -- and, either way, an unwritable config dir does not stop the
-    install the way it once stopped the launcher.
+    This test exists to support a decision to add nothing. `main.py` needs
+    `_warn_about_the_log_file()` because a frozen `console=False` build has
+    nowhere else to say it; the harness was given no equivalent, and the whole
+    argument for that is the assertion below -- `configure()` logs its own
+    `file_log_problem()` at WARNING, which is exactly the level `main()` names
+    for the stderr handler, so the sentence is already on the terminal a gate
+    is reading. Take this test away and the omission becomes a guess.
+
+    And, either way, an unwritable config dir does not stop the install the
+    way it once stopped the launcher: the exit code below is the harness's
+    ordinary "unknown game", not a failure to log.
     """
     blocker = tmp_path / "blocked"
     blocker.write_text("a file, so no directory can be made under it", encoding="utf-8")
     monkeypatch.setattr(platform, "config_dir", lambda: blocker / "yulon")
     monkeypatch.setattr(log_module.tempfile, "gettempdir", lambda: str(blocker))
+    # The terminal the harness is talking to. A handler binds its stream when
+    # it is CONSTRUCTED -- at import, via module-scope `get_logger()` -- so
+    # patching `sys.stderr` alone would prove nothing about the handler that
+    # actually exists; this puts the module in the state a real import leaves
+    # it in and then rebinds the stream of the handler that is really there.
+    # (`test_log.py`'s `_reset_for_tests()` clears it, and in a worker that
+    # took that file first there was no handler at all: measured m910q
+    # 2026-09-05, `assert None is not None`.)
+    terminal = io.StringIO()
+    log_module.get_logger(__name__)
+    handler = log_module._stderr_handler
+    assert handler is not None
+    monkeypatch.setattr(handler, "stream", terminal)
 
     assert install_wiring.main(["wow-nonesuch"]) == 2
     problem = log_module.file_log_problem()
     assert problem is not None and "could not write its log" in problem
+    assert "could not write its log" in terminal.getvalue(), (
+        "the sentence never reached the terminal, so the harness DOES need a reporter of "
+        "its own and the decision not to give it one is unsupported"
+    )

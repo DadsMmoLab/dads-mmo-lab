@@ -16,7 +16,9 @@ from pathlib import Path
 
 import pytest
 
+from tests import conftest
 from yulon import log as log_module
+from yulon import platform
 from yulon.log import _reset_for_tests, configure, file_log_problem, get_logger
 
 
@@ -238,3 +240,124 @@ def test_without_a_stderr_level_info_still_reaches_the_terminal(
     logging.getLogger("yulon.tests").info("Yu'lon launcher starting")
 
     assert "Yu'lon launcher starting" in terminal.getvalue()
+
+
+# --- The one log the suite may never open (review, 2026-09-05) ---------------
+
+
+def _stat(path: Path) -> tuple[bool, int, int]:
+    """`(exists, size, mtime_ns)` for `path`, in a shape that compares equal across a call."""
+    if not path.exists():
+        return (False, 0, 0)
+    info = path.stat()
+    return (True, info.st_size, info.st_mtime_ns)
+
+
+def test_the_suite_cannot_write_the_users_own_log(tmp_path: Path) -> None:
+    """The guard `conftest` puts under every test, driven against the real directory.
+
+    RED for it, measured on m910q 2026-09-05 with `pytest -q tests/test_spine.py`
+    at `d18fcc31`: `/home/pk/.local/share/yulon/yulon.log` grew 2,876,987 ->
+    2,931,487 bytes, 54,500 of them fabricated installs, and the run left a
+    `RotatingFileHandler` on that file attached to the root logger. The file a
+    user sends to support is not a scratch pad.
+
+    Four assertions, and each is here because dropping it makes a different
+    mutation survive:
+
+    * the guard is INSTALLED -- asserted before anything is opened, because if
+      it were not, the very next line would create the directory this test
+      exists to protect. `conftest` installs it at import rather than in a
+      fixture, which is why this reads `log._open_log` directly instead of
+      asking what some fixture did;
+    * it REFUSES the user's own directory, and the file on disk is untouched
+      across the refusal (byte size and mtime), which is what says the refusal
+      happens before `mkdir`/`open` rather than after;
+    * it LETS EVERYTHING ELSE THROUGH -- a guard that refused every directory
+      would pass the assertion above and turn the other 2,500 tests into a
+      suite with no file logging at all;
+    * `platform.config_dir()`, as a test sees it, never answers the user's own
+      directory. That is the redirect rather than the guard, and without it
+      every `install_wiring.main()` in `test_spine.py` would be red instead of
+      quiet.
+    """
+    assert (
+        log_module._open_log is not conftest.UNGUARDED_OPEN_LOG
+    ), "the guard is not installed, so this run can append to the user's own yulon.log"
+    real_log = conftest.THE_USERS_OWN_CONFIG_DIR / "yulon.log"
+    before = _stat(real_log)
+
+    with pytest.raises(AssertionError, match="the user's own log"):
+        configure(config_dir=conftest.THE_USERS_OWN_CONFIG_DIR)
+
+    assert _stat(real_log) == before, f"{real_log} was touched by the attempt to refuse it"
+
+    configure(config_dir=tmp_path / "scratch")
+    assert (
+        tmp_path / "scratch" / "yulon.log"
+    ).is_file(), "the guard refused a directory that is not the user's own"
+    assert not conftest.is_the_users_own_config_dir(platform.config_dir()), (
+        f"a test's platform.config_dir() answered {platform.config_dir()}, which is the "
+        "real one -- the redirect is gone and only the guard is left between the suite "
+        "and the user's log"
+    )
+
+
+def test_a_pinned_stderr_level_and_a_leaked_file_handler_are_both_put_back(
+    tmp_path: Path,
+) -> None:
+    """`conftest.restore_root_logging()`, driven on a root logger crafted to hold both leaks.
+
+    RED, measured on m910q 2026-09-05 by a probe test appended after
+    `tests/test_spine.py` and run in the same process:
+
+        stderr handler pinned at WARNING
+        leaked file handlers: ['/home/pk/.local/share/yulon/yulon.log']
+
+    Both come from ONE call: `install_wiring.main()` does
+    `configure(config_dir=..., stderr_level=WARNING)`, and `configure()` is
+    documented to apply that level to the handler that already exists, forever.
+    Of the two test files that drive that `main()`, only this lane's own
+    accounted for it (review, 2026-09-05); `test_spine.py` drives it at four
+    sites and knows nothing about logging, which is exactly why the undo
+    belongs in `conftest` and not in either file.
+
+    Driven as a function rather than through the fixture because a fixture
+    cannot assert on its own teardown -- and asserting the THIRD handler is
+    still there is what stops the obvious over-fix: a teardown that simply
+    removed everything it had not seen before would take `caplog`'s
+    per-phase `LogCaptureHandler` with it.
+    """
+    root = logging.getLogger()
+    stderr_handler = logging.StreamHandler()
+    root.addHandler(stderr_handler)
+    try:
+        levels = conftest.root_handler_levels()
+        assert stderr_handler in levels
+
+        stderr_handler.setLevel(logging.WARNING)  # what configure(stderr_level=) does
+        leaked = RotatingFileHandler(tmp_path / "yulon.log", encoding="utf-8")
+        root.addHandler(leaked)
+        stranger = logging.StreamHandler()  # stands in for caplog's own handler
+        root.addHandler(stranger)
+        log_module._file_configured = True
+        log_module._file_problem = "this test's own unwritable directory"
+
+        conftest.restore_root_logging(levels)
+
+        assert stderr_handler.level == logging.NOTSET, "the pinned level outlived the test"
+        assert leaked not in root.handlers, "the file handler outlived the test"
+        assert log_module._file_configured is False, (
+            "the handler is gone but the module still calls file logging done, so the next "
+            "test to ask for a log file gets none -- measured as two failures on gw3 under "
+            "-n auto --dist loadfile, green serially, m910q 2026-09-05"
+        )
+        assert (
+            log_module._file_problem is None
+        ), "one test's diagnosis is still the answer `file_log_problem()` gives the next"
+        assert (
+            stranger in root.handlers
+        ), "a handler the snapshot never saw was removed anyway -- that is caplog's"
+    finally:
+        for handler in (stderr_handler, stranger):
+            root.removeHandler(handler)
