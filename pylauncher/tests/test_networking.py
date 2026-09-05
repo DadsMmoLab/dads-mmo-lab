@@ -3940,31 +3940,105 @@ def test_every_zone_the_game_ports_are_written_to_is_named_in_the_plan() -> None
     assert p.refusals == ()
 
 
-_YULON_FEDORA_LISTING = """FedoraWorkstation (default)
+_YULON_FEDORA_PERMANENT = """FedoraWorkstation (default)
   target: default
-  interfaces: enp0s31f6
-  sources:
-  ports: 1025-65535/tcp 1025-65535/udp
-docker (active)
-  target: ACCEPT
-  interfaces: docker0
-  sources:
-  ports:
-public
-  target: default
+  ingress-priority: 0
+  egress-priority: 0
+  icmp-block-inversion: no
   interfaces:
   sources:
-"""
-"""The shape every Yu'lon Linux box has, in `firewall-cmd --list-all-zones` form.
+  services: dhcpv6-client samba-client ssh
+  ports: 1025-65535/udp 1025-65535/tcp
+  protocols:
+  forward: yes
+  masquerade: no
+  forward-ports:
+  source-ports:
+  icmp-blocks:
+  rich rules:
 
-Round 6's own clean run on yulon-fedora (Fedora 44, firewalld 2.4.0,
-2026-09-05) read `zones: ('FedoraWorkstation', 'docker')` with `refusals: 0`,
-and the same shape was rebuilt for real on 2026-09-05 in a fedora:41 container
-on m910q — a `docker` zone with target ACCEPT bound to a `docker0` link, eth0
-bound to `FedoraWorkstation` — where the committed round-6 module read
-`('FedoraWorkstation', 'docker', 'public')` and warned about breadth on a
-healthy single-NIC box. Docker is required by every Yu'lon Linux install, so
-this is the ordinary case, not the multi-homed one.
+docker
+  target: ACCEPT
+  ingress-priority: 0
+  egress-priority: 0
+  icmp-block-inversion: no
+  interfaces:
+  sources:
+  services:
+  ports:
+  protocols:
+  forward: yes
+  masquerade: no
+  forward-ports:
+  source-ports:
+  icmp-blocks:
+  rich rules:
+
+public
+  target: default
+  ingress-priority: 0
+  egress-priority: 0
+  icmp-block-inversion: no
+  interfaces:
+  sources:
+  services: dhcpv6-client mdns ssh
+  ports:
+  protocols:
+  forward: yes
+  masquerade: no
+  forward-ports:
+  source-ports:
+  icmp-blocks:
+  rich rules:
+
+"""
+"""`firewall-cmd --permanent --list-all-zones` on yulon-fedora, 2026-09-05.
+
+Three of the fifteen zone blocks that run printed, copied out of `sudo -n
+firewall-cmd --permanent --list-all-zones` on yulon-fedora (Fedora 44,
+firewalld 2.4.0, Docker 29.7.2 build 1.fc44), captured by me that day with the
+box started read-only for the purpose and stopped afterwards. Two departures
+from the bytes, both recorded rather than hidden: the twelve other blocks are
+left out, and the trailing space firewalld prints after an empty field
+(`cat -A` showed `  interfaces: $`) is not reproduced, because
+`_zone_bindings()` reads the value through `.strip()` and a repo full of
+trailing whitespace is a worse fixture than a footnote. The twelve blocks not
+reproduced here
+(FedoraServer, block, dmz, drop, external, home, internal, libvirt,
+libvirt-routed, nm-shared, trusted, work) are the same shape with `interfaces:`
+and `sources:` empty, and the derived values this fixture is used for are the
+ones the whole 257-line listing produced on the box: `permanent` came out
+`('FedoraWorkstation',)` there and comes out `('FedoraWorkstation',)` here.
+
+What round 7 had instead was a single hand-written string whose docstring
+called it "`firewall-cmd --list-all-zones` form" — a command
+`detect_firewalld_zones()` never runs; the argvs it actually ran on that box,
+recorded by wrapping `runner.run`, were `firewall-cmd --state`, `firewall-cmd
+--permanent --list-all-zones`, `firewall-cmd --get-active-zones`, `cat
+/etc/firewalld/firewalld.conf`, `ss --no-header --listening --tcp --numeric
+--processes`, `stat -L -c %i /proc/1/ns/net` and `stat -L -c %i
+/proc/1/ns/mnt`. That fixture bound `docker0` to `docker` and `enp0s31f6` to
+`FedoraWorkstation` in the permanent listing, which is the one shape real
+Docker does not produce, and the test that used it then hand-fed
+`machine_made=('docker',)` past the derivation it was meant to be checking.
+"""
+
+_YULON_FEDORA_ACTIVE = """FedoraWorkstation (default)
+  interfaces: eth0
+docker
+  interfaces: br-2ec281b6c57a br-85289dddc52d br-db9be8196055 br-eebe26d3f624 docker0
+"""
+"""`firewall-cmd --get-active-zones` on the same box the same minute, all four lines.
+
+This is where Docker's bridges are, and the whole of round 7's blocker.
+Measured beside it on yulon-fedora, 2026-09-05:
+
+    sudo -n firewall-cmd --get-zone-of-interface=docker0              docker
+    sudo -n firewall-cmd --permanent --get-zone-of-interface=docker0  no zone
+
+Note what is NOT here: no `(active)` tag on `docker`, and no `sources:` line at
+all under either zone. `--get-active-zones` prints the name, the `(default)`
+tag on the default zone, and the bindings — nothing else.
 """
 
 
@@ -3972,21 +4046,42 @@ def test_the_docker_zone_is_a_bridge_this_machine_made_not_breadth() -> None:
     """DEFECT 2 of round 6's review: the gate was a COUNT, and Docker makes the count two.
 
     `machine_made_zones()` is the gate now: a zone bound to nothing but this
-    machine's own container bridges is not a second face on the network. On the
-    flagship shape that leaves one exposed zone, so the plan says nothing —
-    which is the property `test_one_zone_is_no_breadth...` asserts, restored on
-    the platform it was written for.
+    machine's own container bridges is not a second face on the network. Driven
+    from `detect_firewalld_zones()` and the two listings the real box printed,
+    because round 7's version of this test hand-built the answer
+    (`machine_made=('docker',)`) and asserted a `permanent` the box does not
+    read — and the derivation it skipped returned `()` there.
+
+    Measured with real subprocesses on yulon-fedora (Fedora 44, firewalld
+    2.4.0, Docker 29.7.2 build 1.fc44) on 2026-09-05, round 7's module at
+    efc6d83f, `detect_firewalld_zones('running', prefix=('sudo','-n'))`:
+
+        write        ('FedoraWorkstation', 'docker')
+        permanent    ('FedoraWorkstation',)
+        runtime      ('FedoraWorkstation', 'docker')
+        machine_made ()                       <- the defect
+
+    and `decide_lockout()` on that reading with that box's real route
+    (connected, ports (22,), readable) came back `ssh-preserved`,
+    `allowed=True`, one note: "the game ports (3724, 8085) are allowed in
+    `FedoraWorkstation`, `docker` — every zone this machine binds that it did
+    not make for its own containers", handing the owner of a single-NIC
+    workstation a `--remove-port` for Docker's own zone.
     """
-    assert networking.machine_made_zones(_YULON_FEDORA_LISTING) == ("docker",)
-    zoning = networking.FirewalldZoning(
-        write=("FedoraWorkstation", "docker"),
-        permanent=("FedoraWorkstation", "docker"),
-        runtime=("FedoraWorkstation", "docker"),
-        flush_all_on_reload=True,
-        default_zone="FedoraWorkstation",
-        configured_default_zone="FedoraWorkstation",
-        machine_made=("docker",),
+    probe, seen = _zone_probes(
+        {
+            _PERMANENT_ARGV: (0, _YULON_FEDORA_PERMANENT),
+            _RUNTIME_ARGV: (0, _YULON_FEDORA_ACTIVE),
+            _CONF_ARGV: (0, "DefaultZone=FedoraWorkstation\nFlushAllOnReload=yes\n"),
+        }
     )
+    zoning = networking.detect_firewalld_zones("running", run=probe)
+    assert zoning is not None
+    assert [tuple(c) for c in seen][:2] == [_PERMANENT_ARGV, _RUNTIME_ARGV]
+    assert zoning.permanent == ("FedoraWorkstation",), "what the real box reads, not the fixture"
+    assert zoning.runtime == ("FedoraWorkstation", "docker")
+    assert zoning.write == ("FedoraWorkstation", "docker")
+    assert zoning.machine_made == ("docker",), "round 7 derived () here and warned about it"
     p = _firewalld_plan(
         daemon="running",
         route=networking.SshRoute(ports=(22,), listeners_readable=True),
@@ -4053,6 +4148,43 @@ def test_a_zone_has_to_look_machine_made_in_every_listing_that_names_it() -> Non
     runtime = "docker\n  interfaces: docker0 enp0s31f6\n  sources:\n"
     assert networking.machine_made_zones(permanent) == ("docker",)
     assert networking.machine_made_zones(permanent, runtime) == ()
+
+
+def test_a_listing_that_names_a_zone_and_binds_it_to_nothing_is_not_a_disagreement() -> None:
+    """Round 7's blocker, as small as it gets, and the docstring clause it made reachable.
+
+    `machine_made_zones()` promised that "a zone named in one listing and
+    absent from the other is judged on the listing that has it", and nothing
+    could ever reach it: `firewall-cmd --permanent --list-all-zones` names
+    EVERY zone that exists — fifteen of them on yulon-fedora, 2026-09-05 — so
+    the escape hatch for a zone that is absent was never taken and the empty
+    permanent reading voted against every runtime binding.
+
+    The two strings below are the real box's two readings of its `docker` zone
+    that day, cut down to the fields this function reads: `--permanent
+    --list-all-zones` named it with nothing bound (`--permanent
+    --get-zone-of-interface=docker0` answered "no zone") and
+    `--get-active-zones` bound it to four `br-*` and `docker0`. A reading that
+    binds neither an interface nor a source says nothing about who made the
+    zone, so it is dropped before the vote — while a reading that binds a real
+    NIC still disqualifies, which is the case above and must not change.
+    """
+    permanent = "docker\n  interfaces:\n  sources:\n"
+    runtime = (
+        "docker\n"
+        "  interfaces: br-2ec281b6c57a br-85289dddc52d br-db9be8196055 br-eebe26d3f624 docker0\n"
+    )
+    assert networking.machine_made_zones(permanent) == (), "no binding is not an exemption either"
+    assert networking.machine_made_zones(runtime) == ("docker",)
+    assert networking.machine_made_zones(permanent, runtime) == ("docker",)
+    assert networking.machine_made_zones(runtime, permanent) == ("docker",), "and order-free"
+
+    # "No information" is BOTH fields empty. A reading that binds a source and no
+    # interface has told us something, and what it told us is disqualifying: an
+    # address range is remote machines. Dropping it as "no interfaces" would let
+    # the runtime bridges carry the zone.
+    sourced_only = "docker\n  interfaces:\n  sources: 10.9.9.0/24\n"
+    assert networking.machine_made_zones(sourced_only, runtime) == ()
 
 
 def test_the_breadth_note_says_written_when_nothing_put_the_ports_in_effect() -> None:
@@ -4222,12 +4354,50 @@ _CONTAINER_MNT_NS = 4026533518
 host: the pid namespace IS the initial one, the network namespace IS pid 1's,
 and the mount namespace is not."""
 
+_NETHOST_PID_NS = 4026533512
+_NETHOST_MNT_NS = 4026533509
+"""And the same image WITHOUT `--pid=host`, `docker run --rm --network=host
+fw41img`, read by me on m910q on 2026-09-05 in the same sitting as the host's
+own `4026531836 / 4026531840 / 4026531841`:
 
-def _namespaced(*, mnt: int, pid1_mnt: int = _HOST_MNT_NS) -> object:
-    """`os.stat` for a process in the host's net namespace and `mnt`'s mount namespace."""
+    /proc/self/ns/pid  4026533512   not the initial namespace
+    /proc/self/ns/net  4026531840 == /proc/1/ns/net  4026531840
+    /proc/self/ns/mnt  4026533509 == /proc/1/ns/mnt  4026533509
+
+Both comparisons answer "same as pid 1" because pid 1 in there is the
+container's own init. The host's mount namespace, 4026531841, appears nowhere
+in that table, and `/etc/firewalld` was present — the image's."""
+
+_UNSHARE_PID_NS = 4026533509
+"""`sudo unshare --pid --fork stat …` on m910q, 2026-09-05: pid 4026533509, net
+4026531840, mnt 4026531841 — a pid namespace of its own and pid 1's own network
+AND mount namespace. Nothing about the firewall differs there; only `/proc/1`
+does."""
+
+_UNSHARE_NET_NS = 4026533509
+"""`sudo unshare --net stat …` on m910q, 2026-09-05: pid 4026531836 (the
+initial one), net 4026533509, mnt 4026531841. The initial pid namespace, so
+`/proc/1` is this machine's and the network comparison means what it says.
+
+The two numbers above are equal, and `_NETHOST_MNT_NS` is a third: a
+non-initial namespace inode is an allocation, not an identity, and the kernel
+hands the same one out again to different namespaces in different runs — a
+later `sudo unshare --pid --fork` the same day read 4026533619. Only
+`_HOST_PID_NS` is a constant (`PROC_PID_INIT_INO`), which is the whole reason
+the pid question can be asked without privilege."""
+
+
+def _namespaced(
+    *,
+    mnt: int,
+    pid1_mnt: int = _HOST_MNT_NS,
+    pid: int = _HOST_PID_NS,
+    net: int = _HOST_NET_NS,
+) -> object:
+    """`os.stat` for a process in `net`'s network namespace and `mnt`'s mount namespace."""
     answers = {
-        "/proc/self/ns/pid": _HOST_PID_NS,
-        "/proc/self/ns/net": _HOST_NET_NS,
+        "/proc/self/ns/pid": pid,
+        "/proc/self/ns/net": net,
         "/proc/1/ns/net": _HOST_NET_NS,
         "/proc/self/ns/mnt": mnt,
         "/proc/1/ns/mnt": pid1_mnt,
@@ -4384,9 +4554,86 @@ def test_a_refusal_caused_by_the_network_namespace_does_not_name_the_other_two()
     assert "does not exist on the filesystem" in missing.read_elsewhere
     assert "network namespace" not in missing.read_elsewhere
 
-    # Four causes, four sentences, and no two of them are the same paragraph.
+    # Five causes, five sentences, and no two of them are the same paragraph.
     said_all = {networking.READ_ELSEWHERE[cause] for cause in networking.READ_ELSEWHERE}
-    assert len(said_all) == len(networking.READ_ELSEWHERE) == 4
+    assert len(said_all) == len(networking.READ_ELSEWHERE) == 5
+
+
+def test_the_cause_is_the_namespace_that_actually_differs() -> None:
+    """Round 7's own defect, one cause over: nothing asserted WHICH cause the probe derives.
+
+    `test_a_refusal_caused_by_the_network_namespace...` injects the cause and
+    checks the sentence, so the derivation was free to name the wrong one — and
+    on the shape the product actually meets, it did. Measured by me on m910q,
+    2026-09-05, running round 7's module at efc6d83f inside `docker run --rm
+    --network=host` of a fedora:41 image carrying `/etc/firewalld`:
+
+        self pid/net/mnt                       4026533512 4026531840 4026533509
+        the host, read the same minute         4026531836 4026531840 4026531841
+        isdir("/etc/firewalld")                True
+        where_the_reading_came_from("firewalld")  other-network-namespace
+        reads_this_machine("firewalld")           False
+
+    The network namespace is 4026531840 — the host's own. The remedy that
+    sentence carries ends "apply them with the firewall tool inside it", which
+    writes the container's `/etc/firewalld`: the exact outcome
+    `"other-mount-namespace"` was added to prevent, recommended by name.
+
+    The refusal is right and its reason was not. What is true in there is that
+    `/proc/1` is the container's init, so BOTH comparisons compare a namespace
+    with itself — self mnt 4026533509 equals `/proc/1/ns/mnt` 4026533509 while
+    the host's is 4026531841. So the cause is the pid namespace, and the
+    remedy is to leave it (or to hand the probe `--pid=host`, after which the
+    mount namespace answers for itself).
+
+    Every signature below is a reading taken on m910q that day, and this is the
+    only test that drives the derivation rather than the mapping.
+    """
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(networking.os.path, "isdir", lambda path: True)
+
+        # `docker run --rm --network=host fw41img`: host net, container pid and mnt.
+        patched.setattr(
+            networking.os,
+            "stat",
+            _namespaced(pid=_NETHOST_PID_NS, mnt=_NETHOST_MNT_NS, pid1_mnt=_NETHOST_MNT_NS),
+        )
+        assert networking.where_the_reading_came_from("firewalld") == "other-pid-namespace"
+        assert networking.in_initial_pid_namespace() is False
+
+        # `sudo unshare --pid --fork`: host net AND host mnt, pid namespace of its own.
+        patched.setattr(networking.os, "stat", _namespaced(pid=_UNSHARE_PID_NS, mnt=_HOST_MNT_NS))
+        assert networking.where_the_reading_came_from("ufw") == "other-pid-namespace"
+
+        # `sudo unshare --net`: the initial pid namespace, so the net comparison is
+        # trustworthy and it is the one that differs — round 6's measured case, unchanged.
+        patched.setattr(networking.os, "stat", _namespaced(net=_UNSHARE_NET_NS, mnt=_HOST_MNT_NS))
+        assert networking.where_the_reading_came_from("ufw") == "other-network-namespace"
+
+        # `--pid=host --network=host`: /proc/1 is this machine's, so the mount
+        # namespace answers for itself and IS the cause.
+        patched.setattr(networking.os, "stat", _namespaced(mnt=_CONTAINER_MNT_NS))
+        assert networking.where_the_reading_came_from("firewalld") == "other-mount-namespace"
+
+        # And an ordinary box is still an ALLOW.
+        patched.setattr(networking.os, "stat", _namespaced(mnt=_HOST_MNT_NS))
+        assert networking.where_the_reading_came_from("ufw") == networking.THIS_MACHINE
+
+    # No `/proc/self/ns` at all — Windows, or a `/proc` without it — is "unknown",
+    # not a named cause, and costs no subprocess.
+    def never(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        raise AssertionError(f"spawned {argv} for a question /proc could not be asked")
+
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(networking.os.path, "isdir", lambda path: True)
+        patched.setattr(networking.os, "stat", _no_proc_ns)
+        assert networking.in_initial_pid_namespace() is None
+        assert networking.where_the_reading_came_from("ufw", run=never) == "unknown"
+
+
+def _no_proc_ns(path: str, *args: object, **kwargs: object) -> object:
+    """`os.stat` on a machine whose `/proc/self/ns` is not there — the None branch."""
+    raise OSError(2, "No such file or directory", path)
 
 
 def test_a_table_that_never_settled_does_not_blame_the_machine_it_was_read_on() -> None:

@@ -2758,11 +2758,14 @@ A repair was in flight in this tree the same night; this entry records the defec
 Every line number above is pinned to `4c959d70` for that reason: `networking.py` was being edited
 while this was written, and by morning they will point at something else.
 
-**ROUND 7, 2026-09-05 — round 6's review, re-derived and closed. Still OPEN as a bug, because
-`enable_firewall=True` still has no caller.** Round 6 (`9b0eb089`) closed the DefaultZone blocker
-and was reviewed as needing another pass. Four findings; all four hold, all four were re-derived on
-`m910q` against the committed round-6 module BEFORE anything was changed, and none of them is a new
-lockout. The evidence, command by command, is in `pyplan/gates/bug39-ssh-lockout/round7-2026-09-05.md`.
+**ROUND 7, 2026-09-05 — round 6's review, re-derived, two of the four repairs NOT closed on the
+shape they claimed. Still OPEN.** Round 6 (`9b0eb089`) closed the DefaultZone blocker and was
+reviewed as needing another pass. Four findings; all four hold, all four were re-derived on `m910q`
+against the committed round-6 module BEFORE anything was changed, and none of them is a new lockout.
+The evidence, command by command, is in `pyplan/gates/bug39-ssh-lockout/round7-2026-09-05.md`, whose
+head now carries the correction. Round 7's own review measured the two repairs below on real boxes
+and found them unproven; the word **Fixed** has been taken back from both, and what actually holds
+of each is recorded here and in the round-8 entry.
 
 * **A refusal named a cause that was not the cause.** `reads_this_machine()` collapsed three
   questions into one tri-state, so `False` had one sentence and it had to name every way of being
@@ -2772,9 +2775,11 @@ lockout. The evidence, command by command, is in `pyplan/gates/bug39-ssh-lockout
   `os.path.isdir('/etc/ufw')` was `True`, and the refusal still read *"this process is in a
   different mount namespace from pid 1, or the directory the firewall backend writes does not
   exist"*. Both disjuncts false; the network namespace named nowhere. That is the same defect
-  `SshRoute.read_elsewhere` was added to fix, one cause over. **Fixed:**
-  `where_the_reading_came_from()` returns the cause, `READ_ELSEWHERE` has one sentence per cause,
-  and every one of them ends with a REMEDY.
+  `SshRoute.read_elsewhere` was added to fix, one cause over. **Changed, and measured only on the
+  shape round 6 named:** `where_the_reading_came_from()` returns the cause, `READ_ELSEWHERE` has one
+  sentence per cause, and every one of them ends with a REMEDY. Correct inside `sudo unshare --net`.
+  NOT correct one shape over — round 8 measured `docker run --network=host` and got
+  `other-network-namespace` for a process in pid 1's own network namespace; see the round-8 entry.
 * **The zone-breadth warning fired on every ordinary Linux box.** Round 6 gated it on
   `len(zones) > 1`, and Docker — required by every Yu'lon Linux install — creates a firewalld zone
   named `docker` bound to `docker0`. Round 6's own clean run on yulon-fedora read
@@ -2783,10 +2788,14 @@ lockout. The evidence, command by command, is in `pyplan/gates/bug39-ssh-lockout
   `FedoraWorkstation` and `DefaultZone=FedoraWorkstation`: the committed module told that
   single-NIC box *"the game ports (3724, 8085) are allowed in `FedoraWorkstation`, `docker` …
   including any of them that faces the internet"* and offered a `--remove-port` for Docker's own
-  zone. **Fixed:** `machine_made_zones()` — a zone bound to at least one interface, no source, and
-  nothing but `docker0` / `br-*` / `veth*` (19 of m910q's 23 links, `ip -br link`, 2026-09-05) is
-  not breadth. The ports still go to every zone; only the GATE changed. Same container after the
-  fix: `machine_made=('docker',)`, both zones written, and no breadth sentence.
+  zone. **NOT fixed by round 7, and the container that showed it fixed was the wrong shape:**
+  `machine_made_zones()` — a zone bound to at least one interface, no source, and nothing but
+  `docker0` / `br-*` / `veth*` (19 of m910q's 23 links, `ip -br link`, 2026-09-05) is not breadth —
+  is the right rule, but it required the zone to look machine-made in every listing that NAMED it,
+  and the stand-in container had its `docker` zone bound with `firewall-cmd --permanent
+  --zone=docker --add-interface=docker0`, a permanent binding real Docker never makes. On
+  yulon-fedora, with real subprocesses, round 7's own module still read `machine_made=()` and still
+  warned. Closed in round 8, on that box; see below.
 * **`reads_this_machine()` said "cheapest first" and asked the free question second.** Measured at
   uid 1000 on m910q with `backend="firewalld"` (a box with no `/etc/firewalld`): one
   `sudo -n stat -L -c %i /proc/1/ns/net` spent before the free, decisive `isdir` was reached.
@@ -2810,7 +2819,72 @@ Nine mutations, each killed by the test that owed it (table in the gate file); b
 both `235 passed`. The production path is unchanged: m910q, ufw, `enable_firewall=True`, plan only —
 `ufw allow 3724/tcp`, `ufw allow 8085/tcp`, `ufw allow 22/tcp`, `ufw --force enable`, refusals 0.
 
-What keeps this section OPEN is what round 5 recorded and round 7 did not change: `enable_firewall`
+**ROUND 8, 2026-09-05 — round 7's blocker closed on the real Fedora box, and the refusal's cause set
+completed. Still OPEN, for the same reason as every round since 5.** Round 7's review measured its
+two headline repairs on real hardware and found neither proved. Everything below was measured by me
+on 2026-09-05: on **yulon-fedora** (Fedora 44, firewalld 2.4.0, Docker 29.7.2 build 1.fc44, started
+read-only for this and stopped afterwards) and on **m910q**. No firewall command was applied
+anywhere — every run is a read, a `plan()`, a `decide_lockout()` or a probe. Evidence, command by
+command, in `pyplan/gates/bug39-ssh-lockout/round8-2026-09-05.md`.
+
+* **The zone-breadth gate was inert on a real Docker box.** Real Docker binds its bridges at
+  RUNTIME only. On yulon-fedora: `firewall-cmd --get-zone-of-interface=docker0` -> `docker`,
+  `firewall-cmd --permanent --get-zone-of-interface=docker0` -> `no zone`. So `firewall-cmd
+  --permanent --list-all-zones` — which names all fifteen zones that exist there — names `docker`
+  with `interfaces:` and `sources:` both empty, while `firewall-cmd --get-active-zones` binds it to
+  `br-2ec281b6c57a br-85289dddc52d br-db9be8196055 br-eebe26d3f624 docker0`. Round 7 required every
+  listing that named a zone to make it look machine-made, so the empty permanent reading voted
+  against the runtime bridges. Round 7's module at `efc6d83f`, real subprocesses on that box:
+  `machine_made ()`, `decide_lockout` -> `ssh-preserved`, allowed, **notes 1**, and the note names
+  `docker`. **Fixed, measured on that box with real subprocesses:** a reading that binds neither an
+  interface nor a source is no information and is dropped before the vote, so a zone the permanent
+  listing only NAMES is judged on the listing that BINDS it — which is what
+  `machine_made_zones()`'s docstring had promised and no input could reach. After: `machine_made
+  ('docker',)`, `notes 0`, `write` and `permanent` and `runtime` unchanged
+  (`('FedoraWorkstation','docker')`, `('FedoraWorkstation',)`, `('FedoraWorkstation','docker')`). A
+  real NIC in ANY listing still disqualifies (the test that says so,
+  `test_a_zone_has_to_look_machine_made_in_every_listing_that_names_it`, is unchanged), and a
+  source-only reading still disqualifies too.
+* **The refusal named the network namespace for a process in pid 1's own network namespace.**
+  `_same_namespace_as_pid1()` returns False whenever `/proc/self/ns/pid` is not the initial pid
+  namespace, and round 7 turned that False into the CAUSE "other-network-namespace". Measured on
+  m910q inside `docker run --rm --network=host` of a fedora:41 image carrying `/etc/firewalld`,
+  round 7's module: self pid 4026533512, self net **4026531840 — the host's own**, self mnt
+  4026533509, and `where_the_reading_came_from('firewalld')` -> `other-network-namespace`, whose
+  remedy ends *"apply them with the firewall tool inside it"* — which writes the container's
+  `/etc/firewalld`, the outcome `other-mount-namespace` exists to prevent. **Fixed:**
+  `in_initial_pid_namespace()` is asked as its own free question, before either comparison, and its
+  own cause `other-pid-namespace` says what is actually true — that `/proc/1` there is the
+  container's init, so both comparisons compare a namespace with itself (self mnt 4026533509 ==
+  `/proc/1/ns/mnt` 4026533509, while the host's is 4026531841) — and its remedy is to run the step
+  from the host's shell, or to add `--pid=host` so the probe can answer. After, all four shapes
+  measured on m910q with the fixed module: host -> `this-machine`; `sudo unshare --net` ->
+  `other-network-namespace` (round 6's case, unchanged); `sudo unshare --pid --fork` ->
+  `other-pid-namespace`; `docker run --network=host` -> `other-pid-namespace`; `docker run
+  --privileged --pid=host --network=host` -> `other-mount-namespace`, which is the remedy's own
+  promise, checked.
+* **The test fixture cited a command the module never runs.** `_YULON_FEDORA_LISTING` was a
+  hand-written string documented as "`firewall-cmd --list-all-zones` form"; the argvs
+  `detect_firewalld_zones()` actually ran on yulon-fedora, recorded by wrapping `runner.run`, are
+  `firewall-cmd --state`, `firewall-cmd --permanent --list-all-zones`, `firewall-cmd
+  --get-active-zones` and `cat /etc/firewalld/firewalld.conf`. It is now two fixtures,
+  `_YULON_FEDORA_PERMANENT` and `_YULON_FEDORA_ACTIVE`, copied out of that box's own output, and the
+  test derives the zoning through `detect_firewalld_zones()` instead of hand-feeding
+  `machine_made=('docker',)` past it.
+* **The stopped-daemon branch.** `machine_made` there is computed from `firewall-offline-cmd
+  --list-all-zones`, the permanent config, where Docker's bridges are never bound — so it is inert,
+  and harmlessly: measured on yulon-fedora the same day, all fifteen zones came back with both
+  fields empty, `bound_only=True` kept only `('FedoraWorkstation',)`, and an unbound `docker` zone
+  cannot reach `permanent` or `write` for a breadth note to name. One sentence in the code, no
+  change to the path.
+
+Six mutations, one at a time, `__pycache__` purged on both sides of each and the substitution
+asserted present-on-disk and the original absent before every run; baseline and restore both
+`237 passed`, 0 survivors. Fedora is not called the "flagship platform" any more: the owner's order
+is Ubuntu -> Fedora -> Arch -> Windows, and this defect fires on every Linux box with Docker.
+
+What keeps this section OPEN is what round 5 recorded and rounds 7 and 8 did not change:
+`enable_firewall`
 occurs in `pylauncher/yulon/networking.py` and `pylauncher/tests/test_networking.py` and nowhere
 else, so no view, service or controller can ask for the enable, and the owner's "click a button and
 the server's ports get forwarded" still ends at a plan the GUI cannot drive. The RELOAD half is on

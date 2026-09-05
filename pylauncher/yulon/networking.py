@@ -419,8 +419,48 @@ def in_host_network_namespace(
     config; see `in_host_mount_namespace()` and `reads_this_machine()`. This
     function's own answer is unchanged and correct: that container really is
     reading the host's sockets.
+
+    Round 8 measured what that False costs when it is turned into a CAUSE.
+    m910q, 2026-09-05, `docker run --rm --network=host fw41img` (fedora:41,
+    `/etc/firewalld` present), read from inside the container:
+
+        /proc/self/ns/pid  4026533512   not the initial one
+        /proc/self/ns/net  4026531840 == /proc/1/ns/net  4026531840
+        /proc/self/ns/mnt  4026533509 == /proc/1/ns/mnt  4026533509
+
+    Both comparisons said "same as pid 1" because pid 1 THERE is the
+    container's own init, and the host's mount namespace (4026531841, read on
+    the host the same minute) is nowhere in that table. So this function's
+    False is right to refuse and wrong to be read as "the network namespace
+    differs" — it does not, and 4026531840 is the host's. That is why
+    `where_the_reading_came_from()` asks `in_initial_pid_namespace()` on its
+    own and returns `"other-pid-namespace"` before it looks at either
+    comparison.
     """
     return _same_namespace_as_pid1("net", run, prefix)
+
+
+def in_initial_pid_namespace() -> bool | None:
+    """Is `/proc/1` this MACHINE's init? True, False, or None for "could not tell".
+
+    The precondition both namespace comparisons rest on, asked as its own
+    question because it has its own answer for the user. In a pid namespace of
+    its own a process still has a `/proc/1` — the namespace's init — so
+    `_same_namespace_as_pid1()` compares that namespace against itself and can
+    answer True about a machine it has never touched (measured in
+    `in_host_network_namespace()`, `docker run --network=host`: self mnt
+    4026533509 == `/proc/1/ns/mnt` 4026533509, while the host's was
+    4026531841).
+
+    Free — one `stat` of `/proc/self/ns/pid`, no subprocess, no privilege, no
+    elevation fallback. None only where `/proc/self/ns` is not there at all
+    (not Linux, or a `/proc` mounted without it), which is the same None
+    `_same_namespace_as_pid1()` returns for the same reason.
+    """
+    try:
+        return os.stat("/proc/self/ns/pid").st_ino == _INITIAL_PID_NAMESPACE_INO
+    except OSError:
+        return None
 
 
 def _same_namespace_as_pid1(kind: str, run: Runner | None, prefix: tuple[str, ...]) -> bool | None:
@@ -494,10 +534,23 @@ READ_ELSEWHERE = {
         "the socket table was read in this machine's network namespace but the filesystem "
         "these rules would be written to is not pid 1's — a sandbox with a mount namespace "
         "of its own (a unit with `PrivateTmp=yes`, a flatpak, a container started "
-        "`--network=host`) writes its own `/etc`, and the policy the rules were meant to "
-        "change is the host's. Run the LAN step outside the sandbox. A Yu'lon AppImage is "
-        "NOT a sandbox for this purpose: measured on m910q, 2026-09-05, an appimagetool "
-        "build's `/proc/self/ns/mnt` was pid 1's"
+        "`--network=host --pid=host`) writes its own `/etc`, and the policy the rules were "
+        "meant to change is the host's. Run the LAN step outside the sandbox. A Yu'lon "
+        "AppImage is NOT a sandbox for this purpose: measured on m910q, 2026-09-05, an "
+        "appimagetool build's `/proc/self/ns/mnt` was pid 1's"
+    ),
+    "other-pid-namespace": (
+        "`/proc/1` here is not this machine's init but the init of a pid namespace of its "
+        "own, so neither namespace question could be answered: both compare against that "
+        "`/proc/1` and would compare the namespace with itself. Measured on m910q, "
+        "2026-09-05, inside `docker run --rm --network=host` of a Fedora image: "
+        "`/proc/self/ns/pid` 4026533512 against the initial namespace's 4026531836, and "
+        "from in there BOTH `/proc/1/ns/net` (4026531840) and `/proc/1/ns/mnt` (4026533509) "
+        "matched this process — while the host's own mount namespace was 4026531841 and the "
+        "`/etc/firewalld` on offer was the image's. Run the LAN step from the host's own "
+        "shell, outside `unshare --pid` and outside the container. If it has to run from a "
+        "container, add `--pid=host` so `/proc/1` is this machine's — the probe can answer "
+        "then, and will still refuse a container that writes its own `/etc`"
     ),
     "unknown": (
         "whether the socket table came from this machine could not be established — pid 1's "
@@ -549,7 +602,7 @@ def where_the_reading_came_from(
                                      `ufw allow 22/tcp`, `ufw --force enable`
                                      refusals=0, warnings=1 (the enable's own)
 
-    Three questions, and the FIRST that answers not-this-machine is the answer
+    FOUR questions, and the FIRST that answers not-this-machine is the answer
     returned — so the caller gets the cause, not a disjunction of every cause.
     Genuinely cheapest first, which round 6 claimed and did not do:
 
@@ -559,6 +612,20 @@ def where_the_reading_came_from(
       and measured on m910q 2026-09-05 at uid 1000 with `backend="firewalld"`
       (a box with no `/etc/firewalld`) that cost one `sudo -n stat -L -c %i
       /proc/1/ns/net` before the free decisive question was reached.
+    * the pid namespace — is `/proc/1` this machine's init at all
+      (`in_initial_pid_namespace()`). Free as well, and asked BEFORE the two
+      comparisons because it is the precondition for both of them: in a pid
+      namespace of its own, `/proc/1` is that namespace's init and comparing
+      against it compares a namespace with itself. Round 7 folded this into
+      `in_host_network_namespace()`'s False and so named the network namespace
+      as the cause for a process whose network namespace was pid 1's own.
+      Measured on m910q, 2026-09-05, `docker run --rm --network=host` of a
+      fedora:41 image carrying `/etc/firewalld`, running the round-7 module in
+      there: self net 4026531840 (the host's, read on the host the same
+      minute), and `where_the_reading_came_from("firewalld")` returned
+      `"other-network-namespace"`, whose remedy ends "apply them with the
+      firewall tool inside it" — which writes the container's own
+      `/etc/firewalld`, the thing `"other-mount-namespace"` exists to prevent.
     * the network namespace — whose sockets are these (round 5's question,
       unchanged and still correct);
     * the mount namespace — is that directory pid 1's copy of it, which is the
@@ -573,6 +640,11 @@ def where_the_reading_came_from(
     directory = _BACKEND_CONFIG_DIR.get(backend or "")
     if directory is not None and not os.path.isdir(directory):
         return "no-backend-config-here"
+    initial = in_initial_pid_namespace()
+    if initial is False:
+        return "other-pid-namespace"
+    if initial is None:
+        return "unknown"
     where = in_host_network_namespace(run, prefix)
     if where is False:
         return "other-network-namespace"
@@ -1200,15 +1272,41 @@ def machine_made_zones(*listings: str | None) -> tuple[str, ...]:
     own bridge, whatever else is in it.
 
     Takes several listings because the permanent and the runtime one can bind
-    different interfaces, and a zone has to look machine-made in EVERY reading
-    that mentions it to count; a zone named in one listing and absent from the
-    other is judged on the listing that has it.
+    different interfaces, and a zone has to look machine-made in every reading
+    that BINDS it to count: one real NIC in any listing disqualifies the zone,
+    however machine-made the other listing makes it look.
+
+    A reading that binds NOTHING — no interfaces and no sources — is no
+    information, and is dropped before that vote rather than counted as a
+    disagreement. Round 7 counted it, and that is what made this whole gate
+    inert on a real box. Measured by me on yulon-fedora (Fedora 44, firewalld
+    2.4.0, Docker 29.7.2 build 1.fc44), 2026-09-05: real Docker binds its
+    bridges at RUNTIME only —
+
+        sudo firewall-cmd --get-zone-of-interface=docker0              docker
+        sudo firewall-cmd --permanent --get-zone-of-interface=docker0  no zone
+
+    — so `firewall-cmd --permanent --list-all-zones`, which names all fifteen
+    zones on that box, names `docker` with `interfaces:` and `sources:` both
+    empty, while `firewall-cmd --get-active-zones` names it bound to
+    `br-2ec281b6c57a br-85289dddc52d br-db9be8196055 br-eebe26d3f624 docker0`.
+    Round 7 required every naming listing to look machine-made, the permanent
+    one bound nothing, so `machine_made` came out `()` on that box and the
+    breadth sentence named `docker` anyway. Dropping the empty reading is what
+    makes this docstring's own promise reachable: a zone the permanent listing
+    only NAMES is judged on the listing that binds it.
+
+    A zone whose every reading binds nothing stays out — it never enters the
+    vote at all — which is the default zone's case, and the default zone is
+    exactly where an unbound interface lands.
     """
     bound: dict[str, list[tuple[tuple[str, ...], tuple[str, ...]]]] = {}
     for text in listings:
         if text is None:
             continue
         for zone, interfaces, sources in _zone_bindings(text):
+            if not interfaces and not sources:
+                continue
             bound.setdefault(zone, []).append((interfaces, sources))
     return tuple(
         zone
@@ -1542,6 +1640,19 @@ def detect_firewalld_zones(
             flush_all_on_reload=flush,
             default_zone=configured,
             configured_default_zone=configured,
+            # `machine_made` is computed here and can never have anything to
+            # do: `firewall-offline-cmd --list-all-zones` is the permanent
+            # config, where Docker's bridges are not bound, so an unbound
+            # `docker` zone is dropped by `bound_only=True` before it can reach
+            # `permanent` or `write` and no breadth note can name it. Measured
+            # on yulon-fedora 2026-09-05, daemon running, offline tool read
+            # read-only: all fifteen zones came back with `interfaces:` and
+            # `sources:` empty, `zones_from_listing(..., bound_only=True)` gave
+            # `('FedoraWorkstation',)` — the `(default)` tag alone — and
+            # `machine_made_zones(offline)` gave `()`. Inert, and harmlessly
+            # so; it is filled rather than left empty because the field means
+            # "what this reading could tell", and a reading that told nothing
+            # is `()`.
             machine_made=machine_made_zones(offline),
         )
     listing = _listing(do, prefix, _FIREWALLD_PERMANENT_ZONES_ARGV)
@@ -2042,16 +2153,30 @@ def _zone_breadth_note(question: LockoutQuestion, *, allowed: bool) -> str | Non
 
     What round 6 got wrong is the GATE. It warned on `len(zones) > 1`, and
     Docker — required by every Yu'lon Linux install — creates a `docker` zone
-    bound to `docker0`, so on the flagship platform the count is two on a
-    healthy single-NIC box. Round 6's own clean run on yulon-fedora read
-    `('FedoraWorkstation', 'docker')`, and re-derived on 2026-09-05 in a
-    fedora:41 container shaped the same way the committed module warned "the
-    game ports (3724, 8085) are allowed in `FedoraWorkstation`, `docker`,
-    `public` — every zone this machine binds, including any of them that faces
-    the internet" and offered a `--remove-port` for Docker's own zone. The gate
-    is now the zones this machine did NOT make for its own containers
-    (`machine_made_zones()`); one of those is no breadth, and "a machine that is
-    fine is told nothing" survives on the platform it was written for.
+    bound to `docker0`, so on any Linux box with Docker the count is two on a
+    healthy single-NIC machine. The gate is now the zones this machine did NOT
+    make for its own containers (`machine_made_zones()`); one of those is no
+    breadth, and "a machine that is fine is told nothing" survives.
+
+    Round 7 wrote that gate and did not close the defect, which is worth
+    keeping here because the failure was in the STAND-IN, not the rule. It was
+    checked in a fedora:41 container whose `docker` zone had been bound with
+    `firewall-cmd --permanent --zone=docker --add-interface=docker0` — a
+    permanent binding real Docker never makes. Measured by me with real
+    subprocesses on yulon-fedora (Fedora 44, firewalld 2.4.0, Docker 29.7.2
+    build 1.fc44) on 2026-09-05, round 7's module at efc6d83f:
+
+        detect_firewalld_zones('running')  machine_made ()
+        decide_lockout(...)                ssh-preserved, allowed, notes 1
+        the note                           "…allowed in `FedoraWorkstation`,
+                                           `docker` — every zone this machine
+                                           binds that it did not make for its
+                                           own containers…"
+
+    The same call after round 8's fix, same box, same minute's readings:
+    `machine_made ('docker',)`, `notes 0`. What was wrong is recorded in
+    `machine_made_zones()`: real Docker binds its bridges at runtime only, and
+    round 7 let the permanent listing's empty reading vote.
 
     And it says WRITTEN, not "allowed", unless the plan is about to put them in
     effect. Measured 2026-09-05 in a fedora:41 container with the daemon
