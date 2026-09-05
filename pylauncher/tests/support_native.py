@@ -31,7 +31,7 @@ from typing import BinaryIO
 from yulon import docker, git, platform, resources
 from yulon.catalog import composegen, native, preflight
 from yulon.catalog.catalog import CatalogEntry, load_catalog
-from yulon.catalog.families import patch
+from yulon.catalog.families import extract, patch
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.installer import InstallOptions
 
@@ -351,17 +351,45 @@ class Recorder:
         the folder it was going to fill empty, and that emptiness is exactly
         what `extract.shortfall()` reads — a double that filled `/out` anyway
         would make every "the tool failed" test pass for the wrong reason.
+
+        `vmap_extractor` gets two rules of its own, both transcribed from the
+        pinned sources on m910q 2026-09-05 (`cmangos/mangos-classic` 8ec338a1
+        and `cmangos/mangos-tbc` f82e7d67, `contrib/vmap_extractor/vmapextract/
+        vmapexport.cpp`, and `extract.DIRTY_MARKERS` carries the quotation):
+
+        * a successful run writes `Buildings/dir` and `Buildings/dir_bin`, so a
+          `data/` this double calls finished has the same two files a real one
+          has. Without them no fixture in the suite could be in the state the
+          review of 2026-09-05 measured on a real install, and the blocker
+          under it was invisible for exactly that reason;
+        * a run that meets either of those files exits 1 with the tool's own
+          last words and writes nothing, which is `main()`'s first `if`.
+
+        Keyed on `argv[0]`'s basename, like `extract.DIRTY_OUTPUT_TOOL` and for
+        its reason: `wow-tortoise`'s `vmapextractor` is a different binary with
+        no such check, and a double that refused for it would be inventing a
+        rule for a tool nobody has read at the pinned revision.
         """
         self.calls.append(f"run:{spec.argv[0]}")
         self.container_runs.append(spec)
         sink(f"{spec.argv[0]} ran")
         out = next((m.host for m in spec.mounts if m.guest == "/out"), None)
+        extractor = spec.argv[0].rsplit("/", 1)[-1] == extract.DIRTY_OUTPUT_TOOL
+        buildings = None if out is None else out / extract.BUILDINGS_DIR
+        if extractor and buildings is not None:
+            if any((buildings / marker).exists() for marker in extract.DIRTY_MARKERS):
+                polluted = "Your output directory seems to be polluted, please use an empty "
+                sink(polluted + "directory!")
+                return docker.AttachedRun(1, (polluted + "directory!",))
         if out is not None and self.run_result.returncode in self.success_returncodes:
             for name, count in self.produce.items():
                 folder = out / name
                 folder.mkdir(parents=True, exist_ok=True)
                 for index in range(count):
                     (folder / f"{index:05d}.bin").write_bytes(b"x")
+            if extractor and buildings is not None:
+                for marker in extract.DIRTY_MARKERS:
+                    (buildings / marker).write_bytes(b"\x00Model001.m2\x00")
         return self.run_result
 
     def copy_from_image(self, image: str, src: str, dest: Path) -> None:

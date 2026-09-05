@@ -422,20 +422,40 @@ class CmangosInstaller(StagedInstaller):
         road: "nothing in this app deletes a named volume, and sending the user
         there would send them round a loop that ends at this same message".
 
-        What is named instead takes away exactly the two pieces of evidence
-        that make this press skip, and touches nothing else: the built IMAGE
-        (`built_image_refs()`, the same strings `built_images()` asked the
-        daemon about, so the command cannot name a tag this install does not
-        have) and `data/.yulon-extract.json`. Removing the image turns
-        `build_would_be_skipped()` False, so the compile runs and picks the
-        patch up; removing the evidence file is what makes the fix visible,
-        because `extract.run_plan()` skips a tool that has a record and
-        `run_mmaps()` reads its record out of that same file -- so one deletion
-        re-runs the extraction (`empty_out_dirs()` clears each `produces`
-        folder first) and the movement maps built from it. The install folder,
-        `.db_password` and the database volume are all left alone, and
-        `stage_import()` leaves an already-imported database alone, so the
-        characters survive.
+        What is named instead takes away the two pieces of evidence that make
+        this press skip, and the one folder the re-extraction cannot start
+        into. The IMAGE (`built_image_refs()`, the same strings
+        `built_images()` asked the daemon about, so the command cannot name a
+        tag this install does not have) turns `build_would_be_skipped()` False,
+        so the compile runs and picks the patch up. `data/.yulon-extract.json`
+        is what makes the fix visible, because `extract.run_plan()` skips a
+        tool that has a record and `run_mmaps()` reads its record out of that
+        same file, so deleting it re-runs the extraction and the movement maps
+        built from it. The install folder, `.db_password` and the database
+        volume are all left alone, and `stage_import()` leaves an
+        already-imported database alone, so the characters survive.
+
+        **The third thing, and the review that put it here.** Until the review
+        of 2026-09-05 this docstring claimed the deletion re-ran the extraction
+        with "`empty_out_dirs()` clears each `produces` folder first". That was
+        false, and reading it was cheaper than measuring it: `empty_out_dirs()`
+        has ONE call site in the package, in `run_plan()`'s retry pass, and its
+        own docstring says "The retry path only, never a first run". The
+        ordinary loop only ever called `make_out_dirs()`, which creates.
+        Measured on m910q 2026-09-05, driving the real `run_plan()` over a
+        `data/` in the `~/tbc-7.4c` shape with the evidence file deleted: `ad`
+        finished, `vmap_extractor` exited 1 saying "Your output directory seems
+        to be polluted, please use an empty directory!", the re-created
+        evidence recorded `dbc and maps` alone, and press 3 died identically --
+        so following the sentence bought a recompile and a wedged install. The
+        remedy now names `data/Buildings` alongside the evidence file, from
+        `extract.clear_before_rerun()` rather than as a literal, so a `data/`
+        with nothing blocking is not told to delete a folder that is not there;
+        `run_plan()` refuses with the folder named if anyone arrives in that
+        state by another road. The other three folders are NOT named, and that
+        is a reading of the pinned sources rather than a hope: `ad`,
+        `vmap_assembler` and `MoveMapGen` overwrite (`extract.DIRTY_MARKERS`
+        records where each was read).
 
         The price is stated rather than hidden, and it is smaller than the
         price the old sentence hid: hours of compiling and extracting, against
@@ -462,7 +482,23 @@ class CmangosInstaller(StagedInstaller):
             return
         named = ", ".join(spec.file for spec in stale)
         images = " ".join(self.built_image_refs(ctx))
-        evidence = ctx.server_dir / DATA_DIR / extract.EVIDENCE_FILE
+        data_dir = ctx.server_dir / DATA_DIR
+        evidence = data_dir / extract.EVIDENCE_FILE
+        # The plain path, not `_data_dir()`: that one refuses a `data/` that
+        # resolves elsewhere, and a refusal about patches is the wrong place to
+        # raise a different one.
+        blocking = extract.clear_before_rerun(self._data().extract, data_dir)
+        doomed = " and ".join(str(path) for path in (evidence, *blocking))
+        why = (
+            (
+                f" {' and '.join(str(path) for path in blocking)} goes with it because the "
+                f"extractor refuses to start into a folder that already holds "
+                f"{' or '.join(extract.DIRTY_MARKERS)}; a press that leaves it there stops "
+                f"there instead. {extract.DIRTY_OUTPUT_NOTE}"
+            )
+            if blocking
+            else ""
+        )
         raise InstallerError(
             f"{self.entry.name} in {ctx.server_dir} was built before this app carried "
             f"{named}, and this press would skip the compile: the build is recorded and its "
@@ -470,12 +506,12 @@ class CmangosInstaller(StagedInstaller):
             "a fix that the built server does not have and cannot get, because the extractor "
             "runs from the image and the maps it already wrote would not be rebuilt either. "
             "Nothing was changed, and the server you have goes on working exactly as it did. "
-            f"To get the fix, keep this folder and take away the two things this press would "
-            f"skip: use “{REBUILD_ACTION}” on the Server tab, then `docker image rm {images}` "
-            f"and delete {evidence}, then install again into the same folder with the same "
+            f"To get the fix, keep this folder and take away what this press would skip: "
+            f"use “{REBUILD_ACTION}” on the Server tab, then `docker image rm {images}` "
+            f"and delete {doomed}, then install again into the same folder with the same "
             "client. That recompiles the server and extracts the maps a second time, which "
             "takes hours, and it leaves the install folder, its database and the characters in "
-            f"it alone. {self._why_not_to_delete_the_folder(ctx)}"
+            f"it alone.{why} {self._why_not_to_delete_the_folder(ctx)}"
         )
 
     def _why_not_to_delete_the_folder(self, ctx: StageContext) -> str:

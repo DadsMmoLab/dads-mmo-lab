@@ -27,6 +27,7 @@ import inspect
 import json
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -2206,17 +2207,25 @@ def finished_extraction(rec: Recorder, server_dir: Path, client: Path) -> Path:
     return evidence
 
 
-def remedy_steps(message: str, server_dir: Path) -> tuple[tuple[str, ...], Path]:
+def remedy_steps(message: str, server_dir: Path) -> tuple[tuple[str, ...], tuple[Path, ...]]:
     """What a user following this refusal would type and delete -- read out of the sentence.
 
     Parsed rather than restated, so a remedy that stops naming an image, stops
-    naming a file, or goes back to naming the install folder cannot be followed
+    naming a path, or goes back to naming the install folder cannot be followed
     by this test at all.
+
+    A LIST of paths since 2026-09-05, and that change is the review's finding
+    in one signature. The sentence named one file; deleting it re-ran an
+    extraction that `vmap_extractor` then refused to start into the
+    `Buildings/` the first extraction had filled, and the press that followed
+    the advice ended wedged. Whatever the sentence names is what the tests
+    below delete and nothing else, so a sentence that goes back to naming one
+    path still has to leave a press that finishes.
     """
     images = re.search(r"`docker image rm ([^`]+)`", message)
-    delete = re.search(r"and delete (\S+), then install", message)
+    delete = re.search(r"and delete (\S+(?: and \S+)*), then install", message)
     assert images is not None and delete is not None, message
-    # The FOLDER, not a path inside it -- the remedy names a file under it, and
+    # The FOLDER, not a path inside it -- the remedy names paths under it, and
     # `delete <server_dir>/data/...` is the sentence working as intended.
     folder = re.escape(f"delete {server_dir}") + r"(?![/\\])"
     for hit in re.finditer(folder, message):
@@ -2224,7 +2233,10 @@ def remedy_steps(message: str, server_dir: Path) -> tuple[tuple[str, ...], Path]
             "the remedy tells the user to delete the install folder, which is where "
             f"the database password lives: {message}"
         )
-    return tuple(images.group(1).split()), Path(delete.group(1))
+    named = tuple(Path(part) for part in delete.group(1).split(" and "))
+    for path in named:
+        assert server_dir in path.parents, f"the remedy names something outside the install: {path}"
+    return tuple(images.group(1).split()), named
 
 
 def test_the_remedy_the_refusal_names_gets_the_fix_in_and_keeps_the_database(
@@ -2245,10 +2257,23 @@ def test_the_remedy_the_refusal_names_gets_the_fix_in_and_keeps_the_database(
     ...` deletes it, and every character in it". `_db_password`'s own docstring
     had already refused to send anyone round that loop.
 
-    What is asserted here is the whole of the replacement: the two things the
-    sentence names are taken away, and the next press compiles, patches,
-    extracts again and finishes, with the password file byte-identical, the
-    volume untouched and the import left alone.
+    THE SECOND BLOCKER, found by the review of the replacement (m910q
+    2026-09-05) and the reason this test is not the one it was: taking away the
+    image and the evidence file re-ran the extraction over a `data/Buildings`
+    the first extraction had filled, and `vmap_extractor` refuses to start when
+    that folder holds `dir` or `dir_bin` -- so the press bought a recompile and
+    then died at "Your output directory seems to be polluted, please use an
+    empty directory!", with the re-created evidence recording `dbc and maps`
+    alone so every later press died there too. This test could not see it,
+    because the double it drives fabricated anonymous files and never those
+    two. It writes them now (`support_native.Recorder.run_container`) and
+    refuses on them, which is what makes the run below a measurement rather
+    than a restatement.
+
+    What is asserted here is the whole of the replacement: everything the
+    sentence names is taken away and nothing else is, and the next press
+    compiles, patches, extracts again and finishes, with the password file
+    byte-identical, the volume untouched and the import left alone.
     """
     server_dir = tmp_path / "srv"
     client = client_folder(tmp_path)
@@ -2264,13 +2289,18 @@ def test_the_remedy_the_refusal_names_gets_the_fix_in_and_keeps_the_database(
     images, doomed = remedy_steps(str(caught.value), server_dir)
     ctx = context(server_dir, client, completed=OLD_TWELVE_STAGE_COMPLETED)
     assert images == engine(rec).built_image_refs(ctx), str(caught.value)
-    assert doomed == evidence, str(caught.value)
+    buildings = server_dir / cmangos.DATA_DIR / extract.BUILDINGS_DIR
+    assert doomed == (evidence, buildings), str(caught.value)
+    assert (buildings / extract.DIR_BIN).is_file(), "the fixture is not a finished extraction"
 
     # Exactly the remedy, and nothing else: the containers go, the images the
-    # sentence named go, the file it named goes. The folder stays.
+    # sentence named go, and each path it named goes. The folder stays, and so
+    # does everything under data/ the sentence did not name.
     rec.containers.clear()
     rec.images = False
-    doomed.unlink()
+    for path in doomed:
+        shutil.rmtree(path) if path.is_dir() else path.unlink()
+    assert (server_dir / cmangos.DATA_DIR / "vmaps").is_dir(), "the remedy took vmaps/ with it"
     rec.calls.clear()
     rec.container_runs.clear()
 
@@ -2379,6 +2409,41 @@ def test_removing_only_the_image_rebuilds_but_leaves_the_old_maps_where_they_wer
     )
     assert [run.argv[0].rsplit("/", 1)[-1] for run in rec.container_runs] == []
     assert sum("already extracted" in line for line in said) == 3, said
+
+
+def test_the_remedy_names_the_buildings_folder_only_when_it_is_there_to_block_the_re_extract(
+    tmp_path: Path,
+) -> None:
+    """An install that never finished an extraction is not told to delete a folder it has not got.
+
+    The pair the sentence is assembled from: `extract.clear_before_rerun()`
+    reads the `data/` in front of it, so the remedy grows the folder when a
+    finished extraction is what makes the press die and says nothing about it
+    otherwise. A remedy naming a path that is not there reads as a mistake, and
+    a user who cannot find it has no way to tell which half of the sentence to
+    trust.
+    """
+    server_dir = tmp_path / "srv"
+    client = client_folder(tmp_path)
+    rec = Recorder()
+    old_install(rec, server_dir)
+    ctx = context(server_dir, client, completed=OLD_TWELVE_STAGE_COMPLETED)
+    buildings = server_dir / cmangos.DATA_DIR / extract.BUILDINGS_DIR
+    assert not buildings.exists()
+
+    with pytest.raises(InstallerError) as bare:
+        list(engine(rec)._patch_sources(ctx))
+    _, doomed = remedy_steps(str(bare.value), server_dir)
+    assert doomed == (server_dir / cmangos.DATA_DIR / extract.EVIDENCE_FILE,), str(bare.value)
+    assert extract.BUILDINGS_DIR not in str(bare.value), str(bare.value)
+
+    finished_extraction(rec, server_dir, client)
+    with pytest.raises(InstallerError) as after:
+        list(engine(rec)._patch_sources(ctx))
+    _, grown = remedy_steps(str(after.value), server_dir)
+    assert grown[-1] == buildings, str(after.value)
+    plan = engine(rec)._data().extract
+    assert extract.clear_before_rerun(plan, server_dir / cmangos.DATA_DIR) == (buildings,)
 
 
 def test_the_images_the_refusal_says_to_remove_are_the_ones_it_asked_the_daemon_about(

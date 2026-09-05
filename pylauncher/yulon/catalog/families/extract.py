@@ -888,6 +888,19 @@ def run_plan(
     `required_file` is the client spec's; `client_build` is only spoken, in the
     shortfall refusal, because the count gate is the real check of the build.
 
+    A tool the evidence does not vouch for is asked one question before it is
+    run (`blocking_output()`): would it refuse to start into the folder that is
+    there? Only `vmap extract` can answer yes, and only over a `Buildings/`
+    that still holds `dir` or `dir_bin`. That state is not hypothetical -- it
+    is what a finished install looks like the moment its evidence file is
+    deleted, which is what `cmangos.py`'s patch refusal used to tell people to
+    do. Measured on m910q 2026-09-05 through this function: without the
+    question the press died at the container with "Your output directory seems
+    to be polluted, please use an empty directory!", the re-created evidence
+    recorded `dbc and maps` alone, and every later press died the same way with
+    no folder ever named. Nothing is deleted for the user here; the refusal
+    names `data/Buildings` and stops before the container.
+
     Two of the plan's fields are fallbacks, and both are said out loud rather
     than done quietly, because "it needed help" and "it went fine" are different
     facts about somebody's machine:
@@ -949,6 +962,16 @@ def run_plan(
             seen = counts(tool.produces, data_dir)
             yield f"{tool.name}: already extracted ({_counts_text(seen)})"
             continue
+        # Before the folders are made and before the container, because the
+        # tool is about to exit 1 on its first breath and say only that a
+        # directory is polluted. A tool the evidence vouches for never reaches
+        # this -- the skip above is what a finished `Buildings/` buys -- so
+        # this fires exactly where the old behaviour wedged: an unsatisfied
+        # `vmap extract` over a `Buildings/` a finished extraction left. The
+        # retry pass below does not come through here; it empties first.
+        blocked = blocking_output(tool, data_dir)
+        if blocked is not None:
+            raise InstallerError(blocked_message(tool, blocked))
         make_out_dirs(tool.produces, data_dir)
         yield f"{tool.name}: running {' '.join(tool.argv)}"
         run = run_container(spec_for(tool), sink=sink, cancel=cancel)
@@ -1162,6 +1185,146 @@ reads, and a folder name that is data is one edit from being somewhere else.
 
 DIR_BIN = "dir_bin"
 """The placement index inside `Buildings/`: one record per placed model, its file name inside."""
+
+DIR_INDEX = "dir"
+"""The text placement index beside `dir_bin`, and the extractor's other dirty-output marker."""
+
+DIRTY_MARKERS: tuple[str, ...] = (DIR_INDEX, DIR_BIN)
+r"""The two names `vmap_extractor`'s `main()` stats before it will start at all.
+
+Read out of the pinned sources on m910q, 2026-09-05, at the two revisions
+`catalog.json` names -- `cmangos/mangos-classic` 8ec338a1
+(`contrib/vmap_extractor/vmapextract/vmapexport.cpp:465-483`) and
+`cmangos/mangos-tbc` f82e7d67 (the same file, :515-533). Both carry the same
+eleven lines, and the condition is an OR over exactly these two paths::
+
+    std::string sdir = std::string(szWorkDirWmo) + "/dir";
+    std::string sdir_bin = std::string(szWorkDirWmo) + "/dir_bin";
+    struct stat status;
+    if (!stat(sdir.c_str(), &status) || !stat(sdir_bin.c_str(), &status))
+    {
+        printf("Your output directory seems to be polluted, please use an empty directory!\n");
+        return 1;
+    }
+
+`szWorkDirWmo` is `Buildings`, so the folder the check is about is
+`data/Buildings` and the exit is 1 -- not a signal, which is why no retry
+recipe in the catalog can reach it (`wow-tbc` has none; `wow-vanilla`'s fires
+on `Segmentation fault|core dumped` and returncode 139).
+
+It is the ONLY one of the four tools that refuses a non-empty output folder,
+and that was read the same day rather than assumed. `contrib/extractor`'s
+`ad` creates with `CreateDir()` and overwrites (`System.cpp:98-103`, and its
+`FileExists()` calls are all about the CLIENT's files); `vmap_assembler`'s
+`main()` is thirty lines with two `return 1`s, both for a bad argv or a failed
+`convertWorld2()`, and `TileAssembler` opens every output with `fopen(..,
+"wb")` (`src/game/vmap/TileAssembler.cpp:110,158,329,338`); `contrib/mmap`'s
+`MoveMapGen` has no such check either -- a `git grep -i` for "polluted",
+"dirty" and "empty directory" over `contrib/mmap`, `contrib/extractor` and
+`contrib/vmap_assembler` at both revisions returns nothing. So `vmaps/`,
+`mmaps/`, `dbc/` and `maps/` need no emptying for a second extraction, and a
+remedy that told a user to delete them would be charging for work the tools do
+not ask for.
+"""
+
+DIRTY_OUTPUT_TOOL = "vmap_extractor"
+"""The basename of the one extractor binary this check was READ out of.
+
+`wow-tortoise` is the reason this is a name and not "every tool that produces
+`Buildings/`". Its `vmap extract` produces `Buildings` exactly like the CMaNGOS
+ones and its binary is `/opt/tortoise/bin/vmapextractor` -- a different
+lineage, and its `main()` has no dirty check at all. Read at the revision
+`catalog.json` pins, `Shyalya/tortoise-wow` 7c0fb278 (m910q 2026-09-05, fetched
+`--depth 1` into `~/tortoise-server/src/tortoise-wow` for the reading, since
+that clone stood at 7f2957e0): `tools/vmap_extractor/vmapextract/
+vmapexport.cpp:465-486` goes from `processArgv` straight to `mkdir`, and a
+grep for "polluted" and "empty directory" over that file at that rev counts 0.
+Refusing a Tortoise press would cost a user an extraction over a rule their
+tool does not have -- see
+`pyplan/gates/doodad-2026-09-05/extractor-dirty-output.txt` §4.
+"""
+
+
+def blocking_output(tool: ExtractTool, data_dir: Path) -> Path | None:
+    """The folder this tool would refuse to start into as it stands, or None.
+
+    Asked BEFORE the container, because the alternative is what a user got
+    until 2026-09-05: an hour of build, a container that exits 1 on its first
+    breath, and "Your output directory seems to be polluted, please use an
+    empty directory!" as the whole of the advice -- a sentence that names no
+    folder, in a message about a tool whose output folder is one of three the
+    plan mentions. Measured on m910q 2026-09-05 through this module's own
+    `run_plan()`: from a finished install with `data/.yulon-extract.json`
+    deleted, every press died there, and the press after it died there too,
+    because the re-created evidence file records `dbc and maps` and nothing
+    else. The install was wedged, and nothing in the message led out.
+
+    BOTH halves are demanded, and they answer different questions. The BINARY
+    (`DIRTY_OUTPUT_TOOL`, matched on `argv[0]`'s basename) is what refuses --
+    the rule belongs to the lineage whose source carries it, and `wow-tortoise`
+    produces the same folder with a binary that has no such check. The FOLDER
+    (`BUILDINGS_DIR` in `produces`) is what the refusal is about, and the
+    catalog is what says the tool writes it;
+    `test_every_shipped_cmangos_entry_produces_and_then_reads_the_buildings_dir`
+    keeps those two together. Either half alone would be a guess about a tool
+    nobody read.
+
+    NOT a call to `empty_out_dirs()`, deliberately, and that is the whole of
+    the difference between this and the obvious fix. That function deletes, its
+    docstring forbids it outside the retry pass ("a first run that finds files
+    under `data/` leaves them exactly as it found them"), and what is under
+    `data/Buildings` on a finished install is hours of somebody's extraction.
+    This one only reads, and hands the name to the sentence that asks.
+    """
+    if tool.argv[0].rsplit("/", 1)[-1] != DIRTY_OUTPUT_TOOL:
+        return None
+    if BUILDINGS_DIR not in tool.produces:
+        return None
+    folder = data_dir / BUILDINGS_DIR
+    if any((folder / marker).exists() for marker in DIRTY_MARKERS):
+        return folder
+    return None
+
+
+def clear_before_rerun(plan: ExtractPlan, data_dir: Path) -> tuple[Path, ...]:
+    """Every folder a second extraction over this `data/` would be refused by, in plan order.
+
+    The remedy's half of `blocking_output()`: `cmangos.py`'s refusal names the
+    evidence file whose deletion re-runs the extraction, and it has to name
+    these in the same breath or the press it asks for dies at the first tool
+    that meets one. Empty on a `data/` no extraction has finished, which is why
+    the sentence is assembled from what this returns rather than written out.
+    """
+    found = (blocking_output(tool, data_dir) for tool in plan.tools)
+    return tuple(folder for folder in found if folder is not None)
+
+
+DIRTY_OUTPUT_NOTE = (
+    "That folder holds an extraction this app made, not anything of yours, and deleting it is "
+    "what a second extraction needs: the tool writes it from the client again, which takes "
+    "tens of minutes and touches nothing else under data/."
+)
+"""Said after the refusal below, and after the same folder is named in a remedy elsewhere."""
+
+
+def blocked_message(tool: ExtractTool, folder: Path) -> str:
+    """The refusal, with the folder named -- the sentence the tool's own last words are not.
+
+    The markers are the ones actually THERE, read again here rather than
+    listed: the tool's condition is an OR, a Stop taken mid-extraction leaves
+    `dir` without `dir_bin`, and a message that named both would be telling
+    somebody about a file they will not find.
+    """
+    present = [marker for marker in DIRTY_MARKERS if (folder / marker).exists()]
+    held = " and ".join(present)
+    return (
+        f"{tool.name} cannot run into {folder}: it already holds {held} from an earlier "
+        f"extraction, and this tool refuses to start while that is there "
+        f'("Your output directory seems to be polluted, please use an empty directory!", and '
+        f"it exits without writing anything). Nothing was run and nothing was changed. "
+        f"Delete {folder} and press Install again. {DIRTY_OUTPUT_NOTE}"
+    )
+
 
 _MODEL_NAME = re.compile(rb"[A-Za-z0-9_.\-]+\.(?:m2|M2)")
 

@@ -572,37 +572,110 @@ same volume name (`ffb3ef7e` before and after the `rmtree`); and press 2 stopped
 every character in it*". `_db_password`'s own docstring had refused to send anyone down that
 road four days earlier, for exactly this reason.
 
-**The remedy now names the two things this press would skip, and keeps everything else.** Stop
-and remove the containers, `docker image rm <this install's image>`, delete
-`<server_dir>/data/.yulon-extract.json`, install again. Removing the image turns
-`build_would_be_skipped()` False so the compile runs; removing the evidence file is what makes
-the fix visible, since `extract.run_plan()` skips a tool that has a record and `run_mmaps()`
-reads its own record out of that same file — one deletion re-runs the extraction (each `produces`
-folder emptied first) and the movement maps built from it. Measured by FOLLOWING THE SENTENCE:
-the test parses the image reference and the file path out of the message, does those two things
-and nothing else, and presses again — the compile runs, the four extraction tools and MoveMapGen
-run, the checkout ends byte-identical to the patched fixture, the install finishes "installed and
-running", `.db_password` is unchanged, the volume set is unchanged, and the import stage says
-"They are already imported; leaving them alone." The control beside it removes ONLY the image:
-the compile runs, and the maps are skipped with three `already extracted` lines — which is why
-the sentence names both.
+**The remedy now names what this press would skip, and keeps everything else.** Stop and remove
+the containers, `docker image rm <this install's image>`, delete
+`<server_dir>/data/.yulon-extract.json` **and `<server_dir>/data/Buildings`**, install again.
+Removing the image turns `build_would_be_skipped()` False so the compile runs; removing the
+evidence file is what makes the fix visible, since `extract.run_plan()` skips a tool that has a
+record and `run_mmaps()` reads its own record out of that same file, so deleting it re-runs the
+extraction and the movement maps built from it. Measured by FOLLOWING THE SENTENCE: the test
+parses the image reference and every path out of the message, does those things and nothing
+else, and presses again — the compile runs, the four extraction tools and MoveMapGen run, the
+checkout ends byte-identical to the patched fixture, the install finishes "installed and
+running", `.db_password` is unchanged, `data/vmaps` is still there, the volume set is unchanged,
+and the import stage says "They are already imported; leaving them alone." The control beside it
+removes ONLY the image: the compile runs, and the maps are skipped with three `already
+extracted` lines — which is why the sentence names the evidence file too.
+
+**Why the third path is in the sentence, and what the round before got wrong.** The 2026-09-05
+review of the paragraph above found the one claim nothing in the suite could see. That paragraph
+said the deletion re-ran the extraction "with each `produces` folder emptied first", crediting
+`empty_out_dirs()`. `empty_out_dirs()` has ONE call site in the package — `run_plan()`'s retry
+pass, `extract.py:1030` — and its own docstring forbids the other one ("The retry path only,
+never a first run"; a first run "leaves them exactly as it found them"). The ordinary loop calls
+`make_out_dirs()`, which creates. So the press the sentence asked for re-ran `vmap_extractor`
+over a `data/Buildings` the first extraction had filled, and that tool's `main()` refuses to
+start when `Buildings/dir` or `Buildings/dir_bin` is there (read at both pinned revisions on
+m910q 2026-09-05 — `mangos-classic 8ec338a1` `contrib/vmap_extractor/vmapextract/vmapexport.cpp`
+:465-483 and `mangos-tbc f82e7d67` :515-533, quoted in `extract.DIRTY_MARKERS`). Driven through
+the real `run_plan()`: `ad` finished, `vmap extract` exited 1 on "*Your output directory seems to
+be polluted, please use an empty directory!*", the evidence file was re-created carrying `dbc and
+maps` alone, and the press after that died identically — a wedge, since no message named a
+folder and no retry recipe can reach an exit-1 (`wow-tbc` has none, `wow-vanilla`'s fires on
+`Segmentation fault|core dumped`/139). The two real installs on that box were in exactly that
+shape: `~/tbc-7.4c/data/Buildings` 7,171 files including a 50,938,121-byte `dir_bin`,
+`~/vanilla-75b` 5,076 including 31,072,203.
+
+Three folders are NOT named, and that is a reading rather than a hope: `ad` creates with
+`CreateDir()` and overwrites (`contrib/extractor/System.cpp:98-103`), `vmap_assembler`'s `main()`
+has two `return 1`s and neither is about the destination while `TileAssembler` opens every output
+`fopen(.., "wb")` (`src/game/vmap/TileAssembler.cpp:110,158,329,338`), and `contrib/mmap`'s
+`MoveMapGen` has no such check either — a `git grep -i` for "polluted", "dirty" and "empty
+directory" over those three trees at both revisions returns nothing. `wow-tortoise` is excluded
+for the opposite reason: its `vmap extract` produces `Buildings` too but runs
+`/opt/tortoise/bin/vmapextractor`, whose `main()` goes from `processArgv` straight to `mkdir`
+with no check at all — read at `Shyalya/tortoise-wow` **7c0fb278**, the rev `catalog.json` pins
+(fetched `--depth 1` for the reading; the clone on the box stood at 7f2957e0), where a grep for
+"polluted" and "empty directory" over that file counts 0. So the refusal is keyed on the BINARY
+as well as the folder rather than claimed for a lineage nobody has watched refuse. Every read in
+this paragraph is in `pyplan/gates/doodad-2026-09-05/extractor-dirty-output.txt`, which is the
+output of the script beside it.
+
+**The engine now says the folder's name instead of the tool saying nothing.** `run_plan()` asks
+`blocking_output()` before it makes any folder or starts any container, and refuses with
+`data/Buildings` named and the fix stated ("Delete … and press Install again"). It does not
+delete anything: `empty_out_dirs()` on a first run is the obvious fix and the wrong one, because
+what is under `data/Buildings` is hours of somebody's extraction and nobody asked for it to go.
+Three further presses reach the same wall and now say the same thing, none of which anyone had
+noticed: a `data/` whose evidence names ANOTHER CLIENT, one whose PLAN HASH changed, and a
+press after a Stop taken while `vmap extract` was running (that one leaves `Buildings/dir`
+behind, so the cancel note's "only the tool that was interrupted runs again" was true of the
+records and not of the next press). Each has a test in `tests/test_extract.py` that follows the
+refusal and finishes.
 
 **What this costs, and the recommendation the owner asked for.** The owner said "do what you
 recommend". The recommendation is the refusal as it now stands, and the argument is the price:
-the old sentence cost a world (a reinstall into the same folder cannot open the old volume, and
-the only way past it deletes every character), while the new one costs a recompile plus an
-extraction — hours on the box, nothing on disk that anyone made. It is also proportionate to
-where the refusal fires: stage 2 of 13, on a folder whose ONLY missing stage is `patch-sources`.
-The alternative the round above rejected (invalidate the record and rebuild automatically) is
-still rejected, and now for a second reason: the user pressing Install is not asking for four
-hours of compiling, and the remedy is the same work done deliberately. What is NOT offered is a
-way to keep the old maps and skip the patch: there is no override, and adding one is a design
-question this lane did not open.
+the first sentence cost a world (a reinstall into the same folder cannot open the old volume, and
+the only way past it deletes every character), the second cost a recompile and then wedged the
+install, and the one in the tree now costs a recompile plus an extraction — hours on the box, and
+on disk only `data/Buildings`, which this app wrote and is about to write again. It is also
+proportionate to where the refusal fires: stage 2 of 13, on a folder whose ONLY missing stage is
+`patch-sources`. The alternative the round above rejected (invalidate the record and rebuild
+automatically) is still rejected, and now for a second reason: the user pressing Install is not
+asking for four hours of compiling, and the remedy is the same work done deliberately. What is
+NOT offered is a way to keep the old maps and skip the patch: there is no override, and adding
+one is a design question this lane did not open. Nor is there a "re-extract this tool" button:
+the folder is deleted by the person who owns it, on a sentence that names it, and no press of
+Install removes anything under `data/` that the retry pass did not put there.
+
+**Two mutation counts in the round before this one, corrected.** The record for 7e1cf849 claimed
+"the fixed-password branch never taken → 2 RED" and "an extraction record never licenses a skip →
+2 RED", and neither number reproduces from the record because neither spelling was written down.
+Re-run on m910q 2026-09-05 on this lane's tree, with the anchor's occurrence count asserted
+`== 1`, every substitution md5-checked on disk and `__pycache__` purged on both sides. Taking
+`_why_not_to_delete_the_folder`'s `generated` branch out of reach — the four lines from `plan =
+self.entry.install.password` to the first `f"Do not delete …fresh start either"`, with
+`if plan.mode != "generated" or plan.file is None:` replaced by `if True:`, which is unique where
+that condition alone occurs TWICE (`cmangos.py` :536 and :670) — gives **1 RED**,
+`test_the_refusal_says_why_the_install_folder_is_the_one_thing_not_to_delete` (md5
+727ba72c…→9cb6da36…). The 2 in the old record came from a `str.replace()` on that twice-occurring
+condition, which flipped the unrelated site as well and drew in
+`test_the_family_s_catalog_refusals_end_in_one_tail_and_not_two`. Making `satisfied()` answer
+False after the record check (`return not shortfall(produces, data_dir)` → `return False`, the
+four-line tail anchored) gives **24 RED** across `test_extract.py` and `test_families_cmangos.py`
+on this tree (md5 131d76f2…→147edccc…); the review measured 18 on 7e1cf849, and the six between
+them are the tests this pass adds. The old record's 2 came from scoring it against
+`tests/test_families_cmangos.py` alone. Both mutants die either way, so no test was weaker than
+claimed — the numbers were.
 
 **The upstream draft's patch is refused by `git apply` — as a CRLF file, on every tree.** The
 second pass fixed the fence's CONTENT and asserted it through `read_text()`, which translates
 line endings; so the assertion went on holding while this repository's Windows checkout held the
-doc as 13,780 CRLF bytes against the patch's 3,943 LF ones. The fence extracted from that copy
+doc with CRLF endings, and the FENCE inside it came to 4,017 bytes against the shipped patch's
+3,943 LF ones. (The 13,780/13,534 pair the first write-up of this quoted is the whole DOCUMENT
+before and after the pin — two objects, not one, as the review of 2026-09-05 said; the pair that
+is a mismatch is 4,017 against 3,943, which is what `fence-eol-apply-check.txt` and the test
+docstring carry.) The fence extracted from that copy
 exits 1 on all four trees measured — `mangos-classic 8ec338a1`, `mangos-tbc f82e7d67`, and each
 clone's newest `origin/master` (`9b682be6`, `46d9a78d`) — with `error: patch failed:
 contrib/vmap_extractor/vmapextract/gameobject_extract.cpp:24`, while the LF form exits 0 on all
