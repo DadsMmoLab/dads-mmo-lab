@@ -1,0 +1,13 @@
+########## the three real installs on m910q, read-only (2026-09-05)
+== /home/pk/tbc-7.4c/data/Buildings  (7171 entries)
+-rw-r--r-- 1 pk pk 50938121 sep.   4 00:05 dir_bin
+-rw-r--r-- 1 pk pk    41308 sep.   4 00:05 temp_gameobject_models
+   files literally named dir: 0
+== /home/pk/vanilla-75b/data/Buildings  (5076 entries)
+-rw-r--r-- 1 pk pk 31072203 sep.   4 11:25 dir_bin
+-rw-r--r-- 1 pk pk    24991 sep.   4 11:25 temp_gameobject_models
+   files literally named dir: 0
+== /home/pk/vanilla-75/data/Buildings  (5076 entries)
+-rw-r--r-- 1 pk pk 31072203 sep.   4 02:33 dir_bin
+-rw-r--r-- 1 pk pk    24991 sep.   4 02:33 temp_gameobject_models
+   files literally named dir: 0

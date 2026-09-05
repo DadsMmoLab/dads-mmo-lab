@@ -1,0 +1,75 @@
+# A press on a state file in the OLD twelve-stage shape (no patch-sources recorded).
+# m910q 2026-09-05. Both halves driven through CmangosInstaller.run() with the
+# Recorder machine double; the state file is the shape state-files-m910q.txt shows.
+
+############ BEFORE the refusal
+# The same checkout with cmangos.py, native.py and patch.py taken from the merge
+# commit (git show HEAD:...), everything else this lane's -- so the only difference
+# from the run below is the refusal itself.
+
+state file completed BEFORE the press:
+    ['clone-sources', 'write-dockerfile', 'generate-compose', 'build', 'extract', 'mmaps', 'conf', 'import']
+
+what the press said, patch-sources through extract:
+    --- patch-sources
+    Applying shared/cmangos/patches/vmap-extractor-doodad-name-case.patch inside src/mangos-tbc: vmap_extractor writes WMO doodad models under their raw MODN name and looks them up under the normalised one, so on a case-sensitive filesystem WMO doodad placements are dropped silently; TBC's own loss was never counted, and the functions this patch edits are byte-identical to the mangos-classic ones where it was (pyplan/upstream-cmangos-doodad-drop.md)
+    Patched contrib/vmap_extractor/vmapextract/gameobject_extract.cpp.
+    Patched contrib/vmap_extractor/vmapextract/model.cpp.
+    Patched contrib/vmap_extractor/vmapextract/vmapexport.cpp.
+    Patched contrib/vmap_extractor/vmapextract/vmapexport.h.
+    Source patches are in place.
+    Step 3 of 13 (23%): db-password
+    --- db-password
+    Wrote this install's database password to .db_password. Back that file up: the database in yulon-wow-tbc-be4ebeb3_db-data cannot be opened without it.
+    Step 4 of 13 (30%): write-dockerfile
+    --- write-dockerfile
+    Wrote Dockerfile
+    Wrote .dockerignore
+    Step 5 of 13 (38%): generate-compose
+    --- generate-compose
+    Wrote docker-compose.yml
+    Wrote docker-compose.override.yml
+    Wrote docker-compose.build.yml
+    Wrote .env
+    Step 6 of 13 (46%): build
+    --- build
+    Stopping now leaves Docker finishing the build step it is already on, in the background. That is deliberate: the work it has done is kept, and starting this install again picks up from there instead of compiling it all a second time.
+    The server is already built; skipping the compile.
+    Step 7 of 13 (53%): extract
+    --- extract
+    Finished tools are kept; only the tool that was interrupted runs again.
+    Extracting server data from /tmp/tmp2edxej9d/client into /tmp/tmp2edxej9d/srv/data (the client is read-only).
+    dbc and maps: running /opt/mangos/bin/tools/ad -i /client -o /out
+    /opt/mangos/bin/tools/ad ran
+    dbc and maps: done (dbc: 100 files, maps: 100 files)
+    vmap extract: running /opt/mangos/bin/tools/vmap_extractor -d /client/Data
+    /opt/mangos/bin/tools/vmap_extractor ran
+    vmap extract: done (Buildings: 100 files)
+    vmap assemble: running /opt/mangos/bin/tools/vmap_assembler Buildings vmaps
+    /opt/mangos/bin/tools/vmap_assembler ran
+    vmap assemble: done (vmaps: 100 files)
+    Extraction finished.
+    Step 8 of 13 (61%): mmaps
+
+source changed by the press: True
+source now byte-equal to the patched fixture: True
+the build seam was called: False
+an extraction container ran: True
+the run finished: WoW TBC is installed and running in /tmp/tmp2edxej9d/srv
+
+############ AFTER the refusal (this lane), the same press and two neighbours
+
+== images present (a finished pre-lane install)
+   REFUSED: WoW TBC in /tmp/tmpbxc8jknd/srv was built before this app carried shared/cmangos/patches/vmap-extractor-doodad-name-case.patch, and this press would skip the compile: the build is recorded and its images are still here. Patching the source now would leave the checkout holding a fix that the built server does not have and cannot get, because the extractor runs from the image and the maps it already wrote would not be rebuilt either. Nothing was changed, and the server you have goes on working exactly as it did. To get the fix, use “Stop and remove containers…” on the Server tab, delete /tmp/tmpbxc8jknd/srv, and install it again.
+   the source tree changed: False
+
+== images deleted (the build will re-run)
+   the press finished: WoW TBC is installed and running in /tmp/tmp272isexz/srv
+   the build seam was called: True
+   the source tree changed: True
+
+== docker will not say
+   the press finished: WoW TBC is installed and running in /tmp/tmpge7u5rey/srv
+   the build seam was called: True
+   the source tree changed: True
+

@@ -13,12 +13,14 @@
             "repo": "mod-playerbots/azerothcore-wotlk",
             "branch": "Playerbot",
             "depth": null,
-            "dest": "."
+            "dest": ".",
+            "rev": "413bea61a85e20d9caef7d66fc601a661fdddd9d"
           },
           {
             "repo": "mod-playerbots/mod-playerbots",
             "branch": "master",
-            "dest": "modules/mod-playerbots"
+            "dest": "modules/mod-playerbots",
+            "rev": "b949b50bfcdd4fab937781bac2d7765e39330e4b"
           }
         ]
       },
@@ -101,15 +103,18 @@
         "sources": [
           {
             "repo": "cmangos/mangos-tbc",
-            "dest": "src/mangos-tbc"
+            "dest": "src/mangos-tbc",
+            "rev": "f82e7d679c283b66bc2adc1b751aa1275e655673"
           },
           {
             "repo": "cmangos/playerbots",
-            "dest": "src/mangos-tbc/src/modules/Bots"
+            "dest": "src/mangos-tbc/src/modules/Bots",
+            "rev": "993f18091e67565986cf55c4d9b8e6eae11223f9"
           },
           {
             "repo": "cmangos/tbc-db",
-            "dest": "src/tbc-db"
+            "dest": "src/tbc-db",
+            "rev": "5078439a44d208732a903bca2d7df51941fb373a"
           }
         ]
       },
@@ -401,7 +406,14 @@
                 }
               ],
               "marker_db": "mangos"
-            }
+            },
+            "patches": [
+              {
+                "file": "shared/cmangos/patches/vmap-extractor-doodad-name-case.patch",
+                "source": "src/mangos-tbc",
+                "reason": "vmap_extractor writes WMO doodad models under their raw MODN name and looks them up under the normalised one, so on a case-sensitive filesystem WMO doodad placements are dropped silently; TBC's own loss was never counted, and the functions this patch edits are byte-identical to the mangos-classic ones where it was (pyplan/upstream-cmangos-doodad-drop.md)"
+              }
+            ]
           }
         }
       },
@@ -453,15 +465,18 @@
         "sources": [
           {
             "repo": "cmangos/mangos-classic",
-            "dest": "src/mangos-classic"
+            "dest": "src/mangos-classic",
+            "rev": "8ec338a1704e7dcb1c0213eb7ed58f9231ade40f"
           },
           {
             "repo": "cmangos/playerbots",
-            "dest": "src/mangos-classic/src/modules/Bots"
+            "dest": "src/mangos-classic/src/modules/Bots",
+            "rev": "993f18091e67565986cf55c4d9b8e6eae11223f9"
           },
           {
             "repo": "cmangos/classic-db",
-            "dest": "src/classic-db"
+            "dest": "src/classic-db",
+            "rev": "22b51464f1625f6ef6275771de1f5466c6f5d19e"
           }
         ]
       },
@@ -747,7 +762,14 @@
                 }
               ],
               "marker_db": "mangos"
-            }
+            },
+            "patches": [
+              {
+                "file": "shared/cmangos/patches/vmap-extractor-doodad-name-case.patch",
+                "source": "src/mangos-classic",
+                "reason": "vmap_extractor writes WMO doodad models under their raw MODN name and looks them up under the normalised one, so on a case-sensitive filesystem 14.8% of a Vanilla world's placed collision geometry is dropped silently (pyplan/upstream-cmangos-doodad-drop.md)"
+              }
+            ]
           }
         }
       },

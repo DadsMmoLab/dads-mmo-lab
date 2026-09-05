@@ -1,0 +1,130 @@
+8ec338a1704e7dcb1c0213eb7ed58f9231ade40f
+f82e7d679c283b66bc2adc1b751aa1275e655673
+########## classic 8ec338a1704e7dcb1c0213eb7ed58f9231ade40f
+===== 1. every occurrence of a "/dir"-suffixed path under contrib
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/vmapexport.cpp:474:        std::string sdir = std::string(szWorkDirWmo) + "/dir";
+===== 2. who opens dir_bin, and how
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/adtfile.cpp:116:    std::string dirname = std::string(szWorkDirWmo) + "/dir_bin";
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/adtfile.cpp:118:    dirfile = fopen(dirname.c_str(), "ab");
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/adtfile.cpp:215:    fclose(dirfile);
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/vmapexport.cpp:475:        std::string sdir_bin = std::string(szWorkDirWmo) + "/dir_bin";
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/vmapexport.cpp:477:        if (!stat(sdir.c_str(), &status) || !stat(sdir_bin.c_str(), &status))
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/wdtfile.cpp:49:    std::string dirname = std::string(szWorkDirWmo) + "/dir_bin";
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/wdtfile.cpp:51:    dirfile = fopen(dirname.c_str(), "ab");
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/wdtfile.cpp:115:    fclose(dirfile);
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/wmo.cpp:625:    // fclose(dirfile);
+===== 3. who writes temp_gameobject_models
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/gameobject_extract.cpp:58:    FILE* model_list = fopen((basepath + "temp_gameobject_models").c_str(), "wb");
+===== 4. the order main() does it in
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/vmapexport.cpp:132:bool ExtractWmo()
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/vmapexport.cpp:266:void ParsMapFiles()
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/vmapexport.cpp:514:        success = ExtractWmo();
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/vmapexport.cpp:538:        ParsMapFiles();
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/vmapexport.cpp:542:        ExtractGameobjectModels();
+===== 5. the other three tools: refusals, overwrites, skips
+(no refusal in any of the three)
+FETCH_HEAD:contrib/extractor/System.cpp:783:    FILE* output = fopen(filename2, "wb");
+FETCH_HEAD:contrib/extractor/System.cpp:890:    FILE* output = fopen(filename.c_str(), "wb");
+FETCH_HEAD:contrib/extractor/System.cpp:118:bool FileExists(const char* FileName)
+FETCH_HEAD:contrib/extractor/System.cpp:972:        if (FileExists(filename.c_str()))
+FETCH_HEAD:contrib/extractor/System.cpp:988:        if (FileExists(filename))
+FETCH_HEAD:contrib/vmap_assembler/vmap_assembler.cpp:30:        return 1;
+FETCH_HEAD:contrib/vmap_assembler/vmap_assembler.cpp:44:        return 1;
+FETCH_HEAD:src/game/vmap/TileAssembler.cpp:111:            FILE* mapfile = fopen(mapfilename.str().c_str(), "wb");
+FETCH_HEAD:src/game/vmap/TileAssembler.cpp:162:                FILE* tilefile = fopen(tilefilename.str().c_str(), "wb");
+FETCH_HEAD:src/game/vmap/TileAssembler.cpp:210:        FILE* dirf = fopen(fname.c_str(), "rb");
+FETCH_HEAD:src/game/vmap/TileAssembler.cpp:334:        FILE* model_list = fopen((iSrcDir + "/" + GAMEOBJECT_MODELS).c_str(), "rb");
+FETCH_HEAD:src/game/vmap/TileAssembler.cpp:338:        FILE* model_list_copy = fopen((iDestDir + "/" + GAMEOBJECT_MODELS).c_str(), "wb");
+FETCH_HEAD:src/game/vmap/TileAssembler.cpp:504:        FILE* rf = fopen(path, "rb");
+FETCH_HEAD:contrib/mmap/src/MapBuilder.cpp:603:            if (shouldSkipTile(mapID, tileX, tileY))
+FETCH_HEAD:contrib/mmap/src/MapBuilder.cpp:1186:    bool MapBuilder::shouldSkipTile(uint32 mapID, uint32 tileX, uint32 tileY)
+FETCH_HEAD:contrib/mmap/src/MapBuilder.h:130:            bool shouldSkipTile(uint32 mapID, uint32 tileX, uint32 tileY);
+    bool MapBuilder::shouldSkipTile(uint32 mapID, uint32 tileX, uint32 tileY)
+    {
+        char fileName[255];
+        sprintf(fileName, "%s/mmaps/%03u%02i%02i.mmtile", m_workdir, mapID, tileY, tileX);
+        FILE* file = fopen(fileName, "rb");
+        if (!file)
+            return false;
+
+        MmapTileHeader header;
+        int count = fread(&header, sizeof(MmapTileHeader), 1, file);
+        fclose(file);
+        if (count != 1)
+            return false;
+
+        if (header.mmapMagic != MMAP_MAGIC || header.dtVersion != uint32(DT_NAVMESH_VERSION))
+            return false;
+
+        if (header.mmapVersion != MMAP_VERSION)
+            return false;
+
+        return true;
+    }
+
+    json MapBuilder::getDefaultConfig()
+########## tbc f82e7d679c283b66bc2adc1b751aa1275e655673
+===== 1. every occurrence of a "/dir"-suffixed path under contrib
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/vmapexport.cpp:524:        std::string sdir = std::string(szWorkDirWmo) + "/dir";
+===== 2. who opens dir_bin, and how
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/adtfile.cpp:116:    std::string dirname = std::string(szWorkDirWmo) + "/dir_bin";
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/adtfile.cpp:118:    dirfile = fopen(dirname.c_str(), "ab");
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/adtfile.cpp:215:    fclose(dirfile);
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/vmapexport.cpp:525:        std::string sdir_bin = std::string(szWorkDirWmo) + "/dir_bin";
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/vmapexport.cpp:527:        if (!stat(sdir.c_str(), &status) || !stat(sdir_bin.c_str(), &status))
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/wdtfile.cpp:49:    std::string dirname = std::string(szWorkDirWmo) + "/dir_bin";
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/wdtfile.cpp:51:    dirfile = fopen(dirname.c_str(), "ab");
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/wdtfile.cpp:115:    fclose(dirfile);
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/wmo.cpp:633:    // fclose(dirfile);
+===== 3. who writes temp_gameobject_models
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/gameobject_extract.cpp:58:    FILE* model_list = fopen((basepath + "temp_gameobject_models").c_str(), "wb");
+===== 4. the order main() does it in
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/vmapexport.cpp:132:bool ExtractWmo()
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/vmapexport.cpp:266:void ParsMapFiles()
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/vmapexport.cpp:563:        success = ExtractWmo();
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/vmapexport.cpp:587:        ParsMapFiles();
+FETCH_HEAD:contrib/vmap_extractor/vmapextract/vmapexport.cpp:591:        ExtractGameobjectModels();
+===== 5. the other three tools: refusals, overwrites, skips
+(no refusal in any of the three)
+FETCH_HEAD:contrib/extractor/System.cpp:772:    FILE* output = fopen(filename2, "wb");
+FETCH_HEAD:contrib/extractor/System.cpp:879:    FILE* output = fopen(filename.c_str(), "wb");
+FETCH_HEAD:contrib/extractor/System.cpp:107:bool FileExists(const char* FileName)
+FETCH_HEAD:contrib/extractor/System.cpp:973:        if (FileExists(filename.c_str()))
+FETCH_HEAD:contrib/extractor/System.cpp:996:        if (FileExists(filename))
+FETCH_HEAD:contrib/extractor/System.cpp:1008:        if (FileExists(filename))
+FETCH_HEAD:contrib/extractor/System.cpp:1032:        if (FileExists(tmp1))
+FETCH_HEAD:contrib/vmap_assembler/vmap_assembler.cpp:30:        return 1;
+FETCH_HEAD:contrib/vmap_assembler/vmap_assembler.cpp:43:        return 1;
+FETCH_HEAD:src/game/vmap/TileAssembler.cpp:111:            FILE* mapfile = fopen(mapfilename.str().c_str(), "wb");
+FETCH_HEAD:src/game/vmap/TileAssembler.cpp:162:                FILE* tilefile = fopen(tilefilename.str().c_str(), "wb");
+FETCH_HEAD:src/game/vmap/TileAssembler.cpp:210:        FILE* dirf = fopen(fname.c_str(), "rb");
+FETCH_HEAD:src/game/vmap/TileAssembler.cpp:334:        FILE* model_list = fopen((iSrcDir + "/" + GAMEOBJECT_MODELS).c_str(), "rb");
+FETCH_HEAD:src/game/vmap/TileAssembler.cpp:338:        FILE* model_list_copy = fopen((iDestDir + "/" + GAMEOBJECT_MODELS).c_str(), "wb");
+FETCH_HEAD:src/game/vmap/TileAssembler.cpp:504:        FILE* rf = fopen(path, "rb");
+FETCH_HEAD:contrib/mmap/src/MapBuilder.cpp:610:            if (shouldSkipTile(mapID, tileX, tileY))
+FETCH_HEAD:contrib/mmap/src/MapBuilder.cpp:1204:    bool MapBuilder::shouldSkipTile(uint32 mapID, uint32 tileX, uint32 tileY)
+FETCH_HEAD:contrib/mmap/src/MapBuilder.h:130:            bool shouldSkipTile(uint32 mapID, uint32 tileX, uint32 tileY);
+    bool MapBuilder::shouldSkipTile(uint32 mapID, uint32 tileX, uint32 tileY)
+    {
+        char fileName[255];
+        sprintf(fileName, "%s/mmaps/%03u%02i%02i.mmtile", m_workdir, mapID, tileY, tileX);
+        FILE* file = fopen(fileName, "rb");
+        if (!file)
+            return false;
+
+        MmapTileHeader header;
+        int count = fread(&header, sizeof(MmapTileHeader), 1, file);
+        fclose(file);
+        if (count != 1)
+            return false;
+
+        if (header.mmapMagic != MMAP_MAGIC || header.dtVersion != uint32(DT_NAVMESH_VERSION))
+            return false;
+
+        if (header.mmapVersion != MMAP_VERSION)
+            return false;
+
+        return true;
+    }
+
+    json MapBuilder::getDefaultConfig()

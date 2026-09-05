@@ -30,7 +30,8 @@ from typing import BinaryIO
 
 from yulon import docker, git, platform, resources
 from yulon.catalog import composegen, native, preflight
-from yulon.catalog.catalog import load_catalog
+from yulon.catalog.catalog import CatalogEntry, load_catalog
+from yulon.catalog.families import extract, patch
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.installer import InstallOptions
 
@@ -54,6 +55,38 @@ whole mechanism (write only an override, then `compose up -d --build`) only
 works because it is. A clone double that made only `.git` hid a blocker that
 refused every install.
 """
+
+
+VMAP_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "cmangos-vmap-8ec338a1"
+"""`contrib/vmap_extractor/vmapextract/` of `mangos-classic` at `8ec338a1`; see `test_patch.py`."""
+
+
+def lay_patch_sources(entry: CatalogEntry) -> Callable[[Path], None]:
+    """An `on_clone` hook laying the pre-image of every patch `entry` carries under its source.
+
+    A clone double leaves `.git` and nothing else, and since 2026-09-05
+    `patch-sources` runs right after the clone and refuses a checkout that
+    lacks the file it edits — so every install driven through a Recorder has
+    to lay the tree the patch was written against, or it stops one stage in.
+    Laid by BASENAME at the path each hunk names, and only under the dest the
+    catalog says the patch applies to; the dest is recognised by its tail so
+    the hook needs no server dir. An entry with no patches gets a hook that
+    does nothing.
+    """
+    block = entry.install.native.cmangos if entry.install.native is not None else None
+    patches = block.patches if block is not None else ()
+    root = resources.installers_dir()
+
+    def on_clone(dest: Path) -> None:
+        for spec in patches:
+            if not dest.as_posix().endswith("/" + spec.source):
+                continue
+            for hunk in patch.parse((root / spec.file).read_text(encoding="utf-8")):
+                target = dest.joinpath(*hunk.path.split("/"))
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes((VMAP_FIXTURE / hunk.path.rsplit("/", 1)[-1]).read_bytes())
+
+    return on_clone
 
 
 @dataclass
@@ -318,17 +351,52 @@ class Recorder:
         the folder it was going to fill empty, and that emptiness is exactly
         what `extract.shortfall()` reads — a double that filled `/out` anyway
         would make every "the tool failed" test pass for the wrong reason.
+
+        `vmap_extractor` gets two rules of its own, both transcribed from the
+        pinned sources (`cmangos/mangos-classic` 8ec338a1 and
+        `cmangos/mangos-tbc` f82e7d67, `contrib/vmap_extractor/vmapextract/`),
+        re-read on yulon-fedora 2026-09-05 in `~/cmangos-probe9`;
+        `extract.DIRTY_MARKERS` carries the quotation:
+
+        * a successful run leaves `Buildings/dir_bin` and
+          `Buildings/temp_gameobject_models`, and NOT `Buildings/dir` -- the
+          shape every real install measured on m910q is in. `dir_bin` is
+          appended per tile (`adtfile.cpp:118`, `wdtfile.cpp:51`, `fopen(..,
+          "ab")`), `temp_gameobject_models` is written last by
+          `ExtractGameobjectModels()` (`gameobject_extract.cpp:58`), and `dir`
+          has no writer under `contrib` at either revision: it is the second
+          half of the tool's stat check and nothing else. A double that wrote
+          `dir` would put every fixture in a state no extraction can produce,
+          and would hide the half of the guard that fires in the world;
+        * a run that meets either of the two CHECKED names exits 1 with the
+          tool's own last words and writes nothing, which is `main()`'s first
+          `if`.
+
+        Keyed on `argv[0]`'s basename, like `extract.DIRTY_OUTPUT_TOOL` and for
+        its reason: `wow-tortoise`'s `vmapextractor` is a different binary with
+        no such check, and a double that refused for it would be inventing a
+        rule for a tool nobody has read at the pinned revision.
         """
         self.calls.append(f"run:{spec.argv[0]}")
         self.container_runs.append(spec)
         sink(f"{spec.argv[0]} ran")
         out = next((m.host for m in spec.mounts if m.guest == "/out"), None)
+        extractor = spec.argv[0].rsplit("/", 1)[-1] == extract.DIRTY_OUTPUT_TOOL
+        buildings = None if out is None else out / extract.BUILDINGS_DIR
+        if extractor and buildings is not None:
+            if any((buildings / marker).exists() for marker in extract.DIRTY_MARKERS):
+                polluted = "Your output directory seems to be polluted, please use an empty "
+                sink(polluted + "directory!")
+                return docker.AttachedRun(1, (polluted + "directory!",))
         if out is not None and self.run_result.returncode in self.success_returncodes:
             for name, count in self.produce.items():
                 folder = out / name
                 folder.mkdir(parents=True, exist_ok=True)
                 for index in range(count):
                     (folder / f"{index:05d}.bin").write_bytes(b"x")
+            if extractor and buildings is not None:
+                for name in (extract.DIR_BIN, extract.GAMEOBJECT_MODELS):
+                    (buildings / name).write_bytes(b"\x00Model001.m2\x00")
         return self.run_result
 
     def copy_from_image(self, image: str, src: str, dest: Path) -> None:

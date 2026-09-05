@@ -26,7 +26,15 @@ import pytest
 
 import yulon
 from tests.conftest import spelled_bounds
-from tests.support_native import ENTRY, IMPORTED, PARTIAL, TBC, Recorder, install
+from tests.support_native import (
+    ENTRY,
+    IMPORTED,
+    PARTIAL,
+    TBC,
+    Recorder,
+    install,
+    lay_patch_sources,
+)
 from yulon import docker, install_wiring, networking, platform, resources, runner
 from yulon.apply import ApplyError
 from yulon.catalog import composegen, native, preflight
@@ -1931,6 +1939,11 @@ def _cli_engine_over(rec: Recorder, monkeypatch: pytest.MonkeyPatch) -> None:
         linux = entry.model_copy(
             update={"install": entry.install.model_copy(update={"platforms": ("linux",)})}
         )
+        # `patch-sources` (2026-09-05) edits the checkout the clone left behind,
+        # and this double's clone leaves only `.git`; without the tree the patch
+        # was written against, every CMaNGOS run here stops one stage after the
+        # clone and never reaches the stage under test.
+        rec.on_clone = lay_patch_sources(linux)
         return family_for(linux)(
             linux,
             installers_root=root,
@@ -2300,6 +2313,11 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
     ("catalog/families/extract.py", "file_count"): (
         "counts what a tool produced; a listing it cannot make is logged and counts as short, "
         "which re-runs the tool rather than skipping it"
+    ),
+    ("catalog/families/extract.py", "doodad_placements"): (
+        "lists the `Buildings/` this app's own extractor just filled, to count how many of the "
+        "models the index places; its `except OSError` logs and answers None, which is 'no "
+        "check ran' and warns about nothing - nothing is written on the strength of it"
     ),
     ("catalog/families/sqlplan.py", "_listing"): (
         "reads `Updates/` in the sources; FileNotFoundError is a real answer there (no such "
@@ -2903,6 +2921,62 @@ def test_the_realm_address_is_set_after_the_server_is_ready_and_before_the_last_
     ), "this entry no longer waits on the loopback address; re-derive the ordering above"
     assert rec.calls.index("wait-ready") < rec.calls.index("sql"), rec.calls
     assert said[-1].startswith(f"{ENTRY.name} is installed"), said[-1]
+
+
+# -- the build's skip rule, asked from outside the build ----------------------
+
+
+@pytest.mark.parametrize(
+    ("recorded", "images", "skipped"),
+    [
+        (True, True, True),
+        (True, False, False),
+        (True, None, False),
+        (False, True, False),
+        (False, False, False),
+        (False, None, False),
+    ],
+    ids=(
+        "recorded+present",
+        "recorded+gone",
+        "recorded+unknown",
+        "fresh+present",
+        "fresh+gone",
+        "fresh+unknown",
+    ),
+)
+def test_build_would_be_skipped_answers_exactly_what_stage_build_then_does(
+    tmp_path: Path, recorded: bool, images: bool | None, skipped: bool
+) -> None:
+    """One rule, two callers, all six states -- because the second caller is a REFUSAL.
+
+    `CmangosInstaller._patch_sources()` refuses to edit a source tree when this
+    predicate says the compile is not going to happen. That refusal is only
+    ever right while the predicate agrees with the stage it is predicting, and
+    the two live 400 lines apart in this file. So the prediction and the
+    outcome are driven together over every value the seam can return, including
+    the `None` that means "the daemon would not say" -- the state where
+    guessing wrong costs a user an unnecessary dead end in one direction and a
+    silently unpatched build in the other.
+    """
+    rec = Recorder(images=images)
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    installer = AzerothCoreInstaller(ENTRY, seams=rec.seams())
+    ctx = native.StageContext(
+        server_dir=server_dir,
+        client_dir=None,
+        state=native.InstallState(
+            ENTRY.id, "abc", "azerothcore", completed=("build",) if recorded else ()
+        ),
+        cancel=None,
+        secrets=native.Secrets(db_password="pw"),
+    )
+    assert installer.build_would_be_skipped(ctx) is skipped
+    said = list(installer.stage_build(ctx))
+    compiled = "build" in rec.calls
+    assert compiled is not skipped
+    assert any("skipping the compile" in line for line in said) is skipped
 
 
 # -- _pump's abandonment (bug-checklist §21) ---------------------------------

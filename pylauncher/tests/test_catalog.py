@@ -217,6 +217,76 @@ def test_every_shipped_entry_is_installable_on_linux_and_names_its_family() -> N
         assert game.install.supports("linux") is True, game.id
 
 
+GATE_PINS = {
+    "wow-wotlk": {
+        "mod-playerbots/azerothcore-wotlk": "413bea61a85e20d9caef7d66fc601a661fdddd9d",
+        "mod-playerbots/mod-playerbots": "b949b50bfcdd4fab937781bac2d7765e39330e4b",
+    },
+    "wow-tbc": {
+        "cmangos/mangos-tbc": "f82e7d679c283b66bc2adc1b751aa1275e655673",
+        "cmangos/playerbots": "993f18091e67565986cf55c4d9b8e6eae11223f9",
+        "cmangos/tbc-db": "5078439a44d208732a903bca2d7df51941fb373a",
+    },
+    "wow-vanilla": {
+        "cmangos/mangos-classic": "8ec338a1704e7dcb1c0213eb7ed58f9231ade40f",
+        "cmangos/playerbots": "993f18091e67565986cf55c4d9b8e6eae11223f9",
+        "cmangos/classic-db": "22b51464f1625f6ef6275771de1f5466c6f5d19e",
+    },
+}
+"""The commit each shipped source was pinned to on 2026-09-05, and the gate that ran on it.
+
+Read out of the gate boxes' own checkouts (`git rev-parse HEAD` in each source's
+`dest`), never off a branch tip:
+
+* `wow-wotlk`: `/home/pk/wowserver` on `yulon-ubuntu`, the tree gate 7.1's clean
+  2026-09-04 run installed and logged into (`pyplan/gates/7.1-ubuntu-2026-09-04-clean/`;
+  its `gate71-press2.log` prints `AzerothCore revision : 413bea61a85e+` from the
+  build and names no commit for the module, so both were read off that box).
+* `wow-tbc`: `/home/pk/tbc-7.4c` on `m910q`, gate 7.4c. The Windows run of
+  2026-09-04 (`pyplan/gates/7.7-win11-tbc/source-identity.txt`) was on
+  `0d2ebc3e`, one commit ahead, and the pin is the LINUX one: 7.4c is the gate
+  with the full evidence chain (build, extract, import, boot, login) on the
+  primary platform, and that note itself establishes the one commit between
+  them touches `src/game` only, so the Windows result stands on either.
+* `wow-vanilla`: `/home/pk/vanilla-75` on `m910q`, gate 7.5; the same core
+  commit the Windows run of 2026-09-04 built (`pyplan/upstream-cmangos-doodad-drop.md`
+  §7 read `8ec338a1` out of both boxes).
+
+`wow-tortoise` is pinned by `test_tortoise_boot_facts.py`, by value, with its
+own argument. Moving any pin here means re-running that entry's gate.
+"""
+
+
+def test_every_shipped_source_is_pinned_to_a_commit() -> None:
+    """No shipped entry clones a moving tip; a fifth entry is held to it on arrival.
+
+    Until 2026-09-05 only `wow-tortoise` carried a `rev`. The other three cloned
+    whatever their branch's tip was on the day, which is how the two Vanilla
+    gate boxes came to agree on `8ec338a1` by coincidence and the two TBC boxes
+    did not (`pyplan/gates/7.7-win11-tbc/source-identity.txt`). A patch carried
+    against upstream source (`patch-sources`) cannot be tolerant of a tip that
+    moves under it, so the pins come first — `pyplan/upstream-cmangos-doodad-drop.md`
+    §10. Enumerated over the catalog rather than over `GATE_PINS`, so an entry
+    added later without a pin fails here and not on some user's install.
+    """
+    games = load_catalog().games
+    assert games
+    unpinned = [
+        f"{game.id}:{source.repo}"
+        for game in games
+        for source in game.emulator.sources
+        if not source.rev
+    ]
+    assert not unpinned, f"cloned from a moving ref: {unpinned}"
+
+
+@pytest.mark.parametrize("game_id", sorted(GATE_PINS))
+def test_the_pins_are_the_commits_the_gates_ran_on(game_id: str) -> None:
+    """By value, because any 40 hex characters satisfy the shape and the loop above."""
+    sources = load_catalog().get(game_id).emulator.sources
+    assert {s.repo: s.rev for s in sources} == GATE_PINS[game_id]
+
+
 def test_only_one_server_runs_at_a_time_is_visible_in_the_data() -> None:
     """Every v1 server publishes the same auth port, so the §12 guard will engage."""
     ports = {g.ports.auth for g in load_catalog().games}
@@ -935,3 +1005,102 @@ def test_tortoise_clones_the_submodules_its_cmake_refuses_to_build_without() -> 
         if inner.dest.startswith(f"{outer.dest}/") and i < j
     ]
     assert not cloned_before_the_tree_it_lands_in, cloned_before_the_tree_it_lands_in
+
+
+# -- source patches (pyplan/upstream-cmangos-doodad-drop.md §10) ------------------
+
+DOODAD_PATCH = "shared/cmangos/patches/vmap-extractor-doodad-name-case.patch"
+"""The one patch that ships, and which entries carry it against which checkout.
+
+`wow-tortoise` carries none, and not by oversight. Its extractor is the older
+lineage whose `wmo.cpp` runs `fixnamen()` over the whole MODN block in place
+before either the writer or the reader looks at a name (read 2026-09-05 at
+`7c0fb278`, `tools/vmap_extractor/vmapextract/wmo.cpp:98`). Reading is what
+that was, and reading is how the same conclusion was reached about
+`mangos-classic` before the extraction disproved half of it, so it was RUN:
+on m910q 2026-09-05 that extractor was built from `7c0fb278` in a container
+and run against the Turtle client (86 s, exit 0, 5,367 files in `Buildings/`),
+and `extract.doodad_placements()` over its output answers
+`DoodadCheck(extracted=4041, placed=2675, unplaced=1366, misspelt=0)` -- zero
+all-caps `.M2`, zero names with a space, and not one file spelled a way the
+placement index would not ask for. Writer and reader agree there, measured.
+
+`mangos-wotlk` is not a shipped entry (`wow-wotlk` is AzerothCore)
+and its `ExtractSingleModel` already normalises (read the same day at
+`4cea3890`), which is why the patch refuses to apply there and nothing asks it to.
+"""
+
+CARRIED = {
+    "wow-tbc": "src/mangos-tbc",
+    "wow-vanilla": "src/mangos-classic",
+    "wow-tortoise": None,
+}
+
+
+@pytest.mark.parametrize("game_id", CMANGOS_GAMES)
+def test_the_doodad_patch_is_carried_by_the_two_entries_whose_extractor_drops_placements(
+    game_id: str,
+) -> None:
+    entry = load_catalog().get(game_id)
+    assert entry.install.native is not None and entry.install.native.cmangos is not None
+    patches = entry.install.native.cmangos.patches
+    source = CARRIED[game_id]
+    if source is None:
+        assert patches == ()
+        return
+    assert [(p.file, p.source) for p in patches] == [(DOODAD_PATCH, source)]
+    assert patches[0].reason
+
+
+def test_only_the_entry_the_drop_was_measured_on_quotes_the_measured_percentage() -> None:
+    """14.8% is one number, from one client, on one box -- and it is not TBC's.
+
+    Measured on m910q 2026-09-05 against the WoW 1.12.1 client with
+    `mangos-classic` at `8ec338a1`: 429,016 placements unpatched against
+    503,782 patched. Nothing was ever extracted from a TBC client to count the
+    same thing, and `wow-tbc`'s `reason` quoted the Vanilla figure with no
+    qualifier until this test -- a sentence a user reads in the install log,
+    stating a measurement of their own world that nobody made.
+
+    What the TBC entry may say is what IS known: the two extractors' relevant
+    functions are byte-identical (`pyplan/upstream-cmangos-doodad-issue.md`),
+    so the defect is certainly there; its size is not.
+    """
+    reasons = {}
+    for game_id, source in CARRIED.items():
+        if source is None:
+            continue
+        entry = load_catalog().get(game_id)
+        assert entry.install.native is not None and entry.install.native.cmangos is not None
+        reasons[game_id] = entry.install.native.cmangos.patches[0].reason
+    assert "14.8%" in reasons["wow-vanilla"] and "Vanilla" in reasons["wow-vanilla"]
+    assert "14.8" not in reasons["wow-tbc"], reasons["wow-tbc"]
+    assert "never counted" in reasons["wow-tbc"], reasons["wow-tbc"]
+
+
+def test_every_shipped_patch_names_a_source_the_entry_clones_and_a_file_that_ships() -> None:
+    """Relationships, enumerated: a patch is a file in the tree AND a dest in the same entry."""
+    from yulon import resources
+    from yulon.catalog.families import patch
+
+    seen = 0
+    for entry in load_catalog().games:
+        block = entry.install.native.cmangos if entry.install.native is not None else None
+        if block is None:
+            continue
+        dests = {source.dest for source in entry.emulator.sources}
+        for spec in block.patches:
+            seen += 1
+            assert spec.source in dests, (entry.id, spec.source)
+            path = resources.installers_dir() / spec.file
+            assert path.is_file(), (entry.id, spec.file)
+            assert patch.parse(path.read_text(encoding="utf-8"))
+    assert seen == 2
+
+
+def test_a_patch_naming_a_source_the_entry_does_not_clone_is_refused() -> None:
+    data = json.loads(CATALOG_FILE.read_text(encoding="utf-8"))
+    tbc = next(game for game in data["games"] if game["id"] == "wow-tbc")
+    tbc["install"]["native"]["cmangos"]["patches"][0]["source"] = "src/somewhere-else"
+    with pytest.raises(ValidationError, match="src/somewhere-else"):
+        parse_catalog(data)

@@ -2261,6 +2261,42 @@ class StagedInstaller:
                 "server refuses to start under SELinux, run `chcon -Rt container_file_t` on it."
             )
 
+    def built_image_refs(self, ctx: StageContext) -> tuple[str, ...]:
+        """The image references this install's build produces, fully qualified.
+
+        Split out of `built_images()` on 2026-09-05 so that a refusal telling a
+        user to REMOVE those images names the same strings the skip decision was
+        made of. Two callers each spelling `composegen.built_image_refs(...)`
+        would be two chances to name an image this install does not have, and a
+        `docker image rm` on the wrong tag either does nothing or removes
+        somebody else's build -- neither of which says which happened.
+        """
+        return composegen.built_image_refs(
+            self.entry, ctx.server_dir, platform_id=self._seams.platform_id
+        )
+
+    def built_images(self, ctx: StageContext) -> bool | None:
+        """Does the daemon hold every image this install's build produces?
+
+        `None` is "the daemon would not say", which is not "no".
+        """
+        return self._seams.images_built(self.built_image_refs(ctx))
+
+    def build_would_be_skipped(self, ctx: StageContext) -> bool:
+        """Will `stage_build` skip the compile on this press?
+
+        The record AND the images, which is `stage_build`'s own rule, kept in
+        one place so an earlier stage can ask the same question and cannot
+        drift from the answer the build itself will give. `None` -- a daemon
+        that would not say -- is False here for the same reason it is a rebuild
+        there: not knowing is not a reason to believe.
+
+        Asked one stage earlier by `CmangosInstaller._patch_sources()`, which
+        refuses to edit a source tree whose compiled form this press is not
+        going to rebuild.
+        """
+        return ctx.state.has("build") and self.built_images(ctx) is True
+
     def stage_build(self, ctx: StageContext) -> Iterator[str]:
         """Compile the server. Hours, and the one stage whose output is worth watching.
 
@@ -2279,11 +2315,7 @@ class StagedInstaller:
         The `BUILD_CANCEL_NOTE` this stage used to yield is gone from the body:
         the spine says a stage's cancel note right after `--- <name>` (A4).
         """
-        built = self._seams.images_built(
-            composegen.built_image_refs(
-                self.entry, ctx.server_dir, platform_id=self._seams.platform_id
-            )
-        )
+        built = self.built_images(ctx)
         if ctx.state.has("build") and built:
             yield "The server is already built; skipping the compile."
             return

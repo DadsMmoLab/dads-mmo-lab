@@ -549,6 +549,45 @@ class SqlPlan(_Strict):
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
+class SourcePatch(_Strict):
+    """One unified diff applied to one cloned source after `clone-sources` (`patch-sources`).
+
+    Data, because which tree carries which defect is a fact about a pinned
+    commit and not about the family: `wow-tbc` and `wow-vanilla` carry the
+    doodad-name patch and `wow-tortoise` does not, and the file, the checkout
+    it edits and the reason all belong beside the pin they were measured
+    against. The apply itself is tolerant and platform-neutral —
+    `families/patch.py` says how — and a `rev` on the source is what makes a
+    patch against it a promise rather than a race with upstream's next commit.
+    """
+
+    file: str = Field(
+        min_length=1,
+        description="The patch, relative to catalog/installers/ (like `templates`).",
+    )
+    source: str = Field(
+        min_length=1,
+        description=(
+            "The `dest` of the emulator source this patch is applied inside; must name one of "
+            "the entry's own `emulator.sources`, which `CatalogEntry` checks."
+        ),
+    )
+    reason: str = Field(
+        min_length=1,
+        description="One sentence the install log says when the patch is applied: what it fixes.",
+    )
+
+    @field_validator("file")
+    @classmethod
+    def _file_stays_inside_installers(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if "\\" in value or path.is_absolute() or ".." in path.parts:
+            raise ValueError(
+                f"file must be a relative POSIX path under catalog/installers/, got {value!r}"
+            )
+        return value
+
+
 class CmangosData(_Strict):
     """Everything the CMaNGOS family needs that differs per game (roadmap 7.3)."""
 
@@ -558,6 +597,13 @@ class CmangosData(_Strict):
     mmaps: MmapPlan
     conf: ConfPatchTable
     sql: SqlPlan
+    patches: tuple[SourcePatch, ...] = Field(
+        default=(),
+        description=(
+            "Source patches applied after the clone, in order. Empty for an entry whose pinned "
+            "trees carry no known defect this project works around (2026-09-05: Tortoise)."
+        ),
+    )
 
 
 class NativeInstall(_Strict):
@@ -967,6 +1013,28 @@ class CatalogEntry(_Strict):
     has_manifests: bool = Field(
         default=False, description="Whether manifests/<id>/ exists for module management."
     )
+
+    @model_validator(mode="after")
+    def _every_patch_names_a_source_this_entry_clones(self) -> CatalogEntry:
+        """A `SourcePatch.source` is a `dest` in `emulator.sources`, and the two live apart.
+
+        The relationship has no owner otherwise: `SourcePatch` cannot see the
+        sources and `Emulator` knows nothing of patches, so a typo in one would
+        be an install that clones everything and then refuses at `patch-sources`
+        with "no such file" over a folder that was never meant to exist.
+        """
+        native = self.install.native
+        block = native.cmangos if native is not None else None
+        if block is None:
+            return self
+        dests = {source.dest for source in self.emulator.sources}
+        for spec in block.patches:
+            if spec.source not in dests:
+                raise ValueError(
+                    f"patch {spec.file!r} applies inside {spec.source!r}, which is not a dest "
+                    f"of any of this entry's sources {sorted(dests)}"
+                )
+        return self
 
     def schema_map(self) -> dict[Db, str]:
         """This game's `manifest db key → schema name` map (see `Databases.schema_map`)."""

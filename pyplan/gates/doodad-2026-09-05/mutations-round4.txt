@@ -1,0 +1,109 @@
+
+=== M1 the run_plan guard removed
+    yulon/catalog/families/extract.py  anchor occurrences = 1
+      md5 78b1aeda3de3cfeb35279264f1ca656c -> caeb3606c91a60249b2ce4633c94711e  (on disk)
+    RED = 5
+      FAILED tests/test_extract.py::test_evidence_for_another_client_forces_a_full_re_extract
+      FAILED tests/test_extract.py::test_an_edited_plan_forces_a_full_re_extract_too
+      FAILED tests/test_extract.py::test_deleting_the_evidence_file_of_a_finished_data_folder_names_the_folder_to_delete
+      FAILED tests/test_extract.py::test_a_cancel_keeps_finished_tools_and_says_so
+      FAILED tests/test_extract.py::test_a_re_extract_for_another_client_drops_the_mmaps_record_and_one_tool_re_running_does_not
+      5 failed, 291 passed in 8.13s
+    restored
+
+=== M2 the remedy names the evidence file only
+    yulon/catalog/families/cmangos.py  anchor occurrences = 1
+      md5 727ba72c4b053473383c028635e55111 -> 6ea22f7e639d8526583834cb1a87a558  (on disk)
+    RED = 2
+      FAILED tests/test_families_cmangos.py::test_the_remedy_the_refusal_names_gets_the_fix_in_and_keeps_the_database
+      FAILED tests/test_families_cmangos.py::test_the_remedy_names_the_buildings_folder_only_when_it_is_there_to_block_the_re_extract
+      2 failed, 294 passed in 7.96s
+    restored
+
+=== M3 blocking_output keyed on the folder alone, not the binary
+    yulon/catalog/families/extract.py  anchor occurrences = 1
+      md5 78b1aeda3de3cfeb35279264f1ca656c -> 8c8aa7ad0da6f5b19f06008c478571e4  (on disk)
+    RED = 1
+      FAILED tests/test_extract.py::test_only_the_binary_the_check_was_read_out_of_is_stopped_by_an_old_buildings_folder
+      1 failed, 295 passed in 8.25s
+    restored
+
+=== M4 the Recorder double stops writing dir/dir_bin
+    tests/support_native.py  anchor occurrences = 1
+      md5 14143b07d6387366f1c4734fdb63402a -> a9fdb7eb420f5900fa4df16bf3271588  (on disk)
+    RED = 2
+      FAILED tests/test_families_cmangos.py::test_the_remedy_the_refusal_names_gets_the_fix_in_and_keeps_the_database
+      FAILED tests/test_families_cmangos.py::test_the_remedy_names_the_buildings_folder_only_when_it_is_there_to_block_the_re_extract
+      2 failed, 294 passed in 7.64s
+    restored
+
+=== M5 the test_extract Runner stops naming its output dir/dir_bin
+    tests/test_extract.py  anchor occurrences = 1
+      md5 a68f92cf468200d49c682c7541c14bb4 -> 5c17a24f4e7b9027fe182a3e26754d67  (on disk)
+    RED = 7
+      FAILED tests/test_extract.py::test_evidence_for_another_client_forces_a_full_re_extract
+      FAILED tests/test_extract.py::test_an_edited_plan_forces_a_full_re_extract_too
+      FAILED tests/test_extract.py::test_deleting_the_evidence_file_of_a_finished_data_folder_names_the_folder_to_delete
+      FAILED tests/test_extract.py::test_the_only_folder_a_second_extraction_has_to_be_given_is_buildings
+      FAILED tests/test_extract.py::test_a_cancel_keeps_finished_tools_and_says_so
+      FAILED tests/test_extract.py::test_when_the_assembler_crashed_the_extractor_is_left_exactly_as_it_was
+      FAILED tests/test_extract.py::test_a_re_extract_for_another_client_drops_the_mmaps_record_and_one_tool_re_running_does_not
+      7 failed, 289 passed in 8.14s
+    restored
+
+=== M6 the test_extract Runner stops refusing a polluted folder
+    tests/test_extract.py  anchor occurrences = 1
+      md5 a68f92cf468200d49c682c7541c14bb4 -> 1cc602810af1aa5c0408f5ea72a592fc  (on disk)
+    RED = 0
+      296 passed in 7.87s
+    restored
+
+=== M10 the refusal lists both markers instead of the ones on disk
+    yulon/catalog/families/extract.py  anchor occurrences = 1
+      md5 78b1aeda3de3cfeb35279264f1ca656c -> 4e0713ef85e2f323f316760bc78ee598  (on disk)
+    RED = 1
+      FAILED tests/test_extract.py::test_the_refusal_names_the_marker_that_is_actually_on_the_disk
+      1 failed, 295 passed in 7.97s
+    restored
+
+=== M1+M6 the guard AND the double's refusal both gone
+    yulon/catalog/families/extract.py  anchor occurrences = 1
+      md5 78b1aeda3de3cfeb35279264f1ca656c -> caeb3606c91a60249b2ce4633c94711e  (on disk)
+    tests/test_extract.py  anchor occurrences = 1
+      md5 a68f92cf468200d49c682c7541c14bb4 -> 1cc602810af1aa5c0408f5ea72a592fc  (on disk)
+    RED = 5
+      FAILED tests/test_extract.py::test_evidence_for_another_client_forces_a_full_re_extract
+      FAILED tests/test_extract.py::test_an_edited_plan_forces_a_full_re_extract_too
+      FAILED tests/test_extract.py::test_deleting_the_evidence_file_of_a_finished_data_folder_names_the_folder_to_delete
+      FAILED tests/test_extract.py::test_a_cancel_keeps_finished_tools_and_says_so
+      FAILED tests/test_extract.py::test_a_re_extract_for_another_client_drops_the_mmaps_record_and_one_tool_re_running_does_not
+      5 failed, 291 passed in 8.05s
+    restored
+
+=== M7 the retry pass stops emptying (the double still refuses)
+    yulon/catalog/families/extract.py  anchor occurrences = 1
+      md5 78b1aeda3de3cfeb35279264f1ca656c -> 6034889725cda05dea361954dc3784b3  (on disk)
+    RED = 7
+      FAILED tests/test_extract.py::test_a_matching_crash_re_runs_the_named_tools_once_and_continues
+      FAILED tests/test_extract.py::test_the_retried_containers_are_built_the_same_way_as_the_first_attempt
+      FAILED tests/test_extract.py::test_the_retry_walks_each_output_folder_once_and_never_the_crashed_attempt
+      FAILED tests/test_extract.py::test_the_retry_empties_the_folder_it_is_about_to_regenerate_and_says_so_first
+      FAILED tests/test_extract.py::test_when_the_assembler_crashed_the_extractor_is_left_exactly_as_it_was
+      FAILED tests/test_extract.py::test_a_folder_that_will_not_empty_refuses_and_the_tool_is_never_re_run
+      FAILED tests/test_extract.py::test_a_retried_tool_the_main_loop_never_reached_still_gets_its_output_folder
+      7 failed, 289 passed in 8.29s
+    restored
+
+=== M7+M6 the retry stops emptying AND the double stops refusing
+    yulon/catalog/families/extract.py  anchor occurrences = 1
+      md5 78b1aeda3de3cfeb35279264f1ca656c -> 6034889725cda05dea361954dc3784b3  (on disk)
+    tests/test_extract.py  anchor occurrences = 1
+      md5 a68f92cf468200d49c682c7541c14bb4 -> 1cc602810af1aa5c0408f5ea72a592fc  (on disk)
+    RED = 3
+      FAILED tests/test_extract.py::test_the_retry_empties_the_folder_it_is_about_to_regenerate_and_says_so_first
+      FAILED tests/test_extract.py::test_when_the_assembler_crashed_the_extractor_is_left_exactly_as_it_was
+      FAILED tests/test_extract.py::test_a_folder_that_will_not_empty_refuses_and_the_tool_is_never_re_run
+      3 failed, 293 passed in 7.99s
+    restored
+
+=== control after every restore: 296 passed in 7.86s

@@ -1,0 +1,96 @@
+round-5 mutations, doodad lane -- yulon-fedora, 2026-09-05
+Run copy ~/yulon-runs/fix9-doodad (git clone --shared ~/dads-mmo-lab, venv symlinked to
+~/dads-mmo-lab/pylauncher/.venv, Python 3.13.15), holding the lane tree byte-for-byte:
+the three baseline md5s below are the same three the laptop worktree prints.
+
+Scored on the GATE's suite -- `-m 'not integration'`, the set run-tests-vm.sh --checks runs
+-- and NOT on the whole suite (which also runs the 23 deselected integration tests) or on the
+two test files alone. The two-file baseline is printed once for reference only; every
+mutation line below is the gate's set.
+
+Rules, applied by mutations-round5.py and visible in its source: each anchor asserted to
+occur EXACTLY once before it is substituted, the substitution md5-checked on disk, every
+__pycache__ under the run copy purged before AND after each pytest, the file restored from
+its original bytes and its md5 re-checked. Nothing survived.
+
+What M9 is for: it is M1 (the guard keyed on `dir`, the marker nothing writes) with both
+doubles put back to writing `dir` -- the round-8 shape. M1 alone is 10 RED; M9 is 4, and the
+six that go quiet are exactly the tests that drive the guard through run_plan() over a
+Buildings/ in the shape the world's are in. The four that stay are this pass's own
+assertions about what the doubles write. The fabrication was hiding six of the ten.
+
+BASELINE md5: {'extract.py': '6b7a9c5602f656c9cd9e545e30545059', 'test_extract.py': 'abd6016032a1a991596d8739066ac386', 'support_native.py': '452b05ac8480ffe87c09ef322ad93e0e'}
+BASELINE gate suite: 2757 passed, 4 skipped, 23 deselected in 77.24s (0:01:17)
+BASELINE two files: 297 passed in 8.96s
+
+=== M1: blocking_output keyed on DIR_INDEX alone -- the marker nothing writes
+    md5 after: {'extract.py': 'b76800017ce702acf00163f9a2374f69'}
+    10 failed, 2747 passed, 4 skipped, 23 deselected in 77.76s (0:01:17)
+    RED: tests/test_extract.py::test_a_cancel_keeps_finished_tools_and_says_so
+         tests/test_extract.py::test_a_re_extract_for_another_client_drops_the_mmaps_record_and_one_tool_re_running_does_not
+         tests/test_extract.py::test_a_refused_press_really_ran_nothing_and_changed_nothing_as_its_sentence_says
+         tests/test_extract.py::test_an_edited_plan_forces_a_full_re_extract_too
+         tests/test_extract.py::test_deleting_the_evidence_file_of_a_finished_data_folder_names_the_folder_to_delete
+         tests/test_extract.py::test_evidence_for_another_client_forces_a_full_re_extract
+         tests/test_extract.py::test_the_only_folder_a_second_extraction_has_to_be_given_is_buildings
+         tests/test_extract.py::test_the_refusal_names_the_marker_that_is_actually_on_the_disk
+         tests/test_families_cmangos.py::test_the_remedy_names_the_buildings_folder_only_when_it_is_there_to_block_the_re_extract
+         tests/test_families_cmangos.py::test_the_remedy_the_refusal_names_gets_the_fix_in_and_keeps_the_database
+    restored, md5 re-checked OK
+
+=== M2: the guard put back inside run_plan's per-tool loop (un-hoisted)
+    md5 after: {'extract.py': 'ef63a91fbd6af6c79c692864a4ce828d'}
+    4 failed, 2753 passed, 4 skipped, 23 deselected in 77.66s (0:01:17)
+    RED: tests/test_extract.py::test_a_refused_press_really_ran_nothing_and_changed_nothing_as_its_sentence_says
+         tests/test_extract.py::test_an_edited_plan_forces_a_full_re_extract_too
+         tests/test_extract.py::test_deleting_the_evidence_file_of_a_finished_data_folder_names_the_folder_to_delete
+         tests/test_extract.py::test_evidence_for_another_client_forces_a_full_re_extract
+    restored, md5 re-checked OK
+
+=== M3: "Nothing was run and nothing was changed. " deleted from the refusal
+    md5 after: {'extract.py': '01e7ca049a4bfa9bd76794fc4f39731c'}
+    1 failed, 2756 passed, 4 skipped, 23 deselected in 77.40s (0:01:17)
+    RED: tests/test_extract.py::test_a_refused_press_really_ran_nothing_and_changed_nothing_as_its_sentence_says
+    restored, md5 re-checked OK
+
+=== M4: blocked_message lists both markers instead of the ones on disk
+    md5 after: {'extract.py': 'c97bc473fbd28424f50f92615e359a5c'}
+    1 failed, 2756 passed, 4 skipped, 23 deselected in 77.29s (0:01:17)
+    RED: tests/test_extract.py::test_the_refusal_names_the_marker_that_is_actually_on_the_disk
+    restored, md5 re-checked OK
+
+=== M5: the test_extract Runner writes `dir` again (the round-8 fabrication)
+    md5 after: {'test_extract.py': '3d0e19c3393da5d13055900e71879329'}
+    2 failed, 2755 passed, 4 skipped, 23 deselected in 76.93s (0:01:16)
+    RED: tests/test_extract.py::test_deleting_the_evidence_file_of_a_finished_data_folder_names_the_folder_to_delete
+         tests/test_extract.py::test_the_only_folder_a_second_extraction_has_to_be_given_is_buildings
+    restored, md5 re-checked OK
+
+=== M6: the test_extract Runner stops writing temp_gameobject_models
+    md5 after: {'test_extract.py': 'de24253a6b7b215aecb7b0495e840713'}
+    1 failed, 2756 passed, 4 skipped, 23 deselected in 77.34s (0:01:17)
+    RED: tests/test_extract.py::test_deleting_the_evidence_file_of_a_finished_data_folder_names_the_folder_to_delete
+    restored, md5 re-checked OK
+
+=== M7: support_native's Recorder writes `dir` again
+    md5 after: {'support_native.py': '47883add6058d4412218ef247cf5a48d'}
+    1 failed, 2756 passed, 4 skipped, 23 deselected in 76.93s (0:01:16)
+    RED: tests/test_families_cmangos.py::test_the_remedy_the_refusal_names_gets_the_fix_in_and_keeps_the_database
+    restored, md5 re-checked OK
+
+=== M8: support_native's Recorder stops writing temp_gameobject_models
+    md5 after: {'support_native.py': 'c202cb67a8cfcb9bb76f7e28b4d71737'}
+    1 failed, 2756 passed, 4 skipped, 23 deselected in 77.52s (0:01:17)
+    RED: tests/test_families_cmangos.py::test_the_remedy_the_refusal_names_gets_the_fix_in_and_keeps_the_database
+    restored, md5 re-checked OK
+
+=== M9: M1 + both doubles writing `dir` again: the round-8 tree's blind spot
+    md5 after: {'extract.py': 'b76800017ce702acf00163f9a2374f69', 'test_extract.py': '3d0e19c3393da5d13055900e71879329', 'support_native.py': '47883add6058d4412218ef247cf5a48d'}
+    4 failed, 2753 passed, 4 skipped, 23 deselected in 77.29s (0:01:17)
+    RED: tests/test_extract.py::test_deleting_the_evidence_file_of_a_finished_data_folder_names_the_folder_to_delete
+         tests/test_extract.py::test_the_only_folder_a_second_extraction_has_to_be_given_is_buildings
+         tests/test_extract.py::test_the_refusal_names_the_marker_that_is_actually_on_the_disk
+         tests/test_families_cmangos.py::test_the_remedy_the_refusal_names_gets_the_fix_in_and_keeps_the_database
+    restored, md5 re-checked OK
+
+FINAL gate suite: 2757 passed, 4 skipped, 23 deselected in 76.85s (0:01:16)

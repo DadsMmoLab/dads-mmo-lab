@@ -25,8 +25,12 @@ says run.
 a file and not the state file: a state file must never be the thing that
 claims a secret exists.
 
-`STAGE_NAMES` and `stages()` name the same twelve stages in the same order as
-of K.7, which bound `import` — the last one outstanding. They were allowed to
+`STAGE_NAMES` and `stages()` name the same stages in the same order — twelve
+as of K.7, which bound `import`, the last one then outstanding; thirteen since
+2026-09-05, when `patch-sources` went in after `clone-sources` to carry the
+`vmap_extractor` fix `pyplan/upstream-cmangos-doodad-drop.md` §10 argued for
+(the stage kind is `families/patch.py`; the data is `CmangosData.patches`).
+They were allowed to
 disagree while the family was being built, because nothing in the app reads
 `STAGE_NAMES` — `stage_names()`, derived from `stages()`, is what the spine
 validates a resume against — and because this class was not in `FAMILIES` until
@@ -39,7 +43,7 @@ DIRECTIONS are held by different ones. Measured 2026-09-02 at `f6ed1b9a`, whole
 suite each time against a 1974-passed/3-skipped baseline, by deleting `import`
 from each side in turn. Take the `Stage` out of `stages()` and FIVE fail:
 `test_the_bound_stages_run_in_order_and_record_the_recorded_ones`, which
-restates all twelve `--- <name>` lines one whole install said,
+restates every `--- <name>` line one whole install said,
 `test_the_import_cancel_note_is_said_at_the_import_and_nowhere_else`,
 `test_import_is_recorded_and_sits_between_start_db_and_up`, and the two
 equality tests below. Take the name out of `STAGE_NAMES` and FOUR fail:
@@ -62,15 +66,15 @@ from __future__ import annotations
 import os
 import queue
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import ClassVar, cast
 
 from yulon import docker, platform
 from yulon.catalog import composegen
-from yulon.catalog.catalog import CmangosData, NativeInstall
-from yulon.catalog.families import conf, dockerfile, extract, sqlplan
+from yulon.catalog.catalog import CmangosData, NativeInstall, SourcePatch
+from yulon.catalog.families import conf, dockerfile, extract, patch, sqlplan
 from yulon.catalog.installer import InstallerError
 from yulon.catalog.native import (
     BUILD_CANCEL_NOTE,
@@ -126,6 +130,18 @@ found nothing to fix there.
 Deliberately a second CONSTANT rather than a second wording spelled inline: one
 sentence written out twice is exactly the drift `CATALOG_ERROR_TAIL` exists to
 have stopped.
+"""
+
+REBUILD_ACTION = "Stop and remove containers…"
+"""The Server tab's own label for the action `_patch_sources()`'s refusal names.
+
+Spelled here rather than imported from `yulon.ui.controller_view`: a family
+engine must not depend on a widget module, and this file is imported by the
+headless install path. So it is a COPY, and a copy of a label is a copy that
+can go stale --
+`test_the_refusal_names_an_action_the_server_tab_actually_offers` asserts the
+two are the same string, which is the only thing that makes naming a button in
+a sentence safe.
 """
 
 DATA_DIR = "data"
@@ -199,6 +215,7 @@ class CmangosInstaller(StagedInstaller):
     family = "cmangos"
     STAGE_NAMES: ClassVar[tuple[str, ...]] = (
         "clone-sources",
+        "patch-sources",
         "db-password",
         "write-dockerfile",
         "generate-compose",
@@ -216,6 +233,7 @@ class CmangosInstaller(StagedInstaller):
         """The family's stage tuple, in `STAGE_NAMES` order."""
         return (
             Stage("clone-sources", self._clone_sources),
+            Stage("patch-sources", self._patch_sources),
             Stage("db-password", self._db_password, recorded=False),
             Stage("write-dockerfile", self._write_dockerfile),
             Stage("generate-compose", self.stage_generate_compose),
@@ -241,6 +259,304 @@ class CmangosInstaller(StagedInstaller):
         """
         yield from self.stage_clone_sources(
             ctx, self.entry.emulator.sources, recorded_as="clone-sources"
+        )
+
+    def _patch_sources(self, ctx: StageContext) -> Iterator[str]:
+        """Apply every `SourcePatch` the entry carries to the checkout it names; say what happened.
+
+        The stage `pyplan/upstream-cmangos-doodad-drop.md` §10 asked for, in
+        the shape it asked for: a new stage after `clone-sources` rather than a
+        step inside its loop (that loop's one job is "clone what the manifest
+        names"), a patch file committed as data beside the family's templates,
+        a record in the state file, and a TOLERANT apply — `patch.apply()`
+        skips a hunk whose fix is already present and refuses, naming the file
+        and the line, when upstream has moved under it. The pins on
+        `Source.rev` came first (`test_catalog.py`, `GATE_PINS`), because a
+        patch against a moving tip breaks the day upstream touches those lines,
+        including the day they fix the defect themselves.
+
+        **The record is not what skips this stage.** A resume carrying
+        `patch-sources` in `completed` reaches this body exactly like a first
+        run — the same rule
+        `_write_dockerfile` and `_conf` are written against, and here for a
+        sharper reason: `clone-sources` re-clones a checkout that was DELETED
+        on the strength of its own disk evidence (`already_cloned()`'s
+        `remote is None` case) while this stage's record survives, so a body
+        that trusted the record would leave a fresh clone unpatched under a
+        state file saying otherwise. The file is the evidence; a second press
+        reads "already carries" off the bytes, and costs one read per file.
+
+        `ctx.state` IS read here, but never to skip: the `build` record is half
+        of `_refuse_to_patch_what_will_not_be_rebuilt()`'s question, and that
+        method stops the press rather than passing over it. Until 2026-09-05
+        this paragraph said "`ctx.state` is not read here at all", which was
+        true and was also the reason the stage could patch a source tree whose
+        build the same press was about to skip.
+
+        What the record buys instead is the `Already finished:` line and the
+        progress count, and the refusal's position: a refusal here raises
+        before `db-password`, so no secret is minted for an install that is
+        about to stop, and before `write-dockerfile`, so no build context
+        exists for a tree that is not the one the patch was measured against.
+
+        Three refusals, three shapes, and none of them shares a tail with
+        another. A patch file the catalog names and the tree does not ship is a
+        catalog error (`CATALOG_ERROR_TAIL`, raised in `_patch_text()`); a
+        patch that does not apply is `patch.PatchError`'s own sentence, which
+        already names the file and the line and says nothing was changed — a
+        class name in front of it would be noise, as `_write_dockerfile` says
+        of `DockerfileError`; and a checkout whose build this press would skip
+        is `_refuse_to_patch_what_will_not_be_rebuilt()`, whose sentence ends
+        in the two things to do about it. None is a catalog error and none is
+        an app bug, so none takes a shared tail.
+        """
+        data = self._data()
+        if not data.patches:
+            yield "This server carries no source patches."
+            return
+        loaded = [(spec, self._patch_text(spec)) for spec in data.patches]
+        self._refuse_to_patch_what_will_not_be_rebuilt(ctx, loaded)
+        for spec, text in loaded:
+            root = ctx.server_dir / spec.source
+            yield f"Applying {spec.file} inside {spec.source}: {spec.reason}"
+            results = self._resolve(spec, text, root)
+            for result in results:
+                if result.applied and result.present:
+                    yield (
+                        f"Patched {result.path} ({result.applied} of "
+                        f"{result.applied + result.present} hunks; the rest were already there)."
+                    )
+                elif result.applied:
+                    yield f"Patched {result.path}."
+                else:
+                    yield f"{result.path} already carries the fix in {spec.file}; leaving it."
+        yield "Source patches are in place."
+
+    def _patch_text(self, spec: SourcePatch) -> str:
+        """The patch file's bytes, or the catalog refusal for one this build does not ship."""
+        path = self.installers_root / spec.file
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise InstallerError(
+                f"{self.entry.name}'s catalog names a source patch {spec.file} that this "
+                f"build does not ship ({exc}). {CATALOG_ERROR_TAIL}"
+            ) from exc
+
+    def _resolve(
+        self, spec: SourcePatch, text: str, root: Path, *, dry_run: bool = False
+    ) -> tuple[patch.FileResult, ...]:
+        """`patch.apply()` with this module's refusal wrapping, dry or wet.
+
+        `patch.PatchError`'s own sentence already names the file and the line
+        and says nothing was changed, so a class name in front of it would be
+        noise, as `_write_dockerfile` says of `DockerfileError`.
+        """
+        try:
+            return patch.apply(text, root, name=spec.file, dry_run=dry_run)
+        except patch.PatchError as exc:
+            raise InstallerError(str(exc)) from exc
+
+    def _refuse_to_patch_what_will_not_be_rebuilt(
+        self, ctx: StageContext, loaded: Sequence[tuple[SourcePatch, str]]
+    ) -> None:
+        """Refuse to edit a source tree whose compiled form this press is going to skip.
+
+        **The case.** Every CMaNGOS install made before this stage existed
+        records twelve stages and not `patch-sources`. Read on m910q
+        2026-09-05: `~/tbc-7.4c` and `~/vanilla-75b` both hold exactly
+        `clone-sources, write-dockerfile, generate-compose, build, extract,
+        mmaps, conf, import`, and both have a `data/.yulon-extract.json`
+        vouching for all four extraction tools. So on the first press after
+        this stage ships, `patch-sources` is the ONE stage such a folder has
+        never run. Driven the same day against a state file in that shape: the
+        press said `Patched contrib/vmap_extractor/vmapextract/...` four times,
+        then `The server is already built; skipping the compile.`, and finished
+        with "is installed and running". The source tree carried the fix; the
+        image compiled from it did not; the vmaps were still short their 14.8%.
+        Nothing in those forty lines said so.
+
+        **Why a refusal and not an invalidation.** The other repair -- drop
+        `build` from the record and delete the extraction evidence, so the
+        press rebuilds and re-extracts -- makes the press correct and makes it
+        catastrophic. It turns a resume into a multi-hour recompile nobody
+        asked for, and the re-extraction rewrites `data/` underneath a server
+        that may be running out of it. This lane already made that trade once,
+        in the other direction: `DoodadCheck` warns and never refuses, because
+        "a refusal would take a working server away over a defect only a
+        rebuild mends". Refusing HERE takes nothing away. It stops a press that
+        was going to achieve nothing, changes not one byte on disk, and leaves
+        Start, Stop, Repair and the running server exactly as they were --
+        those are separate actions and none of them comes through this method.
+
+        **What it costs, stated plainly.** The install button stops working for
+        that folder until the user acts on the sentence. That is the price, and
+        it is the right one: the press it refuses is a press whose only effect
+        would have been to write a lie into the source tree.
+
+        **Narrow on purpose, in three ways.** It fires only when the patch
+        would actually change a file -- an already-patched checkout, which is
+        every ordinary second press of an install made by THIS build, resolves
+        to "already carries" and never reaches the refusal. It fires only when
+        `build_would_be_skipped()` -- the spine's own name for `stage_build`'s
+        skip rule, record AND images -- says the compile is not going to
+        happen; a recorded build whose images the user has deleted, and a
+        daemon that will not answer, both rebuild, and a rebuild picks the
+        patch up. And it runs before anything is written: the dry resolution
+        touches no file, and this method is called before the first `apply()`.
+
+        **The remedy, and the one it replaced.** Until the review of
+        2026-09-05 this sentence ended "use “Stop and remove containers…” on
+        the Server tab, delete {server_dir}, and install it again", and that
+        sequence is a loop that ends in lost characters. Driven twice around
+        its own instructions on m910q that day (`CmangosInstaller.run()`, a
+        state file in the `~/tbc-7.4c` shape): press 1 refused; the remedy
+        removed the containers, which by `docker.remove_staged()`'s design
+        passes no `-v` and keeps the database volume, and deleted the folder --
+        taking `.db_password`, which lives inside it, with it; `install_id()`
+        is a digest of the ABSOLUTE path, so the reinstall came back to the
+        same volume name (ffb3ef7e before and after the `rmtree`) and press 2
+        stopped at `_db_password` with "that database cannot be opened again:
+        `docker volume rm ...` deletes it, and every character in it". That
+        method's own docstring had already refused to send anyone down this
+        road: "nothing in this app deletes a named volume, and sending the user
+        there would send them round a loop that ends at this same message".
+
+        What is named instead takes away the two pieces of evidence that make
+        this press skip, and the one folder the re-extraction cannot start
+        into. The IMAGE (`built_image_refs()`, the same strings
+        `built_images()` asked the daemon about, so the command cannot name a
+        tag this install does not have) turns `build_would_be_skipped()` False,
+        so the compile runs and picks the patch up. `data/.yulon-extract.json`
+        is what makes the fix visible, because `extract.run_plan()` skips a
+        tool that has a record and `run_mmaps()` reads its record out of that
+        same file, so deleting it re-runs the extraction and the movement maps
+        built from it. The install folder, `.db_password` and the database
+        volume are all left alone, and `stage_import()` leaves an
+        already-imported database alone, so the characters survive.
+
+        **The third thing, and the review that put it here.** Until the review
+        of 2026-09-05 this docstring claimed the deletion re-ran the extraction
+        with "`empty_out_dirs()` clears each `produces` folder first". That was
+        false, and reading it was cheaper than measuring it: `empty_out_dirs()`
+        has ONE call site in the package, in `run_plan()`'s retry pass, and its
+        own docstring says "The retry path only, never a first run". The
+        ordinary loop only ever called `make_out_dirs()`, which creates.
+        Measured on m910q 2026-09-05, driving the real `run_plan()` over a
+        `data/` in the `~/tbc-7.4c` shape with the evidence file deleted: `ad`
+        finished, `vmap_extractor` exited 1 saying "Your output directory seems
+        to be polluted, please use an empty directory!", the re-created
+        evidence recorded `dbc and maps` alone, and press 3 died identically --
+        so following the sentence bought a recompile and a wedged install. The
+        remedy now names `data/Buildings` alongside the evidence file, from
+        `extract.clear_before_rerun()` rather than as a literal, so a `data/`
+        with nothing blocking is not told to delete a folder that is not there;
+        `run_plan()` refuses with the folder named if anyone arrives in that
+        state by another road. The other three folders are NOT named, and that
+        is a reading of the pinned sources rather than a hope: none of `ad`,
+        `vmap_assembler` and `MoveMapGen` refuses a non-empty output folder.
+        `ad` and `vmap_assembler` also overwrite what they write, through
+        `fopen(.., "wb")` (`ad`'s one output-path `FileExists()` is on
+        `Cameras/`, and it skips past a camera file already there);
+        `MoveMapGen` does NOT -- `MapBuilder::shouldSkipTile`
+        keeps an existing `.mmtile` whose magic and versions match and rebuilds
+        the rest -- and it does not need to, because the mmaps stage wipes
+        `mmaps/` itself when no finished record vouches for it. "No refusal"
+        and "overwrites" are separate claims and only the first is what this
+        paragraph rests on; until the sixth pass this sentence asserted the
+        first of the two of all three (`extract.DIRTY_MARKERS` records where
+        each was read).
+
+        The price is stated rather than hidden, and it is smaller than the
+        price the old sentence hid: hours of compiling and extracting, against
+        a reinstall that loses the world.
+
+        **What it does not cover, said rather than implied.** A press that
+        DOES rebuild -- because the user removed the image and not the
+        evidence, or because Docker would not answer -- still skips the
+        extraction. That case is audible rather than silent: `_extract()` runs
+        `DoodadCheck` on every press, and stale `Buildings/` is exactly what
+        its warning is for.
+        """
+        if not self.build_would_be_skipped(ctx):
+            return
+        stale = [
+            spec
+            for spec, text in loaded
+            if any(
+                result.applied
+                for result in self._resolve(spec, text, ctx.server_dir / spec.source, dry_run=True)
+            )
+        ]
+        if not stale:
+            return
+        named = ", ".join(spec.file for spec in stale)
+        images = " ".join(self.built_image_refs(ctx))
+        data_dir = ctx.server_dir / DATA_DIR
+        evidence = data_dir / extract.EVIDENCE_FILE
+        # The plain path, not `_data_dir()`: that one refuses a `data/` that
+        # resolves elsewhere, and a refusal about patches is the wrong place to
+        # raise a different one.
+        blocking = extract.clear_before_rerun(self._data().extract, data_dir)
+        doomed = " and ".join(str(path) for path in (evidence, *blocking))
+        why = (
+            (
+                f" {' and '.join(str(path) for path in blocking)} goes with it because the "
+                f"extractor refuses to start into a folder that already holds "
+                f"{' or '.join(extract.DIRTY_MARKERS)}; a press that leaves it there stops "
+                f"there instead. {extract.DIRTY_OUTPUT_NOTE}"
+            )
+            if blocking
+            else ""
+        )
+        raise InstallerError(
+            f"{self.entry.name} in {ctx.server_dir} was built before this app carried "
+            f"{named}, and this press would skip the compile: the build is recorded and its "
+            "images are still here. Patching the source now would leave the checkout holding "
+            "a fix that the built server does not have and cannot get, because the extractor "
+            "runs from the image and the maps it already wrote would not be rebuilt either. "
+            "Nothing was changed, and the server you have goes on working exactly as it did. "
+            f"To get the fix, keep this folder and take away what this press would skip: "
+            f"use “{REBUILD_ACTION}” on the Server tab, then `docker image rm {images}` "
+            f"and delete {doomed}, then install again into the same folder with the same "
+            "client. That recompiles the server and extracts the maps a second time, which "
+            "takes hours, and it leaves the install folder, its database and the characters in "
+            f"it alone.{why} {self._why_not_to_delete_the_folder(ctx)}"
+        )
+
+    def _why_not_to_delete_the_folder(self, ctx: StageContext) -> str:
+        """Why "delete it and install again" is the one repair not to reach for here.
+
+        Split out because it is an argument about THIS install's database and
+        not about patches: the same loop is waiting for any advice that treats
+        the server directory as disposable while the volume beside it is not.
+
+        Two wordings, because the trap has two sizes. A `generated` password is
+        a secret that exists in exactly one place -- a file inside the folder --
+        and deleting the folder makes the volume unopenable; a `fixed` one is in
+        the catalog, so the same deletion merely fails to give the fresh start
+        it looks like, because `install_id()` hashes the path and the reinstall
+        lands back on the same volume. Neither branch names a file that is not
+        there. Every CMaNGOS entry that ships a patch today is `generated`
+        (`wow-tbc`, `wow-vanilla`, both `.db_password`); `wow-tortoise` is the
+        one with no patches at all, so the refusal above cannot reach it, and
+        the second wording is unreachable from shipped data.
+        """
+        plan = self.entry.install.password
+        if plan.mode != "generated" or plan.file is None:
+            return (
+                f"Do not delete {ctx.server_dir} looking for a fresh start either: this "
+                f"install's database is in the Docker volume {self._db_volume(ctx.server_dir)}, "
+                "which removing the containers keeps and which a fresh install into the same "
+                "folder comes straight back to."
+            )
+        volume = self._db_volume(ctx.server_dir)
+        return (
+            f"Do not delete {ctx.server_dir} instead: {plan.file} is inside it and is the only "
+            f"copy of the password this install's database volume {volume} was created with. "
+            "Removing the containers keeps that volume, so a fresh install into the same folder "
+            "would stop for a lost password, and the only way past that stop deletes the volume "
+            "and every character in it."
         )
 
     def _db_password(self, ctx: StageContext) -> Iterator[str]:
@@ -594,6 +910,12 @@ class CmangosInstaller(StagedInstaller):
             cancel=ctx.cancel,
         )
         self._check_cancel(ctx.cancel)
+        # Option C of `pyplan/upstream-cmangos-doodad-drop.md`, built as the
+        # gate that proves `patch-sources` took rather than as a shipped
+        # remedy: `DoodadCheck.line()` says why it warns and never refuses.
+        check = extract.doodad_placements(data_dir / extract.BUILDINGS_DIR)
+        if check is not None:
+            yield check.line()
         yield "Extraction finished."
 
     def _mmaps(self, ctx: StageContext) -> Iterator[str]:
@@ -639,7 +961,8 @@ class CmangosInstaller(StagedInstaller):
         container's confinement to buy nothing.
 
         That argument holds only while `generate-compose` runs BEFORE this
-        stage. It does — `stages()` and `STAGE_NAMES` both put it at index 3
+        stage. It does — `stages()` and `STAGE_NAMES` both put it at index 4
+        (index 3 until `patch-sources` went in on 2026-09-05)
         against 5 and 6 — and
         `test_the_relabel_that_lets_mmaps_run_confined_happens_before_the_first_extraction`
         asserts the order over a live install, because a guard whose
@@ -1006,6 +1329,25 @@ class CmangosInstaller(StagedInstaller):
         disk is refused too, deliberately: the install folder as a whole can be
         put wherever they like, and telling them so is cheaper than deciding
         which outside destinations are the harmless ones.
+
+        "This stage ran nothing and removed nothing" is scoped to the STAGE,
+        and read "Nothing was run and nothing was removed" until the sixth
+        pass of 2026-09-05. Both callers are stage bodies (`_extract`,
+        `_mmaps`) and each asks this before it starts a container or deletes
+        anything, so the narrow claim is true of each; the wide one was a
+        claim about the press, and the press runs `build` before either of
+        them. Measured on yulon-fedora 2026-09-05 through the real `run()`
+        with the images gone: `build` logs "compiling" and "The build
+        finished.", and this function's refusal lands three log lines after
+        that (`Step …`, `--- extract`, the stage's cancel note; `run_plan()`'s
+        refusal, one yield further on, lands four -- the round-10 review's
+        press probe, `pyplan/gates/doodad-2026-09-05/round10-press-probe.txt`),
+        so a sentence reading "Nothing was run" would be read directly under
+        a line saying the build did.
+        `extract.blocked_message()` carries the same scope for the same
+        reason, and
+        `test_a_data_folder_that_leads_out_of_the_install_is_refused_before_anything_runs`
+        asserts this one on both stages and both attempts.
         """
         server_dir = ctx.server_dir
         data_dir = server_dir / DATA_DIR
@@ -1016,8 +1358,8 @@ class CmangosInstaller(StagedInstaller):
                 f"({server_dir}). This install writes extracted game data into that folder and "
                 "deletes a folder inside it when it regenerates movement maps, so a link pointing "
                 "elsewhere would let it overwrite and delete files that are not its own — a game "
-                "client's, if that is where the link goes. Nothing was run and nothing was "
-                f"removed. Remove the link so {DATA_DIR} can be this install's own folder, or "
+                "client's, if that is where the link goes. This stage ran nothing and removed "
+                f"nothing. Remove the link so {DATA_DIR} can be this install's own folder, or "
                 "install this server in the folder you want its data to live in."
             )
         data_dir.mkdir(parents=True, exist_ok=True)
@@ -1097,8 +1439,10 @@ class CmangosInstaller(StagedInstaller):
         `"ROOT_PASSWORD"` and rendered `ENV ROOT_PASSWORD=tbc-0123456789abcdef`
         into a Dockerfile, with the suite at 1889 passed, 3 skipped (2026-09-02,
         recorded at `e176af17`) and mypy, ruff and black clean. That route needs
-        `.env` to be on disk already: `generate-compose` is index 3 and this
-        method's only build-context caller, `_write_dockerfile`, is index 2 — so
+        `.env` to be on disk already: `generate-compose` was index 3 and this
+        method's only build-context caller, `_write_dockerfile`, index 2 (as
+        measured; `patch-sources` moved every index below up by one on
+        2026-09-05, and the ORDER, which is the argument, did not change) — so
         it reads an empty hand on a FIRST install and the real password on any
         run where a previous attempt reached `generate-compose`. A price, still,
         just not one paid on the first press.
@@ -1135,10 +1479,12 @@ class CmangosInstaller(StagedInstaller):
         `STAGE_NAMES` and each verified on 2026-09-02 by running the stage and
         reading the file it left:
 
-        * `db-password` (index 1) writes the plaintext password to the file
-          `install.password` names, at the ROOT of the server dir.
-        * `generate-compose` (index 3 — the stage IMMEDIATELY before `build` at
-          index 4) merges `DB_ROOT_PASSWORD=<that same plaintext>` into
+        * `db-password` (index 1 when measured; 2 since 2026-09-05) writes the
+          plaintext password to the file `install.password` names, at the ROOT
+          of the server dir.
+        * `generate-compose` (index 3 when measured, 4 since 2026-09-05 — either
+          way the stage IMMEDIATELY before `build`) merges
+          `DB_ROOT_PASSWORD=<that same plaintext>` into
           `<server_dir>/.env` for every generated-password entry, which is all
           three CMaNGOS games. This is the one the earlier draft's "two stages"
           left out, and it is the one M-R2 read.

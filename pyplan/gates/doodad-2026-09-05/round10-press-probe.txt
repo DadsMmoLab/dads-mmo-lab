@@ -1,0 +1,56 @@
+Round 10 press probe -- the two numbers the docstrings cite, measured through the real
+CmangosInstaller.run() on yulon-fedora, 2026-09-05, by the round-10 adversarial reviewer
+(workflow wf_a38ba82e-390) in its own copy ~/yulon-runs/review10-doodad at d59ce648, the lane's
+own fixtures, only `images_built -> False` overridden. Copied into the tree by the session that
+merged the lane, because the numbers in cmangos.py / extract.py / test_extract.py cited a
+measurement no file held.
+
+  ssh yulon-fedora 'bash -lc "cd ~/yulon-runs/review10-doodad/pylauncher && QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest tests/test_families_cmangos.py::test_p10_probe -s -q -p no:cacheprovider"'
+
+  ===== S2_dirty_buildings_old_install =====   (old_install + finished_extraction, evidence deleted, Buildings kept -- blocked_message's refusal)
+  build-finished index: [47] of 52 log lines
+     +1: Step 7 of 13 (53%): extract
+     +2: --- extract
+     +3: Finished tools are kept; only the tool that was interrupted runs again.
+     +4: Extracting server data from .../client into .../srv/data (the client is read-only).
+     ==> LOG LINES BETWEEN 'The build finished.' AND THE RAISE: 4
+  RAISED: vmap extract cannot run into .../srv/data/Buildings: it already holds dir_bin ...
+  CONTAINER RUNS DURING THE PRESS: 0
+  CHANGED FILES UNDER server_dir: 12
+       .db_password
+       .dockerignore
+       .env
+       .yulon-install.json
+       Dockerfile
+       docker-compose.build.yml
+       docker-compose.override.yml
+       docker-compose.yml
+       src/mangos-tbc/contrib/vmap_extractor/vmapextract/gameobject_extract.cpp
+       src/mangos-tbc/contrib/vmap_extractor/vmapextract/model.cpp
+       src/mangos-tbc/contrib/vmap_extractor/vmapextract/vmapexport.cpp
+       src/mangos-tbc/contrib/vmap_extractor/vmapextract/vmapexport.h
+  CHANGED UNDER data/: []
+
+  ===== S_LINKED_DATA_datadir_refusal =====   (old_install, `data/` a symlink to the client -- _data_dir()'s own fixture)
+  build-finished index: [47] of 51 log lines
+     +1: Step 7 of 13 (53%): extract
+     +2: --- extract
+     +3: Finished tools are kept; only the tool that was interrupted runs again.
+     ==> LOG LINES BETWEEN 'The build finished.' AND THE RAISE: 3
+  RAISED: .../srv/data leads to .../client, which is outside this install's folder ...
+
+  ===== S3_dirty_buildings_modern =====   (install() through the whole spine, then the evidence file deleted)
+  CHANGED FILES UNDER server_dir: 1
+       .yulon-install.json
+  CHANGED UNDER data/: []
+
+  In a second clean clone (~/probe10b at the same SHA):
+  .db_password EXISTS BEFORE THE PRESS: False
+  .db_password EXISTS AFTER THE PRESS: True
+  TOP-LEVEL NAMES BEFORE: ['.yulon-install.json', 'data', 'src']
+  TOP-LEVEL NAMES AFTER : ['.db_password', '.dockerignore', '.env', '.yulon-install.json', 'Dockerfile', 'data', 'docker-compose.build.yml', 'docker-compose.override.yml', 'docker-compose.yml', 'src']
+
+The third line after "The build finished." is the spine's cancel_note (native.py yields `Step ...`,
+`--- <name>`, then stage.cancel_note); the fourth is `_extract`'s own "Extracting server data" yield,
+which `_data_dir()`'s refusal never reaches. 11 is the count when `.db_password` already exists
+before the press (a real resumed install); the named fixtures carry none.

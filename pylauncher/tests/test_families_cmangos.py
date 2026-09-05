@@ -24,8 +24,10 @@ from __future__ import annotations
 import ast
 import gzip
 import inspect
+import json
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -38,12 +40,21 @@ import pytest
 
 import yulon
 from tests.conftest import spelled_bounds
-from tests.support_native import ABSENT, IMPORTED, PARTIAL, POPULATED_HALF, Recorder
+from tests.support_native import (
+    ABSENT,
+    IMPORTED,
+    PARTIAL,
+    POPULATED_HALF,
+    VMAP_FIXTURE,
+    Recorder,
+    lay_patch_sources,
+)
 from yulon import docker, platform, resources
 from yulon.catalog import composegen, native
 from yulon.catalog.catalog import (
     CatalogEntry,
     PasswordPlan,
+    SourcePatch,
     SqlPhase,
     SqlPlan,
     load_catalog,
@@ -207,8 +218,32 @@ def engine(rec: Recorder, **overrides: object) -> CmangosInstaller:
     return eng
 
 
+def lay_sources(server_dir: Path) -> Callable[[Path], None]:
+    """`support_native.lay_patch_sources` for `ENTRY`: the extractor files the patch stage edits.
+
+    Laid only under the dest the catalog says the patch applies to, for the
+    same reason `lay_sql` lays under the owning source: the spine refuses a
+    nested dest with files in it before that dest's own clone. `server_dir`
+    is kept in the signature so a caller reads which tree it is about.
+    """
+    hook = lay_patch_sources(ENTRY)
+
+    def on_clone(dest: Path) -> None:
+        assert dest.is_relative_to(server_dir), dest
+        hook(dest)
+
+    return on_clone
+
+
 def install(rec: Recorder, server_dir: Path, client_dir: Path, **overrides: object) -> list[str]:
-    rec.on_clone = lay_sql(server_dir, SQL)
+    sql = lay_sql(server_dir, SQL)
+    sources = lay_sources(server_dir)
+
+    def on_clone(dest: Path) -> None:
+        sql(dest)
+        sources(dest)
+
+    rec.on_clone = on_clone
     return list(
         engine(rec, **overrides).run(InstallOptions(server_dir=server_dir, client_dir=client_dir))
     )
@@ -255,6 +290,7 @@ def test_family_and_stage_names_are_the_contract_tuple() -> None:
     assert CmangosInstaller.family == "cmangos"
     assert CmangosInstaller.STAGE_NAMES == (
         "clone-sources",
+        "patch-sources",
         "db-password",
         "write-dockerfile",
         "generate-compose",
@@ -1266,6 +1302,16 @@ def test_the_family_s_catalog_refusals_end_in_one_tail_and_not_two(
         volume_exists=refuse_to_answer,
     )
     said["_password_origin_note"] = fixed._password_origin_note(context(server_dir))
+    # Still driven through the STAGE, not through `_patch_text` directly: the
+    # tail moved into that helper on 2026-09-05 when the stage grew a refusal
+    # of its own, and a test that followed it inward would stop proving the
+    # sentence reaches a user. The key is the function the AST finds spending
+    # the tail; the call is the one the install makes.
+    ghost = SourcePatch(file="shared/cmangos/patches/no-such.patch", source=CORE_DEST, reason="x")
+    with pytest.raises(InstallerError) as from_patch:
+        eng = engine_for(without_patches((ghost,)), Recorder(), volume_exists=refuse_to_answer)
+        list(eng._patch_sources(context(server_dir)))
+    said["_patch_text"] = str(from_patch.value)
 
     assert set(said) == functions_spending("CATALOG_ERROR_TAIL"), (
         "a function spends the catalog tail that this test does not drive, or drives one "
@@ -1812,6 +1858,7 @@ def test_the_bound_stages_run_in_order_and_record_the_recorded_ones(
     said = install(rec, server_dir, client)
     assert [line for line in said if line.startswith("--- ")] == [
         "--- clone-sources",
+        "--- patch-sources",
         "--- db-password",
         "--- write-dockerfile",
         "--- generate-compose",
@@ -1828,6 +1875,7 @@ def test_the_bound_stages_run_in_order_and_record_the_recorded_ones(
     assert state is not None
     assert state.completed == (
         "clone-sources",
+        "patch-sources",
         "write-dockerfile",
         "generate-compose",
         "build",
@@ -1888,6 +1936,649 @@ def test_clone_sources_consults_the_record_under_its_own_stage_name(
     assert first == 3
     assert again.clones == [], "\n".join(said)
     assert any("already in src/mangos-tbc" in line for line in said)
+
+
+# -- patch-sources ------------------------------------------------------------
+
+VMAP_SUBDIR = PurePosixPath("contrib/vmap_extractor/vmapextract")
+CORE_DEST = CMANGOS.patches[0].source if CMANGOS.patches else "src/mangos-tbc"
+EXTRACTOR_FILES = ("gameobject_extract.cpp", "model.cpp", "vmapexport.cpp", "vmapexport.h")
+
+
+def extractor_file(server_dir: Path, name: str) -> Path:
+    return server_dir / CORE_DEST / VMAP_SUBDIR / name
+
+
+def without_patches(patches: tuple[SourcePatch, ...]) -> CatalogEntry:
+    """`ENTRY` with its `cmangos.patches` replaced."""
+    assert ENTRY.install.native is not None and CMANGOS is not None
+    return ENTRY.model_copy(
+        update={
+            "install": ENTRY.install.model_copy(
+                update={
+                    "native": ENTRY.install.native.model_copy(
+                        update={"cmangos": CMANGOS.model_copy(update={"patches": patches})}
+                    )
+                }
+            )
+        }
+    )
+
+
+def test_patch_sources_edits_the_core_checkout_the_clone_made_and_is_recorded(
+    tmp_path: Path,
+) -> None:
+    """Through `run()`: the checkout ends up byte-for-byte what `git apply` produced on m910q."""
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    said = install(rec, server_dir, client_folder(tmp_path))
+    for name in EXTRACTOR_FILES:
+        assert (
+            extractor_file(server_dir, name).read_bytes()
+            == (VMAP_FIXTURE / "patched" / name).read_bytes()
+        ), name
+    state = native.read_state(server_dir, valid=engine(rec).stage_names())
+    assert state is not None and "patch-sources" in state.completed
+    block = said[said.index("--- patch-sources") : said.index("--- db-password")]
+    assert any("Patched" in line and "gameobject_extract.cpp" in line for line in block), block
+    assert any(CMANGOS.patches[0].reason in line for line in block), block
+
+
+def test_a_second_press_finds_the_fix_present_and_rewrites_nothing(tmp_path: Path) -> None:
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    client = client_folder(tmp_path)
+    install(rec, server_dir, client)
+    stamps = {n: extractor_file(server_dir, n).stat().st_mtime_ns for n in EXTRACTOR_FILES}
+    again = Recorder()
+    again.remotes = dict(rec.remotes)
+    said = install(again, server_dir, client)
+    assert any("already carries" in line for line in said), said
+    assert not any("Patched" in line for line in said)
+    assert {n: extractor_file(server_dir, n).stat().st_mtime_ns for n in EXTRACTOR_FILES} == stamps
+
+
+def test_the_record_is_not_what_skips_the_patch(tmp_path: Path) -> None:
+    """A deleted checkout is re-cloned by `clone-sources` on its own disk evidence, and the
+    record of THIS stage survives that; consulting it would leave the fresh clone unpatched
+    with a state file saying otherwise. So the body reads the file, never the record."""
+    server_dir = tmp_path / "srv"
+    rec = Recorder()
+    (server_dir / CORE_DEST / ".git").mkdir(parents=True)
+    lay_sources(server_dir)(server_dir / CORE_DEST)
+    ctx = context(server_dir, completed=("clone-sources", "patch-sources"))
+    said = list(engine(rec)._patch_sources(ctx))
+    assert any("Patched" in line for line in said), said
+    assert (
+        extractor_file(server_dir, "gameobject_extract.cpp").read_bytes()
+        == (VMAP_FIXTURE / "patched" / "gameobject_extract.cpp").read_bytes()
+    )
+
+
+def test_a_moved_upstream_refuses_by_file_and_line_before_anything_is_built(
+    tmp_path: Path,
+) -> None:
+    """The refusal names the file and the line, is the sentence the user reads, and stops the
+    install at this stage: no Dockerfile, no build, no record of the stage."""
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    client = client_folder(tmp_path)
+    sources = lay_sources(server_dir)
+    sql = lay_sql(server_dir, SQL)
+
+    def on_clone(dest: Path) -> None:
+        sql(dest)
+        sources(dest)
+        moved = extractor_file(server_dir, "gameobject_extract.cpp")
+        if moved.is_file():
+            body = moved.read_text(encoding="utf-8")
+            moved.write_text(
+                body.replace("fixedName = GetPlainName(origPath.c_str());", "fixedName = X();"),
+                encoding="utf-8",
+            )
+
+    rec.on_clone = on_clone
+    with pytest.raises(InstallerError) as caught:
+        list(engine(rec).run(InstallOptions(server_dir=server_dir, client_dir=client)))
+    message = str(caught.value)
+    assert "contrib/vmap_extractor/vmapextract/gameobject_extract.cpp" in message
+    assert "line 24" in message
+    assert "nothing was changed" in message
+    assert "build" not in rec.calls
+    assert not (server_dir / "Dockerfile").exists()
+    state = native.read_state(server_dir, valid=engine(rec).stage_names())
+    assert state is not None
+    assert "clone-sources" in state.completed and "patch-sources" not in state.completed
+    # Atomic across the patch: the model.cpp hunks would have applied and were not written.
+    assert (
+        extractor_file(server_dir, "model.cpp").read_bytes()
+        == (VMAP_FIXTURE / "model.cpp").read_bytes()
+    )
+
+
+def test_an_entry_with_no_patches_says_so_and_touches_nothing(tmp_path: Path) -> None:
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    eng = CmangosInstaller(without_patches(()), seams=Recorder().seams(platform_id=lambda: "linux"))
+    said = list(eng._patch_sources(context(server_dir)))
+    assert said == ["This server carries no source patches."]
+    assert sorted(p.name for p in server_dir.iterdir()) == []
+
+
+def test_a_patch_file_the_catalog_names_but_the_tree_lacks_is_a_catalog_error(
+    tmp_path: Path,
+) -> None:
+    server_dir = tmp_path / "srv"
+    (server_dir / CORE_DEST).mkdir(parents=True)
+    ghost = SourcePatch(
+        file="shared/cmangos/patches/nothing-here.patch", source=CORE_DEST, reason="x"
+    )
+    eng = CmangosInstaller(
+        without_patches((ghost,)), seams=Recorder().seams(platform_id=lambda: "linux")
+    )
+    with pytest.raises(InstallerError) as caught:
+        list(eng._patch_sources(context(server_dir)))
+    assert "nothing-here.patch" in str(caught.value)
+    assert str(caught.value).endswith(cmangos.CATALOG_ERROR_TAIL)
+
+
+# -- patch-sources against an install that predates it ------------------------
+
+
+OLD_TWELVE_STAGE_COMPLETED = (
+    "clone-sources",
+    "write-dockerfile",
+    "generate-compose",
+    "build",
+    "extract",
+    "mmaps",
+    "conf",
+    "import",
+)
+"""Every recorded stage of a CMaNGOS install made before `patch-sources` existed.
+
+Not invented: read on m910q 2026-09-05 out of the four state files on that box.
+`~/tbc-7.4c/.yulon-install.json` (wow-tbc) and `~/vanilla-75b/.yulon-install.json`
+(wow-vanilla) hold this list exactly; `~/vanilla-75` stops at `build` and
+`~/tortoise-server` at `generate-compose`. Three of the four record `build`, and
+NONE of them records `patch-sources` -- so on the first press after this lane
+merges, `patch-sources` is the one stage a finished install has never run.
+"""
+
+
+def old_install(
+    rec: Recorder, server_dir: Path, *, completed: Sequence[str] = OLD_TWELVE_STAGE_COMPLETED
+) -> None:
+    """A server folder as a build from before this stage existed left it.
+
+    Everything a finished install has: the checkouts on disk with their
+    `origin` known to the Recorder (which is what makes `already_cloned()`
+    leave them alone -- a resume of a real install does not re-clone, and a
+    test that re-cloned would be laying the source tree through a path the
+    case under test does not take), the SQL the import stage reads, and the
+    state file. So a press on this folder can only be stopped by the stage
+    under test.
+    """
+    sql = lay_sql(server_dir, SQL)
+    for source in ENTRY.emulator.sources:
+        dest = server_dir / source.dest
+        (dest / ".git").mkdir(parents=True, exist_ok=True)
+        rec.remotes[dest] = source.url
+        sql(dest)
+    lay_sources(server_dir)(server_dir / CORE_DEST)
+    native.write_state(
+        server_dir,
+        native.InstallState(
+            game_id=ENTRY.id,
+            install_id=composegen.install_id(server_dir, platform_id=lambda: "linux"),
+            family="cmangos",
+            completed=tuple(completed),
+        ),
+    )
+
+
+def test_the_state_file_this_stage_has_to_survive_records_a_build_and_no_patch_sources(
+    tmp_path: Path,
+) -> None:
+    """The premise of the two tests below, asserted rather than assumed."""
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    old_install(rec, server_dir)
+    on_disk = json.loads((server_dir / native.STATE_FILE).read_text(encoding="utf-8"))
+    assert on_disk["completed"] == list(OLD_TWELVE_STAGE_COMPLETED)
+    assert "patch-sources" not in on_disk["completed"]
+    assert "build" in on_disk["completed"] and "extract" in on_disk["completed"]
+    # And the stage is still one this build knows, so the record round-trips
+    # rather than landing in `unknown`.
+    state = native.read_state(server_dir, valid=engine(rec).stage_names())
+    assert state is not None and state.unknown == ()
+    assert state.completed == OLD_TWELVE_STAGE_COMPLETED
+
+
+def test_a_press_on_an_install_built_before_the_patch_refuses_and_says_what_to_press(
+    tmp_path: Path,
+) -> None:
+    """The defect: patch the source, then skip the build that would have compiled it.
+
+    Before the refusal, a press on `~/tbc-7.4c` would have logged
+    `Patched contrib/vmap_extractor/vmapextract/gameobject_extract.cpp.`,
+    recorded `patch-sources`, and then skipped `build` (recorded, images
+    present) -- leaving a source tree carrying the fix, an image that does not,
+    and vmaps still missing 14.8% of their placements. Nothing in the run said
+    so.
+    """
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    old_install(rec, server_dir)
+    pre = {n: extractor_file(server_dir, n).read_bytes() for n in EXTRACTOR_FILES}
+    with pytest.raises(InstallerError) as caught:
+        list(engine(rec)._patch_sources(context(server_dir, completed=OLD_TWELVE_STAGE_COMPLETED)))
+    message = str(caught.value)
+    assert cmangos.REBUILD_ACTION in message, message
+    assert "install again" in message, message
+    assert "nothing was changed" in message.lower(), message
+    assert {n: extractor_file(server_dir, n).read_bytes() for n in EXTRACTOR_FILES} == pre
+
+
+def test_the_refusal_names_an_action_the_server_tab_actually_offers() -> None:
+    """A remedy sentence naming a button that is not there is worse than no sentence."""
+    from yulon.ui import controller_view
+
+    assert cmangos.REBUILD_ACTION == controller_view.REMOVE_IDLE
+
+
+def finished_extraction(rec: Recorder, server_dir: Path, client: Path) -> Path:
+    """Run the extract and mmaps stages once, so `data/` carries the evidence and the files.
+
+    A finished install has more than a state file: `data/.yulon-extract.json`
+    vouching for four tools, and the folders they filled. Driving the two
+    stages is how this fixture gets an evidence file the module's own rules
+    call satisfied -- writing one by hand would be a fixture agreeing with
+    itself about `plan_hash`, the client facts and the argv digests, which are
+    exactly the four things the skip turns on.
+
+    Returns the evidence file, which is the thing the remedy tells a user to
+    delete.
+    """
+    list(engine(rec)._extract(context(server_dir, client)))
+    list(engine(rec)._mmaps(context(server_dir, client)))
+    evidence = server_dir / cmangos.DATA_DIR / extract.EVIDENCE_FILE
+    assert evidence.is_file()
+    return evidence
+
+
+def remedy_steps(message: str, server_dir: Path) -> tuple[tuple[str, ...], tuple[Path, ...]]:
+    """What a user following this refusal would type and delete -- read out of the sentence.
+
+    Parsed rather than restated, so a remedy that stops naming an image, stops
+    naming a path, or goes back to naming the install folder cannot be followed
+    by this test at all.
+
+    A LIST of paths since 2026-09-05, and that change is the review's finding
+    in one signature. The sentence named one file; deleting it re-ran an
+    extraction that `vmap_extractor` then refused to start into the
+    `Buildings/` the first extraction had filled, and the press that followed
+    the advice ended wedged. Whatever the sentence names is what the tests
+    below delete and nothing else, so a sentence that goes back to naming one
+    path still has to leave a press that finishes.
+    """
+    images = re.search(r"`docker image rm ([^`]+)`", message)
+    delete = re.search(r"and delete (\S+(?: and \S+)*), then install", message)
+    assert images is not None and delete is not None, message
+    # The FOLDER, not a path inside it -- the remedy names paths under it, and
+    # `delete <server_dir>/data/...` is the sentence working as intended.
+    folder = re.escape(f"delete {server_dir}") + r"(?![/\\])"
+    for hit in re.finditer(folder, message):
+        assert message[: hit.start()].endswith("Do not "), (
+            "the remedy tells the user to delete the install folder, which is where "
+            f"the database password lives: {message}"
+        )
+    named = tuple(Path(part) for part in delete.group(1).split(" and "))
+    for path in named:
+        assert server_dir in path.parents, f"the remedy names something outside the install: {path}"
+    return tuple(images.group(1).split()), named
+
+
+def test_the_remedy_the_refusal_names_gets_the_fix_in_and_keeps_the_database(
+    tmp_path: Path,
+) -> None:
+    """Follow the sentence, verbatim, and land on a patched, rebuilt install with its characters.
+
+    The BLOCKER this replaced, re-derived on m910q 2026-09-05 before the
+    rewrite (`run()` driven twice around the old sentence, this same fixture):
+    press 1 refused with "use “Stop and remove containers…” on the Server tab,
+    delete .../srv, and install it again"; the containers went (no `-v` --
+    `docker.remove_staged()` keeps the volume by design) and so did the folder,
+    taking `.db_password` with it, since that file lives inside it; the volume
+    `yulon-wow-tbc-ffb3ef7e_db-data` was still there, and `install_id()`
+    hashes the ABSOLUTE path, so the reinstall came back to the same volume
+    name (ffb3ef7e before and after the `rmtree`); press 2 stopped at
+    `_db_password` -- "that database cannot be opened again: `docker volume rm
+    ...` deletes it, and every character in it". `_db_password`'s own docstring
+    had already refused to send anyone round that loop.
+
+    THE SECOND BLOCKER, found by the review of the replacement (m910q
+    2026-09-05) and the reason this test is not the one it was: taking away the
+    image and the evidence file re-ran the extraction over a `data/Buildings`
+    the first extraction had filled, and `vmap_extractor` refuses to start when
+    that folder holds `dir` or `dir_bin` -- so the press bought a recompile and
+    then died at "Your output directory seems to be polluted, please use an
+    empty directory!", with the re-created evidence recording `dbc and maps`
+    alone so every later press died there too. This test could not see it,
+    because the double it drives fabricated anonymous files and never those
+    two. It writes them now (`support_native.Recorder.run_container`) and
+    refuses on them, which is what makes the run below a measurement rather
+    than a restatement.
+
+    What is asserted here is the whole of the replacement: everything the
+    sentence names is taken away and nothing else is, and the next press
+    compiles, patches, extracts again and finishes, with the password file
+    byte-identical, the volume untouched and the import left alone.
+    """
+    server_dir = tmp_path / "srv"
+    client = client_folder(tmp_path)
+    volume = f"{composegen.project_name(ENTRY.id, server_dir, platform_id=lambda: 'linux')}_db-data"
+    rec = Recorder(volumes={volume}, probe_answers=[IMPORTED], db_started=True)
+    old_install(rec, server_dir)
+    password = server_dir / ".db_password"
+    password.write_text("hunter2\n", encoding="utf-8")
+    evidence = finished_extraction(rec, server_dir, client)
+
+    with pytest.raises(InstallerError) as caught:
+        list(engine(rec).run(InstallOptions(server_dir=server_dir, client_dir=client)))
+    images, doomed = remedy_steps(str(caught.value), server_dir)
+    ctx = context(server_dir, client, completed=OLD_TWELVE_STAGE_COMPLETED)
+    assert images == engine(rec).built_image_refs(ctx), str(caught.value)
+    buildings = server_dir / cmangos.DATA_DIR / extract.BUILDINGS_DIR
+    assert doomed == (evidence, buildings), str(caught.value)
+    # The shape a real one is in, not a shape only this suite can make: `dir_bin`
+    # is appended from the extractor's first tile and `temp_gameobject_models` is
+    # written by the last call in its `main()`, while `dir` -- the other name the
+    # tool STATS -- has no writer under `contrib` at either pinned revision and is
+    # on none of the three real installs measured on m910q.
+    assert (buildings / extract.DIR_BIN).is_file(), "the fixture is not a finished extraction"
+    assert (buildings / extract.GAMEOBJECT_MODELS).is_file(), "the extraction never finished"
+    assert not (buildings / extract.DIR_INDEX).exists(), "no extraction writes a `dir`"
+
+    # Exactly the remedy, and nothing else: the containers go, the images the
+    # sentence named go, and each path it named goes. The folder stays, and so
+    # does everything under data/ the sentence did not name.
+    rec.containers.clear()
+    rec.images = False
+    for path in doomed:
+        shutil.rmtree(path) if path.is_dir() else path.unlink()
+    assert (server_dir / cmangos.DATA_DIR / "vmaps").is_dir(), "the remedy took vmaps/ with it"
+    rec.calls.clear()
+    rec.container_runs.clear()
+
+    said = list(engine(rec).run(InstallOptions(server_dir=server_dir, client_dir=client)))
+    assert "build" in rec.calls, said
+    assert [run.argv[0].rsplit("/", 1)[-1] for run in rec.container_runs] == [
+        "ad",
+        "vmap_extractor",
+        "vmap_assembler",
+        "MoveMapGen",
+    ], "the maps were not extracted again, so the fix is still not in the vmaps"
+    assert all(
+        extractor_file(server_dir, name).read_bytes()
+        == (VMAP_FIXTURE / "patched" / name).read_bytes()
+        for name in EXTRACTOR_FILES
+    )
+    assert said[-1].endswith(f"installed and running in {server_dir}"), said[-1]
+    assert password.read_text(encoding="utf-8") == "hunter2\n", "the password file was rewritten"
+    assert rec.volumes == {volume}, "the database volume was removed or replaced"
+    assert "They are already imported; leaving them alone." in said, said
+
+
+def test_the_refusal_says_why_the_install_folder_is_the_one_thing_not_to_delete(
+    tmp_path: Path,
+) -> None:
+    """The loop is named in the sentence, not left for the user to walk into.
+
+    `remedy_steps` refuses a message that tells anyone to delete the folder;
+    this asserts the other half -- that the reason is spelled out, with the
+    file and the volume named, so a user who was about to do it anyway knows
+    what it costs. The three facts it rests on were each read out of this tree
+    on 2026-09-05: `.db_password` is `install.password.file`, which is a path
+    under the server directory; `docker.remove_staged()` passes no `-v`; and
+    `composegen.install_id()` digests the absolute path, so the same folder
+    comes back to the same volume.
+    """
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    old_install(rec, server_dir)
+    with pytest.raises(InstallerError) as caught:
+        list(engine(rec)._patch_sources(context(server_dir, completed=OLD_TWELVE_STAGE_COMPLETED)))
+    message = str(caught.value)
+    plan = ENTRY.install.password
+    assert plan.file is not None and plan.file in message, message
+    assert f"Do not delete {server_dir}" in message, message
+    assert engine(rec)._db_volume(server_dir) in message, message
+    assert "Removing the containers keeps that volume" in message, message
+
+
+def test_a_fixed_password_entry_is_told_the_other_true_thing_about_deleting_the_folder(
+    tmp_path: Path,
+) -> None:
+    """No `.db_password` to lose, and still not a fresh start -- the volume comes back.
+
+    Unreachable from shipped data (every CMaNGOS entry carrying a patch has a
+    `generated` password), so it is driven here rather than left as a branch
+    nobody has read. The wording must not name a password file that does not
+    exist, which is the mistake the branch is there to avoid.
+    """
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    old_install(rec, server_dir)
+    fixed = entry_with_password(
+        PasswordPlan.model_construct(mode="fixed", value="password", file=None, prefix="")
+    )
+    with pytest.raises(InstallerError) as caught:
+        list(
+            engine_for(fixed, rec)._patch_sources(
+                context(server_dir, completed=OLD_TWELVE_STAGE_COMPLETED)
+            )
+        )
+    message = str(caught.value)
+    assert ".db_password" not in message, message
+    assert "comes straight back to" in message, message
+    assert engine_for(fixed, rec)._db_volume(server_dir) in message, message
+
+
+def test_removing_only_the_image_rebuilds_but_leaves_the_old_maps_where_they_were(
+    tmp_path: Path,
+) -> None:
+    """Why the remedy names the evidence file as well as the image.
+
+    The control for the test above. Take away the image and nothing else, and
+    the press does compile the patched source -- and then skips the extraction,
+    because that skip is `data/.yulon-extract.json`'s to make and not the state
+    file's, so the maps the new binary would have written are not written and
+    the doodads are still missing. One press, two halves, and only the first
+    one is bought by `docker image rm`.
+    """
+    server_dir = tmp_path / "srv"
+    client = client_folder(tmp_path)
+    rec = Recorder(probe_answers=[IMPORTED], db_started=True)
+    old_install(rec, server_dir)
+    (server_dir / ".db_password").write_text("hunter2\n", encoding="utf-8")
+    finished_extraction(rec, server_dir, client)
+
+    rec.images = False
+    rec.calls.clear()
+    rec.container_runs.clear()
+    said = list(engine(rec).run(InstallOptions(server_dir=server_dir, client_dir=client)))
+    assert "build" in rec.calls, said
+    assert all(
+        extractor_file(server_dir, name).read_bytes()
+        == (VMAP_FIXTURE / "patched" / name).read_bytes()
+        for name in EXTRACTOR_FILES
+    )
+    assert [run.argv[0].rsplit("/", 1)[-1] for run in rec.container_runs] == []
+    assert sum("already extracted" in line for line in said) == 3, said
+
+
+def test_the_remedy_names_the_buildings_folder_only_when_it_is_there_to_block_the_re_extract(
+    tmp_path: Path,
+) -> None:
+    """An install that never finished an extraction is not told to delete a folder it has not got.
+
+    The pair the sentence is assembled from: `extract.clear_before_rerun()`
+    reads the `data/` in front of it, so the remedy grows the folder when a
+    finished extraction is what makes the press die and says nothing about it
+    otherwise. A remedy naming a path that is not there reads as a mistake, and
+    a user who cannot find it has no way to tell which half of the sentence to
+    trust.
+    """
+    server_dir = tmp_path / "srv"
+    client = client_folder(tmp_path)
+    rec = Recorder()
+    old_install(rec, server_dir)
+    ctx = context(server_dir, client, completed=OLD_TWELVE_STAGE_COMPLETED)
+    buildings = server_dir / cmangos.DATA_DIR / extract.BUILDINGS_DIR
+    assert not buildings.exists()
+
+    with pytest.raises(InstallerError) as bare:
+        list(engine(rec)._patch_sources(ctx))
+    _, doomed = remedy_steps(str(bare.value), server_dir)
+    assert doomed == (server_dir / cmangos.DATA_DIR / extract.EVIDENCE_FILE,), str(bare.value)
+    assert extract.BUILDINGS_DIR not in str(bare.value), str(bare.value)
+
+    finished_extraction(rec, server_dir, client)
+    with pytest.raises(InstallerError) as after:
+        list(engine(rec)._patch_sources(ctx))
+    _, grown = remedy_steps(str(after.value), server_dir)
+    assert grown[-1] == buildings, str(after.value)
+    plan = engine(rec)._data().extract
+    assert extract.clear_before_rerun(plan, server_dir / cmangos.DATA_DIR) == (buildings,)
+
+
+def test_the_images_the_refusal_says_to_remove_are_the_ones_it_asked_the_daemon_about(
+    tmp_path: Path,
+) -> None:
+    """A `docker image rm` on a tag this install does not have is worse than no advice.
+
+    The message and the skip decision both come from
+    `built_image_refs()` -- the relationship, not the value, is what this
+    asserts: whatever the daemon was asked about is what the user is told to
+    remove. Two call sites each spelling `composegen.built_image_refs(...)`
+    would pass every value test and still be able to drift.
+    """
+    asked: list[tuple[str, ...]] = []
+
+    def images_built(refs: Sequence[str]) -> bool:
+        asked.append(tuple(refs))
+        return True
+
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    old_install(rec, server_dir)
+    eng = engine(rec, images_built=images_built)
+    with pytest.raises(InstallerError) as caught:
+        list(eng._patch_sources(context(server_dir, completed=OLD_TWELVE_STAGE_COMPLETED)))
+    named, _ = remedy_steps(str(caught.value), server_dir)
+    assert asked == [named], (asked, named)
+    assert named, "the refusal named no image at all"
+
+
+def test_the_whole_press_stops_at_patch_sources_and_never_reaches_the_build(
+    tmp_path: Path,
+) -> None:
+    """Through `run()`: the refusal is the sentence, and no later stage runs."""
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    client = client_folder(tmp_path)
+    old_install(rec, server_dir)
+    with pytest.raises(InstallerError) as caught:
+        list(engine(rec).run(InstallOptions(server_dir=server_dir, client_dir=client)))
+    assert cmangos.REBUILD_ACTION in str(caught.value)
+    assert "build" not in rec.calls
+    assert rec.container_runs == []
+    state = native.read_state(server_dir, valid=engine(rec).stage_names())
+    assert state is not None and "patch-sources" not in state.completed
+    assert (
+        extractor_file(server_dir, "gameobject_extract.cpp").read_bytes()
+        == (VMAP_FIXTURE / "gameobject_extract.cpp").read_bytes()
+    )
+
+
+def test_a_recorded_build_whose_images_are_gone_is_patched_because_the_build_will_re_run(
+    tmp_path: Path,
+) -> None:
+    """The refusal is `stage_build`'s own skip rule, asked one stage earlier.
+
+    `stage_build` skips only when the record AND the images agree, so a
+    recorded build whose images the user has deleted recompiles -- and a
+    recompile picks the patch up. Refusing on the record alone would have
+    turned that into a dead end for no reason.
+    """
+    rec = Recorder(images=False)
+    server_dir = tmp_path / "srv"
+    old_install(rec, server_dir)
+    ctx = context(server_dir, completed=OLD_TWELVE_STAGE_COMPLETED)
+    said = list(engine(rec)._patch_sources(ctx))
+    assert any("Patched" in line for line in said), said
+    assert (
+        extractor_file(server_dir, "gameobject_extract.cpp").read_bytes()
+        == (VMAP_FIXTURE / "patched" / "gameobject_extract.cpp").read_bytes()
+    )
+
+
+def test_docker_refusing_to_say_whether_the_images_exist_patches_rather_than_refuses(
+    tmp_path: Path,
+) -> None:
+    """`images_built` answers None, `stage_build` rebuilds on None, so the patch is wanted."""
+    rec = Recorder(images=None)
+    server_dir = tmp_path / "srv"
+    old_install(rec, server_dir)
+    ctx = context(server_dir, completed=OLD_TWELVE_STAGE_COMPLETED)
+    said = list(engine(rec)._patch_sources(ctx))
+    assert any("Patched" in line for line in said), said
+
+
+def test_an_old_install_whose_checkout_already_carries_the_fix_is_not_refused(
+    tmp_path: Path,
+) -> None:
+    """Nothing would change, so there is nothing to be inconsistent about.
+
+    This is the shape every press after the first takes, including the press
+    that follows a fresh install of this build -- so a refusal keyed on the
+    record alone would fire on every ordinary second press of a working
+    install.
+    """
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    old_install(rec, server_dir)
+    for name in EXTRACTOR_FILES:
+        extractor_file(server_dir, name).write_bytes((VMAP_FIXTURE / "patched" / name).read_bytes())
+    ctx = context(server_dir, completed=OLD_TWELVE_STAGE_COMPLETED)
+    said = list(engine(rec)._patch_sources(ctx))
+    assert any("already carries" in line for line in said), said
+    assert not any("Patched" in line for line in said)
+
+
+def test_the_extraction_stage_reports_the_doodad_placement_check_after_the_vmap_tools(
+    tmp_path: Path,
+) -> None:
+    """Option C of the write-up, as the gate that proves the patch took: one line after the
+    tools have run, a warning when a model file is spelled in a way the reader never asks
+    for, and nothing at all when there is no `dir_bin` to read."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    client = client_folder(tmp_path)
+    rec = Recorder()
+    ctx = context(server_dir, client)
+    said = list(engine(rec)._extract(ctx))
+    assert not any("dir_bin" in line or line.startswith("warning:") for line in said), said
+    buildings = server_dir / cmangos.DATA_DIR / extract.BUILDINGS_DIR
+    assert buildings.is_dir(), "the double filled Buildings/ and the check still had nothing"
+    (buildings / "Model001.m2").write_bytes(b"VMAP")
+    (buildings / "INNBED.M2").write_bytes(b"VMAP")
+    (buildings / extract.DIR_BIN).write_bytes(b"\x00Model001.m2\x00Model001.m2\x00")
+    said = list(engine(rec)._extract(ctx))
+    warning = next(line for line in said if line.startswith("warning:"))
+    assert "1 of the 2" in warning and "case-sensitive" in warning
+    assert said.index(warning) < said.index("Extraction finished.")
 
 
 # -- the copy a Stop reads ---------------------------------------------------
@@ -2350,11 +3041,19 @@ def test_db_password_calls_a_generated_plan_with_no_file_a_catalog_error(
     assert list(server_dir.iterdir()) == []
 
 
-def test_db_password_is_a_stage_that_is_never_recorded_and_follows_clone_sources() -> None:
-    """Never recorded because the FILE is the evidence; a state file must not claim a secret."""
+def test_db_password_is_a_stage_that_is_never_recorded_and_follows_patch_sources() -> None:
+    """Never recorded because the FILE is the evidence; a state file must not claim a secret.
+
+    It followed `clone-sources` directly until 2026-09-05, when `patch-sources`
+    went in between: the patch edits the checkout the clone just made and
+    nothing else, so it belongs before the first stage that reads anything
+    off this machine's state, and a secret must not be minted on a run that
+    is about to refuse over a moved upstream.
+    """
     stages = engine(Recorder()).stages()
     names = [stage.name for stage in stages]
-    assert names.index("db-password") == names.index("clone-sources") + 1
+    assert names.index("patch-sources") == names.index("clone-sources") + 1
+    assert names.index("db-password") == names.index("patch-sources") + 1
     stage = next(s for s in stages if s.name == "db-password")
     assert stage.recorded is False
 
@@ -2921,6 +3620,19 @@ def test_a_data_folder_that_leads_out_of_the_install_is_refused_before_anything_
             assert (
                 str(client.resolve()) in said
             ), f"attempt {attempt}: the refusal does not say where the link leads"
+            # Scoped to the STAGE since 2026-09-05. "Nothing was run and
+            # nothing was removed" was a claim about the press, and the press
+            # runs `build` before either stage that calls `_data_dir()` --
+            # measured through `run()` on yulon-fedora 2026-09-05, "The build
+            # finished." lands four log lines above the extract stage's own
+            # refusal. `rec.container_runs` below is the fact half; this is the
+            # words half, and for one round only the fact half was asserted.
+            assert (
+                "This stage ran nothing and removed nothing." in said
+            ), f"attempt {attempt}: {said}"
+            assert (
+                "Nothing was run and nothing was removed" not in said
+            ), f"attempt {attempt}: {said}"
         assert rec.container_runs == [], f"attempt {attempt}: a container ran over a linked data/"
         assert kept.is_file(), f"attempt {attempt}: the client lost content to a refused install"
 
