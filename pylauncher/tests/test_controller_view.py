@@ -1800,7 +1800,7 @@ def test_each_game_gets_the_controller_from_its_own_package(tmp_path: Path) -> N
 
 
 def test_each_game_waits_for_the_ready_line_its_own_server_prints(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, a_world_container_that_answers: None
 ) -> None:
     """The reason three of the four packages reimplement `wait_ready()` at all.
 

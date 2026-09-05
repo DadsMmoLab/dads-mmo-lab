@@ -138,7 +138,7 @@ def wait_server_ready(
 
     `timeout` is the entry's `timeout_s` and it is a QUIET budget: how long the
     world server may print nothing new, restarted every time it prints, bounded
-    by `native.READY_CEILING_SECONDS`. Until 2026-09-05 this spent it once, as a
+    by `native.management_ceiling()`. Until 2026-09-05 this spent it once, as a
     fixed total, while the install spine spent the same field as a window. This
     entry is also the one where the two readings differ most in wall clock: it
     is the only shipped entry that declares a `fatal` marker and the only one

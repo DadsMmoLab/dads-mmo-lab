@@ -188,7 +188,7 @@ def wait_server_ready(*, wsl_distro: str | None = None, **kwargs: float) -> bool
 
     `timeout` is the entry's `timeout_s`, and it is a QUIET budget: how long
     mangosd may print nothing new, restarted every time it prints, bounded by
-    `native.READY_CEILING_SECONDS`. That is the reading the install spine has
+    `native.management_ceiling()`. That is the reading the install spine has
     given the same catalogue field since 2026-09-04, and this call spent it as a
     fixed total wall clock for a day afterwards — the reading the incident
     disproved. `tbc-mangosd` took 46.0 minutes to its first `Avg Diff:` on

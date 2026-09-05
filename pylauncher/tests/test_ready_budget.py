@@ -27,7 +27,9 @@ six-hour ceiling both run in microseconds.
 
 from __future__ import annotations
 
+import ast
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -104,7 +106,7 @@ class FakeWorld:
         self.elapsed += min(spent, ready.timeout)
         return False
 
-    def output(self, spec: docker.ContainerSpec) -> native.WorldOutput:
+    def output(self, spec: docker.ContainerSpec, **_kwargs: object) -> native.WorldOutput:
         printing_until = self.elapsed if self.quiet_after_s is None else self.quiet_after_s
         lines = [
             f">> Loading something big, {int(n * self.print_every_s)}s in"
@@ -252,12 +254,19 @@ def test_a_container_that_is_no_longer_running_is_named_as_such() -> None:
 
 
 def test_a_status_docker_would_not_answer_is_not_read_as_a_dead_container() -> None:
-    """`ContainerState()` answers `""` for a read that failed; that is not "exited"."""
+    """`ContainerState()` answers `""` for a read that failed; that is not "exited".
+
+    The STATUS alone, which is what `_read_world()` keys on: this fake still
+    reports a restart count, so the only thing saying "could not ask" is the
+    empty status. `test_a_docker_that_stops_answering_is_not_reported_as_a_stuck_server`
+    drives the whole reading `_world_output()` really produces for an unreadable
+    daemon, where the count is `None` too.
+    """
     world = FakeWorld(boot_s=float("inf"), status="", quiet_after_s=0.0)
     message = _refusal(world)
 
     assert "is not running" not in message
-    assert "stopped printing" in message
+    assert "docker stopped answering" in message
 
 
 def test_a_fatal_line_ends_the_wait_and_the_whole_line_is_quoted_back() -> None:
@@ -344,11 +353,11 @@ def test_the_default_output_seam_reads_this_run_of_the_world_container() -> None
     """
     asked: list[tuple[str, object]] = []
 
-    def container_state(name: str) -> docker.ContainerState:
+    def container_state(name: str, **_kwargs: object) -> docker.ContainerState:
         asked.append(("state", name))
         return docker.ContainerState("running", "2026-09-04T18:59:55Z", 3)
 
-    def logs(name: str, *, this_run_only: bool = False, since: str = "") -> str:
+    def logs(name: str, *, this_run_only: bool = False, since: str = "", **_kw: object) -> str:
         asked.append(("logs", (name, this_run_only, since)))
         return "loading\n"
 
@@ -411,7 +420,7 @@ def test_a_first_reading_the_daemon_refused_does_not_switch_off_the_crash_check(
     world = FakeWorld(boot_s=float("inf"), restart_every_s=60.0)
     readings = iter([native.WorldOutput(text="", restarts=None, status="")])
 
-    def output(spec: docker.ContainerSpec) -> native.WorldOutput:
+    def output(spec: docker.ContainerSpec, **_kwargs: object) -> native.WorldOutput:
         return next(readings, world.output(spec))
 
     message = _refusal(world, world_output=output)
@@ -421,13 +430,18 @@ def test_a_first_reading_the_daemon_refused_does_not_switch_off_the_crash_check(
 
 
 def test_an_unreadable_restart_count_is_not_counted_towards_a_crash_loop() -> None:
-    """`restarts=None` is "could not ask", and a guess in either direction is worse."""
+    """`restarts=None` is "could not ask", and a guess in either direction is worse.
+
+    What this reading gets SAID about it is
+    `test_a_docker_that_stops_answering_is_not_reported_as_a_stuck_server`'s
+    subject; this one is only about the count never being read as a number.
+    """
     world = FakeWorld(boot_s=float("inf"), quiet_after_s=0.0)
     unknown = native.WorldOutput(text="", restarts=None, status="")
-    message = _refusal(world, world_output=lambda spec: unknown)
+    message = _refusal(world, world_output=lambda spec, **_kwargs: unknown)
 
     assert "restarted" not in message
-    assert "stopped printing" in message
+    assert "crash loop" not in message
 
 
 # -- what the reviewer measured on m910q, 2026-09-05 ------------------------
@@ -470,16 +484,26 @@ def test_a_crash_loop_is_named_a_loop_while_docker_is_restarting_the_container()
     crash-looping world server spends most of its life reporting `restarting`
     rather than `running` (`docker.ContainerState.settled` says exactly this),
     and `docker.wait_ready()` answers False right after a restart -- which is
-    when a window ends. With `restarting` outside the alive statuses it was read
+    when a window ends. With `restarting` outside the alive statuses it is read
     as "it is not running any more", the sentence for a container that has
-    stopped for good, and the loop was never named. Measured by the reviewer on
-    m910q 2026-09-05 with this exact fake.
+    stopped for good, and the loop is never named.
+
+    The restart pace is 1000 s against a 1800 s window, and that is the whole
+    test. This test was written with 60 s, which puts the container thirty
+    restarts past the threshold by the end of the FIRST window -- and
+    `_read_world()` asks the crash-loop question before the status one, so it
+    never reached the status at all and passed with `restarting` deleted from
+    the list (whole file green, m910q 2026-09-05). At 1000 s the count grows by
+    one and then three, under a threshold of four, so the first two windows are
+    decided by the status and the third by the count. Drop `restarting` and the
+    first window ends this with the stop sentence instead.
     """
-    world = FakeWorld(boot_s=float("inf"), restart_every_s=60.0, status="restarting")
+    world = FakeWorld(boot_s=float("inf"), restart_every_s=1000.0, status="restarting")
     message = _refusal(world)
 
     assert "crash loop" in message and "restarted" in message
     assert "is not running any more" not in message
+    assert len(world.windows) == 3, "two windows the status decided, and one the count did"
 
 
 def test_a_crash_loop_caught_between_restarts_is_still_a_loop_and_not_a_stop() -> None:
@@ -635,7 +659,7 @@ def test_a_management_wait_that_cannot_see_the_container_spends_one_window() -> 
         TBC.container_spec(),
         docker.ReadySpec(world="Avg Diff:", timeout=float(TBC_QUIET_S)),
         wait=world.wait_ready,
-        output=lambda spec: blind,
+        output=lambda spec, **_kwargs: blind,
         monotonic=world.clock,
     )
 
@@ -643,11 +667,156 @@ def test_a_management_wait_that_cannot_see_the_container_spends_one_window() -> 
     assert len(world.windows) == 1
 
 
-@pytest.mark.parametrize("name", ["controller", "wow_tbc", "wow_vanilla", "wow_tortoise"])
-def test_every_ready_wait_in_the_app_spends_the_catalogue_number_the_same_way(
-    name: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+WAIT_FUNCTION_NAMES = ("wait_ready", "wait_server_ready")
+"""What a ready wait is called in this package. The audit below finds them by walking."""
+
+READY_WAIT_PRIMITIVE = "yulon/docker.py"
+"""The one module allowed to spend a `ReadySpec.timeout` as a single total.
+
+`docker.wait_ready()` IS the single window: it is what every quiet budget is
+built out of, and `native.wait_ready_quietly()` calls it once per window. Every
+other `wait_ready`/`wait_server_ready` in the package is a management wait and
+must go through that function.
+"""
+
+
+def _wait_functions() -> dict[str, tuple[Path, int]]:
+    """Every ready wait defined under `yulon/`, found by parsing rather than by memory.
+
+    `f"{module}::{qualname}"` -> (file, line). The previous version of the test
+    below carried its sites in a `parametrize` list of four names, and it was
+    wrong the day it was written: `TortoiseController.wait_ready()` and
+    `controller_wow_wotlk.docker_ctl.wait_server_ready()` were both still
+    spending `timeout_s` as one fixed total, and a test whose docstring said
+    "every ready wait in the app" could not see either of them. A list of names
+    in a test is a claim about the tree; this reads the tree.
+    """
+    root = Path(__file__).resolve().parent.parent / "yulon"
+    found: dict[str, tuple[Path, int]] = {}
+    for path in sorted(root.rglob("*.py")):
+        module = path.relative_to(root.parent).as_posix()
+        if module == READY_WAIT_PRIMITIVE:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for parent in ast.walk(tree):
+            for node in ast.iter_child_nodes(parent):
+                if isinstance(node, ast.FunctionDef) and node.name in WAIT_FUNCTION_NAMES:
+                    owner = parent.name + "." if isinstance(parent, ast.ClassDef) else ""
+                    found[f"{module}::{owner}{node.name}"] = (path, node.lineno)
+    return found
+
+
+def _drive_every_wait(server_dir: Path, distro: str) -> dict[str, Callable[[], bool]]:
+    """One caller per site `_wait_functions()` finds, keyed the same way.
+
+    Keyed rather than listed so the audit can assert the two sets are EQUAL: a
+    game package added with its own `wait_server_ready()` fails here until
+    somebody drives it, which is the failure the four-name parametrize could
+    not produce.
+    """
+    from yulon.controller import Controller
+    from yulon.controller_wow_tbc import controller as tbc_controller
+    from yulon.controller_wow_tbc import docker_ctl as tbc_ctl
+    from yulon.controller_wow_tortoise import controller as tortoise_controller
+    from yulon.controller_wow_tortoise import docker_ctl as tortoise_ctl
+    from yulon.controller_wow_vanilla import controller as vanilla_controller
+    from yulon.controller_wow_vanilla import docker_ctl as vanilla_ctl
+    from yulon.controller_wow_wotlk import docker_ctl as wotlk_ctl
+
+    host, port = "127.0.0.1", 8085
+    return {
+        "yulon/controller.py::Controller.wait_ready": lambda: Controller(
+            tbc_ctl.SPEC, server_dir, wsl_distro=distro
+        ).wait_ready(host, port),
+        "yulon/controller_wow_tbc/controller.py::TbcController.wait_ready": (
+            lambda: tbc_controller.TbcController(server_dir, wsl_distro=distro).wait_ready()
+        ),
+        "yulon/controller_wow_tbc/docker_ctl.py::wait_server_ready": (
+            lambda: tbc_ctl.wait_server_ready(wsl_distro=distro)
+        ),
+        "yulon/controller_wow_tortoise/controller.py::TortoiseController.wait_ready": (
+            lambda: tortoise_controller.TortoiseController(
+                server_dir, wsl_distro=distro
+            ).wait_ready(host, port)
+        ),
+        "yulon/controller_wow_tortoise/docker_ctl.py::wait_server_ready": (
+            lambda: tortoise_ctl.wait_server_ready(host, port, wsl_distro=distro)
+        ),
+        "yulon/controller_wow_vanilla/controller.py::VanillaController.wait_ready": (
+            lambda: vanilla_controller.VanillaController(server_dir, wsl_distro=distro).wait_ready(
+                host, port
+            )
+        ),
+        "yulon/controller_wow_vanilla/docker_ctl.py::wait_server_ready": (
+            lambda: vanilla_ctl.wait_server_ready(wsl_distro=distro)
+        ),
+        "yulon/controller_wow_wotlk/docker_ctl.py::wait_server_ready": (
+            lambda: wotlk_ctl.wait_server_ready(host, port, wsl_distro=distro)
+        ),
+    }
+
+
+def test_the_list_of_ready_waits_this_file_drives_is_the_list_the_package_defines(
+    tmp_path: Path,
 ) -> None:
-    """Four sites built a `ReadySpec` from `timeout_s` and waited it out ONCE, as a total.
+    """The enumeration itself, before anything is asserted ABOUT the sites.
+
+    Two sites went a whole round unnoticed because the test that claimed to
+    cover them named four of them in prose. This compares the tree against the
+    drivers, so the next one cannot.
+    """
+    walked = set(_wait_functions())
+    driven = set(_drive_every_wait(tmp_path, "dml-arch"))
+
+    assert walked, "the walk found no ready wait at all, so it is asserting nothing"
+    assert walked == driven, (
+        f"ready waits with no driver: {sorted(walked - driven)}; "
+        f"drivers for nothing: {sorted(driven - walked)}"
+    )
+
+
+def test_no_ready_wait_outside_the_primitive_spends_the_budget_as_one_total() -> None:
+    """`docker.wait_ready_for()` called anywhere but by the quiet loop IS the bug.
+
+    Asserted by parsing rather than by driving, because driving cannot see a
+    site nobody thought to drive -- which is exactly how
+    `TortoiseController.wait_ready()` and the WotLK `wait_server_ready()`
+    survived the round that moved the other six.
+
+    The audit is checked against itself as well: `native.py` must still name
+    `docker.wait_ready_for`, or a rename would leave this scanning for a
+    spelling nothing uses and passing on every tree there will ever be.
+    """
+    root = Path(__file__).resolve().parent.parent / "yulon"
+    allowed = {READY_WAIT_PRIMITIVE, "yulon/catalog/native.py"}
+    offenders: list[str] = []
+    naming_it: set[str] = set()
+    for path in sorted(root.rglob("*.py")):
+        module = path.relative_to(root.parent).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr == "wait_ready_for":
+                naming_it.add(module)
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "wait_ready_for"
+                and module not in allowed
+            ):
+                offenders.append(f"{module}:{node.lineno}")
+
+    assert "yulon/catalog/native.py" in naming_it, "the quiet loop no longer names the primitive"
+    assert offenders == [], (
+        "these spend the quiet budget as one fixed total, which is the reading the "
+        f"2026-09-04 incident disproved: {offenders}"
+    )
+
+
+@pytest.mark.parametrize("site", sorted(_drive_every_wait(Path("/srv/wow"), "d")))
+def test_every_ready_wait_in_the_app_spends_the_catalogue_number_the_same_way(
+    site: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Every site built a `ReadySpec` from `timeout_s` and waited it out ONCE, as a total.
 
     That is the same number the install spine spends as a quiet WINDOW. Two
     readings of one catalogue field is how the incident this lane exists for
@@ -655,11 +824,6 @@ def test_every_ready_wait_in_the_app_spends_the_catalogue_number_the_same_way(
     function that holds the reading -- asserted by taking the single-shot road
     away, so a site that still walks it fails here rather than in a log.
     """
-    from yulon import controller as base_controller
-    from yulon.controller_wow_tbc import docker_ctl as tbc_ctl
-    from yulon.controller_wow_tortoise import docker_ctl as tortoise_ctl
-    from yulon.controller_wow_vanilla import docker_ctl as vanilla_ctl
-
     seen: list[docker.ReadySpec] = []
 
     def quietly(spec: docker.ContainerSpec, ready: docker.ReadySpec, **_kwargs: object) -> bool:
@@ -672,14 +836,218 @@ def test_every_ready_wait_in_the_app_spends_the_catalogue_number_the_same_way(
     monkeypatch.setattr(native, "wait_ready_quietly", quietly)
     monkeypatch.setattr(docker, "wait_ready_for", refuse)
 
-    calls = {
-        "controller": lambda: base_controller.Controller(tbc_ctl.SPEC, tmp_path).wait_ready(
-            "127.0.0.1", 8085
-        ),
-        "wow_tbc": lambda: tbc_ctl.wait_server_ready(),
-        "wow_vanilla": lambda: vanilla_ctl.wait_server_ready(),
-        "wow_tortoise": lambda: tortoise_ctl.wait_server_ready("127.0.0.1", 8085),
-    }
-
-    assert calls[name]() is True
+    assert _drive_every_wait(tmp_path, "dml-arch")[site]() is True
     assert len(seen) == 1
+
+
+@pytest.mark.parametrize("site", sorted(_drive_every_wait(Path("/srv/wow"), "d")))
+def test_a_ready_wait_asks_one_daemon_for_the_wait_the_state_and_the_log(
+    site: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A WSL install's verdict was formed from a daemon the wait was never watching.
+
+    `wait_ready_quietly()` forwarded `wsl_distro` to `docker.wait_ready_for()`
+    and called `_world_output()` without it -- and `_world_output()` is where
+    the container's state and log are read. On Windows a WSL install's
+    containers exist only inside the distro, so those two reads went to Docker
+    Desktop on the host and came back "no such object" for a container that was
+    up and printing, which this wait reads as a daemon that would not talk and
+    gives up on after one window. The opposite is available too: a stale host
+    container of the same name answers, and a dead server is called alive.
+
+    Three reads, one daemon, asserted together rather than one at a time,
+    because the defect is a RELATIONSHIP between them and no read is wrong on
+    its own. RED on m910q 2026-09-05, all eight sites at once:
+    `{'state': None, 'logs': None, 'wait': 'dml-arch'}`.
+    """
+    asked: dict[str, object] = {}
+
+    def wait(spec: docker.ContainerSpec, ready: docker.ReadySpec, **kwargs: object) -> bool:
+        asked["wait"] = kwargs.get("wsl_distro")
+        return True
+
+    def state(container: str, **kwargs: object) -> docker.ContainerState:
+        asked["state"] = kwargs.get("wsl_distro")
+        return docker.ContainerState("running", "2026-09-05T00:00:00Z", 0)
+
+    def logs(container: str, **kwargs: object) -> str:
+        asked["logs"] = kwargs.get("wsl_distro")
+        return "loading\n"
+
+    monkeypatch.setattr(docker, "wait_ready_for", wait)
+    monkeypatch.setattr(docker, "container_state", state)
+    monkeypatch.setattr(docker, "_logs", logs)
+
+    assert _drive_every_wait(tmp_path, "dml-arch")[site]() is True
+    assert asked == {"wait": "dml-arch", "state": "dml-arch", "logs": "dml-arch"}
+
+
+# -- the status list, enumerated ---------------------------------------------
+
+
+@pytest.mark.parametrize("status", ["running", "restarting"])
+def test_a_status_docker_reports_of_a_live_container_is_not_read_as_a_stop(status: str) -> None:
+    """One test per entry in `native._ALIVE_STATUSES`, so dropping any of them goes red.
+
+    Until 2026-09-05 not one of the seven statuses docker can report had a test.
+    The file's only named status test drove a container that had restarted
+    thirty times, and `_read_world()` asks the crash-loop question FIRST, so it
+    never reached the status at all -- it passed for a different reason than its
+    name, and dropping `restarting` from the tuple left the whole file green
+    (m910q, 2026-09-05). Here the container has never restarted, so the status
+    is the only question left that can end the wait.
+
+    The third alive status, `""`, is owned by
+    `test_a_docker_that_stops_answering_is_not_reported_as_a_stuck_server`,
+    which drives it in the only shape `_world_output()` can actually produce it
+    in: an unreadable state carries no restart count either.
+    """
+    world = FakeWorld(boot_s=float("inf"), quiet_after_s=0.0, status=status)
+    message = _refusal(world)
+
+    assert "is not running any more" not in message, f"{status!r} is not a container that stopped"
+    assert "stopped printing" in message
+
+
+@pytest.mark.parametrize("status", ["created", "exited", "paused", "dead", "removing"])
+def test_a_status_that_means_nothing_will_print_is_named_a_stop(status: str) -> None:
+    """And the other half of the list: every status docker has that is NOT alive.
+
+    Docker's set is `created`, `running`, `restarting`, `exited`, `paused`,
+    `dead` and `removing`; the two tests either side of this line name all
+    seven, so adding one to `_ALIVE_STATUSES` costs a red test rather than a
+    six-hour wait on a container that is never going to print again.
+
+    This container prints all the way through and has never restarted, so
+    neither the crash-loop question nor the quiet one can answer for it: the
+    status is what ends the wait, at the first window, and the sentence quotes
+    what docker actually said.
+    """
+    world = FakeWorld(boot_s=float("inf"), status=status)
+    message = _refusal(world)
+
+    assert "is not running any more" in message
+    assert repr(status) in message, "the refusal quotes docker's own word for it"
+    assert len(world.windows) == 1, "nothing is going to print, so nothing waits for it to"
+
+
+# -- what the round-3 review measured on m910q, 2026-09-05 -------------------
+
+
+def test_a_docker_that_stops_answering_is_not_reported_as_a_stuck_server() -> None:
+    """The daemon died mid-wait, and the refusal said the SERVER had stopped printing.
+
+    `_world_output()` answers `WorldOutput("", None, "")` when `container_state()`
+    could not read the container at all, and two identical readings of that were
+    the `quiet` verdict -- "it stopped printing anything at all ... so this one
+    is stuck rather than slow". Nothing here had read the log; nothing here knew
+    anything about the server. It also contradicted the announcement printed
+    moments earlier, which says this wait is watching what the server prints,
+    and it sent the user to `docker compose logs` -- the one command that cannot
+    work when docker is the thing that is down.
+
+    The `""` entry in `native._ALIVE_STATUSES` is owned here: take it out and
+    this arrives as `gone`, and the user is told a running container has stopped
+    because the daemon in front of it did.
+    """
+    world = FakeWorld(boot_s=float("inf"))
+    blind = native.WorldOutput(text="", restarts=None, status="")
+    message = _refusal(world, world_output=lambda spec, **_kwargs: blind)
+
+    assert "docker stopped answering" in message
+    assert "stuck rather than slow" not in message
+    assert "stopped printing" not in message
+    assert "is not running any more" not in message, "an unreadable state is not a stopped one"
+
+
+def test_a_measured_duration_that_rounds_to_zero_is_not_reported_as_zero() -> None:
+    """`_spell_seconds(0)` answered "0 seconds", which is its own docstring's complaint.
+
+    That docstring condemns `"0 minutes"` because it is "true of nothing that
+    ever happened", and every duration this function is handed is one the wait
+    MEASURED -- so it happened, so zero is never the honest word for it. A
+    window can end in effectively no time: `docker.wait_ready()` returns False
+    on its first poll when the log already holds a `fatal` line, and the two
+    `monotonic` reads either side of that can land in one clock tick.
+    """
+    assert native._spell_seconds(0) == "less than a second"
+    assert native._spell_seconds(0.4) == "less than a second"
+    assert native._spell_seconds(1) == "1 second"
+
+
+# -- two ceilings, because there are two kinds of wait -----------------------
+
+
+def test_a_management_wait_is_bounded_by_the_timeout_its_caller_handed_it() -> None:
+    """A Stop/Start button could block for six hours, and nothing tested the change.
+
+    The four management waits used to spend `timeout` ONCE, as a total, so the
+    call was bounded at 480 s, 1800 s or 3600 s depending on which of them it
+    was. Reading the number as a quiet budget was right; taking the INSTALL
+    ceiling with it was not, and it went from 480-3600 s to 21600 s with no test
+    naming the change. `timeout=` bounds the call again, at
+    `MANAGEMENT_CEILING_WINDOWS` times itself -- still strictly longer than the
+    single-shot total it replaced, so no wait that used to succeed is cut short.
+    """
+    world = FakeWorld(boot_s=float("inf"))
+    got = native.wait_ready_quietly(
+        TBC.container_spec(),
+        docker.ReadySpec(world="Avg Diff:", timeout=float(TBC_QUIET_S)),
+        wait=world.wait_ready,
+        output=world.output,
+        monotonic=world.clock,
+    )
+
+    assert got is False
+    assert len(world.windows) == native.MANAGEMENT_CEILING_WINDOWS
+    assert world.elapsed == pytest.approx(TBC_QUIET_S * native.MANAGEMENT_CEILING_WINDOWS)
+    assert world.elapsed > TBC_QUIET_S, "one window is the single-shot total this replaced"
+
+
+def test_the_install_wait_and_a_management_wait_stop_in_different_places() -> None:
+    """Same catalogue number, same talkative server, two different ceilings -- on purpose.
+
+    An install is a long operation the user started knowing it was long and
+    which streams progress the whole way; six hours is there only so a server
+    printing rubbish for ever cannot hang it. A management wait is behind a
+    button the user just pressed and is looking at. Collapsing the two was the
+    regression; `MANAGEMENT_CEILING_WINDOWS` carries the argument for the size.
+    """
+    managed = FakeWorld(boot_s=float("inf"))
+    assert (
+        native.wait_ready_quietly(
+            TBC.container_spec(),
+            docker.ReadySpec(world="Avg Diff:", timeout=float(TBC_QUIET_S)),
+            wait=managed.wait_ready,
+            output=managed.output,
+            monotonic=managed.clock,
+        )
+        is False
+    )
+
+    installing = FakeWorld(boot_s=float("inf"))
+    with pytest.raises(InstallerError, match="never reported ready"):
+        list(
+            _installer(installing).wait_for_ready(
+                _ctx(), ReadyMarkers(world="Avg Diff:", timeout_s=TBC_QUIET_S)
+            )
+        )
+
+    assert installing.elapsed == pytest.approx(native.READY_CEILING_SECONDS)
+    assert managed.elapsed == pytest.approx(TBC_QUIET_S * native.MANAGEMENT_CEILING_WINDOWS)
+    assert managed.elapsed < installing.elapsed
+
+
+def test_a_quiet_budget_larger_than_the_install_ceiling_does_not_raise_it() -> None:
+    """`management_ceiling()` is a multiple of a catalogue number, so it needs a cap.
+
+    Nothing in `catalog.json` is near this today -- the largest `timeout_s` is
+    Tortoise's 3600, read 2026-09-05, which buys four hours -- and that is
+    exactly when a bound costs nothing to add.
+    """
+    assert native.management_ceiling(float(TBC_QUIET_S)) == pytest.approx(
+        TBC_QUIET_S * native.MANAGEMENT_CEILING_WINDOWS
+    )
+    assert native.management_ceiling(float(native.READY_CEILING_SECONDS)) == pytest.approx(
+        native.READY_CEILING_SECONDS
+    )

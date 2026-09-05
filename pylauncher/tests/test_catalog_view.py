@@ -124,7 +124,9 @@ def test_one_tile_per_catalog_entry_with_install_button(qapp: object) -> None:
         assert view.button_for(game.id).text() == "Install"
 
 
-def test_install_asks_for_folders_then_streams_the_installer(qapp: object, tmp_path: Path) -> None:
+def test_install_asks_for_folders_then_streams_the_installer(
+    qapp: object, tmp_path: Path, the_compose_project_is_not_pinned: list[Path]
+) -> None:
     panel = LogPanel()
     made: list[_FakeInstaller] = []
     prompts: list[str] = []
@@ -568,7 +570,9 @@ def test_supported_platform_keeps_the_install_button(qapp: object) -> None:
     assert view.button_for("wow-wotlk").isEnabled() is True
 
 
-def test_unlocking_after_a_job_never_re_enables_a_gated_tile(qapp: object, tmp_path: Path) -> None:
+def test_unlocking_after_a_job_never_re_enables_a_gated_tile(
+    qapp: object, tmp_path: Path, the_compose_project_is_not_pinned: list[Path]
+) -> None:
     """The 6.1 gate must survive `_set_buttons_enabled(True)` (review finding 1.1).
 
     Latent while every entry is Linux-only; armed the moment 6.2 widens WotLK
@@ -1754,7 +1758,7 @@ def test_a_game_already_installed_opens_greyed_and_says_so(qapp: object, tmp_pat
 
 
 def test_a_finished_install_greys_its_own_button_and_leaves_the_others(
-    qapp: object, tmp_path: Path
+    qapp: object, tmp_path: Path, the_compose_project_is_not_pinned: list[Path]
 ) -> None:
     """Ordering test as much as a feature test.
 

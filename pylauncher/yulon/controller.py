@@ -361,7 +361,7 @@ class Controller:
 
         `timeout` is a QUIET budget here, as it is everywhere else in this app:
         how long the world server may print nothing new, restarted every time it
-        prints, bounded by `native.READY_CEILING_SECONDS`. It was a fixed total
+        prints, bounded by `native.management_ceiling()`. It was a fixed total
         wall clock until 2026-09-05 — this call spent `ReadySpec`'s 480 seconds
         once — and a fixed total is the reading the 2026-09-04 incident
         disproved: a CMaNGOS world server took 46.0 minutes to its first

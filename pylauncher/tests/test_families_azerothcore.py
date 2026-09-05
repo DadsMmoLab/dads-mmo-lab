@@ -250,6 +250,17 @@ def test_one_patch_of_a_platform_probe_gets_one_answer_out_of_the_whole_install(
         tmp_path,
         platform_id=lambda: "linux",
         docker_ready=lambda: True,
+        # `gather()`'s own seams, and they have to be taken: this test's
+        # subject is which SELinux probe two callers reach, and it was reaching
+        # the box's docker daemon three times to find out. `vm_resources`
+        # defaults are bound at def time, so patching `platform.vm_resources`
+        # does nothing -- it ran `docker info`; `port_conflicts` ran
+        # `docker ps`; and `bind_mount_ok` went furthest, doing a real
+        # `docker run` of `alpine/git` over `tmp_path`, which took the whole
+        # suite from 50 s to 148 s on m910q (all measured 2026-09-05).
+        vm_resources=lambda: None,
+        bind_mount_ok=lambda server_dir: True,
+        port_conflicts=lambda: [],
     )
 
     # Both consumers, one patch, one answer each.

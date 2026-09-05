@@ -172,7 +172,7 @@ def wait_server_ready(
 
     `timeout` is the entry's `timeout_s` and it is a QUIET budget: how long
     mangosd may print nothing new, restarted every time it prints, bounded by
-    `native.READY_CEILING_SECONDS`. Until 2026-09-05 this spent it once, as a
+    `native.management_ceiling()`. Until 2026-09-05 this spent it once, as a
     fixed total, while the install spine spent the same field as a window — and
     this game is the one that makes the two readings impossible to argue as
     equivalent. On yulon-win11-gate 2026-09-04 Vanilla's first boot took 24.6

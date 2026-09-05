@@ -608,7 +608,53 @@ Desktop's 9p share reading at about 1.4 MB/s. It is a wall-clock number and
 therefore exactly the kind this design is here to get rid of, which is why it
 sits eight times clear of the evidence rather than beside it: a server still
 emitting fresh boot output six hours in has a problem no timeout should hide.
+
+This is the INSTALL ceiling. A management wait gets its own — see
+`MANAGEMENT_CEILING_WINDOWS`.
 """
+
+MANAGEMENT_CEILING_WINDOWS = 4
+"""How many quiet budgets a MANAGEMENT wait may spend before it stops. The install gets six hours.
+
+The two waits are bounded by different things, and collapsing them was a
+regression. An INSTALL is a long operation the user started knowing it was long,
+it streams progress the whole way, and `READY_CEILING_SECONDS` is there only so
+a server printing rubbish for ever cannot hang it. A management wait is behind a
+Stop/Start button on the Server tab: the user pressed it and is looking at it.
+Between 2026-09-04 and 2026-09-05 the management waits took the install's
+ceiling, so a button whose call used to be bounded at 480 s (the shared
+`ReadySpec.timeout` default), 1800 s or 3600 s could block for six hours, and
+nothing tested the change.
+
+Bounding it as a MULTIPLE of the caller's `timeout` rather than as a second flat
+wall-clock constant, because the caller is the one who knows how long its user
+will sit there, and the callers do not agree: 480, 1800 and 3600 seconds are all
+in use today. One flat number would be 45x the smallest caller's expectation or
+below the largest's. `timeout=` therefore still bounds the call, which was half
+the complaint.
+
+Four, and not three or twelve. It must be more than one or the quiet budget is
+not a quiet budget at all — that is the bug this whole lane is about. Above
+that, the size is set by the largest measured miss: the wall-clock guess this
+lane replaced was out by a factor of 1.54 on the one occasion it was measured
+(TBC 46.0 min against `timeout_s: 1800`, yulon-win11-gate 2026-09-04), and
+Vanilla on the same box the same day came in UNDER it at 0.82. Four gives the
+worst of those 2.6x of headroom while keeping the smallest caller's bound at 32
+minutes rather than six hours. It is strictly longer than the single-shot total
+every one of these sites spent before this lane, so no wait that used to
+succeed can now be cut short.
+"""
+
+
+def management_ceiling(timeout: float) -> float:
+    """The wall clock a management wait may spend, given the quiet budget it was handed.
+
+    Capped by `READY_CEILING_SECONDS` as well: a catalogue entry asking for a
+    six-hour quiet budget does not get a twenty-four-hour poll behind a button.
+    Nothing in `catalog.json` is near that today (the largest is Tortoise's
+    3600, read 2026-09-05), which is exactly when a bound is cheap to add.
+    """
+    return min(timeout * MANAGEMENT_CEILING_WINDOWS, float(READY_CEILING_SECONDS))
 
 
 def _line_around(text: str, found: re.Match[str]) -> str:
@@ -636,10 +682,19 @@ def _spell_seconds(seconds: float) -> str:
     reachable the moment they are measured, because `docker.wait_ready()` gives
     up after `_CLI_MISSING_GRACE_SECONDS` — thirty seconds — when the docker CLI
     has gone.
+
+    `0 -> "less than a second"` for the same reason `"0 minutes"` was wrong, and
+    it answered `"0 seconds"` until 2026-09-05: a duration this reports is one
+    the wait MEASURED, so it happened, so no true sentence about it is "0". A
+    window can end in effectively no time — `docker.wait_ready()` returns False
+    on its first poll when the log already holds a `fatal` line, and the two
+    `monotonic` reads either side of it can land in the same clock tick.
     """
     minutes = int(round(seconds / 60))
     if minutes == 0:
         count = int(round(seconds))
+        if count == 0:
+            return "less than a second"
         return f"{count} second" if count == 1 else f"{count} seconds"
     if minutes % 60 == 0:
         hours = minutes // 60
@@ -667,8 +722,22 @@ class WorldOutput:
     status: str
 
 
-def _world_output(spec: docker.ContainerSpec) -> WorldOutput:
+def _world_output(spec: docker.ContainerSpec, *, wsl_distro: str | None = None) -> WorldOutput:
     """`WorldOutput` for the world container, in one state read plus one log read.
+
+    `wsl_distro` names the daemon to ask, and BOTH reads take it or the verdict
+    is formed from a machine the wait was never watching. On Windows a WSL
+    install's containers exist only inside the distro: `docker inspect` on the
+    host answers "No such object", `container_state()` turns that into a
+    default `ContainerState()`, and this comes back `WorldOutput("", None, "")`
+    — "docker would not talk" — for a container that is up and printing. Two of
+    those in a row end the wait. Until 2026-09-05 `wait_ready_quietly()`
+    forwarded the distro to the WAIT and called this without it, so the wait
+    watched one daemon while the verdict came from another. RED on m910q
+    2026-09-05, from the docker guard added to `tests/conftest.py` that day:
+    `test_wait_helpers_forward_the_distro_a_wsl_install_lives_in` — a test whose
+    whole subject is that the distro is forwarded — was passing while it ran
+    `['docker', 'inspect', 't-world', ...]` against the box's own daemon.
 
     `container_state()` first, and its `started_at` is handed to the log read:
     that is what scopes the log to the CURRENT run, without which a restarted
@@ -705,10 +774,12 @@ def _world_output(spec: docker.ContainerSpec) -> WorldOutput:
     state is read FIRST: the failure that takes both down at once — no daemon —
     is caught by the status, not by the log.
     """
-    state = docker.container_state(spec.world)
+    state = docker.container_state(spec.world, wsl_distro=wsl_distro)
     if not state.status:
         return WorldOutput(text="", restarts=None, status="")
-    text = docker._logs(spec.world, this_run_only=True, since=state.started_at)
+    text = docker._logs(
+        spec.world, this_run_only=True, since=state.started_at, wsl_distro=wsl_distro
+    )
     return WorldOutput(text=text, restarts=state.restart_count, status=state.status)
 
 
@@ -722,12 +793,23 @@ life in restart backoff reporting `restarting` — `ContainerState.settled` is
 built on exactly that fact — and `docker.wait_ready()` answers False in the
 seconds right after a restart, which is precisely when a window ends. Reading
 `restarting` as "not running any more" told a user their container had stopped
-while docker was busy starting it again. Measured on m910q 2026-09-05:
-`FakeWorld(boot_s=inf, restart_every_s=60.0, status="restarting")` produced
-`tbc-mangosd is not running any more (docker says 'restarting')`.
+while docker was busy starting it again.
 
-The remaining statuses — `exited`, `dead`, `created`, `paused`, `removing` —
-all mean nothing is going to print, which is the sentence they get.
+Docker's full set is `created`, `running`, `restarting`, `exited`, `paused`,
+`dead` and `removing`, and the four not listed above all mean nothing is going
+to print — which is the sentence they get. Every one of the seven has a test
+(`test_ready_budget.py`, the two parametrized status tests), because until
+2026-09-05 not one of them did.
+
+The list survived its own mutations, which is how that was found. Measured on
+m910q 2026-09-05, against the file as it then stood: dropping `restarting` left
+it GREEN — including the test that carries the word in its name, which drove a
+container thirty restarts past the threshold, and `_read_world()` asks the
+crash-loop question first, so it never reached the status at all. Adding
+`paused` left it green too. Against the file as it now stands both go red, and
+an earlier version of this docstring claimed a measurement the question order
+makes impossible to reproduce. A status list nobody tests is a list that says
+whatever it was last typed as.
 """
 
 
@@ -741,9 +823,9 @@ def _read_world(
     """What a window that ended without the banner means. `("alive", None)` to wait on.
 
     ONE function because there are two loops that must agree — the install
-    spine's `wait_for_ready()`, which turns this into four different sentences,
-    and `wait_ready_quietly()`, which turns it into a bool. Two copies of a
-    four-way ordering is two orderings the day one of them is edited.
+    spine's `wait_for_ready()`, which turns this into five different sentences,
+    and `wait_ready_quietly()`, which turns it into a bool. Two copies of an
+    ordering is two orderings the day one of them is edited.
 
     The order is the whole content, and it is not the order the questions were
     asked in until 2026-09-05:
@@ -763,6 +845,17 @@ def _read_world(
       counts as life, a shrinking log included — a log that shrank means the
       container restarted or `docker logs` failed, and both are better answered
       by the questions above than by declaring silence.
+
+    "quiet" splits in two on the STATUS, and that split is a sentence rather
+    than a decision: both end the wait. `WorldOutput.status` is `""` only when
+    `container_state()` could not read the container at all, and two identical
+    unreadable readings are `unreadable` — docker stopped answering — not
+    `quiet`. Until 2026-09-05 a daemon that died mid-wait was reported as "it
+    stopped printing anything at all ... so this one is stuck rather than slow",
+    which contradicts the announcement printed moments earlier (this wait is
+    watching the log; it had not read the log) and sends the user to
+    `docker compose logs`, the one command that cannot work either. Nothing was
+    learned about the server, and the refusal said it had been.
     """
     grew = None if first_restarts is None or now.restarts is None else now.restarts - first_restarts
     if grew is not None and grew >= restart_loop:
@@ -773,7 +866,7 @@ def _read_world(
     if found is not None:
         return "fatal", _line_around(now.text, found)
     if now == before:
-        return "quiet", None
+        return ("quiet" if now.status else "unreadable"), None
     return "alive", None
 
 
@@ -782,7 +875,7 @@ def wait_ready_quietly(
     ready: docker.ReadySpec,
     *,
     wait: Callable[..., bool] | None = None,
-    output: Callable[[docker.ContainerSpec], WorldOutput] | None = None,
+    output: Callable[..., WorldOutput] | None = None,
     monotonic: Callable[[], float] | None = None,
     wsl_distro: str | None = None,
 ) -> bool:
@@ -791,33 +884,40 @@ def wait_ready_quietly(
     The bool half of `StagedInstaller.wait_for_ready()`, and the reason it
     exists is that one catalogue number was being read two ways. The install
     spine spends `install.native.ready.timeout_s` as a window that restarts
-    every time the world server prints; four other waits —
-    `controller.Controller.wait_ready()` and the three CMaNGOS
-    `docker_ctl.wait_server_ready()` — built a `ReadySpec` from the same field
-    and waited it out ONCE, as a fixed total wall clock. That is the reading the
-    incident of 2026-09-04 disproved: TBC's world server took 46.0 minutes to
-    its first `Avg Diff:` against a `timeout_s` of 1800 while printing the whole
-    way, and every one of those four sites would have called it a failure at 30
-    minutes exactly as the installer did.
+    every time the world server prints; six other waits — the base
+    `controller.Controller.wait_ready()`, `TortoiseController.wait_ready()` and
+    the four `docker_ctl.wait_server_ready()` — built a `ReadySpec` from the
+    same field and waited it out ONCE, as a fixed total wall clock. That is the
+    reading the incident of 2026-09-04 disproved: TBC's world server took 46.0
+    minutes to its first `Avg Diff:` against a `timeout_s` of 1800 while
+    printing the whole way, and every one of those six sites would have called
+    it a failure at 30 minutes exactly as the installer did.
 
     So the number has one meaning in this app now, and it is this one. The
     alternative was to rename the field, which needs `catalog.py` and
-    `catalog.json` — not this lane's to edit — and would have left four sites
+    `catalog.json` — not this lane's to edit — and would have left six sites
     spending a budget under a name that said they should not.
+
+    **`timeout` still bounds the call**, at `MANAGEMENT_CEILING_WINDOWS` times
+    itself — see that constant for why a management wait gets its own ceiling
+    rather than the install's six hours.
 
     `wait`, `output` and `monotonic` are resolved at CALL time, never bound as
     defaults: `docker.wait_ready_for` bound at import is a function a test's
-    `monkeypatch` can no longer replace, and three of those four sites are
-    tested that way.
+    `monkeypatch` can no longer replace, and most of those sites are tested
+    that way.
+
+    `wsl_distro` reaches the WAIT and both READS. It reached only the wait until
+    2026-09-05; `_world_output()`'s docstring has what that cost.
 
     Returns True the moment the world server reports ready. Returns False for
     every one of `_read_world()`'s verdicts and at the ceiling, because a
-    caller polling a running server wants a bool — the four sentences are the
+    caller polling a running server wants a bool — the five sentences are the
     install spine's job, and it keeps its own loop to build them.
 
     A docker that will not answer at all needs no special case here, and one was
     written and then deleted: `WorldOutput("", None, "")` twice running is the
-    "quiet" verdict, so an unreachable daemon already ends this after one
+    `unreadable` verdict, so an unreachable daemon already ends this after one
     window — exactly what the single-shot wait it replaced did. The guard that
     checked for it explicitly survived its own mutation on m910q 2026-09-05
     (`if False:`, whole file still green) and differed from having no guard in
@@ -828,17 +928,18 @@ def wait_ready_quietly(
     wait = wait or docker.wait_ready_for
     look = output or _world_output
     clock = monotonic or time.monotonic
+    ceiling = management_ceiling(ready.timeout)
 
     started = clock()
-    before = look(spec)
+    before = look(spec, wsl_distro=wsl_distro)
     first_restarts = before.restarts
     while True:
-        window = min(ready.timeout, READY_CEILING_SECONDS - (clock() - started))
+        window = min(ready.timeout, ceiling - (clock() - started))
         if window <= 0:
             return False
         if wait(spec, replace(ready, timeout=window), wsl_distro=wsl_distro):
             return True
-        now = look(spec)
+        now = look(spec, wsl_distro=wsl_distro)
         if first_restarts is None:
             first_restarts = now.restarts
         verdict, _ = _read_world(before, now, first_restarts, ready.restart_loop, ready.fatal)
@@ -2191,12 +2292,14 @@ class StagedInstaller:
 
         Structure: `wait_ready()` is called for one `timeout_s` window at a
         time, and between windows `world_output` is asked what the container
-        has said. A window that ends without the banner is read against four
-        questions by `_read_world()`, which holds the order and the argument for
-        it — and which `wait_ready_quietly()` shares, so the four management
+        has said. A window that ends without the banner is read against
+        `_read_world()`'s questions, which holds the order and the argument for
+        it — and which `wait_ready_quietly()` shares, so the six management
         waits cannot drift into a different one. This loop's own job is the
         three things a bool cannot carry: the announcement, the progress notes,
-        and a separate sentence per verdict.
+        and a separate sentence per verdict — including the one that says
+        NOTHING about the server, because docker stopped answering and this
+        wait's only view of the world is through it.
 
         Every duration in those sentences is MEASURED, off the `monotonic`
         seam, and none is assumed from the window count. `docker.wait_ready()`
@@ -2291,6 +2394,15 @@ class StagedInstaller:
                     f"{never_ready}, and it stopped printing anything at all for the last "
                     f"{_spell_seconds(silent_for)} — a server that is still loading says so as "
                     f"it goes, so this one is stuck rather than slow. {logs} has its last words."
+                )
+            if verdict == "unreadable":
+                blind_for = self._seams.monotonic() - window_started
+                raise InstallerError(
+                    f"The wait for {container} stopped because docker stopped answering: "
+                    f"for the last {_spell_seconds(blind_for)} neither its state nor its log "
+                    f"could be read, so nothing here knows whether the server is still "
+                    f"loading, finished, or gone. The install itself got as far as starting "
+                    f"the containers. Check the docker daemon is up, then {logs}."
                 )
             before = now
             yield (f"Still loading after {_spell_seconds(spent)}, and still printing — waiting on.")

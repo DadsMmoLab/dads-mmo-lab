@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Final
 
 from yulon import docker
+from yulon.catalog import native
 from yulon.catalog.catalog import load_catalog
 
 # WotLK AzerothCore containers (mirrors dml-start.sh constants).
@@ -70,9 +71,20 @@ def wait_db_healthy_ready(*, wsl_distro: str | None = None, **kwargs: float) -> 
 def wait_server_ready(
     realm_host: str, realm_port: int, *, wsl_distro: str | None = None, **kwargs: float
 ) -> bool:
-    """`wait_ready()` pre-bound to `SPEC`'s auth/world containers."""
+    """`wait_ready()` pre-bound to `SPEC`'s auth/world containers.
+
+    `timeout` is a QUIET budget, as it is everywhere else in this app: how long
+    the world server may print nothing new, restarted every time it prints,
+    bounded by `native.management_ceiling()`. AzerothCore is the core the
+    2026-09-04 incident did NOT happen to, and that is not a reason to leave
+    this one reading the number differently — what was slow that day was the
+    mount, not the core, and this game ships to the same Docker Desktop 9p
+    share. It spent `timeout` as a fixed total until 2026-09-05, a day after the
+    other five sites moved, because the test that claimed to cover "every ready
+    wait in the app" named its sites in a parameter list.
+    """
     ready = docker.azerothcore_ready(realm_host, realm_port, **kwargs)
-    return docker.wait_ready_for(SPEC, ready, wsl_distro=wsl_distro)
+    return native.wait_ready_quietly(SPEC, ready, wsl_distro=wsl_distro)
 
 
 def port_conflicts_here() -> list[str]:
