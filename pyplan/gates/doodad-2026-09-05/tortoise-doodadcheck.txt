@@ -1,0 +1,23 @@
+# wow-tortoise carries no source patch. Until 2026-09-05 that rested on reading
+# tools/vmap_extractor/vmapextract/wmo.cpp:98 at 7c0fb278. This is the run.
+
+## the extraction (driver log, ~/lanes/review-doodad-src/tortoise-driver.log)
+2026-09-05T00:20:00Z tortoise extraction: exit 0 after 86 s; files=5367
+files with a space: 0
+all-caps .M2: 0
+lowercase .m2: 4041
+sample names:
+1000Needlesbridge.wmo
+40Manarmygeneral.wmo
+40Mancanalinner.wmo
+40Mancanalouter.wmo
+40Mancourtyard.wmo
+40Mandroneboss.wmo
+40Manegglayerboss.wmo
+40Manenterance.wmo
+2026-09-05T00:20:00Z tortoise DONE
+
+## extract.doodad_placements() over its Buildings/, m910q 2026-09-05
+    /home/pk/lanes/review-doodad-src/out-tortoise/Buildings
+    DoodadCheck(extracted=4041, placed=2675, unplaced=1366, misspelt=0)
+    Buildings/: 4041 models, 2675 placed in dir_bin, 1366 with no placement; every model file is spelled the way the placement index asks for it.

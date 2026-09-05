@@ -1012,11 +1012,20 @@ def test_tortoise_clones_the_submodules_its_cmake_refuses_to_build_without() -> 
 DOODAD_PATCH = "shared/cmangos/patches/vmap-extractor-doodad-name-case.patch"
 """The one patch that ships, and which entries carry it against which checkout.
 
-`wow-tortoise` carries none, and not by oversight: its extractor is the older
+`wow-tortoise` carries none, and not by oversight. Its extractor is the older
 lineage whose `wmo.cpp` runs `fixnamen()` over the whole MODN block in place
 before either the writer or the reader looks at a name (read 2026-09-05 at
-`7c0fb278`, `tools/vmap_extractor/vmapextract/wmo.cpp:98`), so writer and reader
-agree there. `mangos-wotlk` is not a shipped entry (`wow-wotlk` is AzerothCore)
+`7c0fb278`, `tools/vmap_extractor/vmapextract/wmo.cpp:98`). Reading is what
+that was, and reading is how the same conclusion was reached about
+`mangos-classic` before the extraction disproved half of it, so it was RUN:
+on m910q 2026-09-05 that extractor was built from `7c0fb278` in a container
+and run against the Turtle client (86 s, exit 0, 5,367 files in `Buildings/`),
+and `extract.doodad_placements()` over its output answers
+`DoodadCheck(extracted=4041, placed=2675, unplaced=1366, misspelt=0)` -- zero
+all-caps `.M2`, zero names with a space, and not one file spelled a way the
+placement index would not ask for. Writer and reader agree there, measured.
+
+`mangos-wotlk` is not a shipped entry (`wow-wotlk` is AzerothCore)
 and its `ExtractSingleModel` already normalises (read the same day at
 `4cea3890`), which is why the patch refuses to apply there and nothing asks it to.
 """
@@ -1041,6 +1050,32 @@ def test_the_doodad_patch_is_carried_by_the_two_entries_whose_extractor_drops_pl
         return
     assert [(p.file, p.source) for p in patches] == [(DOODAD_PATCH, source)]
     assert patches[0].reason
+
+
+def test_only_the_entry_the_drop_was_measured_on_quotes_the_measured_percentage() -> None:
+    """14.8% is one number, from one client, on one box -- and it is not TBC's.
+
+    Measured on m910q 2026-09-05 against the WoW 1.12.1 client with
+    `mangos-classic` at `8ec338a1`: 429,016 placements unpatched against
+    503,782 patched. Nothing was ever extracted from a TBC client to count the
+    same thing, and `wow-tbc`'s `reason` quoted the Vanilla figure with no
+    qualifier until this test -- a sentence a user reads in the install log,
+    stating a measurement of their own world that nobody made.
+
+    What the TBC entry may say is what IS known: the two extractors' relevant
+    functions are byte-identical (`pyplan/upstream-cmangos-doodad-issue.md`),
+    so the defect is certainly there; its size is not.
+    """
+    reasons = {}
+    for game_id, source in CARRIED.items():
+        if source is None:
+            continue
+        entry = load_catalog().get(game_id)
+        assert entry.install.native is not None and entry.install.native.cmangos is not None
+        reasons[game_id] = entry.install.native.cmangos.patches[0].reason
+    assert "14.8%" in reasons["wow-vanilla"] and "Vanilla" in reasons["wow-vanilla"]
+    assert "14.8" not in reasons["wow-tbc"], reasons["wow-tbc"]
+    assert "never counted" in reasons["wow-tbc"], reasons["wow-tbc"]
 
 
 def test_every_shipped_patch_names_a_source_the_entry_clones_and_a_file_that_ships() -> None:

@@ -1,0 +1,20 @@
+== before the fix (/tmp/patch_before.py)
+   insertion at the tail of the context; file starts as 'int a;\nint b;\nint c;\n'
+      press 1: applied/present=[(1, 0)]  file='int a;\nint b;\nint c;\nint d;\n'
+      press 2: applied/present=[(1, 0)]  file='int a;\nint b;\nint c;\nint d;\nint d;\n'
+      press 3: applied/present=[(1, 0)]  file='int a;\nint b;\nint c;\nint d;\nint d;\nint d;\n'
+   insertion at the head of the context; file starts as 'int a;\nint b;\nint c;\n'
+      press 1: applied/present=[(1, 0)]  file='int d;\nint a;\nint b;\nint c;\n'
+      press 2: applied/present=[(1, 0)]  file='int d;\nint d;\nint a;\nint b;\nint c;\n'
+      press 3: applied/present=[(1, 0)]  file='int d;\nint d;\nint d;\nint a;\nint b;\nint c;\n'
+
+== after the fix (/tmp/patch_after.py)
+   insertion at the tail of the context; file starts as 'int a;\nint b;\nint c;\n'
+      press 1: applied/present=[(1, 0)]  file='int a;\nint b;\nint c;\nint d;\n'
+      press 2: applied/present=[(0, 1)]  file='int a;\nint b;\nint c;\nint d;\n'
+      press 3: applied/present=[(0, 1)]  file='int a;\nint b;\nint c;\nint d;\n'
+   insertion at the head of the context; file starts as 'int a;\nint b;\nint c;\n'
+      press 1: applied/present=[(1, 0)]  file='int d;\nint a;\nint b;\nint c;\n'
+      press 2: applied/present=[(0, 1)]  file='int d;\nint a;\nint b;\nint c;\n'
+      press 3: applied/present=[(0, 1)]  file='int d;\nint a;\nint b;\nint c;\n'
+

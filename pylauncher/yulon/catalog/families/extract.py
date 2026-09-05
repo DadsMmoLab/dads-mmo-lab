@@ -1147,10 +1147,17 @@ BUILDINGS_DIR = "Buildings"
 """Where CMaNGOS-lineage `vmap_extractor`s write model files and the placement index.
 
 A fact about the extractor lineage, not about a game: every shipped CMaNGOS
-entry's `vmap extract` tool produces it (the catalog's `produces` keys say so)
-and `vmap_assembler` reads it by this name. Held here beside `MMAPS_DIR` for the
-same reason: it names a folder this module reads, and a folder name that is
-data is one edit from being somewhere else.
+entry's `vmap extract` tool produces it and `vmap_assembler` reads it by this
+name. That is a claim about the catalog, which this module does not own, so it
+is a test and not only a sentence --
+`test_every_shipped_cmangos_entry_produces_and_then_reads_the_buildings_dir`
+enumerates the three entries and their tools. Without it the claim could go
+false in silence and take `doodad_placements()` with it: a `produces` key moved
+to another spelling leaves this folder unwritten, the check finds nothing,
+returns `None`, and the stage prints no line at all.
+
+Held here beside `MMAPS_DIR` for the same reason: it names a folder this module
+reads, and a folder name that is data is one edit from being somewhere else.
 """
 
 DIR_BIN = "dir_bin"

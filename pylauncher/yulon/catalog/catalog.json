@@ -411,7 +411,7 @@
               {
                 "file": "shared/cmangos/patches/vmap-extractor-doodad-name-case.patch",
                 "source": "src/mangos-tbc",
-                "reason": "vmap_extractor writes WMO doodad models under their raw MODN name and looks them up under the normalised one, so on a case-sensitive filesystem 14.8% of a Vanilla world's placed collision geometry is dropped silently (pyplan/upstream-cmangos-doodad-drop.md)"
+                "reason": "vmap_extractor writes WMO doodad models under their raw MODN name and looks them up under the normalised one, so on a case-sensitive filesystem WMO doodad placements are dropped silently; TBC's own loss was never counted, and the functions this patch edits are byte-identical to the mangos-classic ones where it was (pyplan/upstream-cmangos-doodad-drop.md)"
               }
             ]
           }

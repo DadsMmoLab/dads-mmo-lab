@@ -12,6 +12,7 @@ tolerate.
 
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 
@@ -29,6 +30,12 @@ SHIPPED = (
     / "patches"
     / "vmap-extractor-doodad-name-case.patch"
 )
+ISSUE_DOC = Path(__file__).resolve().parents[2] / "pyplan" / "upstream-cmangos-doodad-issue.md"
+"""The upstream report the owner posts under his own name, with the patch inline."""
+SHIPPED_REL = (
+    "pylauncher/catalog/installers/shared/cmangos/patches/vmap-extractor-doodad-name-case.patch"
+)
+"""What the doc says it is quoting; the doc has to go on naming the file it quotes."""
 SUBDIR = Path("contrib") / "vmap_extractor" / "vmapextract"
 FILES = ("gameobject_extract.cpp", "model.cpp", "vmapexport.cpp", "vmapexport.h")
 ANCHOR = "    fixedName = GetPlainName(origPath.c_str());\n"
@@ -229,3 +236,99 @@ def test_a_hunk_with_more_lines_than_its_header_says_is_refused_not_truncated(
     with pytest.raises(patch.PatchError):
         patch.apply(body, tmp_path, name="p")
     assert (tmp_path / "x.cpp").read_text() == "int x;\nint z;\n"
+
+
+# -- the copy that leaves this repository ------------------------------------
+
+
+def fenced_diff(doc: str) -> str:
+    """The one ```diff block in the issue text; more than one and this test is wrong."""
+    fences = re.findall(r"^```diff\n(.*?)^```", doc, re.S | re.M)
+    assert len(fences) == 1, f"{len(fences)} diff fences in {ISSUE_DOC.name}"
+    return fences[0]
+
+
+def test_the_issue_docs_fenced_diff_is_the_shipped_patch_byte_for_byte() -> None:
+    """The doc says "byte-for-byte", and until 2026-09-05 it was not, in three places.
+
+    The fence carried the v1 patch: `vmapexport.cpp` anchored at
+    `@@ -58,6 +58,7 @@ std::set<std::string> gameobjectFiles;` with
+    `char szWorkDirWmo[1024];` for context, against a tree whose declaration
+    block had moved. Measured on m910q 2026-09-05, in the two checkouts the
+    catalog pins: `git apply --check` on the fenced version exits 1 on
+    `mangos-classic` `8ec338a1` AND on `mangos-tbc` `f82e7d67` with
+    `patch failed: contrib/vmap_extractor/vmapextract/vmapexport.cpp:58`,
+    while the shipped file exits 0 on both. A maintainer's first act on an
+    issue is to apply the patch, so a fence that cannot apply on the commit
+    the issue names is the whole report wasted.
+
+    Equality, not "applies too": the fence is what a stranger copies out, and
+    two diffs that both apply can still differ in a comment or an index line.
+    """
+    doc = ISSUE_DOC.read_text(encoding="utf-8")
+    assert SHIPPED_REL in doc, "the doc no longer names the file it claims to quote"
+    assert fenced_diff(doc) == text()
+
+
+def test_the_fenced_diff_parses_into_the_same_hunks_the_shipped_file_does() -> None:
+    """Where the two versions differed: the file, the line, and the counts of every hunk."""
+    fenced = patch.parse(fenced_diff(ISSUE_DOC.read_text(encoding="utf-8")))
+    shipped = patch.parse(text())
+    assert [(h.path, h.start, len(h.before), len(h.after)) for h in fenced] == [
+        (h.path, h.start, len(h.before), len(h.after)) for h in shipped
+    ]
+
+
+# -- a hunk that inserts and removes nothing ---------------------------------
+
+
+INSERT_AT_TAIL = "--- a/x.c\n+++ b/x.c\n@@ -1,3 +1,4 @@\n int a;\n int b;\n int c;\n+int d;\n"
+INSERT_AT_HEAD = "--- a/x.c\n+++ b/x.c\n@@ -1,3 +1,4 @@\n+int d;\n int a;\n int b;\n int c;\n"
+
+
+@pytest.mark.parametrize(
+    ("body", "once"),
+    [
+        (INSERT_AT_TAIL, "int a;\nint b;\nint c;\nint d;\n"),
+        (INSERT_AT_HEAD, "int d;\nint a;\nint b;\nint c;\n"),
+    ],
+    ids=("tail", "head"),
+)
+def test_an_insertion_only_hunk_applies_once_however_often_it_is_pressed(
+    tmp_path: Path, body: str, once: str
+) -> None:
+    """A hunk with no `-` lines whose insertion sits at the edge of its own context.
+
+    Reproduced with this module on 2026-09-05: press 1 gave
+    `int a;\nint b;\nint c;\nint d;\n`, press 2 appended a second `int d;` and
+    press 3 a third. The pre-image is pure context, so after the insert it is
+    STILL contiguous -- `_find(lines, hunk.before)` hits, the post-image check
+    below it never runs, and every press adds another copy. `patch-sources`
+    reads the files on every press by design, so this is the ordinary path,
+    not an edge.
+
+    Three presses, not two: the second press is where the duplicate appears
+    and the third is where an "idempotent after the second" fix would show.
+    """
+    target = tmp_path / "x.c"
+    target.write_text("int a;\nint b;\nint c;\n")
+    first = patch.apply(body, tmp_path, name="p")
+    assert [(r.applied, r.present) for r in first] == [(1, 0)]
+    assert target.read_text() == once
+    for press in (2, 3):
+        results = patch.apply(body, tmp_path, name="p")
+        assert [(r.applied, r.present) for r in results] == [(0, 1)], press
+        assert target.read_text() == once, press
+
+
+def test_every_hunk_the_shipped_patch_carries_inserts_and_removes_nothing() -> None:
+    """Why the case above is this patch's ordinary shape rather than a hypothetical.
+
+    All five hunks are insertions; not one deletes a line. The shipped hunks
+    escape the double-apply only because each insertion happens to sit in the
+    MIDDLE of its context, which is a property of where the upstream code put
+    its blank lines and not a property anyone chose.
+    """
+    hunks = patch.parse(text())
+    assert [h.removals for h in hunks] == [0, 0, 0, 0, 0]
+    assert all(len(h.after) > len(h.before) for h in hunks)

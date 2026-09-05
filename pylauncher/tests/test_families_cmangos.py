@@ -24,6 +24,7 @@ from __future__ import annotations
 import ast
 import gzip
 import inspect
+import json
 import os
 import re
 import subprocess
@@ -1300,11 +1301,16 @@ def test_the_family_s_catalog_refusals_end_in_one_tail_and_not_two(
         volume_exists=refuse_to_answer,
     )
     said["_password_origin_note"] = fixed._password_origin_note(context(server_dir))
+    # Still driven through the STAGE, not through `_patch_text` directly: the
+    # tail moved into that helper on 2026-09-05 when the stage grew a refusal
+    # of its own, and a test that followed it inward would stop proving the
+    # sentence reaches a user. The key is the function the AST finds spending
+    # the tail; the call is the one the install makes.
     ghost = SourcePatch(file="shared/cmangos/patches/no-such.patch", source=CORE_DEST, reason="x")
     with pytest.raises(InstallerError) as from_patch:
         eng = engine_for(without_patches((ghost,)), Recorder(), volume_exists=refuse_to_answer)
         list(eng._patch_sources(context(server_dir)))
-    said["_patch_sources"] = str(from_patch.value)
+    said["_patch_text"] = str(from_patch.value)
 
     assert set(said) == functions_spending("CATALOG_ERROR_TAIL"), (
         "a function spends the catalog tail that this test does not drive, or drives one "
@@ -2073,6 +2079,187 @@ def test_a_patch_file_the_catalog_names_but_the_tree_lacks_is_a_catalog_error(
         list(eng._patch_sources(context(server_dir)))
     assert "nothing-here.patch" in str(caught.value)
     assert str(caught.value).endswith(cmangos.CATALOG_ERROR_TAIL)
+
+
+# -- patch-sources against an install that predates it ------------------------
+
+
+OLD_TWELVE_STAGE_COMPLETED = (
+    "clone-sources",
+    "write-dockerfile",
+    "generate-compose",
+    "build",
+    "extract",
+    "mmaps",
+    "conf",
+    "import",
+)
+"""Every recorded stage of a CMaNGOS install made before `patch-sources` existed.
+
+Not invented: read on m910q 2026-09-05 out of the four state files on that box.
+`~/tbc-7.4c/.yulon-install.json` (wow-tbc) and `~/vanilla-75b/.yulon-install.json`
+(wow-vanilla) hold this list exactly; `~/vanilla-75` stops at `build` and
+`~/tortoise-server` at `generate-compose`. Three of the four record `build`, and
+NONE of them records `patch-sources` -- so on the first press after this lane
+merges, `patch-sources` is the one stage a finished install has never run.
+"""
+
+
+def old_install(
+    rec: Recorder, server_dir: Path, *, completed: Sequence[str] = OLD_TWELVE_STAGE_COMPLETED
+) -> None:
+    """A server folder as a build from before this stage existed left it.
+
+    Everything a finished install has: the checkouts on disk with their
+    `origin` known to the Recorder (which is what makes `already_cloned()`
+    leave them alone -- a resume of a real install does not re-clone, and a
+    test that re-cloned would be laying the source tree through a path the
+    case under test does not take), the SQL the import stage reads, and the
+    state file. So a press on this folder can only be stopped by the stage
+    under test.
+    """
+    sql = lay_sql(server_dir, SQL)
+    for source in ENTRY.emulator.sources:
+        dest = server_dir / source.dest
+        (dest / ".git").mkdir(parents=True, exist_ok=True)
+        rec.remotes[dest] = source.url
+        sql(dest)
+    lay_sources(server_dir)(server_dir / CORE_DEST)
+    native.write_state(
+        server_dir,
+        native.InstallState(
+            game_id=ENTRY.id,
+            install_id=composegen.install_id(server_dir, platform_id=lambda: "linux"),
+            family="cmangos",
+            completed=tuple(completed),
+        ),
+    )
+
+
+def test_the_state_file_this_stage_has_to_survive_records_a_build_and_no_patch_sources(
+    tmp_path: Path,
+) -> None:
+    """The premise of the two tests below, asserted rather than assumed."""
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    old_install(rec, server_dir)
+    on_disk = json.loads((server_dir / native.STATE_FILE).read_text(encoding="utf-8"))
+    assert on_disk["completed"] == list(OLD_TWELVE_STAGE_COMPLETED)
+    assert "patch-sources" not in on_disk["completed"]
+    assert "build" in on_disk["completed"] and "extract" in on_disk["completed"]
+    # And the stage is still one this build knows, so the record round-trips
+    # rather than landing in `unknown`.
+    state = native.read_state(server_dir, valid=engine(rec).stage_names())
+    assert state is not None and state.unknown == ()
+    assert state.completed == OLD_TWELVE_STAGE_COMPLETED
+
+
+def test_a_press_on_an_install_built_before_the_patch_refuses_and_says_what_to_press(
+    tmp_path: Path,
+) -> None:
+    """The defect: patch the source, then skip the build that would have compiled it.
+
+    Before the refusal, a press on `~/tbc-7.4c` would have logged
+    `Patched contrib/vmap_extractor/vmapextract/gameobject_extract.cpp.`,
+    recorded `patch-sources`, and then skipped `build` (recorded, images
+    present) -- leaving a source tree carrying the fix, an image that does not,
+    and vmaps still missing 14.8% of their placements. Nothing in the run said
+    so.
+    """
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    old_install(rec, server_dir)
+    pre = {n: extractor_file(server_dir, n).read_bytes() for n in EXTRACTOR_FILES}
+    with pytest.raises(InstallerError) as caught:
+        list(engine(rec)._patch_sources(context(server_dir, completed=OLD_TWELVE_STAGE_COMPLETED)))
+    message = str(caught.value)
+    assert cmangos.REBUILD_ACTION in message, message
+    assert "install it again" in message, message
+    assert "nothing was changed" in message.lower(), message
+    assert {n: extractor_file(server_dir, n).read_bytes() for n in EXTRACTOR_FILES} == pre
+
+
+def test_the_refusal_names_an_action_the_server_tab_actually_offers() -> None:
+    """A remedy sentence naming a button that is not there is worse than no sentence."""
+    from yulon.ui import controller_view
+
+    assert cmangos.REBUILD_ACTION == controller_view.REMOVE_IDLE
+
+
+def test_the_whole_press_stops_at_patch_sources_and_never_reaches_the_build(
+    tmp_path: Path,
+) -> None:
+    """Through `run()`: the refusal is the sentence, and no later stage runs."""
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    client = client_folder(tmp_path)
+    old_install(rec, server_dir)
+    with pytest.raises(InstallerError) as caught:
+        list(engine(rec).run(InstallOptions(server_dir=server_dir, client_dir=client)))
+    assert cmangos.REBUILD_ACTION in str(caught.value)
+    assert "build" not in rec.calls
+    assert rec.container_runs == []
+    state = native.read_state(server_dir, valid=engine(rec).stage_names())
+    assert state is not None and "patch-sources" not in state.completed
+    assert (
+        extractor_file(server_dir, "gameobject_extract.cpp").read_bytes()
+        == (VMAP_FIXTURE / "gameobject_extract.cpp").read_bytes()
+    )
+
+
+def test_a_recorded_build_whose_images_are_gone_is_patched_because_the_build_will_re_run(
+    tmp_path: Path,
+) -> None:
+    """The refusal is `stage_build`'s own skip rule, asked one stage earlier.
+
+    `stage_build` skips only when the record AND the images agree, so a
+    recorded build whose images the user has deleted recompiles -- and a
+    recompile picks the patch up. Refusing on the record alone would have
+    turned that into a dead end for no reason.
+    """
+    rec = Recorder(images=False)
+    server_dir = tmp_path / "srv"
+    old_install(rec, server_dir)
+    ctx = context(server_dir, completed=OLD_TWELVE_STAGE_COMPLETED)
+    said = list(engine(rec)._patch_sources(ctx))
+    assert any("Patched" in line for line in said), said
+    assert (
+        extractor_file(server_dir, "gameobject_extract.cpp").read_bytes()
+        == (VMAP_FIXTURE / "patched" / "gameobject_extract.cpp").read_bytes()
+    )
+
+
+def test_docker_refusing_to_say_whether_the_images_exist_patches_rather_than_refuses(
+    tmp_path: Path,
+) -> None:
+    """`images_built` answers None, `stage_build` rebuilds on None, so the patch is wanted."""
+    rec = Recorder(images=None)
+    server_dir = tmp_path / "srv"
+    old_install(rec, server_dir)
+    ctx = context(server_dir, completed=OLD_TWELVE_STAGE_COMPLETED)
+    said = list(engine(rec)._patch_sources(ctx))
+    assert any("Patched" in line for line in said), said
+
+
+def test_an_old_install_whose_checkout_already_carries_the_fix_is_not_refused(
+    tmp_path: Path,
+) -> None:
+    """Nothing would change, so there is nothing to be inconsistent about.
+
+    This is the shape every press after the first takes, including the press
+    that follows a fresh install of this build -- so a refusal keyed on the
+    record alone would fire on every ordinary second press of a working
+    install.
+    """
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    old_install(rec, server_dir)
+    for name in EXTRACTOR_FILES:
+        extractor_file(server_dir, name).write_bytes((VMAP_FIXTURE / "patched" / name).read_bytes())
+    ctx = context(server_dir, completed=OLD_TWELVE_STAGE_COMPLETED)
+    said = list(engine(rec)._patch_sources(ctx))
+    assert any("already carries" in line for line in said), said
+    assert not any("Patched" in line for line in said)
 
 
 def test_the_extraction_stage_reports_the_doodad_placement_check_after_the_vmap_tools(

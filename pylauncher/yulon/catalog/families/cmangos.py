@@ -66,14 +66,14 @@ from __future__ import annotations
 import os
 import queue
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import ClassVar, cast
 
 from yulon import docker, platform
 from yulon.catalog import composegen
-from yulon.catalog.catalog import CmangosData, NativeInstall
+from yulon.catalog.catalog import CmangosData, NativeInstall, SourcePatch
 from yulon.catalog.families import conf, dockerfile, extract, patch, sqlplan
 from yulon.catalog.installer import InstallerError
 from yulon.catalog.native import (
@@ -130,6 +130,18 @@ found nothing to fix there.
 Deliberately a second CONSTANT rather than a second wording spelled inline: one
 sentence written out twice is exactly the drift `CATALOG_ERROR_TAIL` exists to
 have stopped.
+"""
+
+REBUILD_ACTION = "Stop and remove containers…"
+"""The Server tab's own label for the action `_patch_sources()`'s refusal names.
+
+Spelled here rather than imported from `yulon.ui.controller_view`: a family
+engine must not depend on a widget module, and this file is imported by the
+headless install path. So it is a COPY, and a copy of a label is a copy that
+can go stale --
+`test_the_refusal_names_an_action_the_server_tab_actually_offers` asserts the
+two are the same string, which is the only thing that makes naming a button in
+a sentence safe.
 """
 
 DATA_DIR = "data"
@@ -263,9 +275,9 @@ class CmangosInstaller(StagedInstaller):
         patch against a moving tip breaks the day upstream touches those lines,
         including the day they fix the defect themselves.
 
-        **The record is not what skips this stage.** `ctx.state` is not read
-        here at all, and a resume carrying `patch-sources` in `completed`
-        reaches this body exactly like a first run — the same rule
+        **The record is not what skips this stage.** A resume carrying
+        `patch-sources` in `completed` reaches this body exactly like a first
+        run — the same rule
         `_write_dockerfile` and `_conf` are written against, and here for a
         sharper reason: `clone-sources` re-clones a checkout that was DELETED
         on the strength of its own disk evidence (`already_cloned()`'s
@@ -274,38 +286,40 @@ class CmangosInstaller(StagedInstaller):
         state file saying otherwise. The file is the evidence; a second press
         reads "already carries" off the bytes, and costs one read per file.
 
+        `ctx.state` IS read here, but never to skip: the `build` record is half
+        of `_refuse_to_patch_what_will_not_be_rebuilt()`'s question, and that
+        method stops the press rather than passing over it. Until 2026-09-05
+        this paragraph said "`ctx.state` is not read here at all", which was
+        true and was also the reason the stage could patch a source tree whose
+        build the same press was about to skip.
+
         What the record buys instead is the `Already finished:` line and the
         progress count, and the refusal's position: a refusal here raises
         before `db-password`, so no secret is minted for an install that is
         about to stop, and before `write-dockerfile`, so no build context
         exists for a tree that is not the one the patch was measured against.
 
-        Two refusals, two tails. A patch file the catalog names and the tree
-        does not ship is a catalog error (`CATALOG_ERROR_TAIL`); a patch that
-        does not apply is `patch.PatchError`'s own sentence, which already
-        names the file and the line and says nothing was changed — a class
-        name in front of it would be noise, as `_write_dockerfile` says of
-        `DockerfileError`.
+        Three refusals, three shapes, and none of them shares a tail with
+        another. A patch file the catalog names and the tree does not ship is a
+        catalog error (`CATALOG_ERROR_TAIL`, raised in `_patch_text()`); a
+        patch that does not apply is `patch.PatchError`'s own sentence, which
+        already names the file and the line and says nothing was changed — a
+        class name in front of it would be noise, as `_write_dockerfile` says
+        of `DockerfileError`; and a checkout whose build this press would skip
+        is `_refuse_to_patch_what_will_not_be_rebuilt()`, whose sentence ends
+        in the two things to do about it. None is a catalog error and none is
+        an app bug, so none takes a shared tail.
         """
         data = self._data()
         if not data.patches:
             yield "This server carries no source patches."
             return
-        for spec in data.patches:
-            path = self.installers_root / spec.file
-            try:
-                text = path.read_text(encoding="utf-8")
-            except OSError as exc:
-                raise InstallerError(
-                    f"{self.entry.name}'s catalog names a source patch {spec.file} that this "
-                    f"build does not ship ({exc}). {CATALOG_ERROR_TAIL}"
-                ) from exc
+        loaded = [(spec, self._patch_text(spec)) for spec in data.patches]
+        self._refuse_to_patch_what_will_not_be_rebuilt(ctx, loaded)
+        for spec, text in loaded:
             root = ctx.server_dir / spec.source
             yield f"Applying {spec.file} inside {spec.source}: {spec.reason}"
-            try:
-                results = patch.apply(text, root, name=spec.file)
-            except patch.PatchError as exc:
-                raise InstallerError(str(exc)) from exc
+            results = self._resolve(spec, text, root)
             for result in results:
                 if result.applied and result.present:
                     yield (
@@ -317,6 +331,110 @@ class CmangosInstaller(StagedInstaller):
                 else:
                     yield f"{result.path} already carries the fix in {spec.file}; leaving it."
         yield "Source patches are in place."
+
+    def _patch_text(self, spec: SourcePatch) -> str:
+        """The patch file's bytes, or the catalog refusal for one this build does not ship."""
+        path = self.installers_root / spec.file
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise InstallerError(
+                f"{self.entry.name}'s catalog names a source patch {spec.file} that this "
+                f"build does not ship ({exc}). {CATALOG_ERROR_TAIL}"
+            ) from exc
+
+    def _resolve(
+        self, spec: SourcePatch, text: str, root: Path, *, dry_run: bool = False
+    ) -> tuple[patch.FileResult, ...]:
+        """`patch.apply()` with this module's refusal wrapping, dry or wet.
+
+        `patch.PatchError`'s own sentence already names the file and the line
+        and says nothing was changed, so a class name in front of it would be
+        noise, as `_write_dockerfile` says of `DockerfileError`.
+        """
+        try:
+            return patch.apply(text, root, name=spec.file, dry_run=dry_run)
+        except patch.PatchError as exc:
+            raise InstallerError(str(exc)) from exc
+
+    def _refuse_to_patch_what_will_not_be_rebuilt(
+        self, ctx: StageContext, loaded: Sequence[tuple[SourcePatch, str]]
+    ) -> None:
+        """Refuse to edit a source tree whose compiled form this press is going to skip.
+
+        **The case.** Every CMaNGOS install made before this stage existed
+        records twelve stages and not `patch-sources`. Read on m910q
+        2026-09-05: `~/tbc-7.4c` and `~/vanilla-75b` both hold exactly
+        `clone-sources, write-dockerfile, generate-compose, build, extract,
+        mmaps, conf, import`, and both have a `data/.yulon-extract.json`
+        vouching for all four extraction tools. So on the first press after
+        this stage ships, `patch-sources` is the ONE stage such a folder has
+        never run. Driven the same day against a state file in that shape: the
+        press said `Patched contrib/vmap_extractor/vmapextract/...` four times,
+        then `The server is already built; skipping the compile.`, and finished
+        with "is installed and running". The source tree carried the fix; the
+        image compiled from it did not; the vmaps were still short their 14.8%.
+        Nothing in those forty lines said so.
+
+        **Why a refusal and not an invalidation.** The other repair -- drop
+        `build` from the record and delete the extraction evidence, so the
+        press rebuilds and re-extracts -- makes the press correct and makes it
+        catastrophic. It turns a resume into a multi-hour recompile nobody
+        asked for, and the re-extraction rewrites `data/` underneath a server
+        that may be running out of it. This lane already made that trade once,
+        in the other direction: `DoodadCheck` warns and never refuses, because
+        "a refusal would take a working server away over a defect only a
+        rebuild mends". Refusing HERE takes nothing away. It stops a press that
+        was going to achieve nothing, changes not one byte on disk, and leaves
+        Start, Stop, Repair and the running server exactly as they were --
+        those are separate actions and none of them comes through this method.
+
+        **What it costs, stated plainly.** The install button stops working for
+        that folder until the user acts on the sentence. That is the price, and
+        it is the right one: the press it refuses is a press whose only effect
+        would have been to write a lie into the source tree.
+
+        **Narrow on purpose, in three ways.** It fires only when the patch
+        would actually change a file -- an already-patched checkout, which is
+        every ordinary second press of an install made by THIS build, resolves
+        to "already carries" and never reaches the refusal. It fires only when
+        `build_would_be_skipped()` -- the spine's own name for `stage_build`'s
+        skip rule, record AND images -- says the compile is not going to
+        happen; a recorded build whose images the user has deleted, and a
+        daemon that will not answer, both rebuild, and a rebuild picks the
+        patch up. And it runs before anything is written: the dry resolution
+        touches no file, and this method is called before the first `apply()`.
+
+        **What it does not cover, said rather than implied.** A press that
+        DOES rebuild still skips the extraction, because that skip is
+        `data/.yulon-extract.json`'s to make and not the state file's -- a new
+        image with the fix, over vmaps written by the old one. That case is
+        audible rather than silent: `_extract()` runs `DoodadCheck` on every
+        press, and stale `Buildings/` is exactly what its warning is for.
+        """
+        if not self.build_would_be_skipped(ctx):
+            return
+        stale = [
+            spec
+            for spec, text in loaded
+            if any(
+                result.applied
+                for result in self._resolve(spec, text, ctx.server_dir / spec.source, dry_run=True)
+            )
+        ]
+        if not stale:
+            return
+        named = ", ".join(spec.file for spec in stale)
+        raise InstallerError(
+            f"{self.entry.name} in {ctx.server_dir} was built before this app carried "
+            f"{named}, and this press would skip the compile: the build is recorded and its "
+            "images are still here. Patching the source now would leave the checkout holding "
+            "a fix that the built server does not have and cannot get, because the extractor "
+            "runs from the image and the maps it already wrote would not be rebuilt either. "
+            "Nothing was changed, and the server you have goes on working exactly as it did. "
+            f"To get the fix, use “{REBUILD_ACTION}” on the Server tab, delete "
+            f"{ctx.server_dir}, and install it again."
+        )
 
     def _db_password(self, ctx: StageContext) -> Iterator[str]:
         """Persist the generated secret, or refuse to replace one the database already has.

@@ -464,7 +464,14 @@ anchors on that function's head. `git apply --check` passes on `mangos-classic` 
 already normalises the name and which no shipped entry clones (`wow-wotlk` is AzerothCore).
 Tortoise carries no patch: its extractor is the older lineage whose `wmo.cpp` runs `fixnamen()`
 over the whole MODN block in place before writer or reader reads a name (`7c0fb278`,
-`tools/vmap_extractor/vmapextract/wmo.cpp:98`), so the two agree there.
+`tools/vmap_extractor/vmapextract/wmo.cpp:98`), so the two agree there. That sentence was a
+reading until 2026-09-05, and reading is how the same conclusion was reached about
+`mangos-classic` before an extraction disproved half of it — so it was run. On `m910q` that
+extractor was built from `7c0fb278` and run against the Turtle client (86 s, exit 0, 5,367 files
+in `Buildings/`), and `extract.doodad_placements()` over the output answers
+`DoodadCheck(extracted=4041, placed=2675, unplaced=1366, misspelt=0)`: no all-caps `.M2`, no name
+with a space, not one file spelled a way the placement index would not ask for
+(`pyplan/gates/doodad-2026-09-05/tortoise-doodadcheck.txt`).
 
 **Verified by running, on `m910q`, 2026-09-05, 1.12.1 client, extractor built from `8ec338a1` in
 an `ubuntu:22.04` container with the Vanilla Dockerfile's apt list.** Full extraction, not a
@@ -495,7 +502,8 @@ box, of which 434 are innocent.
 applied" is an answer and not a prompt, the outcome is the same on every platform, and a refusal
 names the file and the line and writes nothing (every hunk of every file is resolved before the
 first byte is written). Tolerant in two ways only: a hunk found at an offset from its stated
-line applies; a hunk whose post-image is already present is skipped. The record in the state
+line applies; a hunk whose post-image is already present is skipped — and for a hunk that
+removes nothing, the post-image is the question asked FIRST (defect 2 below). The record in the state
 file is NOT what skips it — a deleted checkout is re-cloned on disk evidence while the record
 survives — so the body reads the files on every press. The catalog names the patch per entry
 (`CmangosData.patches`, `SourcePatch{file, source, reason}`), and `CatalogEntry` refuses a
@@ -510,9 +518,45 @@ is not wrong by shape — it boots and plays — and a refusal would take a work
 over a defect only a rebuild mends; what the line is for is the day the patch silently stops
 applying.
 
+**Three defects the lane's own review found before it merged, and what they cost to fix**
+(`pyplan/gates/doodad-2026-09-05/`):
+
+1. *The report shipped a patch that does not apply.* The fenced ```` ```diff ```` in the issue
+   text was an earlier revision of the patch file beside it — `vmapexport.cpp` anchored at
+   `@@ -58,6 +58,7 @@ std::set<std::string> gameobjectFiles;`, against a declaration block that
+   has moved — while the paragraph above it said "byte-for-byte". `git apply --check` on the
+   fenced version exits 1 on `mangos-classic` `8ec338a1` AND on `mangos-tbc` `f82e7d67`, the two
+   commits the issue itself names, while the shipped file exits 0 on both (`apply-check.txt`).
+   A maintainer's first act on an issue is to apply the patch. The fence is now the shipped
+   bytes and `test_the_issue_docs_fenced_diff_is_the_shipped_patch_byte_for_byte` holds them
+   equal.
+
+2. *An insertion-only hunk re-applied on every press.* `patch.apply()` asked "is the pre-image
+   here?" first, and a hunk with no `-` lines has a pre-image of pure context that survives its
+   own application — so an insertion at the head or the tail of that context applied again, and
+   again (`insertion-only-presses.txt`: three presses, three copies of the inserted line). Every
+   hunk this patch ships removes nothing; they escaped only because each `+` block happens to
+   land mid-context. For a hunk with no removals the post-image is now asked about first.
+
+3. *A resume of a pre-lane install patched a source nobody rebuilds.* Every CMaNGOS state file
+   on `m910q` records twelve stages and not `patch-sources` (`state-files-m910q.txt`), so the
+   first press after this merge ran the new stage and nothing else: it patched the checkout,
+   then said `The server is already built; skipping the compile.`, then finished with "installed
+   and running" — a source tree carrying the fix, an image without it, vmaps still short their
+   14.8%, and not a word about it (`pre-lane-resume.txt`). `_patch_sources` now refuses when the
+   patch would change a file AND `build_would_be_skipped()` — the spine's name for
+   `stage_build`'s own record-AND-images rule — says the compile is not going to happen. A
+   refusal rather than an invalidation, because invalidating the recorded build and extraction
+   turns a resume into an unasked-for multi-hour recompile that rewrites `data/` under a running
+   server, while refusing changes nothing on disk and leaves Start, Stop and Repair working. The
+   price, stated: the install button stops working for that folder until the user removes the
+   install and installs it again, which the sentence tells them to do.
+
 **The report** is `pyplan/upstream-cmangos-doodad-issue.md`, not posted.
 
-**Not done, said plainly.** No existing Linux install was retro-fitted (§10 cost 3). No gate
+**Not done, said plainly.** No existing Linux install was retro-fitted (§10 cost 3), and after
+defect 3 above an existing install is not quietly half-retro-fitted either: it is refused, with
+the two-step remedy in the sentence. No gate
 re-ran a whole Vanilla or TBC install through the new stage on a VM — the stage was proved on
 the pinned trees' bytes through the Python applier, and the extractor's behaviour was proved
 on `m910q` with the same patch through `git apply`; the two were shown to produce identical

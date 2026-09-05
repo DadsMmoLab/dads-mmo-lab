@@ -3,7 +3,14 @@
 Drafted 2026-09-05 by lane `doodad` from `pyplan/upstream-cmangos-doodad-drop.md` §1–§9, for the
 owner to post to `cmangos/mangos-classic` (and to `cmangos/mangos-tbc`, which carries the same
 code). **Not posted by this project.** Everything between the markers is the issue body; the
-patch inline is byte-for-byte `pylauncher/catalog/installers/shared/cmangos/patches/vmap-extractor-doodad-name-case.patch`.
+patch inline is byte-for-byte
+`pylauncher/catalog/installers/shared/cmangos/patches/vmap-extractor-doodad-name-case.patch`,
+which `test_the_issue_docs_fenced_diff_is_the_shipped_patch_byte_for_byte` now asserts rather
+than promises. On the day this page was first drafted it was not: the fence held an earlier
+revision of the patch, anchored at `@@ -58,6 +58,7 @@ std::set<std::string> gameobjectFiles;`
+against a declaration block that has since moved, and `git apply --check` refused it on BOTH of
+the commits this page names while accepting the shipped file (measured on m910q, 2026-09-05;
+`pyplan/gates/doodad-2026-09-05/apply-check.txt`).
 
 Suggested title: **vmap_extractor: WMO doodad placements are silently dropped on case-sensitive
 filesystems (writer/reader disagree about the model file's case)**
@@ -148,7 +155,7 @@ index 41bb38249..b8b4b8b0a 100644
      std::string output(szWorkDirWmo);                       // Stores output filename (possible changed)
      output += "/";
 diff --git a/contrib/vmap_extractor/vmapextract/model.cpp b/contrib/vmap_extractor/vmapextract/model.cpp
-index a1d110b01..7c7e8dd45 100644
+index a1d110b01..24d194418 100644
 --- a/contrib/vmap_extractor/vmapextract/model.cpp
 +++ b/contrib/vmap_extractor/vmapextract/model.cpp
 @@ -257,7 +257,16 @@ void Doodad::ExtractSet(WMODoodadData const& doodadData, ADT::MODF const& wmo, u
@@ -169,12 +176,12 @@ index a1d110b01..7c7e8dd45 100644
          fseek(input, 8, SEEK_SET); // get the correct no of vertices
          int nVertices;
 diff --git a/contrib/vmap_extractor/vmapextract/vmapexport.cpp b/contrib/vmap_extractor/vmapextract/vmapexport.cpp
-index 84ca525e2..6ad61c1f7 100644
+index 84ca525e2..299e7f64c 100644
 --- a/contrib/vmap_extractor/vmapextract/vmapexport.cpp
 +++ b/contrib/vmap_extractor/vmapextract/vmapexport.cpp
-@@ -58,6 +58,7 @@ std::set<std::string> gameobjectFiles;
- uint16* LiqType = 0;
- char szWorkDirWmo[1024];
+@@ -72,6 +72,7 @@ bool hasInputPathParam = false;
+ bool hasOutputPathParam = false;
+ bool preciseVectorData = false;
  std::unordered_map<std::string, WMODoodadData> WmoDoodads;
 +uint32 DroppedDoodadPlacements = 0;
  

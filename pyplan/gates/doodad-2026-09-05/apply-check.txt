@@ -1,0 +1,23 @@
+# git apply --check, run on m910q 2026-09-05, in the two checkouts the catalog pins.
+# doc-v1  = the fenced diff as pyplan/upstream-cmangos-doodad-issue.md carried it before this lane
+# doc-v2  = the fenced diff after the fix (the shipped bytes)
+# shipped = pylauncher/catalog/installers/shared/cmangos/patches/vmap-extractor-doodad-name-case.patch
+
+== mangos-classic @ 8ec338a1704e7dcb1c0213eb7ed58f9231ade40f  (0 modified files in the worktree)
+   doc-v1: exit 1
+       error: patch failed: contrib/vmap_extractor/vmapextract/vmapexport.cpp:58
+       error: contrib/vmap_extractor/vmapextract/vmapexport.cpp: patch does not apply
+   doc-v2: exit 0
+   shipped: exit 0
+
+== mangos-tbc @ f82e7d679c283b66bc2adc1b751aa1275e655673  (0 modified files in the worktree)
+   doc-v1: exit 1
+       error: patch failed: contrib/vmap_extractor/vmapextract/vmapexport.cpp:58
+       error: contrib/vmap_extractor/vmapextract/vmapexport.cpp: patch does not apply
+   doc-v2: exit 0
+   shipped: exit 0
+
+# md5, to show doc-v2 and shipped are the same bytes and doc-v1 was not
+4025738c5f4ab57310a6b2ee507b68cd  /tmp/doc-v1.patch
+f24324b00a64eefcd9a5dd362ab75e86  /tmp/doc-v2.patch
+f24324b00a64eefcd9a5dd362ab75e86  /tmp/shipped.patch

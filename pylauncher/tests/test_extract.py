@@ -3108,3 +3108,33 @@ def test_an_index_that_will_not_read_is_no_check_and_is_logged(
 
     monkeypatch.setattr(Path, "read_bytes", refuse)
     assert extract.doodad_placements(folder) is None
+
+
+def test_every_shipped_cmangos_entry_produces_and_then_reads_the_buildings_dir() -> None:
+    """`BUILDINGS_DIR`'s docstring, as a check rather than a sentence.
+
+    That docstring claims two present-tense things about data it does not own:
+    that every shipped CMaNGOS entry's `vmap extract` tool `produces` this
+    folder, and that the assembler reads it by this name. Both are one catalog
+    edit from being false, and a `produces` key moved to another spelling would
+    take `doodad_placements()` with it -- the check would then find no folder,
+    return `None`, and the stage would print nothing at all. Silence is exactly
+    what this whole lane exists to remove, so the claim is asserted.
+    """
+    seen = 0
+    for entry in load_catalog().games:
+        native = entry.install.native
+        block = native.cmangos if native is not None else None
+        if block is None:
+            continue
+        seen += 1
+        tools = block.extract.tools
+        produces = [t.name for t in tools if extract.BUILDINGS_DIR in t.produces]
+        assert produces == ["vmap extract"], (entry.id, produces)
+        reads = [
+            tool.name
+            for tool in block.extract.tools
+            if any(extract.BUILDINGS_DIR in arg for arg in tool.argv)
+        ]
+        assert reads, (entry.id, "no tool names Buildings in its argv")
+    assert seen == 3, seen
