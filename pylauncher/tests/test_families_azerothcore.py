@@ -19,6 +19,7 @@ green (checklist, "CI was green while the suite was red").
 
 from __future__ import annotations
 
+import ast
 import json
 import shutil
 import subprocess
@@ -1736,13 +1737,24 @@ def test_wotlk_stage_names_are_the_historical_tuple() -> None:
 def as_the_clone_seam_does(dest: Path) -> None:
     """What both real clone seams do BEFORE they clone, and a double that skips it proves nothing.
 
-    `RunnerGit.clone()` (`yulon/git.py:525`) and `ContainerGit.clone()`
-    (`yulon/git.py:838`) open the same way: an existing `.git` means
-    update-in-place and return, and otherwise
+    `git.RunnerGit.clone()` and `git.ContainerGit.clone()` open the same way: an
+    existing `.git` means update-in-place and return, and otherwise
     `if spec.dest.exists(): shutil.rmtree(spec.dest)`. For `clone-core`
     `spec.dest` IS the server dir — `families/azerothcore.py`'s `_clone_core()`
     passes `dest=server_dir` — so that one line removes the server dir and
     every byte in it, `.yulon-install.json` included.
+
+    Named rather than cited by line, and checked rather than either. Four line
+    numbers for these two seams were in the tree at once on 2026-09-05 —
+    `git.py:525` and `:838` here, `git.py:530` and `:855` in `2a4f0cab`'s
+    message — and they were not even the same KIND of citation: 525 is
+    `RunnerGit.clone`'s `def`, 838 is a `logger.warning` in the middle of
+    `ContainerGit.clone`, and the two `shutil.rmtree` calls this paragraph is
+    about are at 531 and 856. Not one of the four named the line it was offered
+    for. `test_both_clone_seams_still_open_the_way_this_double_does` reads the
+    two methods instead: a double that stops matching the seam it stands in for
+    is what made the three tests below pass while asserting the opposite of the
+    truth, and no line number in a docstring would have caught that either.
 
     Measured on m910q, 2026-09-05: three doubles in this file wrote `.git` and
     raised without ever doing this, and the three tests asserting that the
@@ -1754,6 +1766,80 @@ def as_the_clone_seam_does(dest: Path) -> None:
         return
     if dest.exists():
         shutil.rmtree(dest)
+
+
+def test_both_clone_seams_still_open_the_way_this_double_does(tmp_path: Path) -> None:
+    """`as_the_clone_seam_does()` is a claim about `git.py`, and this is where it is checked.
+
+    A double that has drifted from the seam it stands in for is not a weaker
+    test, it is a test of something that does not exist: the three tests below
+    asserted that the ownership record survives a death in `clone-core` and
+    passed for months, because the doubles wrote `.git` and raised and the real
+    seams begin by removing the destination. The docstring above used to point
+    at line numbers instead, and every line number anyone wrote for these two
+    methods on 2026-09-05 was wrong.
+
+    Asked of the syntax tree, so a comment mentioning `shutil.rmtree` cannot
+    satisfy it, and asserted for BOTH seams by name -- `install_wiring` picks
+    between them at runtime, and a fix applied to one of the two is the shape
+    this repository has been bitten by before.
+    """
+    module = ast.parse(Path(git.__file__ or "").read_text(encoding="utf-8"))
+    clones = {
+        cls.name: node
+        for cls in ast.walk(module)
+        if isinstance(cls, ast.ClassDef)
+        for node in cls.body
+        if isinstance(node, ast.FunctionDef) and node.name == "clone"
+    }
+    # `Git` is the Protocol both satisfy and its body is `...`; it is asserted
+    # into the set anyway, because a THIRD implementation of it is exactly what
+    # this test has to notice.
+    assert set(clones) == {
+        "Git",
+        "RunnerGit",
+        "ContainerGit",
+    }, "the set of clone seams this double stands in for has changed: " + str(sorted(clones))
+
+    for name in ("RunnerGit", "ContainerGit"):
+        method = clones[name]
+        tests = {
+            ast.unparse(node.test): node for node in ast.walk(method) if isinstance(node, ast.If)
+        }
+        assert "(spec.dest / '.git').is_dir()" in tests, (
+            f"{name}.clone() no longer treats an existing checkout as update-in-place, so the "
+            "double's first branch is about a seam that is gone"
+        )
+        emptying = tests.get("spec.dest.exists()")
+        assert emptying is not None, (
+            f"{name}.clone() no longer empties the destination, which is the whole of what the "
+            "three tests below pin; if it really is gone, they should assert the resume"
+        )
+        assert [ast.unparse(stmt) for stmt in emptying.body] == ["shutil.rmtree(spec.dest)"], (
+            f"{name}.clone() does something other than `shutil.rmtree(spec.dest)` to a "
+            "destination it does not recognise"
+        )
+        assert tests["(spec.dest / '.git').is_dir()"].lineno < emptying.lineno, (
+            f"{name}.clone() empties before it checks for a checkout, which would remove a "
+            "user's repository rather than update it"
+        )
+
+    # And the double does that, on all three shapes the seams distinguish.
+    missing = tmp_path / "not-there"
+    as_the_clone_seam_does(missing)
+    assert not missing.exists()
+
+    checkout = tmp_path / "checkout"
+    (checkout / ".git").mkdir(parents=True)
+    (checkout / "work").write_bytes(b"mine")
+    as_the_clone_seam_does(checkout)
+    assert (checkout / "work").is_file(), "the double removed a checkout the seam updates in place"
+
+    leftovers = tmp_path / "leftovers"
+    leftovers.mkdir()
+    (leftovers / "half-a-clone").write_bytes(b"x")
+    as_the_clone_seam_does(leftovers)
+    assert not leftovers.exists(), "the double kept what the seam removes"
 
 
 def test_the_clone_that_fills_the_server_dir_takes_the_ownership_record_with_it(

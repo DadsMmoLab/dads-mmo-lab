@@ -329,35 +329,50 @@ def cancelled_install_message(entry_name: str, server_dir: Path) -> str:
     (yulon-ubuntu 2026-09-05, `pyplan/gates/7.2-ubuntu-2026-09-05/`): 15 checks
     green, and a modal that got both halves wrong on the folder in front of it.
 
-    *"Use existing…"* has two strengths, and the second exists because making it
-    one cost more than the bug it fixed. Offered flatly when the engine's OWN
-    compose files are there (`generated_compose_files()`): the folder holds
-    something this app built and adopting it loses nothing. Offered
-    CONDITIONALLY when `compose_file()` finds one this app did not write, and
-    the condition is put to the user because no filesystem read settles it. The
-    old split asked `compose_file()` alone and so fired on the
-    `docker-compose.yml` the clone stage brings down with the source
-    (`widget-cancel-folder-after.txt`: that file, nothing built, and a modal
-    telling the user to adopt it — which `attach_existing()` would have done,
-    growing a tab for a server that did not exist). Asking
-    `generated_compose_files()` alone was worse in the other direction: a
-    folder with `.git`, `src/` and an UNMARKED `docker-compose.yml` — a
-    bash-era install, a hand-written compose file, anything from before 7.2,
-    since nothing before 7.2 marked what it wrote — got no offer at all and was
-    told to delete itself, while `attach_existing()` would have adopted it and
-    managed it from a tab. The two folders are the same folder to `stat`. So
-    both readings are said and the user looks, which is the rule the paragraph
-    above already follows.
+    *"Use existing…"* is offered when, and only when, `compose_file()` answers.
+    That is not a preference: `attach_existing()` gates on exactly that reading,
+    so an offer made on anything else is an offer the app then refuses.
+    `generated_compose_files()` chooses the WORDING, and it took two goes to get
+    that division right. The 7.10 split asked `compose_file()` alone and so
+    fired on the `docker-compose.yml` the clone stage brings down with the
+    source (`widget-cancel-folder-after.txt`: that file, nothing built, and a
+    modal telling the user to adopt it — which `attach_existing()` would have
+    done, growing a tab for a server that did not exist). `2a4f0cab` moved the
+    offer onto `generated_compose_files()` and was worse in the other
+    direction: a folder with `.git`, `src/` and an UNMARKED
+    `docker-compose.yml` — a bash-era install, a hand-written compose file,
+    anything from before 7.2, since nothing before 7.2 marked what it wrote —
+    got no offer at all and was told to delete itself, while `attach_existing()`
+    would have adopted it. It also left `ours` deciding an offer on its own, and
+    `ours` does not imply `compose_file()`: `docker-compose.override.yml` is in
+    `composegen.COMPOSE_FILES` and not in `COMPOSE_FILENAMES`, so a folder
+    holding a marked override and no base rendered "nothing is lost" and
+    "Delete <dir>" in consecutive sentences
+    (`test_the_app_never_says_nothing_is_lost_about_a_folder_it_names_for_deletion`).
 
-    *"Press Install again"* is offered when `native.STATE_FILE` is there, and
-    that record is not implied by source on disk: a folder can hold a whole
-    checkout and no record. What the copy must NOT do is explain that with a
-    story about `clone-core`. It used to say a clone still running when Stop was
-    pressed "takes that record with it", which is a defect being described as a
-    design — the record is removed at the START of `clone-core` on every fresh
-    install, whether or not anyone presses Stop, because
-    `_clone_core()` clones into the server dir and the seam empties a
-    destination it is about to clone into
+    **Where the app has its OWN evidence it uses it instead of asking.** The
+    unmarked-compose wording puts two readings to the user — installed before
+    this attempt, or brought down by this attempt's clone — and until
+    2026-09-05 it put them even when `native.STATE_FILE` was sitting in the
+    folder answering the question. `_claim_before_writing()` writes that record
+    only when `started_empty` is true, and the one non-empty folder
+    `_claim_folder()` lets past is a `.git`, which `refuse_unowned_checkout()`
+    stops at the clone before any stage records anything. So a record means the
+    folder was empty when this attempt began, and "it was already there" is not
+    unlikely, it is impossible. Both halves are driven at the engine in
+    `test_the_conditional_offer_defers_to_the_record_the_app_itself_wrote`,
+    because the copy is worth exactly what the engine underneath it does. Where
+    there is no record, no filesystem read separates the two folders — they are
+    the same folder to `stat` — so both readings are said and the user looks.
+
+    *"Press Install again"* is offered on the same record, which is not implied
+    by source on disk: a folder can hold a whole checkout and no record. What
+    the copy must NOT do is explain that with a story about `clone-core`. It
+    used to say a clone still running when Stop was pressed "takes that record
+    with it", which is a defect being described as a design — the record is
+    removed at the START of `clone-core` on every fresh install, whether or not
+    anyone presses Stop, because `_clone_core()` clones into the server dir and
+    the seam empties a destination it is about to clone into
     (`test_the_clone_that_fills_the_server_dir_takes_the_ownership_record_with_it`).
     A message is not the place to file that.
 
@@ -375,7 +390,10 @@ def cancelled_install_message(entry_name: str, server_dir: Path) -> str:
 
     And the remedy is conditional whenever `compose_file()` answers, because a
     flat "Delete <dir>" on a folder this app would adopt is the app telling
-    someone to destroy a server.
+    someone to destroy a server. That is the same reading the offer above turns
+    on, deliberately: one `adoptable` decides both, so the app cannot name a
+    folder for deletion in the same breath as an offer to adopt it — which is
+    what it did while the two were decided separately.
 
     With the record there the resume is real and was measured the same night:
     "Using /home/pk/gate72-cycle2 (resuming)", "Already finished: clone-core,
@@ -404,6 +422,13 @@ def cancelled_install_message(entry_name: str, server_dir: Path) -> str:
         "faster, so do not clear Docker's build cache to tidy up."
     ]
     record = server_dir / native.STATE_FILE
+    # The app's OWN evidence about the folder, and the only input here that is
+    # not a guess about somebody else's files: `_claim_before_writing()` writes
+    # this file only when `started_empty` is true, and the one non-empty folder
+    # `_claim_folder()` lets past — a `.git` — is stopped at the clone by
+    # `refuse_unowned_checkout()` before any stage records anything. So a
+    # record here means the folder was empty when this attempt began.
+    claimed = record.is_file()
     ours = generated_compose_files(server_dir)
     # What `attach_existing()` gates on, asked here for the same reason it is
     # asked there — it is the whole of whether "Use existing…" can take this
@@ -421,18 +446,34 @@ def cancelled_install_message(entry_name: str, server_dir: Path) -> str:
         # A folder this app cannot list is a folder `_claim_folder()` cannot
         # list either, and it refuses on the same `OSError` — so the refusal
         # branch is the true answer here, not the fallback it looks like.
-        # `native._listing()` is called rather than a fifth bare `iterdir()`
-        # for that reason: the engine's answer to "is this folder empty" and
-        # the copy's must not be able to differ, including on the folder
-        # neither of them can read.
+        # `native._listing()` is called rather than a bare `iterdir()` for that
+        # reason: the engine's answer to "is this folder empty" and the copy's
+        # must not be able to differ, including on the folder neither of them
+        # can read. Both answers are driven, on one unreadable folder, in
+        # `test_a_folder_the_copy_cannot_list_is_refused_rather_than_called_empty`.
         leftovers = True
 
-    if ours:
+    # The offer and the delete are decided by ONE reading, `adoptable`, so they
+    # cannot both render. `ours` chooses the wording, never whether to offer.
+    if adoptable is not None and ours:
         parts.append(
             f"The compose files this app writes are there ({', '.join(ours)}), so if the build "
             f'had already finished the server may be built and even running: press "Use '
             f'existing…", choose {server_dir}, and the app will manage it from a tab — nothing '
             "is lost."
+        )
+    elif ours:
+        parts.append(
+            f"Compose files this app wrote are there ({', '.join(ours)}), but "
+            f"{composegen.BASE_FILE} is not, and that is the one Compose loads — so "
+            f'"Use existing…" cannot take {server_dir} as it stands.'
+        )
+    elif adoptable is not None and claimed:
+        parts.append(
+            f"There is a {adoptable.name} in {server_dir} that this app did not write, and it "
+            f"came down with the server's source: {record} is this attempt's own record, and "
+            f"the app writes one only into a folder that was empty when it started. There is "
+            "no server behind that file."
         )
     elif adoptable is not None:
         parts.append(
@@ -443,12 +484,17 @@ def cancelled_install_message(entry_name: str, server_dir: Path) -> str:
             f"this attempt was downloading into an empty folder, that file came down with the "
             "server's source and there is no server behind it."
         )
-    if record.is_file():
+    if claimed:
         # "If it had not" only when the sentence before it is the one that said
-        # "if the build had already finished": the two halves are decided
-        # separately, and a dangling conditional on a folder with no compose
-        # files of ours would refer to a sentence that is not there.
-        opener = "If it had not, press Install again" if ours else "Press Install again"
+        # "if the build had already finished" — which is the first branch, not
+        # merely `ours`: on a folder with an override of ours and no base the
+        # sentence above says the opposite, and the conditional would refer to
+        # a promise nobody made.
+        opener = (
+            "If it had not, press Install again"
+            if ours and adoptable is not None
+            else "Press Install again"
+        )
         parts.append(
             f"{opener} and choose {server_dir}: the installer carries on from the "
             f"last stage recorded in {record}, and a stage is only skipped after what it left "

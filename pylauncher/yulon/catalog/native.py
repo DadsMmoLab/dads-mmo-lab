@@ -2380,15 +2380,36 @@ def _cancelled_message(what: str, note: str = "") -> str:
 def _listing(folder: Path, *, ignoring: str | None = None) -> list[str]:
     """What is in `folder`, minus `ignoring` — or a refusal, never a bare `OSError`.
 
-    THE ONLY PLACE THIS ENGINE LISTS A DIRECTORY, which stopped being true for
-    six hours on 2026-09-05 and is true again. A fifth caller appeared outside
-    this module — `installer.cancelled_install_message()`, deciding with a bare
-    `iterdir()` whether the folder the user just stopped an install in has
-    leftovers, which is `_claim_folder()`'s question asked by the copy that
-    tells the user what `_claim_folder()` will do. Two answers to one question,
-    and they could differ on exactly the folder that matters, the one neither
-    can read. That caller now comes through here, which is why this sentence
-    still says "the only place" rather than "the only place in native.py".
+    THE ONLY PLACE THIS ENGINE DECIDES WHETHER A FOLDER IS ITS TO WRITE INTO.
+    That is narrower than what this line said until 2026-09-05 — "THE ONLY
+    PLACE THIS ENGINE LISTS A DIRECTORY" — which was true of no commit that
+    ever carried it. `families/clientdir.py` walks a client's `Data/` in
+    `_to_depth()` and `locale_dirs()`, `families/extract.py` counts what a tool
+    produced in `file_count()`, and `families/sqlplan.py` lists `Updates/` in a
+    second private function of this very name. Those three READ a folder
+    somebody else filled and deliberately let the `OSError` out to a caller
+    with a better sentence for it than this one has — `mpq_files()` says so in
+    as many words, because `rglob()` answering short would reach the user as
+    "too few archives" about a folder nobody could open. Rewording was the fix
+    rather than routing them through here: they need `Path`s and the raw error,
+    and this function exists to hand back names and a refusal.
+
+    The narrow claim is pinned by enumeration rather than by assertion:
+    `test_every_folder_listing_in_the_engine_is_accounted_for` lists every bare
+    `iterdir()`/`scandir()`/`listdir()` under `yulon/catalog/` with the reason
+    each is not a write decision, so a new one anywhere in the engine fails
+    that audit rather than quietly making this paragraph false again. The audit
+    read two modules until 2026-09-05, which is how a sentence about the whole
+    engine went unchecked over five sixths of it.
+
+    The caller that made the point was `installer.cancelled_install_message()`,
+    which decided with a bare `iterdir()` whether the folder the user just
+    stopped an install in has leftovers — `_claim_folder()`'s question, asked
+    by the copy that tells the user what `_claim_folder()` will do. Two answers
+    to one question, and they could differ on exactly the folder that matters,
+    the one neither can read. It comes through here now, and both answers are
+    driven on one unreadable folder in
+    `test_a_folder_the_copy_cannot_list_is_refused_rather_than_called_empty`.
 
     Four sites asked `folder.iterdir()` bare until 2026-09-02 — `_claim_folder()`, which every
     shipped game reaches through preflight and `_guard()`;

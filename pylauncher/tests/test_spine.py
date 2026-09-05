@@ -30,7 +30,7 @@ from yulon import docker, install_wiring, networking, platform, resources, runne
 from yulon.apply import ApplyError
 from yulon.catalog import composegen, native, preflight
 from yulon.catalog.catalog import CatalogEntry, ReadyMarkers, load_catalog
-from yulon.catalog.families import FAMILIES, azerothcore, family_for
+from yulon.catalog.families import FAMILIES, family_for
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.installer import (
     DockerUnavailableError,
@@ -2008,7 +2008,7 @@ def test_a_compose_refusal_reaches_the_cli_as_a_sentence_and_is_recorded(
 # promises a sentence, and no `last_error` at the stage sites. The sites are
 # ENUMERATED rather than described, because they are what the fix is about; a
 # fifth one added later without the helper is caught by
-# `test_no_folder_in_the_install_spine_is_listed_outside_the_helper`.
+# `test_every_folder_listing_in_the_engine_is_accounted_for`.
 
 
 @dataclass(frozen=True)
@@ -2209,27 +2209,67 @@ def test_a_folder_that_will_not_list_is_a_refusal_and_not_a_traceback(
     )
 
 
-def test_no_folder_in_the_install_spine_is_listed_outside_the_helper() -> None:
-    """One translation means one place that lists a folder, so the next site cannot miss it.
+_ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
+    ("native.py", "_listing"): (
+        "the write decision itself: it translates the OSError into a refusal, because the "
+        "caller's next move on 'empty' is a clone whose seam removes what it finds"
+    ),
+    ("families/clientdir.py", "_to_depth"): (
+        "reads a client folder the user chose; `mpq_files()` needs the OSError raw so an "
+        "unreadable `Data/` is not reported as too few archives"
+    ),
+    ("families/clientdir.py", "locale_dirs"): (
+        "same folder, same reason — what a repack stripped, not what may be written"
+    ),
+    ("families/extract.py", "file_count"): (
+        "counts what a tool produced; a listing it cannot make is logged and counts as short, "
+        "which re-runs the tool rather than skipping it"
+    ),
+    ("families/sqlplan.py", "_listing"): (
+        "reads `Updates/` in the sources; FileNotFoundError is a real answer there (no such "
+        "directory) and every other OSError stops the install regardless of `on_error`"
+    ),
+}
+"""Every bare directory listing in the install engine, and why it is not `native._listing()`.
+
+`native._listing()`'s docstring claimed to be the only place this engine lists a
+directory, and the audit under it read `native` and `azerothcore` only -- so the
+five sixths of the engine that contradicted the sentence were never asked.
+Written out rather than derived: the map IS the claim, and one computed from the
+code would agree with whatever the code did.
+
+A reason per site, because "is this a write decision?" is the only question that
+matters here and it cannot be answered by counting.
+"""
+
+
+def test_every_folder_listing_in_the_engine_is_accounted_for() -> None:
+    """One translation for the write decision, and a named reason for every other listing.
 
     Four sites carried the same untranslated listing and were found one at a
-    time. Asked of the syntax tree rather than of the text, because the comments
-    explaining the fix name `iterdir()` too and a grep would match those.
+    time; a fifth appeared in `installer.py` on 2026-09-05. Asked of the syntax
+    tree rather than of the text, because the comments explaining the fix name
+    `iterdir()` too and a grep would match those.
+
+    The whole package is walked, not a hand-picked pair of modules. That is the
+    difference between an audit and a spot check: a listing this cannot see is
+    a listing nothing checks, and the sentence it would falsify is three
+    screens away in another file.
     """
-    callers = {
-        module.__name__: {
-            enclosing.name
-            for enclosing in ast.walk(ast.parse(Path(module.__file__ or "").read_text("utf-8")))
-            if isinstance(enclosing, ast.FunctionDef)
-            for node in ast.walk(enclosing)
-            if isinstance(node, ast.Attribute) and node.attr == "iterdir"
-        }
-        for module in (native, azerothcore)
+    root = Path(native.__file__ or "").parent
+    found = {
+        (str(path.relative_to(root)).replace("\\", "/"), enclosing.name)
+        for path in sorted(root.rglob("*.py"))
+        for enclosing in ast.walk(ast.parse(path.read_text("utf-8")))
+        if isinstance(enclosing, ast.FunctionDef)
+        for node in ast.walk(enclosing)
+        if isinstance(node, ast.Attribute) and node.attr in {"iterdir", "scandir", "listdir"}
     }
-    assert callers == {
-        native.__name__: {native._listing.__name__},
-        azerothcore.__name__: set(),
-    }
+    assert found == set(_ACCOUNTED_LISTINGS), (
+        "a folder listing in the install engine is not in the map above. If it decides whether "
+        "the engine may write somewhere it belongs in `native._listing()`; if it does not, add "
+        "it with the reason, and check that `_listing()`'s docstring still tells the truth"
+    )
 
 
 # -- a reset that will not finish --------------------------------------------
