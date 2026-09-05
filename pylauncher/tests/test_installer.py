@@ -17,14 +17,20 @@ import subprocess
 import threading
 from collections.abc import Iterator
 from dataclasses import fields
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
 from tests.support_bash import bash_available
+
+# The machine double the family tests drive. Imported here so the two engine
+# refusals this file pins can be reached the way an install reaches them —
+# through `run()` — rather than by calling the method that raises them.
+from tests.support_native import Recorder
+from tests.support_native import install as run_install
 from yulon import platform, runner
+from yulon.catalog import composegen, native
 from yulon.catalog import installer as installer_module
-from yulon.catalog import native
 from yulon.catalog.catalog import load_catalog
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.installer import (
@@ -167,6 +173,7 @@ MODULE_SURFACE_AFTER_7_2 = {
     "cancelled_install_message",
     "compose_file",
     "docker_unavailable",
+    "generated_compose_files",
     "installer_for",
     "logger",
     "platform_names",
@@ -182,7 +189,9 @@ MODULE_SURFACE_AFTER_7_2 = {
     "Iterator",
     "dataclass",
     "Path",
+    "PurePosixPath",
     "Protocol",
+    "composegen",
     "docker",
     "platform",
     "resources",
@@ -383,41 +392,528 @@ def test_installer_for_hands_the_probe_and_reset_to_the_engine() -> None:
 
 
 def test_the_cancel_copy_tells_the_truth_about_resuming(tmp_path: Path) -> None:
-    """Stop leaves a folder the engine can carry on from; the copy must say so.
+    """Three folders, three different things Install does next, and the copy says which.
 
     Until 7.2 both halves had to warn that Install would NOT resume, because
     the bash installer found the folder, offered to wipe it, the app declined,
-    and it exited 0 having done nothing. The engine records every finished
-    stage in `native.STATE_FILE` and re-checks the disk before skipping one, so
-    the honest advice is now the opposite. "Use existing…" keeps its half
-    because it answers a different question — adopting a build that had in fact
-    finished — which is why it is still absent from the other.
+    and it exited 0 having done nothing. 7.2's engine records every finished
+    stage in `native.STATE_FILE` and re-checks the disk before skipping one --
+    measured on yulon-ubuntu 2026-09-05, "Using /home/pk/gate72-cycle2
+    (resuming)" followed by "Already finished: clone-core, clone-modules,
+    generate-compose"
+    (`pyplan/gates/7.2-ubuntu-2026-09-05/cycle2-pressB.log:26`) -- so the copy
+    promised the resume from then on.
+
+    It promised it on every folder, and that is what this now pins. The record
+    is what buys the resume, and a folder can hold source without holding one:
+    `native.STATE_FILE` is written before stage one, and `git.py`'s clone
+    `shutil.rmtree`s the destination it is about to clone into, which for
+    `clone-core` is the server dir -- so on every fresh install of this family
+    the record is removed at the start of stage one, whether or not anyone
+    presses Stop. That is a defect and is pinned as one in
+    `test_the_clone_that_fills_the_server_dir_takes_the_ownership_record_with_it`;
+    this sentence used to describe it as the design, which is what
+    `installer.cancelled_install_message()`'s own docstring forbids the copy
+    from doing and had not been applied here. On that folder the engine refuses
+    the next press rather than carrying on
+    (`test_the_engine_refuses_the_folder_a_cancelled_clone_leaves`), so the
+    copy must not send the user back to the Install button.
     """
-    nothing_there = cancelled_install_message("WoW WotLK", tmp_path)
+    nothing_there = cancelled_install_message(WOTLK, tmp_path)
     assert "Use existing" not in nothing_there
-    assert "carry on" in nothing_there
-    assert "clean start" in nothing_there
+    assert "start over" in nothing_there
+    assert "carries on" not in nothing_there and "refuse" not in nothing_there
     assert "will not pick up" not in nothing_there and "nothing to resume" not in nothing_there
 
-    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
-    source_there = cancelled_install_message("WoW WotLK", tmp_path)
-    assert "Use existing" in source_there
-    assert str(tmp_path / native.STATE_FILE) in source_there
-    assert "carries on" in source_there
-    assert "will NOT carry on" not in source_there
+    (tmp_path / "src").mkdir()
+    no_record = cancelled_install_message(WOTLK, tmp_path)
+    assert "the app will refuse it" in no_record
+    assert f"Delete {tmp_path}" in no_record
+    assert "carries on" not in no_record, "the copy promised a resume the engine refuses"
+
+    native.write_state(tmp_path, native.InstallState(game_id="wow-wotlk", install_id="cafef00d"))
+    resumable = cancelled_install_message(WOTLK, tmp_path)
+    assert str(tmp_path / native.STATE_FILE) in resumable
+    assert "Press Install again" in resumable and "carries on" in resumable
+    assert "refuse" not in resumable and "will NOT carry on" not in resumable
+    assert "If it had not" not in resumable, "a conditional with no sentence to refer back to"
+
+    # The one folder that gets both halves, and they have to read as one choice.
+    for name in composegen.COMPOSE_FILES:
+        (tmp_path / name).write_text(f"{composegen.GENERATED_MARKER}\n", encoding="utf-8")
+    both = cancelled_install_message(WOTLK, tmp_path)
+    assert "Use existing" in both
+    assert "If it had not, press Install again" in both
 
 
-def test_the_cancel_copy_reads_the_folder_the_way_compose_does(tmp_path: Path) -> None:
-    """`compose.yml` is an install too, and it is what two of the four games write.
+def test_the_cancel_copy_does_not_read_upstreams_compose_file_as_its_own(
+    tmp_path: Path,
+) -> None:
+    """The clone brings a `docker-compose.yml` down; it is not evidence of a build.
 
-    The advice differs on whether there is source on disk, so a check stricter
-    than Compose's own sends a finished TBC or Vanilla install down the "there
-    is nothing there" branch — the same class of bug `COMPOSE_FILENAMES` exists
-    for. Asserted by naming the branch's own sentence, not by string equality
-    with the other call, so the two halves may be reworded independently.
+    This test used to be `..._reads_the_folder_the_way_compose_does` and
+    asserted the opposite: that the split answers on `compose_file()`, so on
+    any of the four names Compose itself accepts. That reading was measured
+    wrong on yulon-ubuntu 2026-09-05. A real WotLK install was started from the
+    tile's Install and stopped 20 s into `clone-core`; the folder it left held
+    a 2.2 GB checkout whose only compose file was upstream's own -- git-tracked
+    and unmodified, first line `# docker-compose.yml for AzerothCore.` -- and
+    the modal told the user the source was there and to press "Use existing..."
+    (`pyplan/gates/7.2-ubuntu-2026-09-05/widget-cancel.log`, with
+    `widget-cancel-folder-after.txt` for the folder). Pressing "Use existing..."
+    there adopts a folder holding no server, because `attach_existing()` asks
+    that same `compose_file()` question.
+
+    `COMPOSE_FILENAMES` is not wrong; it answers a different question. It
+    exists so a FINISHED pre-7.2 install called `compose.yml` stays adoptable,
+    and this message is about a folder this run has just written into, where
+    nothing is called that. What this split needs is whether the engine's own
+    compose stage ran, and the engine marks every file it writes.
     """
+    (tmp_path / "docker-compose.yml").write_text(
+        "# docker-compose.yml for AzerothCore.\nservices: {}\n", encoding="utf-8"
+    )
+    upstreams = cancelled_install_message(WOTLK, tmp_path)
+    assert "nothing is lost" not in upstreams, "upstream's own compose file was read as ours"
+    assert "this app did not write" in upstreams, (
+        "the copy said nothing at all about the compose file the user can see in the folder: "
+        + upstreams
+    )
+
     (tmp_path / "compose.yml").write_text("services: {}\n", encoding="utf-8")
-    assert "Use existing" in cancelled_install_message("WoW TBC", tmp_path)
+    assert "nothing is lost" not in cancelled_install_message(WOTLK, tmp_path)
+
+    (tmp_path / composegen.BASE_FILE).write_text(
+        f"{composegen.GENERATED_MARKER}\nservices: {{}}\n", encoding="utf-8"
+    )
+    ours = cancelled_install_message(WOTLK, tmp_path)
+    assert "Use existing" in ours and "nothing is lost" in ours
+    assert composegen.BASE_FILE in ours, "the copy names no file the user can go and look for"
+
+
+def test_the_cancel_copy_never_sends_you_to_delete_a_folder_the_app_would_adopt(
+    tmp_path: Path,
+) -> None:
+    """The one sentence in this modal that can destroy a server, on the folder that earns it.
+
+    `generated_compose_files()` closed the half that adopted a folder holding
+    nothing built. It opened the opposite one, and this is the folder that
+    falls into it: `.git`, `src/`, and a `docker-compose.yml` carrying no
+    `GENERATED_MARKER` — a bash-era install, a compose file somebody wrote by
+    hand, anything at all from before 7.2, since nothing before 7.2 marked what
+    it wrote. Rendered from the real function on 2026-09-05: no "Use existing…"
+    half at all, and "Do not press Install again on this folder … Delete
+    <dir>".
+
+    `attach_existing()` would have taken that folder. It gates on
+    `compose_file()`, which answers on any of the four names Compose itself
+    accepts and asks nothing about who wrote the file — so the app was telling
+    someone to delete a server it can adopt and manage from a tab. That
+    adoptability is asserted here through `compose_file()` itself rather than
+    described, because it is the entire reason the sentence is wrong.
+
+    The copy cannot tell this folder from the one the previous finding was
+    about: a cancelled `clone-core` leaves `.git`, `src/` and upstream's own
+    unmarked `docker-compose.yml` too, and no filesystem read separates them.
+    So it says both readings and lets the user look — which is the rule the
+    rest of this message already follows — and the delete it names is
+    conditional on the user's own answer, never an instruction.
+    """
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "src").mkdir()
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    assert (
+        installer_module.compose_file(tmp_path) is not None
+    ), "the premise is gone: this is no longer a folder `attach_existing()` would take"
+
+    note = cancelled_install_message(WOTLK, tmp_path)
+    assert f"Delete {tmp_path}" not in note, (
+        'the app told the user to delete a folder its own "Use existing…" would adopt: ' + note
+    )
+    assert "Use existing" in note, (
+        "the folder `attach_existing()` accepts got no offer to attach it: " + note
+    )
+    assert "there is no server behind it" in note, (
+        "the other reading — that this is the compose file the clone brought down — is gone, so "
+        "the copy now pushes a user at a tab for a server that does not exist: " + note
+    )
+
+
+def test_the_clone_artefact_reading_is_given_only_where_the_clone_lands_there(
+    tmp_path: Path,
+) -> None:
+    """One folder, two games, and the sentence is true of exactly one of them.
+
+    The unmarked-compose half puts two readings to the user -- "a server
+    installed by an older version of this app, or one you set up by hand"
+    against "that file came down with the server's source". `f9dec5ef` decided
+    between them with `native.STATE_FILE`, on the ground that
+    `_claim_before_writing()` writes one only when `started_empty` is true. It
+    also writes one after every recorded stage, from `_run_one()`, and that
+    ground is false for three of the four shipped games: only `wow-wotlk`
+    names a source with `dest: "."`, so only there does
+    `refuse_unowned_checkout()` ever look at the server dir at all. Reproduced
+    on m910q 2026-09-05 by driving `wow-tbc` through `CmangosInstaller.run()`
+    into a folder holding a user's own `.git`, `my-notes.txt` and
+    `docker-compose.yml`: the record was written and the modal called the
+    user's file a clone artefact
+    (`test_families_cmangos.py::test_a_cancelled_tbc_install_offers_the_users_own_compose_file`).
+
+    So the discriminator under test is the clone layout, and the same folder is
+    rendered here for both games. For `wow-wotlk` the sentence is earned, and
+    the engine half of it is driven rather than restated: a folder with files
+    in it never comes to hold a record, because the checkout is refused at the
+    clone. For `wow-tbc` nothing this install downloads lands at the root, so
+    the file was there first and the adoption is offered.
+    """
+    url = "https://github.com/mod-playerbots/azerothcore-wotlk.git"
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "src").mkdir()
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+
+    # WotLK's clone lands in the server dir, so a folder that had files in it
+    # never comes to hold a record: the checkout is refused at the clone, and
+    # `_record_error()` writes nothing because there is no file of ours to
+    # write into. That refusal is what earns the wording below.
+    with pytest.raises(InstallerError):
+        run_install(Recorder(), tmp_path, remote_url=lambda _dest: url)
+    assert not (tmp_path / native.STATE_FILE).is_file(), (
+        "the engine gave a record to a folder it had just refused; if that is now true this "
+        "test's premise is gone and the copy below cannot rely on it"
+    )
+
+    unclaimed = cancelled_install_message(WOTLK, tmp_path)
+    assert "or one you set up by hand" in unclaimed, unclaimed
+
+    native.write_state(tmp_path, native.InstallState(game_id="wow-wotlk", install_id="cafef00d"))
+    claimed = cancelled_install_message(WOTLK, tmp_path)
+    assert "or one you set up by hand" not in claimed, (
+        "the app asked the user whether the folder held a server before this attempt, on the "
+        "one game whose clone lands in that very folder: " + claimed
+    )
+    assert "Use existing" not in claimed, (
+        "the app offered to adopt a compose file the clone had just brought down: " + claimed
+    )
+    assert "no server behind that file" in claimed, claimed
+    assert str(tmp_path / native.STATE_FILE) in claimed, (
+        "the copy reached a conclusion from the record without naming the file the user can go "
+        "and look at: " + claimed
+    )
+
+    # Same folder, same record, a game whose sources go under `src/`. Nothing
+    # this install downloads can have put that compose file at the root.
+    tbc = cancelled_install_message(TBC, tmp_path)
+    assert "came down with the server's source" not in tbc, (
+        "the app called the user's own compose file a clone artefact for a game that clones "
+        "into src/, with the user's own checkout in the folder: " + tbc
+    )
+    assert "no server behind that file" not in tbc, tbc
+    assert "Use existing" in tbc, (
+        "the folder `attach_existing()` accepts got no offer, on the reading that this "
+        "install put the file there -- which it cannot have: " + tbc
+    )
+    assert TBC.emulator.sources[0].dest in tbc, (
+        "the copy asserted that nothing this install downloads goes to the server dir without "
+        "naming where it does go, so the user cannot check it: " + tbc
+    )
+    assert f"delete {tmp_path}" not in tbc and f"Delete {tmp_path}" not in tbc, tbc
+
+
+def test_no_source_of_a_shipped_game_is_cloned_into_the_server_dir_except_wotlks() -> None:
+    """The discriminator the copy above turns on, read off the catalog for every entry.
+
+    `cancelled_install_message()` says "nothing this install downloads goes
+    there" for a game with no `dest: "."` source. That is a claim about the
+    shipped catalog, so it is asserted against the shipped catalog rather than
+    against the two entries the tests happen to drive -- the previous round's
+    test drove `wow-wotlk` alone, which is the one game for which the wording
+    it was pinning happened to be true.
+
+    Enumerated by id, not counted: a fifth game added with `dest: "."` fails
+    here, and so does WotLK's own layout changing under the copy.
+    """
+    landings = {
+        entry.id: tuple(source.dest for source in entry.emulator.sources)
+        for entry in load_catalog().games
+    }
+    assert set(landings) == {"wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise"}, landings
+    into_server_dir = {
+        game_id
+        for game_id, dests in landings.items()
+        if any(PurePosixPath(dest) == PurePosixPath(".") for dest in dests)
+    }
+    assert into_server_dir == {"wow-wotlk"}, (
+        "a game's clone layout changed under `cancelled_install_message()`, which tells the "
+        "user of every other game that nothing this install downloads reaches the server dir: "
+        + repr(landings)
+    )
+
+
+def test_the_app_never_says_nothing_is_lost_about_a_folder_it_names_for_deletion(
+    tmp_path: Path,
+) -> None:
+    """Two sentences that cannot both be true, rendered by one call.
+
+    `2a4f0cab` claimed this pair could no longer meet, "because the delete is
+    conditional on `compose_file()` and `ours` implies it". `ours` does not
+    imply it. `generated_compose_files()` answers over
+    `composegen.COMPOSE_FILES` -- base, override and build -- and
+    `compose_file()` over the four names Compose itself loads, and
+    `docker-compose.override.yml` is in the first list and not the second. A
+    folder holding a marked override and no base therefore rendered "nothing is
+    lost" and "Delete <dir>" in consecutive sentences.
+
+    The deeper half is that the offer was wrong on its own, delete or no
+    delete: `attach_existing()` gates on `compose_file()`, so it would have
+    refused the very folder the copy was telling the user to hand it. The offer
+    is now made only where the adoption can happen, which is asserted through
+    `compose_file()` itself rather than described.
+    """
+    (tmp_path / composegen.OVERRIDE_FILE).write_text(
+        f"{composegen.GENERATED_MARKER}\nservices: {{}}\n", encoding="utf-8"
+    )
+    assert installer_module.compose_file(tmp_path) is None, (
+        "the premise is gone: `attach_existing()` would take this folder after all, so the "
+        "offer below is no longer wrong"
+    )
+    assert installer_module.generated_compose_files(tmp_path) == (composegen.OVERRIDE_FILE,)
+
+    note = cancelled_install_message(WOTLK, tmp_path)
+    assert f"Delete {tmp_path}" in note, note
+    assert "nothing is lost" not in note, (
+        'the app said "nothing is lost" about a folder it names for deletion in the next '
+        "sentence: " + note
+    )
+    assert "the app will manage it from a tab" not in note, (
+        "the app offered an adoption `attach_existing()` refuses, because there is no compose "
+        "file for Compose to load: " + note
+    )
+    assert f'"Use existing…" cannot take {tmp_path}' in note, (
+        "the copy says nothing about the button the user is most likely to reach for on a "
+        "folder holding files this app wrote: " + note
+    )
+    assert composegen.OVERRIDE_FILE in note, (
+        "the copy says nothing about the file this app wrote that the user can see: " + note
+    )
+
+
+def test_no_folder_shape_is_offered_adoption_and_deletion_at_once(tmp_path: Path) -> None:
+    """The relationship, over every folder shape that reaches this function.
+
+    The test above pins ONE shape, the one a review reported, and `f9dec5ef`
+    fixed that shape and wrote in the docstring that "the app cannot name a
+    folder for deletion in the same breath as an offer to adopt it". It could,
+    two sentences apart, on the next shape along -- a MARKED
+    `docker-compose.yml` with no record, which is what a user is left with
+    after deleting `native.STATE_FILE` on the UNKNOWN refusal's own advice.
+    Rendered on m910q 2026-09-05: "...and the app will manage it from a tab --
+    nothing is lost. Do not press Install again on this folder... If there is
+    no server in it after all, delete <dir> and press Install again to start
+    over."
+
+    A relationship between two sentences has no owner, so no single branch can
+    be read to check it. This enumerates the folder shapes instead -- the
+    product of the four things the function reads: which compose files are
+    there and whether they carry `GENERATED_MARKER`, whether a record is there,
+    and whether a `.git` is -- and asserts the relationship on every render. A
+    new branch that says "nothing is lost" somewhere else fails here without
+    anybody remembering to come back.
+
+    The two games are both directions of the clone-layout split, because the
+    branch set differs between them and a shape sweep over one game would miss
+    half of the branches it is sweeping.
+    """
+    shapes: list[tuple[tuple[str, ...], bool, bool, bool]] = []
+    compose_sets: tuple[tuple[str, ...], ...] = (
+        (),
+        (composegen.BASE_FILE,),
+        (composegen.OVERRIDE_FILE,),
+        (composegen.BASE_FILE, composegen.OVERRIDE_FILE),
+        ("compose.yml",),
+    )
+    for files in compose_sets:
+        for marked in (True, False):
+            for record in (True, False):
+                for checkout in (True, False):
+                    shapes.append((files, marked, record, checkout))
+
+    seen: set[str] = set()
+    for index, (files, marked, record, checkout) in enumerate(shapes):
+        for entry in (WOTLK, TBC):
+            folder = tmp_path / f"{entry.id}-{index}"
+            folder.mkdir()
+            for name in files:
+                body = f"{composegen.GENERATED_MARKER}\n" if marked else ""
+                (folder / name).write_text(f"{body}services: {{}}\n", encoding="utf-8")
+            if record:
+                native.write_state(
+                    folder, native.InstallState(game_id=entry.id, install_id="cafef00d")
+                )
+            if checkout:
+                (folder / ".git").mkdir()
+
+            note = cancelled_install_message(entry, folder)
+            seen.add(f"{'nothing is lost' in note}/{'Use existing' in note}")
+            if "nothing is lost" in note:
+                assert f"delete {folder}" not in note and f"Delete {folder}" not in note, (
+                    f"shape {entry.id} files={files} marked={marked} record={record} "
+                    f"checkout={checkout} was told nothing is lost and then to delete the "
+                    "folder: " + note
+                )
+
+    assert "True/True" in seen, (
+        "no shape in the sweep produced the sentence under test, so this proves nothing about "
+        "it -- the branch that says 'nothing is lost' was never entered"
+    )
+    assert "False/True" in seen and "False/False" in seen, seen
+
+
+def test_a_folder_the_copy_cannot_list_is_refused_rather_than_called_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The branch `2a4f0cab` rewrote, reached at last -- nothing in the suite entered it.
+
+    `cancelled_install_message()` asks `native._listing()` whether the folder
+    has leftovers and treats the refusal as "it has", on the stated ground that
+    `_claim_folder()` refuses the same folder on the same `OSError`. Measured on
+    m910q 2026-09-05 by replacing the `except InstallerError` body with
+    `raise AssertionError`: the whole suite stayed green. Every test in the file
+    handed the function a folder it could read, so the branch's comment was the
+    only thing asserting anything about it.
+
+    The ground it stands on is asserted here rather than restated: the same
+    folder is put to `preflight()`, which reaches `_claim_folder()`, and the
+    engine refuses it with the listing sentence. So "the refusal branch is the
+    true answer here" is a measurement.
+
+    `Path.iterdir` is made to raise for this ONE path, which is what
+    `test_spine.py`'s `_unlistable()` does and for the same reason: a blanket
+    refusal would stop the run somewhere else and prove nothing about this
+    site. Nothing is doubled below that -- the real `_listing()` translates the
+    real `PermissionError`.
+    """
+    listing = Path.iterdir
+
+    def refuse(self: Path) -> Iterator[Path]:
+        if self == tmp_path:
+            raise PermissionError(13, "Permission denied")
+        return listing(self)
+
+    monkeypatch.setattr(Path, "iterdir", refuse)
+
+    note = cancelled_install_message(WOTLK, tmp_path)
+    assert "the app will refuse it" in note, (
+        "a folder nobody can read was reported as one there is nothing in: " + note
+    )
+    assert f"There is nothing in {tmp_path}" not in note, note
+    assert "was not created by this app" in note, note
+
+    # And the engine really does refuse it, on the sentence `_listing()` writes.
+    engine = installer_for(
+        WOTLK,
+        platform_id=lambda: "linux",
+        import_probe=lambda: None,  # type: ignore[arg-type,return-value]
+        reset_unfinished=lambda *_a, **_k: (),  # type: ignore[arg-type]
+    )
+    with pytest.raises(InstallerError) as refused:
+        engine.preflight(InstallOptions(server_dir=tmp_path))
+    assert "could not be listed" in str(refused.value), str(refused.value)
+
+
+def test_the_refusal_gives_the_reason_the_engine_actually_refuses_on(tmp_path: Path) -> None:
+    """Two folders, two different checks, and the copy was giving both of them the git one.
+
+    The refusal used to explain itself with "the app cannot tell its own
+    half-finished download from a checkout you made yourself, so it stops
+    rather than run `git fetch` and `git reset --hard` over your work". That is
+    `refuse_unowned_checkout()`'s reason, and it is true of a folder holding a
+    `.git`. The branch fires on any leftovers at all, so a folder holding only
+    upstream's `docker-compose.yml` and no checkout got the same sentence:
+    there is no checkout in it, nothing will be fetched, and nothing will be
+    reset. What stops that folder is `_claim_folder()`, one step earlier and on
+    a different question — "is not empty and was not created by this app" —
+    and preflight raises it before Docker is mentioned.
+
+    Both are pure filesystem reads, which is why the copy can be right about
+    which one it is; the engine is driven for both shapes in
+    `test_the_engine_refuses_the_folder_a_cancelled_clone_leaves`.
+    """
+    plain = tmp_path / "plain"
+    (plain / "src").mkdir(parents=True)
+    note = cancelled_install_message(WOTLK, plain)
+    assert "the app will refuse it" in note
+    assert "git fetch" not in note and "git reset" not in note, (
+        "a folder with no checkout in it was told about a fetch and a reset that cannot happen: "
+        + note
+    )
+    assert "checkout" not in note, (
+        "the stated cause is git-specific on a folder that holds no git checkout: " + note
+    )
+    assert "was not created by this app" in note, (
+        "the refusal the engine actually raises for this folder is not the one the copy names: "
+        + note
+    )
+
+    checkout = tmp_path / "checkout"
+    (checkout / ".git").mkdir(parents=True)
+    (checkout / "src").mkdir()
+    git_note = cancelled_install_message(WOTLK, checkout)
+    assert "git fetch" in git_note and "git reset --hard" in git_note, git_note
+    assert "no record here of an install this app made" in git_note, git_note
+
+
+def test_the_engine_refuses_the_folder_a_cancelled_clone_leaves(tmp_path: Path) -> None:
+    """What "press Install again" actually does on a checkout with no record of ours.
+
+    The copy's promise is worth exactly what the engine does, so the engine is
+    asked here rather than described. Both refusals are pure filesystem reads
+    and neither needs a daemon, which is why the promise can be pinned in a
+    unit test at all.
+
+    **Driven through `run()`, not by calling the refusal.** Until 2026-09-05
+    the `.git` half of this test called `engine.refuse_unowned_checkout()`
+    directly, which proves the function and says nothing about whether an
+    install reaches it — the failure shape that let six reviewers approve a fix
+    on a path nothing ran. Both halves now go in at a call site: `run()` for
+    the checkout, `preflight()` for the folder with no `.git`.
+
+    Driven for real first: `python -m yulon.install_wiring wow-wotlk
+    --server-dir /home/pk/gate72-cancel-install` against the folder the
+    cancelled widget run left, yulon-ubuntu 2026-09-05, exited 1 with "is
+    already a git checkout of ... and there is no record here of an install
+    this app made"
+    (`pyplan/gates/7.2-ubuntu-2026-09-05/cycle2-pressA2-refused-existing-checkout.log`).
+    """
+    url = "https://github.com/mod-playerbots/azerothcore-wotlk.git"
+    checkout = tmp_path / "checkout"
+    (checkout / ".git").mkdir(parents=True)
+    (checkout / "src").mkdir()
+    rec = Recorder()
+    with pytest.raises(InstallerError) as caught:
+        run_install(rec, checkout, remote_url=lambda _dest: url)
+    assert "no record here of an install this app made" in str(caught.value), str(caught.value)
+
+    # ...and the same shape without the `.git`, which never reaches a stage:
+    # `_claim_folder()` refuses it before preflight says a word about Docker.
+    # The probe and reset are what `install_wiring` passes; an engine built
+    # without them refuses in preflight before it looks at the folder at all.
+    engine = installer_for(
+        WOTLK,
+        platform_id=lambda: "linux",
+        import_probe=lambda: None,  # type: ignore[arg-type,return-value]
+        reset_unfinished=lambda *_a, **_k: (),  # type: ignore[arg-type]
+    )
+    plain = tmp_path / "plain"
+    (plain / "src").mkdir(parents=True)
+    with pytest.raises(InstallerError) as refused:
+        engine.preflight(InstallOptions(server_dir=plain))
+    assert "not empty and was not created by this app" in str(refused.value)
+
+    # Which is what the copy for each folder tells the user, in their words.
+    git_note = cancelled_install_message(WOTLK, checkout)
+    assert "no record here of an install this app made" in git_note
+    note = cancelled_install_message(WOTLK, plain)
+    assert "the app will refuse it" in note and "was not created by this app" in note
 
 
 def test_compose_file_answers_in_composes_own_order(tmp_path: Path) -> None:

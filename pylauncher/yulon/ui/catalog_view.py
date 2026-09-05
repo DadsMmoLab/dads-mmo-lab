@@ -750,7 +750,7 @@ class CatalogView(QWidget):
             # turns into a permanent tab — an install the user had explicitly
             # cancelled, and on a run stopped earlier still, a directory that did
             # not exist at all (install gate, 2026-08-23).
-            note = cancelled_install_message(self._catalog.get(game_id).name, server_dir)
+            note = cancelled_install_message(self._catalog.get(game_id), server_dir)
             logger.info(f"install of {game_id} was cancelled; nothing remembered")
             QMessageBox.information(self, "Install cancelled", note)
             self.install_finished.emit(game_id, False, note)

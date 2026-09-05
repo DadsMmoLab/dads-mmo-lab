@@ -19,6 +19,7 @@ green (checklist, "CI was green while the suite was red").
 
 from __future__ import annotations
 
+import ast
 import json
 import shutil
 import subprocess
@@ -54,6 +55,7 @@ from yulon.catalog.installer import (
     InstallerError,
     InstallOptions,
     UnsupportedPlatformError,
+    cancelled_install_message,
     installer_for,
 )
 
@@ -1732,46 +1734,160 @@ def test_wotlk_stage_names_are_the_historical_tuple() -> None:
     assert len(set(AzerothCoreInstaller.STAGE_NAMES)) == len(AzerothCoreInstaller.STAGE_NAMES)
 
 
-def test_a_folder_this_app_filled_and_then_failed_in_is_still_its_own_on_the_retry(
+def as_the_clone_seam_does(dest: Path) -> None:
+    """What both real clone seams do BEFORE they clone, and a double that skips it proves nothing.
+
+    `git.RunnerGit.clone()` and `git.ContainerGit.clone()` open the same way: an
+    existing `.git` means update-in-place and return, and otherwise
+    `if spec.dest.exists(): shutil.rmtree(spec.dest)`. For `clone-core`
+    `spec.dest` IS the server dir — `families/azerothcore.py`'s `_clone_core()`
+    passes `dest=server_dir` — so that one line removes the server dir and
+    every byte in it, `.yulon-install.json` included.
+
+    Named rather than cited by line, and checked rather than either. Four line
+    numbers for these two seams were in the tree at once on 2026-09-05 —
+    `git.py:525` and `:838` here, `git.py:530` and `:855` in `2a4f0cab`'s
+    message — and they were not even the same KIND of citation: 525 is
+    `RunnerGit.clone`'s `def`, 838 is a `logger.warning` in the middle of
+    `ContainerGit.clone`, and the two `shutil.rmtree` calls this paragraph is
+    about are at 531 and 856. Not one of the four named the line it was offered
+    for. `test_both_clone_seams_still_open_the_way_this_double_does` reads the
+    two methods instead: a double that stops matching the seam it stands in for
+    is what made the three tests below pass while asserting the opposite of the
+    truth, and no line number in a docstring would have caught that either.
+
+    Measured on m910q, 2026-09-05: three doubles in this file wrote `.git` and
+    raised without ever doing this, and the three tests asserting that the
+    ownership record survives a death in stage one passed only because of the
+    omission. With the line in, all three went red. The record does not survive
+    `clone-core`, and the tests below now say so.
+    """
+    if (dest / ".git").is_dir():
+        return
+    if dest.exists():
+        shutil.rmtree(dest)
+
+
+def test_both_clone_seams_still_open_the_way_this_double_does(tmp_path: Path) -> None:
+    """`as_the_clone_seam_does()` is a claim about `git.py`, and this is where it is checked.
+
+    A double that has drifted from the seam it stands in for is not a weaker
+    test, it is a test of something that does not exist: the three tests below
+    asserted that the ownership record survives a death in `clone-core` and
+    passed for months, because the doubles wrote `.git` and raised and the real
+    seams begin by removing the destination. The docstring above used to point
+    at line numbers instead, and every line number anyone wrote for these two
+    methods on 2026-09-05 was wrong.
+
+    Asked of the syntax tree, so a comment mentioning `shutil.rmtree` cannot
+    satisfy it, and asserted for BOTH seams by name -- `install_wiring` picks
+    between them at runtime, and a fix applied to one of the two is the shape
+    this repository has been bitten by before.
+    """
+    module = ast.parse(Path(git.__file__ or "").read_text(encoding="utf-8"))
+    clones = {
+        cls.name: node
+        for cls in ast.walk(module)
+        if isinstance(cls, ast.ClassDef)
+        for node in cls.body
+        if isinstance(node, ast.FunctionDef) and node.name == "clone"
+    }
+    # `Git` is the Protocol both satisfy and its body is `...`; it is asserted
+    # into the set anyway, because a THIRD implementation of it is exactly what
+    # this test has to notice.
+    assert set(clones) == {
+        "Git",
+        "RunnerGit",
+        "ContainerGit",
+    }, "the set of clone seams this double stands in for has changed: " + str(sorted(clones))
+
+    for name in ("RunnerGit", "ContainerGit"):
+        method = clones[name]
+        tests = {
+            ast.unparse(node.test): node for node in ast.walk(method) if isinstance(node, ast.If)
+        }
+        assert "(spec.dest / '.git').is_dir()" in tests, (
+            f"{name}.clone() no longer treats an existing checkout as update-in-place, so the "
+            "double's first branch is about a seam that is gone"
+        )
+        emptying = tests.get("spec.dest.exists()")
+        assert emptying is not None, (
+            f"{name}.clone() no longer empties the destination, which is the whole of what the "
+            "three tests below pin; if it really is gone, they should assert the resume"
+        )
+        assert [ast.unparse(stmt) for stmt in emptying.body] == ["shutil.rmtree(spec.dest)"], (
+            f"{name}.clone() does something other than `shutil.rmtree(spec.dest)` to a "
+            "destination it does not recognise"
+        )
+        assert tests["(spec.dest / '.git').is_dir()"].lineno < emptying.lineno, (
+            f"{name}.clone() empties before it checks for a checkout, which would remove a "
+            "user's repository rather than update it"
+        )
+
+    # And the double does that, on all three shapes the seams distinguish.
+    missing = tmp_path / "not-there"
+    as_the_clone_seam_does(missing)
+    assert not missing.exists()
+
+    checkout = tmp_path / "checkout"
+    (checkout / ".git").mkdir(parents=True)
+    (checkout / "work").write_bytes(b"mine")
+    as_the_clone_seam_does(checkout)
+    assert (checkout / "work").is_file(), "the double removed a checkout the seam updates in place"
+
+    leftovers = tmp_path / "leftovers"
+    leftovers.mkdir()
+    (leftovers / "half-a-clone").write_bytes(b"x")
+    as_the_clone_seam_does(leftovers)
+    assert not leftovers.exists(), "the double kept what the seam removes"
+
+
+def test_the_clone_that_fills_the_server_dir_takes_the_ownership_record_with_it(
     tmp_path: Path,
 ) -> None:
-    """The retry after a crash during stage one, which used to be refused outright.
+    """§38's fix does not reach `clone-core`, because `clone-core` deletes the claim.
 
-    `_run_one()` writes the state file only after a stage FINISHES, so anything
-    that ends the process mid-stage-one — a crash, a power cut, a killed
-    terminal — left a folder holding `src/` and no record. `_guard()` then
-    refused it with "is not empty and was not created by this app", which was
-    false: this app had written every byte in it, and the only route out was to
-    delete a part-finished multi-gigabyte clone by hand.
+    This test was `..._is_still_its_own_on_the_retry` and asserted the opposite
+    — that a folder this app filled and then died in is still its own on the
+    next press. It passed because its `clone_then_die()` double wrote `.git`
+    and raised, and the real seams do something first: `shutil.rmtree` on a
+    destination with no `.git`. For `clone-core` that destination is the server
+    dir, so the claim `_claim_before_writing()` had written seconds earlier was
+    already gone when the clone began. See `as_the_clone_seam_does()`.
 
-    Driven, not reasoned: the TBC-on-Windows gate was killed mid-clone on
-    `yulon-win11` (2026-09-03) and refused its own 162 MB checkout on the next
-    attempt.
+    What §38 bought is real and is still asserted, one stage along: a claim
+    written before stage one survives every later stage's failure, because no
+    later `dest` is the server dir (`clone-modules` writes under `modules/`).
+    `test_a_death_that_runs_no_except_block_still_leaves_the_folder_claimed`
+    holds that half, and
+    `test_the_folder_is_claimed_before_the_first_stage_writes_a_single_byte`
+    holds the write itself. What it did NOT buy is the failure that produced it
+    — the TBC-on-Windows gate killed mid-clone on `yulon-win11` (2026-09-03) is
+    a `clone-core` death — and that is what is pinned here, as a defect rather
+    than a design, so a fix has a red test to turn green.
 
-    Two halves, and the second is what makes the fix narrow rather than
-    convenient. `_claim_if_ours()` records the state only when the guard
-    accepted the folder EMPTY, because that is the one moment "did we fill
-    this" can be answered — and the neighbouring tests require an install into
-    the user's own checkout to leave that checkout untouched.
+    A fix has to change the clone, not the claim: `git clone <url> <dir>`
+    refuses a directory that is not empty, which is why the seam empties it, so
+    any record living inside the server dir is unreachable to stage one. Not
+    attempted from this lane — it moves `yulon/git.py` and needs a live gate —
+    so what is recorded here is the measured shape of the hole.
 
-    **What the fixture leaves behind is the whole test, and the first version
-    got it wrong.** It wrote a plain `src/half-a-checkout` and then asserted
-    only that one sentence was ABSENT from the retry's error. A review pointed
-    out that any other refusal satisfies that, and this is the case: `git clone`
-    creates `.git` in its destination in its first moments, so a killed clone
-    leaves a PARTIAL CHECKOUT, and that is what the retry has to get past. The
-    fixture below leaves one, and what is asserted is positive — the clone was
-    attempted a second time.
+    The user-facing consequence is the last assertion: the folder this leaves
+    is the one `cancelled_install_message()` must not send back to Install.
     """
     server_dir = tmp_path / "wow"
     rec = Recorder()
-    attempts: list[int] = []
+    attempts: list[native.InstallState | None] = []
     url = "https://github.com/mod-playerbots/azerothcore-wotlk.git"
 
     # Stage one gets as far as a partial checkout and then the process dies —
-    # what a killed `git clone` really leaves, `.git` and all.
-    def clone_then_die(*_args: object, **_kwargs: object) -> object:
-        attempts.append(1)
+    # what a killed `git clone` really leaves, `.git` and all, after the wipe
+    # the seam opens with.
+    def clone_then_die(spec: git.CloneSpec) -> None:
+        # Read BEFORE the wipe: the claim being there at this instant is the
+        # whole of what `_claim_before_writing()` promises, and it is true.
+        attempts.append(native.read_state(server_dir, valid=("clone-core",)))
+        as_the_clone_seam_does(spec.dest)
         (server_dir / ".git").mkdir(parents=True, exist_ok=True)
         (server_dir / "half-a-checkout").write_bytes(b"x")
         raise InstallerError("killed mid-clone")
@@ -1780,45 +1896,37 @@ def test_a_folder_this_app_filled_and_then_failed_in_is_still_its_own_on_the_ret
         install(rec, server_dir, clone=clone_then_die, remote_url=lambda _dest: url)
 
     assert (server_dir / "half-a-checkout").is_file(), "the fixture wrote nothing"
-    assert (server_dir / native.STATE_FILE).is_file(), (
-        "the folder this app filled was left with no record of the install, so the retry is "
-        "refused as somebody else's directory"
-    )
-    assert attempts == [1], "the first run did not reach the clone at all"
-
-    # The record names THIS folder. A claim written under any other install id
+    assert len(attempts) == 1, "the first run did not reach the clone at all"
+    claimed = attempts[0]
+    assert claimed is not None, "the folder was not claimed before stage one wrote anything"
+    # The claim names THIS folder. A claim written under any other install id
     # is a claim the guard refuses on the very next run ("looks like a copy of
     # another install"), which is the same dead end wearing a different
-    # sentence. Asserted as a VALUE rather than left to the retry to reveal:
-    # `_record_error()` runs one line after `_claim_if_ours()` and rewrites the
-    # file from the same `state` object, so a wrong id written inside the claim
-    # is erased before anything can observe it — the mask is real, and it is
-    # not a reason for this file to have no opinion about what was claimed.
-    claimed = native.read_state(server_dir, valid=("clone-core",))
-    assert claimed is not None, "the claim did not parse"
+    # sentence. Read at the seam rather than off disk afterwards, because
+    # afterwards there is nothing on disk to read.
     assert claimed.install_id == composegen.install_id(
         server_dir, platform_id=lambda: "macos"
     ), "the folder was claimed for a different install id"
 
-    # And the retry REACHES THE CLONE. Asserted positively, because the absence
-    # of one sentence is not the presence of progress: a review claimed the
-    # folder under a stranger's install id, which produces a DIFFERENT refusal
-    # ("copy of another install"), leaves the user in exactly the dead end this
-    # test is named for, and passed the old assertion. What the fix has to buy
-    # is a second attempt at the work, so that is what is asserted; the wording
-    # check stays as the specific regression it was.
+    assert not (server_dir / native.STATE_FILE).is_file(), (
+        "the record survived `clone-core`; if that is now true the hole this test pins has been "
+        "closed, and the test should assert the resume rather than the refusal"
+    )
+
+    # So the retry meets a checkout with no record, and is refused — the exact
+    # dead end §38 named, still live for the one stage it was reported from.
     with pytest.raises(InstallerError) as again:
         install(rec, server_dir, clone=clone_then_die, remote_url=lambda _dest: url)
-    assert attempts == [
-        1,
-        1,
-    ], "the retry never got as far as the clone; something ahead of it refused the folder: " + str(
+    assert len(attempts) == 1, "the retry reached the clone; the refusal below is not real: " + str(
         again.value
     )
-    assert "killed mid-clone" in str(
-        again.value
-    ), "the second refusal is not the clone's own: " + str(again.value)
-    assert "was not created by this app" not in str(again.value), str(again.value)
+    assert "no record here of an install this app made" in str(again.value), str(again.value)
+
+    # And the modal the user is looking at when they press Stop says so, rather
+    # than sending them at an Install button that stops them.
+    note = cancelled_install_message(ENTRY, server_dir)
+    assert "the app will refuse it" in note, note
+    assert "carries on" not in note, "the copy promised a resume the engine refuses: " + note
 
 
 def test_a_claimed_folder_whose_leftovers_are_not_a_checkout_is_still_refused(
@@ -1826,18 +1934,27 @@ def test_a_claimed_folder_whose_leftovers_are_not_a_checkout_is_still_refused(
 ) -> None:
     """The half the ownership record does NOT buy back, measured rather than assumed.
 
-    `_claim_if_ours()` teaches `_guard()` that the folder is this install's. It
-    teaches `stage_clone_sources()` nothing: that stage asks a different
-    question — is there a `.git` here — and a destination with files and no
-    `.git` is refused, because the clone seam `shutil.rmtree`s a destination it
-    does not recognise and a tree somebody unpacked by hand must not fall
-    through (review, 2026-08-23).
+    `_claim_before_writing()` teaches `_guard()` that the folder is this
+    install's. It teaches `stage_clone_sources()` nothing: that stage asks a
+    different question — is there a `.git` here — and a destination with files
+    and no `.git` is refused, because the clone seam `shutil.rmtree`s a
+    destination it does not recognise and a tree somebody unpacked by hand must
+    not fall through (review, 2026-08-23).
 
-    So a first stage that wrote non-git files and died leaves the user with a
-    second, narrower refusal instead of the first one. It is honest — it names
-    the directory and it does not claim the app did not write it — and it is
-    still a manual delete. Written down here because the fix's own test now
-    passes, and without this the fix would read as complete.
+    **And for `clone-core` the record is not there to consult anyway.** This
+    test asserted `STATE_FILE` was still on disk after the death, and passed
+    only because `write_then_die()` skipped the `shutil.rmtree` the real seams
+    open with (`as_the_clone_seam_does()`, m910q 2026-09-05). With it in, the
+    claim is gone before the double writes a byte, and the retry's refusal is
+    the FIRST one after all — "is not empty and was not created by this app",
+    from `_claim_folder()`, one step earlier than the narrower sentence this
+    test used to end on.
+
+    So the second refusal this test was written to record is not what a
+    `clone-core` death produces; it is what a death in any LATER stage with a
+    non-git destination produces, where the record does survive. Both endings
+    are asserted below, from the same double, so neither can be read as the
+    other.
 
     The two guards disagreeing about who owns the folder is bug §38's open
     design question, and the answer is the owner's: ownership recorded before
@@ -1847,22 +1964,62 @@ def test_a_claimed_folder_whose_leftovers_are_not_a_checkout_is_still_refused(
     server_dir = tmp_path / "wow"
     rec = Recorder()
 
-    def write_then_die(*_args: object, **_kwargs: object) -> object:
+    def write_then_die(spec: git.CloneSpec) -> None:
+        as_the_clone_seam_does(spec.dest)
         (server_dir / "src").mkdir(parents=True, exist_ok=True)
         (server_dir / "src" / "not-a-checkout").write_bytes(b"x")
         raise InstallerError("killed before git made .git")
 
     with pytest.raises(InstallerError):
         install(rec, server_dir, clone=write_then_die)
-    assert (server_dir / native.STATE_FILE).is_file(), "the folder was not claimed"
+    assert not (server_dir / native.STATE_FILE).is_file(), (
+        "the claim survived a `clone-core` death; the hole this and "
+        "`test_the_clone_that_fills_the_server_dir_takes_the_ownership_record_with_it` pin has "
+        "been closed, and both should now assert the resume"
+    )
 
     with pytest.raises(InstallerError) as again:
         install(rec, server_dir, clone=write_then_die)
     message = str(again.value)
-    assert "has files in it but is not a checkout" in message, message
-    assert "was not created by this app" not in message, (
+    assert "not empty and was not created by this app" in message, (
+        "with no record left by stage one, the retry meets `_claim_folder()` first: " + message
+    )
+
+    # The narrower refusal this test is named for is real, and it is what a
+    # death in a stage whose destination is NOT the server dir leaves: the
+    # record survives that one, `_guard()` lets the folder through, and
+    # `_clone_modules()` then refuses the non-git leftovers by name.
+    modules_dir = tmp_path / "wow2"
+
+    def clone_core_then_die_in_modules(spec: git.CloneSpec) -> None:
+        as_the_clone_seam_does(spec.dest)
+        if spec.dest == modules_dir:
+            (spec.dest / ".git").mkdir(parents=True, exist_ok=True)
+            return
+        spec.dest.mkdir(parents=True, exist_ok=True)
+        (spec.dest / "not-a-checkout").write_bytes(b"x")
+        raise InstallerError("killed before git made .git")
+
+    # `clone-core`'s checkout answers for itself on the retry, which is what a
+    # real one does; the module directory has no `.git` and answers `None`.
+    # By `dest`, not by index: `dest == "."` is the rule that replaced
+    # "sources[0] is the core" (`catalog.py`).
+    core_remote = next(s.url for s in ENTRY.emulator.sources if s.dest == ".")
+
+    def remote_of(dest: Path) -> str | None:
+        return core_remote if dest == modules_dir else None
+
+    with pytest.raises(InstallerError):
+        install(rec, modules_dir, clone=clone_core_then_die_in_modules, remote_url=remote_of)
+    assert (
+        modules_dir / native.STATE_FILE
+    ).is_file(), "a death after stage one lost the record too, so the claim buys nothing anywhere"
+    with pytest.raises(InstallerError) as narrower:
+        install(rec, modules_dir, clone=clone_core_then_die_in_modules, remote_url=remote_of)
+    assert "has files in it but is not a checkout" in str(narrower.value), str(narrower.value)
+    assert "was not created by this app" not in str(narrower.value), (
         "the ownership record is doing its job; the remaining refusal must not be the one "
-        "that asserts the app did not write these bytes: " + message
+        "that asserts the app did not write these bytes: " + str(narrower.value)
     )
 
 
@@ -1896,7 +2053,13 @@ def test_the_folder_is_claimed_before_the_first_stage_writes_a_single_byte(
     seen: list[native.InstallState | None] = []
 
     def look_then_clone(spec: git.CloneSpec) -> None:
+        # The read is the FIRST thing, and deliberately ahead of the wipe the
+        # real seam opens with: this test is about the instant the seam is
+        # entered, which is the last moment the claim is on disk for
+        # `clone-core`. What happens to it a line later is
+        # `test_the_clone_that_fills_the_server_dir_takes_the_ownership_record_with_it`.
         seen.append(native.read_state(server_dir, valid=("clone-core",)))
+        as_the_clone_seam_does(spec.dest)
         (spec.dest / ".git").mkdir(parents=True, exist_ok=True)
 
     rec = Recorder()
@@ -1926,19 +2089,38 @@ def test_a_death_that_runs_no_except_block_still_leaves_the_folder_claimed(
     one being fixed. `BaseException` is the honest proxy: `run()` catches
     `InstallerError` and nothing wider, so a `KeyboardInterrupt` out of stage
     one traverses exactly the code a signal would have skipped.
+
+    **The kill lands in `clone-modules`, not `clone-core`, and that is the
+    fix's real reach.** This test killed the FIRST clone and asserted the
+    record was still on disk, which passed only because `die_hard()` skipped
+    the `shutil.rmtree` both real seams open with: for `clone-core` the
+    destination is the server dir, so the record is gone before a `.git`
+    exists, and the assertion below went red the moment the double was made
+    faithful (m910q, 2026-09-05 -- `as_the_clone_seam_does()`). What the early
+    claim genuinely buys is every stage after that one, whose destinations are
+    under `modules/`, and that is what is killed here. The `clone-core` hole is
+    pinned as a defect in
+    `test_the_clone_that_fills_the_server_dir_takes_the_ownership_record_with_it`.
     """
     server_dir = tmp_path / "wow"
+    killed_in: list[Path] = []
 
     def die_hard(spec: git.CloneSpec) -> None:
+        as_the_clone_seam_does(spec.dest)
         (spec.dest / ".git").mkdir(parents=True, exist_ok=True)
+        if spec.dest == server_dir:
+            return
         (spec.dest / "half-a-checkout").write_bytes(b"x")
+        killed_in.append(spec.dest)
         raise KeyboardInterrupt
 
     rec = Recorder()
     with pytest.raises(KeyboardInterrupt):
         install(rec, server_dir, clone=die_hard)
 
-    assert (server_dir / "half-a-checkout").is_file(), "the fixture wrote nothing"
+    assert killed_in, "the kill never landed in a stage after `clone-core`"
+    assert (killed_in[0] / "half-a-checkout").is_file(), "the fixture wrote nothing"
+    assert killed_in[0] != server_dir
     assert (server_dir / native.STATE_FILE).is_file(), (
         "a death that ran no handler left the folder unclaimed, which is the bug this fix "
         "exists for and the exact shape the previous fix could not cover"

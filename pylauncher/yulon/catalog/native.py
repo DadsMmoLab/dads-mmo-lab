@@ -886,6 +886,15 @@ class StagedInstaller:
             # the claim moved ahead of stage one, is every install that started
             # from a folder of ours. The one shape with no file to write into is
             # the user's own checkout, and nothing should be written there.
+            #
+            # Not quite every: measured m910q 2026-09-05, a `clone-core` failure
+            # has no file to write into either. That stage clones INTO the
+            # server dir, and `git.py`'s two seams empty a destination with no
+            # `.git` before cloning, so the claim written twenty lines above is
+            # gone by the time this runs and the failure sentence is dropped on
+            # the floor. Pinned in
+            # `test_the_clone_that_fills_the_server_dir_takes_the_ownership_record_with_it`;
+            # closing it means changing the clone, not this line.
             self._record_error(server_dir, state, str(exc))
             raise
         # OUTSIDE the `try`, and after the last stage, on purpose. Outside,
@@ -918,6 +927,22 @@ class StagedInstaller:
         multi-gigabyte clone by hand. Driven, not reasoned: the TBC-on-Windows
         gate was killed mid-clone on `yulon-win11` (2026-09-03) and refused its
         own 162 MB checkout on the next attempt.
+
+        **And that one failure is the one this still does not fix.** Measured
+        on m910q 2026-09-05: `_clone_core()` clones into the SERVER DIR, and
+        both seams in `git.py` (`RunnerGit.clone`, `ContainerGit.clone`) begin
+        by emptying a destination that has no `.git` -- so the record written
+        below is removed at the start of stage one on every fresh install, kill
+        or no kill. Three tests in `test_families_azerothcore.py` asserted
+        otherwise and passed only because their clone doubles skipped that
+        line; with the doubles made faithful (`as_the_clone_seam_does()`) all
+        three went red, and they now say what happens. What this method DOES
+        buy is every stage after the first: their destinations are under
+        `modules/`, the record survives them, and the retry resumes. Closing
+        the rest means changing where `clone-core` clones -- `git clone <url>
+        <dir>` refuses a directory that is not empty, which is why the seam
+        empties it -- and that is a `git.py` change with a live gate behind it,
+        not a patch here.
 
         **`5eef8d9f` recorded it on the `except InstallerError` path instead,
         and an adversarial review the same day was right that this misses the
@@ -2355,8 +2380,53 @@ def _cancelled_message(what: str, note: str = "") -> str:
 def _listing(folder: Path, *, ignoring: str | None = None) -> list[str]:
     """What is in `folder`, minus `ignoring` — or a refusal, never a bare `OSError`.
 
-    THE ONLY PLACE THIS ENGINE LISTS A DIRECTORY. Four sites asked
-    `folder.iterdir()` bare until 2026-09-02 — `_claim_folder()`, which every
+    THE ONLY PLACE THIS ENGINE DECIDES WHETHER A FOLDER IS ITS TO WRITE INTO.
+    That is narrower than what this line said until 2026-09-05 — "THE ONLY
+    PLACE THIS ENGINE LISTS A DIRECTORY" — which was true of no commit that
+    ever carried it. `families/clientdir.py` walks a client's `Data/` in
+    `_to_depth()` and `locale_dirs()`, `families/extract.py` counts what a tool
+    produced in `file_count()`, and `families/sqlplan.py` lists `Updates/` in a
+    second private function of this very name. Those three READ a folder
+    somebody else filled and deliberately let the `OSError` out to a caller
+    with a better sentence for it than this one has — `mpq_files()` says so in
+    as many words, because `rglob()` answering short would reach the user as
+    "too few archives" about a folder nobody could open. Rewording was the fix
+    rather than routing them through here: they need `Path`s and the raw error,
+    and this function exists to hand back names and a refusal.
+
+    The narrow claim is pinned by enumeration rather than by assertion:
+    `test_every_folder_listing_in_the_package_is_accounted_for` lists every
+    directory listing under `yulon/` in eight spellings — `iterdir`, `scandir`,
+    `listdir`, `glob`, `iglob`, `rglob`, `walk`, `fwalk`, at module level and
+    inside `async def` too — with the reason each is not a write decision, so a
+    new one anywhere in the app fails that audit rather than quietly making this
+    paragraph false again. It read two modules until 2026-09-05, which is how a
+    sentence about the whole engine went unchecked over five sixths of it; then
+    three spellings under `yulon/catalog/`, which a `glob` respelling of the
+    very regression it was widened for walked straight past; then six, which
+    `glob.iglob` walked past the same way. Eight is a set that can be checked,
+    and `test_the_listing_audit_sees_every_spelling_it_names` checks it — not a
+    claim to read every spelling Python has, which is what the set's own
+    docstring said both times it was wrong.
+
+    Not every listed site is exonerated: `apply.py`'s `_require_own_clone()`
+    makes THIS decision — may the module applier write into this clone dir —
+    with a bare `iterdir()` and no `except` at all, so an unreadable clone dir
+    reaches the user as a `PermissionError` traceback (measured, m910q
+    2026-09-05). It is recorded in that map as a defect rather than a design,
+    and filed; the sentence at the top of this docstring is about the INSTALL
+    engine and stays true.
+
+    The caller that made the point was `installer.cancelled_install_message()`,
+    which decided with a bare `iterdir()` whether the folder the user just
+    stopped an install in has leftovers — `_claim_folder()`'s question, asked
+    by the copy that tells the user what `_claim_folder()` will do. Two answers
+    to one question, and they could differ on exactly the folder that matters,
+    the one neither can read. It comes through here now, and both answers are
+    driven on one unreadable folder in
+    `test_a_folder_the_copy_cannot_list_is_refused_rather_than_called_empty`.
+
+    Four sites asked `folder.iterdir()` bare until 2026-09-02 — `_claim_folder()`, which every
     shipped game reaches through preflight and `_guard()`;
     `stage_clone_sources()`, which the three CMaNGOS games bind; and
     AzerothCore's `_clone_core()` and `_clone_modules()` — and reproduced

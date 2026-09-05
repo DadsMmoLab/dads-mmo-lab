@@ -24,13 +24,14 @@ from pathlib import Path
 
 import pytest
 
+import yulon
 from tests.conftest import spelled_bounds
 from tests.support_native import ENTRY, IMPORTED, PARTIAL, TBC, Recorder, install
 from yulon import docker, install_wiring, networking, platform, resources, runner
 from yulon.apply import ApplyError
 from yulon.catalog import composegen, native, preflight
 from yulon.catalog.catalog import CatalogEntry, ReadyMarkers, load_catalog
-from yulon.catalog.families import FAMILIES, azerothcore, family_for
+from yulon.catalog.families import FAMILIES, family_for
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.installer import (
     DockerUnavailableError,
@@ -2008,7 +2009,7 @@ def test_a_compose_refusal_reaches_the_cli_as_a_sentence_and_is_recorded(
 # promises a sentence, and no `last_error` at the stage sites. The sites are
 # ENUMERATED rather than described, because they are what the fix is about; a
 # fifth one added later without the helper is caught by
-# `test_no_folder_in_the_install_spine_is_listed_outside_the_helper`.
+# `test_every_folder_listing_in_the_package_is_accounted_for`.
 
 
 @dataclass(frozen=True)
@@ -2209,27 +2210,285 @@ def test_a_folder_that_will_not_list_is_a_refusal_and_not_a_traceback(
     )
 
 
-def test_no_folder_in_the_install_spine_is_listed_outside_the_helper() -> None:
-    """One translation means one place that lists a folder, so the next site cannot miss it.
+_LISTING_CALLS = frozenset(
+    {"iterdir", "scandir", "listdir", "glob", "rglob", "walk", "iglob", "fwalk"}
+)
+"""The eight standard-library spellings of "what is in this folder" this audit reads.
+
+Eight, enumerated. It said "every spelling a Python file can use" until
+2026-09-05, and one word refuted that twice in a row:
+`iterdir`/`scandir`/`listdir` was the whole set that morning, which left the
+audit unable to fail on the class it enumerates; `glob`/`rglob`/`walk` closed
+the class the first review reported; `iglob`/`fwalk` closed the two the NEXT
+review walked straight past it with. An enumerated set can be checked and an
+absolute cannot, so this one is enumerated and
+`test_the_listing_audit_sees_every_spelling_it_names` drives all eight through
+`_listing_sites()` on a file written for them. Anything outside the eight -- a
+third-party walker, a subprocess `ls` -- this audit does not see and does not
+claim to.
+
+Measured on m910q 2026-09-05, `__pycache__` purged both sides, over this file's
+two audit tests plus `tests/test_installer.py` (25 tests, all green
+unmutated). `installer.py`'s write decision -- `native._listing(server_dir,
+ignoring=native.STATE_FILE)` -- respelled `server_dir.glob("*")` gives
+`2 failed, 23 passed` with `test_every_folder_listing_in_the_package_is_accounted_for`
+among them; respelled `glob.iglob(str(server_dir / "*"))` it gives
+`3 failed, 22 passed`, the audit again (the third is
+`test_the_script_lineage_is_gone`, which the mutation's own `import glob` trips
+-- the module surface is enumerated too). What the audit CANNOT see was read
+off `_listing_sites()` on the same mutated tree rather than inferred from the
+run: with the six spellings of that morning it returns 12 sites and NOT
+`("catalog/installer.py", "cancelled_install_message")`; with these eight it
+returns 13 and does. The audit is an equality against that set, so a site it
+does not return is a site it cannot fail on.
+"""
+
+
+def _listing_sites(root: Path) -> set[tuple[str, str]]:
+    """Every directory listing under `root`, as (file, the function it is in).
+
+    Asked of the syntax tree rather than of the text, because the comments
+    explaining the fixes name `iterdir()` too and a grep would match those.
+
+    Descended rather than `ast.walk`ed, and that is the part that had a hole:
+    `ast.walk` plus `isinstance(node, ast.FunctionDef)` sees only listings whose
+    call is an ATTRIBUTE inside a plain `def`. A listing at module level, one in
+    an `async def`, and `listdir(x)` after `from os import listdir` were all
+    invisible -- three more ways to spell the defect past an audit whose own
+    docstring says "every". `<module>` is a real scope name here for that
+    reason, not a placeholder.
+    """
+    sites: set[tuple[str, str]] = set()
+
+    def descend(node: ast.AST, enclosing: str, rel: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            inner = (
+                child.name
+                if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef)
+                else enclosing
+            )
+            if isinstance(child, ast.Call):
+                func = child.func
+                if isinstance(func, ast.Attribute):
+                    named = func.attr
+                elif isinstance(func, ast.Name):
+                    named = func.id
+                else:
+                    named = ""
+                if named in _LISTING_CALLS:
+                    sites.add((rel, enclosing))
+            descend(child, inner, rel)
+
+    for path in sorted(root.rglob("*.py")):
+        rel = str(path.relative_to(root)).replace("\\", "/")
+        descend(ast.parse(path.read_text("utf-8")), "<module>", rel)
+    return sites
+
+
+_ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
+    ("catalog/native.py", "_listing"): (
+        "the write decision itself: it translates the OSError into a refusal, because the "
+        "caller's next move on 'empty' is a clone whose seam removes what it finds"
+    ),
+    ("catalog/families/clientdir.py", "_to_depth"): (
+        "reads a client folder the user chose; `mpq_files()` needs the OSError raw so an "
+        "unreadable `Data/` is not reported as too few archives"
+    ),
+    ("catalog/families/clientdir.py", "locale_dirs"): (
+        "same folder, same reason - what a repack stripped, not what may be written"
+    ),
+    ("catalog/families/extract.py", "file_count"): (
+        "counts what a tool produced; a listing it cannot make is logged and counts as short, "
+        "which re-runs the tool rather than skipping it"
+    ),
+    ("catalog/families/sqlplan.py", "_listing"): (
+        "reads `Updates/` in the sources; FileNotFoundError is a real answer there (no such "
+        "directory) and every other OSError stops the install regardless of `on_error`"
+    ),
+    ("apply.py", "_require_own_clone"): (
+        "IS a write decision, and the one entry here that is not an exoneration: it lists a "
+        "clone dir under the server dir to decide whether the module applier may write there, "
+        "and raises `<rel> already has files in it and was not put there by this app`. "
+        "Measured on m910q 2026-09-05 - the method has no `except` of any kind, and the same "
+        "expression on a chmod-000 folder raises a raw `PermissionError [Errno 13]`, so an "
+        "unreadable clone dir reaches the user as a traceback. Not routed through "
+        "`native._listing()` from here because that raises `InstallerError` while every "
+        "caller of this one translates `ApplyError`; filed in `pyplan/checklist.md`"
+    ),
+    ("apply.py", "_undeploy"): (
+        "re-derives what a `deploy` step put on disk from the clone's own `src` listing, so it "
+        "removes exactly those names; reads a folder this app filled, decides no write into it"
+    ),
+    ("apply.py", "_patches"): (
+        "resolves a manifest's `patch.file` glob to real paths; a pattern that matches nothing "
+        "is reported as `patch target missing: <path>` by name, never as an emptiness verdict"
+    ),
+    ("apply.py", "_run_sql"): (
+        "resolves a manifest's `sql path` glob the same way, with the same by-name refusal"
+    ),
+    ("docker.py", "_first_populated_ancestor"): (
+        "walks up a path looking for a directory that HAS something in it, to tell a real "
+        "mount from an empty mount point; its own `except OSError` logs and answers None, "
+        "which is the honest 'cannot tell' this probe is allowed to give"
+    ),
+    ("networking.py", "write_client_realmlist"): (
+        "globs `Data/*/realmlist.wtf` in the USER'S client to find the file to write; a glob "
+        "matching nothing falls back to `Data/enUS/`, and the write itself is to a named file"
+    ),
+    ("ui/controller_view.py", "refresh_backups"): (
+        "lists `*.sql` in the backups directory to fill a list widget; reads, shows, writes "
+        "nothing"
+    ),
+}
+"""Every directory listing in the package, and why it is not `native._listing()`.
+
+`native._listing()`'s docstring claimed to be the only place this engine lists a
+directory, and the audit under it read `native` and `azerothcore` only -- so the
+five sixths of the engine that contradicted the sentence were never asked. The
+root was widened to `yulon/catalog/` on 2026-09-05 and to the whole of `yulon/`
+the same day, when a review pointed out that `apply.py` makes the same write
+decision with a bare `iterdir()` one directory up and the audit could not see
+it: "this engine" was still a wider claim than its evidence, one level out.
+
+Written out rather than derived: the map IS the claim, and one computed from the
+code would agree with whatever the code did.
+
+A reason per site, because "is this a write decision?" is the only question that
+matters here and it cannot be answered by counting. One entry says NO -- the
+`apply.py` clone guard -- because a map that could only hold exonerations would
+be somewhere to hide a finding rather than somewhere to record it.
+"""
+
+
+def test_every_folder_listing_in_the_package_is_accounted_for() -> None:
+    """One translation for the install engine's write decision, a named reason for the rest.
 
     Four sites carried the same untranslated listing and were found one at a
-    time. Asked of the syntax tree rather than of the text, because the comments
-    explaining the fix name `iterdir()` too and a grep would match those.
+    time; a fifth appeared in `installer.py` on 2026-09-05.
+
+    The whole package is walked, not a hand-picked pair of modules and not the
+    `catalog/` subtree. That is the difference between an audit and a spot
+    check: a listing this cannot see is a listing nothing checks, and the
+    sentence it would falsify is three screens away in another file.
     """
-    callers = {
-        module.__name__: {
-            enclosing.name
-            for enclosing in ast.walk(ast.parse(Path(module.__file__ or "").read_text("utf-8")))
-            if isinstance(enclosing, ast.FunctionDef)
-            for node in ast.walk(enclosing)
-            if isinstance(node, ast.Attribute) and node.attr == "iterdir"
-        }
-        for module in (native, azerothcore)
-    }
-    assert callers == {
-        native.__name__: {native._listing.__name__},
-        azerothcore.__name__: set(),
-    }
+    root = Path(yulon.__file__ or "").parent
+    assert _listing_sites(root) == set(_ACCOUNTED_LISTINGS), (
+        "a folder listing in this package is not in the map above. If it decides whether the "
+        "app may write somewhere it belongs in `native._listing()`; if it does not, add it "
+        "with the reason, and check that `_listing()`'s docstring still tells the truth"
+    )
+
+
+_SPELLING_PROBE = '''\
+"""One listing per spelling `_LISTING_CALLS` names, plus the scopes it claims to reach."""
+
+import glob
+import os
+from os import listdir
+
+
+AT_MODULE_LEVEL = list(os.scandir("."))
+
+
+def probe_iterdir(p):
+    return list(p.iterdir())
+
+
+def probe_scandir(p):
+    return list(os.scandir(p))
+
+
+def probe_listdir(p):
+    return listdir(p)
+
+
+def probe_glob(p):
+    return list(p.glob("*"))
+
+
+def probe_rglob(p):
+    return list(p.rglob("*"))
+
+
+def probe_walk(p):
+    return list(os.walk(p))
+
+
+def probe_iglob(p):
+    return list(glob.iglob(str(p) + "/*"))
+
+
+def probe_fwalk(p):
+    return list(os.fwalk(p))
+
+
+async def probe_in_an_async_def(p):
+    return [entry for entry in p.rglob("*")]
+
+
+def probe_not_a_listing(p):
+    return p.read_text(encoding="utf-8")
+'''
+
+
+def test_the_listing_audit_sees_every_spelling_it_names(tmp_path: Path) -> None:
+    """The instrument's own scope, checked rather than asserted in prose.
+
+    `_LISTING_CALLS`' docstring is the audit's whole value: the map below it is
+    only as complete as the set of spellings that reaches it. Twice on
+    2026-09-05 that docstring said "every spelling" and a one-word respelling
+    walked past -- `glob` the first time, `glob.iglob` the second -- and both
+    times the audit stayed green while the write decision it exists to find had
+    moved. Prose cannot be run, so the claim is driven here instead.
+
+    Written out literally rather than generated from `_LISTING_CALLS`, which is
+    the difference between a probe and a tautology: a probe built from the set
+    shrinks with the set and agrees with whatever the set says. This file is
+    fixed, the expected sites are fixed, and the two are tied to the set by the
+    second assertion. Both assertions are load-bearing, and each was reddened on
+    m910q 2026-09-05, `__pycache__` purged both sides, over the same 25-test
+    subset: dropping `iglob` and `fwalk` back out of `_LISTING_CALLS` gives
+    `1 failed, 24 passed` on the SITE-SET assertion, naming
+    `('probe.py', 'probe_iglob')` and `('probe.py', 'probe_fwalk')` as the sites
+    that vanished; adding a ninth spelling with no `probe_` function for it
+    gives `1 failed, 24 passed` on the DRIFT assertion instead, naming the
+    spelling nothing probes.
+
+    The scopes are here for the same reason `<module>` is a real key: an
+    `async def` site and a `from os import listdir` name-form call were both
+    invisible before the walker descended, and `probe_not_a_listing` is the
+    negative control -- an audit that flags everything is not an audit.
+    """
+    probe = tmp_path / "probe.py"
+    probe.write_text(_SPELLING_PROBE, encoding="utf-8")
+
+    sites = _listing_sites(tmp_path)
+
+    assert sites == {
+        ("probe.py", "<module>"),
+        ("probe.py", "probe_iterdir"),
+        ("probe.py", "probe_scandir"),
+        ("probe.py", "probe_listdir"),
+        ("probe.py", "probe_glob"),
+        ("probe.py", "probe_rglob"),
+        ("probe.py", "probe_walk"),
+        ("probe.py", "probe_iglob"),
+        ("probe.py", "probe_fwalk"),
+        ("probe.py", "probe_in_an_async_def"),
+    }, (
+        "a spelling or a scope this audit claims to read walked past it. `probe_not_a_listing` "
+        "must be absent and every other site present; a missing `probe_<name>` means "
+        "`_LISTING_CALLS` no longer names that spelling, and the audit below cannot fail on it"
+    )
+
+    spellings_probed = {
+        name.removeprefix("probe_") for _, name in sites if name.startswith("probe_")
+    } - {"in_an_async_def"}
+    assert spellings_probed == set(_LISTING_CALLS), (
+        "`_LISTING_CALLS` and the probe file have drifted. Add the new spelling to "
+        "`_SPELLING_PROBE` with a `probe_<spelling>` function, or this set is a claim nothing "
+        "checks"
+    )
 
 
 # -- a reset that will not finish --------------------------------------------
