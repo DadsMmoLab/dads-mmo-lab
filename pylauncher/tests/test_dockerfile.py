@@ -771,10 +771,14 @@ def test_a_one_character_secret_is_matched_only_where_it_is_the_whole_value(
 ) -> None:
     """Below `MIN_CONTAINED_SECRET` it is equality, so `a` does not condemn `/opt/mangos`.
 
-    Measured on m910q 2026-09-05 over the same 34 shipped values: 30 of the 36 single
-    alphanumeric characters are contained in at least one, and `a` alone is in 16 of them
-    (`/opt/mangos`, `characters`, …). Containment at that length is not a strict rule, it
-    is an install that can never run.
+    Measured on m910q 2026-09-05 over the same 34 shipped values, with
+    `server_dir=/tmp/fixedsrv/srv`: 31 of the 36 single alphanumeric characters are
+    contained in at least one, and `a` alone is in 14 of them (`/opt/mangos`,
+    `characters`, …). Containment at that length is not a strict rule, it is an install
+    that can never run. The directory is named because three of those values carry an
+    8-hex digest of it and both counts move with it — this docstring said 30 and 16 until
+    2026-09-05, from a run under per-game temporary directories. What does not move is
+    that some single character is in some value, which is the whole argument.
 
     Equality still fires, which is the half worth keeping: every leak ever measured into
     this mapping put the password in verbatim under some other key, and that shape is

@@ -397,9 +397,15 @@ def render(template_dir: Path, tokens: Mapping[str, str], *, secrets: Secrets) -
     Against that, containment over a whole Dockerfile is a much larger false-positive
     surface than containment over one token value: a future template line reading
     `# the password file is mounted at run time` would refuse that entry's install
-    outright. No shipped template spells the word today (measured, same box), so this is
-    a cost nobody pays yet and a coverage nobody gains yet — reconsider it the day a
-    family with a short fixed password renders a Dockerfile.
+    outright. No shipped Dockerfile or dockerignore template spells the word today, so
+    this is a cost nobody pays yet and a coverage nobody gains yet — reconsider it the day
+    a family with a short fixed password renders a Dockerfile. Scoped to the two templates
+    this function READS, because unscoped it is false and a reader who checks stops
+    trusting the paragraph: measured on m910q 2026-09-05,
+    `grep -ril 'password\\|passwd' catalog/installers --include=Dockerfile.tmpl
+    --include=dockerignore.tmpl` returns nothing, while the same grep over the whole
+    installers tree returns `shared/cmangos/base.yml.tmpl` and
+    `wow-wotlk/native/base.yml.tmpl` — compose templates, which `render()` never opens.
 
     Both halves come back as `_Rendered`, which is the only text `write()` will lay down.
 

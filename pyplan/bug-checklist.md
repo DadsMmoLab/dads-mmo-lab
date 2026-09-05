@@ -1765,7 +1765,13 @@ shortcut itself. Choosing is owner work.
 the bundle first, and why. That is a warning, not a fix — a user who does not read the header still
 hits it, and per §1 nothing outside `pyplan/` points a user at the header at all.
 
-### 29. The Dockerfile refusal covers declared FIELD NAMES, not secrets — 2026-09-02, the NAME half FIXED 2026-09-04 at `d2b963d5`, the VALUE half FIXED 2026-09-05 on `lane/dockerfile-value`, **CLOSED with the residue named below**
+### 29. The Dockerfile refusal covers declared FIELD NAMES, not secrets — 2026-09-02, the NAME half FIXED 2026-09-04 at `d2b963d5`, the VALUE half FIXED 2026-09-05 at `75bce609`, **CLOSED with the residue named below**
+
+`75bce609` is on `lane/dockerfile-value` and unpushed as this is written, and so are the review
+follow-ups that corrected this entry — `da34fb86` (what the containment floor is answerable to) and
+`fd947b1c` (the false-positive refusal). The SHA is cited rather than the branch because the branch
+is disposable and the neighbouring entries cite SHAs; whoever merges this rewrites it to the merged
+one, which upstream's squash habit means will be a single new SHA.
 
 **Both halves are now built, and the RED for each was re-derived rather than quoted.**
 
@@ -1908,8 +1914,12 @@ and the only fixed password in the shipped catalog is `wow-wotlk`'s literal `pas
 to an entry whose family does not call this function. Against that, containment over a whole
 Dockerfile is a far larger false-positive surface than over one token value: a future template line
 reading `# the password file is mounted at run time` would refuse that entry's install outright. No
-shipped template spells the word today (measured, same box). Reconsider it the day a family with a
-short fixed password renders a Dockerfile.
+shipped Dockerfile or dockerignore template spells the word today — and the scope matters, because
+unscoped that sentence is false: measured on m910q 2026-09-05,
+`grep -ril 'password\|passwd' catalog/installers --include=Dockerfile.tmpl --include=dockerignore.tmpl`
+returns nothing, while the same grep over the whole installers tree returns
+`shared/cmangos/base.yml.tmpl` and `wow-wotlk/native/base.yml.tmpl`, compose templates `render()`
+never opens. Reconsider it the day a family with a short fixed password renders a Dockerfile.
 
 **Ticked, and here is the residue, because the title's general form is not what closed.** What is
 closed: *a value this app DECLARES as a secret cannot reach a generated Dockerfile through the token
