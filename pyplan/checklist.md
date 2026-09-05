@@ -279,7 +279,7 @@
 > re-verified here is the geometry, the detached state, and the bytes that arrived.
 
 - [ ] 7.1 Spine + `AzerothCoreInstaller`, Linux native — `StagedInstaller`/`Stage` extracted from `native.py`, WotLK stage names unchanged and pinned; the 7.1 catalog models (`EmulatorSource.dest`, `PasswordPlan`, `DbFacts`, `ReadyMarkers`, `NativeInstall.family/images/image_prefix/azerothcore`); `ask` forwarded to `ensure_docker`; once-only sudo password (`SudoSession`, `sudo -S`) in provisioning; `docker-buildx` on the dnf and pacman lists; SELinux facts + `{{BIND_LABEL}}` on every host bind line + relabel; `systemd-inhibit`; `install_wiring.py` (probe wiring + the CLI harness); `wait_ready(ReadySpec)`; the proven install's `docker compose config` committed as `tests/data/wotlk-compose-config.json`; wow-wotlk dispatches native on Linux
-  - [ ] Gate: yulon-ubuntu clean checkpoint — **starting state captured** (`docker --version; systemctl is-active docker; id -Gn; ls -d ~/wowserver`, before press 1); press 1: consent dialog + re-login report; re-login; a later press reaches `ready`; kill mid-build, and the resume **recovers the finished objects from the ccache mount** rather than compiling them again; `docker compose config` matches a fixture minted from a DIFFERENT run; auth log `127.0.0.1:8085` read from the authserver container's log, then the realm left advertising an address another machine can REACH (`ready`'s own `UPDATE`, counted in `yulon.log`); account + client login from the host after the LAN step
+  - [ ] Gate: yulon-ubuntu clean checkpoint — **starting state captured** (`docker --version; systemctl is-active docker; id -Gn; ls -d ~/wowserver`, before press 1); press 1: consent dialog + re-login report; re-login; a later press reaches `ready`; kill mid-build, and the resume **recovers the finished objects from the ccache mount** rather than compiling them again; `docker compose config` matches a fixture minted from a DIFFERENT run; auth log `127.0.0.1:8085` read from the authserver container's log, then the realm left advertising an address another machine can REACH — read out of the DATABASE and out of `ready`'s own line in the install transcript, not from `yulon.log` (see §42: the CLI writes none); account + client login from the host after the LAN step
     - **Three clauses were reworded on 2026-09-04, after an audit of a recovered run showed the old wording could not be satisfied by anything that actually happens.** Kept here rather than silently swapped:
       * "**two presses**" → "a later press reaches `ready`". The recovered run took FOUR presses (exit 1, 137, 0, 0) and that is the honest shape of a gate that includes a kill-mid-build: the kill costs a press. Counting presses was never the property worth pinning.
       * "**resume skips the compile**" → the ccache clause. The engine's own `The server is already built; skipping the compile.` fires on a re-press of a COMPLETE install, not on a resume after a kill — a resume re-enters the build step and re-issues every ninja edge, because BuildKit does not cache a partial `RUN`. What it really buys was measured: ~1,315 of 1,829 edges came back from the `--mount=type=cache,target=/ccache` mount in **13.9 s**, and the build finished in **610.7 s** instead of hours. 7.4a's entry made the same correction for its own line on 2026-09-02 ("describing the effect, not the mechanism"); this line had not caught up. Note the mechanism is evictable: a `docker builder prune` between the kill and the resume costs a full compile.
@@ -365,6 +365,21 @@
         REACHABLE, not whether it equals the LAN address). So this half is not a re-run away — it
         is an owner decision to reword the clause to what the engine does now, and no
         `yulon.log` UPDATE count was captured either way.
+      * **The reworded clause was itself unmeasurable for six hours, and the fix is measured here
+        (2026-09-05, yulon-ubuntu).** The 05:00 reword asked for `ready`'s UPDATE "counted in
+        `yulon.log`". There is no `yulon.log` on a gate box: `~/.local/share/yulon/` does not exist
+        on yulon-ubuntu after a full 7.2 run, and the reason is in the code, not the box —
+        `configure(config_dir=platform.config_dir())`, the call that opens the rotating file, is made
+        only by `main.py` (the GUI). `install_wiring.py`, which is what every headless gate drives,
+        never calls it (`grep -c 'configure(' install_wiring.py` -> 0). So the criterion could only
+        ever have been met by a run nobody performs. Filed as bug-checklist §42, because a headless
+        install leaving no log at all is a defect in its own right, not just a gate problem.
+        WHAT WAS MEASURED INSTEAD, and what the clause now asks for:
+        `SELECT id,name,address,localAddress,port FROM acore_auth.realmlist` ->
+        `1 AzerothCore 172.30.55.119 172.30.55.119 8085` (reachable, not loopback), and `ready`'s own
+        line in the transcript, `gate72-press3.log:3377`: "The realm now advertises 172.30.55.119, so
+        players on other machines can reach this server". Both halves of the clause are therefore MET
+        on the 2026-09-05 run; what remains open in 7.1 is the client login and §39.
       * **What the reworded clause asks for, and why (owner decision, 2026-09-05).** The gate now
         reads: the auth log's `127.0.0.1:8085` line, *then* the realm left advertising an address
         another machine can REACH, with `ready`'s own `UPDATE` counted in `yulon.log`. The two

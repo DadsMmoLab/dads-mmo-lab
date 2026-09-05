@@ -2441,3 +2441,29 @@ overwrite the first. That is recorded intent, not a value read back out of the d
 Deliberately not started on 2026-09-05: `networking.py` was mid-flight in §39 round 5 and
 `catalog/native.py` in the §40/§21 lane, and two collisions that night came from editing a file
 another lane owned. Decision recorded in `phase7-decisions.md` Appendix D.
+
+### 42. A headless install writes no log at all — 2026-09-05, OPEN
+
+Found while trying to satisfy a 7.1 clause that asked for a count out of `yulon.log`, on a box that
+had just completed a full 7.2 install. There is no such file, and the reason is in the code rather
+than the box.
+
+`log.configure(config_dir=...)` is what opens the rotating `yulon.log`. Measured 2026-09-05:
+`grep -c 'configure(config_dir' main.py` -> 1, `grep -c 'configure(' yulon/install_wiring.py` -> 0.
+So the GUI writes a log and the CLI writes none, and `~/.local/share/yulon/` does not exist on
+yulon-ubuntu after press 1, press 2, a SIGKILL and press 3 (the whole 7.2 gate).
+
+**Why it matters beyond the gate.** The CLI is what every headless install runs — the gate boxes, a
+Steam Deck started from a shortcut, anyone who scripts an install. When one of those fails, the only
+record is whatever the terminal still holds, and a user who closes it has nothing to send. The GUI's
+own `file_log_problem()` exists precisely because a missing log is worth telling the user about; the
+CLI never even tries.
+
+It also quietly falsified a gate criterion for six hours: 7.1's realm clause, reworded at 05:00 that
+morning, asked for `ready`'s UPDATE "counted in `yulon.log`" — a measurement no headless run could
+ever produce. Corrected the same day to read the database and the transcript instead.
+
+- [ ] `install_wiring` configures file logging the way `main.py` does, or says in its own words why a
+      CLI install deliberately does not.
+- [ ] A test that fails if one entry point writes a log and the other does not.
+- [ ] The gate: run the CLI installer headlessly, then find the log and the stage lines in it.
