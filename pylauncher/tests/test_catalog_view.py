@@ -539,12 +539,22 @@ def test_a_cancel_during_the_clone_does_not_offer_what_the_engine_will_refuse(
     That run passed 15 of 15 checks and still showed a modal saying two things
     that were not true of that folder. It said the source was there and to
     press "Use existing...", on the strength of a compose file the clone stage
-    brings down on every install of every game. And it said to press Install
-    again to carry on, which was then driven and refused: "there is no record
-    here of an install this app made"
+    brings down with the source. And it said to press Install again to carry
+    on, which was then driven and refused: "there is no record here of an
+    install this app made"
     (`cycle2-pressA2-refused-existing-checkout.log`). A message that sends a
     user at a button the app then refuses is worse than no message, because
     the folder it tells them to keep is the reason for the refusal.
+
+    **The first fix for that overshot, and this test held the overshoot.** It
+    asserted no "Use existing..." half at all and a flat "Delete <dir>", on a
+    folder that is `.git` plus an unmarked `docker-compose.yml` -- which is
+    also what a bash-era install and a hand-written compose file look like, and
+    `attach_existing()` adopts every one of them, because it gates on
+    `compose_file()` and asks nothing about who wrote the file. `stat` cannot
+    tell them apart. So the modal now says both readings and puts the condition
+    to the user, and the delete it names is conditional on the user's own
+    answer rather than an instruction (2026-09-05).
     """
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
@@ -611,9 +621,19 @@ def test_a_cancel_during_the_clone_does_not_offer_what_the_engine_will_refuse(
     assert told and told[0][0] == "Install cancelled"
     note = told[0][1]
     assert str(tmp_path) in note
-    assert "Use existing" not in note, "the copy offered to adopt a folder holding no server"
+    assert "nothing is lost" not in note, "the copy offered to adopt a folder holding no server"
+    assert "there is no server behind it" in note, (
+        "the reading this folder actually is -- a clone stopped before anything was built -- is "
+        "not in the modal: " + note
+    )
+    assert "Use existing" in note, (
+        "the same folder is what a pre-7.2 install looks like, and `attach_existing()` would "
+        "take it; the modal has to offer that: " + note
+    )
     assert "the app will refuse it" in note, "the copy still points at the button that refuses"
-    assert f"Delete {tmp_path}" in note
+    assert f"Delete {tmp_path}" not in note, (
+        'the app told the user to delete a folder its own "Use existing…" would adopt: ' + note
+    )
     assert "carries on" not in note and "carry on" not in note
 
 

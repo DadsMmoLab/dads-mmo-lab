@@ -886,6 +886,15 @@ class StagedInstaller:
             # the claim moved ahead of stage one, is every install that started
             # from a folder of ours. The one shape with no file to write into is
             # the user's own checkout, and nothing should be written there.
+            #
+            # Not quite every: measured m910q 2026-09-05, a `clone-core` failure
+            # has no file to write into either. That stage clones INTO the
+            # server dir, and `git.py`'s two seams empty a destination with no
+            # `.git` before cloning, so the claim written twenty lines above is
+            # gone by the time this runs and the failure sentence is dropped on
+            # the floor. Pinned in
+            # `test_the_clone_that_fills_the_server_dir_takes_the_ownership_record_with_it`;
+            # closing it means changing the clone, not this line.
             self._record_error(server_dir, state, str(exc))
             raise
         # OUTSIDE the `try`, and after the last stage, on purpose. Outside,
@@ -918,6 +927,22 @@ class StagedInstaller:
         multi-gigabyte clone by hand. Driven, not reasoned: the TBC-on-Windows
         gate was killed mid-clone on `yulon-win11` (2026-09-03) and refused its
         own 162 MB checkout on the next attempt.
+
+        **And that one failure is the one this still does not fix.** Measured
+        on m910q 2026-09-05: `_clone_core()` clones into the SERVER DIR, and
+        both seams in `git.py` (`RunnerGit.clone`, `ContainerGit.clone`) begin
+        by emptying a destination that has no `.git` -- so the record written
+        below is removed at the start of stage one on every fresh install, kill
+        or no kill. Three tests in `test_families_azerothcore.py` asserted
+        otherwise and passed only because their clone doubles skipped that
+        line; with the doubles made faithful (`as_the_clone_seam_does()`) all
+        three went red, and they now say what happens. What this method DOES
+        buy is every stage after the first: their destinations are under
+        `modules/`, the record survives them, and the retry resumes. Closing
+        the rest means changing where `clone-core` clones -- `git clone <url>
+        <dir>` refuses a directory that is not empty, which is why the seam
+        empties it -- and that is a `git.py` change with a live gate behind it,
+        not a patch here.
 
         **`5eef8d9f` recorded it on the `except InstallerError` path instead,
         and an adversarial review the same day was right that this misses the
@@ -2355,8 +2380,17 @@ def _cancelled_message(what: str, note: str = "") -> str:
 def _listing(folder: Path, *, ignoring: str | None = None) -> list[str]:
     """What is in `folder`, minus `ignoring` — or a refusal, never a bare `OSError`.
 
-    THE ONLY PLACE THIS ENGINE LISTS A DIRECTORY. Four sites asked
-    `folder.iterdir()` bare until 2026-09-02 — `_claim_folder()`, which every
+    THE ONLY PLACE THIS ENGINE LISTS A DIRECTORY, which stopped being true for
+    six hours on 2026-09-05 and is true again. A fifth caller appeared outside
+    this module — `installer.cancelled_install_message()`, deciding with a bare
+    `iterdir()` whether the folder the user just stopped an install in has
+    leftovers, which is `_claim_folder()`'s question asked by the copy that
+    tells the user what `_claim_folder()` will do. Two answers to one question,
+    and they could differ on exactly the folder that matters, the one neither
+    can read. That caller now comes through here, which is why this sentence
+    still says "the only place" rather than "the only place in native.py".
+
+    Four sites asked `folder.iterdir()` bare until 2026-09-02 — `_claim_folder()`, which every
     shipped game reaches through preflight and `_guard()`;
     `stage_clone_sources()`, which the three CMaNGOS games bind; and
     AzerothCore's `_clone_core()` and `_clone_modules()` — and reproduced

@@ -18,7 +18,11 @@ about Docker has one author; `cancelled_install_message()` stays because
 `catalog_view.py` shows it after Stop, and `generated_compose_files()` beside
 it because that copy's "Use existing…" half turns on which compose files the
 engine itself wrote — a different question from `compose_file()`'s, and one
-this module was answering with `compose_file()` until 2026-09-05.
+this module was answering with `compose_file()` until 2026-09-05. The copy asks
+BOTH: `compose_file()` is what `attach_existing()` gates on, so it is what
+decides whether the folder can be adopted at all, and a message that told the
+user to delete a folder the app would adopt was the cost of asking only the
+other one.
 """
 
 from __future__ import annotations
@@ -272,15 +276,20 @@ def generated_compose_files(server_dir: Path) -> tuple[str, ...]:
     "Use existing…" adopting a folder of unknown provenance, and it answers on
     any of the four filenames Compose itself accepts. This asks "did the
     engine's own compose stage run?", and on a cancelled install the two
-    disagree: the emulator repository ships a `docker-compose.yml` at its root,
-    so `clone-core` lays one down on every install of every game before
-    `composegen` writes a byte (`composegen.write_plan()`'s `replaceable`
-    argument exists for exactly that file).
+    disagree: the AzerothCore repository ships a `docker-compose.yml` at its
+    root, so a WotLK `clone-core` lays one down before `composegen` writes a
+    byte (`composegen.write_plan()`'s `replaceable` argument exists for exactly
+    that file).
 
     Measured on yulon-ubuntu 2026-09-05: a WotLK install stopped 20 s into
     `clone-core` left a folder whose only compose file was upstream's own,
     git-tracked and unmodified
     (`pyplan/gates/7.2-ubuntu-2026-09-05/widget-cancel-folder-after.txt`).
+    That is one family on one box. Whether the CMaNGOS repositories ship one
+    too has not been measured, and nothing here needs it to: the question this
+    function answers is about the marker, not about upstream's habits, so a
+    family whose source ships no compose file simply never exercises the
+    disagreement.
 
     `composegen.is_ours()` is the marker rule and is reused rather than
     respelled, but it cannot be called alone here: it answers True for a file
@@ -320,30 +329,53 @@ def cancelled_install_message(entry_name: str, server_dir: Path) -> str:
     (yulon-ubuntu 2026-09-05, `pyplan/gates/7.2-ubuntu-2026-09-05/`): 15 checks
     green, and a modal that got both halves wrong on the folder in front of it.
 
-    *"Use existing…"* is offered when the engine's OWN compose files are there
-    (`generated_compose_files()`), because that is what makes a folder something
-    Compose can bring up. The old split asked `compose_file()` and so fired on
-    the `docker-compose.yml` the clone stage brings down with the source: the
-    cancelled folder in `widget-cancel-folder-after.txt` held that file and
-    nothing built, and the modal told the user to adopt it — which
-    `attach_existing()` would have done, growing a tab for a server that did not
-    exist.
+    *"Use existing…"* has two strengths, and the second exists because making it
+    one cost more than the bug it fixed. Offered flatly when the engine's OWN
+    compose files are there (`generated_compose_files()`): the folder holds
+    something this app built and adopting it loses nothing. Offered
+    CONDITIONALLY when `compose_file()` finds one this app did not write, and
+    the condition is put to the user because no filesystem read settles it. The
+    old split asked `compose_file()` alone and so fired on the
+    `docker-compose.yml` the clone stage brings down with the source
+    (`widget-cancel-folder-after.txt`: that file, nothing built, and a modal
+    telling the user to adopt it — which `attach_existing()` would have done,
+    growing a tab for a server that did not exist). Asking
+    `generated_compose_files()` alone was worse in the other direction: a
+    folder with `.git`, `src/` and an UNMARKED `docker-compose.yml` — a
+    bash-era install, a hand-written compose file, anything from before 7.2,
+    since nothing before 7.2 marked what it wrote — got no offer at all and was
+    told to delete itself, while `attach_existing()` would have adopted it and
+    managed it from a tab. The two folders are the same folder to `stat`. So
+    both readings are said and the user looks, which is the rule the paragraph
+    above already follows.
 
     *"Press Install again"* is offered when `native.STATE_FILE` is there, and
-    that record is not implied by source on disk. It is written before stage
-    one, and `git.py`'s clone `shutil.rmtree`s the destination it is about to
-    clone into — so a Stop during `clone-core` leaves the checkout and takes the
-    record with it. That is not a guess: the folder that run left had no
-    `.yulon-install.json`, and pressing on
-    (`python -m yulon.install_wiring wow-wotlk --server-dir …`) exited 1 with
-    "there is already a git checkout of … and there is no record here of an
-    install this app made"
-    (`cycle2-pressA2-refused-existing-checkout.log`). A folder with no record
-    and anything in it is refused either way: with a `.git` by
-    `refuse_unowned_checkout()`, without one by `_claim_folder()`'s "is not
-    empty and was not created by this app". So the copy says the app will refuse
-    it and names the one action that works — delete the folder — rather than
-    sending the user at a button that stops them.
+    that record is not implied by source on disk: a folder can hold a whole
+    checkout and no record. What the copy must NOT do is explain that with a
+    story about `clone-core`. It used to say a clone still running when Stop was
+    pressed "takes that record with it", which is a defect being described as a
+    design — the record is removed at the START of `clone-core` on every fresh
+    install, whether or not anyone presses Stop, because
+    `_clone_core()` clones into the server dir and the seam empties a
+    destination it is about to clone into
+    (`test_the_clone_that_fills_the_server_dir_takes_the_ownership_record_with_it`).
+    A message is not the place to file that.
+
+    **The refusal names the check that actually stops the folder in front of
+    it.** Two different ones, and the copy gave both of them the git reason
+    until 2026-09-05. With a `.git`: `refuse_unowned_checkout()`, whose reason
+    IS fetch-and-reset over a checkout that may be yours — measured, `python -m
+    yulon.install_wiring wow-wotlk --server-dir …` exited 1 with "there is
+    already a git checkout of … and there is no record here of an install this
+    app made" (`cycle2-pressA2-refused-existing-checkout.log`). Without one:
+    `_claim_folder()`'s "is not empty and was not created by this app", raised
+    in preflight, where there is no checkout to fetch and nothing to reset. Both
+    are driven at a call site in
+    `test_the_engine_refuses_the_folder_a_cancelled_clone_leaves`.
+
+    And the remedy is conditional whenever `compose_file()` answers, because a
+    flat "Delete <dir>" on a folder this app would adopt is the app telling
+    someone to destroy a server.
 
     With the record there the resume is real and was measured the same night:
     "Using /home/pk/gate72-cycle2 (resuming)", "Already finished: clone-core,
@@ -373,14 +405,26 @@ def cancelled_install_message(entry_name: str, server_dir: Path) -> str:
     ]
     record = server_dir / native.STATE_FILE
     ours = generated_compose_files(server_dir)
+    # What `attach_existing()` gates on, asked here for the same reason it is
+    # asked there — it is the whole of whether "Use existing…" can take this
+    # folder — and NOT conflated with `ours`, which is whether this app wrote
+    # what is in it.
+    adoptable = compose_file(server_dir)
+    # `refuse_unowned_checkout()`'s input, which is what decides WHICH refusal
+    # the next press meets. A pure `is_dir()`, exactly as the engine asks it.
+    has_checkout = (server_dir / ".git").is_dir()
     try:
-        leftovers = server_dir.is_dir() and any(
-            child.name != native.STATE_FILE for child in server_dir.iterdir()
+        leftovers = bool(
+            server_dir.is_dir() and native._listing(server_dir, ignoring=native.STATE_FILE)
         )
-    except OSError:
+    except InstallerError:
         # A folder this app cannot list is a folder `_claim_folder()` cannot
-        # list either, and it refuses on the `OSError` — so the refusal branch
-        # is the true answer here, not the fallback it looks like.
+        # list either, and it refuses on the same `OSError` — so the refusal
+        # branch is the true answer here, not the fallback it looks like.
+        # `native._listing()` is called rather than a fifth bare `iterdir()`
+        # for that reason: the engine's answer to "is this folder empty" and
+        # the copy's must not be able to differ, including on the folder
+        # neither of them can read.
         leftovers = True
 
     if ours:
@@ -389,6 +433,15 @@ def cancelled_install_message(entry_name: str, server_dir: Path) -> str:
             f'had already finished the server may be built and even running: press "Use '
             f'existing…", choose {server_dir}, and the app will manage it from a tab — nothing '
             "is lost."
+        )
+    elif adoptable is not None:
+        parts.append(
+            f"There is a compose file in {server_dir} that this app did not write "
+            f"({adoptable.name}). If it was already there before this attempt — a server "
+            f"installed by an older version of this app, or one you set up by hand — press "
+            f'"Use existing…", choose {server_dir}, and the app will manage it from a tab. If '
+            f"this attempt was downloading into an empty folder, that file came down with the "
+            "server's source and there is no server behind it."
         )
     if record.is_file():
         # "If it had not" only when the sentence before it is the one that said
@@ -402,13 +455,23 @@ def cancelled_install_message(entry_name: str, server_dir: Path) -> str:
             "on disk has been checked."
         )
     elif leftovers:
+        why = (
+            "it holds a git checkout: with no record here of an install this app made, the app "
+            "cannot tell its own half-finished download from a checkout you made yourself, so "
+            "it stops rather than run `git fetch` and `git reset --hard` over your work"
+            if has_checkout
+            else "it has files in it: the app will not write into a folder that is not empty "
+            "and was not created by this app"
+        )
+        remedy = (
+            f"If there is no server in it after all, delete {server_dir} and press Install "
+            "again to start over."
+            if adoptable is not None
+            else f"Delete {server_dir}, then press Install again to start over."
+        )
         parts.append(
             f"Do not press Install again on this folder — the app will refuse it. There is no "
-            f"{native.STATE_FILE} in {server_dir}: a clone that was still running when you "
-            "pressed Stop takes that record with it, and without it the app cannot tell its "
-            "own half-finished download from a checkout you made yourself, so it stops rather "
-            f"than run `git fetch` and `git reset --hard` over your work. Delete {server_dir}, "
-            "then press Install again to start over."
+            f"{native.STATE_FILE} in {server_dir}, {why}. {remedy}"
         )
     else:
         parts.append(
