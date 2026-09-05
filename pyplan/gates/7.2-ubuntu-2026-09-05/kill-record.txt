@@ -1,0 +1,86 @@
+=== mid-build SIGKILL of press 2, lane gate-71-72, 2026-09-05T00:30:18+02:00
+--- trigger: first edge >= 0 seen in /home/pk/gate72-press2.log (polled every 2 s)
+--- the last edge line in the log at the moment of the kill
+#25 366.1 [1226/1834] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/FishingAction.cpp.o
+--- Building edges reported so far
+1205
+--- the unit's own process tree before the kill
+● gate72-press2.service - /usr/bin/bash -c "cd /home/pk/gate72/pylauncher && sg docker -c \"python3 /home/pk/press-driver.py /home/pk/gate72-press2.log -- ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/wowserver\""
+     Loaded: loaded (/run/user/1000/systemd/transient/gate72-press2.service; transient)
+  Transient: yes
+     Active: active (running) since Sat 2026-09-05 00:15:37 CEST; 14min ago
+   Main PID: 8590 (sg)
+      Tasks: 56 (limit: 21399)
+     Memory: 78.3M (peak: 252.2M)
+        CPU: 59.100s
+     CGroup: /user.slice/user-1000.slice/user@1000.service/app.slice/gate72-press2.service
+             ├─ 8590 sg docker -c "python3 /home/pk/press-driver.py /home/pk/gate72-press2.log -- ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/wowserver"
+             ├─ 8594 sh -c "python3 /home/pk/press-driver.py /home/pk/gate72-press2.log -- ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/wowserver"
+             ├─ 8595 python3 /home/pk/press-driver.py /home/pk/gate72-press2.log -- ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/wowserver
+             ├─ 8611 ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/wowserver
+             ├─ 8906 systemd-inhibit --what=idle:sleep "--who=Yu'lon" "--why=installing a server" sleep infinity
+             ├─ 8914 sleep infinity
+             ├─11151 docker compose -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.build.yml build --progress plain
+             ├─11174 /usr/libexec/docker/cli-plugins/docker-compose compose -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.build.yml build --progress plain
+             └─11209 /usr/libexec/docker/cli-plugins/docker-buildx bake --file - --progress rawjson --metadata-file /tmp/compose-build-metadataFile-6b018983-5055-4c95-8c95-9f566d06dc81.json --allow fs.read=/home/pk/wowserver --allow fs.read=/home/pk/wowserver --allow fs.read=/home/pk/wowserver --allow fs.read=/home/pk/wowserver
+
+Sep 05 00:30:09 yulon-ubuntu bash[8595]: #25 356.7 [1217/1834] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/CustomStrategyEditAction.cpp.o
+Sep 05 00:30:09 yulon-ubuntu bash[8595]: #25 356.8 [1218/1834] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/DelayAction.cpp.o
+Sep 05 00:30:13 yulon-ubuntu bash[8595]: #25 361.0 [1219/1834] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/DebugAction.cpp.o
+Sep 05 00:30:14 yulon-ubuntu bash[8595]: #25 361.9 [1220/1834] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/DropQuestAction.cpp.o
+Sep 05 00:30:14 yulon-ubuntu bash[8595]: #25 361.9 [1221/1834] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/DestroyItemAction.cpp.o
+Sep 05 00:30:15 yulon-ubuntu bash[8595]: #25 362.9 [1222/1834] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/EquipGlyphsAction.cpp.o
+Sep 05 00:30:16 yulon-ubuntu bash[8595]: #25 364.1 [1223/1834] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/EmoteAction.cpp.o
+Sep 05 00:30:16 yulon-ubuntu bash[8595]: #25 364.3 [1224/1834] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/FollowActions.cpp.o
+Sep 05 00:30:17 yulon-ubuntu bash[8595]: #25 364.4 [1225/1834] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/FlagAction.cpp.o
+Sep 05 00:30:18 yulon-ubuntu bash[8595]: #25 366.1 [1226/1834] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/FishingAction.cpp.o
+--- compiler processes on the host (BuildKit runs them in a container, but ps sees them)
+cc1plus/ccache/ninja: 36
+--- kill: systemctl --user kill --signal=SIGKILL gate72-press2 at 2026-09-05T00:30:18+02:00
+exit 0
+--- unit state after
+Result=signal
+ExecMainCode=2
+ExecMainStatus=9
+ActiveState=failed
+SubState=failed
+--- survivors (bracketed patterns, so this recorder cannot match itself)
+no install_wiring process
+no press-driver process
+no buildx process
+no compose client process
+no systemd-inhibit left behind
+--- does the daemon keep compiling after its client is gone? (sampled every 5 s for 60 s)
+2026-09-05T00:30:22+02:00 containers=0 compiler-processes=0
+2026-09-05T00:30:27+02:00 containers=0 compiler-processes=0
+2026-09-05T00:30:32+02:00 containers=0 compiler-processes=0
+2026-09-05T00:30:37+02:00 containers=0 compiler-processes=0
+2026-09-05T00:30:42+02:00 containers=0 compiler-processes=0
+2026-09-05T00:30:47+02:00 containers=0 compiler-processes=0
+2026-09-05T00:30:52+02:00 containers=0 compiler-processes=0
+2026-09-05T00:30:57+02:00 containers=0 compiler-processes=0
+2026-09-05T00:31:02+02:00 containers=0 compiler-processes=0
+2026-09-05T00:31:07+02:00 containers=0 compiler-processes=0
+2026-09-05T00:31:12+02:00 containers=0 compiler-processes=0
+2026-09-05T00:31:17+02:00 containers=0 compiler-processes=0
+--- docker ps -a
+CONTAINER ID   IMAGE     COMMAND   CREATED   STATUS    PORTS     NAMES
+--- last line of the log
+#25 366.4 [1227/1834] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/EquipAction.cpp.o
+--- install state file after the kill
+{
+  "version": 1,
+  "game_id": "wow-wotlk",
+  "family": "azerothcore",
+  "install_id": "243c46e3",
+  "completed": [
+    "clone-core",
+    "clone-modules",
+    "generate-compose"
+  ],
+  "last_error": "",
+  "updated_unix": 1788560473
+}
+--- df -h ~
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda2        97G   28G   65G  30% /

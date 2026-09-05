@@ -1,0 +1,381 @@
+=== final state after press 3 reached ready, 2026-09-05T01:14:33+02:00, lane gate-71-72
+--- press units
+gate72-press1: Result=exit-code ExecMainStartTimestamp=Sat 2026-09-05 00:01:59 CEST ExecMainExitTimestamp=Sat 2026-09-05 00:03:02 CEST ExecMainStatus=1 ActiveState=failed 
+gate72-press2: Result=signal ExecMainStartTimestamp=Sat 2026-09-05 00:15:37 CEST ExecMainExitTimestamp=Sat 2026-09-05 00:30:18 CEST ExecMainStatus=9 ActiveState=failed 
+gate72-press3: Result=success ExecMainStartTimestamp=Sat 2026-09-05 00:32:19 CEST ExecMainExitTimestamp=Sat 2026-09-05 01:09:57 CEST ExecMainStatus=0 ActiveState=active 
+gate72-widget-cancel: Result=success ExecMainStartTimestamp=Sat 2026-09-05 00:07:41 CEST ExecMainExitTimestamp=Sat 2026-09-05 00:13:29 CEST ExecMainStatus=0 ActiveState=active 
+gate72-killwatch: Result=success ExecMainStartTimestamp= ExecMainExitTimestamp= ExecMainStatus=0 ActiveState=inactive 
+gate72-sampler: Result=success ExecMainStartTimestamp=Sat 2026-09-05 00:01:56 CEST ExecMainExitTimestamp= ExecMainStatus=0 ActiveState=active 
+--- install state file
+{
+  "version": 1,
+  "game_id": "wow-wotlk",
+  "family": "azerothcore",
+  "install_id": "243c46e3",
+  "completed": [
+    "clone-core",
+    "clone-modules",
+    "generate-compose",
+    "build",
+    "client-data",
+    "import"
+  ],
+  "last_error": "",
+  "updated_unix": 1788563121
+}
+--- core HEAD
+413bea61a Merge pull request #244 from mod-playerbots/test-staging
+b949b50 Merge pull request #2722 from mod-playerbots/test-staging
+--- docker ps -a
+ac-worldserver	yulon.local/ac-wotlk-worldserver:native-243c46e3	Up 9 minutes	127.0.0.1:7878->7878/tcp, 0.0.0.0:8085->8085/tcp, [::]:8085->8085/tcp
+ac-authserver	yulon.local/ac-wotlk-authserver:native-243c46e3	Up 9 minutes	0.0.0.0:3724->3724/tcp, [::]:3724->3724/tcp
+ac-db-import	yulon.local/ac-wotlk-db-import:native-243c46e3	Exited (0) 9 minutes ago	
+ac-database	mysql:8.4	Up 15 minutes (healthy)	127.0.0.1:3306->3306/tcp, 33060/tcp
+ac-client-data-init	yulon.local/ac-wotlk-client-data:native-243c46e3	Exited (0) 16 minutes ago	
+--- images
+yulon.local/ac-wotlk-db-import:native-243c46e3	1.57GB
+yulon.local/ac-wotlk-worldserver:native-243c46e3	1.03GB
+yulon.local/ac-wotlk-authserver:native-243c46e3	336MB
+yulon.local/ac-wotlk-client-data:native-243c46e3	147MB
+mysql:8.4	1.12GB
+alpine/git:<none>	138MB
+--- volumes
+yulon-wow-wotlk-243c46e3_client-data
+yulon-wow-wotlk-243c46e3_db-data
+--- listening
+LISTEN 0      4096         0.0.0.0:8085       0.0.0.0:*          
+LISTEN 0      4096       127.0.0.1:3306       0.0.0.0:*          
+LISTEN 0      4096         0.0.0.0:3724       0.0.0.0:*          
+LISTEN 0      4096       127.0.0.1:7878       0.0.0.0:*          
+LISTEN 0      4096            [::]:8085          [::]:*          
+LISTEN 0      4096            [::]:3724          [::]:*          
+--- schemas (tables per database)
+acore_auth	22
+acore_characters	111
+acore_playerbots	30
+acore_world	315
+--- realmlist
+1	AzerothCore	172.30.55.119	172.30.55.119	8085
+--- accounts
+100
+--- bots online (characters.online=1)
+500
+--- worldserver: last lines
+[0m[36m496/500 Bot Kesia logged in
+[0m[36m497/500 Bot Irmae logged in
+[0m[36m498/500 Bot Athock logged in
+[0m[36m499/500 Bot Thormen logged in
+[0m[36m500/500 Bot Moglu logged in
+--- ufw
+Status: inactive
+--- df
+/dev/sda2        97G   41G   52G  45% /
+               total        used        free      shared  buff/cache   available
+Mem:              19           6           0           0          13          12
+
+=== ZERO-BASH PROOF
+--- ls ~/dads-mmo-lab-install-*.log
+ls: cannot access '/home/pk/dads-mmo-lab-install-*.log': No such file or directory
+--- bash-lineage processes now (bracketed patterns)
+78136 bash -c { echo "=== final state after press 3 reached ready, $(date -Is), lane gate-71-72"; echo "--- press units"; for u in gate72-press1 gate72-press2 gate72-press3 gate72-widget-cancel gate72-killwatch gate72-sampler; do echo "$u: $(systemctl --user show $u -p ActiveState -p Result -p ExecMainStatus -p ExecMainStartTimestamp -p ExecMainExitTimestamp | tr "\n" " ")"; done; echo "--- install state file"; cat ~/wowserver/.yulon-install.json; echo "--- core HEAD"; git -C ~/wowserver log --oneline -1; git -C ~/wowserver/modules/mod-playerbots log --oneline -1; echo "--- docker ps -a"; docker ps -a --format "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"; echo "--- images"; docker images --format "{{.Repository}}:{{.Tag}}\t{{.Size}}"; echo "--- volumes"; docker volume ls -q; echo "--- listening"; ss -ltn | grep -E ":(3724|8085|3306|7878) "; echo "--- schemas (tables per database)"; docker exec ac-database mysql -uroot -ppassword -N -e "SELECT table_schema, COUNT(*) FROM information_schema.tables WHERE table_schema LIKE \"acore_%\" GROUP BY table_schema" 2>/dev/null; echo "--- realmlist"; docker exec ac-database mysql -uroot -ppassword -N -e "SELECT id,name,address,localAddress,port FROM acore_auth.realmlist" 2>/dev/null; echo "--- accounts"; docker exec ac-database mysql -uroot -ppassword -N -e "SELECT COUNT(*) FROM acore_auth.account" 2>/dev/null; echo "--- bots online (characters.online=1)"; docker exec ac-database mysql -uroot -ppassword -N -e "SELECT COUNT(*) FROM acore_characters.characters WHERE online=1" 2>/dev/null; echo "--- worldserver: last lines"; docker logs --tail 5 ac-worldserver 2>&1 | cut -c1-160; echo "--- ufw"; sudo ufw status | head -2; echo "--- df"; df -h ~ | tail -1; free -g | head -2; echo; echo "=== ZERO-BASH PROOF"; echo "--- ls ~/dads-mmo-lab-install-*.log"; ls ~/dads-mmo-lab-install-*.log 2>&1; echo "--- bash-lineage processes now (bracketed patterns)"; pgrep -af "[i]nstall-[a-z-]*\.sh|[d]ml-start\.sh|[w]ow-manage\.sh" || echo "none"; echo "--- sampler: samples taken, and every sample that was NOT clean"; wc -l < ~/gate72-zero-bash-sampler.log; grep -v "lineage=\[none\] any-sh=\[none\] install-logs=0" ~/gate72-zero-bash-sampler.log || echo "(every sample clean)"; echo "--- sampler first and last sample"; head -1 ~/gate72-zero-bash-sampler.log; tail -1 ~/gate72-zero-bash-sampler.log; echo "--- bash-lineage files in the checkout used (outside archive/)"; find ~/gate72 -path "*/archive" -prune -o \( -name "install-*.sh" -o -name "dml-start.sh" -o -name "wow-manage.sh" \) -print | grep -v /archive/ || echo "none"; echo "--- the same, anywhere under \$HOME"; find ~ -xdev \( -name "install-*.sh" -o -name "dml-start.sh" -o -name "wow-manage.sh" \) 2>/dev/null | grep -v "/archive/" || echo "none"; echo "--- what the three transcripts say ran: every --- stage line"; for p in 1 2 3; do echo "press$p: $(grep -c "^--- " ~/gate72-press$p.log) stage lines: $(grep "^--- " ~/gate72-press$p.log | tr "\n" " ")"; done; echo "--- any .sh mentioned in the three transcripts, outside the engine own text"; grep -hoE "[A-Za-z0-9_./-]+\.sh\b" ~/gate72-press1.log ~/gate72-press2.log ~/gate72-press3.log | sort | uniq -c | sort -rn | head; echo "--- the authserver container log (7.1 auth-log clause is an OWNER decision; captured, not claimed)"; docker logs ac-authserver 2>&1 | grep -n "8085\|realm\|Realm" | head -5; docker logs ac-authserver 2>&1 | grep -ci "^.*UPDATE" ; } > ~/gate72-final-state.txt 2>&1; cat ~/gate72-final-state.txt
+--- sampler: samples taken, and every sample that was NOT clean
+489
+2026-09-05T00:07:13+02:00 lineage=[none] any-sh=[   6600 bash -c mkdir -p ~/ccache-probe && cat > ~/ccache-probe/Dockerfile <<'EOF' # Reads the ccache counters out of the SAME BuildKit cache mount the AzerothCore build uses # (apps/docker/Dockerfile: --mount=type=cache,target=/ccache). BuildKit keys a cache mount # by its id, which defaults to the target path, so any Dockerfile naming target=/ccache on # this builder sees the same directory. --no-cache makes the last RUN execute every time. FROM ubuntu:24.04 RUN apt-get update && apt-get install -y --no-install-recommends ccache && rm -rf /var/lib/apt/lists/* RUN --mount=type=cache,target=/ccache,sharing=locked CCACHE_DIR=/ccache ccache -s && echo "--- du" && du -sh /ccache EOF cat > ~/ccache-probe.sh <<'EOF' #!/usr/bin/env bash # usage: ccache-probe.sh "<label>"   -- appends one ccache -s reading to ~/gate72-ccache-stats.txt { echo "=== ccache -s at $(date -Is) : $1"; docker build --no-cache --progress plain ~/ccache-probe 2>&1 | grep -E "^#[0-9]+ [0-9.]+ |^#[0-9]+ DONE" | grep -E "ccache|Hits|Misses|Cacheable|Cache size|Local storage|du|[0-9]+M|[0-9]+K|DONE" | tail -14; echo; } >> ~/gate72-ccache-stats.txt EOF chmod +x ~/ccache-probe.sh echo "$(date +%H:%M:%S)  gate-71-72: ccache probe T0 (docker build of a 3-line ubuntu:24.04+ccache image reading the /ccache cache mount) under sg docker; then the 7.10 widget-cancel run into ~/gate72-cancel-install" >> ~/claude-activity.log sg docker -c "~/ccache-probe.sh \"T0 baseline: clean-ssh + press 1 (Docker just installed), before any build on this box\""; cat ~/gate72-ccache-stats.txt; sg docker -c "docker images --format \"{{.Repository}}:{{.Tag}} {{.Size}}\""
+   6606 sg docker -c ~/ccache-probe.sh "T0 baseline: clean-ssh + press 1 (Docker just installed), before any build on this box"
+   6607 sh -c ~/ccache-probe.sh "T0 baseline: clean-ssh + press 1 (Docker just installed), before any build on this box"
+   6608 bash /home/pk/ccache-probe.sh T0 baseline: clean-ssh + press 1 (Docker just installed), before any build on this box] install-logs=0
+2026-09-05T00:07:28+02:00 lineage=[none] any-sh=[   6600 bash -c mkdir -p ~/ccache-probe && cat > ~/ccache-probe/Dockerfile <<'EOF' # Reads the ccache counters out of the SAME BuildKit cache mount the AzerothCore build uses # (apps/docker/Dockerfile: --mount=type=cache,target=/ccache). BuildKit keys a cache mount # by its id, which defaults to the target path, so any Dockerfile naming target=/ccache on # this builder sees the same directory. --no-cache makes the last RUN execute every time. FROM ubuntu:24.04 RUN apt-get update && apt-get install -y --no-install-recommends ccache && rm -rf /var/lib/apt/lists/* RUN --mount=type=cache,target=/ccache,sharing=locked CCACHE_DIR=/ccache ccache -s && echo "--- du" && du -sh /ccache EOF cat > ~/ccache-probe.sh <<'EOF' #!/usr/bin/env bash # usage: ccache-probe.sh "<label>"   -- appends one ccache -s reading to ~/gate72-ccache-stats.txt { echo "=== ccache -s at $(date -Is) : $1"; docker build --no-cache --progress plain ~/ccache-probe 2>&1 | grep -E "^#[0-9]+ [0-9.]+ |^#[0-9]+ DONE" | grep -E "ccache|Hits|Misses|Cacheable|Cache size|Local storage|du|[0-9]+M|[0-9]+K|DONE" | tail -14; echo; } >> ~/gate72-ccache-stats.txt EOF chmod +x ~/ccache-probe.sh echo "$(date +%H:%M:%S)  gate-71-72: ccache probe T0 (docker build of a 3-line ubuntu:24.04+ccache image reading the /ccache cache mount) under sg docker; then the 7.10 widget-cancel run into ~/gate72-cancel-install" >> ~/claude-activity.log sg docker -c "~/ccache-probe.sh \"T0 baseline: clean-ssh + press 1 (Docker just installed), before any build on this box\""; cat ~/gate72-ccache-stats.txt; sg docker -c "docker images --format \"{{.Repository}}:{{.Tag}} {{.Size}}\""
+   6606 sg docker -c ~/ccache-probe.sh "T0 baseline: clean-ssh + press 1 (Docker just installed), before any build on this box"
+   6607 sh -c ~/ccache-probe.sh "T0 baseline: clean-ssh + press 1 (Docker just installed), before any build on this box"
+   6608 bash /home/pk/ccache-probe.sh T0 baseline: clean-ssh + press 1 (Docker just installed), before any build on this box] install-logs=0
+2026-09-05T00:15:45+02:00 lineage=[none] any-sh=[   8577 bash -c echo "$(date +%H:%M:%S)  gate-71-72: press 2 of the 7.2 sequence under sg docker (unit gate72-press2, log ~/gate72-press2.log); kill watcher armed as unit gate72-killwatch, SIGKILL at the first ninja edge >= 900" >> ~/claude-activity.log; systemd-run --user --unit=gate72-killwatch -p RemainAfterExit=yes /usr/bin/bash -c "sg docker -c \"/home/pk/kill-watcher.sh 900\" > /home/pk/gate72-killwatch.out 2>&1"; systemd-run --user --unit=gate72-press2 -p RemainAfterExit=yes /usr/bin/bash -c "cd /home/pk/gate72/pylauncher && sg docker -c \"python3 /home/pk/press-driver.py /home/pk/gate72-press2.log -- ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/wowserver\""; date -Is; sleep 20; head -30 ~/gate72-press2.log
+   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:16:00+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:16:15+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:16:30+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:16:45+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:17:00+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:17:15+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:17:30+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:17:45+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:18:00+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:18:15+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:18:30+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:18:45+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:19:01+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:19:16+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:19:31+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:19:46+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:20:01+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:20:16+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:20:31+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:20:46+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:21:01+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:21:16+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:21:31+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:21:46+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:22:01+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:22:16+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:22:31+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:22:46+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:23:02+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:23:17+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:23:32+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:23:47+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:24:02+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:24:17+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:24:32+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:24:47+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:25:02+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:25:17+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:25:32+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:25:47+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:26:03+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:26:18+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:26:33+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:26:48+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:27:03+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:27:18+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:27:33+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:27:48+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:28:03+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:28:19+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:28:34+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:28:49+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:29:04+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:29:19+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:29:34+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:29:49+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:30:04+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:30:19+02:00 lineage=[none] any-sh=[  25663 bash -c systemctl --user stop gate72-killwatch 2>&1; sed -i "s#/1829\\\]#/[0-9]+\\]#g" ~/kill-watcher.sh; grep -n "1829\|\[0-9\]+\\\]" ~/kill-watcher.sh | head -5; bash -n ~/kill-watcher.sh && echo syntax-ok; md5sum ~/kill-watcher.sh; sg docker -c "~/kill-watcher.sh 0" > ~/gate72-killwatch.out 2>&1; cat ~/gate72-kill-record.txt
+  25671 sg docker -c ~/kill-watcher.sh 0
+  25672 sh -c ~/kill-watcher.sh 0
+  25673 bash /home/pk/kill-watcher.sh 0] install-logs=0
+2026-09-05T00:30:34+02:00 lineage=[none] any-sh=[  25663 bash -c systemctl --user stop gate72-killwatch 2>&1; sed -i "s#/1829\\\]#/[0-9]+\\]#g" ~/kill-watcher.sh; grep -n "1829\|\[0-9\]+\\\]" ~/kill-watcher.sh | head -5; bash -n ~/kill-watcher.sh && echo syntax-ok; md5sum ~/kill-watcher.sh; sg docker -c "~/kill-watcher.sh 0" > ~/gate72-killwatch.out 2>&1; cat ~/gate72-kill-record.txt
+  25671 sg docker -c ~/kill-watcher.sh 0
+  25672 sh -c ~/kill-watcher.sh 0
+  25673 bash /home/pk/kill-watcher.sh 0] install-logs=0
+2026-09-05T00:30:50+02:00 lineage=[none] any-sh=[  25663 bash -c systemctl --user stop gate72-killwatch 2>&1; sed -i "s#/1829\\\]#/[0-9]+\\]#g" ~/kill-watcher.sh; grep -n "1829\|\[0-9\]+\\\]" ~/kill-watcher.sh | head -5; bash -n ~/kill-watcher.sh && echo syntax-ok; md5sum ~/kill-watcher.sh; sg docker -c "~/kill-watcher.sh 0" > ~/gate72-killwatch.out 2>&1; cat ~/gate72-kill-record.txt
+  25671 sg docker -c ~/kill-watcher.sh 0
+  25672 sh -c ~/kill-watcher.sh 0
+  25673 bash /home/pk/kill-watcher.sh 0] install-logs=0
+2026-09-05T00:31:05+02:00 lineage=[none] any-sh=[  25663 bash -c systemctl --user stop gate72-killwatch 2>&1; sed -i "s#/1829\\\]#/[0-9]+\\]#g" ~/kill-watcher.sh; grep -n "1829\|\[0-9\]+\\\]" ~/kill-watcher.sh | head -5; bash -n ~/kill-watcher.sh && echo syntax-ok; md5sum ~/kill-watcher.sh; sg docker -c "~/kill-watcher.sh 0" > ~/gate72-killwatch.out 2>&1; cat ~/gate72-kill-record.txt
+  25671 sg docker -c ~/kill-watcher.sh 0
+  25672 sh -c ~/kill-watcher.sh 0
+  25673 bash /home/pk/kill-watcher.sh 0] install-logs=0
+2026-09-05T00:31:20+02:00 lineage=[none] any-sh=[  25663 bash -c systemctl --user stop gate72-killwatch 2>&1; sed -i "s#/1829\\\]#/[0-9]+\\]#g" ~/kill-watcher.sh; grep -n "1829\|\[0-9\]+\\\]" ~/kill-watcher.sh | head -5; bash -n ~/kill-watcher.sh && echo syntax-ok; md5sum ~/kill-watcher.sh; sg docker -c "~/kill-watcher.sh 0" > ~/gate72-killwatch.out 2>&1; cat ~/gate72-kill-record.txt
+  25671 sg docker -c ~/kill-watcher.sh 0
+  25672 sh -c ~/kill-watcher.sh 0
+  25673 bash /home/pk/kill-watcher.sh 0] install-logs=0
+2026-09-05T00:31:35+02:00 lineage=[none] any-sh=[  25663 bash -c systemctl --user stop gate72-killwatch 2>&1; sed -i "s#/1829\\\]#/[0-9]+\\]#g" ~/kill-watcher.sh; grep -n "1829\|\[0-9\]+\\\]" ~/kill-watcher.sh | head -5; bash -n ~/kill-watcher.sh && echo syntax-ok; md5sum ~/kill-watcher.sh; sg docker -c "~/kill-watcher.sh 0" > ~/gate72-killwatch.out 2>&1; cat ~/gate72-kill-record.txt
+  25671 sg docker -c ~/kill-watcher.sh 0
+  25672 sh -c ~/kill-watcher.sh 0
+  25673 bash /home/pk/kill-watcher.sh 0
+  26165 bash /home/pk/ccache-probe.sh T1: after the mid-build SIGKILL of press 2 (edge >= 0)] install-logs=0
+2026-09-05T00:54:31+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:54:46+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:55:01+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:55:16+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:55:31+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:55:46+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:56:01+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:56:16+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:56:31+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:56:46+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:57:01+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:57:16+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:57:31+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:57:47+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:58:02+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:58:47+02:00 lineage=[none] any-sh=[  61166 bash /usr/local/bin/docker-entrypoint.sh mysqld] install-logs=0
+--- sampler first and last sample
+2026-09-05T00:01:56+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:14:21+02:00 lineage=[none] any-sh=[none] install-logs=0
+--- bash-lineage files in the checkout used (outside archive/)
+none
+--- the same, anywhere under $HOME
+none
+--- what the three transcripts say ran: every --- stage line
+press1: 0 stage lines: 
+press2: 4 stage lines: --- clone-core --- clone-modules --- generate-compose --- build 
+press3: 9 stage lines: --- clone-core --- clone-modules --- generate-compose --- build --- client-data --- start-db --- import --- up --- ready 
+--- any .sh mentioned in the three transcripts, outside the engine own text
+      2 /azerothcore/entrypoint.sh
+      2 apps/docker/entrypoint.sh
+--- the authserver container log (7.1 auth-log clause is an OWNER decision; captured, not claimed)
+42:[0m[36mAdded realm "AzerothCore" at 127.0.0.1:8085.
+4

@@ -1,0 +1,66 @@
+=== cache-mount diagnostic, lane gate-71-72, 2026-09-05T01:15:00+02:00
+docker: Docker version 29.1.3, build 29.1.3-0ubuntu3~24.04.2; compose: Docker Compose version 2.40.3+ds1-0ubuntu1~24.04.1; buildx: github.com/docker/buildx 0.30.1 0.30.1-0ubuntu1~24.04.1
+
+=== C. every exec.cachemount record the daemon holds now (after press 3's full build)
+ID:           nqdvt8lmkoybkuv24ynb1no1x
+Size:         4.096kB
+Description:  cached mount /ccache ... with id "//ccache"
+Usage count:  1
+Last used:    2 seconds ago
+Type:         exec.cachemount
+
+=== A. a RUN writes into a cache mount, its client is SIGKILLed 20 s in; does the write survive?
+--- start the writer (docker build, --no-cache, progress plain) in the background
+--- writer log so far
+#5 0.415 total 51212
+#5 0.415 drwxr-xr-x    2 root     root          4096 Sep  4 23:15 .
+#5 0.415 drwxr-xr-x    1 root     root          4096 Sep  4 23:15 ..
+#5 0.415 -rw-r--r--    1 root     root      52428800 Sep  4 23:15 blob
+#5 0.415 -rw-r--r--    1 root     root            20 Sep  4 23:15 marker
+--- compiler-shaped processes: 1 sleep-120 in the container
+--- SIGKILL the client (pid 79277) at 2026-09-05T01:15:20+02:00
+/home/pk/cachemount-diag.sh: line 89: 79277 Killed                  docker build --no-cache --progress plain -f "$D/Dockerfile.a" "$D" > "$D/a-writer.log" 2>&1
+--- containers still running: 3; sleep-120 processes: 0
+--- probe the same cache mount id from a fresh build
+#5 0.402 total 8
+#5 0.402 drwxr-xr-x    2 root     root          4096 Sep  4 23:15 .
+#5 0.402 drwxr-xr-x    1 root     root          4096 Sep  4 23:15 ..
+#5 0.403 cat: can't open '/diagcache/marker': No such file or directory
+#5 ERROR: process "/bin/sh -c ls -la /diagcache && cat /diagcache/marker" did not complete successfully: exit code: 1
+ERROR: failed to build: failed to solve: process "/bin/sh -c ls -la /diagcache && cat /diagcache/marker" did not complete successfully: exit code: 1
+--- the record
+Size:         4.096kB
+Description:  cached mount /diagcache ... with id "/diag-a"
+Usage count:  1
+
+=== A2. the same, but the RUN COMPLETES (control: a finished RUN's writes are kept)
+#5 0.387 drwxr-xr-x    2 root     root          4096 Sep  4 23:15 .
+#5 0.387 drwxr-xr-x    1 root     root          4096 Sep  4 23:15 ..
+#5 0.387 -rw-r--r--    1 root     root            21 Sep  4 23:15 marker
+#5 0.404 drwxr-xr-x    2 root     root          4096 Sep  4 23:15 .
+#5 0.404 drwxr-xr-x    1 root     root          4096 Sep  4 23:15 ..
+#5 0.405 cat: can't open '/diagcache/marker': No such file or directory
+#5 ERROR: process "/bin/sh -c ls -la /diagcache && cat /diagcache/marker" did not complete successfully: exit code: 1
+ERROR: failed to build: failed to solve: process "/bin/sh -c ls -la /diagcache && cat /diagcache/marker" did not complete successfully: exit code: 1
+
+=== B. compose build (bake) writes a cache mount; docker build reads the same target
+#6 0.735 total 12
+#6 0.735 drwxr-xr-x    2 root     root          4096 Sep  4 23:15 .
+#6 0.735 drwxr-xr-x    1 root     root          4096 Sep  4 23:15 ..
+#6 0.735 -rw-r--r--    1 root     root            25 Sep  4 23:15 marker
+--- docker build probe of target=/diagcache2 (no id given on either side)
+#5 0.549 drwxr-xr-x    2 root     root          4096 Sep  4 23:15 .
+#5 0.549 drwxr-xr-x    1 root     root          4096 Sep  4 23:15 ..
+#5 0.550 cat: can't open '/diagcache2/marker': No such file or directory
+#5 ERROR: process "/bin/sh -c ls -la /diagcache2 && cat /diagcache2/marker" did not complete successfully: exit code: 1
+ERROR: failed to build: failed to solve: process "/bin/sh -c ls -la /diagcache2 && cat /diagcache2/marker" did not complete successfully: exit code: 1
+--- the records for /diagcache2, with the id string each side used
+Size:         4.096kB
+Description:  cached mount /diagcache2 ... with id "//diagcache2"
+Usage count:  1
+Size:         16.49kB
+Description:  mount / from exec /bin/sh -c sh -c 'echo written-by-compose-build > /diagcache2/marker && ls -la /diagcache2'
+Usage count:  1
+
+=== cleanup of the diagnostic's own images (cache-mount records are left for the reader)
+done

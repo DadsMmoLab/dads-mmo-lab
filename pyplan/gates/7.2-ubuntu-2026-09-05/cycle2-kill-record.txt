@@ -1,0 +1,86 @@
+=== mid-build SIGKILL of press 2, lane gate-71-72, 2026-09-05T01:35:32+02:00
+--- trigger: first edge >= 600 seen in /home/pk/gate72-c2-pressA3.log (polled every 2 s)
+--- the last edge line in the log at the moment of the kill
+#25 210.7 [605/1834] Building CXX object src/server/scripts/CMakeFiles/scripts.dir/Commands/cs_pet.cpp.o
+--- Building edges reported so far
+590
+--- the unit's own process tree before the kill
+● gate72-c2-pressA3.service - /usr/bin/bash -c "cd /home/pk/gate72/pylauncher && sg docker -c \"python3 /home/pk/press-driver.py /home/pk/gate72-c2-pressA3.log -- ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/gate72-cycle2\""
+     Loaded: loaded (/run/user/1000/systemd/transient/gate72-c2-pressA3.service; transient)
+  Transient: yes
+     Active: active (running) since Sat 2026-09-05 01:24:05 CEST; 11min ago
+   Main PID: 89510 (sg)
+      Tasks: 56 (limit: 21399)
+     Memory: 78.5M (peak: 263.8M)
+        CPU: 1min 2.951s
+     CGroup: /user.slice/user-1000.slice/user@1000.service/app.slice/gate72-c2-pressA3.service
+             ├─89510 sg docker -c "python3 /home/pk/press-driver.py /home/pk/gate72-c2-pressA3.log -- ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/gate72-cycle2"
+             ├─89514 sh -c "python3 /home/pk/press-driver.py /home/pk/gate72-c2-pressA3.log -- ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/gate72-cycle2"
+             ├─89515 python3 /home/pk/press-driver.py /home/pk/gate72-c2-pressA3.log -- ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/gate72-cycle2
+             ├─89535 ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/gate72-cycle2
+             ├─89847 systemd-inhibit --what=idle:sleep "--who=Yu'lon" "--why=installing a server" sleep infinity
+             ├─89855 sleep infinity
+             ├─93974 docker compose -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.build.yml build --progress plain
+             ├─93996 /usr/libexec/docker/cli-plugins/docker-compose compose -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.build.yml build --progress plain
+             └─94034 /usr/libexec/docker/cli-plugins/docker-buildx bake --file - --progress rawjson --metadata-file /tmp/compose-build-metadataFile-a2a2ffc7-a6e5-4033-a67e-83ed681cd88a.json --allow fs.read=/home/pk/gate72-cycle2 --allow fs.read=/home/pk/gate72-cycle2 --allow fs.read=/home/pk/gate72-cycle2 --allow fs.read=/home/pk/gate72-cycle2
+
+Sep 05 01:35:30 yulon-ubuntu bash[89515]: #25 208.3 [596/1834] Building CXX object src/server/scripts/CMakeFiles/scripts.dir/Commands/cs_mail.cpp.o
+Sep 05 01:35:30 yulon-ubuntu bash[89515]: #25 208.3 [597/1834] Building CXX object src/server/game/CMakeFiles/game.dir/World/World.cpp.o
+Sep 05 01:35:30 yulon-ubuntu bash[89515]: #25 208.9 [598/1834] Building CXX object src/server/scripts/CMakeFiles/scripts.dir/Commands/cs_player_settings.cpp.o
+Sep 05 01:35:31 yulon-ubuntu bash[89515]: #25 209.1 [599/1834] Building CXX object src/server/scripts/CMakeFiles/scripts.dir/Commands/cs_list.cpp.o
+Sep 05 01:35:31 yulon-ubuntu bash[89515]: #25 209.2 [600/1834] Building CXX object src/server/scripts/CMakeFiles/scripts.dir/Commands/cs_mmaps.cpp.o
+Sep 05 01:35:31 yulon-ubuntu bash[89515]: #25 209.4 [601/1834] Building CXX object src/server/scripts/CMakeFiles/scripts.dir/Commands/cs_player.cpp.o
+Sep 05 01:35:31 yulon-ubuntu bash[89515]: #25 209.4 [602/1834] Building CXX object src/server/scripts/CMakeFiles/scripts.dir/Commands/cs_gobject.cpp.o
+Sep 05 01:35:31 yulon-ubuntu bash[89515]: #25 209.4 [603/1834] Building CXX object src/server/scripts/CMakeFiles/scripts.dir/Commands/cs_lookup.cpp.o
+Sep 05 01:35:32 yulon-ubuntu bash[89515]: #25 210.7 [604/1834] Building CXX object src/server/scripts/CMakeFiles/scripts.dir/Commands/cs_script_loader.cpp.o
+Sep 05 01:35:32 yulon-ubuntu bash[89515]: #25 210.7 [605/1834] Building CXX object src/server/scripts/CMakeFiles/scripts.dir/Commands/cs_pet.cpp.o
+--- compiler processes on the host (BuildKit runs them in a container, but ps sees them)
+cc1plus/ccache/ninja: 37
+--- kill: systemctl --user kill --signal=SIGKILL gate72-c2-pressA3 at 2026-09-05T01:35:33+02:00
+exit 0
+--- unit state after
+Result=signal
+ExecMainCode=2
+ExecMainStatus=9
+ActiveState=failed
+SubState=failed
+--- survivors (bracketed patterns, so this recorder cannot match itself)
+107605 bash -c for i in $(seq 1 40); do grep -q "cycle2 T1" ~/gate72-ccache-stats.txt 2>/dev/null && break; sleep 5; done; date -Is; grep -c "cycle2 T1" ~/gate72-ccache-stats.txt; sed -n 1,6p ~/gate72-c2-kill-record.txt; grep -n "compiler-processes\|no install_wiring\|no buildx\|no systemd-inhibit" ~/gate72-c2-kill-record.txt | head -5; echo "--- T1 (v2 probe)"; tail -12 ~/gate72-ccache-stats.txt; echo "--- start press B (resume) + finished watcher"; echo "$(date +%H:%M:%S)  gate-71-72: cycle 2 press B (resume) on ~/gate72-cycle2, unit gate72-c2-pressB; finished-watcher kills it at The build finished" >> ~/claude-activity.log; systemd-run --user --unit=gate72-c2-finwatch -p RemainAfterExit=yes -E UNIT=gate72-c2-pressB -E LOG=/home/pk/gate72-c2-pressB.log -E OUT=/home/pk/gate72-c2-finished-record.txt /usr/bin/bash -c "sg docker -c \"/home/pk/finished-watcher.sh\" > /home/pk/gate72-c2-finwatch.out 2>&1"; systemd-run --user --unit=gate72-c2-pressB -p RemainAfterExit=yes /usr/bin/bash -c "cd /home/pk/gate72/pylauncher && sg docker -c \"python3 /home/pk/press-driver.py /home/pk/gate72-c2-pressB.log -- ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/gate72-cycle2\""; date -Is
+107605 bash -c for i in $(seq 1 40); do grep -q "cycle2 T1" ~/gate72-ccache-stats.txt 2>/dev/null && break; sleep 5; done; date -Is; grep -c "cycle2 T1" ~/gate72-ccache-stats.txt; sed -n 1,6p ~/gate72-c2-kill-record.txt; grep -n "compiler-processes\|no install_wiring\|no buildx\|no systemd-inhibit" ~/gate72-c2-kill-record.txt | head -5; echo "--- T1 (v2 probe)"; tail -12 ~/gate72-ccache-stats.txt; echo "--- start press B (resume) + finished watcher"; echo "$(date +%H:%M:%S)  gate-71-72: cycle 2 press B (resume) on ~/gate72-cycle2, unit gate72-c2-pressB; finished-watcher kills it at The build finished" >> ~/claude-activity.log; systemd-run --user --unit=gate72-c2-finwatch -p RemainAfterExit=yes -E UNIT=gate72-c2-pressB -E LOG=/home/pk/gate72-c2-pressB.log -E OUT=/home/pk/gate72-c2-finished-record.txt /usr/bin/bash -c "sg docker -c \"/home/pk/finished-watcher.sh\" > /home/pk/gate72-c2-finwatch.out 2>&1"; systemd-run --user --unit=gate72-c2-pressB -p RemainAfterExit=yes /usr/bin/bash -c "cd /home/pk/gate72/pylauncher && sg docker -c \"python3 /home/pk/press-driver.py /home/pk/gate72-c2-pressB.log -- ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/gate72-cycle2\""; date -Is
+107605 bash -c for i in $(seq 1 40); do grep -q "cycle2 T1" ~/gate72-ccache-stats.txt 2>/dev/null && break; sleep 5; done; date -Is; grep -c "cycle2 T1" ~/gate72-ccache-stats.txt; sed -n 1,6p ~/gate72-c2-kill-record.txt; grep -n "compiler-processes\|no install_wiring\|no buildx\|no systemd-inhibit" ~/gate72-c2-kill-record.txt | head -5; echo "--- T1 (v2 probe)"; tail -12 ~/gate72-ccache-stats.txt; echo "--- start press B (resume) + finished watcher"; echo "$(date +%H:%M:%S)  gate-71-72: cycle 2 press B (resume) on ~/gate72-cycle2, unit gate72-c2-pressB; finished-watcher kills it at The build finished" >> ~/claude-activity.log; systemd-run --user --unit=gate72-c2-finwatch -p RemainAfterExit=yes -E UNIT=gate72-c2-pressB -E LOG=/home/pk/gate72-c2-pressB.log -E OUT=/home/pk/gate72-c2-finished-record.txt /usr/bin/bash -c "sg docker -c \"/home/pk/finished-watcher.sh\" > /home/pk/gate72-c2-finwatch.out 2>&1"; systemd-run --user --unit=gate72-c2-pressB -p RemainAfterExit=yes /usr/bin/bash -c "cd /home/pk/gate72/pylauncher && sg docker -c \"python3 /home/pk/press-driver.py /home/pk/gate72-c2-pressB.log -- ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/gate72-cycle2\""; date -Is
+no compose client process
+107605 bash -c for i in $(seq 1 40); do grep -q "cycle2 T1" ~/gate72-ccache-stats.txt 2>/dev/null && break; sleep 5; done; date -Is; grep -c "cycle2 T1" ~/gate72-ccache-stats.txt; sed -n 1,6p ~/gate72-c2-kill-record.txt; grep -n "compiler-processes\|no install_wiring\|no buildx\|no systemd-inhibit" ~/gate72-c2-kill-record.txt | head -5; echo "--- T1 (v2 probe)"; tail -12 ~/gate72-ccache-stats.txt; echo "--- start press B (resume) + finished watcher"; echo "$(date +%H:%M:%S)  gate-71-72: cycle 2 press B (resume) on ~/gate72-cycle2, unit gate72-c2-pressB; finished-watcher kills it at The build finished" >> ~/claude-activity.log; systemd-run --user --unit=gate72-c2-finwatch -p RemainAfterExit=yes -E UNIT=gate72-c2-pressB -E LOG=/home/pk/gate72-c2-pressB.log -E OUT=/home/pk/gate72-c2-finished-record.txt /usr/bin/bash -c "sg docker -c \"/home/pk/finished-watcher.sh\" > /home/pk/gate72-c2-finwatch.out 2>&1"; systemd-run --user --unit=gate72-c2-pressB -p RemainAfterExit=yes /usr/bin/bash -c "cd /home/pk/gate72/pylauncher && sg docker -c \"python3 /home/pk/press-driver.py /home/pk/gate72-c2-pressB.log -- ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/gate72-cycle2\""; date -Is
+--- does the daemon keep compiling after its client is gone? (sampled every 5 s for 60 s)
+2026-09-05T01:35:36+02:00 containers=0 compiler-processes=1
+2026-09-05T01:35:41+02:00 containers=0 compiler-processes=1
+2026-09-05T01:35:46+02:00 containers=0 compiler-processes=1
+2026-09-05T01:35:51+02:00 containers=0 compiler-processes=1
+2026-09-05T01:35:57+02:00 containers=0 compiler-processes=1
+2026-09-05T01:36:02+02:00 containers=0 compiler-processes=1
+2026-09-05T01:36:07+02:00 containers=0 compiler-processes=1
+2026-09-05T01:36:12+02:00 containers=0 compiler-processes=1
+2026-09-05T01:36:17+02:00 containers=0 compiler-processes=1
+2026-09-05T01:36:22+02:00 containers=0 compiler-processes=1
+2026-09-05T01:36:27+02:00 containers=0 compiler-processes=1
+2026-09-05T01:36:32+02:00 containers=0 compiler-processes=1
+--- docker ps -a
+CONTAINER ID   IMAGE     COMMAND   CREATED   STATUS    PORTS     NAMES
+--- last line of the log
+#25 210.7 [605/1834] Building CXX object src/server/scripts/CMakeFiles/scripts.dir/Commands/cs_pet.cpp.o
+--- install state file after the kill
+{
+  "version": 1,
+  "game_id": "wow-wotlk",
+  "family": "azerothcore",
+  "install_id": "846544ff",
+  "completed": [
+    "clone-core",
+    "clone-modules",
+    "generate-compose"
+  ],
+  "last_error": "",
+  "updated_unix": 1788564550
+}
+--- df -h ~
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda2        97G   38G   55G  41% /

@@ -1,0 +1,1039 @@
+2026-09-05T00:01:56+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:02:12+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:02:27+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:02:42+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:02:57+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:03:12+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:03:27+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:03:42+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:03:57+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:04:12+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:04:27+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:04:42+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:04:57+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:05:12+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:05:27+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:05:42+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:05:57+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:06:12+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:06:28+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:06:43+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:06:58+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:07:13+02:00 lineage=[none] any-sh=[   6600 bash -c mkdir -p ~/ccache-probe && cat > ~/ccache-probe/Dockerfile <<'EOF' # Reads the ccache counters out of the SAME BuildKit cache mount the AzerothCore build uses # (apps/docker/Dockerfile: --mount=type=cache,target=/ccache). BuildKit keys a cache mount # by its id, which defaults to the target path, so any Dockerfile naming target=/ccache on # this builder sees the same directory. --no-cache makes the last RUN execute every time. FROM ubuntu:24.04 RUN apt-get update && apt-get install -y --no-install-recommends ccache && rm -rf /var/lib/apt/lists/* RUN --mount=type=cache,target=/ccache,sharing=locked CCACHE_DIR=/ccache ccache -s && echo "--- du" && du -sh /ccache EOF cat > ~/ccache-probe.sh <<'EOF' #!/usr/bin/env bash # usage: ccache-probe.sh "<label>"   -- appends one ccache -s reading to ~/gate72-ccache-stats.txt { echo "=== ccache -s at $(date -Is) : $1"; docker build --no-cache --progress plain ~/ccache-probe 2>&1 | grep -E "^#[0-9]+ [0-9.]+ |^#[0-9]+ DONE" | grep -E "ccache|Hits|Misses|Cacheable|Cache size|Local storage|du|[0-9]+M|[0-9]+K|DONE" | tail -14; echo; } >> ~/gate72-ccache-stats.txt EOF chmod +x ~/ccache-probe.sh echo "$(date +%H:%M:%S)  gate-71-72: ccache probe T0 (docker build of a 3-line ubuntu:24.04+ccache image reading the /ccache cache mount) under sg docker; then the 7.10 widget-cancel run into ~/gate72-cancel-install" >> ~/claude-activity.log sg docker -c "~/ccache-probe.sh \"T0 baseline: clean-ssh + press 1 (Docker just installed), before any build on this box\""; cat ~/gate72-ccache-stats.txt; sg docker -c "docker images --format \"{{.Repository}}:{{.Tag}} {{.Size}}\""
+   6606 sg docker -c ~/ccache-probe.sh "T0 baseline: clean-ssh + press 1 (Docker just installed), before any build on this box"
+   6607 sh -c ~/ccache-probe.sh "T0 baseline: clean-ssh + press 1 (Docker just installed), before any build on this box"
+   6608 bash /home/pk/ccache-probe.sh T0 baseline: clean-ssh + press 1 (Docker just installed), before any build on this box] install-logs=0
+2026-09-05T00:07:28+02:00 lineage=[none] any-sh=[   6600 bash -c mkdir -p ~/ccache-probe && cat > ~/ccache-probe/Dockerfile <<'EOF' # Reads the ccache counters out of the SAME BuildKit cache mount the AzerothCore build uses # (apps/docker/Dockerfile: --mount=type=cache,target=/ccache). BuildKit keys a cache mount # by its id, which defaults to the target path, so any Dockerfile naming target=/ccache on # this builder sees the same directory. --no-cache makes the last RUN execute every time. FROM ubuntu:24.04 RUN apt-get update && apt-get install -y --no-install-recommends ccache && rm -rf /var/lib/apt/lists/* RUN --mount=type=cache,target=/ccache,sharing=locked CCACHE_DIR=/ccache ccache -s && echo "--- du" && du -sh /ccache EOF cat > ~/ccache-probe.sh <<'EOF' #!/usr/bin/env bash # usage: ccache-probe.sh "<label>"   -- appends one ccache -s reading to ~/gate72-ccache-stats.txt { echo "=== ccache -s at $(date -Is) : $1"; docker build --no-cache --progress plain ~/ccache-probe 2>&1 | grep -E "^#[0-9]+ [0-9.]+ |^#[0-9]+ DONE" | grep -E "ccache|Hits|Misses|Cacheable|Cache size|Local storage|du|[0-9]+M|[0-9]+K|DONE" | tail -14; echo; } >> ~/gate72-ccache-stats.txt EOF chmod +x ~/ccache-probe.sh echo "$(date +%H:%M:%S)  gate-71-72: ccache probe T0 (docker build of a 3-line ubuntu:24.04+ccache image reading the /ccache cache mount) under sg docker; then the 7.10 widget-cancel run into ~/gate72-cancel-install" >> ~/claude-activity.log sg docker -c "~/ccache-probe.sh \"T0 baseline: clean-ssh + press 1 (Docker just installed), before any build on this box\""; cat ~/gate72-ccache-stats.txt; sg docker -c "docker images --format \"{{.Repository}}:{{.Tag}} {{.Size}}\""
+   6606 sg docker -c ~/ccache-probe.sh "T0 baseline: clean-ssh + press 1 (Docker just installed), before any build on this box"
+   6607 sh -c ~/ccache-probe.sh "T0 baseline: clean-ssh + press 1 (Docker just installed), before any build on this box"
+   6608 bash /home/pk/ccache-probe.sh T0 baseline: clean-ssh + press 1 (Docker just installed), before any build on this box] install-logs=0
+2026-09-05T00:07:43+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:07:58+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:08:13+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:08:28+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:08:43+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:08:58+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:09:13+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:09:28+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:09:43+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:09:58+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:10:13+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:10:28+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:10:44+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:10:59+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:11:14+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:11:29+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:11:44+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:11:59+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:12:14+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:12:29+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:12:44+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:12:59+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:13:14+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:13:29+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:13:44+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:13:59+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:14:14+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:14:29+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:14:44+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:15:00+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:15:15+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:15:30+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:15:45+02:00 lineage=[none] any-sh=[   8577 bash -c echo "$(date +%H:%M:%S)  gate-71-72: press 2 of the 7.2 sequence under sg docker (unit gate72-press2, log ~/gate72-press2.log); kill watcher armed as unit gate72-killwatch, SIGKILL at the first ninja edge >= 900" >> ~/claude-activity.log; systemd-run --user --unit=gate72-killwatch -p RemainAfterExit=yes /usr/bin/bash -c "sg docker -c \"/home/pk/kill-watcher.sh 900\" > /home/pk/gate72-killwatch.out 2>&1"; systemd-run --user --unit=gate72-press2 -p RemainAfterExit=yes /usr/bin/bash -c "cd /home/pk/gate72/pylauncher && sg docker -c \"python3 /home/pk/press-driver.py /home/pk/gate72-press2.log -- ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/wowserver\""; date -Is; sleep 20; head -30 ~/gate72-press2.log
+   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:16:00+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:16:15+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:16:30+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:16:45+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:17:00+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:17:15+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:17:30+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:17:45+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:18:00+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:18:15+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:18:30+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:18:45+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:19:01+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:19:16+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:19:31+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:19:46+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:20:01+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:20:16+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:20:31+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:20:46+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:21:01+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:21:16+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:21:31+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:21:46+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:22:01+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:22:16+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:22:31+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:22:46+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:23:02+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:23:17+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:23:32+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:23:47+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:24:02+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:24:17+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:24:32+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:24:47+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:25:02+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:25:17+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:25:32+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:25:47+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:26:03+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:26:18+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:26:33+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:26:48+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:27:03+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:27:18+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:27:33+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:27:48+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:28:03+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:28:19+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:28:34+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:28:49+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:29:04+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:29:19+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:29:34+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:29:49+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:30:04+02:00 lineage=[none] any-sh=[   8580 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 900" > /home/pk/gate72-killwatch.out 2>&1
+   8582 sg docker -c /home/pk/kill-watcher.sh 900
+   8583 sh -c /home/pk/kill-watcher.sh 900
+   8584 bash /home/pk/kill-watcher.sh 900] install-logs=0
+2026-09-05T00:30:19+02:00 lineage=[none] any-sh=[  25663 bash -c systemctl --user stop gate72-killwatch 2>&1; sed -i "s#/1829\\\]#/[0-9]+\\]#g" ~/kill-watcher.sh; grep -n "1829\|\[0-9\]+\\\]" ~/kill-watcher.sh | head -5; bash -n ~/kill-watcher.sh && echo syntax-ok; md5sum ~/kill-watcher.sh; sg docker -c "~/kill-watcher.sh 0" > ~/gate72-killwatch.out 2>&1; cat ~/gate72-kill-record.txt
+  25671 sg docker -c ~/kill-watcher.sh 0
+  25672 sh -c ~/kill-watcher.sh 0
+  25673 bash /home/pk/kill-watcher.sh 0] install-logs=0
+2026-09-05T00:30:34+02:00 lineage=[none] any-sh=[  25663 bash -c systemctl --user stop gate72-killwatch 2>&1; sed -i "s#/1829\\\]#/[0-9]+\\]#g" ~/kill-watcher.sh; grep -n "1829\|\[0-9\]+\\\]" ~/kill-watcher.sh | head -5; bash -n ~/kill-watcher.sh && echo syntax-ok; md5sum ~/kill-watcher.sh; sg docker -c "~/kill-watcher.sh 0" > ~/gate72-killwatch.out 2>&1; cat ~/gate72-kill-record.txt
+  25671 sg docker -c ~/kill-watcher.sh 0
+  25672 sh -c ~/kill-watcher.sh 0
+  25673 bash /home/pk/kill-watcher.sh 0] install-logs=0
+2026-09-05T00:30:50+02:00 lineage=[none] any-sh=[  25663 bash -c systemctl --user stop gate72-killwatch 2>&1; sed -i "s#/1829\\\]#/[0-9]+\\]#g" ~/kill-watcher.sh; grep -n "1829\|\[0-9\]+\\\]" ~/kill-watcher.sh | head -5; bash -n ~/kill-watcher.sh && echo syntax-ok; md5sum ~/kill-watcher.sh; sg docker -c "~/kill-watcher.sh 0" > ~/gate72-killwatch.out 2>&1; cat ~/gate72-kill-record.txt
+  25671 sg docker -c ~/kill-watcher.sh 0
+  25672 sh -c ~/kill-watcher.sh 0
+  25673 bash /home/pk/kill-watcher.sh 0] install-logs=0
+2026-09-05T00:31:05+02:00 lineage=[none] any-sh=[  25663 bash -c systemctl --user stop gate72-killwatch 2>&1; sed -i "s#/1829\\\]#/[0-9]+\\]#g" ~/kill-watcher.sh; grep -n "1829\|\[0-9\]+\\\]" ~/kill-watcher.sh | head -5; bash -n ~/kill-watcher.sh && echo syntax-ok; md5sum ~/kill-watcher.sh; sg docker -c "~/kill-watcher.sh 0" > ~/gate72-killwatch.out 2>&1; cat ~/gate72-kill-record.txt
+  25671 sg docker -c ~/kill-watcher.sh 0
+  25672 sh -c ~/kill-watcher.sh 0
+  25673 bash /home/pk/kill-watcher.sh 0] install-logs=0
+2026-09-05T00:31:20+02:00 lineage=[none] any-sh=[  25663 bash -c systemctl --user stop gate72-killwatch 2>&1; sed -i "s#/1829\\\]#/[0-9]+\\]#g" ~/kill-watcher.sh; grep -n "1829\|\[0-9\]+\\\]" ~/kill-watcher.sh | head -5; bash -n ~/kill-watcher.sh && echo syntax-ok; md5sum ~/kill-watcher.sh; sg docker -c "~/kill-watcher.sh 0" > ~/gate72-killwatch.out 2>&1; cat ~/gate72-kill-record.txt
+  25671 sg docker -c ~/kill-watcher.sh 0
+  25672 sh -c ~/kill-watcher.sh 0
+  25673 bash /home/pk/kill-watcher.sh 0] install-logs=0
+2026-09-05T00:31:35+02:00 lineage=[none] any-sh=[  25663 bash -c systemctl --user stop gate72-killwatch 2>&1; sed -i "s#/1829\\\]#/[0-9]+\\]#g" ~/kill-watcher.sh; grep -n "1829\|\[0-9\]+\\\]" ~/kill-watcher.sh | head -5; bash -n ~/kill-watcher.sh && echo syntax-ok; md5sum ~/kill-watcher.sh; sg docker -c "~/kill-watcher.sh 0" > ~/gate72-killwatch.out 2>&1; cat ~/gate72-kill-record.txt
+  25671 sg docker -c ~/kill-watcher.sh 0
+  25672 sh -c ~/kill-watcher.sh 0
+  25673 bash /home/pk/kill-watcher.sh 0
+  26165 bash /home/pk/ccache-probe.sh T1: after the mid-build SIGKILL of press 2 (edge >= 0)] install-logs=0
+2026-09-05T00:31:50+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:32:05+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:32:20+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:32:35+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:32:50+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:33:05+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:33:20+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:33:35+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:33:50+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:34:06+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:34:21+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:34:36+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:34:51+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:35:06+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:35:21+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:35:36+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:35:51+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:36:07+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:36:22+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:36:37+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:36:52+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:37:07+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:37:22+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:37:37+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:37:52+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:38:07+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:38:23+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:38:38+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:38:53+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:39:08+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:39:23+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:39:38+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:39:54+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:40:09+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:40:24+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:40:39+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:40:54+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:41:09+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:41:24+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:41:39+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:41:55+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:42:10+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:42:25+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:42:40+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:42:55+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:43:10+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:43:26+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:43:41+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:43:56+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:44:11+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:44:26+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:44:41+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:44:56+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:45:12+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:45:27+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:45:42+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:45:57+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:46:12+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:46:27+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:46:42+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:46:58+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:47:13+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:47:28+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:47:43+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:47:58+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:48:13+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:48:28+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:48:43+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:48:59+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:49:14+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:49:29+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:49:44+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:49:59+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:50:14+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:50:29+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:50:45+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:51:00+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:51:15+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:51:30+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:51:45+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:52:00+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:52:15+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:52:30+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:52:45+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:53:00+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:53:15+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:53:30+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:53:46+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:54:01+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:54:16+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:54:31+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:54:46+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:55:01+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:55:16+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:55:31+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:55:46+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:56:01+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:56:16+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:56:31+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:56:46+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:57:01+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:57:16+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:57:31+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:57:47+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:58:02+02:00 lineage=[none] any-sh=[  58399 /bin/bash -c set -eu data=/azerothcore/env/dist/data fns=/azerothcore/apps/installer/includes/functions.sh ver=$(sed -n 's/^[[:space:]]*local VERSION=//p' "$fns" 2>/dev/null | head -1 | tr -d "\"' ") case "${ver:-}" in   v[0-9]*) ;;   *)     echo "yulon: cannot read client-data VERSION from $fns — using upstream downloader"     . "$fns"     inst_download_client_data     exit $?     ;; esac mkdir -p "$data" if [ -f "$data/data-version" ] && grep -qx "INSTALLED_VERSION=$ver" "$data/data-version"; then   echo "yulon: client data $ver already installed"   exit 0 fi # Version-keyed name: a partial left by an OLDER version must never be # resumed into a newer one — that would splice two archives together. zip="$data/data-$ver.zip" retry_all=--retry-all-errors curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all= echo "yulon: downloading client data $ver (resumable)" if ! curl -L --fail --retry 30 --retry-delay 10 $retry_all --continue-at - \      -o "$zip" "https://github.com/wowgaming/client-data/releases/download/$ver/data.zip"; then   # A COMPLETE file makes the server answer 416, which --fail reports as   # an error. "Already finished" must not read as "failed".   echo "yulon: fetch returned non-zero — testing whether the archive is complete"   unzip -t "$zip" >/dev/null 2>&1 || { echo "yulon: client-data download FAILED"; exit 1; } fi # Refuse to extract a truncated archive: a half-unzipped data dir boots # a silently wrong server, which every check we have would call healthy. unzip -t "$zip" >/dev/null echo "yulon: extracting client data $ver" unzip -q -o "$zip" -d "$data/" rm -f "$zip" echo "INSTALLED_VERSION=$ver" > "$data/data-version" echo "yulon: client data $ver installed" ] install-logs=0
+2026-09-05T00:58:17+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:58:32+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:58:47+02:00 lineage=[none] any-sh=[  61166 bash /usr/local/bin/docker-entrypoint.sh mysqld] install-logs=0
+2026-09-05T00:59:02+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:59:17+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:59:32+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T00:59:47+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:00:02+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:00:17+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:00:32+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:00:47+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:01:02+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:01:17+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:01:33+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:01:48+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:02:03+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:02:18+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:02:33+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:02:48+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:03:03+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:03:18+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:03:33+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:03:48+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:04:03+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:04:18+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:04:33+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:04:48+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:05:03+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:05:18+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:05:33+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:05:49+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:06:04+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:06:19+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:06:34+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:06:49+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:07:04+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:07:19+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:07:34+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:07:49+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:08:04+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:08:19+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:08:34+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:08:49+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:09:04+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:09:19+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:09:34+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:09:50+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:10:05+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:10:20+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:10:35+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:10:50+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:11:05+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:11:20+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:11:35+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:11:50+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:12:05+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:12:20+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:12:35+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:12:50+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:13:05+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:13:20+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:13:35+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:13:51+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:14:06+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:14:21+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:14:36+02:00 lineage=[78136 bash -c { echo "=== final state after press 3 reached ready, $(date -Is), lane gate-71-72"; echo "--- press units"; for u in gate72-press1 gate72-press2 gate72-press3 gate72-widget-cancel gate72-killwatch gate72-sampler; do echo "$u: $(systemctl --user show $u -p ActiveState -p Result -p ExecMainStatus -p ExecMainStartTimestamp -p ExecMainExitTimestamp | tr "\n" " ")"; done; echo "--- install state file"; cat ~/wowserver/.yulon-install.json; echo "--- core HEAD"; git -C ~/wowserver log --oneline -1; git -C ~/wowserver/modules/mod-playerbots log --oneline -1; echo "--- docker ps -a"; docker ps -a --format "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"; echo "--- images"; docker images --format "{{.Repository}}:{{.Tag}}\t{{.Size}}"; echo "--- volumes"; docker volume ls -q; echo "--- listening"; ss -ltn | grep -E ":(3724|8085|3306|7878) "; echo "--- schemas (tables per database)"; docker exec ac-database mysql -uroot -ppassword -N -e "SELECT table_schema, COUNT(*) FROM information_schema.tables WHERE table_schema LIKE \"acore_%\" GROUP BY table_schema" 2>/dev/null; echo "--- realmlist"; docker exec ac-database mysql -uroot -ppassword -N -e "SELECT id,name,address,localAddress,port FROM acore_auth.realmlist" 2>/dev/null; echo "--- accounts"; docker exec ac-database mysql -uroot -ppassword -N -e "SELECT COUNT(*) FROM acore_auth.account" 2>/dev/null; echo "--- bots online (characters.online=1)"; docker exec ac-database mysql -uroot -ppassword -N -e "SELECT COUNT(*) FROM acore_characters.characters WHERE online=1" 2>/dev/null; echo "--- worldserver: last lines"; docker logs --tail 5 ac-worldserver 2>&1 | cut -c1-160; echo "--- ufw"; sudo ufw status | head -2; echo "--- df"; df -h ~ | tail -1; free -g | head -2; echo; echo "=== ZERO-BASH PROOF"; echo "--- ls ~/dads-mmo-lab-install-*.log"; ls ~/dads-mmo-lab-install-*.log 2>&1; echo "--- bash-lineage processes now (bracketed patterns)"; pgrep -af "[i]nstall-[a-z-]*\.sh|[d]ml-start\.sh|[w]ow-manage\.sh" || echo "none"; echo "--- sampler: samples taken, and every sample that was NOT clean"; wc -l < ~/gate72-zero-bash-sampler.log; grep -v "lineage=\[none\] any-sh=\[none\] install-logs=0" ~/gate72-zero-bash-sampler.log || echo "(every sample clean)"; echo "--- sampler first and last sample"; head -1 ~/gate72-zero-bash-sampler.log; tail -1 ~/gate72-zero-bash-sampler.log; echo "--- bash-lineage files in the checkout used (outside archive/)"; find ~/gate72 -path "*/archive" -prune -o \( -name "install-*.sh" -o -name "dml-start.sh" -o -name "wow-manage.sh" \) -print | grep -v /archive/ || echo "none"; echo "--- the same, anywhere under \$HOME"; find ~ -xdev \( -name "install-*.sh" -o -name "dml-start.sh" -o -name "wow-manage.sh" \) 2>/dev/null | grep -v "/archive/" || echo "none"; echo "--- what the three transcripts say ran: every --- stage line"; for p in 1 2 3; do echo "press$p: $(grep -c "^--- " ~/gate72-press$p.log) stage lines: $(grep "^--- " ~/gate72-press$p.log | tr "\n" " ")"; done; echo "--- any .sh mentioned in the three transcripts, outside the engine own text"; grep -hoE "[A-Za-z0-9_./-]+\.sh\b" ~/gate72-press1.log ~/gate72-press2.log ~/gate72-press3.log | sort | uniq -c | sort -rn | head; echo "--- the authserver container log (7.1 auth-log clause is an OWNER decision; captured, not claimed)"; docker logs ac-authserver 2>&1 | grep -n "8085\|realm\|Realm" | head -5; docker logs ac-authserver 2>&1 | grep -ci "^.*UPDATE" ; } > ~/gate72-final-state.txt 2>&1; cat ~/gate72-final-state.txt
+78347 find /home/pk -xdev ( -name install-*.sh -o -name dml-start.sh -o -name wow-manage.sh )] any-sh=[  78347 find /home/pk -xdev ( -name install-*.sh -o -name dml-start.sh -o -name wow-manage.sh )] install-logs=0
+2026-09-05T01:14:51+02:00 lineage=[none] any-sh=[  78551 bash -c echo "$(date +%H:%M:%S)  gate-71-72: press 3 reached ready (exit 0, 01:09:56); ccache T2 probe, then the cache-mount diagnostic (busybox builds only), server left running" >> ~/claude-activity.log; sg docker -c "~/ccache-probe.sh \"T2: after press 3 completed the whole 1834-edge build\""; tail -8 ~/gate72-ccache-stats.txt; echo "=== DIAG"; sg docker -c "~/cachemount-diag.sh"
+  78553 sg docker -c ~/ccache-probe.sh "T2: after press 3 completed the whole 1834-edge build"
+  78554 sh -c ~/ccache-probe.sh "T2: after press 3 completed the whole 1834-edge build"
+  78555 bash /home/pk/ccache-probe.sh T2: after press 3 completed the whole 1834-edge build] install-logs=0
+2026-09-05T01:15:06+02:00 lineage=[none] any-sh=[  78551 sg docker -c ~/cachemount-diag.sh
+  79150 sh -c ~/cachemount-diag.sh
+  79151 bash /home/pk/cachemount-diag.sh] install-logs=0
+2026-09-05T01:15:21+02:00 lineage=[none] any-sh=[  78551 sg docker -c ~/cachemount-diag.sh
+  79150 sh -c ~/cachemount-diag.sh
+  79151 bash /home/pk/cachemount-diag.sh] install-logs=0
+2026-09-05T01:15:36+02:00 lineage=[none] any-sh=[  78551 sg docker -c ~/cachemount-diag.sh
+  79150 sh -c ~/cachemount-diag.sh
+  79151 bash /home/pk/cachemount-diag.sh
+  80262 bash /home/pk/cachemount-diag.sh] install-logs=0
+2026-09-05T01:15:51+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:16:06+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:16:21+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:16:36+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:16:51+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:17:06+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:17:21+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:17:37+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:17:52+02:00 lineage=[none] any-sh=[  82514 sg docker -c ~/cachemount-diag2.sh
+  82518 sh -c ~/cachemount-diag2.sh
+  82519 bash /home/pk/cachemount-diag2.sh] install-logs=0
+2026-09-05T01:18:07+02:00 lineage=[none] any-sh=[  82514 sg docker -c ~/cachemount-diag2.sh
+  82518 sh -c ~/cachemount-diag2.sh
+  82519 bash /home/pk/cachemount-diag2.sh] install-logs=0
+2026-09-05T01:18:22+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:18:37+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:18:52+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:19:07+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:19:22+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:19:37+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:19:52+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:20:07+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:20:22+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:20:37+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:20:52+02:00 lineage=[none] any-sh=[  85839 bash -c cp ~/ccache-probe.sh ~/ccache-probe.v1-no-cache.sh; cp ~/ccache-probe/Dockerfile ~/ccache-probe/Dockerfile.v1 cat > ~/ccache-probe/Dockerfile <<'EOF' # Reads the ccache counters out of the SAME BuildKit cache mount the AzerothCore build uses # (apps/docker/Dockerfile:83: --mount=type=cache,target=/ccache,sharing=locked). BuildKit keys a # cache mount by its id, which defaults to the target path, so any Dockerfile naming target=/ccache # on this builder sees the same directory. # v2, 2026-09-05 01:2x: NO --no-cache. Measured in cachemount-diag3.txt: a --no-cache build that names # a cache mount RESETS it, so v1 of this probe emptied the engine ccache it was meant to read. The # NONCE build-arg is what makes the last RUN execute instead of coming from the layer cache. FROM ubuntu:24.04 RUN apt-get update && apt-get install -y --no-install-recommends ccache && rm -rf /var/lib/apt/lists/* ARG NONCE RUN --mount=type=cache,target=/ccache,sharing=locked sh -c "echo probe-$NONCE && CCACHE_DIR=/ccache ccache -s && echo --- du && du -sh /ccache" EOF cat > ~/ccache-probe.sh <<'EOF' #!/usr/bin/env bash # usage: ccache-probe.sh "<label>"   -- appends one ccache -s reading to ~/gate72-ccache-stats.txt # v2: no --no-cache (see the Dockerfile header); a nonce forces the reading RUN to execute. { echo "=== ccache -s at $(date -Is) : $1"; docker build --progress plain --build-arg NONCE=$(date +%s%N) ~/ccache-probe 2>&1 | grep -E "^#[0-9]+ [0-9.]+ |^#[0-9]+ DONE" | grep -E "probe-|Hits|Misses|Cacheable|Cache size|Local storage|du|[0-9]+[MK]\s|DONE" | tail -14; echo; } >> ~/gate72-ccache-stats.txt EOF chmod +x ~/ccache-probe.sh cp ~/kill-watcher.sh ~/kill-watcher.v1.sh sed -i "s#^LOG=.*#LOG=\${LOG:-\$HOME/gate72-press2.log}#; s#^OUT=.*#OUT=\${OUT:-\$HOME/gate72-kill-record.txt}#; s#gate72-press2#\${UNIT:-gate72-press2}#g; s#\"\$HOME/wowserver/.yulon-install.json\"#\"\${SERVER_DIR:-\$HOME/wowserver}/.yulon-install.json\"#; s#T1: after the mid-build SIGKILL of press 2#\${PROBE_LABEL:-T1: after the mid-build SIGKILL}#" ~/kill-watcher.sh sed -i "s#^LOG=\\${LOG:-\\$HOME/\\${UNIT:-gate72-press2}.log}#LOG=\${LOG:-\$HOME/gate72-press2.log}#" ~/kill-watcher.sh bash -n ~/kill-watcher.sh && echo "kill-watcher syntax ok"; grep -n "^LOG=\|^OUT=\|UNIT\|SERVER_DIR\|PROBE_LABEL" ~/kill-watcher.sh | head -12 echo "--- stop the real stack (containers kept), prune the builder, T0 with the v2 probe" echo "$(date +%H:%M:%S)  gate-71-72: cycle 2 for the ccache clause -- real stack STOPPED (containers kept), docker builder prune -af, then kill+resume on the throwaway folder ~/gate72-cancel-install with v2 probes (no --no-cache)" >> ~/claude-activity.log { echo "=== cycle 2 preparation, $(date -Is)"; echo "--- docker stop of the real stack (containers and images kept; restarted at the end)"; sg docker -c "docker stop ac-worldserver ac-authserver ac-database"; sg docker -c "docker ps -a --format \"{{.Names}} {{.Status}}\""; echo "--- ports free?"; ss -ltn | grep -E ":(3724|8085|3306) " || echo "3724/8085/3306 free"; echo "--- docker builder prune -af (the ccache mount was already empty: diag3; this makes the throwaway build a real full build rather than a layer-cache replay)"; sg docker -c "docker builder prune -af 2>&1 | tail -2"; echo "--- state of the throwaway folder"; ls -ld ~/gate72-cancel-install; cat ~/gate72-cancel-install/.yulon-install.json 2>&1; echo "--- df"; df -h ~ | tail -1; } > ~/gate72-cycle2-prep.txt 2>&1; cat ~/gate72-cycle2-prep.txt sg docker -c "~/ccache-probe.sh \"cycle2 T0: after docker builder prune -af, before the throwaway build (v2 probe, no --no-cache)\""; tail -9 ~/gate72-ccache-stats.txt] install-logs=0
+2026-09-05T01:21:07+02:00 lineage=[none] any-sh=[  85839 bash -c cp ~/ccache-probe.sh ~/ccache-probe.v1-no-cache.sh; cp ~/ccache-probe/Dockerfile ~/ccache-probe/Dockerfile.v1 cat > ~/ccache-probe/Dockerfile <<'EOF' # Reads the ccache counters out of the SAME BuildKit cache mount the AzerothCore build uses # (apps/docker/Dockerfile:83: --mount=type=cache,target=/ccache,sharing=locked). BuildKit keys a # cache mount by its id, which defaults to the target path, so any Dockerfile naming target=/ccache # on this builder sees the same directory. # v2, 2026-09-05 01:2x: NO --no-cache. Measured in cachemount-diag3.txt: a --no-cache build that names # a cache mount RESETS it, so v1 of this probe emptied the engine ccache it was meant to read. The # NONCE build-arg is what makes the last RUN execute instead of coming from the layer cache. FROM ubuntu:24.04 RUN apt-get update && apt-get install -y --no-install-recommends ccache && rm -rf /var/lib/apt/lists/* ARG NONCE RUN --mount=type=cache,target=/ccache,sharing=locked sh -c "echo probe-$NONCE && CCACHE_DIR=/ccache ccache -s && echo --- du && du -sh /ccache" EOF cat > ~/ccache-probe.sh <<'EOF' #!/usr/bin/env bash # usage: ccache-probe.sh "<label>"   -- appends one ccache -s reading to ~/gate72-ccache-stats.txt # v2: no --no-cache (see the Dockerfile header); a nonce forces the reading RUN to execute. { echo "=== ccache -s at $(date -Is) : $1"; docker build --progress plain --build-arg NONCE=$(date +%s%N) ~/ccache-probe 2>&1 | grep -E "^#[0-9]+ [0-9.]+ |^#[0-9]+ DONE" | grep -E "probe-|Hits|Misses|Cacheable|Cache size|Local storage|du|[0-9]+[MK]\s|DONE" | tail -14; echo; } >> ~/gate72-ccache-stats.txt EOF chmod +x ~/ccache-probe.sh cp ~/kill-watcher.sh ~/kill-watcher.v1.sh sed -i "s#^LOG=.*#LOG=\${LOG:-\$HOME/gate72-press2.log}#; s#^OUT=.*#OUT=\${OUT:-\$HOME/gate72-kill-record.txt}#; s#gate72-press2#\${UNIT:-gate72-press2}#g; s#\"\$HOME/wowserver/.yulon-install.json\"#\"\${SERVER_DIR:-\$HOME/wowserver}/.yulon-install.json\"#; s#T1: after the mid-build SIGKILL of press 2#\${PROBE_LABEL:-T1: after the mid-build SIGKILL}#" ~/kill-watcher.sh sed -i "s#^LOG=\\${LOG:-\\$HOME/\\${UNIT:-gate72-press2}.log}#LOG=\${LOG:-\$HOME/gate72-press2.log}#" ~/kill-watcher.sh bash -n ~/kill-watcher.sh && echo "kill-watcher syntax ok"; grep -n "^LOG=\|^OUT=\|UNIT\|SERVER_DIR\|PROBE_LABEL" ~/kill-watcher.sh | head -12 echo "--- stop the real stack (containers kept), prune the builder, T0 with the v2 probe" echo "$(date +%H:%M:%S)  gate-71-72: cycle 2 for the ccache clause -- real stack STOPPED (containers kept), docker builder prune -af, then kill+resume on the throwaway folder ~/gate72-cancel-install with v2 probes (no --no-cache)" >> ~/claude-activity.log { echo "=== cycle 2 preparation, $(date -Is)"; echo "--- docker stop of the real stack (containers and images kept; restarted at the end)"; sg docker -c "docker stop ac-worldserver ac-authserver ac-database"; sg docker -c "docker ps -a --format \"{{.Names}} {{.Status}}\""; echo "--- ports free?"; ss -ltn | grep -E ":(3724|8085|3306) " || echo "3724/8085/3306 free"; echo "--- docker builder prune -af (the ccache mount was already empty: diag3; this makes the throwaway build a real full build rather than a layer-cache replay)"; sg docker -c "docker builder prune -af 2>&1 | tail -2"; echo "--- state of the throwaway folder"; ls -ld ~/gate72-cancel-install; cat ~/gate72-cancel-install/.yulon-install.json 2>&1; echo "--- df"; df -h ~ | tail -1; } > ~/gate72-cycle2-prep.txt 2>&1; cat ~/gate72-cycle2-prep.txt sg docker -c "~/ccache-probe.sh \"cycle2 T0: after docker builder prune -af, before the throwaway build (v2 probe, no --no-cache)\""; tail -9 ~/gate72-ccache-stats.txt] install-logs=0
+2026-09-05T01:21:23+02:00 lineage=[none] any-sh=[  85839 bash -c cp ~/ccache-probe.sh ~/ccache-probe.v1-no-cache.sh; cp ~/ccache-probe/Dockerfile ~/ccache-probe/Dockerfile.v1 cat > ~/ccache-probe/Dockerfile <<'EOF' # Reads the ccache counters out of the SAME BuildKit cache mount the AzerothCore build uses # (apps/docker/Dockerfile:83: --mount=type=cache,target=/ccache,sharing=locked). BuildKit keys a # cache mount by its id, which defaults to the target path, so any Dockerfile naming target=/ccache # on this builder sees the same directory. # v2, 2026-09-05 01:2x: NO --no-cache. Measured in cachemount-diag3.txt: a --no-cache build that names # a cache mount RESETS it, so v1 of this probe emptied the engine ccache it was meant to read. The # NONCE build-arg is what makes the last RUN execute instead of coming from the layer cache. FROM ubuntu:24.04 RUN apt-get update && apt-get install -y --no-install-recommends ccache && rm -rf /var/lib/apt/lists/* ARG NONCE RUN --mount=type=cache,target=/ccache,sharing=locked sh -c "echo probe-$NONCE && CCACHE_DIR=/ccache ccache -s && echo --- du && du -sh /ccache" EOF cat > ~/ccache-probe.sh <<'EOF' #!/usr/bin/env bash # usage: ccache-probe.sh "<label>"   -- appends one ccache -s reading to ~/gate72-ccache-stats.txt # v2: no --no-cache (see the Dockerfile header); a nonce forces the reading RUN to execute. { echo "=== ccache -s at $(date -Is) : $1"; docker build --progress plain --build-arg NONCE=$(date +%s%N) ~/ccache-probe 2>&1 | grep -E "^#[0-9]+ [0-9.]+ |^#[0-9]+ DONE" | grep -E "probe-|Hits|Misses|Cacheable|Cache size|Local storage|du|[0-9]+[MK]\s|DONE" | tail -14; echo; } >> ~/gate72-ccache-stats.txt EOF chmod +x ~/ccache-probe.sh cp ~/kill-watcher.sh ~/kill-watcher.v1.sh sed -i "s#^LOG=.*#LOG=\${LOG:-\$HOME/gate72-press2.log}#; s#^OUT=.*#OUT=\${OUT:-\$HOME/gate72-kill-record.txt}#; s#gate72-press2#\${UNIT:-gate72-press2}#g; s#\"\$HOME/wowserver/.yulon-install.json\"#\"\${SERVER_DIR:-\$HOME/wowserver}/.yulon-install.json\"#; s#T1: after the mid-build SIGKILL of press 2#\${PROBE_LABEL:-T1: after the mid-build SIGKILL}#" ~/kill-watcher.sh sed -i "s#^LOG=\\${LOG:-\\$HOME/\\${UNIT:-gate72-press2}.log}#LOG=\${LOG:-\$HOME/gate72-press2.log}#" ~/kill-watcher.sh bash -n ~/kill-watcher.sh && echo "kill-watcher syntax ok"; grep -n "^LOG=\|^OUT=\|UNIT\|SERVER_DIR\|PROBE_LABEL" ~/kill-watcher.sh | head -12 echo "--- stop the real stack (containers kept), prune the builder, T0 with the v2 probe" echo "$(date +%H:%M:%S)  gate-71-72: cycle 2 for the ccache clause -- real stack STOPPED (containers kept), docker builder prune -af, then kill+resume on the throwaway folder ~/gate72-cancel-install with v2 probes (no --no-cache)" >> ~/claude-activity.log { echo "=== cycle 2 preparation, $(date -Is)"; echo "--- docker stop of the real stack (containers and images kept; restarted at the end)"; sg docker -c "docker stop ac-worldserver ac-authserver ac-database"; sg docker -c "docker ps -a --format \"{{.Names}} {{.Status}}\""; echo "--- ports free?"; ss -ltn | grep -E ":(3724|8085|3306) " || echo "3724/8085/3306 free"; echo "--- docker builder prune -af (the ccache mount was already empty: diag3; this makes the throwaway build a real full build rather than a layer-cache replay)"; sg docker -c "docker builder prune -af 2>&1 | tail -2"; echo "--- state of the throwaway folder"; ls -ld ~/gate72-cancel-install; cat ~/gate72-cancel-install/.yulon-install.json 2>&1; echo "--- df"; df -h ~ | tail -1; } > ~/gate72-cycle2-prep.txt 2>&1; cat ~/gate72-cycle2-prep.txt sg docker -c "~/ccache-probe.sh \"cycle2 T0: after docker builder prune -af, before the throwaway build (v2 probe, no --no-cache)\""; tail -9 ~/gate72-ccache-stats.txt
+  86283 sg docker -c ~/ccache-probe.sh "cycle2 T0: after docker builder prune -af, before the throwaway build (v2 probe, no --no-cache)"
+  86284 sh -c ~/ccache-probe.sh "cycle2 T0: after docker builder prune -af, before the throwaway build (v2 probe, no --no-cache)"
+  86285 bash /home/pk/ccache-probe.sh cycle2 T0: after docker builder prune -af, before the throwaway build (v2 probe, no --no-cache)] install-logs=0
+2026-09-05T01:21:38+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:21:53+02:00 lineage=[none] any-sh=[  87073 bash -c echo "$(date +%H:%M:%S)  gate-71-72: cycle 2 press A on ~/gate72-cancel-install (unit gate72-c2-pressA), kill watcher at edge >= 600 (unit gate72-c2-killwatch)" >> ~/claude-activity.log; systemd-run --user --unit=gate72-c2-killwatch -p RemainAfterExit=yes -E UNIT=gate72-c2-pressA -E OUT=/home/pk/gate72-c2-kill-record.txt -E SERVER_DIR=/home/pk/gate72-cancel-install -E "PROBE_LABEL=cycle2 T1: after the mid-build SIGKILL of press A" /usr/bin/bash -c "sg docker -c \"/home/pk/kill-watcher.sh 600\" > /home/pk/gate72-c2-killwatch.out 2>&1"; systemd-run --user --unit=gate72-c2-pressA -p RemainAfterExit=yes /usr/bin/bash -c "cd /home/pk/gate72/pylauncher && sg docker -c \"python3 /home/pk/press-driver.py /home/pk/gate72-c2-pressA.log -- ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/gate72-cancel-install\""; date -Is; sleep 40; grep -n "^\[pass\]\|^\[warn\]\|^\[refuse\]\|^Using\|^Already\|^--- \|install failed\|already\|leaving" ~/gate72-c2-pressA.log | cut -c1-200
+  87076 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  87078 sg docker -c /home/pk/kill-watcher.sh 600
+  87079 sh -c /home/pk/kill-watcher.sh 600
+  87080 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:22:08+02:00 lineage=[none] any-sh=[  87073 bash -c echo "$(date +%H:%M:%S)  gate-71-72: cycle 2 press A on ~/gate72-cancel-install (unit gate72-c2-pressA), kill watcher at edge >= 600 (unit gate72-c2-killwatch)" >> ~/claude-activity.log; systemd-run --user --unit=gate72-c2-killwatch -p RemainAfterExit=yes -E UNIT=gate72-c2-pressA -E OUT=/home/pk/gate72-c2-kill-record.txt -E SERVER_DIR=/home/pk/gate72-cancel-install -E "PROBE_LABEL=cycle2 T1: after the mid-build SIGKILL of press A" /usr/bin/bash -c "sg docker -c \"/home/pk/kill-watcher.sh 600\" > /home/pk/gate72-c2-killwatch.out 2>&1"; systemd-run --user --unit=gate72-c2-pressA -p RemainAfterExit=yes /usr/bin/bash -c "cd /home/pk/gate72/pylauncher && sg docker -c \"python3 /home/pk/press-driver.py /home/pk/gate72-c2-pressA.log -- ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/gate72-cancel-install\""; date -Is; sleep 40; grep -n "^\[pass\]\|^\[warn\]\|^\[refuse\]\|^Using\|^Already\|^--- \|install failed\|already\|leaving" ~/gate72-c2-pressA.log | cut -c1-200
+  87076 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  87078 sg docker -c /home/pk/kill-watcher.sh 600
+  87079 sh -c /home/pk/kill-watcher.sh 600
+  87080 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:22:23+02:00 lineage=[none] any-sh=[  87073 bash -c echo "$(date +%H:%M:%S)  gate-71-72: cycle 2 press A on ~/gate72-cancel-install (unit gate72-c2-pressA), kill watcher at edge >= 600 (unit gate72-c2-killwatch)" >> ~/claude-activity.log; systemd-run --user --unit=gate72-c2-killwatch -p RemainAfterExit=yes -E UNIT=gate72-c2-pressA -E OUT=/home/pk/gate72-c2-kill-record.txt -E SERVER_DIR=/home/pk/gate72-cancel-install -E "PROBE_LABEL=cycle2 T1: after the mid-build SIGKILL of press A" /usr/bin/bash -c "sg docker -c \"/home/pk/kill-watcher.sh 600\" > /home/pk/gate72-c2-killwatch.out 2>&1"; systemd-run --user --unit=gate72-c2-pressA -p RemainAfterExit=yes /usr/bin/bash -c "cd /home/pk/gate72/pylauncher && sg docker -c \"python3 /home/pk/press-driver.py /home/pk/gate72-c2-pressA.log -- ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/gate72-cancel-install\""; date -Is; sleep 40; grep -n "^\[pass\]\|^\[warn\]\|^\[refuse\]\|^Using\|^Already\|^--- \|install failed\|already\|leaving" ~/gate72-c2-pressA.log | cut -c1-200
+  87076 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  87078 sg docker -c /home/pk/kill-watcher.sh 600
+  87079 sh -c /home/pk/kill-watcher.sh 600
+  87080 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:22:38+02:00 lineage=[none] any-sh=[  87076 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  87078 sg docker -c /home/pk/kill-watcher.sh 600
+  87079 sh -c /home/pk/kill-watcher.sh 600
+  87080 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:22:53+02:00 lineage=[none] any-sh=[  87076 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  87078 sg docker -c /home/pk/kill-watcher.sh 600
+  87079 sh -c /home/pk/kill-watcher.sh 600
+  87080 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:23:08+02:00 lineage=[none] any-sh=[  88186 bash -c systemctl --user stop gate72-c2-killwatch; systemctl --user reset-failed gate72-c2-pressA 2>/dev/null; cp ~/gate72-c2-pressA.log ~/gate72-c2-pressA-refused.log; { echo "=== cycle 2: the real install container names had to go, $(date -Is)"; echo "# press A was refused: \"A container called ac-database already exists and belongs to another install (yulon-wow-wotlk-243c46e3)\" -- gate72-c2-pressA-refused.log:26. AzerothCore compose pins container_name, so a second install on one box cannot even be built while the first one has containers. docker compose down (NO -v: volumes kept) in ~/wowserver; images kept; the engine own start_staged (compose up -d --no-deps ...) recreates them at the end of cycle 2."; cd ~/wowserver && sg docker -c "docker compose down 2>&1 | tail -12"; sg docker -c "docker ps -a --format \"{{.Names}} {{.Status}}\"; docker volume ls -q; docker images --format \"{{.Repository}}:{{.Tag}}\" | grep native"; } > ~/gate72-cycle2-down.txt 2>&1; cat ~/gate72-cycle2-down.txt; echo "$(date +%H:%M:%S)  gate-71-72: real install containers removed (compose down, volumes+images kept) so the throwaway build can run; cycle 2 press A2 (unit gate72-c2-pressA2), kill at edge >= 600" >> ~/claude-activity.log; systemd-run --user --unit=gate72-c2-killwatch2 -p RemainAfterExit=yes -E UNIT=gate72-c2-pressA2 -E OUT=/home/pk/gate72-c2-kill-record.txt -E SERVER_DIR=/home/pk/gate72-cancel-install -E "PROBE_LABEL=cycle2 T1: after the mid-build SIGKILL of press A2" /usr/bin/bash -c "sg docker -c \"/home/pk/kill-watcher.sh 600\" > /home/pk/gate72-c2-killwatch.out 2>&1"; systemd-run --user --unit=gate72-c2-pressA2 -p RemainAfterExit=yes /usr/bin/bash -c "cd /home/pk/gate72/pylauncher && sg docker -c \"python3 /home/pk/press-driver.py /home/pk/gate72-c2-pressA2.log -- ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/gate72-cancel-install\""; date -Is; sleep 45; grep -n "^\[refuse\]\|^Using\|^Already\|^--- \|install failed\|already\|leaving\|Cloning" ~/gate72-c2-pressA2.log | cut -c1-160
+  88324 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  88326 sg docker -c /home/pk/kill-watcher.sh 600
+  88327 sh -c /home/pk/kill-watcher.sh 600
+  88328 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:23:23+02:00 lineage=[none] any-sh=[  88186 bash -c systemctl --user stop gate72-c2-killwatch; systemctl --user reset-failed gate72-c2-pressA 2>/dev/null; cp ~/gate72-c2-pressA.log ~/gate72-c2-pressA-refused.log; { echo "=== cycle 2: the real install container names had to go, $(date -Is)"; echo "# press A was refused: \"A container called ac-database already exists and belongs to another install (yulon-wow-wotlk-243c46e3)\" -- gate72-c2-pressA-refused.log:26. AzerothCore compose pins container_name, so a second install on one box cannot even be built while the first one has containers. docker compose down (NO -v: volumes kept) in ~/wowserver; images kept; the engine own start_staged (compose up -d --no-deps ...) recreates them at the end of cycle 2."; cd ~/wowserver && sg docker -c "docker compose down 2>&1 | tail -12"; sg docker -c "docker ps -a --format \"{{.Names}} {{.Status}}\"; docker volume ls -q; docker images --format \"{{.Repository}}:{{.Tag}}\" | grep native"; } > ~/gate72-cycle2-down.txt 2>&1; cat ~/gate72-cycle2-down.txt; echo "$(date +%H:%M:%S)  gate-71-72: real install containers removed (compose down, volumes+images kept) so the throwaway build can run; cycle 2 press A2 (unit gate72-c2-pressA2), kill at edge >= 600" >> ~/claude-activity.log; systemd-run --user --unit=gate72-c2-killwatch2 -p RemainAfterExit=yes -E UNIT=gate72-c2-pressA2 -E OUT=/home/pk/gate72-c2-kill-record.txt -E SERVER_DIR=/home/pk/gate72-cancel-install -E "PROBE_LABEL=cycle2 T1: after the mid-build SIGKILL of press A2" /usr/bin/bash -c "sg docker -c \"/home/pk/kill-watcher.sh 600\" > /home/pk/gate72-c2-killwatch.out 2>&1"; systemd-run --user --unit=gate72-c2-pressA2 -p RemainAfterExit=yes /usr/bin/bash -c "cd /home/pk/gate72/pylauncher && sg docker -c \"python3 /home/pk/press-driver.py /home/pk/gate72-c2-pressA2.log -- ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/gate72-cancel-install\""; date -Is; sleep 45; grep -n "^\[refuse\]\|^Using\|^Already\|^--- \|install failed\|already\|leaving\|Cloning" ~/gate72-c2-pressA2.log | cut -c1-160
+  88324 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  88326 sg docker -c /home/pk/kill-watcher.sh 600
+  88327 sh -c /home/pk/kill-watcher.sh 600
+  88328 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:23:38+02:00 lineage=[none] any-sh=[  88186 bash -c systemctl --user stop gate72-c2-killwatch; systemctl --user reset-failed gate72-c2-pressA 2>/dev/null; cp ~/gate72-c2-pressA.log ~/gate72-c2-pressA-refused.log; { echo "=== cycle 2: the real install container names had to go, $(date -Is)"; echo "# press A was refused: \"A container called ac-database already exists and belongs to another install (yulon-wow-wotlk-243c46e3)\" -- gate72-c2-pressA-refused.log:26. AzerothCore compose pins container_name, so a second install on one box cannot even be built while the first one has containers. docker compose down (NO -v: volumes kept) in ~/wowserver; images kept; the engine own start_staged (compose up -d --no-deps ...) recreates them at the end of cycle 2."; cd ~/wowserver && sg docker -c "docker compose down 2>&1 | tail -12"; sg docker -c "docker ps -a --format \"{{.Names}} {{.Status}}\"; docker volume ls -q; docker images --format \"{{.Repository}}:{{.Tag}}\" | grep native"; } > ~/gate72-cycle2-down.txt 2>&1; cat ~/gate72-cycle2-down.txt; echo "$(date +%H:%M:%S)  gate-71-72: real install containers removed (compose down, volumes+images kept) so the throwaway build can run; cycle 2 press A2 (unit gate72-c2-pressA2), kill at edge >= 600" >> ~/claude-activity.log; systemd-run --user --unit=gate72-c2-killwatch2 -p RemainAfterExit=yes -E UNIT=gate72-c2-pressA2 -E OUT=/home/pk/gate72-c2-kill-record.txt -E SERVER_DIR=/home/pk/gate72-cancel-install -E "PROBE_LABEL=cycle2 T1: after the mid-build SIGKILL of press A2" /usr/bin/bash -c "sg docker -c \"/home/pk/kill-watcher.sh 600\" > /home/pk/gate72-c2-killwatch.out 2>&1"; systemd-run --user --unit=gate72-c2-pressA2 -p RemainAfterExit=yes /usr/bin/bash -c "cd /home/pk/gate72/pylauncher && sg docker -c \"python3 /home/pk/press-driver.py /home/pk/gate72-c2-pressA2.log -- ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/gate72-cancel-install\""; date -Is; sleep 45; grep -n "^\[refuse\]\|^Using\|^Already\|^--- \|install failed\|already\|leaving\|Cloning" ~/gate72-c2-pressA2.log | cut -c1-160
+  88324 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  88326 sg docker -c /home/pk/kill-watcher.sh 600
+  88327 sh -c /home/pk/kill-watcher.sh 600
+  88328 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:23:53+02:00 lineage=[none] any-sh=[  88324 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  88326 sg docker -c /home/pk/kill-watcher.sh 600
+  88327 sh -c /home/pk/kill-watcher.sh 600
+  88328 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:24:08+02:00 lineage=[none] any-sh=[  89491 bash -c sed -n 31,32p ~/gate72-c2-pressA2.log; cp ~/gate72-c2-pressA2.log ~/gate72-c2-pressA2-refused.log; systemctl --user stop gate72-c2-killwatch2; systemctl --user reset-failed gate72-c2-pressA2 2>/dev/null; echo "$(date +%H:%M:%S)  gate-71-72: re-press on the cancelled folder REFUSED (already a git checkout, no record) -- a finding for the cancel copy; cycle 2 moves to a fresh folder ~/gate72-cycle2 (unit gate72-c2-pressA3), kill at edge >= 600" >> ~/claude-activity.log; systemd-run --user --unit=gate72-c2-killwatch3 -p RemainAfterExit=yes -E UNIT=gate72-c2-pressA3 -E OUT=/home/pk/gate72-c2-kill-record.txt -E SERVER_DIR=/home/pk/gate72-cycle2 -E "PROBE_LABEL=cycle2 T1: after the mid-build SIGKILL of press A3" /usr/bin/bash -c "sg docker -c \"/home/pk/kill-watcher.sh 600\" > /home/pk/gate72-c2-killwatch.out 2>&1"; systemd-run --user --unit=gate72-c2-pressA3 -p RemainAfterExit=yes /usr/bin/bash -c "cd /home/pk/gate72/pylauncher && sg docker -c \"python3 /home/pk/press-driver.py /home/pk/gate72-c2-pressA3.log -- ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/gate72-cycle2\""; date -Is; sleep 30; grep -n "^\[refuse\]\|^Using\|^--- \|install failed\|Cloning" ~/gate72-c2-pressA3.log | cut -c1-160
+  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:24:23+02:00 lineage=[none] any-sh=[  89491 bash -c sed -n 31,32p ~/gate72-c2-pressA2.log; cp ~/gate72-c2-pressA2.log ~/gate72-c2-pressA2-refused.log; systemctl --user stop gate72-c2-killwatch2; systemctl --user reset-failed gate72-c2-pressA2 2>/dev/null; echo "$(date +%H:%M:%S)  gate-71-72: re-press on the cancelled folder REFUSED (already a git checkout, no record) -- a finding for the cancel copy; cycle 2 moves to a fresh folder ~/gate72-cycle2 (unit gate72-c2-pressA3), kill at edge >= 600" >> ~/claude-activity.log; systemd-run --user --unit=gate72-c2-killwatch3 -p RemainAfterExit=yes -E UNIT=gate72-c2-pressA3 -E OUT=/home/pk/gate72-c2-kill-record.txt -E SERVER_DIR=/home/pk/gate72-cycle2 -E "PROBE_LABEL=cycle2 T1: after the mid-build SIGKILL of press A3" /usr/bin/bash -c "sg docker -c \"/home/pk/kill-watcher.sh 600\" > /home/pk/gate72-c2-killwatch.out 2>&1"; systemd-run --user --unit=gate72-c2-pressA3 -p RemainAfterExit=yes /usr/bin/bash -c "cd /home/pk/gate72/pylauncher && sg docker -c \"python3 /home/pk/press-driver.py /home/pk/gate72-c2-pressA3.log -- ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/gate72-cycle2\""; date -Is; sleep 30; grep -n "^\[refuse\]\|^Using\|^--- \|install failed\|Cloning" ~/gate72-c2-pressA3.log | cut -c1-160
+  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:24:38+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:24:53+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:25:08+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:25:24+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:25:39+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:25:54+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:26:09+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:26:24+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:26:39+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:26:54+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:27:09+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:27:24+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:27:39+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:27:54+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:28:09+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:28:24+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:28:39+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:28:54+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:29:10+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:29:25+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:29:40+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:29:55+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:30:10+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:30:25+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:30:40+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:30:55+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:31:10+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:31:25+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:31:40+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:31:55+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:32:10+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:32:25+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:32:41+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:32:56+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:33:11+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:33:26+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:33:41+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:33:56+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:34:11+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:34:26+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:34:42+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:34:57+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:35:12+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:35:27+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:35:42+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:35:57+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:36:12+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:36:27+02:00 lineage=[none] any-sh=[  89500 /usr/bin/bash -c sg docker -c "/home/pk/kill-watcher.sh 600" > /home/pk/gate72-c2-killwatch.out 2>&1
+  89502 sg docker -c /home/pk/kill-watcher.sh 600
+  89503 sh -c /home/pk/kill-watcher.sh 600
+  89504 bash /home/pk/kill-watcher.sh 600] install-logs=0
+2026-09-05T01:36:42+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:36:57+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:37:13+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:37:28+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:37:43+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:37:58+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:38:13+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:38:28+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:38:43+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:38:58+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:39:14+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:39:29+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:39:44+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:39:59+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:40:14+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:40:29+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:40:44+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:40:59+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:41:15+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:41:30+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:41:45+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:42:00+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:42:15+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:42:30+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:42:46+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:43:01+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:43:16+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:43:32+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:43:47+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:44:02+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:44:17+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:44:32+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:44:47+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:45:02+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:45:18+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:45:33+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:45:48+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:46:03+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:46:18+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:46:33+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:46:48+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:47:04+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:47:19+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:47:34+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:47:49+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:48:04+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:48:19+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:48:35+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:48:50+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:49:05+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:49:20+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:49:35+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:49:50+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:50:06+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:50:21+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:50:36+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:50:51+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:51:06+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:51:21+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:51:36+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:51:52+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh] install-logs=0
+2026-09-05T01:52:07+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh
+ 123771 bash -c for i in $(seq 1 60); do grep -q "cycle2 T2" ~/gate72-ccache-stats.txt 2>/dev/null && grep -q "DONE" <(awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt) && break; sleep 10; done; date -Is; cat ~/gate72-c2-finished-record.txt 2>&1; echo "--- T2"; awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt; echo "--- edge rate A3 vs B"; ~/edge-rate.sh ~/gate72-c2-pressA3.log ~/gate72-c2-pressB.log > ~/gate72-c2-edge-rate.txt 2>&1; cat ~/gate72-c2-edge-rate.txt] install-logs=0
+2026-09-05T01:52:22+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh
+ 123771 bash -c for i in $(seq 1 60); do grep -q "cycle2 T2" ~/gate72-ccache-stats.txt 2>/dev/null && grep -q "DONE" <(awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt) && break; sleep 10; done; date -Is; cat ~/gate72-c2-finished-record.txt 2>&1; echo "--- T2"; awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt; echo "--- edge rate A3 vs B"; ~/edge-rate.sh ~/gate72-c2-pressA3.log ~/gate72-c2-pressB.log > ~/gate72-c2-edge-rate.txt 2>&1; cat ~/gate72-c2-edge-rate.txt] install-logs=0
+2026-09-05T01:52:37+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh
+ 123771 bash -c for i in $(seq 1 60); do grep -q "cycle2 T2" ~/gate72-ccache-stats.txt 2>/dev/null && grep -q "DONE" <(awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt) && break; sleep 10; done; date -Is; cat ~/gate72-c2-finished-record.txt 2>&1; echo "--- T2"; awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt; echo "--- edge rate A3 vs B"; ~/edge-rate.sh ~/gate72-c2-pressA3.log ~/gate72-c2-pressB.log > ~/gate72-c2-edge-rate.txt 2>&1; cat ~/gate72-c2-edge-rate.txt] install-logs=0
+2026-09-05T01:52:52+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh
+ 123771 bash -c for i in $(seq 1 60); do grep -q "cycle2 T2" ~/gate72-ccache-stats.txt 2>/dev/null && grep -q "DONE" <(awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt) && break; sleep 10; done; date -Is; cat ~/gate72-c2-finished-record.txt 2>&1; echo "--- T2"; awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt; echo "--- edge rate A3 vs B"; ~/edge-rate.sh ~/gate72-c2-pressA3.log ~/gate72-c2-pressB.log > ~/gate72-c2-edge-rate.txt 2>&1; cat ~/gate72-c2-edge-rate.txt] install-logs=0
+2026-09-05T01:53:07+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh
+ 123771 bash -c for i in $(seq 1 60); do grep -q "cycle2 T2" ~/gate72-ccache-stats.txt 2>/dev/null && grep -q "DONE" <(awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt) && break; sleep 10; done; date -Is; cat ~/gate72-c2-finished-record.txt 2>&1; echo "--- T2"; awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt; echo "--- edge rate A3 vs B"; ~/edge-rate.sh ~/gate72-c2-pressA3.log ~/gate72-c2-pressB.log > ~/gate72-c2-edge-rate.txt 2>&1; cat ~/gate72-c2-edge-rate.txt] install-logs=0
+2026-09-05T01:53:23+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh
+ 123771 bash -c for i in $(seq 1 60); do grep -q "cycle2 T2" ~/gate72-ccache-stats.txt 2>/dev/null && grep -q "DONE" <(awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt) && break; sleep 10; done; date -Is; cat ~/gate72-c2-finished-record.txt 2>&1; echo "--- T2"; awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt; echo "--- edge rate A3 vs B"; ~/edge-rate.sh ~/gate72-c2-pressA3.log ~/gate72-c2-pressB.log > ~/gate72-c2-edge-rate.txt 2>&1; cat ~/gate72-c2-edge-rate.txt] install-logs=0
+2026-09-05T01:53:38+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh
+ 123771 bash -c for i in $(seq 1 60); do grep -q "cycle2 T2" ~/gate72-ccache-stats.txt 2>/dev/null && grep -q "DONE" <(awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt) && break; sleep 10; done; date -Is; cat ~/gate72-c2-finished-record.txt 2>&1; echo "--- T2"; awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt; echo "--- edge rate A3 vs B"; ~/edge-rate.sh ~/gate72-c2-pressA3.log ~/gate72-c2-pressB.log > ~/gate72-c2-edge-rate.txt 2>&1; cat ~/gate72-c2-edge-rate.txt] install-logs=0
+2026-09-05T01:53:53+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh
+ 123771 bash -c for i in $(seq 1 60); do grep -q "cycle2 T2" ~/gate72-ccache-stats.txt 2>/dev/null && grep -q "DONE" <(awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt) && break; sleep 10; done; date -Is; cat ~/gate72-c2-finished-record.txt 2>&1; echo "--- T2"; awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt; echo "--- edge rate A3 vs B"; ~/edge-rate.sh ~/gate72-c2-pressA3.log ~/gate72-c2-pressB.log > ~/gate72-c2-edge-rate.txt 2>&1; cat ~/gate72-c2-edge-rate.txt] install-logs=0
+2026-09-05T01:54:08+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh
+ 123771 bash -c for i in $(seq 1 60); do grep -q "cycle2 T2" ~/gate72-ccache-stats.txt 2>/dev/null && grep -q "DONE" <(awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt) && break; sleep 10; done; date -Is; cat ~/gate72-c2-finished-record.txt 2>&1; echo "--- T2"; awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt; echo "--- edge rate A3 vs B"; ~/edge-rate.sh ~/gate72-c2-pressA3.log ~/gate72-c2-pressB.log > ~/gate72-c2-edge-rate.txt 2>&1; cat ~/gate72-c2-edge-rate.txt] install-logs=0
+2026-09-05T01:54:23+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh
+ 123771 bash -c for i in $(seq 1 60); do grep -q "cycle2 T2" ~/gate72-ccache-stats.txt 2>/dev/null && grep -q "DONE" <(awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt) && break; sleep 10; done; date -Is; cat ~/gate72-c2-finished-record.txt 2>&1; echo "--- T2"; awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt; echo "--- edge rate A3 vs B"; ~/edge-rate.sh ~/gate72-c2-pressA3.log ~/gate72-c2-pressB.log > ~/gate72-c2-edge-rate.txt 2>&1; cat ~/gate72-c2-edge-rate.txt] install-logs=0
+2026-09-05T01:54:38+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh
+ 123771 bash -c for i in $(seq 1 60); do grep -q "cycle2 T2" ~/gate72-ccache-stats.txt 2>/dev/null && grep -q "DONE" <(awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt) && break; sleep 10; done; date -Is; cat ~/gate72-c2-finished-record.txt 2>&1; echo "--- T2"; awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt; echo "--- edge rate A3 vs B"; ~/edge-rate.sh ~/gate72-c2-pressA3.log ~/gate72-c2-pressB.log > ~/gate72-c2-edge-rate.txt 2>&1; cat ~/gate72-c2-edge-rate.txt] install-logs=0
+2026-09-05T01:54:53+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh
+ 123771 bash -c for i in $(seq 1 60); do grep -q "cycle2 T2" ~/gate72-ccache-stats.txt 2>/dev/null && grep -q "DONE" <(awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt) && break; sleep 10; done; date -Is; cat ~/gate72-c2-finished-record.txt 2>&1; echo "--- T2"; awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt; echo "--- edge rate A3 vs B"; ~/edge-rate.sh ~/gate72-c2-pressA3.log ~/gate72-c2-pressB.log > ~/gate72-c2-edge-rate.txt 2>&1; cat ~/gate72-c2-edge-rate.txt] install-logs=0
+2026-09-05T01:55:08+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh
+ 123771 bash -c for i in $(seq 1 60); do grep -q "cycle2 T2" ~/gate72-ccache-stats.txt 2>/dev/null && grep -q "DONE" <(awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt) && break; sleep 10; done; date -Is; cat ~/gate72-c2-finished-record.txt 2>&1; echo "--- T2"; awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt; echo "--- edge rate A3 vs B"; ~/edge-rate.sh ~/gate72-c2-pressA3.log ~/gate72-c2-pressB.log > ~/gate72-c2-edge-rate.txt 2>&1; cat ~/gate72-c2-edge-rate.txt] install-logs=0
+2026-09-05T01:55:23+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh
+ 123771 bash -c for i in $(seq 1 60); do grep -q "cycle2 T2" ~/gate72-ccache-stats.txt 2>/dev/null && grep -q "DONE" <(awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt) && break; sleep 10; done; date -Is; cat ~/gate72-c2-finished-record.txt 2>&1; echo "--- T2"; awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt; echo "--- edge rate A3 vs B"; ~/edge-rate.sh ~/gate72-c2-pressA3.log ~/gate72-c2-pressB.log > ~/gate72-c2-edge-rate.txt 2>&1; cat ~/gate72-c2-edge-rate.txt] install-logs=0
+2026-09-05T01:55:38+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh
+ 123771 bash -c for i in $(seq 1 60); do grep -q "cycle2 T2" ~/gate72-ccache-stats.txt 2>/dev/null && grep -q "DONE" <(awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt) && break; sleep 10; done; date -Is; cat ~/gate72-c2-finished-record.txt 2>&1; echo "--- T2"; awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt; echo "--- edge rate A3 vs B"; ~/edge-rate.sh ~/gate72-c2-pressA3.log ~/gate72-c2-pressB.log > ~/gate72-c2-edge-rate.txt 2>&1; cat ~/gate72-c2-edge-rate.txt] install-logs=0
+2026-09-05T01:55:54+02:00 lineage=[none] any-sh=[ 108763 sg docker -c /home/pk/finished-watcher.sh
+ 108764 sh -c /home/pk/finished-watcher.sh
+ 108765 bash /home/pk/finished-watcher.sh
+ 123771 bash -c for i in $(seq 1 60); do grep -q "cycle2 T2" ~/gate72-ccache-stats.txt 2>/dev/null && grep -q "DONE" <(awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt) && break; sleep 10; done; date -Is; cat ~/gate72-c2-finished-record.txt 2>&1; echo "--- T2"; awk "/cycle2 T2/,0" ~/gate72-ccache-stats.txt; echo "--- edge rate A3 vs B"; ~/edge-rate.sh ~/gate72-c2-pressA3.log ~/gate72-c2-pressB.log > ~/gate72-c2-edge-rate.txt 2>&1; cat ~/gate72-c2-edge-rate.txt] install-logs=0
+2026-09-05T01:56:09+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:56:24+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:56:39+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:56:54+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:57:09+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:57:24+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:57:39+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:57:54+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:58:09+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:58:24+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:58:39+02:00 lineage=[none] any-sh=[none] install-logs=0
+2026-09-05T01:58:54+02:00 lineage=[none] any-sh=[none] install-logs=0

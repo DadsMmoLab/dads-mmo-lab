@@ -1,0 +1,20 @@
+=== cycle 2 preparation, 2026-09-05T01:20:46+02:00
+--- docker stop of the real stack (containers and images kept; restarted at the end)
+ac-worldserver
+ac-authserver
+ac-database
+ac-worldserver Exited (0) Less than a second ago
+ac-authserver Exited (0) 14 seconds ago
+ac-db-import Exited (0) 15 minutes ago
+ac-database Exited (0) 11 seconds ago
+ac-client-data-init Exited (0) 22 minutes ago
+--- ports free?
+3724/8085/3306 free
+--- docker builder prune -af (the ccache mount was already empty: diag3; this makes the throwaway build a real full build rather than a layer-cache replay)
+joiq4cu46bdl8pkrnwveibsjx               	true 	117.4MB   	6 minutes ago
+Total:	12.28GB
+--- state of the throwaway folder
+drwxrwxr-x 20 pk docker 4096 Sep  5 00:13 /home/pk/gate72-cancel-install
+cat: /home/pk/gate72-cancel-install/.yulon-install.json: No such file or directory
+--- df
+/dev/sda2        97G   30G   63G  33% /

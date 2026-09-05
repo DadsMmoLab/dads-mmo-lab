@@ -1,0 +1,132 @@
+=== final state 2, after cycle 2 cleanup and the stack restarted, 2026-09-05T01:58:59+02:00, lane gate-71-72
+--- docker ps -a
+ac-worldserver	yulon.local/ac-wotlk-worldserver:native-243c46e3	Up 2 minutes	127.0.0.1:7878->7878/tcp, 0.0.0.0:8085->8085/tcp, [::]:8085->8085/tcp
+ac-authserver	yulon.local/ac-wotlk-authserver:native-243c46e3	Up 2 minutes	0.0.0.0:3724->3724/tcp, [::]:3724->3724/tcp
+ac-database	mysql:8.4	Up 2 minutes (healthy)	127.0.0.1:3306->3306/tcp, 33060/tcp
+--- images / volumes
+yulon.local/ac-wotlk-db-import:native-243c46e3	1.57GB
+yulon.local/ac-wotlk-worldserver:native-243c46e3	1.03GB
+yulon.local/ac-wotlk-authserver:native-243c46e3	336MB
+yulon.local/ac-wotlk-client-data:native-243c46e3	147MB
+mysql:8.4	1.12GB
+alpine/git:<none>	138MB
+yulon-wow-wotlk-243c46e3_client-data
+yulon-wow-wotlk-243c46e3_db-data
+--- install state file
+{
+  "version": 1,
+  "game_id": "wow-wotlk",
+  "family": "azerothcore",
+  "install_id": "243c46e3",
+  "completed": [
+    "clone-core",
+    "clone-modules",
+    "generate-compose",
+    "build",
+    "client-data",
+    "import"
+  ],
+  "last_error": "",
+  "updated_unix": 1788563121
+}
+--- schemas
+acore_auth	22
+acore_characters	111
+acore_playerbots	30
+acore_world	315
+--- realmlist / accounts / bots online
+1	AzerothCore	172.30.55.119	172.30.55.119	8085
+101
+101	YULON
+100	RNDBOT99
+181
+--- worldserver
+[0m[36mWORLD: World Initialized In 1 Minutes 19 Seconds
+[0m[36mAzerothCore rev. 413bea61a85e+ 2026-09-04 09:03:49 -0700 (Playerbot branch) (Unix, RelWithDebInfo, Static) (worldserver-daemon) ready...
+--- listening
+LISTEN 0      4096         0.0.0.0:8085       0.0.0.0:*          
+LISTEN 0      4096       127.0.0.1:3306       0.0.0.0:*          
+LISTEN 0      4096         0.0.0.0:3724       0.0.0.0:*          
+LISTEN 0      4096       127.0.0.1:7878       0.0.0.0:*          
+LISTEN 0      4096            [::]:8085          [::]:*          
+LISTEN 0      4096            [::]:3724          [::]:*          
+--- ufw
+Status: inactive
+--- tailscale
+tailscale NOT INSTALLED on this restore (the 7.1 lane installed it on 09-04 after the restore; this restore did not)
+--- df / free
+/dev/sda2        97G   40G   53G  43% /
+               total        used        free      shared  buff/cache   available
+Mem:              19           5           0           0          13          13
+--- home
+box-preparation.txt
+cachemount-diag2.sh
+cachemount-diag.sh
+ccache-probe
+ccache-probe.sh
+ccache-probe.v1-no-cache.sh
+claude-activity.log
+compose-config-0905.raw.json
+compose-config-0905.yml
+Desktop
+Documents
+Downloads
+edge-rate.sh
+finished-watcher.sh
+gate72
+gate72-account-driver.py
+kill-watcher-as-run.sh
+kill-watcher.sh
+kill-watcher.v1.sh
+Music
+Pictures
+press-driver.py
+Public
+round5
+snap
+state-as-restored.txt
+Templates
+Videos
+widget_cancel_driver.py
+wowserver
+zero-bash-sampler.sh
+--- bash lineage, last look
+ls: cannot access '/home/pk/dads-mmo-lab-install-*.log': No such file or directory
+--- sampler stopped; its last line and its total
+2026-09-05T01:58:54+02:00 lineage=[none] any-sh=[none] install-logs=0
+1039
+--- lingering user units left
+  UNIT                         LOAD   ACTIVE SUB    DESCRIPTION
+  gate72-c2-finwatch.service   loaded active exited /usr/bin/bash -c "sg docker -c \"/home/pk/finished-watcher.sh\" > /home/pk/gate72-c2-finwatch.out 2>&1"
+  gate72-c2-killwatch3.service loaded active exited /usr/bin/bash -c "sg docker -c \"/home/pk/kill-watcher.sh 600\" > /home/pk/gate72-c2-killwatch.out 2>&1"
+● gate72-c2-pressA3.service    loaded failed failed /usr/bin/bash -c "cd /home/pk/gate72/pylauncher && sg docker -c \"python3 /home/pk/press-driver.py /home/pk/gate72-c2-pressA3.log -- ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/gate72-cycle2\""
+● gate72-c2-pressB.service     loaded failed failed /usr/bin/bash -c "cd /home/pk/gate72/pylauncher && sg docker -c \"python3 /home/pk/press-driver.py /home/pk/gate72-c2-pressB.log -- ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/gate72-cycle2\""
+● gate72-press1.service        loaded failed failed /usr/bin/bash -c "cd /home/pk/gate72/pylauncher && python3 /home/pk/press-driver.py /home/pk/gate72-press1.log -- ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/wowserver"
+● gate72-press2.service        loaded failed failed /usr/bin/bash -c "cd /home/pk/gate72/pylauncher && sg docker -c \"python3 /home/pk/press-driver.py /home/pk/gate72-press2.log -- ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/wowserver\""
+  gate72-press3.service        loaded active exited /usr/bin/bash -c "cd /home/pk/gate72/pylauncher && sg docker -c \"python3 /home/pk/press-driver.py /home/pk/gate72-press3.log -- ./.venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/wowserver\""
+  gate72-widget-cancel.service loaded active exited /usr/bin/bash -c "cd /home/pk/gate72/pylauncher && sg docker -c \"./.venv/bin/python -u /home/pk/widget_cancel_driver.py\" > /home/pk/gate72-widget-cancel.log 2>&1"
+
+Legend: LOAD   → Reflects whether the unit definition was properly loaded.
+        ACTIVE → The high-level unit activation state, i.e. generalization of SUB.
+        SUB    → The low-level unit activation state, values depend on unit type.
+
+--- activity log
+23:59:06  gate-71-72: box restored from clean-ssh at 23:57:34; cloning pjerra/dads-mmo-lab at 2f39a6d9 to ~/gate72 and making a venv (requirements.txt only). Nothing installed yet.
+00:00:18  gate-71-72: clean-ssh has no python3-venv; apt-get install python3.12-venv (box preparation, recorded), then venv + requirements.txt
+00:01:58  gate-71-72: press 1 of the 7.2 sequence (consent + re-login refusal expected), unit gate72-press1, log ~/gate72-press1.log
+00:07:09  gate-71-72: ccache probe T0 (docker build of a 3-line ubuntu:24.04+ccache image reading the /ccache cache mount) under sg docker; then the 7.10 widget-cancel run into ~/gate72-cancel-install
+00:07:41  gate-71-72: 7.10 widget cancel run starting (unit gate72-widget-cancel): Install click into ~/gate72-cancel-install, Stop during clone-core, offscreen Qt, under sg docker
+00:15:37  gate-71-72: press 2 of the 7.2 sequence under sg docker (unit gate72-press2, log ~/gate72-press2.log); kill watcher armed as unit gate72-killwatch, SIGKILL at the first ninja edge >= 900
+00:31:37  gate-71-72: press 2 SIGKILLed mid-build (edge >= 0); ~/gate72-kill-record.txt; ccache T1 taken
+00:32:19  gate-71-72: press 3 (resume after the SIGKILL at edge 1226/1834) under sg docker, unit gate72-press3, log ~/gate72-press3.log; runs to ready
+01:14:43  gate-71-72: press 3 reached ready (exit 0, 01:09:56); ccache T2 probe, then the cache-mount diagnostic (busybox builds only), server left running
+01:17:46  gate-71-72: cache-mount diagnostic 2 (busybox builds, no --no-cache) -- does --no-cache isolate cache mounts on this daemon?
+01:20:46  gate-71-72: cycle 2 for the ccache clause -- real stack STOPPED (containers kept), docker builder prune -af, then kill+resume on the throwaway folder ~/gate72-cancel-install with v2 probes (no --no-cache)
+01:21:51  gate-71-72: cycle 2 press A on ~/gate72-cancel-install (unit gate72-c2-pressA), kill watcher at edge >= 600 (unit gate72-c2-killwatch)
+01:23:00  gate-71-72: real install containers removed (compose down, volumes+images kept) so the throwaway build can run; cycle 2 press A2 (unit gate72-c2-pressA2), kill at edge >= 600
+01:24:05  gate-71-72: re-press on the cancelled folder REFUSED (already a git checkout, no record) -- a finding for the cancel copy; cycle 2 moves to a fresh folder ~/gate72-cycle2 (unit gate72-c2-pressA3), kill at edge >= 600
+01:36:39  gate-71-72: cycle 2 press B (resume) on ~/gate72-cycle2, unit gate72-c2-pressB; finished-watcher kills it at The build finished
+01:36:41  gate-71-72: press 2 SIGKILLed mid-build (edge >= 600); ~/gate72-kill-record.txt; ccache T1 taken
+01:55:59  gate-71-72: cycle 2 press B build finished and unit killed before start-db; T2 taken
+01:56:37  gate-71-72: cycle 2 done; removing the throwaway (846544ff) container/images/volumes and both throwaway folders; bringing the real stack back with the engine own compose up
+01:58:55  gate-71-72: stack back (World Initialized 1m19s); account through ControllerServices, compose config capture from ~/wowserver (no -f), final state; then the sampler is stopped and the box is LEFT RUNNING with the finished install

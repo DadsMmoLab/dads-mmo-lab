@@ -1,0 +1,20 @@
+=== cycle 2: the real install container names had to go, 2026-09-05T01:22:58+02:00
+# press A was refused: "A container called ac-database already exists and belongs to another install (yulon-wow-wotlk-243c46e3)" -- gate72-c2-pressA-refused.log:26. AzerothCore compose pins container_name, so a second install on one box cannot even be built while the first one has containers. docker compose down (NO -v: volumes kept) in ~/wowserver; images kept; the engine own start_staged (compose up -d --no-deps ...) recreates them at the end of cycle 2.
+ Container ac-client-data-init  Stopped
+ Container ac-client-data-init  Removing
+ Container ac-db-import  Removed
+ Container ac-database  Stopping
+ Container ac-database  Stopped
+ Container ac-database  Removing
+ Container ac-client-data-init  Removed
+ Container ac-database  Removed
+ Network yulon-wow-wotlk-243c46e3_default  Removing
+ Network yulon-wow-wotlk-243c46e3_ac-network  Removing
+ Network yulon-wow-wotlk-243c46e3_ac-network  Removed
+ Network yulon-wow-wotlk-243c46e3_default  Removed
+yulon-wow-wotlk-243c46e3_client-data
+yulon-wow-wotlk-243c46e3_db-data
+yulon.local/ac-wotlk-db-import:native-243c46e3
+yulon.local/ac-wotlk-worldserver:native-243c46e3
+yulon.local/ac-wotlk-authserver:native-243c46e3
+yulon.local/ac-wotlk-client-data:native-243c46e3

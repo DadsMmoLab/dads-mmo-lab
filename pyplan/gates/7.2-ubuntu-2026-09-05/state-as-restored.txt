@@ -1,0 +1,70 @@
+=== yulon-ubuntu as restored from checkpoint clean-ssh, probed 2026-09-04T23:58:41+02:00 by lane gate-71-72 (restore issued 2026-09-04T23:57:34+02:00 from vmhost)
+--- uptime
+ 23:58:41 up 0 min,  2 users,  load average: 0.55, 0.16, 0.06
+--- docker
+docker NOT INSTALLED
+bash: line 1: docker: command not found
+--- systemctl is-active docker
+inactive
+--- id
+uid=1000(pk) gid=1000(pk) groups=1000(pk),4(adm),24(cdrom),27(sudo),30(dip),46(plugdev),100(users),114(lpadmin)
+no docker group
+--- home
+total 76
+drwxr-x--- 15 pk   pk   4096 Sep  4 23:58 .
+drwxr-xr-x  3 root root 4096 Aug 21 22:40 ..
+-rw-r--r--  1 pk   pk    220 Mar 31  2024 .bash_logout
+-rw-r--r--  1 pk   pk   3771 Mar 31  2024 .bashrc
+drwx------ 12 pk   pk   4096 Aug 21 23:14 .cache
+drwx------ 11 pk   pk   4096 Aug 21 23:17 .config
+drwxr-xr-x  2 pk   pk   4096 Aug 21 23:11 Desktop
+drwxr-xr-x  2 pk   pk   4096 Aug 21 23:11 Documents
+drwxr-xr-x  2 pk   pk   4096 Aug 21 23:11 Downloads
+drwx------  4 pk   pk   4096 Aug 21 23:11 .local
+drwxr-xr-x  2 pk   pk   4096 Aug 21 23:11 Music
+drwxr-xr-x  2 pk   pk   4096 Aug 21 23:11 Pictures
+-rw-r--r--  1 pk   pk    807 Mar 31  2024 .profile
+drwxr-xr-x  2 pk   pk   4096 Aug 21 23:11 Public
+drwx------  3 pk   pk   4096 Aug 21 23:08 snap
+drwx------  2 pk   pk   4096 Aug 21 23:03 .ssh
+-rw-rw-r--  1 pk   pk    492 Sep  4 23:58 state-as-restored.txt
+-rw-r--r--  1 pk   pk      0 Aug 21 23:09 .sudo_as_admin_successful
+drwxr-xr-x  2 pk   pk   4096 Aug 21 23:11 Templates
+drwxr-xr-x  2 pk   pk   4096 Aug 21 23:11 Videos
+--- ~/wowserver
+ls: cannot access '/home/pk/wowserver': No such file or directory
+--- df -h ~
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda2        97G   15G   78G  16% /
+--- ufw
+Status: inactive
+--- listening
+State  Recv-Q Send-Q Local Address:Port Peer Address:PortProcess
+LISTEN 0      4096       127.0.0.1:631       0.0.0.0:*          
+LISTEN 0      4096   127.0.0.53%lo:53        0.0.0.0:*          
+LISTEN 0      4096      127.0.0.54:53        0.0.0.0:*          
+LISTEN 0      4096         0.0.0.0:22        0.0.0.0:*          
+LISTEN 0      4096           [::1]:631          [::]:*          
+LISTEN 0      4096            [::]:22           [::]:*          
+--- bash lineage
+ls: cannot access '/home/pk/dads-mmo-lab-install-*.log': No such file or directory
+2328 bash -c { echo "=== yulon-ubuntu as restored from checkpoint clean-ssh, probed $(date -Is) by lane gate-71-72 (restore issued 2026-09-04T23:57:34+02:00 from vmhost)"; echo "--- uptime"; uptime; echo "--- docker"; which docker || echo "docker NOT INSTALLED"; docker --version 2>&1; echo "--- systemctl is-active docker"; systemctl is-active docker; echo "--- id"; id; getent group docker || echo "no docker group"; echo "--- home"; ls -la ~; echo "--- ~/wowserver"; ls -ld ~/wowserver 2>&1; echo "--- df -h ~"; df -h ~; echo "--- ufw"; sudo ufw status; echo "--- listening"; ss -ltn; echo "--- bash lineage"; ls ~/dads-mmo-lab-install-*.log 2>&1; pgrep -af "install-.*\.sh|dml-start|wow-manage" || echo "no bash-lineage process"; echo "--- tools"; for t in git python3 curl ccache systemd-inhibit tailscale claude-say; do printf "%-16s %s\n" $t "$(command -v $t || echo NOT INSTALLED)"; done; python3 --version; echo "--- os"; . /etc/os-release; echo "$PRETTY_NAME kernel $(uname -r)"; nproc; free -g; echo "--- sudo"; sudo -n true && echo "passwordless sudo: yes"; echo "--- activity log"; cat ~/claude-activity.log 2>&1; } > ~/state-as-restored.txt 2>&1; cat ~/state-as-restored.txt
+--- tools
+git              /usr/bin/git
+python3          /usr/bin/python3
+curl             /usr/bin/curl
+ccache           NOT INSTALLED
+systemd-inhibit  /usr/bin/systemd-inhibit
+tailscale        NOT INSTALLED
+claude-say       NOT INSTALLED
+Python 3.12.3
+--- os
+Ubuntu 24.04.4 LTS kernel 7.0.0-30-generic
+15
+               total        used        free      shared  buff/cache   available
+Mem:              19           1          17           0           1          18
+Swap:              7           0           7
+--- sudo
+passwordless sudo: yes
+--- activity log
+cat: /home/pk/claude-activity.log: No such file or directory

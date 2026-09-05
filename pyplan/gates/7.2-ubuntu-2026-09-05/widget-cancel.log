@@ -1,0 +1,80 @@
+2026-09-05T00:07:42+02:00 ==============================================================================
+2026-09-05T00:07:42+02:00 7.10 widget cancel: a real install, started by the tile's Install, stopped by the panel's Stop
+2026-09-05T00:07:42+02:00 ==============================================================================
+2026-09-05T00:07:42+02:00        checkout /home/pk/gate72/pylauncher; folder /home/pk/gate72-cancel-install
+2026-09-05T00:07:42+02:00        id -Gn -> docker adm cdrom sudo dip plugdev users lpadmin pk
+2026-09-05T00:07:42+02:00        docker images before -> ''
+2026-09-05T00:07:42+02:00        folder before the click: 0 entries: []
+This plugin does not support propagateSizeHints()
+2026-09-05T00:07:42+02:00 [OK]   the WotLK tile's Install is a real, enabled QPushButton -- text='Install'
+2026-09-05T00:07:42+02:00 [OK]   the panel's Stop exists and is dead while idle
+2026-09-05T00:07:42+02:00 
+-- click Install
+2026-09-05T00:07:42+02:00 [OK]   the click reached the folder picker and started a job -- picked=[PosixPath('/home/pk/gate72-cancel-install')] started=['wow-wotlk']
+2026-09-05T00:07:42+02:00 [OK]   Stop went live once the install was running
+2026-09-05T00:07:42+02:00 
+-- wait for the engine's own clone-core line in the panel
+2026-09-05 00:07:49 INFO [yulon.platform] holding this machine awake for the build: systemd-inhibit --what=idle:sleep --who=Yu'lon --why=installing a server sleep infinity
+2026-09-05 00:07:49 INFO [yulon.git] containerized git: `run --rm -v /home/pk/gate72-cancel-install:/git -w /git --user 1000:124 alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26 -c core.autocrlf=false -c core.eol=lf -c http.version=HTTP/1.1 clone --config core.autocrlf=false --config core.eol=lf --config http.version=HTTP/1.1 --branch Playerbot https://github.com/mod-playerbots/azerothcore-wotlk.git .` into /home/pk/gate72-cancel-install
+2026-09-05T00:07:49+02:00 [OK]   the engine reached clone-core (its transcript says so) -- 7.1s after the click
+2026-09-05T00:07:49+02:00        panel so far:
+2026-09-05T00:07:49+02:00          | [00:07:49] [pass] the server folder: /home/pk/gate72-cancel-install looks usable
+2026-09-05T00:07:49+02:00          | [00:07:49] [pass] sharing the folder with Docker: a container can read /home/pk/gate72-cancel-install
+2026-09-05T00:07:49+02:00          | [00:07:49] [pass] SELinux: not enforcing
+2026-09-05T00:07:49+02:00          | [00:07:49] [pass] the server's ports: nothing else is using them
+2026-09-05T00:07:49+02:00          | [00:07:49] Using /home/pk/gate72-cancel-install (a fresh install)
+2026-09-05T00:07:49+02:00          | [00:07:49] Step 1 of 9 (11%): clone-core
+2026-09-05T00:07:49+02:00          | [00:07:49] --- clone-core
+2026-09-05T00:07:49+02:00          | [00:07:49] Cloning mod-playerbots/azerothcore-wotlk into /home/pk/gate72-cancel-install (this is a large repository)
+2026-09-05T00:07:49+02:00 
+-- let the clone run 20s, then click Stop
+2026-09-05T00:08:09+02:00        (timed out after 20.0s waiting for nothing (a deliberate pause))
+2026-09-05T00:08:09+02:00        folder at Stop: 1 entries: ['.git']
+2026-09-05T00:08:09+02:00        docker ps at Stop: 'reverent_liskov c0280cf95723 Up 19 seconds'
+2026-09-05T00:08:09+02:00 [OK]   Stop is enabled at the moment of the click
+2026-09-05T00:08:09+02:00        CLICK Stop at 2026-09-05T00:08:09+02:00
+2026-09-05T00:08:09+02:00        panel.cancelled right after the click: True; status: 'Installing WoW WotLK'
+2026-09-05T00:08:14+02:00        (timed out after 5s waiting for 5 s after Stop)
+2026-09-05T00:08:14+02:00        docker ps 5 s after Stop: 'reverent_liskov c0280cf95723 Up 24 seconds'
+2026-09-05T00:08:14+02:00 
+-- wait for install_finished (the clone cannot be interrupted; the spine raises after it)
+2026-09-05 00:13:29 INFO [yulon.ui.catalog_view] install of wow-wotlk was cancelled; nothing remembered
+This plugin does not support propagateSizeHints()
+2026-09-05T00:13:29+02:00        [modal] title='Install cancelled'
+2026-09-05T00:13:29+02:00        [modal] Stop was pressed, so WoW WotLK has NOT been remembered as an install and the app will not show a tab for it. Stopping undoes nothing and tidies nothing away — look in /home/pk/gate72-cancel-install to see what the installer had got to (a download it was in the middle of may have removed its own leftovers; anything already finished stays). If the build had started, Docker keeps finishing the step it was on in the background — that is deliberate, and the finished pieces are what make a second attempt much faster, so do not clear Docker's build cache to tidy up. The source is there. If the build had already finished, the server may be built and even running: press "Use existing…", choose /home/pk/gate72-cancel-install, and the app will manage it from a tab — nothing is lost. If it had not, press Install again and choose /home/pk/gate72-cancel-install: the installer carries on from the last stage recorded in /home/pk/gate72-cancel-install/.yulon-install.json, and a stage is only skipped after what it left on disk has been checked.
+2026-09-05T00:13:29+02:00        [modal] clicking 'OK'
+2026-09-05T00:13:29+02:00 [OK]   install_finished arrived -- 320.4s after Stop
+2026-09-05T00:13:29+02:00        docker ps after finish: ''
+2026-09-05T00:13:29+02:00        panel tail:
+2026-09-05T00:13:29+02:00          | [00:07:49] [pass] Docker: the daemon answered
+2026-09-05T00:13:29+02:00          | [00:07:49] [pass] memory: Docker's VM has 19.5 GB
+2026-09-05T00:13:29+02:00          | [00:07:49] [warn] compiler jobs vs memory: this build compiles with 16 parallel jobs at about 2 GB each, and 19.5 GB affords about 9 Docker Engine has no CPU setting to lower — the build sees every CP
+2026-09-05T00:13:29+02:00          | [00:07:49] [pass] free space on Docker's disk and the server folder: 75 GB free
+2026-09-05T00:13:29+02:00          | [00:07:49] [pass] the server folder: /home/pk/gate72-cancel-install looks usable
+2026-09-05T00:13:29+02:00          | [00:07:49] [pass] sharing the folder with Docker: a container can read /home/pk/gate72-cancel-install
+2026-09-05T00:13:29+02:00          | [00:07:49] [pass] SELinux: not enforcing
+2026-09-05T00:13:29+02:00          | [00:07:49] [pass] the server's ports: nothing else is using them
+2026-09-05T00:13:29+02:00          | [00:07:49] Using /home/pk/gate72-cancel-install (a fresh install)
+2026-09-05T00:13:29+02:00          | [00:07:49] Step 1 of 9 (11%): clone-core
+2026-09-05T00:13:29+02:00          | [00:07:49] --- clone-core
+2026-09-05T00:13:29+02:00          | [00:07:49] Cloning mod-playerbots/azerothcore-wotlk into /home/pk/gate72-cancel-install (this is a large repository)
+2026-09-05T00:13:29+02:00        panel.running=False panel.cancelled=True status='cancelled'
+2026-09-05T00:13:29+02:00 [OK]   the panel reports the job as CANCELLED
+2026-09-05T00:13:29+02:00        install_finished -> game='wow-wotlk' ok=False
+2026-09-05T00:13:29+02:00        message carried by the signal:
+2026-09-05T00:13:29+02:00          Stop was pressed, so WoW WotLK has NOT been remembered as an install and the app will not show a tab for it. Stopping undoes nothing and tidies nothing away — look in /home/pk/gate72-cancel-install to see what the installer had got to (a download it was in the middle of may have removed its own leftovers; anything already finished stays). If the build had started, Docker keeps finishing the step it was on in the background — that is deliberate, and the finished pieces are what make a second attempt much faster, so do not clear Docker's build cache to tidy up. The source is there. If the build had already finished, the server may be built and even running: press "Use existing…", choose /home/pk/gate72-cancel-install, and the app will manage it from a tab — nothing is lost. If it had not, press Install again and choose /home/pk/gate72-cancel-install: the installer carries on from the last stage recorded in /home/pk/gate72-cancel-install/.yulon-install.json, and a stage is only skipped after what it left on disk has been checked.
+2026-09-05T00:13:29+02:00 [OK]   the signal says NOT installed (ok=False)
+2026-09-05T00:13:29+02:00        folder after: 38 entries: ['.agents', '.claude', '.coderabbit.yml', '.devcontainer', '.dockerignore', '.editorconfig', '.git', '.git_commit_template.txt', '.gitattributes', '.github', '.gitignore', '.suppress.cppcheck'] ...
+2026-09-05T00:13:29+02:00        compose file there: /home/pk/gate72-cancel-install/docker-compose.yml
+2026-09-05T00:13:29+02:00        cancelled_install_message() for the folder AS IT IS NOW:
+2026-09-05T00:13:29+02:00          Stop was pressed, so WoW WotLK has NOT been remembered as an install and the app will not show a tab for it. Stopping undoes nothing and tidies nothing away — look in /home/pk/gate72-cancel-install to see what the installer had got to (a download it was in the middle of may have removed its own leftovers; anything already finished stays). If the build had started, Docker keeps finishing the step it was on in the background — that is deliberate, and the finished pieces are what make a second attempt much faster, so do not clear Docker's build cache to tidy up. The source is there. If the build had already finished, the server may be built and even running: press "Use existing…", choose /home/pk/gate72-cancel-install, and the app will manage it from a tab — nothing is lost. If it had not, press Install again and choose /home/pk/gate72-cancel-install: the installer carries on from the last stage recorded in /home/pk/gate72-cancel-install/.yulon-install.json, and a stage is only skipped after what it left on disk has been checked.
+2026-09-05T00:13:29+02:00 [OK]   the message the widget emitted IS cancelled_install_message() for this folder state
+2026-09-05T00:13:29+02:00 [OK]   a modal titled 'Install cancelled' was shown to the user -- modal titles seen: ['Install cancelled']
+2026-09-05T00:13:29+02:00 [OK]   the modal's text is that same copy
+2026-09-05T00:13:29+02:00 [OK]   the tile still reads Install (nothing remembered) -- reads 'Install'
+2026-09-05T00:13:29+02:00 [OK]   the copy names the folder
+2026-09-05T00:13:29+02:00 [OK]   the copy says Stop undid nothing
+
+2026-09-05T00:13:29+02:00 ==============================================================================
+2026-09-05T00:13:29+02:00 RESULT: 15 OK, 0 FAIL   (click->clone 7.1s, Stop->finished 320.4s)
+2026-09-05T00:13:29+02:00 ==============================================================================

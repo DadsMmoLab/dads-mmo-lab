@@ -1,0 +1,73 @@
+=== cycle 2 cleanup and the real stack back up, 2026-09-05T01:56:37+02:00
+--- throwaway container/images/volumes (install id 846544ff)
+ac-client-data-init
+Untagged: yulon.local/ac-wotlk-authserver:native-846544ff
+Deleted: sha256:b64040e4dfa17368acd13063a6298fe6b162dfe53c0f01f04165ce22eaa982b2
+Untagged: yulon.local/ac-wotlk-client-data:native-846544ff
+Deleted: sha256:0ef5633678a0560b9bb2306f87a176ab479090c94012c10b36d3bc966b96a659
+yulon-wow-wotlk-846544ff_client-data
+yulon-wow-wotlk-846544ff_default
+--- diagnostic images (busybox, ubuntu:24.04 probe image) left; diag image removed earlier
+--- throwaway folders removed
+/home/pk/gate72
+/home/pk/gate72-account-driver.py
+/home/pk/gate72-c2-edge-rate.txt
+/home/pk/gate72-c2-finished-record.txt
+/home/pk/gate72-c2-finwatch.out
+/home/pk/gate72-c2-kill-record.txt
+/home/pk/gate72-c2-killwatch.out
+/home/pk/gate72-c2-pressA2.log
+/home/pk/gate72-c2-pressA2-refused.log
+/home/pk/gate72-c2-pressA3.log
+/home/pk/gate72-c2-pressA.log
+/home/pk/gate72-c2-pressA-refused.log
+/home/pk/gate72-c2-pressB.log
+/home/pk/gate72-cachemount-diag2.txt
+/home/pk/gate72-cachemount-diag3.txt
+/home/pk/gate72-cachemount-diag.txt
+/home/pk/gate72-cancel-folder-after.txt
+/home/pk/gate72-ccache-stats.txt
+/home/pk/gate72-cycle2-cleanup.txt
+/home/pk/gate72-cycle2-down.txt
+/home/pk/gate72-cycle2-prep.txt
+/home/pk/gate72-edge-rate.txt
+/home/pk/gate72-final-state.txt
+/home/pk/gate72-kill-record.txt
+/home/pk/gate72-killwatch.out
+/home/pk/gate72-press1.log
+/home/pk/gate72-press2.log
+/home/pk/gate72-press3.log
+/home/pk/gate72-widget-cancel.log
+/home/pk/gate72-zero-bash-sampler.log
+/home/pk/wowserver
+--- what remains in docker
+yulon.local/ac-wotlk-db-import:native-243c46e3 1.57GB
+yulon.local/ac-wotlk-worldserver:native-243c46e3 1.03GB
+yulon.local/ac-wotlk-authserver:native-243c46e3 336MB
+yulon.local/ac-wotlk-client-data:native-243c46e3 147MB
+mysql:8.4 1.12GB
+alpine/git:<none> 138MB
+yulon-wow-wotlk-243c46e3_client-data
+yulon-wow-wotlk-243c46e3_db-data
+--- the real stack, the engine own way: compose up -d --no-deps ac-database ac-authserver ac-worldserver in ~/wowserver
+ Container ac-database  Healthy
+ Container ac-authserver  Starting
+ Container ac-database  Healthy
+ Container ac-worldserver  Starting
+ Container ac-worldserver  Started
+ Container ac-authserver  Started
+--- waiting for the worldserver ready line (up to 6 min)
+2026-09-05T01:58:08+02:00
+ac-worldserver Up About a minute
+ac-authserver Up About a minute
+ac-database Up About a minute (healthy)
+[0m[36mWORLD: World Initialized In 1 Minutes 19 Seconds
+[0m[36mAzerothCore rev. 413bea61a85e+ 2026-09-04 09:03:49 -0700 (Playerbot branch) (Unix, RelWithDebInfo, Static) (worldserver-daemon) ready...
+LISTEN 0      4096         0.0.0.0:8085       0.0.0.0:*          
+LISTEN 0      4096       127.0.0.1:3306       0.0.0.0:*          
+LISTEN 0      4096         0.0.0.0:3724       0.0.0.0:*          
+LISTEN 0      4096       127.0.0.1:7878       0.0.0.0:*          
+LISTEN 0      4096            [::]:8085          [::]:*          
+LISTEN 0      4096            [::]:3724          [::]:*          
+--- df
+/dev/sda2        97G   40G   53G  43% /
