@@ -3013,8 +3013,10 @@ started or stopped, nothing ran on the laptop. Evidence, command by command, in
   Enumerated in the checkout rather than read: four constants carry 4026533509
   (`_NETHOST_MNT_NS`, `_UNSHARE_PID_NS`, `_UNSHARE_MOUNTPROC_MNT_NS`, `_UNSHARE_NET_NS`) and one
   carries 4026533510 (`_UNSHARE_MOUNTPROC_PID_NS`). The docstring names all five.
-* **Round 7's qualifier is back in the OPEN paragraph below**, and the one live apply this lane ever
-  ran on a real Fedora box is now recorded rather than alluded to: `sudo -n journalctl _COMM=sudo
+* **Round 7's qualifier is back in the OPEN paragraph below**, and the live apply this lane ran on a
+  real Fedora box in round 6 is now recorded rather than alluded to (round 10's review-of-review
+  then found an earlier one in boot `-5`, 2026-09-04 23:32-23:35 UTC, without a failsafe — the
+  Fedora record's addendum): `sudo -n journalctl _COMM=sudo
   --since today` on yulon-fedora lists **39 firewall writes at 06:00:22-06:07:39 UTC** in boot `-4`
   — two `systemd-run --on-active=420 --unit=b39-failsafe[2] systemctl stop firewalld` failsafes,
   both cancelled before firing, two identical `--add-port` / `--remove-port` cycles over
@@ -3043,10 +3045,24 @@ was applied on any box reached over ssh in those rounds, and the only `firewall-
 executed were **inside a container** — container `b39r7` on m910q, whose `docker` zone round 7 bound
 by hand with `firewall-cmd --permanent --zone=docker --add-interface=docker0`
 (`pyplan/gates/bug39-ssh-lockout/round7-2026-09-05.md:8-9` and `:29-31`). Rounds 8, 9 and 10 ran
-listings and probes only. Earlier than that the lane did apply, on a real box: round 6's clean run
-wrote 39 firewall commands to **yulon-fedora** at 06:00-06:08 UTC on 2026-09-05 and put the box back
-— recorded, with the journal, in
-`pyplan/gates/bug39-ssh-lockout/yulon-fedora-round6-applied-2026-09-05.md`.
+listings and probes only. Earlier than that the lane did apply, on a real box, twice: round 6's
+clean run wrote 39 firewall commands to **yulon-fedora** at 06:00-06:08 UTC on 2026-09-05 and put
+the box back, and an unrecorded run the night before (boot `-5`, 2026-09-04 23:32-23:35 UTC, 24
+writes, no failsafe) did the same — both recorded, with the journal, in
+`pyplan/gates/bug39-ssh-lockout/yulon-fedora-round6-applied-2026-09-05.md` and its addendum.
+
+**Stopped at round 10 by owner decision, 2026-09-05 ("stop at 10"), and merged.** What is
+measured-closed at `e9d2e1a0`: the guard ALLOWs on the production path with the ssh route preserved
+(round 5 onward); the `docker` zone is judged machine-made on yulon-fedora's real listings and the
+breadth NOTE no longer fires there (round 8, re-run with real subprocesses by round 8's meta);
+the namespace cause names the namespace that actually differs, in both `unshare` shapes (round 9,
+reproduced by rounds 9 and 10); every 'Fixed' claim measured on a stand-in of the wrong shape was
+retracted (round 8). What is NOT done, and stays open under this heading: the LAN button as the
+owner wants it — "click a button and the server's ports get forwarded" — has still never been
+pressed on a real remote Linux box by the app; the two measured lockout routes of round 5 are
+guarded, not exercised end to end. Round 10's remaining text findings were closed by hand at the
+merge (this paragraph and the Fedora record's addendum); their measurements are the round-10
+review-of-review's, quoted with their commands, not re-run by the merger except the `chmod`.
 
 **What is measured-closed, and what is not**, in past tense with the commit each was closed at.
 Closed, each on the shape it names: the DefaultZone reading and the enable being withheld by
