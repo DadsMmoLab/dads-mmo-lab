@@ -19,11 +19,11 @@ Open: 7.1, 7.2, 7.7, 7.8 (hardware), 7.10.
   (`the three CMaNGOS entries KEEP platforms: ["linux"]`, false since `2f39a6d9`). `lane/clause72`
   is settling what the clause meant. The previous lane refused to reword a criterion so it passes,
   which was right.
-* **7.7** — Tortoise has been installing on `yulon-win11-gate` since 23:19 and is at step 12 of 12,
-  world server loading, `restarts=0`, printing continuously. **It only survives because `timeout_s`
-  was widened to 10800 in that box's local catalog copy**; under the repo's 1800 it would already have
-  been failed, as TBC was. Still owed: Tortoise's `platforms` widening once it passes, and WotLK's
-  transcript.
+* **7.7** — Tortoise PASSED on `yulon-win11-gate` at 00:43:19 box-local (exit 0, banner `Loading time:
+  59 minutes 18 seconds`, `RestartCount=0`). Widened to `["linux", "windows"]` and the ready budget
+  moved 3600 → 10800 s at `eb5f3b3f` (the stage measured 3702 s wall; evidence in
+  `pyplan/gates/7.7-win11-tortoise/`). All four games are now proven on native Windows. Still owed:
+  WotLK's transcript on that box.
 
 ## The eight lane branches, and what each owes
 
@@ -41,9 +41,10 @@ Open: 7.1, 7.2, 7.7, 7.8 (hardware), 7.10.
 ## Running in the background, and it survives a compact
 
 * Workflows `w96ix1cqw` (round 3) and `wf01as8gm` (§29 + 7.2).
-* The Tortoise watcher, and the VM resize queued behind its exit code — `yulon-win11-gate` is still at
-  its baseline 8 vCPU / 16 GB, correctly, because the owner's rule is that a working VM is never shut
-  down. `C:\Users\PK\vmsize.ps1` on the host does the resizing and restoring, with write-once baselines.
+* The Tortoise watcher is done (see 7.7 above). Every VM is at its baseline as of 10:15 CEST
+  (`vmsize.ps1 -Show`: only `yulon-fedora` had drifted, down to 4/4, restored to 10/11 while Off).
+  `C:\Users\PK\vmsize.ps1` on the host does the resizing and restoring, with write-once baselines;
+  its headroom check now applies to Running VMs only, since an Off VM's configured memory costs nothing.
 
 ## Owner decisions still open
 
